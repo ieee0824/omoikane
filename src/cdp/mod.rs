@@ -306,8 +306,7 @@ impl CdpSession {
             storage_session_id,
         )
         .map_err(CdpSessionError::JavaScript)?;
-        runtime.enable_live_css_animations();
-        runtime.set_shared_cookie_store(Arc::clone(&cookie_store));
+        Self::configure_runtime_playback(&mut runtime, &cookie_store);
         let mut http_client = Client::new();
         http_client.set_shared_cookie_store(Arc::clone(&cookie_store));
         let mut session = Self {
@@ -362,6 +361,35 @@ impl CdpSession {
             .map_err(CdpSessionError::JavaScript)?;
         session.rebuild_node_index();
         Ok(session)
+    }
+
+    /// Sets the shared resource store and live playback for every tab runtime.
+    fn configure_runtime_playback(
+        runtime: &mut JsRuntime,
+        cookie_store: &Arc<Mutex<crate::http::CookieJar>>,
+    ) {
+        runtime.enable_live_css_animations();
+        runtime.set_shared_cookie_store(Arc::clone(cookie_store));
+    }
+
+    /// Carries host configuration into a replacement document runtime.
+    fn configure_replacement_runtime(
+        &self,
+        runtime: &mut JsRuntime,
+    ) -> Result<(), CdpSessionError> {
+        if let Some((reporter, surface)) = self.runtime.error_reporter_destination() {
+            runtime.set_error_reporter(reporter, surface);
+        }
+        Self::configure_runtime_playback(runtime, &self.cookie_store);
+        runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
+        runtime.set_user_agent(self.http_client.user_agent().to_string());
+        runtime.set_fullscreen_supported(self.fullscreen_supported);
+        runtime.set_pointer_lock_deferred(self.pointer_lock_deferred);
+        runtime
+            .set_pointer_lock_focus(self.pointer_lock_focused)
+            .map_err(CdpSessionError::JavaScript)?;
+        runtime.set_fullscreen_transition_allowed(self.fullscreen_transition_allowed);
+        Self::install_runtime_helpers_on(runtime).map_err(CdpSessionError::JavaScript)
     }
 
     fn runtime_timeout(&self) -> Duration {

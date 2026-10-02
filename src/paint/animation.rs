@@ -7,6 +7,27 @@ use std::sync::{Arc, Mutex};
 
 pub(crate) type ImageTimeline = Arc<Mutex<HashMap<(usize, String), u64>>>;
 
+/// Selects a frame from a nonempty normalized (nonzero) delay sequence.
+/// `duration_ms` is its sum; `plays` selects finite or infinite looping.
+pub(super) fn animation_frame_index(
+    delays_ms: &[u64],
+    duration_ms: u64,
+    plays: Option<u64>,
+    elapsed_ms: u64,
+) -> usize {
+    if plays.is_some_and(|plays| elapsed_ms >= duration_ms.saturating_mul(plays)) {
+        return delays_ms.len() - 1;
+    }
+    let mut position = elapsed_ms % duration_ms.max(1);
+    for (index, delay) in delays_ms.iter().enumerate() {
+        if position < *delay {
+            return index;
+        }
+        position = position.saturating_sub(*delay);
+    }
+    delays_ms.len() - 1
+}
+
 /// Immutable timing data; demand queries only compare frame indices.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ImagePlayback {
@@ -20,18 +41,12 @@ pub(crate) struct ImagePlayback {
 
 impl ImagePlayback {
     pub(crate) fn frame_index(&self, now: u64) -> usize {
-        let elapsed = now.saturating_sub(self.start_ms);
-        if !self.running(now) {
-            return self.delays_ms.len() - 1;
-        }
-        let mut position = elapsed % self.duration_ms.max(1);
-        for (index, delay) in self.delays_ms.iter().enumerate() {
-            if position < *delay {
-                return index;
-            }
-            position -= delay;
-        }
-        self.delays_ms.len() - 1
+        animation_frame_index(
+            &self.delays_ms,
+            self.duration_ms,
+            self.plays,
+            now.saturating_sub(self.start_ms),
+        )
     }
 
     pub(crate) fn running(&self, now: u64) -> bool {
@@ -67,11 +82,7 @@ impl ImageAnimation {
             document,
             source: source.to_string(),
             start_ms,
-            delays_ms: self
-                .frames
-                .iter()
-                .map(|frame| u64::from(frame.delay_ms.max(1)))
-                .collect(),
+            delays_ms: self.delays_ms.clone(),
             duration_ms: self.duration_ms,
             plays: self.plays,
         });
@@ -102,17 +113,6 @@ impl Image {
 }
 
 impl Canvas {
-    /// Preserves timing metadata when a child document becomes a raster image.
-    pub(crate) fn into_image(self) -> Image {
-        Image {
-            width: self.width,
-            height: self.height,
-            pixels: self.pixels,
-            animation_regions: self.animation_regions,
-            animated_pixels: None,
-        }
-    }
-
     pub(crate) fn image_playbacks(&self) -> Vec<Arc<ImagePlayback>> {
         let mut result = Vec::new();
         for region in &self.animation_regions {
@@ -126,7 +126,12 @@ impl Canvas {
         result
     }
 
-    pub(super) fn observe_scaled_image(&mut self, image: &Image, destination: Rect, clip: Rect) {
+    pub(super) fn record_animation_regions_from_scaled_image(
+        &mut self,
+        image: &Image,
+        destination: Rect,
+        clip: Rect,
+    ) {
         let transform = AffineTransform {
             a: destination.width / image.width.max(1) as f32,
             d: destination.height / image.height.max(1) as f32,
@@ -134,19 +139,19 @@ impl Canvas {
             f: destination.y,
             ..AffineTransform::identity()
         };
-        self.observe_animation_regions(&image.animation_regions, transform, Some(clip));
+        self.record_transformed_animation_regions(&image.animation_regions, transform, Some(clip));
     }
 
-    pub(super) fn observe_canvas(
+    pub(super) fn record_animation_regions_from_canvas(
         &mut self,
         source: &Canvas,
         transform: AffineTransform,
         clip: Option<Rect>,
     ) {
-        self.observe_animation_regions(&source.animation_regions, transform, clip);
+        self.record_transformed_animation_regions(&source.animation_regions, transform, clip);
     }
 
-    fn observe_animation_regions(
+    fn record_transformed_animation_regions(
         &mut self,
         regions: &[AnimationRegion],
         transform: AffineTransform,
@@ -210,17 +215,3 @@ impl Canvas {
         }
     }
 }
-
-// Pixel equality remains independent of private playback bookkeeping.
-impl PartialEq for Image {
-    fn eq(&self, other: &Self) -> bool {
-        self.width == other.width && self.height == other.height && self.pixels == other.pixels
-    }
-}
-impl Eq for Image {}
-impl PartialEq for Canvas {
-    fn eq(&self, other: &Self) -> bool {
-        self.width == other.width && self.height == other.height && self.pixels == other.pixels
-    }
-}
-impl Eq for Canvas {}

@@ -160,10 +160,8 @@ struct BrowserApp {
     frame_scheduler: PlatformFrameScheduler,
     frame_cache: BrowserFrameCache,
     clock_document: u64,
-    last_chrome: Option<(ChromeLayout, UrlBar)>,
-    trace_paint: bool,
-    paint_sequence: u64,
-    started_at: Instant,
+    last_chrome: Option<render_pump::PresentedChrome>,
+    paint_trace: Option<render_pump::PaintTrace>,
     input: PlatformInput,
     window_title: String,
     modifiers: InputModifiers,
@@ -208,9 +206,8 @@ impl BrowserApp {
             frame_cache: BrowserFrameCache::default(),
             clock_document,
             last_chrome: None,
-            trace_paint: std::env::var_os("OMOIKANE_TRACE_PAINT").is_some(),
-            paint_sequence: 0,
-            started_at,
+            paint_trace: std::env::var_os("OMOIKANE_TRACE_PAINT")
+                .map(|_| render_pump::PaintTrace::new(started_at)),
             input: PlatformInput::new(),
             window_title: DEFAULT_WINDOW_TITLE.to_string(),
             modifiers: InputModifiers::default(),
@@ -886,9 +883,10 @@ impl ApplicationHandler for BrowserApp {
                     .request_rendering_opportunity(Instant::now());
             }
             WindowEvent::RedrawRequested => {
-                let force_present = !self.frame_scheduler.redraw_pending();
-                let elapsed_ms = self.consume_page_delta(Instant::now(), true);
-                if let Err(error) = self.draw(elapsed_ms, force_present) {
+                // Without a queued application redraw, this is an OS exposure event.
+                let os_exposure = !self.frame_scheduler.redraw_pending();
+                let elapsed_ms = self.begin_page_frame(Instant::now());
+                if let Err(error) = self.draw(elapsed_ms, os_exposure) {
                     eprintln!("frame failed: {error}");
                 }
             }
@@ -980,9 +978,8 @@ impl ApplicationHandler for BrowserApp {
                 .plan(now, self.frame_cache.demand(&self.session))
             {
                 PlatformFramePlan::Redraw => {
-                    if self.frame_scheduler.queue_redraw() {
-                        window.request_redraw();
-                    }
+                    self.frame_scheduler.queue_redraw();
+                    window.request_redraw();
                     event_loop.set_control_flow(ControlFlow::Wait);
                 }
                 PlatformFramePlan::Wait => event_loop.set_control_flow(ControlFlow::Wait),

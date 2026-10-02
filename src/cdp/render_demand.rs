@@ -20,10 +20,9 @@ pub enum NextRendering {
 /// Includes document generation; style, layout, scroll and paint generations;
 /// layout and visual viewports; scrolling, focus and selection state; and host
 /// visibility, shared visited-history generation and visible animated-image
-/// frame indices. DOM, hover,
-/// text-control caret/value and child-document changes
-/// invalidate the included generations. Hosts capture this after a successful
-/// paint and retain it without borrowing the session.
+/// frame indices. DOM, hover, text-control caret/value and child-document
+/// changes invalidate the included generations. Hosts capture this after a
+/// successful paint and retain it without borrowing the session.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaintStateKey {
     document_generation: u64,

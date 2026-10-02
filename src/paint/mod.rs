@@ -202,6 +202,14 @@ pub struct Image {
     animated_pixels: Option<animation::AnimatedPixels>,
 }
 
+// Equality compares dimensions and pixels, excluding playback metadata.
+impl PartialEq for Image {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width && self.height == other.height && self.pixels == other.pixels
+    }
+}
+impl Eq for Image {}
+
 /// GIF disposal operation applied after a frame's display interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GifDisposal {
@@ -237,6 +245,7 @@ impl ImageFrame {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageAnimation {
     frames: Vec<ImageFrame>,
+    delays_ms: Vec<u64>,
     duration_ms: u64,
     plays: Option<u64>,
 }
@@ -252,25 +261,12 @@ impl ImageAnimation {
     }
     /// Selects the frame visible at an elapsed frame-scheduler timestamp.
     pub fn frame_at(&self, elapsed_ms: u64) -> &ImageFrame {
-        if self
-            .plays
-            .is_some_and(|plays| elapsed_ms >= self.duration_ms.saturating_mul(plays))
-        {
-            return &self.frames[self.frames.len() - 1];
-        }
-        let mut position = if self.duration_ms == 0 {
-            0
-        } else {
-            elapsed_ms % self.duration_ms
-        };
-        for frame in &self.frames {
-            let delay = u64::from(frame.delay_ms.max(1));
-            if position < delay {
-                return frame;
-            }
-            position = position.saturating_sub(delay);
-        }
-        &self.frames[self.frames.len() - 1]
+        &self.frames[animation::animation_frame_index(
+            &self.delays_ms,
+            self.duration_ms,
+            self.plays,
+            elapsed_ms,
+        )]
     }
 }
 
@@ -430,7 +426,26 @@ pub struct Canvas {
     animation_regions: Vec<animation::AnimationRegion>,
 }
 
+// Equality compares dimensions and pixels, excluding playback metadata.
+impl PartialEq for Canvas {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width && self.height == other.height && self.pixels == other.pixels
+    }
+}
+impl Eq for Canvas {}
+
 impl Canvas {
+    /// Preserves timing metadata when a child document becomes a raster image.
+    pub(crate) fn into_image(self) -> Image {
+        Image {
+            width: self.width,
+            height: self.height,
+            pixels: self.pixels,
+            animation_regions: self.animation_regions,
+            animated_pixels: None,
+        }
+    }
+
     /// Creates a transparent canvas with the given dimensions.
     pub fn new(width: u32, height: u32) -> Self {
         Self {
@@ -953,7 +968,7 @@ impl Canvas {
         if x0 >= x1 || y0 >= y1 {
             return;
         }
-        self.observe_scaled_image(image, destination, area);
+        self.record_animation_regions_from_scaled_image(image, destination, area);
         let image = image.sampled_image(crate::layout::image_animation_time_ms());
         let shrink_x = destination.width < image.width as f32;
         let shrink_y = destination.height < image.height as f32;
@@ -3324,13 +3339,9 @@ fn paint_box_internal_untransformed(
             apply_clip_path_shape(&mut offscreen, &shape);
         }
         // メインキャンバスに合成
-        canvas.observe_canvas(
+        canvas.record_animation_regions_from_canvas(
             &offscreen,
-            AffineTransform {
-                e: buf_x as f32,
-                f: buf_y as f32,
-                ..AffineTransform::identity()
-            },
+            AffineTransform::translate(buf_x as f32, buf_y as f32),
             inherited_clip,
         );
         let dst_w = canvas.width() as i32;
@@ -3394,7 +3405,7 @@ fn composite_affine(
     let Some(inverse) = transform.inverse() else {
         return;
     };
-    destination.observe_canvas(source, transform, clip);
+    destination.record_animation_regions_from_canvas(source, transform, clip);
     let width = source.width() as i32;
     let height = source.height() as i32;
     let hint_x0 = source_hint.x.floor().max(0.0).min(width as f32) as i32;
@@ -3722,8 +3733,51 @@ fn prepare_mask_tile(
     Some((tile, tile_width, tile_height))
 }
 
-fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedStyle, area: Rect) {
-    let prepared = layers
+struct PreparedMaskLayer {
+    tile: Arc<Image>,
+    tile_width: f32,
+    tile_height: f32,
+    repeat_x: bool,
+    repeat_y: bool,
+    position_x: f32,
+    position_y: f32,
+    mode: MaskMode,
+    composite: MaskComposite,
+}
+
+impl PreparedMaskLayer {
+    fn destination_rect(&self, area: Rect) -> Rect {
+        Rect {
+            x: if self.repeat_x {
+                area.x
+            } else {
+                area.x + self.position_x
+            },
+            y: if self.repeat_y {
+                area.y
+            } else {
+                area.y + self.position_y
+            },
+            width: if self.repeat_x {
+                area.width
+            } else {
+                self.tile_width
+            },
+            height: if self.repeat_y {
+                area.height
+            } else {
+                self.tile_height
+            },
+        }
+    }
+}
+
+fn prepare_mask_layers(
+    layers: &[MaskLayer],
+    style: &ComputedStyle,
+    area: Rect,
+) -> Vec<PreparedMaskLayer> {
+    layers
         .iter()
         .filter_map(|layer| {
             let layer_style = mask_style_for_layer(style, layer.index);
@@ -3739,7 +3793,7 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
             );
             let mode = mask_mode_for_layer(style, layer.index);
             let composite = mask_composite_for_layer(style, layer.index);
-            Some((
+            Some(PreparedMaskLayer {
                 tile,
                 tile_width,
                 tile_height,
@@ -3749,33 +3803,25 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
                 position_y,
                 mode,
                 composite,
-            ))
+            })
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedStyle, area: Rect) {
+    let prepared = prepare_mask_layers(layers, style, area);
     if prepared.is_empty() {
         // A mask that could not be prepared (for example because its size is
         // zero or exceeds the allocation cap) falls back to painting without
         // a mask rather than making the entire element transparent.
         return;
     }
-    for (tile, tile_width, tile_height, repeat_x, repeat_y, position_x, position_y, _, _) in
-        &prepared
-    {
-        let destination = Rect {
-            x: if *repeat_x {
-                area.x
-            } else {
-                area.x + position_x
-            },
-            y: if *repeat_y {
-                area.y
-            } else {
-                area.y + position_y
-            },
-            width: if *repeat_x { area.width } else { *tile_width },
-            height: if *repeat_y { area.height } else { *tile_height },
-        };
-        canvas.observe_scaled_image(tile, destination, area);
+    for layer in &prepared {
+        canvas.record_animation_regions_from_scaled_image(
+            &layer.tile,
+            layer.destination_rect(area),
+            area,
+        );
     }
     let width = canvas.width as i32;
     let height = canvas.height as i32;
@@ -3787,74 +3833,77 @@ fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedS
     for y in 0..height {
         for x in 0..width {
             let inside_area = x >= area_x0 && x < area_x1 && y >= area_y0 && y < area_y1;
-            let mut combined: Option<u8> = None;
-            if inside_area {
-                for (
-                    tile,
-                    tile_width,
-                    tile_height,
-                    repeat_x,
-                    repeat_y,
-                    position_x,
-                    position_y,
-                    mode,
-                    composite,
-                ) in &prepared
-                {
-                    let anchor_x = area.x + *position_x;
-                    let anchor_y = area.y + *position_y;
-                    let color = sample_mask_color(
-                        tile.as_ref(),
-                        x as f32,
-                        y as f32,
-                        anchor_x,
-                        anchor_y,
-                        *tile_width,
-                        *tile_height,
-                        *repeat_x,
-                        *repeat_y,
-                    );
-                    let alpha = if *mode == MaskMode::Luminance {
-                        let luminance = (0.2126 * color.r as f32
-                            + 0.7152 * color.g as f32
-                            + 0.0722 * color.b as f32)
-                            .round()
-                            .clamp(0.0, 255.0) as u16;
-                        ((luminance * color.a as u16 + 127) / 255) as u8
-                    } else {
-                        color.a
-                    };
-                    combined = Some(match combined {
-                        None => alpha,
-                        Some(previous) => {
-                            match composite {
-                                MaskComposite::Subtract => {
-                                    ((previous as u16 * (255 - alpha as u16) + 127) / 255) as u8
-                                }
-                                MaskComposite::Intersect => {
-                                    ((previous as u16 * alpha as u16 + 127) / 255) as u8
-                                }
-                                MaskComposite::Exclude => {
-                                    // Keep the intermediate sum in a wide type. Clamping
-                                    // `previous + alpha` before subtracting the product
-                                    // changes the exclude result for mid/high alphas.
-                                    let product =
-                                        (u32::from(previous) * u32::from(alpha) + 127) / 255;
-                                    (u32::from(previous) + u32::from(alpha) - 2 * product)
-                                        .clamp(0, 255) as u8
-                                }
-                                MaskComposite::Add => previous.saturating_add(alpha),
-                            }
-                        }
-                    });
-                }
-            }
-            let mask_alpha = combined.unwrap_or(0);
+            let mask_alpha = if inside_area {
+                combined_mask_alpha(&prepared, area, x as f32, y as f32)
+            } else {
+                0
+            };
             let index = ((y * width + x) * 4) as usize;
             canvas.pixels[index + 3] =
                 ((canvas.pixels[index + 3] as u16 * mask_alpha as u16 + 127) / 255) as u8;
         }
     }
+}
+
+fn combined_mask_alpha(prepared: &[PreparedMaskLayer], area: Rect, x: f32, y: f32) -> u8 {
+    let mut combined: Option<u8> = None;
+    for PreparedMaskLayer {
+        tile,
+        tile_width,
+        tile_height,
+        repeat_x,
+        repeat_y,
+        position_x,
+        position_y,
+        mode,
+        composite,
+    } in prepared
+    {
+        let anchor_x = area.x + *position_x;
+        let anchor_y = area.y + *position_y;
+        let color = sample_mask_color(
+            tile.as_ref(),
+            x,
+            y,
+            anchor_x,
+            anchor_y,
+            *tile_width,
+            *tile_height,
+            *repeat_x,
+            *repeat_y,
+        );
+        let alpha = if *mode == MaskMode::Luminance {
+            let luminance =
+                (0.2126 * color.r as f32 + 0.7152 * color.g as f32 + 0.0722 * color.b as f32)
+                    .round()
+                    .clamp(0.0, 255.0) as u16;
+            ((luminance * color.a as u16 + 127) / 255) as u8
+        } else {
+            color.a
+        };
+        combined = Some(match combined {
+            None => alpha,
+            Some(previous) => {
+                match composite {
+                    MaskComposite::Subtract => {
+                        ((previous as u16 * (255 - alpha as u16) + 127) / 255) as u8
+                    }
+                    MaskComposite::Intersect => {
+                        ((previous as u16 * alpha as u16 + 127) / 255) as u8
+                    }
+                    MaskComposite::Exclude => {
+                        // Keep the intermediate sum in a wide type. Clamping
+                        // `previous + alpha` before subtracting the product
+                        // changes the exclude result for mid/high alphas.
+                        let product = (u32::from(previous) * u32::from(alpha) + 127) / 255;
+                        (u32::from(previous) + u32::from(alpha) - 2 * product).clamp(0, 255) as u8
+                    }
+                    MaskComposite::Add => previous.saturating_add(alpha),
+                }
+            }
+        });
+    }
+    combined.unwrap_or(0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5688,13 +5737,9 @@ fn apply_backdrop_filters(
 /// The region must be within the canvas bounds.
 fn copy_region_out(canvas: &Canvas, x: usize, y: usize, width: usize, height: usize) -> Canvas {
     let mut region = Canvas::new(width as u32, height as u32);
-    region.observe_canvas(
+    region.record_animation_regions_from_canvas(
         canvas,
-        AffineTransform {
-            e: -(x as f32),
-            f: -(y as f32),
-            ..AffineTransform::identity()
-        },
+        AffineTransform::translate(-(x as f32), -(y as f32)),
         None,
     );
     let row_bytes = width * 4;
@@ -5722,13 +5767,12 @@ fn copy_region_in(
     width: usize,
     height: usize,
 ) {
-    canvas.observe_canvas(
+    canvas.record_animation_regions_from_canvas(
         region,
-        AffineTransform {
-            e: dest_x as f32 - source_x as f32,
-            f: dest_y as f32 - source_y as f32,
-            ..AffineTransform::identity()
-        },
+        AffineTransform::translate(
+            dest_x as f32 - source_x as f32,
+            dest_y as f32 - source_y as f32,
+        ),
         Some(Rect {
             x: dest_x as f32,
             y: dest_y as f32,
@@ -7359,6 +7403,8 @@ impl Canvas {
     }
 
     /// キャンバスの全ピクセルの alpha に `factor` (0.0〜1.0) を乗算する。
+    /// `factor <= 0` also clears animation regions: fully transparent images
+    /// cannot create visible changes and must not keep requesting frames.
     pub fn multiply_alpha(&mut self, factor: f32) {
         if factor <= 0.0 {
             self.animation_regions.clear();

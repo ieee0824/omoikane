@@ -3879,18 +3879,20 @@ impl HostState {
                         live_animations && resolver.set_animation_time_ms(transition_time_ms);
                     (
                         changed || animation_changed,
+                        // Keyframes can animate geometry as well as paint properties;
+                        // conservatively rebuild layout when their sampled values change.
                         resolver.running_transitions_require_layout() || animation_changed,
                     )
                 })
                 .unwrap_or((false, false));
-            if time_changed && document_id == self.document.identity() {
-                self.style_generation = self.style_generation.saturating_add(1);
-                if requires_layout {
-                    self.capture_scroll_offsets_before_layout();
-                    self.layout_root = None;
+            if time_changed {
+                if document_id == self.document.identity() {
+                    self.style_generation = self.style_generation.saturating_add(1);
+                    if requires_layout {
+                        self.capture_scroll_offsets_before_layout();
+                        self.layout_root = None;
+                    }
                 }
-                self.invalidate_paint_cache();
-            } else if time_changed {
                 self.invalidate_paint_cache();
             }
             return;
@@ -5797,13 +5799,13 @@ impl JsRuntime {
     ) -> Result<crate::paint::Canvas, crate::paint::PaintError> {
         let timeline = Arc::clone(&self.host_state.borrow().image_timeline);
         let canvas = crate::layout::with_image_animation_timeline(timeline, || {
-            self.paint_current_document_impl()
+            self.paint_document_at_current_image_time()
         })?;
         self.host_state.borrow_mut().visible_image_playbacks = canvas.image_playbacks();
         Ok(canvas)
     }
 
-    fn paint_current_document_impl(
+    fn paint_document_at_current_image_time(
         &mut self,
     ) -> Result<crate::paint::Canvas, crate::paint::PaintError> {
         self.eval("__omoikane_flush_stylesheets()")

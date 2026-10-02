@@ -603,20 +603,7 @@ impl CdpSession {
             self.storage_session_id,
         )
         .map_err(CdpSessionError::JavaScript)?;
-        if let Some((reporter, surface)) = self.runtime.error_reporter_destination() {
-            runtime.set_error_reporter(reporter, surface);
-        }
-        runtime.enable_live_css_animations();
-        runtime.set_shared_cookie_store(Arc::clone(&self.cookie_store));
-        runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
-        runtime.set_user_agent(self.http_client.user_agent().to_string());
-        runtime.set_fullscreen_supported(self.fullscreen_supported);
-        runtime.set_pointer_lock_deferred(self.pointer_lock_deferred);
-        runtime
-            .set_pointer_lock_focus(self.pointer_lock_focused)
-            .map_err(CdpSessionError::JavaScript)?;
-        runtime.set_fullscreen_transition_allowed(self.fullscreen_transition_allowed);
-        Self::install_runtime_helpers_on(&mut runtime).map_err(CdpSessionError::JavaScript)?;
+        self.configure_replacement_runtime(&mut runtime)?;
         runtime.install_csp_policy(csp_headers);
         if let Some(state) = form_state {
             runtime
@@ -686,20 +673,7 @@ impl CdpSession {
             self.storage_session_id,
         )
         .map_err(CdpSessionError::JavaScript)?;
-        if let Some((reporter, surface)) = self.runtime.error_reporter_destination() {
-            runtime.set_error_reporter(reporter, surface);
-        }
-        runtime.enable_live_css_animations();
-        runtime.set_shared_cookie_store(Arc::clone(&self.cookie_store));
-        runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
-        runtime.set_user_agent(self.http_client.user_agent().to_string());
-        runtime.set_fullscreen_supported(self.fullscreen_supported);
-        runtime.set_pointer_lock_deferred(self.pointer_lock_deferred);
-        runtime
-            .set_pointer_lock_focus(self.pointer_lock_focused)
-            .map_err(CdpSessionError::JavaScript)?;
-        runtime.set_fullscreen_transition_allowed(self.fullscreen_transition_allowed);
-        Self::install_runtime_helpers_on(&mut runtime).map_err(CdpSessionError::JavaScript)?;
+        self.configure_replacement_runtime(&mut runtime)?;
         runtime.install_csp_policy(csp_headers);
         if let Some(state) = form_state {
             runtime
