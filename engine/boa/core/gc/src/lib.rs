@@ -952,7 +952,6 @@ impl Collector {
                 return false;
             }
 
-            node.header.minor_unmark();
             if node.header.promote_if_mature() {
                 remember_young_allocation(*pointer);
                 promoted_strongs.push(*pointer);
@@ -972,7 +971,6 @@ impl Collector {
                 return false;
             }
 
-            eph.header().minor_unmark();
             if eph.header().promote_if_mature() {
                 remember_ephemeron_allocation(*pointer);
                 promoted_ephemerons.push(*pointer);
@@ -981,6 +979,8 @@ impl Collector {
             true
         });
         gc.old_weaks.extend(promoted_ephemerons.iter().copied());
+
+        Self::clear_survivor_minor_marks(gc, &promoted_strongs, &promoted_ephemerons);
 
         // Remove stale remembered pointers before their allocations are freed.
         // Promoted strong children no longer need to be nursery roots. Promoted
@@ -1038,6 +1038,25 @@ impl Collector {
             finalize_elapsed,
             sweep_started.elapsed(),
         );
+    }
+
+    /// Keep this collection's reachability marks until all promotion tracing
+    /// has finished. Clearing a young value before an ephemeron is promoted
+    /// lets the promotion walk mark it again and makes the next minor skip its
+    /// newly written edges.
+    fn clear_survivor_minor_marks(
+        gc: &BoaGc,
+        promoted_strongs: &[GcErasedPointer],
+        promoted_ephemerons: &[EphemeronPointer],
+    ) {
+        for pointer in gc.youngs.iter().chain(promoted_strongs) {
+            // SAFETY: surviving and promoted allocations have not been swept.
+            unsafe { pointer.as_ref() }.header.minor_unmark();
+        }
+        for pointer in gc.young_weaks.iter().chain(promoted_ephemerons) {
+            // SAFETY: surviving and promoted ephemerons have not been swept.
+            unsafe { pointer.as_ref() }.header().minor_unmark();
+        }
     }
 
     /// Seeds and solves the minor strong/ephemeron fixed point.
