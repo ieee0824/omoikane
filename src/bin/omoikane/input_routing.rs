@@ -1,13 +1,14 @@
 //! Routes native keyboard, IME and pointer input between the page and the
 //! browser chrome (find-in-page UI and address bar).
 //!
-//! Keys and IME go to exactly one [`InputTarget`]. Pointer input goes to the
-//! page only over the page area, except that a button pressed in the page
-//! keeps the page as its target until released, and Pointer Lock sends
-//! everything to the page.
+//! Keys and IME go to exactly one [`InputTarget`]. Mouse input goes to the page
+//! only over the page area, except that a button pressed in the page keeps the
+//! page as its target until released, and Pointer Lock sends mouse input to
+//! the page. Each touch keeps the target selected by its starting region.
 
-use omoikane::platform_input::PlatformMouseButton;
+use omoikane::platform_input::{PlatformMouseButton, PlatformTouchPhase};
 use serde_json::json;
+use winit::event::{Touch, TouchPhase};
 
 use super::BrowserApp;
 use super::chrome_layout::{ChromeLayout, WindowRegion};
@@ -35,6 +36,66 @@ pub(super) enum PagePointer {
 }
 
 impl BrowserApp {
+    /// Forwards a native contact only when its gesture belongs to the page.
+    pub(super) fn dispatch_touch(
+        &mut self,
+        touch: Touch,
+    ) -> Result<(), omoikane::cdp::JsonRpcError> {
+        let phase = match touch.phase {
+            TouchPhase::Started => PlatformTouchPhase::Started,
+            TouchPhase::Moved => PlatformTouchPhase::Moved,
+            TouchPhase::Ended => PlatformTouchPhase::Ended,
+            TouchPhase::Cancelled => PlatformTouchPhase::Cancelled,
+        };
+        let Some((x, y)) = self.route_touch(
+            self.chrome_layout(),
+            touch.id,
+            phase,
+            touch.location.x,
+            touch.location.y,
+        ) else {
+            return Ok(());
+        };
+        self.input.touch(&mut self.session, touch.id, phase, x, y)
+    }
+
+    /// Routes each contact according to where it started. A tap on the URL
+    /// field focuses it; a page contact stays with the page through its end,
+    /// including movements over the toolbar. Unmatched contacts are ignored.
+    pub(super) fn route_touch(
+        &mut self,
+        layout: ChromeLayout,
+        id: u64,
+        phase: PlatformTouchPhase,
+        x: f64,
+        y: f64,
+    ) -> Option<(f64, f64)> {
+        let to_page = match phase {
+            PlatformTouchPhase::Started => {
+                self.page_touches.remove(&id);
+                match layout.region_at(x, y) {
+                    WindowRegion::Page { .. } => {
+                        self.url_bar.cancel();
+                        self.page_touches.insert(id);
+                        true
+                    }
+                    WindowRegion::Toolbar { .. } => {
+                        if url_field(layout.toolbar(), layout.scale()).contains(x, y) {
+                            self.focus_url_bar();
+                        }
+                        false
+                    }
+                    WindowRegion::Outside => false,
+                }
+            }
+            PlatformTouchPhase::Moved => self.page_touches.contains(&id),
+            PlatformTouchPhase::Ended | PlatformTouchPhase::Cancelled => {
+                self.page_touches.remove(&id)
+            }
+        };
+        to_page.then(|| layout.page_point(x, y))
+    }
+
     /// Returns the current key/IME target. Editing the address bar and the
     /// find UI are kept mutually exclusive, so the address bar wins only
     /// while it is the one being edited.
