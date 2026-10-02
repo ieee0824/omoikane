@@ -2929,7 +2929,7 @@ impl HostState {
 
         match fetched {
             Some((mime, body, csp_headers, effective_url)) if is_html_mime_type(&mime) => {
-                let html = String::from_utf8_lossy(&body);
+                let html = crate::html::encoding::decode_html_bytes(&body, Some(&mime));
                 (
                     crate::html::TreeBuilder::parse(&html).document(),
                     csp_headers,

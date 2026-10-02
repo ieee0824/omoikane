@@ -1,9 +1,13 @@
 use encoding_rs::Encoding;
 
 pub(crate) fn decode_html_response(response: &crate::http::HttpResponse) -> String {
-    let body = response.body();
-    let charset = response
-        .header("content-type")
+    decode_html_bytes(response.body(), response.header("content-type"))
+}
+
+/// Decodes an HTML resource using its transport charset or in-document meta.
+/// Top-level and nested browsing contexts share this decision.
+pub(crate) fn decode_html_bytes(body: &[u8], content_type: Option<&str>) -> String {
+    let charset = content_type
         .and_then(parse_charset_from_content_type)
         .or_else(|| detect_charset_from_html_meta(body));
 

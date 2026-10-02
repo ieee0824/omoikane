@@ -349,6 +349,16 @@ three generic families in normal/bold and upright/italic styles. Input CSS is in
 the named fixture and test source at the revision recorded by the workflow.
 Font diagnostics are opt-in and scoped to the thread executing the journey.
 
+`cargo test --locked --test legacy_encoding` uses the local
+[Japanese encoding fixture](fixtures/legacy-encoding/README.md) to check
+Shift_JIS meta decoding in frames, iframes, objects and direct navigation,
+HTTP charset precedence, and frame-link navigation. Body/title values and full
+painted frames must match UTF-8 references. Japanese fallback glyphs must be
+available and nonempty: install `fonts-noto-cjk` on Linux; macOS uses its installed
+Hiragino fonts. CI and Browser behavior run the same tests and save PNGs and font
+metadata under `OMOIKANE_BROWSER_REPORT_DIR/legacy-encoding`. These tests exercise
+the GUI's shared browser/painting code and title metadata, not OS window chrome.
+
 The workflow also runs `cargo test --lib font -- --include-ignored --nocapture`.
 The original fonts in [anonymized-font-selection](fixtures/anonymized-font-selection/README.md)
 verify metadata-based selection independently of filenames and directory order,
