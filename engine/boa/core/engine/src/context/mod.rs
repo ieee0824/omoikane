@@ -10,6 +10,7 @@ pub use hooks::{DefaultHooks, HostHooks};
 #[cfg(feature = "intl")]
 pub use icu::IcuError;
 use intrinsics::Intrinsics;
+use rustc_hash::FxHashSet;
 #[cfg(feature = "temporal")]
 use temporal_rs::provider::TimeZoneProvider;
 #[cfg(feature = "temporal")]
@@ -44,6 +45,9 @@ mod hooks;
 pub(crate) mod icu;
 pub mod intrinsics;
 
+#[cfg(test)]
+mod tests;
+
 thread_local! {
     static CANNOT_BLOCK_COUNTER: Cell<u64> = const { Cell::new(0) };
 }
@@ -51,7 +55,9 @@ thread_local! {
 /// GC handles owned by a [`Context`] but stored outside the VM heap.
 #[derive(Default, Trace, Finalize)]
 struct ContextRoots {
-    kept_alive: Vec<JsObject>,
+    // AddToKeptObjects only needs one strong edge per object until the job
+    // ends. Repeated WeakRef.deref calls must not multiply the GC root scan.
+    kept_alive: FxHashSet<JsObject>,
     data: HostDefined,
     pending_async_resume: Option<builtins::generator::PendingAsyncResume>,
 }
@@ -696,7 +702,7 @@ impl Context {
     }
 
     pub(crate) fn keep_alive(&mut self, object: JsObject) {
-        self.roots.kept_alive.push(object);
+        self.roots.kept_alive.insert(object);
     }
 
     /// Retrieves the current stack trace of the context.

@@ -194,6 +194,29 @@ fn runner_preserves_task_errors_progress_and_termination_reason() {
     );
 }
 
+#[test]
+fn faithful_test26_timing_survives_stalled_followup_ticks() {
+    let (server, _fixture) = TemporaryFixture::start(
+        r#"<!doctype html><html><body><span id="score">26</span><script>
+        var tests = new Array(28), score = 26, index = 26, log = "";
+        function update() {}
+        setTimeout(function () {
+            const deadline = Date.now() + 40;
+            while (Date.now() < deadline) {}
+        }, 10);
+        </script></body></html>"#,
+    );
+    let result = run_acid3(&server.base_url(), DriveMode::Faithful);
+    assert_eq!(result.termination_reason, TerminationReason::NoPendingWork);
+    assert_eq!(result.index, Some(26));
+    assert!(
+        result
+            .test26_step_wall_ms
+            .is_some_and(|elapsed| elapsed >= 35.0),
+        "empty ticks after a stalled test must not overwrite the measured work: {result:?}"
+    );
+}
+
 /// Both drive modes must score 100/100 without script or driving errors.
 #[test]
 fn runner_scores_100_in_both_drive_modes() {

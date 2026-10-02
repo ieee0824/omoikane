@@ -83,6 +83,49 @@ fn node_identity_uses_captured_call_and_collection_methods() {
 }
 
 #[test]
+fn node_ids_stay_immutable_through_adoption_and_prototype_changes() {
+    let document = TreeBuilder::parse("<html><body></body></html>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+                    const other = document.implementation.createHTMLDocument('other');
+                    const nodes = [document.createElement('p'), document.createTextNode('text'),
+                        document.createComment('comment'), document.createDocumentFragment(), document];
+                    const same = Node.prototype.isSameNode;
+                    const owner = Object.getOwnPropertyDescriptor(Node.prototype, 'ownerDocument').get;
+                    for (const node of nodes) {
+                        const id = node.__id;
+                        const descriptor = Object.getOwnPropertyDescriptor(node, '__id');
+                        if (typeof descriptor.get !== 'function' || descriptor.set !== undefined ||
+                            'value' in descriptor || !descriptor.enumerable || descriptor.configurable ||
+                            descriptor.get.call(other) !== other.__id ||
+                            descriptor.get.call({}) !== undefined) return false;
+                        if (Reflect.set(node, '__id', -1) || Reflect.deleteProperty(node, '__id') ||
+                            Reflect.defineProperty(node, '__id', { value: -1 })) return false;
+                        if (node !== document && node.nodeType !== 11) {
+                            other.body.appendChild(node);
+                            if (node.__id !== id || owner.call(node) !== other) return false;
+                            other.body.removeChild(node);
+                        }
+                        const forged = Object.create(Node.prototype);
+                        forged.__id = id;
+                        try { same.call(forged, node); return false; }
+                        catch (error) { if (error.name !== 'TypeError') return false; }
+                        Object.setPrototypeOf(node, { __id: -1 });
+                        if (node.__id !== id || !same.call(node, node)) return false;
+                    }
+                    return true;
+                })()"#,
+            )
+            .expect("node identity must be immutable and separately branded")
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
 fn deep_connectivity_does_not_spend_the_script_loop_budget() {
     let mut runtime = deep_runtime();
     assert_eq!(
@@ -240,4 +283,56 @@ fn range_boundary_move_invalidates_document_only_removal_cache() {
             .as_boolean(),
         Some(true)
     );
+}
+
+#[test]
+fn insertion_cycle_checks_do_not_spend_the_js_loop_budget_per_ancestor() {
+    let mut runtime = deep_runtime();
+    let result = runtime
+        .eval(
+            r#"(() => {
+                const leaf = document.getElementById('leaf');
+                Object.defineProperty(leaf, 'parentNode', {
+                    get() { throw new Error('observable ancestor lookup'); }
+                });
+                leaf.insertBefore(document.createTextNode('first'), null);
+                leaf.appendChild(document.createTextNode('second'));
+                try { leaf.insertBefore(leaf, null); return false; }
+                catch (error) { if (error.name !== 'HierarchyRequestError') return false; }
+                try { leaf.appendChild(leaf); return false; }
+                catch (error) { if (error.name !== 'HierarchyRequestError') return false; }
+                try { leaf.insertBefore(document.body, null); return false; }
+                catch (error) { if (error.name !== 'HierarchyRequestError') return false; }
+                try { leaf.appendChild(document.body); return false; }
+                catch (error) { if (error.name !== 'HierarchyRequestError') return false; }
+                return leaf.textContent === 'textfirstsecond' &&
+                    document.body.parentNode === document.documentElement;
+            })()"#,
+        )
+        .expect("native ancestry checks must handle a tree deeper than the JS loop budget");
+    assert_eq!(result.as_boolean(), Some(true));
+}
+
+#[test]
+fn insertion_includes_shadow_hosts_while_observer_ancestry_stops_at_roots() {
+    let mut runtime = deep_runtime();
+    let result = runtime
+        .eval(
+            r#"(() => {
+                const host = document.createElement('div');
+                const shadow = host.attachShadow({mode: 'open'});
+                const observer = new MutationObserver(() => {});
+                observer.observe(host, {childList: true, subtree: true});
+                const inner = document.createElement('span');
+                shadow.appendChild(inner);
+                if (observer.takeRecords().length !== 0) return false;
+                host.appendChild(document.createElement('p'));
+                if (observer.takeRecords().length !== 1) return false;
+                try { inner.insertBefore(host, null); return false; }
+                catch (error) { if (error.name !== 'HierarchyRequestError') return false; }
+                return host.parentNode === null && inner.parentNode === shadow;
+            })()"#,
+        )
+        .expect("insertion and observer ancestry must keep their distinct shadow-root boundaries");
+    assert_eq!(result.as_boolean(), Some(true));
 }

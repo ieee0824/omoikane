@@ -318,7 +318,8 @@ pub struct Acid3Run {
     pub log: Option<String>,
     /// How many times the loop step actually executed.
     pub iterations: usize,
-    /// Wall time spent driving test 26, including a failed or timed-out step.
+    /// Longest test 26 drive step, including a failed or timed-out step.
+    /// Empty follow-up ticks at a stalled index must not replace that timing.
     pub test26_step_wall_ms: Option<f64>,
 }
 
@@ -408,7 +409,8 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
                 let test26_start = (last_index == 26).then(Instant::now);
                 let tick_result = runtime.tick(delay_ms);
                 if let Some(start) = test26_start {
-                    test26_step_wall_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+                    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                    test26_step_wall_ms = Some(test26_step_wall_ms.unwrap_or(0.0_f64).max(elapsed));
                 }
                 task_errors.extend(runtime.take_task_errors());
                 if let Err(e) = tick_result {
@@ -477,7 +479,8 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
                 let update_result =
                     runtime.eval_safe("if (typeof update === 'function') update();");
                 if let Some(start) = test26_start {
-                    test26_step_wall_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+                    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                    test26_step_wall_ms = Some(test26_step_wall_ms.unwrap_or(0.0_f64).max(elapsed));
                 }
                 if let Err(e) = update_result {
                     drive_errors.push(format!("update(): {e}"));

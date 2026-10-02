@@ -2393,13 +2393,11 @@
       }
     }
     if (__omoikane_node_type(newId) !== 11) {
-      for (let ancestor = parent; ancestor; ancestor = internalHostIncludingParent(ancestor)) {
-        if (internalNodeId(ancestor) === newId) {
-          throw new DOMException(
-            "The new child element contains the parent.",
-            "HierarchyRequestError"
-          );
-        }
+      if (nativeNodeIsInclusiveDescendant(parentId, newId, true)) {
+        throw new DOMException(
+          "The new child element contains the parent.",
+          "HierarchyRequestError"
+        );
       }
     }
 
@@ -2619,15 +2617,19 @@
   }
   globalThis.DOMTokenList = DOMTokenList;
 
+  // Share the accessor instead of allocating a function for every wrapper.
+  // Keep its receiver-based lookup and the immutable own-property descriptor.
+  const nativeNodeIdGetter = {
+    get() { return safeWeakMapGet(nativeNodeIds, this); },
+  }.get;
+
   class Node {
     constructor(id) {
       safeWeakMapSet(nativeNodeIds, this, id);
       safeDefineProperty(this, "__id", {
         enumerable: true,
         configurable: false,
-        get() {
-          return safeWeakMapGet(nativeNodeIds, this);
-        },
+        get: nativeNodeIdGetter,
       });
       safeWeakMapSet(nodeEventStates, this, createNodeEventState());
     }
@@ -2650,15 +2652,11 @@
     // cyclic, i.e. `node` is this node or one of its ancestors. Mirrors the DOM
     // "ensure pre-insertion validity" hierarchy check.
     __ensureNotAncestor(node) {
-      let ancestor = this;
-      while (ancestor) {
-        if (node && ancestor.__id === node.__id) {
-          throw new DOMException(
-            "The new child element contains the parent.",
-            "HierarchyRequestError"
-          );
-        }
-        ancestor = ancestor.parentNode;
+      if (node && nativeNodeIsInclusiveDescendant(this.__id, node.__id)) {
+        throw new DOMException(
+          "The new child element contains the parent.",
+          "HierarchyRequestError"
+        );
       }
     }
 

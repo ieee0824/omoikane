@@ -1,0 +1,686 @@
+{
+  "issue": 1167,
+  "base_revision": "a7416e78e301c4641b9275431a61dc34ac386004",
+  "environment": {
+    "platform": "Linux-6.8.0-137-generic-x86_64-with-glibc2.36",
+    "cpu": {
+      "model name": "Intel(R) Core(TM) i7-8665U CPU @ 1.90GHz",
+      "cpu MHz": "2000.881",
+      "siblings": "8",
+      "cpu cores": "4"
+    },
+    "logical_cpus": 8,
+    "memory_max": "max",
+    "cpu_max": "max 100000",
+    "governor": "powersave",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+    "base": "a7416e78e301c4641b9275431a61dc34ac386004"
+  },
+  "profiles": [
+    {
+      "file": "/target/omoikane-issue1210/debug/.fingerprint/omoikane-99dcf13358c04c79/test-integration-test-acid3_harness.json",
+      "rustc": 1625334936438085654,
+      "profile": 18320869684608397701,
+      "features": "[]",
+      "target": 2804332972620776146,
+      "compile_kind": 0
+    },
+    {
+      "file": "/target/omoikane-issue1210/debug/.fingerprint/boa_engine-1f7f49a304c8415d/lib-boa_engine.json",
+      "rustc": 1625334936438085654,
+      "profile": 4660650176717421292,
+      "features": "[\"annex-b\", \"default\", \"float16\", \"xsum\"]",
+      "target": 13430903570513768486,
+      "compile_kind": 0
+    },
+    {
+      "file": "/target/omoikane-issue1210/debug/.fingerprint/boa_engine-1235689123c10b0b/lib-boa_engine.json",
+      "rustc": 1625334936438085654,
+      "profile": 13930582170632458817,
+      "features": "[\"annex-b\", \"default\", \"float16\", \"xsum\"]",
+      "target": 13430903570513768486,
+      "compile_kind": 0
+    },
+    {
+      "file": "/target/omoikane-issue1167/debug/.fingerprint/omoikane-99dcf13358c04c79/test-integration-test-acid3_harness.json",
+      "rustc": 1625334936438085654,
+      "profile": 18320869684608397701,
+      "features": "[]",
+      "target": 2804332972620776146,
+      "compile_kind": 0
+    },
+    {
+      "file": "/target/omoikane-issue1167/debug/.fingerprint/boa_engine-1235689123c10b0b/lib-boa_engine.json",
+      "rustc": 1625334936438085654,
+      "profile": 13930582170632458817,
+      "features": "[\"annex-b\", \"default\", \"float16\", \"xsum\"]",
+      "target": 13430903570513768486,
+      "compile_kind": 0
+    }
+  ],
+  "formal_conditions": {
+    "fixture": "tests/fixtures/acid3/acid3.html",
+    "javascript_timeout_seconds": 5,
+    "required_score": 100,
+    "feature_flags": [],
+    "before_target": "/target/omoikane-issue1210",
+    "after_target": "/target/omoikane-issue1167",
+    "native_test_profile": "root O1, dependencies O2, line-tables-only, debug assertions and overflow checks enabled"
+  },
+  "conclusion": "Repeated both-mode 100/100 acceptance remains unmet. Timed-out measurements are censored and must not be used as completed-work speedup ratios.",
+  "series": {
+    "unpinned": {
+      "note": "Intermediate source candidate included an observer-empty branch subsequently removed; not the final candidate.",
+      "metadata": {
+        "before_binary": "/target/omoikane-issue1210/debug/deps/acid3_harness-99dcf13358c04c79",
+        "after_binary": "/target/omoikane-issue1167/debug/deps/acid3_harness-99dcf13358c04c79",
+        "binary_sha256": {
+          "/target/omoikane-issue1210/debug/deps/acid3_harness-99dcf13358c04c79": "e3c09722f036fe1ee7423d1f355f15f1cee1499d94f1a1977bda079b54c648db",
+          "/target/omoikane-issue1167/debug/deps/acid3_harness-99dcf13358c04c79": "8066fa943f6b7d31075dae8bb0679d38fffd55124fa6a297c825dc75d762f51b"
+        },
+        "fixture_sha256": {
+          "/tmp/omoikane-issue1210/tests/fixtures/acid3/acid3.html": "54e921f770c775f1e255558c34c380792f102bbf0e81a3a64032afe3e1bc15b9",
+          "/tmp/omoikane-issue1167/tests/fixtures/acid3/acid3.html": "54e921f770c775f1e255558c34c380792f102bbf0e81a3a64032afe3e1bc15b9"
+        },
+        "command_filter": "runner_scores_100_in_both_drive_modes --exact --nocapture --test-threads=1",
+        "note": "Original fixture, wall-clock deadline and score/error assertions are unmodified. Before and after are source-built with default features. Failed old Faithful reports can contain the known overwritten empty-tick timing; raw JSON is preserved.",
+        "git_head": "a7416e78e301c4641b9275431a61dc34ac386004",
+        "git_diff_stat": " engine/boa/core/engine/src/context/mod.rs |  10 ++-\n src/js/dom_bootstrap.js                   |  39 ++++-----\n src/js/mod.rs                             |   8 +-\n tests/acid3_common/harness.rs             |   9 ++-\n tests/acid3_harness.rs                    |  23 ++++++\n tests/dom_tree_queries.rs                 | 129 ++++++++++++++++++++++++++++++\n 6 files changed, 192 insertions(+), 26 deletions(-)\n",
+        "source_sha256": {
+          "engine/boa/core/engine/src/context/mod.rs": "9a495979d75e656b5e4affeb089556845c228a882d3f0eb5c6a2393280276d1b",
+          "src/js/dom_bootstrap.js": "d6ae55e160ce4a53ce347676fdf184962d9ac095fa62ce8e13bd1e7f9dbff522",
+          "src/js/mod.rs": "d6d4b92b2fe296611949f9c0042cbd931082183882924531389fd3324a7d9115",
+          "tests/acid3_common/harness.rs": "4724d4562daaea5ffe343754966d098b278e6573967243ba912ac972c0f199fa",
+          "tests/acid3_harness.rs": "f2dc9df52089c16bf388ef962ca320169cb6d48ca77d81d928dc11b487ca4b79",
+          "tests/dom_tree_queries.rs": "f0de565bbf82b1109fd058fbbbf8b02ba0c4bfd9f8f4c52652394529363b956c",
+          "engine/boa/core/engine/src/context/tests.rs": "32e0e25e2072540aa40386acdc825fdcbe7d56b760f40380bf442dcac6e8c02a"
+        }
+      },
+      "runs": [
+        {
+          "name": "before",
+          "timestamp": "2026-10-02T01:21:45.935645+00:00",
+          "exit_code": 101,
+          "wall_seconds": 13.123064817045815,
+          "user_cpu_seconds": 12.815249,
+          "system_cpu_seconds": 0.246751,
+          "major_faults": 0,
+          "load_before": [
+            2.56982421875,
+            1.52783203125,
+            1.6337890625
+          ],
+          "load_after": [
+            2.54931640625,
+            1.5595703125,
+            1.64306640625
+          ],
+          "modes": {
+            "direct": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5010.210942,
+              "termination_reason": "drive-error",
+              "script_errors": [],
+              "drive_errors": [
+                "update(): RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at <anonymous> (unknown at :3300:44)\n    at <anonymous> (unknown at :858:90)\n    at update (unknown at :3268:34)\n    at <main> (unknown at :1:41)"
+              ],
+              "task_errors": []
+            },
+            "faithful": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 0.035185999999999995,
+              "termination_reason": "task-error",
+              "script_errors": [],
+              "drive_errors": [],
+              "task_errors": [
+                "[timer callback] RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at <anonymous> (unknown at :3371:31)\n    at <anonymous> (unknown at :6813:39)\n    at <anonymous> (unknown at :860:18)\n    at update (unknown at :3268:34)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "after",
+          "timestamp": "2026-10-02T01:21:59.059701+00:00",
+          "exit_code": 101,
+          "wall_seconds": 13.446456492005382,
+          "user_cpu_seconds": 13.171618,
+          "system_cpu_seconds": 0.2669229999999999,
+          "major_faults": 0,
+          "load_before": [
+            2.54931640625,
+            1.5595703125,
+            1.64306640625
+          ],
+          "load_after": [
+            2.51953125,
+            1.5986328125,
+            1.65380859375
+          ],
+          "modes": {
+            "direct": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5000.009285,
+              "termination_reason": "drive-error",
+              "script_errors": [],
+              "drive_errors": [
+                "update(): RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at isInclusiveDescendant (unknown at :2316:38)\n    at queueMutation (unknown at :18033:65)\n    at insertNodeBeforeInternal (unknown at :2458:18)\n    at <anonymous> (unknown at :3350:38)\n    at <anonymous> (unknown at :857:35)\n    at update (unknown at :3268:34)\n    at <main> (unknown at :1:41)"
+              ],
+              "task_errors": []
+            },
+            "faithful": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5041.813262,
+              "termination_reason": "task-error",
+              "script_errors": [],
+              "drive_errors": [],
+              "task_errors": [
+                "[timer callback] RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at queueMutation (unknown at :18046:16)\n    at insertNodeBeforeInternal (unknown at :2458:18)\n    at <anonymous> (unknown at :3350:38)\n    at <anonymous> (unknown at :857:35)\n    at update (unknown at :3268:34)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "after",
+          "timestamp": "2026-10-02T01:22:12.507013+00:00",
+          "exit_code": 101,
+          "wall_seconds": 12.987920941028278,
+          "user_cpu_seconds": 12.697030999999999,
+          "system_cpu_seconds": 0.222001,
+          "major_faults": 0,
+          "load_before": [
+            2.51953125,
+            1.5986328125,
+            1.65380859375
+          ],
+          "load_after": [
+            2.76611328125,
+            1.67822265625,
+            1.6787109375
+          ],
+          "modes": {
+            "direct": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5044.6656330000005,
+              "termination_reason": "drive-error",
+              "script_errors": [],
+              "drive_errors": [
+                "update(): RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at <anonymous> (unknown at :3303:44)\n    at <anonymous> (unknown at :2666:36)\n    at <anonymous> (unknown at :855:48)\n    at update (unknown at :3268:34)\n    at <main> (unknown at :1:41)"
+              ],
+              "task_errors": []
+            },
+            "faithful": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5027.300363,
+              "termination_reason": "task-error",
+              "script_errors": [],
+              "drive_errors": [],
+              "task_errors": [
+                "[timer callback] RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at MutationRecord (unknown at :18000:7)\n    at queueMutation (unknown at :18046:30)\n    at <anonymous> (unknown at :3335:20)\n    at <anonymous> (unknown at :860:34)\n    at update (unknown at :3268:34)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "before",
+          "timestamp": "2026-10-02T01:22:25.495810+00:00",
+          "exit_code": 101,
+          "wall_seconds": 13.700260208977852,
+          "user_cpu_seconds": 13.422092,
+          "system_cpu_seconds": 0.19735200000000008,
+          "major_faults": 0,
+          "load_before": [
+            2.76611328125,
+            1.67822265625,
+            1.6787109375
+          ],
+          "load_after": [
+            2.669921875,
+            1.7109375,
+            1.68994140625
+          ],
+          "modes": {
+            "direct": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5043.303681,
+              "termination_reason": "drive-error",
+              "script_errors": [],
+              "drive_errors": [
+                "update(): RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at <anonymous> (unknown at :3362:42)\n    at <anonymous> (unknown at :3374:37)\n    at <anonymous> (unknown at :6813:39)\n    at <anonymous> (unknown at :857:18)\n    at update (unknown at :3268:34)\n    at <main> (unknown at :1:41)"
+              ],
+              "task_errors": []
+            },
+            "faithful": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 0.042564,
+              "termination_reason": "task-error",
+              "script_errors": [],
+              "drive_errors": [],
+              "task_errors": [
+                "[timer callback] RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at internalNodeId (unknown at :786:33)\n    at insertNodeBeforeInternal (unknown at :2379:36)\n    at <anonymous> (unknown at :3352:38)\n    at <anonymous> (unknown at :857:35)\n    at update (unknown at :3268:34)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "after",
+          "timestamp": "2026-10-02T01:22:39.198455+00:00",
+          "exit_code": 101,
+          "wall_seconds": 13.260968130023684,
+          "user_cpu_seconds": 12.996668000000007,
+          "system_cpu_seconds": 0.2122639999999999,
+          "major_faults": 0,
+          "load_before": [
+            2.669921875,
+            1.7109375,
+            1.68994140625
+          ],
+          "load_after": [
+            2.44091796875,
+            1.70849609375,
+            1.68994140625
+          ],
+          "modes": {
+            "direct": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5000.024334,
+              "termination_reason": "drive-error",
+              "script_errors": [],
+              "drive_errors": [
+                "update(): RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at internalNodeId (unknown at :788:32)\n    at subtreeHasWindowName (unknown at :15366:30)\n    at some (native)\n    at refreshWindowNamesForMutation (unknown at :18008:36)\n    at queueMutation (unknown at :18022:34)\n    at insertNodeBeforeInternal (unknown at :2458:18)\n    at <anonymous> (unknown at :3350:38)\n    at <anonymous> (unknown at :857:35)\n    at update (unknown at :3268:34)\n    at <main> (unknown at :1:41)"
+              ],
+              "task_errors": []
+            },
+            "faithful": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5018.871433,
+              "termination_reason": "task-error",
+              "script_errors": [],
+              "drive_errors": [],
+              "task_errors": [
+                "[timer callback] RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at setOwnerDocumentId (unknown at :300:49)\n    at stampOwnerDoc (unknown at :1141:48)\n    at <anonymous> (unknown at :6534:30)\n    at <anonymous> (unknown at :6741:24)\n    at <anonymous> (unknown at :854:36)\n    at update (unknown at :3268:34)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "after",
+          "timestamp": "2026-10-02T01:22:52.460754+00:00",
+          "exit_code": 101,
+          "wall_seconds": 26.35258897196036,
+          "user_cpu_seconds": 25.920729999999992,
+          "system_cpu_seconds": 0.37515200000000015,
+          "major_faults": 0,
+          "load_before": [
+            2.44091796875,
+            1.70849609375,
+            1.68994140625
+          ],
+          "load_after": [
+            2.19287109375,
+            1.7138671875,
+            1.69287109375
+          ],
+          "modes": {
+            "direct": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5000.009279000001,
+              "termination_reason": "drive-error",
+              "script_errors": [],
+              "drive_errors": [
+                "update(): RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at <anonymous> (unknown at :858:111)\n    at update (unknown at :3268:34)\n    at <main> (unknown at :1:41)"
+              ],
+              "task_errors": []
+            },
+            "faithful": {
+              "score": 100,
+              "total": 100,
+              "test26_step_wall_ms": 4958.161658,
+              "termination_reason": "completed",
+              "script_errors": [],
+              "drive_errors": [],
+              "task_errors": []
+            }
+          }
+        }
+      ]
+    },
+    "cpu2": {
+      "note": "Checkpoint production candidate, CPU 2 affinity; existing powersave governor and frequency limits unchanged. Frequency samples summarize the whole test process, not only test26.",
+      "metadata": {
+        "before_binary": "/target/omoikane-issue1210/debug/deps/acid3_harness-99dcf13358c04c79",
+        "after_binary": "/target/omoikane-issue1167/debug/deps/acid3_harness-99dcf13358c04c79",
+        "binary_sha256": {
+          "/target/omoikane-issue1210/debug/deps/acid3_harness-99dcf13358c04c79": "e3c09722f036fe1ee7423d1f355f15f1cee1499d94f1a1977bda079b54c648db",
+          "/target/omoikane-issue1167/debug/deps/acid3_harness-99dcf13358c04c79": "90f80f42836d0a355348d8ae2410e295b6b5c46560a2fbc0cb87ed7052fca8b0"
+        },
+        "fixture_sha256": {
+          "/tmp/omoikane-issue1210/tests/fixtures/acid3/acid3.html": "54e921f770c775f1e255558c34c380792f102bbf0e81a3a64032afe3e1bc15b9",
+          "/tmp/omoikane-issue1167/tests/fixtures/acid3/acid3.html": "54e921f770c775f1e255558c34c380792f102bbf0e81a3a64032afe3e1bc15b9"
+        },
+        "command_filter": "runner_scores_100_in_both_drive_modes --exact --nocapture --test-threads=1",
+        "note": "Original fixture, wall-clock deadline and score/error assertions are unmodified. Before and after are source-built with default features. Failed old Faithful reports can contain the known overwritten empty-tick timing; raw JSON is preserved.",
+        "cpu_affinity": "CPU 2 (sibling 6)",
+        "frequency_note": "Sampled sysfs scaling_cur_freq every 100ms; governor and CPU limits unchanged",
+        "git_head": "a7416e78e301c4641b9275431a61dc34ac386004",
+        "git_diff_stat": " engine/boa/core/engine/src/context/mod.rs | 10 +++-\n src/js/dom_bootstrap.js                   | 36 ++++++------\n src/js/mod.rs                             |  8 ++-\n tests/acid3_common/harness.rs             |  9 ++-\n tests/acid3_harness.rs                    | 23 ++++++++\n tests/dom_tree_queries.rs                 | 96 +++++++++++++++++++++++++++++++\n 6 files changed, 156 insertions(+), 26 deletions(-)\n",
+        "source_sha256": {
+          "engine/boa/core/engine/src/context/mod.rs": "9a495979d75e656b5e4affeb089556845c228a882d3f0eb5c6a2393280276d1b",
+          "src/js/dom_bootstrap.js": "dcf5d7fc236330269aa53d41a6d2df48db94b6f4e88200cea69a3a8d85583760",
+          "src/js/mod.rs": "d6d4b92b2fe296611949f9c0042cbd931082183882924531389fd3324a7d9115",
+          "tests/acid3_common/harness.rs": "4724d4562daaea5ffe343754966d098b278e6573967243ba912ac972c0f199fa",
+          "tests/acid3_harness.rs": "f2dc9df52089c16bf388ef962ca320169cb6d48ca77d81d928dc11b487ca4b79",
+          "tests/dom_tree_queries.rs": "30e4d70574ecc529242090c5743263c4b721f319280607a5cabff9d207819d69",
+          "engine/boa/core/engine/src/context/tests.rs": "32e0e25e2072540aa40386acdc825fdcbe7d56b760f40380bf442dcac6e8c02a"
+        }
+      },
+      "runs": [
+        {
+          "name": "before",
+          "timestamp": "2026-10-02T01:36:48.212923+00:00",
+          "exit_code": 101,
+          "wall_seconds": 23.31593512702966,
+          "user_cpu_seconds": 22.821644,
+          "system_cpu_seconds": 0.28996099999999997,
+          "frequency_khz_min": 1999987,
+          "frequency_khz_max": 4200061,
+          "frequency_khz_mean": 3137153.8583690985,
+          "major_faults": 1,
+          "load_before": [
+            2.1201171875,
+            2.26171875,
+            2.02197265625
+          ],
+          "load_after": [
+            2.2333984375,
+            2.2734375,
+            2.03125
+          ],
+          "modes": {
+            "direct": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5000.053745,
+              "termination_reason": "drive-error",
+              "script_errors": [],
+              "drive_errors": [
+                "update(): RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at wrapNode (unknown at :779:63)\n    at <anonymous> (unknown at :6743:33)\n    at <anonymous> (unknown at :854:36)\n    at update (unknown at :3268:34)\n    at <main> (unknown at :1:41)"
+              ],
+              "task_errors": []
+            },
+            "faithful": {
+              "score": 100,
+              "total": 100,
+              "test26_step_wall_ms": 4549.027161999999,
+              "termination_reason": "completed",
+              "script_errors": [],
+              "drive_errors": [],
+              "task_errors": []
+            }
+          }
+        },
+        {
+          "name": "after",
+          "timestamp": "2026-10-02T01:37:11.529553+00:00",
+          "exit_code": 101,
+          "wall_seconds": 12.886138200992718,
+          "user_cpu_seconds": 12.598783999999998,
+          "system_cpu_seconds": 0.19655000000000006,
+          "frequency_khz_min": 1700027,
+          "frequency_khz_max": 3000001,
+          "frequency_khz_mean": 2738660.8682170543,
+          "major_faults": 0,
+          "load_before": [
+            2.2333984375,
+            2.2734375,
+            2.03125
+          ],
+          "load_after": [
+            2.11669921875,
+            2.2470703125,
+            2.02490234375
+          ],
+          "modes": {
+            "direct": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5000.0087029999995,
+              "termination_reason": "drive-error",
+              "script_errors": [],
+              "drive_errors": [
+                "update(): RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at MutationRecord (unknown at :18001:7)\n    at queueMutation (unknown at :18043:30)\n    at <anonymous> (unknown at :3335:20)\n    at <anonymous> (unknown at :860:34)\n    at update (unknown at :3268:34)\n    at <main> (unknown at :1:41)"
+              ],
+              "task_errors": []
+            },
+            "faithful": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5017.967669,
+              "termination_reason": "task-error",
+              "script_errors": [],
+              "drive_errors": [],
+              "task_errors": [
+                "[timer callback] RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at wrapNode (unknown at :782:15)\n    at <anonymous> (unknown at :6741:33)\n    at <anonymous> (unknown at :854:36)\n    at update (unknown at :3268:34)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "after",
+          "timestamp": "2026-10-02T01:37:24.416529+00:00",
+          "exit_code": 101,
+          "wall_seconds": 24.74180666002212,
+          "user_cpu_seconds": 24.251416000000006,
+          "system_cpu_seconds": 0.3085429999999999,
+          "frequency_khz_min": 1700005,
+          "frequency_khz_max": 3300015,
+          "frequency_khz_mean": 2817069.2186234817,
+          "major_faults": 0,
+          "load_before": [
+            2.11669921875,
+            2.2470703125,
+            2.02490234375
+          ],
+          "load_after": [
+            2.09912109375,
+            2.2412109375,
+            2.02880859375
+          ],
+          "modes": {
+            "direct": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5000.013106,
+              "termination_reason": "drive-error",
+              "script_errors": [],
+              "drive_errors": [
+                "update(): RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at get (unknown at :2625:34)\n    at <anonymous> (unknown at :3627:16)\n    at <anonymous> (unknown at :3325:34)\n    at <anonymous> (unknown at :860:34)\n    at update (unknown at :3268:34)\n    at <main> (unknown at :1:41)"
+              ],
+              "task_errors": []
+            },
+            "faithful": {
+              "score": 100,
+              "total": 100,
+              "test26_step_wall_ms": 5005.353084,
+              "termination_reason": "completed",
+              "script_errors": [],
+              "drive_errors": [],
+              "task_errors": []
+            }
+          }
+        },
+        {
+          "name": "before",
+          "timestamp": "2026-10-02T01:37:49.159078+00:00",
+          "exit_code": 101,
+          "wall_seconds": 13.551878781989217,
+          "user_cpu_seconds": 13.210853,
+          "system_cpu_seconds": 0.24851900000000005,
+          "frequency_khz_min": 1899984,
+          "frequency_khz_max": 3300015,
+          "frequency_khz_mean": 2669448.1029411764,
+          "major_faults": 0,
+          "load_before": [
+            2.09912109375,
+            2.2412109375,
+            2.02880859375
+          ],
+          "load_after": [
+            2.353515625,
+            2.2939453125,
+            2.0498046875
+          ],
+          "modes": {
+            "direct": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5022.4475139999995,
+              "termination_reason": "drive-error",
+              "script_errors": [],
+              "drive_errors": [
+                "update(): RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at <anonymous> (unknown at :2701:37)\n    at <anonymous> (unknown at :855:48)\n    at update (unknown at :3268:34)\n    at <main> (unknown at :1:41)"
+              ],
+              "task_errors": []
+            },
+            "faithful": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 0.032543,
+              "termination_reason": "task-error",
+              "script_errors": [],
+              "drive_errors": [],
+              "task_errors": [
+                "[timer callback] RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at insertNodeBeforeInternal (unknown at :2460:18)\n    at <anonymous> (unknown at :3352:38)\n    at <anonymous> (unknown at :857:35)\n    at update (unknown at :3268:34)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "after",
+          "timestamp": "2026-10-02T01:38:02.711794+00:00",
+          "exit_code": 101,
+          "wall_seconds": 13.300660773005802,
+          "user_cpu_seconds": 12.926276000000001,
+          "system_cpu_seconds": 0.28757900000000003,
+          "frequency_khz_min": 1699994,
+          "frequency_khz_max": 3299997,
+          "frequency_khz_mean": 2521623.676691729,
+          "major_faults": 0,
+          "load_before": [
+            2.353515625,
+            2.2939453125,
+            2.0498046875
+          ],
+          "load_after": [
+            3.068359375,
+            2.44970703125,
+            2.103515625
+          ],
+          "modes": {
+            "direct": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5000.013365,
+              "termination_reason": "drive-error",
+              "script_errors": [],
+              "drive_errors": [
+                "update(): RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at <anonymous> (unknown at :858:111)\n    at update (unknown at :3268:34)\n    at <main> (unknown at :1:41)"
+              ],
+              "task_errors": []
+            },
+            "faithful": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5019.743546,
+              "termination_reason": "task-error",
+              "script_errors": [],
+              "drive_errors": [],
+              "task_errors": [
+                "[timer callback] RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at <anonymous> (unknown at :3298:44)\n    at <anonymous> (unknown at :858:90)\n    at update (unknown at :3268:34)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "after",
+          "timestamp": "2026-10-02T01:38:16.013369+00:00",
+          "exit_code": 101,
+          "wall_seconds": 12.969066268007737,
+          "user_cpu_seconds": 12.697393999999989,
+          "system_cpu_seconds": 0.19565199999999994,
+          "frequency_khz_min": 1699997,
+          "frequency_khz_max": 3202381,
+          "frequency_khz_mean": 2551025.9384615384,
+          "major_faults": 0,
+          "load_before": [
+            3.068359375,
+            2.44970703125,
+            2.103515625
+          ],
+          "load_after": [
+            3.07177734375,
+            2.4775390625,
+            2.11767578125
+          ],
+          "modes": {
+            "direct": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5000.006855,
+              "termination_reason": "drive-error",
+              "script_errors": [],
+              "drive_errors": [
+                "update(): RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at <anonymous> (unknown at :6553:24)\n    at <anonymous> (unknown at :855:31)\n    at update (unknown at :3268:34)\n    at <main> (unknown at :1:41)"
+              ],
+              "task_errors": []
+            },
+            "faithful": {
+              "score": 26,
+              "total": 100,
+              "test26_step_wall_ms": 5021.227303,
+              "termination_reason": "task-error",
+              "script_errors": [],
+              "drive_errors": [],
+              "task_errors": [
+                "[timer callback] RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout\n    at queueMutation (unknown at :18043:29)\n    at <anonymous> (unknown at :3335:20)\n    at <anonymous> (unknown at :860:34)\n    at update (unknown at :3268:34)"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "baseline_preservation": {
+    "original_path": "/target/omoikane-issue1210/debug/deps/acid3_harness-99dcf13358c04c79",
+    "preserved_path": "/tmp/omoikane-issue1167/.artifacts/issue1167/baseline-acid3-a7416e78",
+    "sha256": "e3c09722f036fe1ee7423d1f355f15f1cee1499d94f1a1977bda079b54c648db",
+    "updated_scripts": [
+      "prepare-diagnostic.py",
+      "measure-diagnostic.py",
+      "measure-pinned.py",
+      "measure-source.py"
+    ],
+    "note": "Completed root target cleaned by parent after preserving executable and dependency verification. Original measurement metadata remains unchanged."
+  },
+  "validation_checkpoint": {
+    "log": ".artifacts/issue1167/full-test-final22.log",
+    "exit_code": 101,
+    "passed": 3370,
+    "failed": 1,
+    "ignored": 28,
+    "targets_summarized": 96,
+    "failed_target": "acid3_harness::runner_scores_100_in_both_drive_modes",
+    "build": "pending; explicit user-requested WIP checkpoint precedes normal pre-commit build",
+    "ci": "pending"
+  }
+}

@@ -14187,15 +14187,19 @@ fn node_is_inclusive_descendant_native(
     ensure_same_origin_node(context, node_id)?;
     let ancestor_id = parse_node_id(args.get(1), context)?;
     ensure_same_origin_node(context, ancestor_id)?;
+    let include_shadow_hosts = args.get(2).is_some_and(JsValue::to_boolean);
     with_host_state(|state| {
         let mut current = state.borrow().get_node(node_id);
         while let Some(node) = current {
             if node.identity() == ancestor_id {
                 return Ok(JsValue::from(true));
             }
-            // Range and traversal ancestry stops at ordinary tree roots;
-            // unlike connectivity it must not cross a shadow host.
+            // Range and traversal stop at ordinary roots. Insertion's cycle
+            // check explicitly includes shadow hosts without wrapping ancestors.
             current = node.parent_node();
+            if current.is_none() && include_shadow_hosts {
+                current = node.shadow_host();
+            }
         }
         Ok(JsValue::from(false))
     })
