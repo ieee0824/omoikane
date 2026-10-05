@@ -223,10 +223,17 @@ impl HostState {
         Ok(None)
     }
 
+    /// Loads a form submission's response into a child browsing context.
+    ///
+    /// GET submissions share [`HostState::load_iframe_document`], including its
+    /// `about:blank` fallback on fetch failure. A POST propagates request and
+    /// transport errors instead, always commits the response's effective URL
+    /// (or the submission URL), and keeps its CSP headers even when the content
+    /// type is not rendered.
     pub(super) fn load_iframe_form_submission(
         &mut self,
         submission: &Submission,
-    ) -> Result<(NodeHandle, Vec<String>, Option<String>), JsHostError> {
+    ) -> Result<LoadedChildDocument, JsHostError> {
         if submission.method.eq_ignore_ascii_case("GET") {
             let site = self.location_href.parse::<crate::http::Url>().ok();
             return Ok(self.load_iframe_document(&submission.url, site.as_ref()));
@@ -243,32 +250,17 @@ impl HostState {
             request.set_header("Content-Type", content_type);
         }
         let response = self.http_client.send(request)?;
-        let mime = response.header("Content-Type").unwrap_or("");
-        let document = if is_html_mime_type(mime) {
-            crate::html::TreeBuilder::parse(&crate::html::decode_html_response(&response))
-                .document()
-        } else if is_xml_mime_type(mime) {
-            crate::xml::parse(response.body()).unwrap_or_else(|_| blank_html_document())
-        } else if mime
-            .split(';')
-            .next()
-            .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/plain"))
-        {
-            plain_text_document(response.body())
-        } else {
-            blank_html_document()
-        };
-        let csp = response
-            .headers()
-            .iter()
-            .filter(|(name, _)| name.eq_ignore_ascii_case("content-security-policy"))
-            .map(|(_, value)| value.clone())
-            .collect();
+        let mime_type = response.header("Content-Type").unwrap_or("");
+        let document = child_document::parse_child_document(mime_type, response.body())
+            .unwrap_or_else(blank_html_document);
         let url = response
             .effective_url()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| submission.url.clone());
-        Ok((document, csp, Some(url)))
+            .map_or_else(|| submission.url.clone(), ToString::to_string);
+        Ok(LoadedChildDocument {
+            document,
+            csp_headers: child_document::response_csp_headers(&response),
+            url: Some(url),
+        })
     }
 }
 

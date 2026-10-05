@@ -53,6 +53,10 @@ use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 
 mod broadcast_channel;
 mod cache_storage;
+mod child_document;
+#[cfg(test)]
+mod child_document_tests;
+use child_document::{FetchedChildResource, LoadedChildDocument};
 mod compression_stream;
 #[cfg(test)]
 mod compression_stream_tests;
@@ -2501,14 +2505,14 @@ impl HostState {
         let inherits_creator_origin = submission.is_none() && resource_attribute == "srcdoc"
             || navigation_url.is_empty()
             || matches_about_blank_url(&navigation_url);
-        let (document, csp_headers, child_url) = if let Some(request) = submission {
+        let LoadedChildDocument {
+            document,
+            csp_headers,
+            url: child_url,
+        } = if let Some(request) = submission {
             self.load_iframe_form_submission(request)?
         } else if resource_attribute == "srcdoc" {
-            (
-                crate::html::TreeBuilder::parse(&resource).document(),
-                Vec::new(),
-                Some("about:srcdoc".to_string()),
-            )
+            LoadedChildDocument::srcdoc(&resource)
         } else {
             self.load_iframe_document(&resource, resource_base.as_ref())
         };
@@ -2769,8 +2773,11 @@ impl HostState {
         let base = self
             .base_url_for_document(current_document_id)
             .or_else(|| self.base_url_for_document(opener_document_id));
-        let (document, headers, effective_url) =
-            self.load_iframe_document(requested, base.as_ref());
+        let LoadedChildDocument {
+            document,
+            csp_headers: headers,
+            url: effective_url,
+        } = self.load_iframe_document(requested, base.as_ref());
         let document_id = document.identity();
         let document_url = effective_url.unwrap_or_else(|| "about:blank".to_owned());
         let inherits_opener = requested.is_empty() || matches_about_blank_url(requested);
@@ -2859,110 +2866,68 @@ impl HostState {
     ///
     /// Returns an `about:blank` skeleton for an empty/`about:blank` reference, a
     /// fetch failure, or an unsupported content type. HTML resources are parsed
-    /// as HTML; XML MIME types, including SVG, are parsed as XML.
+    /// as HTML; XML MIME types, including SVG, are parsed as XML. See
+    /// [`LoadedChildDocument`] for the committed URL and CSP header contract.
     fn load_iframe_document(
         &mut self,
         src: &str,
         base_url: Option<&crate::http::Url>,
-    ) -> (NodeHandle, Vec<String>, Option<String>) {
+    ) -> LoadedChildDocument {
         if src.is_empty() || matches_about_blank_url(src) {
-            return (
-                blank_html_document(),
-                Vec::new(),
-                Some(if src.is_empty() {
-                    "about:blank".to_string()
-                } else {
-                    src.to_string()
-                }),
-            );
+            let url = if src.is_empty() { "about:blank" } else { src };
+            return LoadedChildDocument::about_blank(url.to_owned());
         }
+        self.fetch_child_resource(src, base_url)
+            .map_or_else(LoadedChildDocument::fetch_failed, |resource| {
+                resource.into_get_document()
+            })
+    }
 
-        // Resolve the reference (shared with script loading) to either inline
-        // `data:` bytes or an absolute URL, then obtain the (mime, body) pair.
-        //
-        // NOTE: unlike script loading (see `fetch_script_source`), an iframe
-        // load intentionally does NOT inspect the HTTP status code. A real
-        // browser renders even an error response's body into the frame, so we
-        // adopt the response body as the sub-document regardless of status.
-        // This asymmetry with `fetch_script_source` (which requires 200) is
-        // deliberate.
-        let fetched: Option<(String, Vec<u8>, Vec<String>, Option<String>)> =
-            match resolve_resource_ref(src, base_url) {
-                Some(ResolvedResource::Data { mime_type, data }) => {
-                    Some((mime_type, data, Vec::new(), Some(src.to_string())))
-                }
-                Some(ResolvedResource::Url(url)) => {
-                    let requested_fragment = src.split_once('#').map(|(_, fragment)| fragment);
-                    let response =
-                        crate::http::HttpRequest::get(&url)
-                            .ok()
-                            .and_then(|mut request| {
-                                if let Ok(site) = self.location_href.parse::<crate::http::Url>() {
-                                    request.set_cookie_context(site, false);
-                                }
-                                self.http_client.send(request).ok()
-                            });
-                    response.map(|resp| {
-                        let mime = resp.header("Content-Type").unwrap_or("").to_string();
-                        let csp_headers = resp
-                            .headers()
-                            .iter()
-                            .filter(|(name, _)| {
-                                name.eq_ignore_ascii_case("content-security-policy")
-                            })
-                            .map(|(_, value)| value.clone())
-                            .collect();
-                        let mut effective_url = resp
-                            .effective_url()
-                            .map(ToString::to_string)
-                            .or_else(|| Some(url.to_string()));
-                        if let (Some(fragment), Some(effective_url)) =
-                            (requested_fragment, effective_url.as_mut())
-                            && !effective_url.contains('#')
-                        {
-                            effective_url.push('#');
-                            effective_url.push_str(fragment);
-                        }
-                        (mime, resp.body().to_vec(), csp_headers, effective_url)
-                    })
-                }
-                None => None,
-            };
-
-        match fetched {
-            Some((mime, body, csp_headers, effective_url)) if is_html_mime_type(&mime) => {
-                let html = crate::html::encoding::decode_html_bytes(&body, Some(&mime));
-                (
-                    crate::html::TreeBuilder::parse(&html).document(),
-                    csp_headers,
-                    effective_url,
-                )
+    /// Resolves `src` to inline `data:` bytes or fetches it with a GET.
+    /// Returns `None` when the reference cannot be resolved or the request
+    /// fails.
+    ///
+    /// Unlike script loading (see `fetch_script_source`), a child document
+    /// intentionally does NOT inspect the HTTP status code. A real browser
+    /// renders even an error response's body into the frame, so the body is
+    /// adopted regardless of status. The asymmetry with `fetch_script_source`
+    /// (which requires 200) is deliberate.
+    fn fetch_child_resource(
+        &mut self,
+        src: &str,
+        base_url: Option<&crate::http::Url>,
+    ) -> Option<FetchedChildResource> {
+        let url = match resolve_resource_ref(src, base_url)? {
+            ResolvedResource::Data { mime_type, data } => {
+                return Some(FetchedChildResource {
+                    mime_type,
+                    body: data,
+                    csp_headers: Vec::new(),
+                    effective_url: src.to_owned(),
+                });
             }
-            Some((mime, body, csp_headers, effective_url)) if is_xml_mime_type(&mime) => (
-                crate::xml::parse(&body).unwrap_or_else(|_| blank_html_document()),
-                csp_headers,
-                effective_url,
-            ),
-            Some((mime, body, csp_headers, effective_url))
-                if mime
-                    .split(';')
-                    .next()
-                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/plain")) =>
-            {
-                (
-                    form_submission::plain_text_document(&body),
-                    csp_headers,
-                    effective_url,
-                )
-            }
-            // Unsupported content types such as images keep an empty
-            // document. Text responses above create text nodes, so literal
-            // markup in a text/plain response cannot become HTML elements.
-            Some((_mime, _body, _csp_headers, effective_url)) => {
-                (blank_html_document(), Vec::new(), effective_url)
-            }
-            None => (blank_html_document(), Vec::new(), None),
+            ResolvedResource::Url(url) => url,
+        };
+        let mut request = crate::http::HttpRequest::get(&url).ok()?;
+        if let Ok(site) = self.location_href.parse::<crate::http::Url>() {
+            request.set_cookie_context(site, false);
         }
+        let response = self.http_client.send(request).ok()?;
+        let mut effective_url = response
+            .effective_url()
+            .map_or_else(|| url.to_string(), ToString::to_string);
+        if let Some((_, fragment)) = src.split_once('#')
+            && !effective_url.contains('#')
+        {
+            effective_url.push('#');
+            effective_url.push_str(fragment);
+        }
+        Some(FetchedChildResource {
+            mime_type: response.header("Content-Type").unwrap_or("").to_owned(),
+            csp_headers: child_document::response_csp_headers(&response),
+            body: response.body().to_vec(),
+            effective_url,
+        })
     }
 
     fn register_tree(&mut self, node: &NodeHandle) {
