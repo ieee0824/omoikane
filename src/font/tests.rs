@@ -1037,15 +1037,16 @@ fn load_test_font_for_registry() -> Option<Font> {
     Font::load_from_bytes(data).ok()
 }
 
-fn load_selection_fixture() -> Arc<Font> {
-    Arc::new(
-        Font::load_from_file(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf")
-                .as_path(),
-        )
-        .expect("fixed selection fixture"),
+fn selection_fixture_bytes() -> Vec<u8> {
+    std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf"),
     )
+    .expect("fixed selection fixture")
+}
+
+fn load_selection_fixture() -> Arc<Font> {
+    Arc::new(Font::load_from_bytes(selection_fixture_bytes()).expect("fixed selection fixture"))
 }
 
 #[test]
@@ -1167,34 +1168,32 @@ fn unicode_range_composite_face_splits_grapheme_runs_in_source_order() {
 
 #[test]
 fn web_font_registry_exact_match_weight_400() {
-    let font_regular = match load_test_font_for_registry() {
-        Some(f) => f,
-        None => {
-            eprintln!("Skipping: no system font found");
-            return;
-        }
-    };
-    let font_bold = match load_test_font_for_registry() {
-        Some(f) => f,
-        None => return,
-    };
+    let font_regular = load_selection_fixture();
+    let font_bold = load_selection_fixture();
 
     let mut registry = WebFontRegistry::new();
-    registry.push("MyFont", FontWeight(400), FontStyle::Normal, font_regular);
-    registry.push("MyFont", FontWeight(700), FontStyle::Normal, font_bold);
+    registry.push_shared(
+        "MyFont",
+        FontWeight(400),
+        FontStyle::Normal,
+        Arc::clone(&font_regular),
+    );
+    registry.push_shared(
+        "MyFont",
+        FontWeight(700),
+        FontStyle::Normal,
+        Arc::clone(&font_bold),
+    );
 
-    // Exact match for normal weight
-    assert!(
-        registry
-            .select_best("MyFont", FontWeight(400), FontStyle::Normal)
-            .is_some()
-    );
-    // Exact match for bold weight
-    assert!(
-        registry
-            .select_best("MyFont", FontWeight(700), FontStyle::Normal)
-            .is_some()
-    );
+    for (weight, expected) in [(400, &font_regular), (700, &font_bold)] {
+        let selected = registry
+            .select_best("MyFont", FontWeight(weight), FontStyle::Normal)
+            .unwrap();
+        assert!(
+            std::ptr::eq(selected, expected.as_ref()),
+            "weight {weight} must select its exact variant"
+        );
+    }
 }
 
 #[test]
@@ -1246,71 +1245,53 @@ fn font_family_key_folds_unicode_case_and_trims() {
 
 #[test]
 fn web_font_registry_bold_selects_700_when_available() {
-    let font_regular = match load_test_font_for_registry() {
-        Some(f) => f,
-        None => {
-            eprintln!("Skipping: no system font found");
-            return;
-        }
-    };
-    let font_bold = match load_test_font_for_registry() {
-        Some(f) => f,
-        None => return,
-    };
+    let font_regular = load_selection_fixture();
+    let font_bold = load_selection_fixture();
 
     let mut registry = WebFontRegistry::new();
-    registry.push(
+    registry.push_shared(
         "TestFamily",
         FontWeight(400),
         FontStyle::Normal,
-        font_regular,
+        Arc::clone(&font_regular),
     );
-    registry.push("TestFamily", FontWeight(700), FontStyle::Normal, font_bold);
+    registry.push_shared(
+        "TestFamily",
+        FontWeight(700),
+        FontStyle::Normal,
+        Arc::clone(&font_bold),
+    );
 
     // Requesting bold (700) should prefer the 700 variant
     let selected = registry
         .select_best("TestFamily", FontWeight(700), FontStyle::Normal)
         .expect("should find a font");
-
-    // We can't easily distinguish the two loaded fonts by value (both from same file),
-    // so just ensure a font is returned without panic.
-    let _ = selected;
+    assert!(std::ptr::eq(selected, font_bold.as_ref()));
 }
 
 #[test]
 fn web_font_registry_italic_selects_italic_over_normal() {
-    let font_regular = match load_test_font_for_registry() {
-        Some(f) => f,
-        None => {
-            eprintln!("Skipping: no system font found");
-            return;
-        }
-    };
-    let font_italic = match load_test_font_for_registry() {
-        Some(f) => f,
-        None => return,
-    };
+    let font_regular = load_selection_fixture();
+    let font_italic = load_selection_fixture();
 
     let mut registry = WebFontRegistry::new();
-    registry.push(
+    registry.push_shared(
         "TestFamily",
         FontWeight(400),
         FontStyle::Normal,
-        font_regular,
+        Arc::clone(&font_regular),
     );
-    registry.push(
+    registry.push_shared(
         "TestFamily",
         FontWeight(400),
         FontStyle::Italic,
-        font_italic,
+        Arc::clone(&font_italic),
     );
 
-    // Requesting italic should return a font
-    assert!(
-        registry
-            .select_best("TestFamily", FontWeight(400), FontStyle::Italic)
-            .is_some()
-    );
+    let selected = registry
+        .select_best("TestFamily", FontWeight(400), FontStyle::Italic)
+        .unwrap();
+    assert!(std::ptr::eq(selected, font_italic.as_ref()));
 }
 
 #[test]
@@ -1351,37 +1332,37 @@ fn web_font_registry_unknown_family_returns_none() {
 
 #[test]
 fn font_cache_register_web_font_with_variant() {
-    let font_path = match find_test_font() {
-        Some(p) => p,
-        None => {
-            eprintln!("Skipping font_cache_register_web_font_with_variant: no system font found");
-            return;
-        }
-    };
-
-    let data_regular = std::fs::read(&font_path).unwrap();
-    let data_bold = std::fs::read(&font_path).unwrap();
-
     let mut cache = FontCache::new(10);
-    cache
+    let regular = cache
         .register_web_font_with_variant(
             "MultiFont",
             FontWeight(400),
             FontStyle::Normal,
-            data_regular,
+            selection_fixture_bytes(),
         )
         .unwrap();
-    cache
-        .register_web_font_with_variant("MultiFont", FontWeight(700), FontStyle::Normal, data_bold)
+    let bold = cache
+        .register_web_font_with_variant(
+            "MultiFont",
+            FontWeight(700),
+            FontStyle::Normal,
+            selection_fixture_bytes(),
+        )
         .unwrap();
 
     assert!(cache.contains("MultiFont"));
     // Both variants stored → cache has 2 entries for this family
     assert_eq!(cache.len(), 2);
 
-    // Best variant for bold should be found
-    let bold = cache.select_best_variant("MultiFont", FontWeight(700), FontStyle::Normal);
-    assert!(bold.is_some());
+    for (weight, expected) in [(400, &regular), (700, &bold)] {
+        let selected = cache
+            .select_best_variant("MultiFont", FontWeight(weight), FontStyle::Normal)
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&selected, expected),
+            "weight {weight} must select its registered variant"
+        );
+    }
 }
 
 #[test]
