@@ -77,9 +77,39 @@ pub enum ResponseType {
     OpaqueRedirect,
 }
 
+/// Successful CORS preflight results, keyed by the request properties that
+/// the preflight approved and valid until the response's `max-age` expires.
 #[derive(Debug, Default)]
 pub struct PreflightCache {
-    entries: HashMap<(Origin, Origin, String, Vec<String>, bool), Instant>,
+    entries: HashMap<PreflightCacheKey, Instant>,
+}
+
+/// Identifies one approved preflight.  A cached entry is reused only for the
+/// same origins, method, unsafe header set, and credentials mode.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PreflightCacheKey {
+    /// Origin of the document that issued the request (the `Origin` header).
+    request_origin: Origin,
+    /// Origin of the URL the preflight was sent to.
+    target_origin: Origin,
+    /// Request method as sent in `Access-Control-Request-Method`.
+    method: String,
+    /// Sorted, lowercase, deduplicated CORS-unsafe request header names.
+    unsafe_header_names: Vec<String>,
+    /// Whether the request was made with credentials mode `include`.
+    credentialed: bool,
+}
+
+impl PreflightCache {
+    /// Drops entries that expired at `now` and reports whether `key` remains.
+    fn contains_fresh(&mut self, key: &PreflightCacheKey, now: Instant) -> bool {
+        self.entries.retain(|_, expires| *expires > now);
+        self.entries.contains_key(key)
+    }
+
+    fn insert(&mut self, key: PreflightCacheKey, expires: Instant) {
+        self.entries.insert(key, expires);
+    }
 }
 
 #[derive(Debug)]
@@ -273,26 +303,27 @@ fn ensure_preflight(
     if is_cors_safelisted_method(request.method()) && unsafe_headers.is_empty() {
         return Ok(());
     }
-    let target = Origin::from_url(request.url());
-    let credentialed = credentials == CredentialsMode::Include;
-    let key = (
-        origin.clone(),
-        target,
-        request.method().as_str().to_string(),
-        unsafe_headers.clone(),
-        credentialed,
-    );
+    let method = request.method().as_str();
+    let key = PreflightCacheKey {
+        request_origin: origin.clone(),
+        target_origin: Origin::from_url(request.url()),
+        method: method.to_string(),
+        unsafe_header_names: unsafe_headers,
+        credentialed: credentials == CredentialsMode::Include,
+    };
     let now = Instant::now();
-    cache.entries.retain(|_, expires| *expires > now);
-    if cache.entries.contains_key(&key) {
+    if cache.contains_fresh(&key, now) {
         return Ok(());
     }
 
     let mut preflight = HttpRequest::new(Method::Options, request.url().clone());
     preflight.set_header("Origin", origin.serialize());
-    preflight.set_header("Access-Control-Request-Method", request.method().as_str());
-    if !unsafe_headers.is_empty() {
-        preflight.set_header("Access-Control-Request-Headers", unsafe_headers.join(", "));
+    preflight.set_header("Access-Control-Request-Method", method);
+    if !key.unsafe_header_names.is_empty() {
+        preflight.set_header(
+            "Access-Control-Request-Headers",
+            key.unsafe_header_names.join(", "),
+        );
     }
     let response = client
         .send_once_with_timeout(preflight, false, timeout)
@@ -303,33 +334,89 @@ fn ensure_preflight(
                 CorsError::Network(error.to_string())
             }
         })?;
-    if !(200..300).contains(&response.status_code())
-        || cors_check(&response, origin, credentials).is_err()
-        || !header_tokens(&response, "access-control-allow-methods")
-            .iter()
-            .any(|method| {
-                (method == "*" && !credentialed)
-                    || method.eq_ignore_ascii_case(request.method().as_str())
-            })
-        || !unsafe_headers.iter().all(|name| {
-            header_tokens(&response, "access-control-allow-headers")
-                .iter()
-                .any(|allowed| {
-                    (allowed == "*" && !credentialed) || allowed.eq_ignore_ascii_case(name)
-                })
-        })
+    validate_preflight_response(
+        &response,
+        origin,
+        credentials,
+        method,
+        &key.unsafe_header_names,
+    )?;
+    cache.insert(key, now + preflight_max_age(&response));
+    Ok(())
+}
+
+/// Checks a preflight response against the actual request it approves.
+///
+/// Every failed stage reports [`CorsError::Preflight`]: a non-2xx status, a
+/// failed CORS check of the preflight response, a method missing from
+/// `Access-Control-Allow-Methods`, or any unsafe header missing from
+/// `Access-Control-Allow-Headers`.
+fn validate_preflight_response(
+    response: &HttpResponse,
+    origin: &Origin,
+    credentials: CredentialsMode,
+    method: &str,
+    unsafe_header_names: &[String],
+) -> Result<(), CorsError> {
+    if !(200..300).contains(&response.status_code()) {
+        return Err(CorsError::Preflight);
+    }
+    cors_check(response, origin, credentials).map_err(|_| CorsError::Preflight)?;
+    let allowance = PreflightAllowance::from_response(response);
+    let credentialed = credentials == CredentialsMode::Include;
+    if !allowance.allows_method(method, credentialed)
+        || !allowance.allows_headers(unsafe_header_names, credentialed)
     {
         return Err(CorsError::Preflight);
     }
-    let max_age = response
+    Ok(())
+}
+
+/// Methods and headers listed by a preflight response.
+struct PreflightAllowance {
+    methods: Vec<String>,
+    headers: Vec<String>,
+}
+
+impl PreflightAllowance {
+    fn from_response(response: &HttpResponse) -> Self {
+        Self {
+            methods: header_tokens(response, "access-control-allow-methods"),
+            headers: header_tokens(response, "access-control-allow-headers"),
+        }
+    }
+
+    fn allows_method(&self, method: &str, credentialed: bool) -> bool {
+        self.methods
+            .iter()
+            .any(|allowed| allowed_token_matches(allowed, method, credentialed))
+    }
+
+    /// Every unsafe header name must be listed; an empty set is allowed.
+    fn allows_headers(&self, unsafe_header_names: &[String], credentialed: bool) -> bool {
+        unsafe_header_names.iter().all(|name| {
+            self.headers
+                .iter()
+                .any(|allowed| allowed_token_matches(allowed, name, credentialed))
+        })
+    }
+}
+
+/// Matches an allow-list token case-insensitively.  The `*` wildcard matches
+/// any value only for requests without credentials.
+fn allowed_token_matches(allowed: &str, value: &str, credentialed: bool) -> bool {
+    (allowed == "*" && !credentialed) || allowed.eq_ignore_ascii_case(value)
+}
+
+/// Cache lifetime from `Access-Control-Max-Age`: 5 seconds when absent or
+/// invalid, capped at 24 hours.
+fn preflight_max_age(response: &HttpResponse) -> Duration {
+    let seconds = response
         .header("access-control-max-age")
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(5)
         .min(86_400);
-    cache
-        .entries
-        .insert(key, now + Duration::from_secs(max_age));
-    Ok(())
+    Duration::from_secs(seconds)
 }
 
 fn cors_check(
@@ -501,5 +588,215 @@ mod tests {
         let origin = Origin::from_url(&"https://app.example/".parse().unwrap());
         assert!(cors_check(&response, &origin, CredentialsMode::Omit).is_ok());
         assert!(cors_check(&response, &origin, CredentialsMode::Include).is_err());
+    }
+
+    fn app_origin() -> Origin {
+        Origin::from_url(&"https://app.example/".parse().unwrap())
+    }
+
+    fn preflight_response(status: u16, headers: &[(&str, &str)]) -> HttpResponse {
+        HttpResponse::new(
+            status,
+            "OK",
+            headers
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+            Vec::new(),
+        )
+    }
+
+    fn validate(
+        response: &HttpResponse,
+        credentials: CredentialsMode,
+        method: &str,
+        headers: &[&str],
+    ) -> Result<(), CorsError> {
+        let headers = headers
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+        validate_preflight_response(response, &app_origin(), credentials, method, &headers)
+    }
+
+    #[test]
+    fn preflight_wildcards_apply_only_without_credentials() {
+        let response = preflight_response(
+            204,
+            &[
+                ("Access-Control-Allow-Origin", "https://app.example"),
+                ("Access-Control-Allow-Credentials", "true"),
+                ("Access-Control-Allow-Methods", "*"),
+                ("Access-Control-Allow-Headers", "*"),
+            ],
+        );
+        assert!(validate(&response, CredentialsMode::Omit, "PUT", &["x-token"]).is_ok());
+        assert!(validate(&response, CredentialsMode::SameOrigin, "PUT", &["x-token"]).is_ok());
+        assert!(matches!(
+            validate(&response, CredentialsMode::Include, "PUT", &[]),
+            Err(CorsError::Preflight)
+        ));
+        let explicit_method = preflight_response(
+            204,
+            &[
+                ("Access-Control-Allow-Origin", "https://app.example"),
+                ("Access-Control-Allow-Credentials", "true"),
+                ("Access-Control-Allow-Methods", "put"),
+                ("Access-Control-Allow-Headers", "*"),
+            ],
+        );
+        assert!(validate(&explicit_method, CredentialsMode::Include, "PUT", &[]).is_ok());
+        assert!(matches!(
+            validate(
+                &explicit_method,
+                CredentialsMode::Include,
+                "PUT",
+                &["x-token"]
+            ),
+            Err(CorsError::Preflight)
+        ));
+    }
+
+    #[test]
+    fn preflight_explicit_allow_lists_match_case_insensitively_with_credentials() {
+        let response = preflight_response(
+            200,
+            &[
+                ("Access-Control-Allow-Origin", "https://app.example"),
+                ("Access-Control-Allow-Credentials", "TRUE"),
+                ("Access-Control-Allow-Methods", "GET, Put"),
+                ("Access-Control-Allow-Headers", "X-Token"),
+            ],
+        );
+        assert!(validate(&response, CredentialsMode::Include, "PUT", &["x-token"]).is_ok());
+        assert!(validate(&response, CredentialsMode::Omit, "PUT", &["x-token"]).is_ok());
+    }
+
+    #[test]
+    fn preflight_rejects_unlisted_method_or_header() {
+        let response = preflight_response(
+            204,
+            &[
+                ("Access-Control-Allow-Origin", "*"),
+                ("Access-Control-Allow-Methods", "GET, POST"),
+                ("Access-Control-Allow-Headers", "x-token"),
+            ],
+        );
+        assert!(matches!(
+            validate(&response, CredentialsMode::Omit, "DELETE", &[]),
+            Err(CorsError::Preflight)
+        ));
+        assert!(matches!(
+            validate(&response, CredentialsMode::Omit, "POST", &["x-other"]),
+            Err(CorsError::Preflight)
+        ));
+        let no_methods = preflight_response(204, &[("Access-Control-Allow-Origin", "*")]);
+        assert!(matches!(
+            validate(&no_methods, CredentialsMode::Omit, "POST", &[]),
+            Err(CorsError::Preflight)
+        ));
+    }
+
+    #[test]
+    fn preflight_requires_every_unsafe_header_across_header_lines() {
+        let response = preflight_response(
+            204,
+            &[
+                ("Access-Control-Allow-Origin", "*"),
+                ("Access-Control-Allow-Methods", "PUT"),
+                ("Access-Control-Allow-Headers", "x-a, , x-b"),
+                ("access-control-allow-headers", "x-c"),
+            ],
+        );
+        assert!(
+            validate(
+                &response,
+                CredentialsMode::Omit,
+                "PUT",
+                &["x-a", "x-b", "x-c"]
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate(&response, CredentialsMode::Omit, "PUT", &["x-a", "x-d"]),
+            Err(CorsError::Preflight)
+        ));
+    }
+
+    #[test]
+    fn preflight_rejects_failed_status_or_cors_check_as_preflight_error() {
+        let allow = [
+            ("Access-Control-Allow-Origin", "*"),
+            ("Access-Control-Allow-Methods", "PUT"),
+        ];
+        assert!(matches!(
+            validate(
+                &preflight_response(403, &allow),
+                CredentialsMode::Omit,
+                "PUT",
+                &[]
+            ),
+            Err(CorsError::Preflight)
+        ));
+        let other_origin = preflight_response(
+            204,
+            &[
+                ("Access-Control-Allow-Origin", "https://other.example"),
+                ("Access-Control-Allow-Methods", "PUT"),
+            ],
+        );
+        assert!(matches!(
+            validate(&other_origin, CredentialsMode::Omit, "PUT", &[]),
+            Err(CorsError::Preflight)
+        ));
+        let missing_credentials = preflight_response(
+            204,
+            &[
+                ("Access-Control-Allow-Origin", "https://app.example"),
+                ("Access-Control-Allow-Methods", "PUT"),
+            ],
+        );
+        assert!(validate(&missing_credentials, CredentialsMode::Omit, "PUT", &[]).is_ok());
+        assert!(matches!(
+            validate(&missing_credentials, CredentialsMode::Include, "PUT", &[]),
+            Err(CorsError::Preflight)
+        ));
+    }
+
+    #[test]
+    fn preflight_max_age_defaults_and_is_capped() {
+        let max_age = |value: Option<&str>| {
+            let headers = value
+                .map(|value| vec![("Access-Control-Max-Age", value)])
+                .unwrap_or_default();
+            preflight_max_age(&preflight_response(204, &headers))
+        };
+        assert_eq!(max_age(None), Duration::from_secs(5));
+        assert_eq!(max_age(Some("invalid")), Duration::from_secs(5));
+        assert_eq!(max_age(Some("600")), Duration::from_secs(600));
+        assert_eq!(max_age(Some("999999")), Duration::from_secs(86_400));
+    }
+
+    #[test]
+    fn preflight_cache_distinguishes_credentials_and_expires_entries() {
+        let target = Origin::from_url(&"https://api.example/".parse().unwrap());
+        let key = PreflightCacheKey {
+            request_origin: app_origin(),
+            target_origin: target,
+            method: "PUT".into(),
+            unsafe_header_names: vec!["x-token".into()],
+            credentialed: false,
+        };
+        let credentialed_key = PreflightCacheKey {
+            credentialed: true,
+            ..key.clone()
+        };
+        let now = Instant::now();
+        let mut cache = PreflightCache::default();
+        cache.insert(key.clone(), now + Duration::from_secs(5));
+        assert!(cache.contains_fresh(&key, now));
+        assert!(!cache.contains_fresh(&credentialed_key, now));
+        assert!(!cache.contains_fresh(&key, now + Duration::from_secs(5)));
+        assert!(cache.entries.is_empty());
     }
 }
