@@ -58,6 +58,8 @@ mod compression_stream;
 mod compression_stream_tests;
 #[cfg(test)]
 mod computed_pseudo_tests;
+#[cfg(test)]
+mod computed_style_layout_tests;
 mod document_write;
 mod errors;
 use errors::JsHostError;
@@ -3600,6 +3602,13 @@ impl HostState {
     /// stylesheet/rule-index portion of an existing resolver.
     fn invalidate_document_style_cache(&mut self, document: &NodeHandle) {
         self.form_validation.invalidate();
+        self.invalidate_document_style_cache_keeping_validation(document);
+    }
+
+    /// Invalidates cascade-derived values for `document` while keeping the
+    /// cached constraint-validation snapshot, for changes that cannot affect
+    /// form validity.
+    fn invalidate_document_style_cache_keeping_validation(&mut self, document: &NodeHandle) {
         let document_id = document.identity();
         if let Some(entry) = self.document_styles.get_mut(&document_id) {
             entry.needs_full_sample = true;
@@ -3633,8 +3642,20 @@ impl HostState {
     /// stylesheet parsing intact. Detached nodes affect no live document.
     fn invalidate_style_cache_for_node(&mut self, node: &NodeHandle) {
         self.form_validation.invalidate();
+        self.invalidate_style_cache_for_node_keeping_validation(node);
+    }
+
+    /// Invalidates styles after a change to `node`'s inline `style` attribute.
+    /// Constraint validity depends on form attributes, values and tree
+    /// structure, never on inline style, so the validation snapshot stays
+    /// fresh and the next CSSOM read does not rescan every form control.
+    fn invalidate_inline_style_for_node(&mut self, node: &NodeHandle) {
+        self.invalidate_style_cache_for_node_keeping_validation(node);
+    }
+
+    fn invalidate_style_cache_for_node_keeping_validation(&mut self, node: &NodeHandle) {
         if let Some(document) = document_root_for_node(node) {
-            self.invalidate_document_style_cache(&document);
+            self.invalidate_document_style_cache_keeping_validation(&document);
         }
         if matches!(node.tag_name().as_deref(), Some("iframe" | "frame"))
             && let Some(child) = self.iframe_documents.get(&node.identity())
@@ -12998,16 +13019,21 @@ fn computed_style_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let style = resolve_native_computed_style(args, context)?;
+    let flush_only = args.get(3).is_some_and(JsValue::to_boolean);
+    let name = args
+        .get(4)
+        .and_then(JsValue::as_string)
+        .map(|name| name.to_std_string_escaped());
+    let needs_used_size = !flush_only && name.as_deref().is_none_or(cssom_property_uses_used_size);
+    let style = resolve_native_computed_style(args, needs_used_size, context)?;
     // A synchronous flush samples transitions before event dispatch, but its
     // caller does not need to materialize a property map until a later read.
-    if args.get(3).is_some_and(JsValue::to_boolean) {
+    if flush_only {
         return Ok(JsValue::undefined());
     }
     // A named CSSOM read needs only one serialized property. Resolve afresh as
     // above, but avoid allocating the complete JavaScript property map.
-    if let Some(name) = args.get(4).and_then(JsValue::as_string) {
-        let name = name.to_std_string_escaped();
+    if let Some(name) = name {
         return Ok(style
             .as_ref()
             .and_then(|style| style.get(&name))
@@ -13036,9 +13062,18 @@ fn computed_style_native(
     Ok(js_string!(json.as_str()).into())
 }
 
+/// Reports whether a computed CSSOM property reads a layout-resolved used
+/// size. Only `width`, `height` and their logical aliases replace the cascaded
+/// value with the box size, so other named reads can skip layout.
+fn cssom_property_uses_used_size(name: &str) -> bool {
+    matches!(name, "width" | "height" | "inline-size" | "block-size")
+}
+
 /// Resolves an owned CSSOM snapshot before constructing any JavaScript objects.
+/// Layout runs only when `needs_used_size` asks for resolved `width`/`height`.
 fn resolve_native_computed_style(
     args: &[JsValue],
+    needs_used_size: bool,
     context: &mut Context,
 ) -> JsResult<Option<ComputedStyle>> {
     let node_id = parse_node_id(args.first(), context)?;
@@ -13071,32 +13106,15 @@ fn resolve_native_computed_style(
         let Some(document) = document_root_for_node(&node) else {
             return Ok(None);
         };
-        let document_id = document.identity();
         let mut state = state.borrow_mut();
-        if pseudo.is_some() {
-            state.ensure_style_resolver(&document);
-        }
-        let used_size = if pseudo.is_none() {
-            resolved_layout_size(&mut state, &document, &node)
-        } else {
-            None
-        };
-        let Some(resolver) = state
-            .document_styles
-            .get_mut(&document_id)
-            .and_then(|entry| entry.resolver.as_mut())
+        let Some(mut style) =
+            resolve_cssom_style(&mut state, &document, &node, pseudo, needs_used_size)
         else {
             return Ok(None);
         };
-        let Some(mut style) = (match pseudo {
-            Some(pseudo) => resolver.computed_pseudo_style(&node, pseudo),
-            None => Some(resolver.computed_style(&node)),
-        }) else {
+        let Some(resolver) = document_style_resolver(&mut state, &document) else {
             return Ok(None);
         };
-        if let Some(used_size) = used_size {
-            apply_cssom_used_size(&mut style, used_size);
-        }
         let auto_min_size = ["min-width", "min-height"].iter().any(|name| {
             matches!(style.get(name), Some(ComputedValue::Keyword(value)) if value == "auto")
         });
@@ -13109,6 +13127,54 @@ fn resolve_native_computed_style(
         style.populate_logical_cssom(flex_or_grid_item);
         Ok(Some(style))
     })
+}
+
+fn document_style_resolver<'a>(
+    state: &'a mut HostState,
+    document: &NodeHandle,
+) -> Option<&'a mut StyleResolver> {
+    state
+        .document_styles
+        .get_mut(&document.identity())
+        .and_then(|entry| entry.resolver.as_mut())
+}
+
+/// Computes `node`'s style for CSSOM, laying out the document only when the
+/// result depends on it: a resolved `width`/`height` was requested, or the
+/// cascade uses `@container` rules or container-relative colors, which read
+/// the container sizes captured by the latest layout.
+fn resolve_cssom_style(
+    state: &mut HostState,
+    document: &NodeHandle,
+    node: &NodeHandle,
+    pseudo: Option<PseudoElement>,
+    needs_used_size: bool,
+) -> Option<ComputedStyle> {
+    let compute = |state: &mut HostState| {
+        let resolver = document_style_resolver(state, document)?;
+        match pseudo {
+            Some(pseudo) => resolver.computed_pseudo_style(node, pseudo),
+            None => Some(resolver.computed_style(node)),
+        }
+    };
+    if pseudo.is_none() && needs_used_size {
+        let used_size = resolved_layout_size(state, document, node);
+        let mut style = compute(state)?;
+        if let Some(used_size) = used_size {
+            apply_cssom_used_size(&mut style, used_size);
+        }
+        return Some(style);
+    }
+    state.ensure_style_resolver(document);
+    let style = compute(state)?;
+    let needs_containers = pseudo.is_none()
+        && document_style_resolver(state, document)
+            .is_some_and(|resolver| resolver.needs_container_contexts());
+    if !needs_containers {
+        return Some(style);
+    }
+    resolved_layout_size(state, document, node);
+    compute(state)
 }
 
 /// Applies CSSOM's resolved width and height while retaining box sizing rules.
@@ -15779,7 +15845,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         // elements cannot affect it until the insertion path invalidates it.
         if is_style_attribute {
             state.borrow_mut().refresh_csp_inline_style_nodes(&node);
-            state.borrow_mut().invalidate_style_cache_for_node(&node);
+            state.borrow_mut().invalidate_inline_style_for_node(&node);
         } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         } else {
@@ -15858,7 +15924,7 @@ fn set_attribute_ns_native(
         }
         if is_style_attribute {
             state.borrow_mut().refresh_csp_inline_style_nodes(&node);
-            state.borrow_mut().invalidate_style_cache_for_node(&node);
+            state.borrow_mut().invalidate_inline_style_for_node(&node);
         } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         } else {
@@ -18874,7 +18940,7 @@ fn remove_attribute_native(
         // element's live document. Detached elements affect no document yet.
         if is_style_attribute {
             state.borrow_mut().refresh_csp_inline_style_nodes(&node);
-            state.borrow_mut().invalidate_style_cache_for_node(&node);
+            state.borrow_mut().invalidate_inline_style_for_node(&node);
         } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         } else {
@@ -18942,7 +19008,7 @@ fn remove_attribute_ns_native(
         }
         if is_style_attribute {
             state.borrow_mut().refresh_csp_inline_style_nodes(&node);
-            state.borrow_mut().invalidate_style_cache_for_node(&node);
+            state.borrow_mut().invalidate_inline_style_for_node(&node);
         } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         } else {
