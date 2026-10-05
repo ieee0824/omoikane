@@ -109,9 +109,9 @@ Linux ARM64・macOS ARM64とも同じ320回がすべて成功し、時計の前�
 - parserの既存ignored診断 `illegal_code_point_following_numeric_literal` は
   元の「テスト妥当性の確認が必要」という理由を保持する。engine側の既存skipを
   未実装機能の新規成功として数えない。
-- rootの `debug_blog_ast_moe_layout_snapshot` は既存のローカル診断で、untrackedの
-  HTML snapshotを必要とする。ローカルの移行前後では同じhashのsnapshotを用いる。
-  CIではsnapshot不在なら既存コードがearly returnするため、この診断にCIの動作保証を求めない。
+- rootにあった `debug_blog_ast_moe_layout_snapshot` は、untrackedのHTML snapshotを
+  必要とし、assertを持たないローカル診断だった。CIでは何も検証しないため
+  [Issue #1253](https://github.com/ieee0824/omoikane/issues/1253) で削除した。
 - ブラウザの固定fixture、lazy stylesheet load、描画画像の確認範囲は
   [ブラウザ動作基準](gate6-browser-baseline.md)に記録する。
 
