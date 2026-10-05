@@ -197,4 +197,22 @@ mod tests {
             2
         );
     }
+
+    #[test]
+    fn inline_style_changes_keep_the_validation_snapshot_fresh() {
+        let document = crate::html::TreeBuilder::parse("<form><input required></form>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        let scans =
+            |runtime: &JsRuntime| runtime.host_state.borrow().form_validation.completed_scans;
+        runtime.eval("globalThis.input=document.querySelector('input'); if(!input.matches(':invalid')) throw Error('invalid expected');").unwrap();
+        assert_eq!(scans(&runtime), 1);
+        runtime.eval("input.style.color='red'; input.setAttribute('style','color: blue'); input.setAttributeNS(null,'style','color: green'); if(!input.matches(':invalid')) throw Error('still invalid'); input.removeAttribute('style'); if(!input.matches(':invalid')) throw Error('still invalid');").unwrap();
+        assert_eq!(
+            scans(&runtime),
+            1,
+            "inline style cannot change constraint validity"
+        );
+        runtime.eval("input.removeAttribute('required'); if(!input.matches(':valid')) throw Error('valid expected');").unwrap();
+        assert_eq!(scans(&runtime), 2, "a validity attribute change rescans");
+    }
 }

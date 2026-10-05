@@ -16334,10 +16334,13 @@
         // only, matching the `get` trap's symbol guard.
         if (typeof prop === "symbol") return prop in target;
         if (prop in target) return true;
+        const key = __styleNameToCss(prop);
+        // A named read answers membership without resolving layout for the
+        // whole property map; indices and logical shorthands still need it.
+        if (!/^(0|[1-9][0-9]*)$/.test(prop) && readValue(key) !== undefined) return true;
         const map = readMap();
         const indexed = indexedName(map, prop);
         if (indexed !== null) return indexed !== "";
-        const key = __styleNameToCss(prop);
         return Object.prototype.hasOwnProperty.call(map, key) ||
           computedLogicalShorthand(map, key) !== null;
       },
