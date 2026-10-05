@@ -652,14 +652,6 @@ mod tests {
         worker.join();
     }
 
-    #[test]
-    fn tls_rejects_invalid_server_name() {
-        // IP addresses cannot be used as SNI server names with rustls
-        let req = HttpRequest::get("https://127.0.0.1/").unwrap();
-        let result = send(&req);
-        assert!(result.is_err());
-    }
-
     // --- TLS tests using a local rustls server with rcgen certificates ---
 
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -862,6 +854,38 @@ mod tests {
 
         assert!(result.is_err(), "should reject hostname mismatch");
         assert!(worker.join().is_err());
+    }
+
+    #[test]
+    fn tls_verifies_ip_address_hosts_against_ip_subject_alt_names() {
+        // An IP host is a valid rustls server name, so it must be checked
+        // against the certificate's IP SAN rather than any DNS SAN.
+        let (port, ca_cert, worker) = start_tls_test_server("localhost", "should-not-reach");
+        let req = HttpRequest::get(&format!("https://[::1]:{port}/")).unwrap();
+        let error = send_to_local_tls_server_with_config(&req, port, &ca_cert).unwrap_err();
+        let HttpParseError::Io(error) = &error else {
+            panic!("expected a TLS I/O error, got {error:?}");
+        };
+        assert!(
+            matches!(
+                error
+                    .get_ref()
+                    .and_then(|e| e.downcast_ref::<rustls::Error>()),
+                Some(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::NotValidForName
+                        | rustls::CertificateError::NotValidForNameContext { .. }
+                ))
+            ),
+            "a DNS-only certificate must not be valid for an IP host: {error:?}"
+        );
+        assert!(worker.join().is_err());
+
+        let (port, ca_cert, worker) = start_tls_test_server("::1", "ip-san-ok");
+        let req = HttpRequest::get(&format!("https://[::1]:{port}/")).unwrap();
+        let resp = send_to_local_tls_server_with_config(&req, port, &ca_cert).unwrap();
+        assert_eq!(resp.status_code(), 200);
+        assert_eq!(resp.body(), b"ip-san-ok");
+        worker.join().unwrap();
     }
 
     #[test]
