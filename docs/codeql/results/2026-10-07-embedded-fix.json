@@ -1,0 +1,137 @@
+{
+  "issue": 1266,
+  "date": "2026-10-07",
+  "cli": "2.27.1",
+  "library": "0.2.22",
+  "analysis_target": "x86_64-unknown-linux-gnu",
+  "rust_host": "aarch64-unknown-linux-gnu",
+  "build_mode": "none",
+  "baseline_main": "903227c78811cdc22dbf473845d17b72ce116cf8",
+  "fix": "embed_module token-tree forwarding; procedural parser unchanged",
+  "diagnostic_probe": {
+    "observed_errors": 2,
+    "error": "expected identifier",
+    "argument": "compress = \"none\" / \"lz4\"",
+    "forwarded_group_delimiter": "Parenthesis",
+    "failure_before_filesystem_access": true,
+    "instrumentation_restored": true
+  },
+  "diagnostics_before": {
+    "warning": 18,
+    "info": 5,
+    "error": 0
+  },
+  "diagnostics_after": {
+    "warning": 14,
+    "info": 5,
+    "error": 0,
+    "other_diagnostics_unchanged": true
+  },
+  "macro_rows_before": {
+    "rows": 593,
+    "AST_zero": 15
+  },
+  "macro_rows_after": {
+    "rows": 591,
+    "AST_zero": 13,
+    "other_file_macro_rows_unchanged": true
+  },
+  "embedded_AST": {
+    "67": {
+      "before_outer": 36,
+      "before_inner": 9,
+      "before_compile_error": 0,
+      "after_outer": 405,
+      "after_inner": 378
+    },
+    "77": {
+      "before_outer": 36,
+      "before_inner": 9,
+      "before_compile_error": 0,
+      "after_outer": 402,
+      "after_inner": 375
+    }
+  },
+  "regression_before": {
+    "array_roots": 0,
+    "file_entry_tuples": 0,
+    "fixture_paths": 0,
+    "compile_error_calls": 1
+  },
+  "regression_after": {
+    "array_roots": 1,
+    "file_entry_tuples": 4,
+    "fixture_paths": 4,
+    "compile_error_calls": 0
+  },
+  "fixture_tests": {
+    "passed": 2,
+    "failed": 0,
+    "ignored": 0
+  },
+  "sources_match_final_candidate_and_DB_archive": true,
+  "source_sha256": {
+    "engine/boa/core/macros/src/embedded_module_loader.rs": "5a5d52a9e0fb05c33022982979e5c1c88790a85168af0d2858151810230136fa",
+    "engine/boa/core/engine/src/module/loader/embedded.rs": "395d2fe40ed97d35b050cbe17bc18b6a56cdd158531e0a694ba5c7698027a3fc",
+    "engine/boa/tests/macros/tests/embedded.rs": "3d31256ae4286fa9a059becaad7f0a405970f1d26eed27db7b42d36b3160a14d"
+  },
+  "raw_artifact_sha256": {
+    "before-parse-values.csv": "f3023ab4c415734f54fecd94c38d5bb944b10656307ba1b012cd146d826feb69",
+    "baseline-expansion.csv": "307c2b67eb5ba96cfad072087e61f2e37bbf9cb7e5e29e8bc1ef0852aafd1e9a",
+    "tt-forwarding-expansion.csv": "4dadcaac20132969def44ea4cdce105f35f4c1ab5fa82f7d7595ecd7b72681b9",
+    "tt-forwarding-macros.csv": "e0cb32db38536669600f6eac0d4c6e878c4a38c73ae355296dc52ea2976108d6",
+    "tt-forwarding-diagnostics.csv": "3964933379d4c127db0596ace22c2171c6a3e0d459d0f4a5d2d7e424d5c43cc7",
+    "instrumentation-before-parse.patch": "ced842e4c080f0c2b31afcf39e0ac89664581adee6ecc38b65ecb706d9c775b3",
+    "tt-forwarding.patch": "c55755fcf3d3fa4bdf10e3cd6d174c11641b17ac8d54ef721891ee679d34c4b4"
+  },
+  "limits": [
+    "Remaining offset_of/__Fn/ARM64 cfg macro gaps are unchanged.",
+    "Array/fixture AST proves expansion, not complete type/dataflow coverage.",
+    "This local DB has production sources at903227c7 plus the exact2line fix; it does not include the new standalone repro crate."
+  ],
+  "validation": {
+    "cargo_test_locked": {
+      "command": "cargo test --locked",
+      "exit_code": 0,
+      "passed": 3433,
+      "failed": 0,
+      "ignored": 15,
+      "result_groups": 99
+    },
+    "cargo_build_locked": {
+      "exit_code": 0
+    },
+    "native_JIT_contracts": {
+      "command": "bash scripts/check-jit-native.sh",
+      "exit_code": 0,
+      "contract_binaries": 8,
+      "passed": 38,
+      "failed": 0,
+      "ignored": 0,
+      "native_interpreter_matched_cases": 16,
+      "jit_policy": "execution-confirmed"
+    },
+    "embedded_tests": {
+      "command": "cargo test --locked --manifest-path engine/boa/Cargo.toml -p boa_macros_tests --test embedded",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "source_matches_candidate": true
+    },
+    "engine_source_retention": {
+      "passed": true,
+      "origin_manifest_modified": false
+    },
+    "QL_pack_ci": "passed",
+    "QL_format": "passed",
+    "rustfmt_check": "passed",
+    "diff_check": "passed"
+  },
+  "normalized_artifact_sha256": {
+    "2026-10-07-embedded-input.csv": "dc82ecce44eb5bd0fc52bc97aef2059c467cb9752d180f63e35c219a6e825d52",
+    "2026-10-07-embedded-baseline-expansion.csv": "307c2b67eb5ba96cfad072087e61f2e37bbf9cb7e5e29e8bc1ef0852aafd1e9a",
+    "2026-10-07-embedded-fixed-diagnostics.csv": "d414afbdf9578f6cc85b71f4f22fbe58b0421a9680edb8b52029d9a87cc636fc",
+    "2026-10-07-embedded-input-probe.patch": "f31eb0a07b94a4bd4b61ad68ad02ef814781e6f6eec18eebd304bf906f9e4ef3",
+    "2026-10-07-embedded-tt-forwarding-expansion.csv": "4dadcaac20132969def44ea4cdce105f35f4c1ab5fa82f7d7595ecd7b72681b9"
+  }
+}

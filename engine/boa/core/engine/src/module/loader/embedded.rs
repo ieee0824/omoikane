@@ -20,9 +20,9 @@ use boa_engine::{Context, JsNativeError, JsResult, JsString, Module, Source};
 /// or `.cjs` extension.
 #[macro_export]
 macro_rules! embed_module {
-    ($($x: expr),*) => {
+    ($($x: tt)*) => {
         $crate::module::embedded::EmbeddedModuleLoader::from_iter(
-            $crate::__embed_module_inner!($($x),*),
+            $crate::__embed_module_inner!($($x)*),
         )
     };
 }
