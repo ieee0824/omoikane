@@ -3457,6 +3457,11 @@ mod tests {
         None
     }
 
+    fn alpha_at(image: &Image, x: u32, y: u32) -> u8 {
+        let index = (y * image.width() + x) as usize * 4;
+        image.pixels()[index + 3]
+    }
+
     #[test]
     fn renders_svg_rect() {
         let html = r#"<svg width="10" height="10"><rect x="0" y="0" width="10" height="10" fill="red"/></svg>"#;
@@ -3875,8 +3880,8 @@ mod tests {
         let doc = TreeBuilder::parse(html).document();
         let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
 
-        assert_eq!(image.pixels()[(10 * 20 + 10) * 4 + 3], 255);
-        assert_eq!(image.pixels()[(0 * 20) * 4 + 3], 0);
+        assert_eq!(alpha_at(&image, 10, 10), 255);
+        assert_eq!(alpha_at(&image, 0, 0), 0);
     }
 
     #[test]
@@ -3885,8 +3890,8 @@ mod tests {
         let doc = TreeBuilder::parse(html).document();
         let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
 
-        assert_eq!(image.pixels()[(6 * 10 + 5) * 4 + 3], 255);
-        assert_eq!(image.pixels()[(0 * 10 + 5) * 4 + 3], 0);
+        assert_eq!(alpha_at(&image, 5, 6), 255);
+        assert_eq!(alpha_at(&image, 5, 0), 0);
     }
 
     #[test]
@@ -3895,8 +3900,8 @@ mod tests {
         let doc = TreeBuilder::parse(html).document();
         let image = render_svg_to_image(&find_svg(&doc).unwrap()).unwrap();
 
-        assert_eq!(image.pixels()[(5 * 10 + 5) * 4 + 3], 255);
-        assert_eq!(image.pixels()[(0 * 10) * 4 + 3], 0);
+        assert_eq!(alpha_at(&image, 5, 5), 255);
+        assert_eq!(alpha_at(&image, 0, 0), 0);
     }
 
     #[test]
