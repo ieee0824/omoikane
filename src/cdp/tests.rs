@@ -218,6 +218,30 @@ fn encodes_and_decodes_masked_text_frames() {
 }
 
 #[test]
+fn rejects_unmasked_client_frames_without_dispatching() {
+    let mut server = CdpServer::new();
+    let upgrade = server.accept_upgrade(sample_upgrade_request()).unwrap();
+    let ping = WebSocketFrame {
+        fin: true,
+        opcode: WebSocketOpcode::Ping,
+        payload: b"hello".to_vec(),
+    };
+    assert!(
+        server
+            .receive(upgrade.client_id, &ping.encode(false))
+            .is_err()
+    );
+    assert!(server.drain_outgoing(upgrade.client_id).unwrap().is_empty());
+    server
+        .receive(upgrade.client_id, &ping.encode(true))
+        .unwrap();
+    assert_eq!(
+        server.drain_outgoing(upgrade.client_id).unwrap(),
+        vec![WebSocketFrame::pong(ping.payload)]
+    );
+}
+
+#[test]
 fn upgrades_connections_and_dispatches_json_rpc_requests() {
     let mut server = CdpServer::new();
     server.register_method("Browser.getVersion", |_| {

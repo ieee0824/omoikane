@@ -516,11 +516,13 @@ impl BrowserSession {
     }
 
     pub fn receive(&mut self, client_id: u64, bytes: &[u8]) -> Result<(), CdpError> {
-        let owner_disconnect = WebSocketFrame::decode(bytes)
-            .ok()
-            .is_some_and(|(frame, _)| {
-                frame.opcode == WebSocketOpcode::Close && self.owner_client_id == Some(client_id)
-            });
+        let owner_disconnect =
+            WebSocketFrame::decode_client(bytes)
+                .ok()
+                .is_some_and(|(frame, _)| {
+                    frame.opcode == WebSocketOpcode::Close
+                        && self.owner_client_id == Some(client_id)
+                });
         if owner_disconnect {
             let mut state = self.state.borrow_mut();
             state.cancel_pending_dialog();
