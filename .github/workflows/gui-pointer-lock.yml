@@ -3,10 +3,10 @@ name: GUI Pointer Lock
 on:
   pull_request:
     branches: [main]
-    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
+    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'scripts/test-gui-scroll.py', 'tests/fixtures/gui-scroll/**', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
   push:
     branches: [main]
-    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
+    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'scripts/test-gui-scroll.py', 'tests/fixtures/gui-scroll/**', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
   workflow_dispatch:
 
 permissions:
@@ -66,6 +66,10 @@ jobs:
         run: /usr/bin/python3 scripts/test-pointer-lock-x11.py --binary target/debug/omoikane --artifacts .artifacts/gui-pointer-lock
       - name: Verify idle paints and real animation deadlines
         run: /usr/bin/python3 scripts/test-gui-render-demand.py --verify --binary target/debug/omoikane --artifacts .artifacts/gui-render-demand
+      - name: Verify continuous wheel rendering at both device scales
+        run: |
+          /usr/bin/python3 scripts/test-gui-scroll.py --binary target/debug/omoikane --scale 1 --artifacts .artifacts/gui-scroll-1
+          /usr/bin/python3 scripts/test-gui-scroll.py --binary target/debug/omoikane --scale 2 --artifacts .artifacts/gui-scroll-2
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -74,6 +78,8 @@ jobs:
             .artifacts/gui-pointer-lock/
             .artifacts/gui-scale/
             .artifacts/gui-render-demand/
+            .artifacts/gui-scroll-1/
+            .artifacts/gui-scroll-2/
             .artifacts/gui-url-entry/
             .artifacts/gui-url-entry-negative/
           include-hidden-files: true

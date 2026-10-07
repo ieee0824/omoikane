@@ -158,6 +158,8 @@ struct BrowserApp {
     context: Option<Context<Arc<Window>>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     frame_scheduler: PlatformFrameScheduler,
+    /// Earliest frame allowed inside an input batch, independent of wakeups.
+    wheel_frame_deadline: Instant,
     frame_cache: BrowserFrameCache,
     clock_document: u64,
     last_chrome: Option<render_pump::PresentedChrome>,
@@ -203,6 +205,7 @@ impl BrowserApp {
             context: None,
             surface: None,
             frame_scheduler: PlatformFrameScheduler::new(started_at, FRAME_INTERVAL),
+            wheel_frame_deadline: started_at,
             frame_cache: BrowserFrameCache::default(),
             clock_document,
             last_chrome: None,
@@ -543,6 +546,27 @@ impl BrowserApp {
         true
     }
 
+    fn dispatch_wheel(
+        &mut self,
+        delta_x: f64,
+        delta_y: f64,
+    ) -> Result<(), omoikane::cdp::JsonRpcError> {
+        let started = self.paint_trace.as_ref().map(|_| Instant::now());
+        let result = self.input.wheel(&mut self.session, delta_x, delta_y);
+        if let Some(started) = started {
+            eprintln!(
+                "OMOIKANE_WHEEL {}",
+                json!({
+                    "dispatch_ms": started.elapsed().as_secs_f64() * 1000.0,
+                    "delta_x": delta_x,
+                    "delta_y": delta_y,
+                    "success": result.is_ok(),
+                })
+            );
+        }
+        result
+    }
+
     fn dispatch_input(&mut self, event: WindowEvent) -> bool {
         self.trace_input_event(&event);
         let scale_factor = self.device_scale().factor();
@@ -591,7 +615,7 @@ impl BrowserApp {
                     return false;
                 }
                 let (delta_x, delta_y) = wheel_delta_css_pixels(delta, scale_factor);
-                self.input.wheel(&mut self.session, delta_x, delta_y)
+                self.dispatch_wheel(delta_x, delta_y)
             }
             WindowEvent::Touch(touch) => self.dispatch_touch(touch),
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -847,6 +871,9 @@ impl ApplicationHandler for BrowserApp {
             return;
         }
         if !matches!(event, WindowEvent::RedrawRequested) {
+            if matches!(event, WindowEvent::MouseWheel { .. }) {
+                self.render_before_wheel(Instant::now());
+            }
             self.sync_page_time_before_input(Instant::now());
         }
         match event {
