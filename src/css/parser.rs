@@ -1307,6 +1307,7 @@ impl Parser {
                     | "translate"
                     | "rotate"
                     | "scale"
+                    | "will-change"
             )
             || contains_var && matches!(name.as_str(), "font" | "transition"))
             && has_top_level_comma(&value_tokens)

@@ -34,6 +34,11 @@ WPT_ROOT=target/wpt WPT_REQUIRED=1 cargo test --locked --test p1_transform_refte
 reftestは改変しない上流HTMLと参照を800×600で比較し、全件の画素差は0だった。
 XHTML参照はXMLとして読む。積層テストは指定領域の色も検査し、参照側にも同じ
 未対応機能があるときに比較だけで成功しないようにする。
-使用した25ソースのSHA256と固定revisionは
+使用した28ソースのSHA256と固定revisionは
 [individual-transforms-validation.json](individual-transforms-validation.json) に記録した。
 対象のtestharnessケースは `tests/wpt/manifest.json` に登録し、reftestはWPT CIでも実行する。
+
+mainのプロパティ検証との統合では、既存の積層判定で使う`will-change`を登録し、
+初期値`auto`とキーワード・カンマ区切りの検証を追加した。ヒント中のプロパティ名は
+ASCIIの大文字小文字を区別せず判定する。公式のvalid/invalid/computed WPT
+3件・170項目が成功し、個別transformの11件の画像比較も画素差0を維持した。

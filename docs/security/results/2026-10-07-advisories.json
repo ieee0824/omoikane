@@ -1,0 +1,68 @@
+{
+  "base_revision": "c37c50e9",
+  "date": "2026-10-07",
+  "cargo_deny": "0.20.2",
+  "locks": {
+    "root": {
+      "sha256": "07fbc1f30dd99df8b6488565b728ea14e9054a943207a4dd15423dad964f6dbf",
+      "unconfigured_findings": [
+        {
+          "category": "unmaintained",
+          "id": "RUSTSEC-2024-0436"
+        },
+        {
+          "category": "unmaintained",
+          "id": "RUSTSEC-2026-0206"
+        },
+        {
+          "category": "unmaintained",
+          "id": "RUSTSEC-2026-0192"
+        }
+      ],
+      "configured_audit": "passed",
+      "maintenance_review_by": "2027-01-07"
+    },
+    "boa": {
+      "sha256": "feab9c75666b9342b3117b5d08cad0f79ef42c6f969a6919e9f72d31c610b299",
+      "unconfigured_findings": [
+        {
+          "category": "unmaintained",
+          "id": "RUSTSEC-2024-0384"
+        },
+        {
+          "category": "unmaintained",
+          "id": "RUSTSEC-2024-0436"
+        },
+        {
+          "category": "unmaintained",
+          "id": "RUSTSEC-2025-0134"
+        }
+      ],
+      "configured_audit": "passed",
+      "maintenance_review_by": "2027-01-07"
+    }
+  },
+  "features": "all",
+  "verification": {
+    "boa_related_tests": {
+      "passed": 1462,
+      "failed": 0,
+      "ignored": 4
+    },
+    "boa_baseline_jit_contracts": {
+      "passed": 76,
+      "failed": 0
+    },
+    "boa_related_build": "passed",
+    "root_locked_tests": {
+      "passed": 3437,
+      "failed": 0,
+      "ignored": 15,
+      "threads": 2,
+      "external_wpt_configured": false
+    },
+    "root_locked_build": "passed",
+    "engine_source_check": "passed",
+    "exception_policy_tests": 3
+  }
+}

@@ -168,3 +168,17 @@ fn singular_depth_scale_preserves_geometry_but_excludes_pointer_targets() {
         );
     }
 }
+
+#[test]
+fn will_change_remains_supported_when_property_registry_validates_the_cascade() {
+    let mut runtime = JsRuntime::with_document(
+        TreeBuilder::parse(
+            "<div id=target style='will-change: transform; will-change: 10px'></div>",
+        )
+        .document(),
+    )
+    .unwrap();
+    let observed = runtime.eval("JSON.stringify([CSS.supports('will-change','transform'), CSS.supports('will-change','translate, opacity'), CSS.supports('will-change','auto, transform'), CSS.supports('will-change','10px'), getComputedStyle(document.getElementById('target')).willChange])").unwrap().as_string().unwrap().to_std_string_escaped();
+    assert_eq!(observed, "[true,true,false,false,\"transform\"]");
+    assert_eq!(runtime.eval("['none','all','will-change'].every(value => !CSS.supports('will-change',value)) && CSS.supports('will-change','TRANSFORM')").unwrap().as_boolean(), Some(true));
+}

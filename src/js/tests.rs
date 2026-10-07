@@ -3478,7 +3478,11 @@ fn window_selection_tracks_ranges_and_is_scoped_per_document() {
                 const childText = childDocument.createTextNode("child");
                 childDocument.body.appendChild(childText);
                 let crossDocumentError = "";
-                try { range.setEnd(childText, 1); } catch (error) { crossDocumentError = error.name; }
+                try { selection.getRangeAt(0).setEnd(childText, 1); } catch (error) { crossDocumentError = error.name; }
+                // Replacing the selected range releases the old range's document restriction.
+                if (selection.getRangeAt(0) === range) return 'selection retained replaced range';
+                range.setEnd(childText, 1);
+                if (range.startContainer !== childText || !range.collapsed) return 'released range did not adopt its new root';
                 const childSelection = childDocument.getSelection();
                 const childRange = childDocument.createRange();
                 childRange.selectNodeContents(childText);

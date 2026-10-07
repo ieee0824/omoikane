@@ -124,6 +124,23 @@
     {
       "path": "css/css-transforms/individual-transform/stacking-context-ref.html",
       "sha256": "270486abc9d947c3d85278d0fb36f509c566309e8698d509781dfda49f492831"
+    },
+    {
+      "path": "css/css-will-change/parsing/will-change-valid.html",
+      "sha256": "d66c6c82184fc74cc487d9497e30b73dd49de0f4b25c8367655a11a9f7b0c0d8"
+    },
+    {
+      "path": "css/css-will-change/parsing/will-change-invalid.html",
+      "sha256": "341ca783a6a1f5521f327c0f677af2165ad8b9cb8ce399cb3c7fd60f0c06f068"
+    },
+    {
+      "path": "css/css-will-change/parsing/will-change-computed.html",
+      "sha256": "4c3914dd379ca72f2a526322f968e7e66991fbc94be3783ea3b8fc39aebc3aab"
     }
-  ]
+  ],
+  "will_change_testharness": {
+    "cases": 3,
+    "subtests": 170,
+    "failures": 0
+  }
 }

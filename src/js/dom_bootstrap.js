@@ -2,8 +2,24 @@
   // Native bindings are installed before this bootstrap runs. Keep the
   // unfiltered slot lookup private to the event dispatcher so page scripts
   // cannot use it to inspect closed shadow trees.
+  const domInterfaces = globalThis.__omoikane_dom_interface_bridge;
+  const PlatformDOMRect = globalThis.DOMRect;
+  const readPointDictionary = globalThis.__omoikane_geometry_point_values;
+  delete globalThis.__omoikane_geometry_point_values;
+  const readMatrixDictionary = globalThis.__omoikane_geometry_matrix_init;
+  delete globalThis.__omoikane_geometry_matrix_init;
+  const PlatformStaticRange = globalThis.StaticRange;
+  const PlatformHTMLCollection = globalThis.HTMLCollection;
+  const makeRectList = globalThis.__omoikane_make_rect_list;
+  delete globalThis.__omoikane_make_rect_list;
+  delete globalThis.__omoikane_dom_interface_bridge;
+  const childCollections = new WeakMap();
+  const documentCollections = new WeakMap();
+  const DocumentCollectionMap = Map;
+  const documentImplementations = new WeakMap();
   const internalAssignedSlot = globalThis.__omoikane_internal_assigned_slot;
   let registerCanonicalNodeIdentity = globalThis.__omoikane_register_canonical_node_identity;
+  const nativeStyleSupports = globalThis.__omoikane_css_supports;
   const nativeGetOptionSelected = globalThis.__omoikane_get_option_selected;
   const nativeSetOptionSelected = globalThis.__omoikane_set_option_selected;
   delete globalThis.__omoikane_internal_assigned_slot;
@@ -55,6 +71,8 @@
   const nativeDoctypePublicId = globalThis.__omoikane_doctype_public_id;
   const nativeDoctypeSystemId = globalThis.__omoikane_doctype_system_id;
   const nativeChildNodeIds = globalThis.__omoikane_child_node_ids;
+  const nativeQuerySelectorAll = globalThis.__omoikane_query_selector_all;
+  const nativeQuerySelector = globalThis.__omoikane_query_selector;
   const nativeGetElementById = globalThis.__omoikane_get_element_by_id;
   const nativeNodeIndex = globalThis.__omoikane_node_index;
   const nativeNodeIsConnected = globalThis.__omoikane_node_is_connected;
@@ -3004,6 +3022,8 @@
       const normalizeDecls = (declarations) => {
         const normalized = [];
         for (const declaration of declarations) {
+          if (!declaration.name.startsWith("--") &&
+              !nativeStyleSupports(declaration.name, declaration.value)) continue;
           if (declaration.name === "transition" ||
               declaration.name.startsWith("transition-") ||
               validatesSpecialStyleProperties.has(declaration.name)) {
@@ -3090,6 +3110,7 @@
       // single value returned by getValue/getPriority.
       const setValue = (kebab, value, priority) => {
         value = String(value);
+        if (!kebab.startsWith("--") && !nativeStyleSupports(kebab, value)) return;
         if (kebab === "transition" || kebab.startsWith("transition-") || validatesSpecialStyleProperties.has(kebab)) {
           const normalized = __omoikane_normalize_style_value(kebab, value);
           if (normalized === null) return;
@@ -3294,7 +3315,12 @@
     }
 
     get children() {
-      return this.childNodes.filter(n => n.nodeType === 1);
+      let collection = childCollections.get(this);
+      if (!collection) {
+        collection = makeHTMLCollection(() => this.childNodes.filter(node => node.nodeType === 1));
+        childCollections.set(this, collection);
+      }
+      return collection;
     }
 
     get firstChild() {
@@ -3371,33 +3397,39 @@
 
     getElementsByTagName(tag) {
       const requested = String(tag);
-      try {
-        return this.querySelectorAll(requested);
-      } catch (_) {
-        // The native selector parser intentionally accepts CSS identifiers,
-        // which are narrower than XML names. Fall back only for names that
-        // cannot be represented by that parser (for example `dØdd`).
-      }
-      const htmlDocument = (this.nodeType === 9 ? this : this.ownerDocument).contentType === "text/html";
-      const result = [];
-      const visit = node => {
-        for (const child of node.childNodes) {
-          if (child.nodeType === 1) {
-            const htmlElement = htmlDocument && child instanceof HTMLElement;
-            const matches = requested === "*" || (htmlElement
-              ? asciiLowercase(child.localName) === asciiLowercase(requested)
-              : child.localName === requested);
-            if (matches) result.push(child);
-          }
-          visit(child);
-        }
+      const htmlDocument = nodeDocument(this).contentType === "text/html";
+      const matches = element => {
+        if (requested === "*") return true;
+        const id = internalNodeId(element);
+        const html = htmlDocument && (nativeNodeNamespaceURI(id) === "http://www.w3.org/1999/xhtml" || nativeNodeIsHtmlElement(id));
+        const prefix = nativeNodePrefix(id), localName = internalNodeLocalName(element);
+        const name = prefix ? prefix + ":" + localName : localName;
+        return html ? asciiLowercase(name) === asciiLowercase(requested) : name === requested;
       };
-      visit(this);
-      return makeNodeList(result);
+      // Keep the collection live while using native traversal for selector-safe
+      // names. Repeated document.body reads must not scan the tree in JavaScript.
+      const selectorSafe = requested === "*" || /^[A-Za-z_][A-Za-z0-9_-]*$/.test(requested);
+      return makeHTMLCollection(() => selectorSafe
+        ? (nativeQuerySelectorAll(internalNodeId(this), requested) || []).map(wrapNode).filter(matches)
+        : collectElements(this, matches));
     }
 
-    getElementsByClassName(cls) {
-      return this.querySelectorAll("." + String(cls));
+    getElementsByTagNameNS(namespace, localName) {
+      const ns = namespace == null || namespace === "" ? null : String(namespace);
+      const name = String(localName);
+      return makeHTMLCollection(() => collectElements(this, element =>
+        (ns === "*" || (element.namespaceURI || (element instanceof HTMLElement ? "http://www.w3.org/1999/xhtml" : null)) === ns) &&
+        (name === "*" || element.localName === name)));
+    }
+
+    getElementsByClassName(classes) {
+      const names = String(classes).trim().split(/[\t\n\f\r ]+/).filter(Boolean);
+      const doc = this.nodeType === 9 ? this : this.ownerDocument;
+      const fold = doc.compatMode === "BackCompat" ? asciiLowercase : value => value;
+      return makeHTMLCollection(() => collectElements(this, element => {
+        const actual = (element.getAttribute("class") || "").split(/[\t\n\f\r ]+/).map(fold);
+        return names.length > 0 && names.every(name => actual.includes(fold(name)));
+      }));
     }
 
     get ownerDocument() {
@@ -3640,29 +3672,7 @@
       return map;
     }
 
-    get dataset() {
-      const node = this;
-      return new Proxy({}, {
-        get(target, prop) {
-          if (typeof prop !== "string") return undefined;
-          const attrName = "data-" + prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
-          const val = node.getAttribute(attrName);
-          return val === null ? undefined : val;
-        },
-        set(target, prop, value) {
-          if (typeof prop !== "string") return true;
-          const attrName = "data-" + prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
-          node.setAttribute(attrName, String(value));
-          return true;
-        },
-        deleteProperty(target, prop) {
-          if (typeof prop !== "string") return true;
-          const attrName = "data-" + prop.replace(/[A-Z]/g, m => "-" + m.toLowerCase());
-          node.removeAttribute(attrName);
-          return true;
-        }
-      });
-    }
+    get dataset() { return domInterfaces.makeDataset(this); }
 
     get nodeValue() {
       const t = this.nodeType;
@@ -3783,10 +3793,7 @@
 
     getBoundingClientRect() {
       const m = this.__layoutMetrics();
-      return {
-        x: m.x, y: m.y, width: m.width, height: m.height,
-        top: m.top, left: m.left, bottom: m.bottom, right: m.right,
-      };
+      return new PlatformDOMRect(m.x, m.y, m.width, m.height);
     }
 
     getClientRects() {
@@ -3795,11 +3802,10 @@
       // `display: none`) returns an empty list. `hasBox` distinguishes the two,
       // which a zero-sized rect alone cannot.
       const m = this.__layoutMetrics();
-      if (!m.hasBox) return [];
-      return m.clientRects ? m.clientRects.map(rect => ({ ...rect })) : [{
-        x: m.x, y: m.y, width: m.width, height: m.height,
-        top: m.top, left: m.left, bottom: m.bottom, right: m.right,
-      }];
+      if (!m.hasBox) return makeRectList([]);
+      return makeRectList(m.clientRects ? m.clientRects.map(rect => new PlatformDOMRect(rect.x, rect.y, rect.width, rect.height)) : [
+        new PlatformDOMRect(m.x, m.y, m.width, m.height),
+      ]);
     }
 
     get offsetWidth() { return this.__layoutMetrics().offsetWidth; }
@@ -5922,18 +5928,17 @@
     }
   }
 
-  class Range {
-    constructor(doc) {
+  class Range extends globalThis.AbstractRange {
+    constructor(doc = globalThis.document) {
+      super(domInterfaces.rangeToken);
+      domInterfaces.registerRange(this, () => [
+        this.__startContainer, this.__startOffset, this.__endContainer, this.__endOffset,
+      ]);
       this.__doc = doc;
       this.__startContainer = doc; this.__startOffset = 0;
       this.__endContainer = doc; this.__endOffset = 0;
       registerTraversal(doc, "ranges", this);
     }
-    get startContainer() { return this.__startContainer; }
-    get startOffset() { return this.__startOffset; }
-    get endContainer() { return this.__endContainer; }
-    get endOffset() { return this.__endOffset; }
-    get collapsed() { return this.__startContainer === this.__endContainer && this.__startOffset === this.__endOffset; }
     get commonAncestorContainer() { return commonAncestor(this.__startContainer, this.__endContainer); }
     __validate(node, offset) {
       if (!node || node.nodeType === 10) throw new DOMException("Invalid boundary node.", "InvalidNodeTypeError");
@@ -5952,6 +5957,7 @@
         this.__doc = doc;
         registerTraversal(doc, "ranges", this);
       }
+      prepareSelectionBoundaryChange(this, node);
       // Living DOM reroots (collapses) a range when the new point and the
       // opposite point have different roots; it does not throw the DOM2
       // WrongDocumentError. Updating __doc above keeps mutation tracking on the
@@ -5961,7 +5967,7 @@
         this.__endContainer = node; this.__endOffset = offset;
       }
       this.__startContainer = node; this.__startOffset = offset;
-      selectionRangeMutated(this);
+      selectionRangeMutated(this, "start", node, offset);
     }
     setEnd(node, offset) {
       offset = this.__validate(node, offset);
@@ -5974,12 +5980,13 @@
         this.__doc = doc;
         registerTraversal(doc, "ranges", this);
       }
+      prepareSelectionBoundaryChange(this, node);
       if (nodeRoot(node) !== nodeRoot(this.__startContainer) ||
           boundaryCompare(node, offset, this.__startContainer, this.__startOffset) < 0) {
         this.__startContainer = node; this.__startOffset = offset;
       }
       this.__endContainer = node; this.__endOffset = offset;
-      selectionRangeMutated(this);
+      selectionRangeMutated(this, "end", node, offset);
     }
     __beforeAfter(node, delta, start) {
       if (!node || !node.parentNode) throw new DOMException("Node has no parent.", "InvalidNodeTypeError");
@@ -6153,12 +6160,13 @@
       // two result arrays for every live range on every DOM removal.
       // A Document cannot be inside a removed child. Common collapsed ranges
       // also share a container, so only ask native ancestry once for both.
+      const descendant = safeWeakMapHas(selectionByComposedRange, this) ? shadowIncludingDescendant : isInclusiveDescendant;
       const startContainer = this.__startContainer;
       const endContainer = this.__endContainer;
       const startInsideRemoved = startContainer !== this.__doc &&
-        isInclusiveDescendant(startContainer, removed);
+        descendant(startContainer, removed);
       const endInsideRemoved = endContainer === startContainer ? startInsideRemoved :
-        endContainer !== this.__doc && isInclusiveDescendant(endContainer, removed);
+        endContainer !== this.__doc && descendant(endContainer, removed);
       if (startInsideRemoved) {
         this.__startContainer = parent;
         this.__startOffset = index;
@@ -6171,7 +6179,7 @@
       } else if (this.__endContainer === parent && this.__endOffset > index) {
         this.__endOffset--;
       }
-      selectionRangeMutated(this);
+      selectionRangeMutated(this, "native");
     }
     __mergeText(target, removed, offset, parent, index) {
       const adjust = (container, value) => {
@@ -6181,7 +6189,7 @@
       };
       [this.__startContainer, this.__startOffset] = adjust(this.__startContainer, this.__startOffset);
       [this.__endContainer, this.__endOffset] = adjust(this.__endContainer, this.__endOffset);
-      selectionRangeMutated(this);
+      selectionRangeMutated(this, "native");
     }
     __replaceData(node, offset, count, replacementLength) {
       const adjust = (container, value) => {
@@ -6191,7 +6199,7 @@
       };
       [this.__startContainer, this.__startOffset] = adjust(this.__startContainer, this.__startOffset);
       [this.__endContainer, this.__endOffset] = adjust(this.__endContainer, this.__endOffset);
-      selectionRangeMutated(this);
+      selectionRangeMutated(this, "native");
     }
     __splitText(oldNode,newNode,offset,parent,index) {
       const adjust=(container,value) => container===oldNode && value>offset ? [newNode,value-offset] : [container,value];
@@ -6201,7 +6209,7 @@
         if (this.__startContainer===parent && this.__startOffset>index) this.__startOffset++;
         if (this.__endContainer===parent && this.__endOffset>index) this.__endOffset++;
       }
-      selectionRangeMutated(this);
+      selectionRangeMutated(this, "native");
     }
   }
   Range.START_TO_START=0; Range.START_TO_END=1; Range.END_TO_END=2; Range.END_TO_START=3;
@@ -6214,14 +6222,144 @@
   // has its own wrapper identity and WeakMap entry.
   const selectionConstructionToken = {};
   const selectionByDocument = new WeakMap();
+  const selectionStateByObject = new WeakMap();
+  function selectionState(selection) {
+    const state = safeWeakMapGet(selectionStateByObject, selection);
+    if (!state) throw new IntrinsicTypeError("Illegal invocation");
+    return state;
+  }
   const selectionChangeQueued = new WeakSet();
+  // Composed boundaries are owned privately; ordinary Range setters still
+  // obey DOM's same-root collapsing rules.
+  const composedRangeBySelection = new WeakMap();
+  const selectionByComposedRange = new WeakMap();
+  function selectionShadowHost(node) {
+    const id = getWrapperNodeId(wrapperNodeIds, node);
+    return id === undefined ? null : wrapNode(nativeShadowHost(id));
+  }
+  function selectionTreeRoot(node) {
+    let root = node;
+    for (let parent; root && (parent = nativeParentNode(internalNodeId(root))) != null;) root = wrapNode(parent);
+    return root;
+  }
+  function shadowIncludingParent(node) {
+    const id = internalNodeId(node);
+    return id === undefined ? null : wrapNode(nativeParentNode(id) ?? nativeShadowHost(id));
+  }
+  function selectionRange(selection) {
+    return safeWeakMapGet(composedRangeBySelection, selection) || selectionState(selection).range;
+  }
+  function selectionCollapsed(selection) {
+    const range = selectionRange(selection);
+    return !range || (range.__startContainer === range.__endContainer && range.__startOffset === range.__endOffset);
+  }
+  function selectionRangeCount(selection) {
+    return selectionBoundary(selection, true) && selectionBoundary(selection, false) ? 1 : 0;
+  }
+  function selectionBoundary(selection, anchor) {
+    const range = selectionRange(selection);
+    if (!range) return null;
+    const end = anchor === (selectionState(selection).direction === "backward");
+    const node = end ? range.__endContainer : range.__startContainer;
+    return selectionTreeRoot(node) === selectionState(selection).doc
+      ? [node, end ? range.__endOffset : range.__startOffset] : null;
+  }
+  function shadowIncludingDescendant(node, ancestor) {
+    for (let current = node; current; current = shadowIncludingParent(current)) {
+      if (current === ancestor) return true;
+    }
+    return false;
+  }
+  function composedBoundaryCompare(aNode, aOffset, bNode, bOffset) {
+    if (selectionTreeRoot(aNode) === selectionTreeRoot(bNode)) return boundaryCompare(aNode, aOffset, bNode, bOffset);
+    const childIndex = child => selectionShadowHost(child) ? -1 : indexOfNode(child);
+    if (shadowIncludingDescendant(bNode, aNode)) {
+      let child = bNode;
+      while (shadowIncludingParent(child) !== aNode) child = shadowIncludingParent(child);
+      return aOffset <= childIndex(child) ? -1 : 1;
+    }
+    if (shadowIncludingDescendant(aNode, bNode)) {
+      let child = aNode;
+      while (shadowIncludingParent(child) !== bNode) child = shadowIncludingParent(child);
+      return childIndex(child) < bOffset ? -1 : 1;
+    }
+    const aPath = [], bPath = [];
+    for (let node = aNode; node; node = shadowIncludingParent(node)) aPath.push(node);
+    for (let node = bNode; node; node = shadowIncludingParent(node)) bPath.push(node);
+    aPath.reverse(); bPath.reverse();
+    let index = 0;
+    while (index < aPath.length && aPath[index] === bPath[index]) index++;
+    if (!index) return 0;
+    return childIndex(aPath[index]) < childIndex(bPath[index]) ? -1 : 1;
+  }
+  function releaseComposedRange(selection) {
+    const previous = safeWeakMapGet(composedRangeBySelection, selection);
+    if (previous && safeWeakMapHas(selectionByComposedRange, previous)) {
+      safeWeakMapDelete(selectionByComposedRange, previous);
+      previous.__selectionDocument = null;
+      previous.detach();
+    }
+    safeWeakMapDelete(composedRangeBySelection, selection);
+  }
+  function setComposedRange(selection, ordinary, start = ordinary.__startContainer,
+      startOffset = ordinary.__startOffset, end = ordinary.__endContainer, endOffset = ordinary.__endOffset) {
+    releaseComposedRange(selection);
+    if (selectionTreeRoot(start) === selectionState(selection).doc && selectionTreeRoot(end) === selectionState(selection).doc &&
+        start === ordinary.__startContainer && startOffset === ordinary.__startOffset &&
+        end === ordinary.__endContainer && endOffset === ordinary.__endOffset) {
+      safeWeakMapSet(composedRangeBySelection, selection, ordinary);
+      return ordinary;
+    }
+    const composed = new Range(selectionState(selection).doc);
+    composed.__startContainer = start; composed.__startOffset = startOffset;
+    composed.__endContainer = end; composed.__endOffset = endOffset;
+    composed.__selectionDocument = selectionState(selection).doc;
+    safeWeakMapSet(composedRangeBySelection, selection, composed);
+    safeWeakMapSet(selectionByComposedRange, composed, selection);
+    selectionRangeMutated(composed, "native");
+    return composed;
+  }
+  function prepareSelectionBoundaryChange(range, node) {
+    if (!range.__selectionDocument) return;
+    const selection = safeWeakMapGet(selectionByDocument, range.__selectionDocument);
+    if (!selection || selectionState(selection).range !== range || safeWeakMapGet(composedRangeBySelection, selection) !== range) return;
+    if (selectionTreeRoot(node) !== selectionState(selection).doc) {
+      // Detach the composed snapshot before an ordinary setter collapses the
+      // opposite boundary across roots.
+      const composed = new Range(selectionState(selection).doc);
+      composed.__startContainer = range.__startContainer; composed.__startOffset = range.__startOffset;
+      composed.__endContainer = range.__endContainer; composed.__endOffset = range.__endOffset;
+      composed.__selectionDocument = selectionState(selection).doc;
+      safeWeakMapSet(composedRangeBySelection, selection, composed);
+      safeWeakMapSet(selectionByComposedRange, composed, selection);
+    }
+  }
+  function updateComposedBoundary(selection, range, edge, node, offset) {
+    if (!shadowIncludingDescendant(node, selectionState(selection).doc)) {
+      selection.removeAllRanges();
+      return;
+    }
+    const composed = safeWeakMapGet(composedRangeBySelection, selection);
+    if (!composed || composed === range) return;
+    if (edge === "start") {
+      if (composedBoundaryCompare(node, offset, composed.__endContainer, composed.__endOffset) > 0) {
+        composed.__endContainer = node; composed.__endOffset = offset;
+      }
+      composed.__startContainer = node; composed.__startOffset = offset;
+    } else {
+      if (composedBoundaryCompare(node, offset, composed.__startContainer, composed.__startOffset) < 0) {
+        composed.__startContainer = node; composed.__startOffset = offset;
+      }
+      composed.__endContainer = node; composed.__endOffset = offset;
+    }
+  }
 
   function syncContentVisibilitySelection(doc) {
-    const selection = selectionByDocument.get(doc);
-    const range = selection?.__range;
+    const selection = safeWeakMapGet(selectionByDocument, doc);
+    const range = selection && (safeWeakMapGet(composedRangeBySelection, selection) || selectionState(selection).range);
     __omoikane_set_content_visibility_selection(
-      range?.startContainer?.__id ?? null,
-      range?.endContainer?.__id ?? null
+      range?.__startContainer?.__id ?? null,
+      range?.__endContainer?.__id ?? null
     );
   }
 
@@ -6240,12 +6378,17 @@
     }
   }
 
-  function selectionRangeMutated(range) {
+  function selectionRangeMutated(range, kind = "reset", node = null, offset = 0) {
     const state = traversalByDocument.get(traversalDocumentKey(range.__doc));
     if (state) state.documentBoundaryRangesOnly = undefined;
     if (!range.__selectionDocument) return;
-    const selection = selectionByDocument.get(range.__selectionDocument);
-    if (selection && selection.__range === range) queueSelectionChange(selection.__doc);
+    const selection = safeWeakMapGet(selectionByDocument, range.__selectionDocument);
+    if (!selection) return;
+    if (selectionState(selection).range === range) {
+      if (kind === "start" || kind === "end") updateComposedBoundary(selection, range, kind, node, offset);
+      else if (kind !== "native") setComposedRange(selection, range);
+    } else if (safeWeakMapGet(selectionByComposedRange, range) !== selection) return;
+    queueSelectionChange(selectionState(selection).doc);
   }
 
   class Selection {
@@ -6253,68 +6396,55 @@
       if (token !== selectionConstructionToken || !(doc instanceof Document)) {
         throw new TypeError("Illegal constructor");
       }
-      this.__doc = doc;
-      this.__range = null;
-      this.__direction = "forward";
+      safeWeakMapSet(selectionStateByObject, this, {doc, range:null, direction:"forward"});
     }
 
-    get anchorNode() {
-      if (!this.__range) return null;
-      return this.__direction === "backward"
-        ? this.__range.endContainer : this.__range.startContainer;
-    }
-    get anchorOffset() {
-      if (!this.__range) return 0;
-      return this.__direction === "backward"
-        ? this.__range.endOffset : this.__range.startOffset;
-    }
-    get focusNode() {
-      if (!this.__range) return null;
-      return this.__direction === "backward"
-        ? this.__range.startContainer : this.__range.endContainer;
-    }
-    get focusOffset() {
-      if (!this.__range) return 0;
-      return this.__direction === "backward"
-        ? this.__range.startOffset : this.__range.endOffset;
-    }
-    get isCollapsed() { return !this.__range || this.__range.collapsed; }
-    get rangeCount() { return this.__range ? 1 : 0; }
+    get anchorNode() { return selectionBoundary(this, true)?.[0] ?? null; }
+    get anchorOffset() { return selectionBoundary(this, true)?.[1] ?? 0; }
+    get focusNode() { return selectionBoundary(this, false)?.[0] ?? null; }
+    get focusOffset() { return selectionBoundary(this, false)?.[1] ?? 0; }
+    get isCollapsed() { return selectionCollapsed(this); }
+    get rangeCount() { return selectionRangeCount(this); }
     get type() {
-      if (!this.__range) return "None";
-      return this.__range.collapsed ? "Caret" : "Range";
+      if (!selectionRangeCount(this)) return "None";
+      return selectionCollapsed(this) ? "Caret" : "Range";
     }
     getRangeAt(index) {
-      if ((Number(index) | 0) !== 0 || !this.__range) {
+      selectionState(this);
+      if (!arguments.length) throw new IntrinsicTypeError("getRangeAt requires an index");
+      if (((+index) >>> 0) !== 0 || !selectionRangeCount(this)) {
         throw new DOMException("The index is not in the allowed range.", "IndexSizeError");
       }
-      return this.__range;
+      return selectionState(this).range;
     }
     addRange(range) {
       if (!(range instanceof Range)) throw new TypeError("Selection.addRange requires a Range");
-      if (nodeDocument(range.startContainer) !== this.__doc ||
-          nodeDocument(range.endContainer) !== this.__doc) {
+      if (nodeDocument(range.startContainer) !== selectionState(this).doc ||
+          nodeDocument(range.endContainer) !== selectionState(this).doc) {
         throw new DOMException("The range belongs to another Document.", "WrongDocumentError");
       }
-      if (this.__range === range) return;
-      this.__range = range;
-      range.__selectionDocument = this.__doc;
-      this.__direction = "forward";
-      queueSelectionChange(this.__doc);
+      if (selectionState(this).range === range) return;
+      selectionState(this).range = range;
+      range.__selectionDocument = selectionState(this).doc;
+      setComposedRange(this, range);
+      selectionState(this).direction = "forward";
+      queueSelectionChange(selectionState(this).doc);
     }
     removeRange(range) {
-      if (this.__range !== range) {
+      if (selectionState(this).range !== range) {
         throw new DOMException("The range is not in this Selection.", "NotFoundError");
       }
-      this.__range.__selectionDocument = null;
-      this.__range = null;
-      queueSelectionChange(this.__doc);
+      releaseComposedRange(this);
+      selectionState(this).range.__selectionDocument = null;
+      selectionState(this).range = null;
+      queueSelectionChange(selectionState(this).doc);
     }
     removeAllRanges() {
-      if (!this.__range) return;
-      this.__range.__selectionDocument = null;
-      this.__range = null;
-      queueSelectionChange(this.__doc);
+      if (!selectionState(this).range) return;
+      releaseComposedRange(this);
+      selectionState(this).range.__selectionDocument = null;
+      selectionState(this).range = null;
+      queueSelectionChange(selectionState(this).doc);
     }
     empty() { this.removeAllRanges(); }
     collapse(node, offset = 0) {
@@ -6322,113 +6452,138 @@
         this.removeAllRanges();
         return;
       }
-      if (!(node instanceof Node) || nodeDocument(node) !== this.__doc) {
+      if (!(node instanceof Node) || nodeDocument(node) !== selectionState(this).doc) {
         throw new DOMException("The node belongs to another Document.", "WrongDocumentError");
       }
-      const range = this.__range || new Range(this.__doc);
+      const range = selectionState(this).range || new Range(selectionState(this).doc);
       range.setStart(node, offset);
       range.setEnd(node, offset);
-      this.__range = range;
-      range.__selectionDocument = this.__doc;
-      this.__direction = "forward";
-      queueSelectionChange(this.__doc);
+      selectionState(this).range = range;
+      range.__selectionDocument = selectionState(this).doc;
+      setComposedRange(this, range);
+      selectionState(this).direction = "forward";
+      queueSelectionChange(selectionState(this).doc);
     }
     collapseToStart() {
-      if (!this.__range) throw new DOMException("The Selection is empty.", "InvalidStateError");
-      this.collapse(this.__range.startContainer, this.__range.startOffset);
+      const range = selectionRange(this);
+      if (!range) throw new DOMException("The Selection is empty.", "InvalidStateError");
+      this.collapse(range.__startContainer, range.__startOffset);
     }
     collapseToEnd() {
-      if (!this.__range) throw new DOMException("The Selection is empty.", "InvalidStateError");
-      this.collapse(this.__range.endContainer, this.__range.endOffset);
+      const range = selectionRange(this);
+      if (!range) throw new DOMException("The Selection is empty.", "InvalidStateError");
+      this.collapse(range.__endContainer, range.__endOffset);
     }
     selectAllChildren(node) {
-      if (!(node instanceof Node) || nodeDocument(node) !== this.__doc) {
+      if (!(node instanceof Node) || nodeDocument(node) !== selectionState(this).doc) {
         throw new DOMException("The node belongs to another Document.", "WrongDocumentError");
       }
-      const range = this.__range || new Range(this.__doc);
+      const range = selectionState(this).range || new Range(selectionState(this).doc);
       range.selectNodeContents(node);
-      this.__range = range;
-      range.__selectionDocument = this.__doc;
-      this.__direction = "forward";
-      queueSelectionChange(this.__doc);
+      selectionState(this).range = range;
+      range.__selectionDocument = selectionState(this).doc;
+      setComposedRange(this, range);
+      selectionState(this).direction = "forward";
+      queueSelectionChange(selectionState(this).doc);
     }
     setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset) {
       if (!(anchorNode instanceof Node) || !(focusNode instanceof Node) ||
-          nodeDocument(anchorNode) !== this.__doc || nodeDocument(focusNode) !== this.__doc) {
+          nodeDocument(anchorNode) !== selectionState(this).doc || nodeDocument(focusNode) !== selectionState(this).doc) {
         throw new DOMException("The node belongs to another Document.", "WrongDocumentError");
       }
-      const range = this.__range || new Range(this.__doc);
-      const order = boundaryCompare(anchorNode, Number(anchorOffset) >>> 0, focusNode, Number(focusOffset) >>> 0);
-      if (order <= 0) {
-        range.setStart(anchorNode, anchorOffset);
-        range.setEnd(focusNode, focusOffset);
-        this.__direction = "forward";
-      } else {
-        range.setStart(focusNode, focusOffset);
-        range.setEnd(anchorNode, anchorOffset);
-        this.__direction = "backward";
-      }
-      this.__range = range;
-      range.__selectionDocument = this.__doc;
-      queueSelectionChange(this.__doc);
+      const range = new Range(selectionState(this).doc);
+      anchorOffset = range.__validate(anchorNode, anchorOffset);
+      focusOffset = range.__validate(focusNode, focusOffset);
+      if (!shadowIncludingDescendant(anchorNode, selectionState(this).doc) || !shadowIncludingDescendant(focusNode, selectionState(this).doc)) return;
+      const order = composedBoundaryCompare(anchorNode, anchorOffset, focusNode, focusOffset);
+      const start = order <= 0 ? anchorNode : focusNode, startOffset = order <= 0 ? anchorOffset : focusOffset;
+      const end = order <= 0 ? focusNode : anchorNode, endOffset = order <= 0 ? focusOffset : anchorOffset;
+      range.setStart(start, startOffset); range.setEnd(end, endOffset);
+      if (selectionState(this).range) selectionState(this).range.__selectionDocument = null;
+      selectionState(this).range = range;
+      range.__selectionDocument = selectionState(this).doc;
+      selectionState(this).direction = order <= 0 ? "forward" : "backward";
+      setComposedRange(this, range, start, startOffset, end, endOffset);
+      queueSelectionChange(selectionState(this).doc);
     }
     extend(node, offset = 0) {
-      if (!this.__range) return;
-      if (!(node instanceof Node) || nodeDocument(node) !== this.__doc) {
+      if (!selectionState(this).range) return;
+      if (!(node instanceof Node) || nodeDocument(node) !== selectionState(this).doc) {
         throw new DOMException("The node belongs to another Document.", "WrongDocumentError");
       }
-      const anchorNode = this.anchorNode;
-      const anchorOffset = this.anchorOffset;
-      const order = boundaryCompare(anchorNode, anchorOffset, node, Number(offset) >>> 0);
-      if (order <= 0) {
-        this.__range.setStart(anchorNode, anchorOffset);
-        this.__range.setEnd(node, offset);
-        this.__direction = "forward";
-      } else {
-        this.__range.setStart(node, offset);
-        this.__range.setEnd(anchorNode, anchorOffset);
-        this.__direction = "backward";
-      }
-      queueSelectionChange(this.__doc);
+      const composed = safeWeakMapGet(composedRangeBySelection, this) || selectionState(this).range;
+      const anchorNode = selectionState(this).direction === "backward" ? composed.__endContainer : composed.__startContainer;
+      const anchorOffset = selectionState(this).direction === "backward" ? composed.__endOffset : composed.__startOffset;
+      this.setBaseAndExtent(anchorNode, anchorOffset, node, offset);
     }
     containsNode(node, allowPartialContainment = false) {
-      if (!(node instanceof Node) || !this.__range || nodeDocument(node) !== this.__doc) return false;
+      if (!(node instanceof Node) || !selectionState(this).range || nodeDocument(node) !== selectionState(this).doc) return false;
       if (!node.parentNode) return false;
       const parent = node.parentNode;
       const start = [parent, indexOfNode(node)];
       const end = [parent, indexOfNode(node) + 1];
-      const afterStart = boundaryCompare(start[0], start[1], this.__range.startContainer, this.__range.startOffset) >= 0;
-      const beforeEnd = boundaryCompare(end[0], end[1], this.__range.endContainer, this.__range.endOffset) <= 0;
+      const afterStart = boundaryCompare(start[0], start[1], selectionState(this).range.startContainer, selectionState(this).range.startOffset) >= 0;
+      const beforeEnd = boundaryCompare(end[0], end[1], selectionState(this).range.endContainer, selectionState(this).range.endOffset) <= 0;
       if (allowPartialContainment) {
-        return boundaryCompare(end[0], end[1], this.__range.startContainer, this.__range.startOffset) > 0 &&
-          boundaryCompare(start[0], start[1], this.__range.endContainer, this.__range.endOffset) < 0;
+        return boundaryCompare(end[0], end[1], selectionState(this).range.startContainer, selectionState(this).range.startOffset) > 0 &&
+          boundaryCompare(start[0], start[1], selectionState(this).range.endContainer, selectionState(this).range.endOffset) < 0;
       }
       return afterStart && beforeEnd;
     }
     deleteFromDocument() {
-      if (!this.__range) return;
-      this.__range.deleteContents();
+      if (!selectionState(this).range) return;
+      selectionState(this).range.deleteContents();
     }
-    toString() { return this.__range ? this.__range.toString() : ""; }
+    getComposedRanges(options = {}) {
+      if (options !== null && typeof options !== "object" && typeof options !== "function") {
+        throw new IntrinsicTypeError("Expected a dictionary");
+      }
+      selectionState(this);
+      const suppliedRoots = options == null ? undefined : options.shadowRoots;
+      const roots = [];
+      if (suppliedRoots !== undefined) {
+        if (suppliedRoots === null || (typeof suppliedRoots !== "object" && typeof suppliedRoots !== "function")) {
+          throw new IntrinsicTypeError("Expected a sequence of ShadowRoots");
+        }
+        for (const root of suppliedRoots) {
+          if (!selectionShadowHost(root)) throw new IntrinsicTypeError("Expected a ShadowRoot");
+          roots.push(root);
+        }
+      }
+      if (!selectionState(this).range) return [];
+      const includesRoot = root => roots.some(allowed => {
+        for (let node = allowed; node; node = shadowIncludingParent(node)) {
+          if (node === root) return true;
+        }
+        return false;
+      });
+      const rescope = (node, offset, end) => {
+        let root = selectionTreeRoot(node);
+        let host;
+        while ((host = selectionShadowHost(root)) && !includesRoot(root)) {
+          offset = nativeNodeIndex(internalNodeId(host)) + (end ? 1 : 0);
+          node = wrapNode(nativeParentNode(internalNodeId(host)));
+          root = selectionTreeRoot(node);
+        }
+        return [node, offset];
+      };
+      const composed = safeWeakMapGet(composedRangeBySelection, this) || selectionState(this).range;
+      const [startContainer, startOffset] = rescope(composed.__startContainer, composed.__startOffset, false);
+      const [endContainer, endOffset] = rescope(composed.__endContainer, composed.__endOffset, true);
+      return [new PlatformStaticRange({ startContainer, startOffset, endContainer, endOffset })];
+    }
+    toString() { return selectionState(this).range ? selectionState(this).range.toString() : ""; }
   }
 
   function selectionForDocument(doc) {
     if (!(doc instanceof Document)) return null;
-    let selection = selectionByDocument.get(doc);
+    let selection = safeWeakMapGet(selectionByDocument, doc);
     if (!selection) {
       selection = new Selection(selectionConstructionToken, doc);
-      selectionByDocument.set(doc, selection);
+      safeWeakMapSet(selectionByDocument, doc, selection);
     }
     return selection;
   }
-
-  // Elements whose `name` content attribute participates in HTMLCollection
-  // named access, in addition to `id` (which applies to every element). Per the
-  // HTML spec these are the "named" elements exposed on collections such as
-  // `document.forms` / `document.images` / `document.anchors`.
-  const COLLECTION_NAME_TAGS = new Set([
-    "A", "AREA", "FORM", "IMG", "OBJECT", "EMBED", "IFRAME", "INPUT", "MAP",
-  ]);
 
   // Walks `root`'s subtree in tree (document) order and returns every element
   // for which `predicate` holds. Used to build the live document HTMLCollections
@@ -6437,7 +6592,9 @@
   function collectElements(root, predicate) {
     const out = [];
     const walk = (node) => {
-      for (const child of node.childNodes) {
+      // Collection membership uses native tree state, not author-overridden accessors.
+      for (const id of nativeChildNodeIds(internalNodeId(node)) || []) {
+        const child = wrapNode(id);
         if (child.nodeType !== 1) continue;
         if (predicate(child)) out.push(child);
         walk(child);
@@ -6447,61 +6604,57 @@
     return out;
   }
 
-  // Builds a live HTMLCollection over the elements returned by `collect()`.
-  // `collect()` is re-invoked on every access so the collection always reflects
-  // the current tree (DOM "live" semantics), even when the collection object is
-  // retained across mutations. Supports `.length`, integer index access,
-  // `item(index)`, `namedItem(name)`, iteration, and named property access by
-  // `id` (any element) or `name` (elements in COLLECTION_NAME_TAGS). Out-of-range
-  // index access resolves to `null`.
+  // Named access is restricted to HTML-namespace name attributes. The shared
+  // factory implements indexed properties and live methods over this resolver.
   function makeHTMLCollection(
     collect,
-    allowsNamedName = el => COLLECTION_NAME_TAGS.has(el.tagName),
+    allowsNamedName = element => element.namespaceURI === "http://www.w3.org/1999/xhtml" || element instanceof HTMLElement,
     missingNamedValue = undefined,
   ) {
-    // Per spec an id match wins over a name match; both scan in tree order.
-    const byName = (list, key) => {
-      let named = null;
-      for (const el of list) {
-        if (!el.getAttribute) continue;
-        if (el.getAttribute("id") === key) return el;
-        if (named === null && allowsNamedName(el) && el.getAttribute("name") === key) {
-          named = el;
-        }
-      }
-      return named;
-    };
-    const isIndex = (prop) =>
-      typeof prop === "string" && /^(?:0|[1-9]\d*)$/.test(prop);
-    return new Proxy([], {
-      get(_target, prop) {
-        const list = collect();
-        if (prop === "length") return list.length;
-        if (prop === "item") return (index) => list[Number(index) | 0] ?? null;
-        if (prop === "namedItem") return (name) => byName(list, String(name));
-        if (isIndex(prop)) return list[Number(prop)] ?? null;
-        if (typeof prop === "string") {
-          const named = byName(list, prop);
-          if (named) return named;
-        }
-        // Array prototype members (Symbol.iterator, forEach, ...) and anything
-        // else resolve against the live snapshot; bind methods to it.
-        const value = list[prop];
-        if (typeof prop === "string" && value === undefined && missingNamedValue !== undefined) {
-          return missingNamedValue;
-        }
-        return typeof value === "function" ? value.bind(list) : value;
-      },
-      has(_target, prop) {
-        const list = collect();
-        if (prop === "length" || prop === "item" || prop === "namedItem") {
-          return true;
-        }
-        if (isIndex(prop)) return Number(prop) < list.length;
-        if (typeof prop === "string" && byName(list, prop)) return true;
-        return prop in list;
-      },
-    });
+    return domInterfaces.makeCollection(collect, allowsNamedName, missingNamedValue);
+  }
+
+  function documentTagElement(root, tag) {
+    const id = nativeQuerySelector(internalNodeId(root), tag);
+    if (id == null) return null;
+    const element = wrapNode(id);
+    if (!nativeNodePrefix(id) && internalNodeLocalName(element) === tag) return element;
+    // XML case and qualified-name rules can differ from CSS tag matching.
+    return documentTagCollection(root, tag)[0] || null;
+  }
+
+  function documentTagCollection(root, tag) {
+    let collections = safeWeakMapGet(documentCollections, root);
+    if (!collections) {
+      collections = new DocumentCollectionMap();
+      safeWeakMapSet(documentCollections, root, collections);
+    }
+    const key = "tag:" + tag;
+    let collection = safeMapGet(collections, key);
+    if (!collection) {
+      collection = root.getElementsByTagName(tag);
+      safeMapSet(collections, key, collection);
+    }
+    return collection;
+  }
+
+  function documentHTMLCollection(root, name, filter) {
+    let collections = safeWeakMapGet(documentCollections, root);
+    if (!collections) {
+      collections = new DocumentCollectionMap();
+      safeWeakMapSet(documentCollections, root, collections);
+    }
+    let collection = safeMapGet(collections, name);
+    if (!collection) {
+      collection = makeHTMLCollection(() => collectElements(root, filter));
+      safeMapSet(collections, name, collection);
+    }
+    return collection;
+  }
+  function hasHTMLCollectionTag(element, names) {
+    return (element.namespaceURI === "http://www.w3.org/1999/xhtml" ||
+      (element.namespaceURI === null && isHtmlElementInHtmlDocument(element))) &&
+      names.includes(element.localName);
   }
 
   function findElementById(root, id) {
@@ -6640,8 +6793,10 @@
     }
 
     get implementation() {
+      let implementation = documentImplementations.get(this);
+      if (implementation) return implementation;
       const ownerDocument = this;
-      return {
+      implementation = domInterfaces.makeImplementation({
         hasFeature() {
           return true;
         },
@@ -6696,7 +6851,9 @@
           doc.appendChild(html);
           return doc;
         },
-      };
+      });
+      documentImplementations.set(this, implementation);
+      return implementation;
     }
 
     createDocumentFragment() {
@@ -6811,7 +6968,7 @@
     }
 
     get body() {
-      return this.getElementsByTagName("body")[0] || null;
+      return documentTagElement(this, "body");
     }
 
     // The element focused in this document. With nothing focused — on load,
@@ -6833,7 +6990,7 @@
     }
 
     get head() {
-      return this.getElementsByTagName("head")[0] || null;
+      return documentTagElement(this, "head");
     }
 
     get documentElement() {
@@ -6845,7 +7002,7 @@
 
     get doctype() {
       for (const child of this.childNodes) {
-        if (child.nodeType === 10) return child;
+        if (nativeNodeType(internalNodeId(child)) === 10) return child;
       }
       return null;
     }
@@ -6879,42 +7036,23 @@
     // (e.g. `document.forms.myForm`). Scoped to this document's own tree, so an
     // iframe's contentDocument resolves its own forms.
     get forms() {
-      const root = this;
-      return makeHTMLCollection(() =>
-        collectElements(root, (el) =>
-          el.tagName === "FORM" ||
-          (el.localName === "form" && el.namespaceURI === "http://www.w3.org/1999/xhtml")));
+      return documentHTMLCollection(this, "forms", element => hasHTMLCollectionTag(element, ["form"]));
     }
 
-    // Live HTMLCollection of the <a> and <area> elements that carry an `href`
-    // content attribute, in tree order.
+    // Same live collection for HTML links carrying an href attribute.
     get links() {
-      const root = this;
-      return makeHTMLCollection(() =>
-        collectElements(
-          root,
-          (el) =>
-            (el.tagName === "A" || el.tagName === "AREA") &&
-            el.hasAttribute("href"),
-        ));
+      return documentHTMLCollection(this, "links", element =>
+        hasHTMLCollectionTag(element, ["a", "area"]) && element.hasAttribute("href"));
     }
 
-    // Live HTMLCollection of every <img> in this document, in tree order.
     get images() {
-      const root = this;
-      return makeHTMLCollection(() =>
-        collectElements(root, (el) => el.tagName === "IMG"));
+      return documentHTMLCollection(this, "images", element => hasHTMLCollectionTag(element, ["img"]));
     }
 
-    // Live HTMLCollection of the <a> elements that carry a `name` content
-    // attribute, in tree order.
+    // Same live collection for named HTML anchors.
     get anchors() {
-      const root = this;
-      return makeHTMLCollection(() =>
-        collectElements(
-          root,
-          (el) => el.tagName === "A" && el.hasAttribute("name"),
-        ));
+      return documentHTMLCollection(this, "anchors", element =>
+        hasHTMLCollectionTag(element, ["a"]) && element.hasAttribute("name"));
     }
 
     get readyState() {
@@ -7018,14 +7156,6 @@
     // context at all.
     hasFocus() {
       return focusChainDocuments().includes(this);
-    }
-
-    getElementsByTagName(tag) {
-      return this.querySelectorAll(String(tag));
-    }
-
-    getElementsByClassName(cls) {
-      return this.querySelectorAll("." + String(cls));
     }
 
     getElementsByName(name) {
@@ -7141,7 +7271,7 @@
     });
   }
   distributePrototypeMembers(Node.prototype, [Element.prototype, Document.prototype], [
-    "getElementsByTagName", "getElementsByClassName", "innerHTML",
+    "getElementsByTagName", "getElementsByTagNameNS", "getElementsByClassName", "innerHTML",
   ]);
   distributePrototypeMembers(Node.prototype, [DocumentType.prototype], [
     "publicId", "systemId", "internalSubset",
@@ -7183,11 +7313,22 @@
     catch (_) { return false; }
   }
 
-  function declarationView(block, onChange = null) {
+  function declarationView(block, onChange = null, validateProperties = true) {
     let source = String(block || "");
-    const declarations = () => JSON.parse(__omoikane_css_declarations(source)).map(
-      ([name, value]) => ({ name, value })
-    );
+    let cachedSource = null;
+    let cachedDeclarations = [];
+    const accepts = (name, value) => !validateProperties || name.startsWith("--") ||
+      nativeStyleSupports(name, value.replace(/\s*!\s*important\s*$/i, ""));
+    const declarations = () => {
+      if (cachedSource !== source) {
+        const parsed = JSON.parse(__omoikane_css_declarations(source)).map(
+          ([name, value]) => ({ name, value })
+        ).filter(declaration => accepts(declaration.name, declaration.value));
+        cachedDeclarations = parsed;
+        cachedSource = source;
+      }
+      return cachedDeclarations;
+    };
     const serialize = values => values.map(
       declaration => declaration.name + ": " + declaration.value + ";"
     ).join(" ");
@@ -7210,6 +7351,7 @@
       const key = propertyName(name);
       value = String(value);
       if (!key || value === "") return removeValue(key);
+      if (!accepts(key, value)) return;
       if (key === "transition" || key.startsWith("transition-") || validatesSpecialStyleProperties.has(key)) {
         const normalized = __omoikane_normalize_style_value(key, value);
         if (normalized === null) return;
@@ -7514,7 +7656,8 @@
           void declarations;
           this.__text = this.__serializeCssText();
           if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
-        }
+        },
+        !this.__selectorText.startsWith("@")
       );
       this.__innerSheet = new CSSStyleSheet(null, {
         rules: contents.rules,
@@ -7594,7 +7737,8 @@
           if (typeof globalThis.__omoikane_font_face_rule_changed === "function") {
             globalThis.__omoikane_font_face_rule_changed(this, name);
           }
-        }
+        },
+        false
       );
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
@@ -10385,16 +10529,18 @@
       return controls.length > 1 ? makeLiveNodeList(resolve, RadioNodeList.prototype) :
         controls[0] || null;
     };
-    return new Proxy(collection, {
+    const proxy = new Proxy(collection, {
       get(target, property, receiver) {
         if (property === "namedItem") return named;
         if (typeof property === "string" && !/^(0|[1-9][0-9]*)$/.test(property) &&
-            !["length", "item"].includes(property) && !(property in Array.prototype)) {
+            !["length", "item"].includes(property) && !(property in PlatformHTMLCollection.prototype)) {
           return named(property) || undefined;
         }
         return Reflect.get(target, property, receiver);
       },
     });
+    domInterfaces.registerCollectionAlias(proxy, collection);
+    return proxy;
   }
 
   function copyCustomFormValue(value) {
@@ -12327,7 +12473,7 @@
       const s=this.__s;let sx=0,sy=0,sw=src.width,sh=src.height,dx,dy,dw,dh;
       if(args.length===2){[dx,dy]=args;dw=sw;dh=sh;}else if(args.length===4){[dx,dy,dw,dh]=args;}else{[sx,sy,sw,sh,dx,dy,dw,dh]=args;}
       for(let y=0;y<dh;y++)for(let x=0;x<dw;x++){const xx=Math.floor(sx+x*sw/dw),yy=Math.floor(sy+y*sh/dh),i=(yy*src.width+xx)*4;blendCanvasPixel(s,dx+x,dy+y,[src.pixels[i],src.pixels[i+1],src.pixels[i+2],Math.round(src.pixels[i+3]*s.style.globalAlpha)]);}commitCanvas(this.canvas,s);}
-    measureText(text){const size=parseFloat(this.__s.style.font)||10;return {width:String(text).length*size*.6,actualBoundingBoxAscent:size*.8,actualBoundingBoxDescent:size*.2};}
+    measureText(text){const size=parseFloat(this.__s.style.font)||10;return domInterfaces.makeTextMetrics({width:String(text).length*size*.6,actualBoundingBoxAscent:size*.8,actualBoundingBoxDescent:size*.2});}
     fillText(text,x,y){const s=this.__s,size=parseFloat(s.style.font)||10,w=this.measureText(text).width;this.fillRect(x,y-size*.8,w,size);}
     strokeText(text,x,y){const s=this.__s,size=parseFloat(s.style.font)||10,w=this.measureText(text).width;this.strokeRect(x,y-size*.8,w,size);}
   }
@@ -13297,9 +13443,7 @@
     get [Symbol.toStringTag]() { return "SVGPoint"; }
   }
 
-  class DOMPoint extends SVGPoint {
-    get [Symbol.toStringTag]() { return "DOMPoint"; }
-  }
+  const DOMPoint = globalThis.DOMPoint;
 
   function svgMatrixFrom(value) {
     if (value instanceof DOMMatrix) return value;
@@ -13324,85 +13468,147 @@
     ];
   }
 
-  class DOMMatrix {
-    constructor(init) {
-      let values;
-      if (init === undefined || init === null) {
-        values = [1, 0, 0, 1, 0, 0];
-      } else if (typeof init === "string") {
-        values = svgTransformMatrix(init).toArray();
-      } else if (Array.isArray(init) || ArrayBuffer.isView(init)) {
-        values = Array.from(init).map(value => finiteSvgNumber(value));
-        if (values.length === 16) {
-          values = [values[0], values[1], values[4], values[5], values[12], values[13]];
+  const matrixState = new WeakMap();
+  const matrixGet = Function.prototype.call.bind(WeakMap.prototype.get);
+  const matrixSet = Function.prototype.call.bind(WeakMap.prototype.set);
+  const matrixAliases = { a: 0, b: 1, c: 4, d: 5, e: 12, f: 13 };
+  const matrixIdentity = () => Array.from({ length: 16 }, (_, index) => index % 5 === 0 ? 1 : 0);
+  function matrixRecord(matrix) {
+    const record = matrixGet(matrixState, matrix);
+    if (!record) throw new TypeError("Illegal invocation");
+    return record;
+  }
+  function matrixFromValues(values, is2D) {
+    const result = new DOMMatrix(values);
+    matrixRecord(result).is2D = is2D;
+    return result;
+  }
+  function matrixProduct(left, right) {
+    const result = Array(16).fill(0);
+    for (let column = 0; column < 4; column++) {
+      for (let row = 0; row < 4; row++) {
+        for (let index = 0; index < 4; index++) {
+          result[column * 4 + row] += left[index * 4 + row] * right[column * 4 + index];
         }
-        if (values.length < 6) values = [1, 0, 0, 1, 0, 0];
-      } else if (typeof init === "object") {
-        values = [
-          finiteSvgNumber(init.a, 1), finiteSvgNumber(init.b),
-          finiteSvgNumber(init.c), finiteSvgNumber(init.d, 1),
-          finiteSvgNumber(init.e), finiteSvgNumber(init.f),
-        ];
-      } else {
-        values = [1, 0, 0, 1, 0, 0];
       }
-      [this.a, this.b, this.c, this.d, this.e, this.f] = values.slice(0, 6);
     }
+    return result;
+  }
+  function matrixInverse(values) {
+    const rows = Array.from({ length: 4 }, (_, row) =>
+      Array.from({ length: 8 }, (_, column) => column < 4
+        ? values[column * 4 + row] : (column - 4 === row ? 1 : 0)));
+    for (let column = 0; column < 4; column++) {
+      let pivot = column;
+      for (let row = column + 1; row < 4; row++) {
+        if (Math.abs(rows[row][column]) > Math.abs(rows[pivot][column])) pivot = row;
+      }
+      const divisor = rows[pivot][column];
+      if (!Number.isFinite(divisor) || divisor === 0) return Array(16).fill(NaN);
+      [rows[column], rows[pivot]] = [rows[pivot], rows[column]];
+      for (let index = 0; index < 8; index++) rows[column][index] /= divisor;
+      for (let row = 0; row < 4; row++) {
+        if (row === column) continue;
+        const factor = rows[row][column];
+        for (let index = 0; index < 8; index++) rows[row][index] -= factor * rows[column][index];
+      }
+    }
+    return Array.from({ length: 16 }, (_, index) => rows[index % 4][4 + Math.floor(index / 4)]);
+  }
 
-    get m11() { return this.a; }
-    set m11(value) { this.a = finiteSvgNumber(value); }
-    get m12() { return this.b; }
-    set m12(value) { this.b = finiteSvgNumber(value); }
-    get m21() { return this.c; }
-    set m21(value) { this.c = finiteSvgNumber(value); }
-    get m22() { return this.d; }
-    set m22(value) { this.d = finiteSvgNumber(value); }
-    get m41() { return this.e; }
-    set m41(value) { this.e = finiteSvgNumber(value); }
-    get m42() { return this.f; }
-    set m42(value) { this.f = finiteSvgNumber(value); }
-    get is2D() { return true; }
+  class DOMMatrix {
+    constructor(init = undefined) {
+      let values = matrixIdentity(), is2D = true;
+      if (typeof init === "string") {
+        const threeD = /^\s*matrix3d\(([^()]*)\)\s*$/i.exec(init);
+        if (threeD) {
+          values = threeD[1].split(',').map(value => +value);
+          if (values.length !== 16 || values.some(value => !Number.isFinite(value))) {
+            throw new DOMException("Invalid matrix", "SyntaxError");
+          }
+          is2D = false;
+        } else {
+          const matrix = svgTransformMatrix(init);
+          values = matrixRecord(matrix).values.slice();
+          is2D = matrix.is2D;
+        }
+      } else if (init != null) {
+        let input;
+        if (typeof init[Symbol.iterator] === "function") {
+          input = Array.from(init, value => +value);
+        } else {
+          input = Object.keys(matrixAliases).map(name =>
+            init[name] === undefined ? (name === 'a' || name === 'd' ? 1 : 0) : +init[name]);
+        }
+        if (input.length === 16) {
+          values = input; is2D = false;
+        } else if (input.length === 6) {
+          Object.values(matrixAliases).forEach((index, offset) => { values[index] = input[offset]; });
+        } else {
+          throw new TypeError("A matrix requires six or sixteen values");
+        }
+      }
+      matrixSet(matrixState, this, { values, is2D });
+    }
+    get is2D() { return matrixRecord(this).is2D; }
     get isIdentity() {
-      return this.a === 1 && this.b === 0 && this.c === 0 && this.d === 1 &&
-        this.e === 0 && this.f === 0;
+      return matrixRecord(this).values.every((value, index) => value === (index % 5 === 0 ? 1 : 0));
     }
-    multiply(other) {
-      const rhs = svgMatrixFrom(other);
-      return new DOMMatrix(multiplySvgMatrices(this, rhs));
+    multiply(other = {}) {
+      const left = matrixRecord(this), right = readMatrixDictionary(other);
+      return matrixFromValues(matrixProduct(left.values, right.values), left.is2D && right.is2D);
     }
-    translate(tx, ty = 0) {
-      return this.multiply(new DOMMatrix([1, 0, 0, 1, finiteSvgNumber(tx), finiteSvgNumber(ty)]));
+    translate(tx = 0, ty = 0, tz = 0) {
+      const values = matrixIdentity();
+      [values[12], values[13], values[14]] = [+tx, +ty, +tz];
+      return this.multiply(matrixFromValues(values, +tz === 0));
     }
-    scale(scaleX, scaleY = scaleX) {
-      return this.multiply(new DOMMatrix([
-        finiteSvgNumber(scaleX), 0, 0, finiteSvgNumber(scaleY), 0, 0,
-      ]));
+    scale(scaleX = 1, scaleY = scaleX, scaleZ = 1) {
+      const values = matrixIdentity();
+      [values[0], values[5], values[10]] = [+scaleX, +scaleY, +scaleZ];
+      return this.multiply(matrixFromValues(values, +scaleZ === 1));
     }
     rotate(angle = 0) {
-      const radians = finiteSvgNumber(angle) * Math.PI / 180;
+      const radians = +angle * Math.PI / 180;
       const cosine = Math.cos(radians), sine = Math.sin(radians);
       return this.multiply(new DOMMatrix([cosine, sine, -sine, cosine, 0, 0]));
     }
     inverse() {
-      const determinant = this.a * this.d - this.b * this.c;
-      if (determinant === 0) {
-        throw new DOMException("The matrix is not invertible.", "InvalidStateError");
-      }
-      return new DOMMatrix([
-        this.d / determinant, -this.b / determinant,
-        -this.c / determinant, this.a / determinant,
-        (this.c * this.f - this.d * this.e) / determinant,
-        (this.b * this.e - this.a * this.f) / determinant,
-      ]);
+      const source = matrixRecord(this), values = matrixInverse(source.values);
+      return matrixFromValues(values, source.is2D && values.every(Number.isFinite));
     }
-    transformPoint(point) {
+    transformPoint(point = {}) {
+      const [x, y, z, w] = readPointDictionary(point), values = matrixRecord(this).values;
       return new DOMPoint(
-        this.a * finiteSvgNumber(point && point.x) + this.c * finiteSvgNumber(point && point.y) + this.e,
-        this.b * finiteSvgNumber(point && point.x) + this.d * finiteSvgNumber(point && point.y) + this.f,
+        values[0] * x + values[4] * y + values[8] * z + values[12] * w,
+        values[1] * x + values[5] * y + values[9] * z + values[13] * w,
+        values[2] * x + values[6] * y + values[10] * z + values[14] * w,
+        values[3] * x + values[7] * y + values[11] * z + values[15] * w,
       );
     }
-    toArray() { return [this.a, this.b, this.c, this.d, this.e, this.f]; }
+    toArray() { return Object.values(matrixAliases).map(index => matrixRecord(this).values[index]); }
     get [Symbol.toStringTag]() { return "DOMMatrix"; }
+  }
+  const matrixProperties = { ...matrixAliases };
+  for (let column = 1; column <= 4; column++) {
+    for (let row = 1; row <= 4; row++) matrixProperties['m' + column + row] = (column - 1) * 4 + row - 1;
+  }
+  for (const [name, index] of Object.entries(matrixProperties)) {
+    Object.defineProperty(DOMMatrix.prototype, name, {
+      enumerable: true, configurable: true,
+      get() { return matrixRecord(this).values[index]; },
+      set(value) {
+        const record = matrixRecord(this), converted = +value;
+        record.values[index] = converted;
+        if (!(index in { 0: 1, 1: 1, 4: 1, 5: 1, 12: 1, 13: 1 }) &&
+            converted !== (index % 5 === 0 ? 1 : 0)) record.is2D = false;
+      },
+    });
+  }
+
+  Object.defineProperty(DOMMatrix.prototype, Symbol.toStringTag, { value: "DOMMatrix", configurable: true });
+  for (const name of ["is2D", "isIdentity", "multiply", "translate", "scale", "rotate", "inverse", "transformPoint"]) {
+    Object.defineProperty(DOMMatrix.prototype, name, { enumerable: true });
   }
 
   class SVGMatrix extends DOMMatrix {
@@ -14766,6 +14972,11 @@
 
   const pointerLockDispatchEvent = Node.prototype.dispatchEvent;
   globalThis.Node = Node;
+  domInterfaces.bindNode(
+    node => safeWeakMapHas(attributeNodeStates, node) || safeWeakMapHas(wrapperNodeIds, node),
+    node => safeWeakMapHas(attributeNodeStates, node) ? 2 : nativeNodeType(getWrapperNodeId(wrapperNodeIds, node)),
+    DOMException,
+  );
   globalThis.NodeList = NodeList;
   globalThis.Window = Window;
   globalThis.Element = Element;
@@ -15274,7 +15485,7 @@
   globalThis.SVGAnimatedString = SVGAnimatedString;
   globalThis.SVGAnimatedRect = SVGAnimatedRect;
   globalThis.DOMPoint = DOMPoint;
-  globalThis.DOMMatrix = DOMMatrix;
+  Object.defineProperty(globalThis, "DOMMatrix", { value: DOMMatrix, writable: true, configurable: true });
   globalThis.SVGRectElement = SVGRectElement;
   globalThis.SVGImageElement = SVGImageElement;
   globalThis.SVGCircleElement = SVGCircleElement;
@@ -15289,6 +15500,11 @@
   globalThis.SVGTSpanElement = SVGTSpanElement;
   globalThis.SVGTextPathElement = SVGTextPathElement;
   globalThis.Event = Event;
+  globalThis.__omoikane_dispatch_lifecycle_event = function(type) {
+    const event = new Event(type, { bubbles: type === "DOMContentLoaded" });
+    if (type === "load") globalThis.dispatchEvent(event);
+    else globalThis.document.dispatchEvent(event);
+  };
   globalThis.CustomEvent = CustomEvent;
   globalThis.MessageEvent = MessageEvent;
   globalThis.MouseEvent = MouseEvent;
@@ -23389,6 +23605,7 @@
     for (const domName of [
       "Node", "Element", "HTMLElement", "Document", "DocumentFragment", "Text",
       "CharacterData", "Attr", "ShadowRoot", "HTMLCollection", "NodeList", "Range",
+      "AbstractRange", "StaticRange", "DOMImplementation", "DOMStringMap", "DOMRectList",
       "MutationObserver", "ResizeObserver", "IntersectionObserver", "CustomElementRegistry",
       "HTMLDivElement", "HTMLSpanElement", "HTMLBodyElement", "HTMLCanvasElement",
       "HTMLImageElement", "HTMLIFrameElement", "HTMLFrameElement", "HTMLScriptElement", "SVGElement",
@@ -26156,4 +26373,13 @@
     return safeWeakMapGet(iframeChildNavigators, frame)(documentId, kind, value, extra, committedURL, eventState);
   });
   nativeRegisterFormState(internalNodeId(formStateDocument), captureCustomFormState, restoreCustomFormState);
+  for (const name of [
+    "Event", "CustomEvent", "EventTarget", "AbortController", "AbortSignal", "Node", "Document",
+    "DOMImplementation", "DocumentFragment", "ProcessingInstruction", "DocumentType", "Element", "Attr",
+    "CharacterData", "Text", "Comment", "NodeIterator", "TreeWalker", "NodeFilter", "NodeList",
+    "HTMLCollection", "DOMTokenList",
+  ]) {
+    if (Object.hasOwn(globalThis, name)) Object.defineProperty(globalThis, name, { enumerable: false });
+  }
+
 })();

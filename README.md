@@ -57,7 +57,7 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 - CJK テキストの行折り返し・禁則処理・フォールバック
 - `text-decoration`（underline / overline / line-through、per-fragment 対応）
 - `text-transform`（uppercase / lowercase / capitalize）
-- `letter-spacing` / `word-spacing`
+- `letter-spacing`（`word-spacing` の描画接続は [#1273](https://github.com/ieee0824/omoikane/issues/1273) で管理）
 - `list-style-type`（disc / circle / square / decimal / roman / alpha）
 - `list-style-position`（outside / inside）
 
@@ -348,3 +348,20 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 ## ライセンス
 
 TBD
+
+### Dependency advisory checks
+
+Install `cargo-deny` 0.20.2, then run from the repository root:
+
+```sh
+python3 scripts/check-advisory-exceptions.py
+cargo deny fetch db
+cargo deny --all-features --locked check advisories
+cargo deny --manifest-path engine/boa/Cargo.toml --all-features --locked check advisories
+```
+
+The Dependency audit workflow runs both locks on PRs, main pushes and weekly.
+Database fetch failures fail their own step; vulnerability and unsound findings
+fail the audit. `deny.toml` permits only documented maintenance notices with
+scope, reason and a review date. The policy check fails when that date arrives.
+For the Boa graph classification, see [the audit record](docs/security/boa-dependency-audit.md).

@@ -145,6 +145,7 @@ collect_pattern \
   "/html/semantics/forms/constraints/form-validation-willValidate.html" \
   "/html/semantics/forms/constraints/radio-group-valueMissing.html"
 collect_pattern "/css/css-transforms/transform-getBoundingClientRect-001.html"
+collect_pattern "/css/css-will-change/parsing/will-change-valid.html" "/css/css-will-change/parsing/will-change-invalid.html" "/css/css-will-change/parsing/will-change-computed.html"
 collect_pattern "/css/css-transforms/individual-transform/" "/css/reference/ref-filled-green-200px-square.html" "/css/reference/ref-filled-green-100px-square.xht"
 collect_pattern "/css/css-transforms/parsing/translate-parsing-valid.html"
 collect_pattern "/css/css-transforms/parsing/translate-parsing-invalid.html"
@@ -261,6 +262,12 @@ collect_pattern \
   "/css/css-grid/parsing/grid-auto-columns-valid.html" \
   "/css/css-grid/parsing/grid-auto-columns-invalid.html" \
   "/css/css-grid/parsing/grid-auto-columns-computed.html"
+collect_pattern \
+  "/css/geometry/" \
+  "/dom/collections/" \
+  "/dom/ranges/StaticRange-constructor.html" \
+  "/dom/interface-objects.html" \
+  "/selection/shadow-dom/tentative/"
 # A pinned revision alone does not prove that newly requested WPT paths exist.
 if [[ "$current_revision" == "$revision" ]] &&
   diff -q <(printf '%s\n' "${patterns[@]}" | LC_ALL=C sort -u) \

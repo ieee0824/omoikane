@@ -4728,7 +4728,7 @@ fn is_positioned_for_paint(style: &ComputedStyle) -> bool {
 fn has_transform_style(style: &ComputedStyle) -> bool {
     style.has_transform_animation_context()
         || style.get("will-change").is_some_and(|value| {
-            value.css_text().split(',').any(|property| matches!(property.trim(), "transform" | "translate" | "rotate" | "scale"))
+            value.css_text().split(',').any(|property| ["transform", "translate", "rotate", "scale"].iter().any(|name| property.trim().eq_ignore_ascii_case(name)))
         })
         || ["transform", "translate", "rotate", "scale"].iter().any(|property| {
         matches!(style.get(property), Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("none"))
