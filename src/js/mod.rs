@@ -64,6 +64,8 @@ mod compression_stream_tests;
 mod computed_pseudo_tests;
 #[cfg(test)]
 mod computed_style_layout_tests;
+#[cfg(test)]
+mod computed_text_shadow_tests;
 mod document_write;
 mod errors;
 use errors::JsHostError;
@@ -12415,8 +12417,27 @@ fn computed_value_to_css_string(property_name: &str, value: &ComputedValue) -> S
     }
 }
 
-/// Serializes a resolved [`ComputedStyle`] to a JSON object mapping each CSS
-/// property name (kebab-case) to its computed string value.
+/// Resolves property values that need the element's own context for CSSOM.
+fn computed_style_property_to_css_string(
+    property_name: &str,
+    value: &ComputedValue,
+    style: &ComputedStyle,
+) -> String {
+    if property_name == "text-shadow" {
+        let current_color = style
+            .get("color")
+            .map(ComputedValue::css_text)
+            .unwrap_or_else(|| "black".into());
+        if let Some(resolved) =
+            crate::css::style::text_shadow::resolved_css_text(&value.css_text(), &current_color)
+        {
+            return resolved;
+        }
+    }
+    computed_value_to_css_string(property_name, value)
+}
+
+/// Serializes a resolved style to JSON with kebab-case CSS property names.
 fn serialize_computed_style(style: &ComputedStyle) -> String {
     let mut json = String::from("{");
     let mut first = true;
@@ -12428,8 +12449,8 @@ fn serialize_computed_style(style: &ComputedStyle) -> String {
         json.push('"');
         json.push_str(&escape_json_string(&name));
         json.push_str("\":\"");
-        json.push_str(&escape_json_string(&computed_value_to_css_string(
-            &name, &value,
+        json.push_str(&escape_json_string(&computed_style_property_to_css_string(
+            &name, &value, style,
         )));
         json.push('"');
     }
@@ -12999,19 +13020,18 @@ fn computed_style_native(
     // A named CSSOM read needs only one serialized property. Resolve afresh as
     // above, but avoid allocating the complete JavaScript property map.
     if let Some(name) = name {
-        return Ok(style
-            .as_ref()
-            .and_then(|style| style.get(&name))
-            .map_or_else(JsValue::undefined, |value| {
-                js_string!(computed_value_to_css_string(&name, value)).into()
-            }));
+        return Ok(style.as_ref().map_or_else(JsValue::undefined, |style| {
+            style.get(&name).map_or_else(JsValue::undefined, |value| {
+                js_string!(computed_style_property_to_css_string(&name, value, style)).into()
+            })
+        }));
     }
     if args.get(2).is_some_and(JsValue::to_boolean) {
         // CSSOM uses an object directly, avoiding an escaped JSON round trip.
         let object = JsObject::with_object_proto(context.intrinsics());
         if let Some(style) = style {
             for (name, value) in style.properties() {
-                let value = computed_value_to_css_string(&name, &value);
+                let value = computed_style_property_to_css_string(&name, &value, &style);
                 object.create_data_property_or_throw(
                     js_string!(name.as_str()),
                     js_string!(value.as_str()),
@@ -15391,7 +15411,9 @@ fn normalize_style_value_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
-    let normalized = if matches!(
+    let normalized = if property == "text-shadow" {
+        crate::css::style::text_shadow::normalize_specified(&value)
+    } else if matches!(
         property.as_str(),
         "text-underline-position" | "text-underline-offset"
     ) {

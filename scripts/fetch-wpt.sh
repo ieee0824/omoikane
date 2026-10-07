@@ -34,6 +34,7 @@ collect_pattern \
   "/dom/nodes/attributes.js" \
   "/dom/nodes/productions.js"
 collect_pattern "/css/css-text-decor/parsing/text-underline-position-valid.html"
+collect_pattern "/css/css-text-decor/text-shadow/"
 collect_pattern "/css/css-text-decor/parsing/text-underline-position-invalid.html"
 collect_pattern "/css/css-text-decor/parsing/text-underline-position-computed.html"
 collect_pattern "/css/css-text-decor/text-underline-offset-valid.html"

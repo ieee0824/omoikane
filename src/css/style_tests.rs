@@ -7,6 +7,119 @@ use crate::dom::{NodeHandle, ShadowRootMode};
 use super::*;
 
 #[test]
+fn text_shadow_paused_snapshot_interpolates_negative_delay() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet("@keyframes shadow { from { color:red; text-shadow:0px 0px } to { color:lime; text-shadow:blue 20px 10px 4px, red 10px 4px } } div { animation:shadow 1s linear -.5s paused }").unwrap());
+    let middle = resolver.computed_style(&element);
+    assert_eq!(
+        middle.get("text-shadow"),
+        Some(&ComputedValue::Keyword(
+            "rgb(64, 64, 128) 10px 5px 2px, rgba(255, 0, 0, 0.5) 5px 2px 0px".into()
+        ))
+    );
+}
+
+#[test]
+fn text_shadow_interpolation_pads_lists_and_preserves_fractional_alpha() {
+    use super::text_shadow::interpolate;
+    assert_eq!(
+        interpolate("none", "red 20px -10px 6px, blue 8px 4px 2px", 0.5, "black").as_deref(),
+        Some("rgba(255, 0, 0, 0.5) 10px -5px 3px, rgba(0, 0, 255, 0.5) 4px 2px 1px")
+    );
+    assert_eq!(
+        interpolate(
+            "rgba(255, 0, 0, 0.5) 0px 0px 0px",
+            "rgba(0, 0, 255, 0.25) 10px 20px 4px",
+            0.5,
+            "black"
+        )
+        .as_deref(),
+        Some("rgba(170, 0, 85, 0.375) 5px 10px 2px")
+    );
+    assert_eq!(
+        interpolate(
+            "currentcolor 0px 0px 0px",
+            "currentcolor 10px 20px 4px",
+            0.5,
+            "blue"
+        )
+        .as_deref(),
+        Some("currentcolor 5px 10px 2px")
+    );
+}
+
+#[test]
+fn text_shadow_transition_resolves_currentcolor_from_the_same_frame() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    element.set_attribute(
+        "style",
+        "color:red;text-shadow:0px 0px;transition:text-shadow 1s linear,color 1s linear",
+    );
+    resolver.computed_style(&element);
+    element.set_attribute("style", "color:lime;text-shadow:blue 20px 10px 4px;transition:text-shadow 1s linear,color 1s linear");
+    resolver.invalidate_style_cache_for_test();
+    resolver.computed_style(&element);
+    resolver.set_transition_time_ms(500.0);
+    let middle = resolver.computed_style(&element);
+    assert_eq!(
+        middle.get("text-shadow"),
+        Some(&ComputedValue::Keyword(
+            "rgb(64, 64, 128) 10px 5px 2px".into()
+        ))
+    );
+    resolver.set_transition_time_ms(1000.0);
+    let end = resolver.computed_style(&element);
+    assert_eq!(
+        super::text_shadow::resolved_css_text(&end.get("text-shadow").unwrap().css_text(), "lime")
+            .as_deref(),
+        Some("rgb(0, 0, 255) 20px 10px 4px")
+    );
+}
+
+#[test]
+fn text_shadow_animation_resolves_animated_color_and_pads_missing_shadows() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet("@keyframes shadow { from { color:red; text-shadow:0px 0px } to { color:lime; text-shadow:blue 20px 10px 4px, red 10px 4px } } div { animation:shadow 1s linear forwards }").unwrap());
+    resolver.set_animation_time_ms(0.0);
+    resolver.computed_style(&element);
+    resolver.set_animation_time_ms(500.0);
+    let middle = resolver.computed_style(&element);
+    assert_eq!(
+        middle.get("text-shadow"),
+        Some(&ComputedValue::Keyword(
+            "rgb(64, 64, 128) 10px 5px 2px, rgba(255, 0, 0, 0.5) 5px 2px 0px".into()
+        ))
+    );
+}
+
+#[test]
+fn text_shadow_accepts_lists_and_rejects_inset_spread_and_negative_blur() {
+    for valid in [
+        "none",
+        "1px 2px",
+        "red -1em 2px 3px, 0 0 blue",
+        "0 0 currentcolor",
+    ] {
+        assert!(supports_declaration("text-shadow", valid), "{valid}");
+    }
+    for invalid in [
+        "1px",
+        "inset 1px 2px",
+        "1px 2px 3px 4px",
+        "1px 2px -3px",
+        "1% 2px",
+        "1px red 2px",
+        "1px 2px,",
+        "INHERIT 1px 2px",
+    ] {
+        assert!(!supports_declaration("text-shadow", invalid), "{invalid}");
+    }
+}
+
+#[test]
 fn shared_paint_style_preserves_owned_cssom_and_retained_snapshots() {
     let node = NodeHandle::element("div");
     node.set_attribute("style", "width: 10px; color: red");

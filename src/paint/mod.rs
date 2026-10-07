@@ -424,6 +424,13 @@ pub struct Canvas {
     height: u32,
     pixels: Vec<u8>,
     animation_regions: Vec<animation::AnimationRegion>,
+    ink_probe: Option<InkBoundsProbe>,
+}
+
+/// Short-lived text-only probe: records raster and decoration bounds without pixels.
+#[derive(Debug, Clone, Default)]
+struct InkBoundsProbe {
+    bounds: Option<Rect>,
 }
 
 // Equality compares dimensions and pixels, excluding playback metadata.
@@ -453,6 +460,7 @@ impl Canvas {
             height,
             pixels: vec![0; width as usize * height as usize * 4],
             animation_regions: Vec::new(),
+            ink_probe: None,
         }
     }
 
@@ -463,7 +471,37 @@ impl Canvas {
             height,
             pixels,
             animation_regions: Vec::new(),
+            ink_probe: None,
         })
+    }
+
+    fn text_ink_probe() -> Self {
+        Self {
+            ink_probe: Some(InkBoundsProbe::default()),
+            ..Self::new(0, 0)
+        }
+    }
+
+    fn probed_ink_bounds(&self) -> Option<Rect> {
+        self.ink_probe.as_ref().and_then(|probe| probe.bounds)
+    }
+
+    fn record_text_ink(&mut self, rect: Rect, color: Color, clip: Option<Rect>) -> bool {
+        let Some(probe) = &mut self.ink_probe else {
+            return false;
+        };
+        if color.a != 0
+            && let Some(rect) = normalize_rect(rect)
+        {
+            let area = match clip {
+                Some(clip) => intersect(rect, clip),
+                None => Some(rect),
+            };
+            if let Some(area) = area {
+                probe.bounds = Some(probe.bounds.map_or(area, |old| union_rect(old, area)));
+            }
+        }
+        true
     }
 
     /// Returns the canvas width in pixels.
@@ -862,6 +900,9 @@ impl Canvas {
     }
 
     pub(crate) fn fill_rect_clipped(&mut self, rect: Rect, color: Color, clip: Option<Rect>) {
+        if self.record_text_ink(rect, color, clip) {
+            return;
+        }
         if color.a == 0 {
             return;
         }
@@ -1058,6 +1099,9 @@ impl Canvas {
             width: mask_width as f32,
             height: mask_height as f32,
         };
+        if self.record_text_ink(destination, color, clip) {
+            return;
+        }
         let Some(mut area) = normalize_rect(destination) else {
             return;
         };
@@ -2342,7 +2386,7 @@ fn paint_transformed_box(
         height: required_source.height + 2.0,
     };
     let Some(source_region) = intersect(
-        offset.rect(subtree_paint_bounds(layout, resolver)),
+        offset.rect(subtree_paint_bounds(layout, resolver, context)),
         required_source,
     ) else {
         return;
@@ -3260,7 +3304,7 @@ fn paint_box_internal_untransformed(
             width: canvas.width() as f32,
             height: canvas.height() as f32,
         };
-        let mut effect_bounds = offset.rect(subtree_paint_bounds(layout, resolver));
+        let mut effect_bounds = offset.rect(subtree_paint_bounds(layout, resolver, context));
         if let Some(shape) = &clip_shape {
             let Some(shaped_bounds) = intersect(effect_bounds, shape.bounds()) else {
                 return;
@@ -3517,18 +3561,23 @@ fn composite_affine(
     }
 }
 
-fn subtree_paint_bounds(layout: &LayoutBox, resolver: &mut StyleResolver) -> Rect {
+fn subtree_paint_bounds(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    context: PaintContext<'_>,
+) -> Rect {
     // `paint_box_internal` expands the current box's owning fragments before
     // effects and transforms reach this walk. Keep that root in source space
     // so its replay offset is applied once. Descendant fragments still need
     // their final target bounds when an ancestor allocates an effect surface.
-    subtree_paint_bounds_internal(layout, resolver, false)
+    subtree_paint_bounds_internal(layout, resolver, false, context)
 }
 
 fn subtree_paint_bounds_internal(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
     include_own_fragments: bool,
+    context: PaintContext<'_>,
 ) -> Rect {
     let mut bounds = border_box_rect(layout);
     if include_own_fragments {
@@ -3548,6 +3597,9 @@ fn subtree_paint_bounds_internal(
         for fragment in &line.fragments {
             bounds = union_rect(bounds, fragment.rect);
         }
+    }
+    if let Some(ink) = text::text_shadow_paint_bounds(layout, resolver, context) {
+        bounds = union_rect(bounds, ink);
     }
     if let Some(marker) = &layout.marker {
         bounds = union_rect(
@@ -3588,7 +3640,7 @@ fn subtree_paint_bounds_internal(
     }
 
     for child in &layout.children {
-        let child_bounds = subtree_paint_bounds_internal(child, resolver, true);
+        let child_bounds = subtree_paint_bounds_internal(child, resolver, true, context);
         bounds = union_rect(
             bounds,
             transformed_rect_bounds(child_bounds, child.transform),

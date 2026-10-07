@@ -1,5 +1,8 @@
 {
   "tests": [
+    { "path": "css/css-text-decor/text-shadow/parsing/text-shadow-valid.html" },
+    { "path": "css/css-text-decor/text-shadow/parsing/text-shadow-invalid.html" },
+    { "path": "css/css-text-decor/text-shadow/parsing/text-shadow-computed.html" },
     { "path": "dom/events/AddEventListenerOptions-once.any.js" },
     { "path": "dom/events/AddEventListenerOptions-passive.any.js" },
     { "path": "dom/events/AddEventListenerOptions-signal.any.js" },

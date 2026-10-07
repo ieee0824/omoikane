@@ -203,8 +203,16 @@ pub(super) fn paint_reference(
         width: required_source.width + 2.0,
         height: required_source.height + 2.0,
     };
-    let Some(source_region) = intersect(subtree_paint_bounds(layout, resolver), required_source)
-    else {
+    let context = PaintContext {
+        viewport,
+        text_fonts,
+        web_fonts,
+        nested_documents: None,
+    };
+    let Some(source_region) = intersect(
+        subtree_paint_bounds(layout, resolver, context),
+        required_source,
+    ) else {
         return;
     };
     let source_x0 = source_region.x.floor() as i32;

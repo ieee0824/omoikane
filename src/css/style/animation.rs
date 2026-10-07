@@ -2,6 +2,25 @@
 
 use super::*;
 
+pub(super) fn snapshot_shadow_base(
+    steps: &[KeyframeStep],
+    properties: &PropertyMap,
+) -> Option<[Option<ComputedValue>; 2]> {
+    steps
+        .iter()
+        .any(|step| {
+            step.declarations
+                .iter()
+                .any(|declaration| declaration.name == "text-shadow")
+        })
+        .then(|| {
+            [
+                properties.get("color").cloned(),
+                properties.get("text-shadow").cloned(),
+            ]
+        })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum AnimationDirection {
     Normal,
@@ -200,6 +219,48 @@ impl AnimationTimeline {
 }
 
 impl StyleResolver {
+    /// Uses the same shadow interpolation for deterministic paused snapshots.
+    pub(super) fn interpolate_snapshot_text_shadow(
+        &self,
+        steps: &[KeyframeStep],
+        progress: f32,
+        properties: &mut PropertyMap,
+        important: &HashSet<String>,
+        underlying: Option<[Option<ComputedValue>; 2]>,
+    ) {
+        let Some(underlying) = underlying else {
+            return;
+        };
+        if important.contains("text-shadow") {
+            return;
+        }
+        let steps = steps
+            .iter()
+            .map(|step| KeyframeStep {
+                offset: step.offset,
+                declarations: step
+                    .declarations
+                    .iter()
+                    .filter(|declaration| {
+                        matches!(declaration.name.as_str(), "color" | "text-shadow")
+                    })
+                    .cloned()
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        for (name, value) in ["color", "text-shadow"].into_iter().zip(underlying) {
+            if let Some(value) = value {
+                properties.insert(name, value);
+            } else {
+                properties.remove(name);
+            }
+        }
+        let timing = properties
+            .get("animation-timing-function")
+            .map_or_else(|| "ease".into(), ComputedValue::css_text);
+        self.interpolate_live_keyframes(&steps, progress, &timing, None, properties, important);
+    }
+
     pub(super) fn apply_animation_effect(
         &self,
         node: &NodeHandle,
@@ -339,10 +400,14 @@ impl StyleResolver {
             .filter(|(name, _)| name.starts_with("--"))
             .map(|(name, value)| (name.to_string(), computed_value_to_value(value)))
             .collect();
-        let names: HashSet<_> = steps
+        let mut names: Vec<_> = steps
             .iter()
             .flat_map(|step| step.declarations.iter().map(|d| d.name.as_str()))
+            .collect::<HashSet<_>>()
+            .into_iter()
             .collect();
+        // Dependent currentcolor values must see this frame's animated color.
+        names.sort_unstable_by_key(|name| (*name != "color", *name));
         for name in names {
             if important.contains(name) {
                 continue;
@@ -379,11 +444,15 @@ impl StyleResolver {
             let eased_progress =
                 super::super::transition::animation_timing_progress(timing, linear_progress);
             if let (Some(lower), Some(upper)) = (resolve(lower), resolve(upper)) {
-                let value = super::super::transition::interpolate_custom_property(
+                let current_color = properties
+                    .get("color")
+                    .map_or_else(|| "black".into(), ComputedValue::css_text);
+                let value = super::super::transition::interpolate_property_with_color(
                     name,
                     &lower,
                     &upper,
                     eased_progress,
+                    &current_color,
                 )
                 .unwrap_or_else(|| if eased_progress < 0.5 { lower } else { upper });
                 let flow = logical_flow_from_properties(properties);

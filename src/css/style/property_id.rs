@@ -294,6 +294,7 @@ define_properties! {
         "text-decoration-thickness" => TextDecorationThickness,
         "text-indent" => TextIndent,
         "text-overflow" => TextOverflow,
+        "text-shadow" => TextShadow,
         "text-transform" => TextTransform,
         "text-underline-offset" => TextUnderlineOffset,
         "text-underline-position" => TextUnderlinePosition,
