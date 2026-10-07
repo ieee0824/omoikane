@@ -1,5 +1,8 @@
 {
   "tests": [
+    { "path": "css/css-will-change/parsing/will-change-valid.html" },
+    { "path": "css/css-will-change/parsing/will-change-invalid.html" },
+    { "path": "css/css-will-change/parsing/will-change-computed.html" },
     { "path": "dom/interface-objects.html" },
     { "path": "dom/ranges/StaticRange-constructor.html" },
     { "path": "dom/collections/HTMLCollection-supported-property-names.html" },
@@ -410,6 +413,15 @@
     { "path": "css/css-grid/parsing/grid-auto-columns-valid.html" },
     { "path": "css/css-grid/parsing/grid-auto-columns-invalid.html" },
     { "path": "css/css-grid/parsing/grid-auto-columns-computed.html" },
-    { "path": "css/css-flexbox/hittest-overlapping-order.html" }
+    { "path": "css/css-flexbox/hittest-overlapping-order.html" },
+    { "path": "css/css-transforms/parsing/translate-parsing-valid.html" },
+    { "path": "css/css-transforms/parsing/translate-parsing-invalid.html" },
+    { "path": "css/css-transforms/parsing/translate-parsing-computed.html" },
+    { "path": "css/css-transforms/parsing/rotate-parsing-valid.html" },
+    { "path": "css/css-transforms/parsing/rotate-parsing-invalid.html" },
+    { "path": "css/css-transforms/parsing/rotate-parsing-computed.html" },
+    { "path": "css/css-transforms/parsing/scale-parsing-valid.html" },
+    { "path": "css/css-transforms/parsing/scale-parsing-invalid.html" },
+    { "path": "css/css-transforms/parsing/scale-parsing-computed.html" }
   ]
 }

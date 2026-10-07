@@ -19848,6 +19848,9 @@ fn take_discarded_node_ids_native(
 mod tests;
 
 #[cfg(test)]
+mod individual_transform_tests;
+
+#[cfg(test)]
 mod inline_geometry_tests;
 
 #[cfg(test)]

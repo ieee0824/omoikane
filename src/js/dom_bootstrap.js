@@ -402,6 +402,7 @@
   });
   const validatesSpecialStyleProperties = new Set([
     "order", "grid-auto-flow", "grid-auto-rows", "grid-auto-columns",
+    "translate", "rotate", "scale",
     "text-shadow",
     "all",
     "color", "background-color", "border-color",
@@ -3913,7 +3914,7 @@
         const contentVisibility = style.contentVisibility || "visible";
         if ((style.position !== "static" && style.position !== "") || contained ||
             contentVisibility === "hidden" || contentVisibility === "auto" ||
-            (style.transform && style.transform !== "none") ||
+            ["transform", "translate", "rotate", "scale"].some(property => style[property] && style[property] !== "none") ||
             (style.perspective && style.perspective !== "none")) return ancestor;
         if (tagName === "TD" || tagName === "TH" || tagName === "TABLE") return ancestor;
       }

@@ -1218,17 +1218,7 @@ impl Parser {
         }
     }
 
-    fn parse_declaration(&mut self) -> Result<Vec<Declaration>, CssParseError> {
-        let name = self.expect_ident()?;
-        let name = if name.starts_with("--") {
-            name
-        } else {
-            name.to_ascii_lowercase()
-        };
-        self.skip_whitespace();
-        self.expect_colon()?;
-        self.skip_whitespace();
-
+    fn parse_declaration_value_tokens(&mut self, close_functions_at_eof: bool) -> Vec<CssToken> {
         let mut value_tokens = Vec::new();
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
@@ -1255,6 +1245,30 @@ impl Parser {
                 _ => value_tokens.push(self.next().expect("peeked token should exist")),
             }
         }
+
+        // CSS component values close unfinished functions at end of input.
+        // Individual transforms require this for CSSOM assignment/supports.
+        if close_functions_at_eof && self.peek().is_none() {
+            value_tokens.extend(std::iter::repeat_n(CssToken::ParenClose, paren_depth));
+        }
+        value_tokens
+    }
+
+    fn parse_declaration(&mut self) -> Result<Vec<Declaration>, CssParseError> {
+        let name = self.expect_ident()?;
+        let name = if name.starts_with("--") {
+            name
+        } else {
+            name.to_ascii_lowercase()
+        };
+        self.skip_whitespace();
+        self.expect_colon()?;
+        self.skip_whitespace();
+
+        let value_tokens = self.parse_declaration_value_tokens(matches!(
+            name.as_str(),
+            "translate" | "rotate" | "scale"
+        ));
 
         let (value_tokens, important) = split_important(&value_tokens);
         let contains_var = tokens_contain_var_function(&value_tokens);
@@ -1290,6 +1304,10 @@ impl Parser {
                     | "grid-auto-flow"
                     | "grid-auto-rows"
                     | "grid-auto-columns"
+                    | "translate"
+                    | "rotate"
+                    | "scale"
+                    | "will-change"
             )
             || contains_var && matches!(name.as_str(), "font" | "transition"))
             && has_top_level_comma(&value_tokens)
@@ -1645,7 +1663,7 @@ fn parse_value_sequence_with_mode(
                 } else {
                     let is_math_function = matches!(
                         name.to_ascii_lowercase().as_str(),
-                        "calc" | "min" | "max" | "clamp"
+                        "calc" | "min" | "max" | "clamp" | "sign" | "abs"
                     );
                     if ((name.eq_ignore_ascii_case("rgb")
                         || name.eq_ignore_ascii_case("rgba")

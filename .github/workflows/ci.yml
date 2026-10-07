@@ -162,7 +162,7 @@ jobs:
           cache-workspace-crates: true
           cache-on-failure: true
       - uses: actions/cache@v4
-        if: matrix.shard == 'compatibility'
+        if: matrix.shard == 'compatibility' || matrix.shard == 'integration'
         with:
           path: .cache/wpt
           key: wpt-${{ hashFiles('tests/wpt/revision.txt') }}
@@ -170,6 +170,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-cjk
+      - name: Fetch WPT references for integration tests
+        if: matrix.shard == 'integration'
+        env:
+          WPT_ROOT: .cache/wpt
+        run: scripts/fetch-wpt.sh
       - name: Run gate partition
         env:
           GATE_SHARD: ${{ matrix.shard }}
@@ -240,6 +245,11 @@ jobs:
           WPT_REPORT: .artifacts/wpt/report.json
           WPT_JUNIT: .artifacts/wpt/junit.xml
         run: cargo test --locked --test wpt_smoke -- --nocapture
+      - name: Run individual transform reftests
+        env:
+          WPT_ROOT: .cache/wpt
+          WPT_REQUIRED: "1"
+        run: cargo test --locked --test p1_transform_reftests -- --nocapture
       - name: Run printed page layer reftests
         env:
           WPT_ROOT: .cache/wpt
