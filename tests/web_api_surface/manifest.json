@@ -14,7 +14,7 @@
       "description": "HTMLElement.offsetParent resolves positioned ancestors and hidden boxes",
       "setup": "globalThis.__offsetParentHost = document.createElement('div'); __offsetParentHost.style.position = 'relative'; globalThis.__offsetParentChild = document.createElement('div'); __offsetParentHost.appendChild(__offsetParentChild); globalThis.__offsetParentHidden = document.createElement('div'); __offsetParentHidden.style.display = 'none'; __offsetParentHost.appendChild(__offsetParentHidden); document.body.appendChild(__offsetParentHost)",
       "probe": "__offsetParentChild.offsetParent === __offsetParentHost && __offsetParentHidden.offsetParent === null && document.createElement('div').offsetParent === null",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "dom.form-controls-collection",
@@ -22,7 +22,7 @@
       "description": "HTMLFormElement.elements exposes live item and namedItem access",
       "setup": "globalThis.__formProbe = document.createElement('form'); globalThis.__formControl = document.createElement('input'); __formControl.name = 'field'; __formProbe.appendChild(__formControl)",
       "probe": "__formProbe.elements.item(0) === __formControl && __formProbe.elements.namedItem('field') === __formControl && Array.from(__formProbe.elements)[0] === __formControl",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "dom.toggle-attribute",
@@ -30,7 +30,7 @@
       "description": "Element.toggleAttribute reflects boolean force and returns the resulting presence",
       "setup": "globalThis.__toggleProbe = document.createElement('div')",
       "probe": "__toggleProbe.toggleAttribute('hidden') === true && __toggleProbe.toggleAttribute('hidden') === false && __toggleProbe.toggleAttribute('hidden', undefined) === false && __toggleProbe.toggleAttribute('hidden', true) === true && __toggleProbe.hasAttribute('hidden') && __toggleProbe.getAttribute('hidden') === ''",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "dom.insert-adjacent",
@@ -38,7 +38,7 @@
       "description": "Element insert-adjacent methods support all four positions and text insertion",
       "setup": "globalThis.__adjacentHost = document.createElement('div'); globalThis.__adjacentTarget = document.createElement('section'); globalThis.__adjacentTail = document.createElement('i'); __adjacentHost.appendChild(__adjacentTarget); __adjacentHost.appendChild(__adjacentTail); document.body.appendChild(__adjacentHost); globalThis.__adjacentBefore = document.createElement('b'); globalThis.__adjacentAfter = document.createElement('em'); __adjacentTarget.insertAdjacentElement('BeFoReBeGiN', __adjacentBefore); __adjacentTarget.insertAdjacentElement('AFTEREND', __adjacentAfter); __adjacentTarget.insertAdjacentText('afterbegin', 'front'); __adjacentTarget.insertAdjacentText('beforeend', 'back')",
       "probe": "typeof Element.prototype.insertAdjacentElement === 'function' && typeof Element.prototype.insertAdjacentText === 'function' && __adjacentHost.firstChild === __adjacentBefore && __adjacentBefore.nextSibling === __adjacentTarget && __adjacentTarget.nextSibling === __adjacentAfter && __adjacentAfter.nextSibling === __adjacentTail && __adjacentTarget.textContent === 'frontback'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "dom.node-equality",
@@ -46,7 +46,7 @@
       "description": "Node identity and structural equality follow the DOM algorithms",
       "setup": "globalThis.__nodeEqualityProbe = document.createElement('section'); __nodeEqualityProbe.setAttribute('data-kind', 'probe'); __nodeEqualityProbe.appendChild(document.createTextNode('value')); globalThis.__nodeEqualityClone = __nodeEqualityProbe.cloneNode(true)",
       "probe": "typeof Node.prototype.isSameNode === 'function' && typeof Node.prototype.isEqualNode === 'function' && Node.prototype.isSameNode.length === 1 && Node.prototype.isEqualNode.length === 1 && __nodeEqualityProbe.isSameNode(__nodeEqualityProbe) && !__nodeEqualityProbe.isSameNode(__nodeEqualityClone) && __nodeEqualityProbe.isEqualNode(__nodeEqualityClone) && !__nodeEqualityProbe.isEqualNode(null)",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "dom.attr-named-node-map",
@@ -54,7 +54,7 @@
       "description": "Attr nodes keep stable identity through a live NamedNodeMap and support namespace-aware attachment",
       "setup": "globalThis.__attrHost = document.createElement('div'); globalThis.__attrMap = __attrHost.attributes; globalThis.__attrNode = document.createAttributeNS('urn:surface', 's:item'); __attrNode.value = 'value'; __attrMap.setNamedItemNS(__attrNode)",
       "probe": "typeof Attr === 'function' && typeof NamedNodeMap === 'function' && __attrMap === __attrHost.attributes && __attrMap instanceof NamedNodeMap && __attrMap.getNamedItemNS('urn:surface', 'item') === __attrNode && __attrNode.ownerElement === __attrHost && __attrHost.getAttributeNodeNS('urn:surface', 'item') === __attrNode && __attrHost.getAttributeNS('urn:surface', 'item') === 'value'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.compositing-properties",
@@ -62,7 +62,7 @@
       "description": "3D and compositing CSS properties validate through CSS.supports and computed style",
       "setup": "globalThis.__compositingProbe = document.createElement('div'); __compositingProbe.style.cssText = 'transform-style: preserve-3d; backface-visibility: hidden; mix-blend-mode: multiply; isolation: isolate'; document.body.appendChild(__compositingProbe)",
       "probe": "CSS.supports('transform-style', 'preserve-3d') && CSS.supports('backface-visibility', 'hidden') && CSS.supports('mix-blend-mode', 'multiply') && CSS.supports('isolation', 'isolate') && getComputedStyle(__compositingProbe).transformStyle === 'preserve-3d' && getComputedStyle(__compositingProbe).backfaceVisibility === 'hidden' && getComputedStyle(__compositingProbe).mixBlendMode === 'multiply' && getComputedStyle(__compositingProbe).isolation === 'isolate'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "security.iframe-sandbox",
@@ -70,7 +70,7 @@
       "description": "iframe sandbox exposes a DOMTokenList and isolates documents without allow-same-origin",
       "setup": "globalThis.__sandboxProbe = document.createElement('iframe'); __sandboxProbe.sandbox.add('allow-scripts'); document.body.appendChild(__sandboxProbe)",
       "probe": "__sandboxProbe.sandbox instanceof DOMTokenList && __sandboxProbe.sandbox.contains('allow-scripts') && __sandboxProbe.sandbox.supports('allow-same-origin') && (() => { try { new DOMTokenList(); return false } catch (error) { return error instanceof TypeError } })() && __sandboxProbe.contentDocument === null && __sandboxProbe.contentWindow.closed === false",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.selector-list-pseudos",
@@ -78,7 +78,7 @@
       "description": ":is(), :where(), and selector-list :not() share Selectors Level 4 matching",
       "setup": "globalThis.__selectorHost = document.createElement('section'); __selectorHost.innerHTML = '<div class=first><span id=selector-target></span></div><div class=second></div>'; document.body.appendChild(__selectorHost)",
       "probe": "__selectorHost.querySelector(':is(.first, .missing) > :where(#selector-target)') !== null && __selectorHost.querySelectorAll('div:not(.first, .missing)').length === 1",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.has-relative-selector",
@@ -86,7 +86,7 @@
       "description": ":has() evaluates descendant, child, and sibling selectors from an anchor",
       "setup": "globalThis.__hasHost = document.createElement('section'); __hasHost.innerHTML = '<div class=first><span class=nested></span></div><div class=second></div>'",
       "probe": "__hasHost.matches(':has(> .first + .second)') && __hasHost.matches(':has(.nested)') && __hasHost.querySelector('.first').matches(':has(+ .second)')",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "dom.get-root-node",
@@ -109,7 +109,7 @@
       "description": "Range parses a detached fragment in its start context",
       "setup": "globalThis.__contextRange = document.createRange(); __contextRange.selectNodeContents(document.body); globalThis.__contextFragment = __contextRange.createContextualFragment('<p>context</p>')",
       "probe": "__contextFragment.nodeType === 11 && __contextFragment.firstChild.localName === 'p' && __contextFragment.firstChild.ownerDocument === document && __contextFragment.parentNode === null",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "dom.mutation-observer-callback",
@@ -140,7 +140,7 @@
       "area": "web-components",
       "description": "Elements can attach a shadow root",
       "probe": "typeof ShadowRoot === 'function' && typeof Element.prototype.attachShadow === 'function'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "dom.shadow-slotting",
@@ -148,7 +148,7 @@
       "description": "Shadow slots assign light DOM nodes through HTMLSlotElement",
       "setup": "globalThis.__slotHost = document.createElement('div'); globalThis.__slotted = document.createElement('span'); __slotHost.appendChild(__slotted); globalThis.__slotRoot = __slotHost.attachShadow({mode:'open'}); globalThis.__slot = document.createElement('slot'); __slotRoot.appendChild(__slot)",
       "probe": "typeof HTMLSlotElement === 'function' && __slot instanceof HTMLSlotElement && __slotted.assignedSlot === __slot && __slot.assignedNodes()[0] === __slotted",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "dom.shadow-composed-events",
@@ -156,7 +156,7 @@
       "description": "Composed events cross and retarget across shadow boundaries",
       "setup": "globalThis.__eventHost = document.createElement('div'); document.body.appendChild(__eventHost); globalThis.__eventRoot = __eventHost.attachShadow({mode:'open'}); globalThis.__eventTarget = document.createElement('span'); __eventRoot.appendChild(__eventTarget); globalThis.__eventObserved = false; __eventHost.addEventListener('surface-probe', event => { __eventObserved = event.target === __eventHost && event.composedPath().includes(__eventRoot); }); __eventTarget.dispatchEvent(new Event('surface-probe', {bubbles:true, composed:true}))",
       "probe": "typeof Event.prototype.composedPath === 'function' && new Event('surface-probe', {composed:true}).composed === true && __eventObserved === true",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.shadow-cascade",
@@ -164,7 +164,7 @@
       "description": "Shadow styles scope normal, host, and slotted selectors",
       "setup": "globalThis.__styleHost = document.createElement('x-surface'); globalThis.__styleLight = document.createElement('span'); __styleLight.className = 'surface-item'; __styleHost.appendChild(__styleLight); document.body.appendChild(__styleHost); globalThis.__styleRoot = __styleHost.attachShadow({mode:'open'}); __styleRoot.innerHTML = '<style>:host { width: 17px } .inside { height: 18px } ::slotted(.surface-item) { margin-left: 19px }</style><span class=inside></span><slot></slot>'",
       "probe": "getComputedStyle(__styleHost).width === '17px' && getComputedStyle(__styleRoot.querySelector('.inside')).height === '18px' && getComputedStyle(__styleLight).marginLeft === '19px'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.shadow-parts",
@@ -172,7 +172,7 @@
       "description": "Document author styles target explicitly exposed shadow parts",
       "setup": "globalThis.__partStyle = document.createElement('style'); __partStyle.textContent = 'x-part-surface::part(label) { width: 20px }'; document.body.appendChild(__partStyle); globalThis.__partHost = document.createElement('x-part-surface'); document.body.appendChild(__partHost); globalThis.__partRoot = __partHost.attachShadow({mode:'closed'}); globalThis.__partTarget = document.createElement('span'); __partTarget.setAttribute('part', 'label'); __partRoot.appendChild(__partTarget)",
       "probe": "getComputedStyle(__partTarget).width === '20px'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "dom.custom-elements",
@@ -193,7 +193,7 @@
       "area": "editing",
       "description": "Window Selection API is available",
       "probe": "typeof getSelection === 'function' && typeof Selection === 'function'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "editing.text-control-selection",
@@ -201,7 +201,7 @@
       "description": "Text controls expose selection and input editing APIs",
       "setup": "globalThis.__editingProbe = document.createElement('input'); __editingProbe.value = 'ab'; __editingProbe.setSelectionRange(1, 2)",
       "probe": "typeof InputEvent === 'function' && __editingProbe.selectionStart === 1 && __editingProbe.selectionEnd === 2 && typeof __editingProbe.select === 'function'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "html.iframe-content-document",
@@ -225,7 +225,7 @@
       "description": "Form controls expose live validity state and forms aggregate invalid controls",
       "setup": "globalThis.__validationForm = document.createElement('form'); globalThis.__validationInput = document.createElement('input'); __validationInput.required = true; __validationForm.appendChild(__validationInput); document.body.appendChild(__validationForm); globalThis.__invalidEvents = 0; __validationInput.addEventListener('invalid', () => { __invalidEvents++; }); globalThis.__invalidFormResult = __validationForm.checkValidity()",
       "probe": "typeof ValidityState === 'function' && __validationInput.validity instanceof ValidityState && __validationInput.validity === __validationInput.validity && __invalidFormResult === false && __invalidEvents === 1 && __validationInput.validity.valueMissing && !__validationInput.validity.valid && __validationInput.validationMessage !== '' && (() => { __validationInput.value = 'ok'; if (!__validationForm.checkValidity()) return false; __validationInput.setCustomValidity('surface custom error'); return __validationInput.validity.customError && __validationInput.validationMessage === 'surface custom error'; })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "html.element-internals",
@@ -233,7 +233,7 @@
       "description": "Form-associated custom elements contribute submission values, validation, labels and reset reactions through ElementInternals",
       "setup": "globalThis.__internalsResets = 0; customElements.define('surface-form-control', class extends HTMLElement { static formAssociated = true; constructor() { super(); this.internals = this.attachInternals(); this.internals.setFormValue('submitted'); } formResetCallback() { __internalsResets++; this.internals.setFormValue('reset'); } }); globalThis.__internalsForm = document.createElement('form'); globalThis.__internalsControl = document.createElement('surface-form-control'); __internalsControl.setAttribute('name', 'answer'); __internalsForm.append(__internalsControl); document.body.append(__internalsForm)",
       "probe": "(() => { const i = __internalsControl.internals; if (!(i instanceof ElementInternals) || i.form !== __internalsForm || !i.willValidate || new FormData(__internalsForm).get('answer') !== 'submitted') return false; i.setValidity({customError:true}, 'Fix the field'); if (__internalsForm.checkValidity() || i.validity.valid || i.validationMessage !== 'Fix the field') return false; i.setValidity({}); __internalsForm.reset(); return __internalsForm.checkValidity() && __internalsResets === 1 && new FormData(__internalsForm).get('answer') === 'reset'; })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "html.table-cell-interface",
@@ -281,7 +281,7 @@
       "description": "queueMicrotask shares one FIFO microtask queue with promise reactions",
       "setup": "globalThis.__microtaskOrder = []; queueMicrotask(() => __microtaskOrder.push('qm1')); Promise.resolve().then(() => __microtaskOrder.push('p1')); queueMicrotask(() => { __microtaskOrder.push('qm2'); queueMicrotask(() => __microtaskOrder.push('nested')); })",
       "probe": "typeof queueMicrotask === 'function' && __microtaskOrder.join(',') === 'qm1,p1,qm2,nested'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "scheduling.animation-frame-callback",
@@ -293,13 +293,24 @@
       "baseline_supported": true
     },
     {
+      "id": "navigation.location-destination",
+      "area": "navigation",
+      "description": "Location assignment queues the resolved destination without replacing history",
+      "setup": "globalThis.__surfaceCommittedURL = document.URL; location.assign('/surface-next?from=probe')",
+      "expected_navigation_requests": 1,
+      "probe": "document.URL === __surfaceCommittedURL",
+      "baseline_supported": true,
+      "expected_navigation_url": "http://localhost/surface-next?from=probe"
+    },
+    {
       "id": "navigation.location-request",
       "area": "navigation",
-      "description": "Location assignment resolves its URL and queues a browser navigation",
-      "setup": "location.assign('/surface-next?from=probe')",
+      "description": "Cross-document navigation keeps the committed Location and Document URL until commit",
+      "setup": "globalThis.__surfaceCommittedURL = document.URL; location.assign('/surface-next?from=probe')",
       "expected_navigation_requests": 1,
-      "probe": "location.href === 'http://localhost/surface-next?from=probe' && document.URL === location.href",
-      "baseline_supported": false
+      "probe": "location.href === __surfaceCommittedURL && document.URL === __surfaceCommittedURL",
+      "baseline_supported": true,
+      "expected_navigation_url": "http://localhost/surface-next?from=probe"
     },
     {
       "id": "performance.mark-entry",
@@ -314,14 +325,14 @@
       "area": "scheduling",
       "description": "Initial navigation timing is exposed as a PerformanceNavigationTiming entry",
       "probe": "performance.getEntriesByType('navigation').length === 1 && performance.getEntriesByType('navigation')[0] instanceof PerformanceNavigationTiming && typeof performance.getEntriesByType('navigation')[0].name === 'string' && performance.getEntriesByType('navigation')[0].entryType === 'navigation'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "performance.resource-timing-core",
       "area": "scheduling",
       "description": "Resource Timing classes, filtering, buffer controls, and clearing are exposed",
       "probe": "typeof PerformanceResourceTiming === 'function' && typeof performance.clearResourceTimings === 'function' && typeof performance.setResourceTimingBufferSize === 'function' && PerformanceObserver.supportedEntryTypes.includes('resource')",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "performance.observer-user-timing",
@@ -351,7 +362,7 @@
       "description": "@supports conditions control cascade and expose CSSSupportsRule",
       "setup": "(() => { const style = document.createElement('style'); style.textContent = '@supports (display: grid) { #probe { width: 23px; } }'; document.head.appendChild(style); })()",
       "probe": "CSS.supports('(display: grid) and (color: red)') && document.styleSheets[1].cssRules[0] instanceof CSSSupportsRule && document.styleSheets[1].cssRules[0].matches && getComputedStyle(document.getElementById('probe')).width === '23px'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.cascade-layers",
@@ -359,7 +370,7 @@
       "description": "Cascade layer order controls computed style and exposes block and statement rules",
       "setup": "(() => { const target = document.createElement('div'); target.id = 'surface-layered'; document.body.appendChild(target); const style = document.createElement('style'); style.textContent = '@layer base, override; @layer override { div { width: 37px; } } @layer base { #surface-layered { width: 1px; } }'; document.head.appendChild(style); globalThis.__surfaceLayerSheet = style.sheet; })()",
       "probe": "getComputedStyle(document.getElementById('surface-layered')).width === '37px' && (() => { const statement = __surfaceLayerSheet.cssRules[0]; const block = __surfaceLayerSheet.cssRules[1]; return statement instanceof CSSLayerStatementRule && statement.nameList.length === 2 && statement.nameList[0] === 'base' && statement.nameList[1] === 'override' && Object.isFrozen(statement.nameList) && block instanceof CSSLayerBlockRule && block.name === 'override' && block.cssRules.length === 1; })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.scope-cascade-rule",
@@ -367,7 +378,7 @@
       "description": "@scope boundaries control cascade and expose CSSScopeRule",
       "setup": "(() => { const root = document.createElement('section'); root.className = 'surface-scope'; root.innerHTML = '<div id=surface-scoped></div>'; document.body.appendChild(root); const style = document.createElement('style'); style.textContent = '@scope (.surface-scope) { :scope > #surface-scoped { width: 29px; } }'; document.head.appendChild(style); globalThis.__surfaceScopeSheet = style.sheet; })()",
       "probe": "getComputedStyle(document.getElementById('surface-scoped')).width === '29px' && (() => { const rule = __surfaceScopeSheet.cssRules[0]; return rule instanceof CSSScopeRule && rule.start === '.surface-scope' && rule.end === null; })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.font-loading",
@@ -375,7 +386,7 @@
       "description": "FontFaceSet and CSSFontFaceRule expose live CSS-connected font descriptors",
       "setup": "(() => { const style = document.createElement('style'); style.textContent = '@font-face { font-family: SurfaceFace; src: url(data:font/ttf;base64,AA==); font-weight: 400; }'; document.head.appendChild(style); globalThis.__surfaceFontSheet = style.sheet; globalThis.__surfaceFontRule = style.sheet.cssRules[0]; globalThis.__surfaceFontFace = Array.from(document.fonts).find(face => face.family === 'SurfaceFace'); __surfaceFontRule.style.setProperty('font-weight', '700'); })()",
       "probe": "typeof FontFace === 'function' && document.fonts instanceof FontFaceSet && __surfaceFontRule instanceof CSSFontFaceRule && __surfaceFontSheet.cssRules[0] === __surfaceFontRule && __surfaceFontFace instanceof FontFace && __surfaceFontFace.weight === '700' && document.fonts.has(__surfaceFontFace)",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.container-size-query",
@@ -383,7 +394,7 @@
       "description": "Size container queries feed layout geometry back into cascade and expose CSSContainerRule",
       "setup": "(() => { const shell = document.createElement('section'); shell.id = 'surface-container'; shell.innerHTML = '<div id=surface-contained></div>'; document.body.appendChild(shell); const style = document.createElement('style'); style.textContent = '#surface-container { width: 420px; container-type: inline-size; container-name: surface-shell; } #surface-contained { width: 1px; } @container surface-shell (inline-size >= 400px) { #surface-contained { width: 31px; } }'; document.head.appendChild(style); globalThis.__surfaceContainerSheet = style.sheet; })()",
       "probe": "getComputedStyle(document.getElementById('surface-contained')).width === '31px' && (() => { const rule = Array.from(__surfaceContainerSheet.cssRules).find(candidate => candidate instanceof CSSContainerRule); return rule && rule.containerName === 'surface-shell' && rule.containerQuery === '(inline-size >= 400px)'; })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.transforms-2d-geometry",
@@ -391,7 +402,7 @@
       "description": "2D transforms affect painted DOM geometry without changing layout size",
       "setup": "globalThis.__transformProbe = document.createElement('div'); __transformProbe.style.cssText = 'position:absolute;left:0;top:0;width:100px;height:50px;transform-origin:0 0;transform:translateX(100px) rotate(90deg)'; document.body.appendChild(__transformProbe)",
       "probe": "CSS.supports('transform', 'translateX(100px) rotate(90deg)') && (() => { const rect = __transformProbe.getBoundingClientRect(); return rect.left === 50 && rect.top === 0 && rect.width === 50 && rect.height === 100 && __transformProbe.offsetWidth === 100 && __transformProbe.offsetHeight === 50; })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.transforms-3d-perspective-geometry",
@@ -399,7 +410,7 @@
       "description": "3D transform functions project DOM geometry while preserving untransformed layout size",
       "setup": "globalThis.__transform3dProbe = document.createElement('div'); __transform3dProbe.style.cssText = 'position:absolute;left:0;top:0;width:100px;height:50px;transform-origin:50% 50%;transform:perspective(500px) rotateY(30deg) translateZ(20px)'; document.body.appendChild(__transform3dProbe)",
       "probe": "CSS.supports('transform', 'matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)') && CSS.supports('transform', 'perspective(500px) rotateY(30deg)') && (() => { const rect = __transform3dProbe.getBoundingClientRect(); const computed = getComputedStyle(__transform3dProbe).transform; return computed.includes('perspective') && Number.isFinite(rect.left) && Number.isFinite(rect.width) && rect.width > 70 && rect.width < 110 && __transform3dProbe.offsetWidth === 100 && __transform3dProbe.offsetHeight === 50; })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.transitions-timeline",
@@ -408,7 +419,7 @@
       "setup": "globalThis.__transitionProbe = document.createElement('div'); __transitionProbe.style.cssText = 'width:10px;height:10px;opacity:0;transition:opacity 32ms linear,width 32ms linear'; document.body.appendChild(__transitionProbe); getComputedStyle(__transitionProbe).opacity; __transitionProbe.offsetWidth; __transitionProbe.style.opacity = '1'; __transitionProbe.style.width = '30px'; getComputedStyle(__transitionProbe).opacity; __transitionProbe.offsetWidth",
       "run_animation_frame": true,
       "probe": "Math.abs(Number(getComputedStyle(__transitionProbe).opacity) - 0.5) < 0.001 && __transitionProbe.offsetWidth === 20",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.filter-effects",
@@ -416,7 +427,7 @@
       "description": "Filter Effects declarations validate and expose normalized computed values",
       "setup": "globalThis.__filterProbe = document.createElement('div'); __filterProbe.style.cssText = 'filter:brightness(150%) blur(2px);backdrop-filter:grayscale(50%)'; document.body.appendChild(__filterProbe)",
       "probe": "CSS.supports('filter', 'brightness(150%) blur(2px)') && !CSS.supports('filter', 'blur(-1px)') && getComputedStyle(__filterProbe).filter === 'brightness(1.5) blur(2px)' && getComputedStyle(__filterProbe).backdropFilter === 'grayscale(0.5)'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.match-media-screen",
@@ -439,7 +450,7 @@
       "description": "Constructable stylesheets can be replaced and adopted by a Document",
       "setup": "globalThis.__constructedSheet = new CSSStyleSheet(); __constructedSheet.replaceSync('#probe { visibility: hidden; }'); document.adoptedStyleSheets = [__constructedSheet]",
       "probe": "__constructedSheet.ownerNode === null && __constructedSheet.cssRules.length === 1 && document.adoptedStyleSheets[0] === __constructedSheet && getComputedStyle(document.getElementById('probe')).visibility === 'hidden'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.web-animations",
@@ -459,9 +470,9 @@
       "id": "network.fetch-request-semantics",
       "area": "network",
       "description": "Request preserves non-GET method, headers and body metadata",
-      "setup": "globalThis.__surfaceRequest = new Request('/submit', { method: 'POST', headers: { 'X-Probe': 'yes' }, body: 'payload' })",
-      "probe": "__surfaceRequest.url === 'http://localhost/submit' && __surfaceRequest.method === 'POST' && __surfaceRequest.headers.get('x-probe') === 'yes' && __surfaceRequest.headers.get('content-type') === 'text/plain;charset=UTF-8' && __surfaceRequest.body === 'payload'",
-      "baseline_supported": false
+      "setup": "globalThis.__surfaceRequest = new Request('/submit', { method: 'POST', headers: { 'X-Probe': 'yes' }, body: 'payload' }); globalThis.__surfaceRequestText = null; __surfaceRequest.text().then(text => { __surfaceRequestText = text; })",
+      "probe": "__surfaceRequest.url === 'http://localhost/submit' && __surfaceRequest.method === 'POST' && __surfaceRequest.headers.get('x-probe') === 'yes' && __surfaceRequest.headers.get('content-type') === 'text/plain;charset=UTF-8' && __surfaceRequest.body instanceof ReadableStream && __surfaceRequest.bodyUsed === true && __surfaceRequestText === 'payload'",
+      "baseline_supported": true
     },
     {
       "id": "network.fetch-cors-policy",
@@ -469,7 +480,7 @@
       "description": "Request exposes CORS, credentials and redirect policy modes",
       "setup": "globalThis.__corsRequest = new Request('/cors', { mode: 'cors', credentials: 'include', redirect: 'manual' }); globalThis.__noCorsRejected = false; try { new Request('/cors', { mode: 'no-cors', method: 'PUT' }); } catch (_) { __noCorsRejected = true; }",
       "probe": "__corsRequest.mode === 'cors' && __corsRequest.credentials === 'include' && __corsRequest.redirect === 'manual' && __noCorsRejected",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "network.xhr",
@@ -529,7 +540,7 @@
       "setup": "globalThis.__indexedDbSurfaceProbe = { done: false, value: '' }; const request = indexedDB.open('omoikane-surface-db', 1); request.onupgradeneeded = event => event.target.result.createObjectStore('items', { keyPath: 'id' }); request.onsuccess = event => { const tx = event.target.result.transaction('items', 'readwrite'); tx.objectStore('items').put({ id: 1, value: 'ok' }).onsuccess = () => { const read = event.target.result.transaction('items').objectStore('items').get(1); read.onsuccess = result => { __indexedDbSurfaceProbe.done = true; __indexedDbSurfaceProbe.value = result.target.result.value; }; }; };",
       "run_tasks": true,
       "probe": "typeof indexedDB === 'object' && typeof IDBDatabase === 'function' && __indexedDbSurfaceProbe.done === true && __indexedDbSurfaceProbe.value === 'ok'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "storage.cache-storage",
@@ -556,7 +567,7 @@
       "setup": "globalThis.__webLocksSurface = { done: false, ok: false }; navigator.locks.request('surface-lock', lock => lock.name + ':' + lock.mode).then(async value => { const state = await navigator.locks.query(); __webLocksSurface = { done: true, ok: value === 'surface-lock:exclusive' && state.held.length === 0 && state.pending.length === 0 }; }, () => { __webLocksSurface.done = true; })",
       "run_tasks": true,
       "probe": "typeof Lock === 'function' && typeof LockManager === 'function' && navigator.locks instanceof LockManager && navigator.locks === navigator.locks && __webLocksSurface.done && __webLocksSurface.ok",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "workers.dedicated-worker",
@@ -572,7 +583,7 @@
       "setup": "globalThis.__sharedWorkerSurface = { done: false }; const source = encodeURIComponent('onconnect = event => { const port = event.ports[0]; port.onmessage = message => port.postMessage(message.data); };'); __sharedWorkerSurface.worker = new SharedWorker('data:text/javascript,' + source, { name: 'omoikane-surface-shared-worker' }); __sharedWorkerSurface.worker.port.onmessage = event => { __sharedWorkerSurface.done = event.data === 'ok'; }; __sharedWorkerSurface.worker.port.postMessage('ok')",
       "run_tasks": true,
       "probe": "typeof SharedWorker === 'function' && typeof __sharedWorkerSurface.worker.port.postMessage === 'function' && __sharedWorkerSurface.done === true",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "workers.service-worker",
@@ -581,7 +592,7 @@
       "setup": "globalThis.__serviceWorkerSurface = { done: false }; navigator.serviceWorker.register('/surface-worker.js', { scope: '/surface/' }).then(registration => navigator.serviceWorker.getRegistration('/surface/page.html').then(found => { __serviceWorkerSurface.done = found === registration && registration.active && registration.active.state === 'activated'; }), () => { __serviceWorkerSurface.done = false; })",
       "run_tasks": true,
       "probe": "navigator.serviceWorker && typeof navigator.serviceWorker.register === 'function' && __serviceWorkerSurface.done === true",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "workers.worklet",
@@ -590,7 +601,7 @@
       "setup": "globalThis.__workletSurface = { done: false }; globalThis.__workletSurfaceSource = encodeURIComponent(\"registerWorklet('surface'); queueMicrotask(() => registerPaint('surface-paint', class {}));\"); __workletSurface.promise = CSS.paintWorklet.addModule('data:text/javascript,' + __workletSurfaceSource).then(() => { __workletSurface.done = CSS.paintWorklet instanceof Worklet && CSS.paintWorklet.moduleCount === 1 && CSS.paintWorklet.registeredNames.join(',') === 'surface,surface-paint'; }, () => { __workletSurface.done = false; });",
       "run_tasks": true,
       "probe": "typeof Worklet === 'function' && typeof WorkletGlobalScope === 'function' && CSS.paintWorklet instanceof Worklet && __workletSurface.done === true",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "messaging.message-channel",
@@ -611,7 +622,7 @@
       "area": "messaging",
       "description": "BroadcastChannel same-origin messaging is exposed",
       "probe": "typeof BroadcastChannel === 'function' && (() => { const channel = new BroadcastChannel('web-api-surface'); const supported = channel.name === 'web-api-surface' && typeof channel.postMessage === 'function' && typeof channel.close === 'function' && 'onmessage' in channel && 'onmessageerror' in channel; channel.close(); return supported; })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "data.url-search-params",
@@ -633,7 +644,7 @@
       "description": "Blob normalizes its type, concatenates parts, and slices with clamped offsets",
       "setup": "globalThis.__blobProbe = {}; const blob = new Blob(['ab', new Uint8Array([99]), new Blob(['d'])], { type: 'TEXT/Plain' }); Promise.all([blob.text(), blob.slice(-2).text(), blob.slice(1, 1e21).text(), new Response(blob).blob().then(round => round.type + ':' + round.size)]).then(([text, tail, rest, roundTrip]) => { __blobProbe.ok = blob.size === 4 && blob.type === 'text/plain' && text === 'abcd' && tail === 'cd' && rest === 'bcd' && roundTrip === 'text/plain:4'; })",
       "probe": "typeof Blob === 'function' && __blobProbe.ok === true",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "data.file-api",
@@ -642,7 +653,7 @@
       "run_tasks": true,
       "setup": "globalThis.__fileProbe = {}; const file = new File(['hi'], 'n.txt', { type: 'text/plain', lastModified: 7 }); const reader = new FileReader(); const events = []; for (const type of ['loadstart', 'progress', 'load', 'loadend']) reader.addEventListener(type, () => events.push(type)); reader.addEventListener('loadend', () => { __fileProbe.ok = file.name === 'n.txt' && file.lastModified === 7 && file instanceof Blob && events.join(',') === 'loadstart,progress,load,loadend' && reader.readyState === FileReader.DONE && reader.result === 'hi'; }); reader.readAsText(file)",
       "probe": "typeof File === 'function' && typeof FileReader === 'function' && __fileProbe.ok === true",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "data.object-url",
@@ -650,14 +661,14 @@
       "description": "URL.createObjectURL resolves through fetch and stops resolving after revoke",
       "setup": "globalThis.__objectUrlProbe = {}; const url = URL.createObjectURL(new Blob(['payload'], { type: 'text/plain' })); fetch(url).then(async response => { __objectUrlProbe.served = response.status === 200 && response.headers.get('content-type') === 'text/plain' && response.headers.get('content-length') === '7' && await response.text() === 'payload'; URL.revokeObjectURL(url); return fetch(url); }).then(() => { __objectUrlProbe.revoked = false; }, error => { __objectUrlProbe.revoked = error instanceof TypeError; })",
       "probe": "(() => { const minted = URL.createObjectURL(new Blob()); const shaped = /^blob:/.test(minted); URL.revokeObjectURL(minted); return shaped; })() && __objectUrlProbe.served === true && __objectUrlProbe.revoked === true",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "data.form-data",
       "area": "data",
       "description": "FormData exposes ordered string entry mutation and iteration",
       "probe": "typeof FormData === 'function' && (() => { const data = new FormData(); data.append('a', 'one'); data.append('a', 'two'); data.set('b', 'three'); return data.get('a') === 'one' && data.getAll('a').length === 2 && data.has('b') && Array.from(data).length === 3; })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "security.web-crypto",
@@ -665,7 +676,7 @@
       "description": "Web Crypto key lifecycle and HMAC operations are exposed",
       "setup": "globalThis.__cryptoSurface = { done: false }; (async () => { const key = await crypto.subtle.importKey('raw', new Uint8Array([1,2,3,4]), { name: 'HMAC', hash: 'SHA-256' }, true, ['sign','verify']); const signature = await crypto.subtle.sign('HMAC', key, new Uint8Array([9,8,7])); const verified = await crypto.subtle.verify('HMAC', key, signature, new Uint8Array([9,8,7])); const jwk = await crypto.subtle.exportKey('jwk', key); __cryptoSurface.done = key instanceof CryptoKey && key.type === 'secret' && key.algorithm.name === 'HMAC' && key.algorithm.hash.name === 'SHA-256' && key.usages.includes('sign') && verified && jwk.kty === 'oct'; })().catch(() => { __cryptoSurface.done = false; })",
       "probe": "typeof Crypto === 'function' && crypto instanceof Crypto && typeof crypto.getRandomValues === 'function' && typeof crypto.randomUUID === 'function' && crypto.subtle instanceof SubtleCrypto && typeof crypto.subtle.digest === 'function' && typeof CryptoKey === 'function' && typeof CryptoKeyPair === 'function' && typeof crypto.subtle.generateKey === 'function' && typeof crypto.subtle.importKey === 'function' && typeof crypto.subtle.exportKey === 'function' && typeof crypto.subtle.sign === 'function' && typeof crypto.subtle.verify === 'function' && __cryptoSurface.done === true",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "graphics.svg-dom",
@@ -693,7 +704,7 @@
       "area": "graphics",
       "description": "WebGL rendering contexts are exposed",
       "probe": "typeof WebGLRenderingContext === 'function'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "graphics.svg-image-element",
@@ -701,14 +712,14 @@
       "description": "SVG image elements expose their dedicated interface and animated geometry lengths",
       "setup": "globalThis.__svgImageProbe = document.createElementNS('http://www.w3.org/2000/svg', 'image'); __svgImageProbe.setAttribute('width', '12')",
       "probe": "typeof SVGImageElement === 'function' && typeof SVGAnimatedString === 'function' && __svgImageProbe instanceof SVGImageElement && __svgImageProbe instanceof SVGGraphicsElement && __svgImageProbe.width.baseVal.value === 12 && __svgImageProbe.href instanceof SVGAnimatedString",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "graphics.webgpu",
       "area": "graphics",
       "description": "WebGPU adapter entry point is exposed",
       "probe": "navigator.gpu && typeof navigator.gpu.requestAdapter === 'function'",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "media.html-media-element",
@@ -860,7 +871,7 @@
       "description": "VisualViewport exposes its interface contract and live default geometry",
       "setup": "globalThis.__visualViewportEvents = 0; visualViewport.addEventListener('resize', () => { __visualViewportEvents += 1; }); globalThis.__visualViewportSame = visualViewport === window.visualViewport && visualViewport.width === innerWidth && visualViewport.height === innerHeight && visualViewport.scale === 1",
       "probe": "__visualViewportSame && typeof VisualViewport === 'function' && visualViewport instanceof VisualViewport && visualViewport instanceof EventTarget && visualViewport.toString() === '[object VisualViewport]' && visualViewport.offsetLeft === 0 && visualViewport.offsetTop === 0 && visualViewport.pageLeft === scrollX && visualViewport.pageTop === scrollY && __visualViewportEvents === 0 && (() => { try { new VisualViewport(); return false; } catch (error) { return error instanceof TypeError; } })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "dom.focus-chain",
@@ -875,14 +886,14 @@
       "area": "dom",
       "description": "XPath 1.0 evaluates namespaced paths and exposes typed DOM XPath results",
       "probe": "(() => { try { const doc = new DOMParser().parseFromString('<r xmlns=\"urn:r\"><n v=\"2\"/><n v=\"3\"/></r>', 'application/xml'); const resolver = prefix => prefix === 'r' ? 'urn:r' : null; const expression = doc.createExpression('sum(/r:r/r:n/@v)', resolver); const result = expression.evaluate(doc, XPathResult.NUMBER_TYPE, null); return typeof XPathEvaluator === 'function' && result.numberValue === 5 && new XPathEvaluator().createNSResolver(doc.documentElement) === doc.documentElement; } catch (_) { return false; } })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "dom.xml-serializer",
       "area": "dom",
       "description": "XMLSerializer preserves namespaces, escaping, CDATA sections, and required-argument errors across an XML round trip",
       "probe": "(() => { try { const parser = new DOMParser(); const serializer = new XMLSerializer(); const parsed = parser.parseFromString('<root xmlns=\"urn:root\"><p:item xmlns:p=\"urn:item\" value=\"&quot;\">before&lt;<![CDATA[<raw>&data]]></p:item></root>', 'application/xml'); const serialized = serializer.serializeToString(parsed); const reparsed = parser.parseFromString(serialized, 'application/xml'); const item = reparsed.documentElement.firstElementChild; let missingArgument = false; try { serializer.serializeToString(); } catch (error) { missingArgument = error instanceof TypeError; } return typeof XMLSerializer === 'function' && XMLSerializer.prototype.serializeToString.length === 1 && reparsed.documentElement.namespaceURI === 'urn:root' && item.namespaceURI === 'urn:item' && item.getAttribute('value') === '\"' && item.childNodes.length === 2 && item.childNodes[1] instanceof CDATASection && item.childNodes[1].data === '<raw>&data' && missingArgument; } catch (_) { return false; } })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.text-overflow-ellipsis",
@@ -906,7 +917,7 @@
       "description": "Content visibility validates, computes intrinsic placeholders, skips offscreen text, and re-enters for focus",
       "setup": "globalThis.__cvSpacer = document.createElement('div'); __cvSpacer.style.height = '2000px'; globalThis.__cv = document.createElement('section'); __cv.style.cssText = 'content-visibility:auto;contain-intrinsic-size:auto 24px'; globalThis.__cvChild = document.createElement('span'); __cvChild.tabIndex = 0; __cvChild.textContent = 'visible when relevant'; __cv.appendChild(__cvChild); document.body.appendChild(__cvSpacer); document.body.appendChild(__cv)",
       "probe": "CSS.supports('content-visibility', 'auto') && CSS.supports('contain-intrinsic-size', 'auto 24px') && !CSS.supports('contain-intrinsic-size', 'auto') && getComputedStyle(__cv).contentVisibility === 'auto' && getComputedStyle(__cv).containIntrinsicSize === 'auto 24px' && __cv.innerText === '' && (() => { __cvChild.focus({preventScroll:true}); return document.activeElement === __cvChild && __cv.innerText === 'visible when relevant'; })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.multi-column-layout",
@@ -914,7 +925,7 @@
       "description": "Multi-column properties compute and distribute fixed-height flow content across columns",
       "setup": "globalThis.__multicol = document.createElement('div'); __multicol.style.cssText = 'width:220px;height:40px;columns:100px 2;column-gap:20px;column-fill:auto;column-rule:4px solid red'; globalThis.__multicolChildren = []; for (let i = 0; i < 3; i++) { const child = document.createElement('div'); child.style.height = '20px'; __multicol.appendChild(child); __multicolChildren.push(child); } document.body.appendChild(__multicol)",
       "probe": "(() => { const style = getComputedStyle(__multicol); const box = __multicol.getBoundingClientRect(); const rects = __multicolChildren.map(child => child.getBoundingClientRect()); return CSS.supports('columns', '100px 2') && CSS.supports('column-fill', 'auto') && CSS.supports('column-rule', '4px solid red') && !CSS.supports('column-count', '0') && style.columnCount === '2' && style.columnWidth === '100px' && style.columnGap === '20px' && style.columnRuleWidth === '4px' && rects[0].left === box.left && rects[1].left === box.left && rects[2].left === box.left + 120 && rects[2].top === box.top; })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "css.generated-counters",
@@ -922,7 +933,7 @@
       "description": "CSS counter properties validate, compute, and ignore invalid CSSOM assignments",
       "setup": "globalThis.__counterTarget = document.createElement('span'); __counterTarget.style.counterReset = 'chapter 2'; __counterTarget.style.counterIncrement = 'chapter'; document.body.appendChild(__counterTarget)",
       "probe": "(() => { __counterTarget.style.counterIncrement = 'chapter 3'; __counterTarget.style.counterIncrement = 'none chapter'; const style = getComputedStyle(__counterTarget); return CSS.supports('counter-reset', 'chapter 2') && CSS.supports('counter-increment', 'chapter') && !CSS.supports('counter-reset', 'none chapter') && style.counterReset === 'chapter 2' && style.counterIncrement === 'chapter 3' && __counterTarget.style.counterIncrement === 'chapter 3'; })()",
-      "baseline_supported": false
+      "baseline_supported": true
     },
     {
       "id": "network.text-streams",
@@ -938,7 +949,7 @@
       "description": "shape-outside basic shapes and shape-margin validate and expose canonical computed values",
       "setup": "globalThis.__shapeFloat = document.createElement('div'); __shapeFloat.style.cssText = 'float:left;width:100px;height:100px;shape-outside:padding-box circle(40% at 25% 50%);shape-margin:12.5%'; document.body.appendChild(__shapeFloat)",
       "probe": "(() => { const style = getComputedStyle(__shapeFloat); return CSS.supports('shape-outside', 'inset(10%) border-box') && CSS.supports('shape-outside', 'polygon(0 0,100% 0,0 100%)') && !CSS.supports('shape-outside', 'ellipse(20% 40%)') && !CSS.supports('shape-margin', '-1px') && style.shapeOutside === 'circle(40% at 25% 50%) padding-box' && style.shapeMargin === '12.5%'; })()",
-      "baseline_supported": false
+      "baseline_supported": true
     }
   ]
 }
