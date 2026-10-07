@@ -336,6 +336,145 @@ fn source_iframe_defaults_to_self_and_sandbox_blocks_forms_or_top_navigation() {
 }
 
 #[test]
+fn nested_form_targets_preserve_sandbox_permissions() {
+    for (sandbox, target, destination) in [
+        ("", "_self", "source"),
+        ("", "_parent", "top"),
+        ("", "_top", "top"),
+        ("", "_blank", "blocked"),
+        ("", "missing", "blocked"),
+        ("", "sibling", "sibling"),
+        ("allow-same-origin allow-forms", "_self", "source"),
+        ("allow-same-origin allow-forms", "source", "source"),
+        ("allow-same-origin allow-forms", "descendant", "descendant"),
+        ("allow-same-origin allow-forms", "sibling", "blocked"),
+        ("allow-same-origin allow-forms", "_parent", "blocked"),
+        ("allow-same-origin allow-forms", "_top", "blocked"),
+        ("allow-same-origin", "descendant", "blocked"),
+        (
+            "allow-same-origin allow-forms allow-top-navigation",
+            "_top",
+            "top",
+        ),
+        (
+            "allow-same-origin allow-forms allow-top-navigation",
+            "sibling",
+            "blocked",
+        ),
+    ] {
+        let server = Server::start();
+        let mut runtime = make_runtime(
+            &server,
+            "<iframe name=source></iframe><iframe name=sibling srcdoc='<p>initial</p>'></iframe>",
+        );
+        let child = format!(
+            "<form action=/receive target='{target}'></form><iframe name=descendant srcdoc='<p>initial</p>'></iframe>"
+        );
+        runtime.eval(&format!(
+            "globalThis.source=document.querySelector('iframe'); source.setAttribute('sandbox',{}); source.srcdoc={}",
+            serde_json::to_string(sandbox).unwrap(), serde_json::to_string(&child).unwrap()
+        )).unwrap();
+        // Empty sandbox means unrestricted, rather than an active sandbox with no tokens.
+        if sandbox.is_empty() {
+            runtime.eval("source.removeAttribute('sandbox')").unwrap();
+        }
+        runtime.run_until_idle().unwrap();
+        runtime
+            .eval("source.contentDocument.querySelector('form').submit()")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        let navigations = runtime.take_navigation_requests();
+        if destination == "top" {
+            assert_eq!(navigations.len(), 1, "{sandbox} {target}");
+            assert!(server.requests.try_recv().is_err());
+        } else {
+            assert!(navigations.is_empty(), "{sandbox} {target}");
+            if destination == "blocked" {
+                assert!(server.requests.try_recv().is_err());
+                check(
+                    &mut runtime,
+                    "source.contentDocument.querySelector('form') !== null",
+                );
+            } else {
+                assert_eq!(
+                    server
+                        .requests
+                        .recv_timeout(Duration::from_secs(3))
+                        .unwrap()
+                        .line
+                        .trim(),
+                    "GET /receive HTTP/1.1"
+                );
+                let document = match destination {
+                    "source" => "source.contentDocument",
+                    "sibling" => "document.querySelector('iframe[name=sibling]').contentDocument",
+                    "descendant" => {
+                        "source.contentDocument.querySelector('iframe').contentDocument"
+                    }
+                    _ => unreachable!(),
+                };
+                check(
+                    &mut runtime,
+                    &format!("{document}.querySelector('#result') !== null"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn sandboxed_named_links_allow_self_and_descendants_but_not_siblings() {
+    for (target, allowed) in [("source", true), ("descendant", true), ("sibling", false)] {
+        let server = Server::start();
+        let mut runtime = make_runtime(
+            &server,
+            "<iframe name=source sandbox='allow-same-origin allow-scripts allow-forms allow-top-navigation'></iframe><iframe name=sibling srcdoc='<p>initial</p>'></iframe>",
+        );
+        let child = format!(
+            "<a href=/receive target='{target}'>go</a><iframe name=descendant srcdoc='<p>initial</p>'></iframe>"
+        );
+        runtime
+            .eval(&format!(
+                "globalThis.source=document.querySelector('iframe'); source.srcdoc={}",
+                serde_json::to_string(&child).unwrap()
+            ))
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime
+            .eval("source.contentWindow.eval('document.querySelector(\"a\").click()')")
+            .unwrap_or_else(|error| panic!("target={target}: {error}"));
+        runtime.run_until_idle().unwrap();
+        assert!(runtime.take_navigation_requests().is_empty());
+        if allowed {
+            assert_eq!(
+                server
+                    .requests
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap()
+                    .line
+                    .trim(),
+                "GET /receive HTTP/1.1"
+            );
+            let document = if target == "source" {
+                "source.contentDocument"
+            } else {
+                "source.contentDocument.querySelector('iframe').contentDocument"
+            };
+            check(
+                &mut runtime,
+                &format!("{document}.querySelector('#result') !== null"),
+            );
+        } else {
+            assert!(server.requests.try_recv().is_err());
+            check(
+                &mut runtime,
+                "source.contentDocument.querySelector('a') !== null",
+            );
+        }
+    }
+}
+
+#[test]
 fn cross_origin_submission_preserves_proxy_but_blocks_document_access() {
     let source = Server::start();
     let destination = Server::start();

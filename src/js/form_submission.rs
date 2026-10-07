@@ -16,6 +16,13 @@ pub(super) enum NamedLinkTarget {
     Frame(NodeHandle),
 }
 
+/// Resolution does not enqueue navigation or alter pending resource loads.
+enum FormTarget {
+    TopLevel,
+    Frame(NodeHandle),
+    Blocked,
+}
+
 impl HostState {
     pub(super) fn refresh_iframe_context_name(&mut self, frame: &NodeHandle) {
         if self.iframe_context_ids.contains_key(&frame.identity()) {
@@ -43,7 +50,7 @@ impl HostState {
         })
     }
 
-    fn named_form_target(&self, root: &NodeHandle, name: &str) -> Option<NodeHandle> {
+    fn named_browsing_context_frame(&self, root: &NodeHandle, name: &str) -> Option<NodeHandle> {
         if matches!(root.tag_name().as_deref(), Some("iframe" | "frame")) {
             let current_name = self
                 .browsing_context_names
@@ -54,19 +61,34 @@ impl HostState {
                 return Some(root.clone());
             }
             if let Some(frame) = self.iframe_documents.get(&root.identity()) {
-                if let Some(found) = self.named_form_target(&frame.document, name) {
+                if let Some(found) = self.named_browsing_context_frame(&frame.document, name) {
                     return Some(found);
                 }
             }
         }
         if let Some(shadow) = root.shadow_root() {
-            if let Some(found) = self.named_form_target(&shadow, name) {
+            if let Some(found) = self.named_browsing_context_frame(&shadow, name) {
                 return Some(found);
             }
         }
         root.child_nodes()
             .iter()
-            .find_map(|child| self.named_form_target(child, name))
+            .find_map(|child| self.named_browsing_context_frame(child, name))
+    }
+
+    /// Whether the target frame belongs to a descendant context of `source`.
+    fn frame_is_descendant_of_document(&self, frame: &NodeHandle, source: &NodeHandle) -> bool {
+        let mut ancestor = owner_document_for_node(frame);
+        while let Some(document) = ancestor {
+            if document == *source {
+                return true;
+            }
+            ancestor = self
+                .frame_for_document(document.identity())
+                .as_ref()
+                .and_then(owner_document_for_node);
+        }
+        false
     }
 
     pub(super) fn resolve_named_link_target(
@@ -83,7 +105,7 @@ impl HostState {
         let Some(source) = owner_document_for_node(link) else {
             return NamedLinkTarget::Blocked;
         };
-        let Some(frame) = self.named_form_target(&self.document, target) else {
+        let Some(frame) = self.named_browsing_context_frame(&self.document, target) else {
             return NamedLinkTarget::NotFound;
         };
         if !self.node_is_in_active_document(&frame) {
@@ -95,26 +117,18 @@ impl HostState {
             .get(&source.identity())
             .copied()
             .unwrap_or_default();
-        if sandbox.active && source_frame.as_ref() != Some(&frame) {
-            let mut ancestor = owner_document_for_node(&frame);
-            let mut descendant = false;
-            while let Some(document) = ancestor {
-                if document == source {
-                    descendant = true;
-                    break;
-                }
-                ancestor = self
-                    .frame_for_document(document.identity())
-                    .as_ref()
-                    .and_then(owner_document_for_node);
-            }
-            if !descendant {
-                return NamedLinkTarget::Blocked;
-            }
+        if sandbox.active
+            && source_frame.as_ref() != Some(&frame)
+            && !self.frame_is_descendant_of_document(&frame, &source)
+        {
+            return NamedLinkTarget::Blocked;
         }
         NamedLinkTarget::Frame(frame)
     }
 
+    /// Queues an allowed submission. `Some(id)` identifies a frame whose
+    /// navigation callback the caller must dispatch. `None` means either a
+    /// blocked/unsupported target or successfully queued top-level navigation.
     pub(super) fn queue_form_submission(
         &mut self,
         form: &NodeHandle,
@@ -125,17 +139,17 @@ impl HostState {
             return Ok(None);
         }
         let source = owner_document_for_node(form).unwrap_or_else(|| self.document.clone());
-        let sandbox = self
-            .document_sandbox
-            .get(&source.identity())
-            .copied()
-            .unwrap_or_default();
-        if sandbox.active && !sandbox.allow_forms {
+        let destination = self.resolve_form_target(&source, target);
+        if !self.form_target_is_allowed(&source, &destination) {
             return Ok(None);
         }
+        Ok(self.deliver_form_submission(&source, destination, request))
+    }
+
+    fn resolve_form_target(&self, source: &NodeHandle, target: &str) -> FormTarget {
         let source_frame = self.frame_for_document(source.identity());
         let target_frame = if target.is_empty() || target.eq_ignore_ascii_case("_self") {
-            source_frame.clone()
+            source_frame
         } else if target.eq_ignore_ascii_case("_top") {
             None
         } else if target.eq_ignore_ascii_case("_parent") {
@@ -144,13 +158,13 @@ impl HostState {
                 .and_then(owner_document_for_node)
                 .and_then(|parent| self.frame_for_document(parent.identity()))
         } else if target.eq_ignore_ascii_case("_blank") {
-            return Ok(None);
+            return FormTarget::Blocked;
         } else if self
             .context_key_for_document(source.identity())
             .and_then(|key| self.browsing_context_names.get(&key))
             .is_some_and(|name| name == target)
         {
-            source_frame.clone()
+            source_frame
         } else if self
             .browsing_context_names
             .get(&0)
@@ -158,39 +172,47 @@ impl HostState {
         {
             None
         } else {
-            // Opening an auxiliary window needs a host window-creation API.
-            // Do not silently replace the current top-level page instead.
-            let found = (!target.eq_ignore_ascii_case("_blank"))
-                .then(|| self.named_form_target(&self.document, target))
-                .flatten();
-            let Some(found) = found else {
-                // This host has no auxiliary-window creation API. Treat a
-                // request for a new context as a blocked popup, retaining the
-                // source document and its current navigation.
-                return Ok(None);
+            // This delivery path cannot create an auxiliary host window.
+            let Some(frame) = self.named_browsing_context_frame(&self.document, target) else {
+                return FormTarget::Blocked;
             };
-            Some(found)
+            Some(frame)
         };
-        if sandbox.active && target_frame != source_frame {
-            // Sandboxed documents may navigate their descendants, but not
-            // sibling contexts or ancestors without the top-navigation token.
-            let mut ancestor = target_frame.as_ref().and_then(owner_document_for_node);
-            let mut descendant = false;
-            while let Some(document) = ancestor {
-                if document == source {
-                    descendant = true;
-                    break;
-                }
-                ancestor = self
-                    .frame_for_document(document.identity())
-                    .as_ref()
-                    .and_then(owner_document_for_node);
+        target_frame.map_or(FormTarget::TopLevel, FormTarget::Frame)
+    }
+
+    /// Form permission is separate from the named-link sandbox policy.
+    fn form_target_is_allowed(&self, source: &NodeHandle, target: &FormTarget) -> bool {
+        let sandbox = self
+            .document_sandbox
+            .get(&source.identity())
+            .copied()
+            .unwrap_or_default();
+        if sandbox.active && !sandbox.allow_forms {
+            return false;
+        }
+        let source_frame = self.frame_for_document(source.identity());
+        match target {
+            FormTarget::Blocked => false,
+            FormTarget::TopLevel => {
+                !sandbox.active || source_frame.is_none() || sandbox.allow_top_navigation
             }
-            if !descendant && !(target_frame.is_none() && sandbox.allow_top_navigation) {
-                return Ok(None);
+            FormTarget::Frame(frame) => {
+                !sandbox.active
+                    || source_frame.as_ref() == Some(frame)
+                    || self.frame_is_descendant_of_document(frame, source)
             }
         }
-        if let Some(frame) = target_frame {
+    }
+
+    /// Updates pending loads and dispatches only a previously permitted target.
+    fn deliver_form_submission(
+        &mut self,
+        source: &NodeHandle,
+        target: FormTarget,
+        request: Submission,
+    ) -> Option<usize> {
+        if let FormTarget::Frame(frame) = target {
             // A planned navigation supersedes an initial about:blank load or
             // an earlier submission that has not started yet.
             self.event_loop
@@ -207,8 +229,8 @@ impl HostState {
                 },
                 Some(source.identity()),
             );
-            return Ok(Some(frame_id));
-        } else {
+            return Some(frame_id);
+        } else if matches!(target, FormTarget::TopLevel) {
             let visit_source = self.visit_source_for_document(source.identity());
             self.event_loop.enqueue_navigation_from_source(
                 NavigationRequest::FormSubmit {
@@ -220,7 +242,7 @@ impl HostState {
                 visit_source,
             );
         }
-        Ok(None)
+        None
     }
 
     /// Loads a form submission's response into a child browsing context.
