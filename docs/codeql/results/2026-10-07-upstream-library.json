@@ -1,0 +1,121 @@
+{
+  "issue": 1266,
+  "date": "2026-10-07",
+  "upstream_repository": "https://github.com/github/codeql",
+  "upstream_commit": "36994cdec4ffab77993ac386c85cf551e28f552f",
+  "cli": "2.27.1",
+  "library": "0.2.24-dev",
+  "release_status": "unreleased development sources; extractor unchanged",
+  "dependencies": {
+    "codeql/rust-all": {
+      "version": "0.2.24-dev",
+      "manifest_sha256": "28c917dc65f56178930037dae67b3f9fdbb0a7059ddd6a07817c993f74c9a268"
+    },
+    "codeql/concepts": {
+      "version": "0.0.34-dev",
+      "manifest_sha256": "30c7d7e31d00138a5c78de4544b83a80a17f5e7b50ce0c894029ace8a2dc8f8b"
+    },
+    "codeql/controlflow": {
+      "version": "2.0.44-dev",
+      "manifest_sha256": "598b8cca939ac9e1b50a642ec7d9b783bf618ed668bb74e326a34be9dd755650"
+    },
+    "codeql/dataflow": {
+      "version": "2.1.16-dev",
+      "manifest_sha256": "57f329582ec858f0910ce3b4b5222fe9cf19271579aea0621bacdf5e860510f0"
+    },
+    "codeql/mad": {
+      "version": "1.0.60-dev",
+      "manifest_sha256": "64512ce307a6c9a79363d4a3b383559f0a80d3d22919871166cc4b92879bcf62"
+    },
+    "codeql/namebinding": {
+      "version": "0.0.9-dev",
+      "manifest_sha256": "8a257d15a5f694a46bf1ecb8452a954c61b5219dbbddd3f2be08674df6b480bf"
+    },
+    "codeql/regex": {
+      "version": "1.0.60-dev",
+      "manifest_sha256": "6340fc89a0531a3d87d4791672b66d6a08eb50808e175d48acc19ea062cef1d4"
+    },
+    "codeql/ssa": {
+      "version": "2.0.36-dev",
+      "manifest_sha256": "83d21df1bf408505a8182bcf978d64a4b158dcaf2a06d37662fde26e58475fa4"
+    },
+    "codeql/threat-models": {
+      "version": "1.0.60-dev",
+      "manifest_sha256": "0b683a7db99259cfc26b66ef1b9eb35189ec918d86b843c03f2c48d14e8e18f4"
+    },
+    "codeql/tutorial": {
+      "version": "1.0.60-dev",
+      "manifest_sha256": "76ddfb5725bb0199043347824d3dee496c49c91a2318b053ad1f1cec7a7469d2"
+    },
+    "codeql/typeinference": {
+      "version": "0.0.41-dev",
+      "manifest_sha256": "c0ad8f674919e60ddb5d1c465d04cbf7356ab84cfbd5598c7552193e305957d6"
+    },
+    "codeql/typetracking": {
+      "version": "2.0.44-dev",
+      "manifest_sha256": "e4eba2cba73be487521420bea92fa1baf1f6272c4df0bd8b8cd1ecea13b2374e"
+    },
+    "codeql/util": {
+      "version": "2.0.47-dev",
+      "manifest_sha256": "39dfa9410c911bc7359f568eef3b379a1012a12b6211da3e69f5203c3577f635"
+    }
+  },
+  "source_resolution_verified": true,
+  "library_sources_modified": false,
+  "workspace_adaptation": "provide rust/ql/examples/issue1266/qlpack.yml; upstream library sources unchanged",
+  "measured_main": {
+    "sha": "8bb183dad528d420db2146f1996d2f7ad38a84b8",
+    "run_id": 37593834964,
+    "rust_job_id": 112701543023,
+    "zip_sha256": "2d68924af0d891f5fd6b0e6c2ea552f1e97696480850fa2150aa7abda4ffc1cb",
+    "zip_bytes": 349389677,
+    "tracked_source_hashes": {
+      "engine/boa/core/engine/src/jit/arithmetic.rs": "5d4424ccf2c922c7a5608bf71bb5bea4a0b22de4e2bac7f10740d5ad065a04a7",
+      "engine/boa/core/engine/src/jit/runtime_call.rs": "d8d6878d70bde2f8152efd532a16e73acb31b5491f2314741c485884689ff526",
+      "engine/boa/core/engine/src/jit/mod.rs": "0161e9aed0908e145d5dc1bab0c3aa8069006a85acfffb5b662fd2a632e5744b",
+      "engine/boa/core/engine/src/module/loader/mod.rs": "747de8fc6f7a6c6d8bd0a703be07a5224e751e06a5ca1ba776cc20cbadaaa92b",
+      "engine/boa/tests/macros/tests/embedded.rs": "3d31256ae4286fa9a059becaad7f0a405970f1d26eed27db7b42d36b3160a14d",
+      "tests/jit_code_memory.rs": "5b2ff18af6bb18381628f8e942d3e16ed4d491e21cbc70b0bdc404bae4f6e9f6"
+    },
+    "source_archive_hashes_verified": true
+  },
+  "prior_main_comparison": {
+    "sha": "903227c78811cdc22dbf473845d17b72ce116cf8",
+    "diagnostics": 23,
+    "macro_rows": 593,
+    "macro_ast_zero": 15,
+    "both_queries_identical_to_stable": true
+  },
+  "latest_main_comparison": {
+    "stable_library": "0.2.22",
+    "development_library": "0.2.24-dev",
+    "all_diagnostics_identical": true,
+    "all_tracked_macro_rows_identical": true,
+    "diagnostics": {
+      "warning": 24,
+      "info": 5,
+      "error": 0,
+      "original_warning": 18,
+      "standalone_repro_warning": 6
+    },
+    "macro_rows": 593,
+    "AST_zero": 15,
+    "raw_sha256": {
+      "main-8bb-stable-diagnostics.csv": "7169eed6464b150a6d6bcc3d1eb70ea83199e3f9461b9f5bc5d9ba6d2e2a7487",
+      "main-8bb-stable-macros.csv": "2e7a25a3ea8065e6ee0af0e9a3207f3ed83164b2111d291ecbbd7522f5f90c4a",
+      "main-8bb-dev-diagnostics.csv": "7169eed6464b150a6d6bcc3d1eb70ea83199e3f9461b9f5bc5d9ba6d2e2a7487",
+      "main-8bb-dev-macros.csv": "2e7a25a3ea8065e6ee0af0e9a3207f3ed83164b2111d291ecbbd7522f5f90c4a"
+    }
+  },
+  "changed_QL_library_sources_count_vs_stable": 320,
+  "changed_QL_library_sources_examples": [
+    "codeql/files/FileSystem.qll",
+    "codeql/rust/controlflow/internal/generated/CfgNodes.qll",
+    "codeql/rust/dataflow/internal/DataFlowImpl.qll",
+    "codeql/rust/dataflow/internal/Node.qll",
+    "codeql/rust/elements.qll",
+    "codeql/rust/elements/ArrayExpr.qll",
+    "codeql/rust/elements/AsmClobberAbi.qll",
+    "codeql/rust/elements/AsmExpr.qll"
+  ]
+}

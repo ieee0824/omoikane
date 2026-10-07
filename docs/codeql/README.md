@@ -140,7 +140,7 @@ ARM64専用テストの`panic_2021`1件が合算されていた。`jit/mod.rs`�
 `offset_of!`の通常式との対照、およびARM64の文単位cfgと関数cfgの対照を含む。
 警告を出す再現ソースはアプリ本体とは別に分類して記録する。
 
-最新main `903227c7`の[run37587266992](https://github.com/ieee0824/omoikane/actions/runs/37587266992)
+初回に測定したmain `903227c7`の[run37587266992](https://github.com/ieee0824/omoikane/actions/runs/37587266992)
 が成功し、取得DBのSHA・CLI2.27.1・build-mode:noneを照合した。
 [新しいDBのハッシュと比較結果](results/2026-10-07-main-903227c7.json)に記録したとおり、
 全23診断と対象593マクロ行は上の基準と一致し、15位置の内側AST欠落が残る。
@@ -161,7 +161,66 @@ ARM64 hostで再現crateの4テスト・locked build、および
 workspace外の`engine/boa/tests/src/lib.rs`診断は別分類のまま保持する。
 
 この時点の最新CLIは2.27.1、最新Rust libraryは0.2.22で基準と同じ。
-更新版による改善確認は未完了であり、Issue #1266を継続する。
+公開済み更新版での比較はできないため、以下では上流の開発版を明示して比較する。
+
+## 開発版ライブラリとembeddedの転送修正
+
+公開済みの`rust-all`は0.2.22。0.2.23を指定した取得も、公開版が存在しないため
+失敗した。一方、公式`github/codeql`のcommit
+`36994cdec4ffab77993ac386c85cf551e28f552f`には`rust-all 0.2.24-dev`がある。
+この開発版と同commitのshared libraryを使い、CLI 2.27.1で照会した。
+**extractorの更新ではなく、未公開ライブラリの比較**である。
+[版・依存・main DBの記録](results/2026-10-07-upstream-library.json)に
+ソースcommit、manifest hash、解決された依存を保存した。
+開発版ライブラリのソースは変更していない。
+
+測定対象は[#1268](https://github.com/ieee0824/omoikane/pull/1268)マージ後のmain
+`8bb183dad528d420db2146f1996d2f7ad38a84b8`。
+[run37593834964](https://github.com/ieee0824/omoikane/actions/runs/37593834964)とRust jobは
+完了成功し、取得ZIP・DB metadata・SHAを照合した。
+安定版での診断は従来の23件と、追加した独立再現crateのwarning 6件を合わせた29件。
+従来6ファイルの593マクロ結果は変わらず、15位置のAST欠落が残る。
+再現crateの診断をアプリ本体の悪化や改善として数えない。
+このDBの[全診断](results/2026-10-07-main-8bb-diagnostics.csv)と
+[対象マクロ](results/2026-10-07-main-8bb-macros.csv)は、安定版0.2.22と開発版0.2.24-devで
+それぞれ順序を無視して一致した。解決先は上流checkoutのライブラリであり、
+依存版の表示だけを変えた比較ではない。
+
+embeddedの原因は、proc macroの解析前に入力を観測する隔離実験で確認した。
+CodeQLは`$x:expr`で転送された`compress = "none"` / `"lz4"`を
+`Group { delimiter: Parenthesis, ... }`として渡す。
+`Argument::parse`は文字列か識別子を要求するため、`expected identifier`で失敗する。
+`CARGO_MANIFEST_DIR`からfixtureを読む前に失敗しており、ディレクトリ不足が
+原因という推測は採用しない。
+[実際の入力CSV](results/2026-10-07-embedded-input.csv)には実行値の2行を抽出し、source rootを正規化した。
+[観測用patch](results/2026-10-07-embedded-input-probe.patch)は診断worktreeでの
+`build-mode:none`専用で、実行可能なModuleLoaderを返さない。
+観測後にproc macroを元に戻し、製品ソースにはこの観測処理を入れていない。
+
+`embed_module!`は`tt`として元のトークン列を渡し、引数の検証は従来のproc macroに
+任せる。元fixture、圧縮処理、ファイルI/O、ABI assertion、cfgは保持する。
+修正後の内側マクロは無圧縮で378 node、LZ4で375 nodeとなった。
+その他の対象マクロの結果は変更前と一致する。
+[変更前後の集計とソースhash](results/2026-10-07-embedded-fix.json)、
+[変更後の全診断](results/2026-10-07-embedded-fixed-diagnostics.csv)も保持した。
+本体側warningは18から14へ減り、info 5・error 0は不変だった。
+この隔離DBは`903227c7`へ同じ2行修正を適用したもので、独立再現crateの6診断を含まない。
+
+[EmbeddedExpansion.ql](queries/EmbeddedExpansion.ql)で、内側の展開が配列であり、
+4つのfile-entry tupleと4つのfixture pathを含み、`compile_error`を含まないことを
+確認する。単なる外側AST数の増加では判定しない。
+[変更前](results/2026-10-07-embedded-baseline-expansion.csv)は両方とも
+`array=0, tuples=0, paths=0, compile_error=1`、
+[変更後](results/2026-10-07-embedded-tt-forwarding-expansion.csv)は両方とも
+`array=1, tuples=4, paths=4, compile_error=0`。
+既存の`simple`と`compressed_lz4`は転送変更後も成功した。
+型推論・dataflowや他の13位置の完全解析を保証する結果ではない。
+修正候補で`cargo test --locked`は3,433成功・15 ignored、`cargo build --locked`も成功。
+`scripts/check-jit-native.sh`の8契約バイナリと16組のnative/interpreter比較が成功した。
+元のengineソース保持・path依存、QL packと書式、Rust書式、差分も確認した。
+
+回帰確認には同じクエリを変更前後のDBへ直列に実行し、CSVの行67・77がそれぞれ
+`1,4,4,0`となることを確認する。観測用patchを適用したDBをこの確認に使わない。
 
 ### 手順
 

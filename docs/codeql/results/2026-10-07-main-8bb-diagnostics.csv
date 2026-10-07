@@ -1,0 +1,30 @@
+name,beginLine,beginColumn,severity,tag,message,fullMessage
+docs/codeql/repros/macro-gaps/src/lib.rs,12,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+docs/codeql/repros/macro-gaps/src/lib.rs,13,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+docs/codeql/repros/macro-gaps/src/lib.rs,21,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+docs/codeql/repros/macro-gaps/src/lib.rs,31,14,30,parse_error,macro expansion failed for '$crate::__Fn',macro expansion failed for '$crate::__Fn'
+docs/codeql/repros/macro-gaps/src/lib.rs,41,14,30,parse_error,macro expansion failed for '$crate::__Fn',macro expansion failed for '$crate::__Fn'
+docs/codeql/repros/macro-gaps/src/lib.rs,88,9,30,parse_error,macro expansion failed for '$crate::panic::panic_2021',macro expansion failed for '$crate::panic::panic_2021'
+engine/boa/tests/macros/tests/embedded.rs,67,33,30,parse_error,expected expression,expected expression
+engine/boa/tests/macros/tests/embedded.rs,67,33,30,parse_error,macro expansion failed: the macro '::core::compile_error' expands to ERROR but a Expr was expected,macro expansion failed: the macro '::core::compile_error' expands to ERROR but a Expr was expected
+engine/boa/tests/macros/tests/embedded.rs,77,33,30,parse_error,expected expression,expected expression
+engine/boa/tests/macros/tests/embedded.rs,77,33,30,parse_error,macro expansion failed: the macro '::core::compile_error' expands to ERROR but a Expr was expected,macro expansion failed: the macro '::core::compile_error' expands to ERROR but a Expr was expected
+tests/jit_code_memory.rs,53,5,30,parse_error,macro expansion failed for '$crate::panic::panic_2021',macro expansion failed for '$crate::panic::panic_2021'
+engine/boa/tests/src/lib.rs,1,1,30,semantics,semantic analyzer unavailable (not included in files loaded from manifest),semantic analyzer unavailable (not included in files loaded from manifest): macro expansion will be skipped.
+engine/boa/core/engine/src/jit/arithmetic.rs,64,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+engine/boa/core/engine/src/jit/arithmetic.rs,69,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+engine/boa/core/engine/src/jit/arithmetic.rs,74,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+engine/boa/core/engine/src/jit/arithmetic.rs,79,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+engine/boa/core/engine/src/jit/arithmetic.rs,84,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+engine/boa/core/engine/src/jit/arithmetic.rs,89,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+engine/boa/core/engine/src/jit/arithmetic.rs,94,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+engine/boa/core/engine/src/jit/arithmetic.rs,2195,9,30,parse_error,macro expansion failed for '$crate::panic::panic_2021',macro expansion failed for '$crate::panic::panic_2021'
+engine/boa/core/engine/src/jit/arithmetic/arm64.rs,1,1,20,semantics,semantic analyzer unavailable (not included as a module),semantic analyzer unavailable (not included as a module): macro expansion will be skipped.
+engine/boa/core/engine/src/jit/mod.rs,356,9,30,parse_error,macro expansion failed for '$crate::panic::panic_2021',macro expansion failed for '$crate::panic::panic_2021'
+engine/boa/core/engine/src/jit/runtime_call.rs,222,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+engine/boa/core/engine/src/module/loader/mod.rs,214,14,30,parse_error,macro expansion failed for '$crate::__Fn',macro expansion failed for '$crate::__Fn'
+engine/boa/core/engine/src/module/loader/mod.rs,234,14,30,parse_error,macro expansion failed for '$crate::__Fn',macro expansion failed for '$crate::__Fn'
+engine/boa/core/engine/src/sys/js/mod.rs,1,1,20,semantics,semantic analyzer unavailable (not included as a module),semantic analyzer unavailable (not included as a module): macro expansion will be skipped.
+engine/boa/core/engine/src/value/inner/nan_boxed.rs,1,1,20,semantics,semantic analyzer unavailable (not included as a module),semantic analyzer unavailable (not included as a module): macro expansion will be skipped.
+engine/boa/tests/macros/tests/derive/from_js_with.rs,1,1,20,semantics,semantic analyzer unavailable (not included as a module),semantic analyzer unavailable (not included as a module): macro expansion will be skipped.
+engine/boa/tests/macros/tests/derive/simple_struct.rs,1,1,20,semantics,semantic analyzer unavailable (not included as a module),semantic analyzer unavailable (not included as a module): macro expansion will be skipped.

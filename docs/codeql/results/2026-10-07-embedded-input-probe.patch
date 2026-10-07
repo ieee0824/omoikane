@@ -1,0 +1,26 @@
+diff --git a/engine/boa/core/macros/src/embedded_module_loader.rs b/engine/boa/core/macros/src/embedded_module_loader.rs
+index 8635be78..47b1b94d 100644
+--- a/engine/boa/core/macros/src/embedded_module_loader.rs
++++ b/engine/boa/core/macros/src/embedded_module_loader.rs
+@@ -146,6 +146,21 @@ fn find_all_files(dir: &mut fs::ReadDir, root: &PathBuf) -> Vec<PathBuf> {
+ pub(crate) fn embed_module_impl(input: TokenStream) -> TokenStream {
+     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
+
++    // Diagnostic worktree only: observe parsing before parse_macro_input can return.
++    let observation = match syn::parse::<EmbedModuleMacroInput>(input.clone()) {
++        Ok(parsed) => {
++            let root = manifest_dir.join(parsed.path.value());
++            format!(
++                "CODEQL_EMBEDDED_PROBE_PARSED manifest={manifest_dir:?}; root={root:?}; read_dir={:?}",
++                std::fs::read_dir(&root).map(|entries| entries.count())
++            )
++        }
++        Err(error) => format!(
++            "CODEQL_EMBEDDED_PROBE_PARSE_ERROR error={error}; manifest={manifest_dir:?}; input={input:?}"
++        ),
++    };
++    return format!("{observation:?}").parse().expect("string literal");
++
+     let input = syn::parse_macro_input!(input as EmbedModuleMacroInput);
+
+     let root = manifest_dir.join(input.path.value());
