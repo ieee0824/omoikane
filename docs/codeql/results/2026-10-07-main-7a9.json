@@ -1,0 +1,125 @@
+{
+  "sha": "7a9a1e3ab79ba2a2d922e868dfbfbb3571e7b657",
+  "run": 37602658585,
+  "zip_sha256": "bbcb1219907acbc44d2f743c81b8744ebf467a87e93ff07d8b73d7096a521405",
+  "zip_bytes": 350230657,
+  "archive": "database-attempt-0.zip",
+  "cli": "2.27.1",
+  "build_mode": "none",
+  "stable_library": "0.2.22",
+  "development_library": "0.2.24-dev",
+  "development_source_commit": "36994cdec4ffab77993ac386c85cf551e28f552f",
+  "diagnostics": {
+    "warning": 20,
+    "info": 5,
+    "error": 0
+  },
+  "original_warning": 14,
+  "standalone_repro_warning": 6,
+  "macro_rows": 591,
+  "AST_zero": 13,
+  "stable_development_results_identical": true,
+  "regression_arrays_and_four_file_entries_verified": true,
+  "source_archive_hashes": {
+    "engine/boa/core/engine/src/jit/arithmetic.rs": "5d4424ccf2c922c7a5608bf71bb5bea4a0b22de4e2bac7f10740d5ad065a04a7",
+    "engine/boa/core/engine/src/jit/runtime_call.rs": "d8d6878d70bde2f8152efd532a16e73acb31b5491f2314741c485884689ff526",
+    "engine/boa/core/engine/src/jit/mod.rs": "0161e9aed0908e145d5dc1bab0c3aa8069006a85acfffb5b662fd2a632e5744b",
+    "engine/boa/core/engine/src/module/loader/mod.rs": "747de8fc6f7a6c6d8bd0a703be07a5224e751e06a5ca1ba776cc20cbadaaa92b",
+    "engine/boa/tests/macros/tests/embedded.rs": "3d31256ae4286fa9a059becaad7f0a405970f1d26eed27db7b42d36b3160a14d",
+    "tests/jit_code_memory.rs": "5b2ff18af6bb18381628f8e942d3e16ed4d491e21cbc70b0bdc404bae4f6e9f6",
+    "engine/boa/core/macros/src/embedded_module_loader.rs": "5a5d52a9e0fb05c33022982979e5c1c88790a85168af0d2858151810230136fa",
+    "engine/boa/core/engine/src/module/loader/embedded.rs": "395d2fe40ed97d35b050cbe17bc18b6a56cdd158531e0a694ba5c7698027a3fc"
+  },
+  "raw_csv_sha256": {
+    "dev-diagnostics.csv": "72aada4b135bab26c24d3a5f5ea7f6d63ffd33084835ce355668936fee5f3551",
+    "dev-macros.csv": "f49c4354962b31a52c9a2cade88d9516ea6ebe2168bf6cedf7131f9e212c19d2",
+    "stable-diagnostics.csv": "72aada4b135bab26c24d3a5f5ea7f6d63ffd33084835ce355668936fee5f3551",
+    "embedded.csv": "4dadcaac20132969def44ea4cdce105f35f4c1ab5fa82f7d7595ecd7b72681b9",
+    "stable-macros.csv": "f49c4354962b31a52c9a2cade88d9516ea6ebe2168bf6cedf7131f9e212c19d2"
+  },
+  "rust_job_id": 112730593357,
+  "date": "2026-10-07",
+  "issue": 1266,
+  "scope": "Completed main run after PR1302; original and standalone reproduction diagnostics classified separately.",
+  "limitations": [
+    "No newer published extractor was tested; CLI remains2.27.1.",
+    "Development library0.2.24-dev is unreleased source, not a published extractor update.",
+    "Remaining13 AST gaps persist; array/entry coverage does not prove complete type/dataflow coverage."
+  ],
+  "published_macro_locations_scope": "13 missing inner expansions plus4 outer/inner embedded rows; full591-row CSV retained locally with raw hash.",
+  "normalized_sha256": {
+    "2026-10-07-main-7a9-embedded.csv": "8104d7fc025fd11ec04662e3166b8c92280a3063ebe50395dc438285e36e22d4",
+    "2026-10-07-main-7a9-diagnostics.csv": "f8e42ced23387c0e1b5e548beb7cb08bd936abe67c5cd9be87a3722baaa998a5",
+    "2026-10-07-main-7a9-macro-locations.csv": "1ecaf5db0f5f51e6bfe3f81f9f1948a4e1b3224cbf7500ab6ac41f3bc2f13b12"
+  },
+  "development_dependencies": {
+    "codeql/rust-all": {
+      "version": "0.2.24-dev",
+      "manifest_sha256": "28c917dc65f56178930037dae67b3f9fdbb0a7059ddd6a07817c993f74c9a268"
+    },
+    "codeql/concepts": {
+      "version": "0.0.34-dev",
+      "manifest_sha256": "30c7d7e31d00138a5c78de4544b83a80a17f5e7b50ce0c894029ace8a2dc8f8b"
+    },
+    "codeql/controlflow": {
+      "version": "2.0.44-dev",
+      "manifest_sha256": "598b8cca939ac9e1b50a642ec7d9b783bf618ed668bb74e326a34be9dd755650"
+    },
+    "codeql/dataflow": {
+      "version": "2.1.16-dev",
+      "manifest_sha256": "57f329582ec858f0910ce3b4b5222fe9cf19271579aea0621bacdf5e860510f0"
+    },
+    "codeql/mad": {
+      "version": "1.0.60-dev",
+      "manifest_sha256": "64512ce307a6c9a79363d4a3b383559f0a80d3d22919871166cc4b92879bcf62"
+    },
+    "codeql/namebinding": {
+      "version": "0.0.9-dev",
+      "manifest_sha256": "8a257d15a5f694a46bf1ecb8452a954c61b5219dbbddd3f2be08674df6b480bf"
+    },
+    "codeql/regex": {
+      "version": "1.0.60-dev",
+      "manifest_sha256": "6340fc89a0531a3d87d4791672b66d6a08eb50808e175d48acc19ea062cef1d4"
+    },
+    "codeql/ssa": {
+      "version": "2.0.36-dev",
+      "manifest_sha256": "83d21df1bf408505a8182bcf978d64a4b158dcaf2a06d37662fde26e58475fa4"
+    },
+    "codeql/threat-models": {
+      "version": "1.0.60-dev",
+      "manifest_sha256": "0b683a7db99259cfc26b66ef1b9eb35189ec918d86b843c03f2c48d14e8e18f4"
+    },
+    "codeql/tutorial": {
+      "version": "1.0.60-dev",
+      "manifest_sha256": "76ddfb5725bb0199043347824d3dee496c49c91a2318b053ad1f1cec7a7469d2"
+    },
+    "codeql/typeinference": {
+      "version": "0.0.41-dev",
+      "manifest_sha256": "c0ad8f674919e60ddb5d1c465d04cbf7356ab84cfbd5598c7552193e305957d6"
+    },
+    "codeql/typetracking": {
+      "version": "2.0.44-dev",
+      "manifest_sha256": "e4eba2cba73be487521420bea92fa1baf1f6272c4df0bd8b8cd1ecea13b2374e"
+    },
+    "codeql/util": {
+      "version": "2.0.47-dev",
+      "manifest_sha256": "39dfa9410c911bc7359f568eef3b379a1012a12b6211da3e69f5203c3577f635"
+    }
+  },
+  "stable_query_dependencies": {
+    "codeql/concepts": "0.0.32",
+    "codeql/controlflow": "2.0.42",
+    "codeql/dataflow": "2.1.14",
+    "codeql/mad": "1.0.58",
+    "codeql/namebinding": "0.0.7",
+    "codeql/regex": "1.0.58",
+    "codeql/rust-all": "0.2.22",
+    "codeql/ssa": "2.0.34",
+    "codeql/threat-models": "1.0.58",
+    "codeql/tutorial": "1.0.58",
+    "codeql/typeinference": "0.0.39",
+    "codeql/typetracking": "2.0.42",
+    "codeql/util": "2.0.45"
+  },
+  "query_pack_lock_sha256": "de3115fac212bf399c701e839a1131c9a262e85c21f37e2242ce9bbd4da92b6f"
+}

@@ -222,7 +222,30 @@ CodeQLは`$x:expr`で転送された`compress = "none"` / `"lz4"`を
 回帰確認には同じクエリを変更前後のDBへ直列に実行し、CSVの行67・77がそれぞれ
 `1,4,4,0`となることを確認する。観測用patchを適用したDBをこの確認に使わない。
 
-### 手順
+## マージ後mainでの確認
+
+[#1302](https://github.com/ieee0824/omoikane/pull/1302)は、全8workflow成功・52チェック成功・
+条件付きskip 2件を確認して`7a9a1e3ab79ba2a2d922e868dfbfbb3571e7b657`へマージした。
+このmainの[CodeQL run37602658585](https://github.com/ieee0824/omoikane/actions/runs/37602658585)も
+完了成功し、DB metadataとZIP・展開後のSHA/CLI/build modeを照合した。
+ZIPは350,230,657 bytes、SHA-256は
+`bbcb1219907acbc44d2f743c81b8744ebf467a87e93ff07d8b73d7096a521405`。
+
+[全診断](results/2026-10-07-main-7a9-diagnostics.csv)はwarning 20・info 5・error 0。
+warningの内訳は本体14件と独立再現crate 6件で、embeddedの4件だけが消えている。
+その他の本体診断と再現crateの診断は変更前と一致する。
+[対象マクロ位置](results/2026-10-07-main-7a9-macro-locations.csv)では、
+全591結果行のうち13位置の内側AST欠落が残る。
+[embedded回帰結果](results/2026-10-07-main-7a9-embedded.csv)は両fixtureとも
+配列1・file-entry tuple 4・fixture path 4・compile_error 0。
+
+安定版0.2.22と開発版0.2.24-devの全診断・対象マクロ結果は一致し、
+DB内ソース8ファイルのhashも照合した。
+[run・版・依存元・DB/CSV/ソースhash・残存制限](results/2026-10-07-main-7a9.json)に記録した。
+CLI/extractorは2.27.1のままであり、新しい公開extractorを検証した結果ではない。
+Issue #1266の最初の更新条件は未完了として保持する。
+
+### 再測定手順
 
 必要なもの: `gh`、測定DBと同じ版のCodeQL CLI、ZIP展開ツール。
 クエリの依存は [qlpack.yml](queries/qlpack.yml) とlockで固定する。
