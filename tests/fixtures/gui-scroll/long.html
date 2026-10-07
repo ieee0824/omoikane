@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>scroll:0 wheel:0 click:none</title>
+<style>
+body { margin: 0; font: 14px sans-serif; }
+.row { height: 80px; box-sizing: border-box; padding: 12px; background: #40c080; }
+.odd { background: #c08040; }
+.row span { display: inline-block; width: 120px; }
+</style>
+<body>
+<script>
+let html = '';
+for (let i = 0; i < 300; i++) {
+  html += `<div id="row-${i}" class="row ${i % 2 ? 'odd' : ''}"><span>Row ${i}</span><span>Long page</span><span>Scroll fixture</span></div>`;
+}
+document.body.insertAdjacentHTML('afterbegin', html);
+let wheels = 0, scrolls = 0, clicked = 'none';
+// The native host queries this getter. Reporting must not mutate DOM/style
+// and force a reflow that ordinary scrolling would not otherwise require.
+Object.defineProperty(document, 'title', {
+  get: () => `scroll:${document.scrollingElement.scrollTop === scrollY ? scrollY : -1} wheel:${wheels} click:${clicked} events:${scrolls}`
+});
+document.addEventListener('wheel', () => { wheels++; });
+window.addEventListener('scroll', () => { scrolls++; });
+document.addEventListener('click', e => { clicked = e.target.closest('.row').id; });
+</script>

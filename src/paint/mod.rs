@@ -1221,7 +1221,7 @@ pub(crate) fn paint_layout_with_document_snapshots(
     canvas
 }
 
-fn paint_box_style(layout: &LayoutBox, resolver: &mut StyleResolver) -> ComputedStyle {
+fn paint_box_style(layout: &LayoutBox, resolver: &mut StyleResolver) -> Arc<ComputedStyle> {
     layout
         .pseudo
         .and_then(|pseudo| resolver.paint_pseudo_style(&layout.node, pseudo))
@@ -2539,7 +2539,7 @@ struct HitTestGeometry {
     local_point: (f32, f32),
     query_point: (f32, f32),
     clip: Option<Rect>,
-    style: ComputedStyle,
+    style: Arc<ComputedStyle>,
     border_box: Rect,
 }
 

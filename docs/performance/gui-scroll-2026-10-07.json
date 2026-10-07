@@ -1,0 +1,1704 @@
+{
+  "base": "db4192eaba0fb15dbe8bad8112021d5a96e06271",
+  "environment": "Linux x86_64, private Xvfb/Openbox, Rust 1.98.1",
+  "method": "Same optional phase instrumentation in both binaries; 2 warmups then 10 individual native wheels; 10 XTest button clicks deliver 20 native wheels. CSS viewport 640x400, 300 rows. No overlapping Cargo or benchmarks. Medians are observations, not CI thresholds. Debug before page bounds use identical deterministic desktop geometry verified by whole-page pixel comparison.",
+  "limitations": "X11 synthetic input only; no physical macOS/Wayland measurement. Scroll events are coalesced per rendering opportunity: old burst delivered one, new burst delivers progress. Every wheel and accumulated scroll position are preserved. Adjusted tree still constructed once per scroll generation; no stripe repaint or content-visibility policy change.",
+  "baseline_binary_sha256": {
+    "debug": "565451a301ae8cdaf32b1528fe476cd396cb8830d8598676d06533ceaa7f3225",
+    "release": "49186bf1cd765fd64f9d472996834ac53a9aa7ea717485c8f47e536ad75c039a"
+  },
+  "runs": [
+    {
+      "profile": "debug",
+      "scale": 1,
+      "before": {
+        "scale": 1,
+        "iterations": 10,
+        "samples": [
+          {
+            "adjusted_layout_ms": 27.495611,
+            "elapsed_ms": 5213,
+            "frame_ms": 160.99081,
+            "paint_ms": 123.167814,
+            "present_ms": 3.400047,
+            "scale": 1.0,
+            "sequence": 5,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 51.13511200000001,
+            "success": true,
+            "observed_ms": 323.22380899859127
+          },
+          {
+            "adjusted_layout_ms": 28.326612,
+            "elapsed_ms": 5545,
+            "frame_ms": 159.54921099999999,
+            "paint_ms": 120.730305,
+            "present_ms": 3.26472,
+            "scale": 1.0,
+            "sequence": 6,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 60.44917,
+            "success": true,
+            "observed_ms": 325.52449200011324
+          },
+          {
+            "adjusted_layout_ms": 27.414780999999998,
+            "elapsed_ms": 5866,
+            "frame_ms": 158.047866,
+            "paint_ms": 120.205872,
+            "present_ms": 3.1345180000000004,
+            "scale": 1.0,
+            "sequence": 7,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 58.51397,
+            "success": true,
+            "observed_ms": 324.5235060021514
+          },
+          {
+            "adjusted_layout_ms": 28.084083999999997,
+            "elapsed_ms": 6189,
+            "frame_ms": 159.313818,
+            "paint_ms": 121.030509,
+            "present_ms": 3.565289,
+            "scale": 1.0,
+            "sequence": 8,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 54.733612,
+            "success": true,
+            "observed_ms": 328.4809610049706
+          },
+          {
+            "adjusted_layout_ms": 27.824722,
+            "elapsed_ms": 6524,
+            "frame_ms": 159.992619,
+            "paint_ms": 121.321996,
+            "present_ms": 3.456586,
+            "scale": 1.0,
+            "sequence": 9,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 60.49338,
+            "success": true,
+            "observed_ms": 327.7949940020335
+          },
+          {
+            "adjusted_layout_ms": 28.56552,
+            "elapsed_ms": 6847,
+            "frame_ms": 160.26944,
+            "paint_ms": 121.114422,
+            "present_ms": 3.217639,
+            "scale": 1.0,
+            "sequence": 10,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 56.257999000000005,
+            "success": true,
+            "observed_ms": 327.5162639984046
+          },
+          {
+            "adjusted_layout_ms": 28.461902000000002,
+            "elapsed_ms": 7179,
+            "frame_ms": 161.599973,
+            "paint_ms": 122.398829,
+            "present_ms": 3.3508829999999996,
+            "scale": 1.0,
+            "sequence": 11,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 58.815214999999995,
+            "success": true,
+            "observed_ms": 322.5881410035072
+          },
+          {
+            "adjusted_layout_ms": 28.543065,
+            "elapsed_ms": 7496,
+            "frame_ms": 157.96560300000002,
+            "paint_ms": 119.195147,
+            "present_ms": 3.562956,
+            "scale": 1.0,
+            "sequence": 12,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 56.912846,
+            "success": true,
+            "observed_ms": 321.63797700195573
+          },
+          {
+            "adjusted_layout_ms": 27.817933,
+            "elapsed_ms": 7822,
+            "frame_ms": 164.33051,
+            "paint_ms": 125.83425000000001,
+            "present_ms": 3.1462679999999996,
+            "scale": 1.0,
+            "sequence": 13,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 54.844278,
+            "success": true,
+            "observed_ms": 317.07944800291443
+          },
+          {
+            "adjusted_layout_ms": 28.575316,
+            "elapsed_ms": 8137,
+            "frame_ms": 160.40337599999998,
+            "paint_ms": 121.242644,
+            "present_ms": 3.37834,
+            "scale": 1.0,
+            "sequence": 14,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 56.920601,
+            "success": true,
+            "observed_ms": 324.71727400115924
+          }
+        ],
+        "median_ms": {
+          "dispatch_ms": 56.9167235,
+          "adjusted_layout_ms": 28.205348,
+          "paint_ms": 121.178533,
+          "frame_ms": 160.1310295,
+          "present_ms": 3.3646114999999996
+        },
+        "continuous_status": [
+          1280,
+          32
+        ],
+        "hit_row": 18,
+        "burst_frames": 1
+      },
+      "after": {
+        "scale": 1,
+        "iterations": 10,
+        "samples": [
+          {
+            "adjusted_layout_ms": 11.310142,
+            "elapsed_ms": 4976,
+            "frame_ms": 102.887038,
+            "paint_ms": 83.604073,
+            "present_ms": 3.211981,
+            "scale": 1.0,
+            "sequence": 6,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 21.068255,
+            "success": true,
+            "observed_ms": 220.62767400348093
+          },
+          {
+            "adjusted_layout_ms": 12.007632000000001,
+            "elapsed_ms": 5200,
+            "frame_ms": 104.221183,
+            "paint_ms": 84.120389,
+            "present_ms": 3.0963499999999997,
+            "scale": 1.0,
+            "sequence": 7,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 23.156017000000002,
+            "success": true,
+            "observed_ms": 209.17269199708244
+          },
+          {
+            "adjusted_layout_ms": 11.792872,
+            "elapsed_ms": 5408,
+            "frame_ms": 105.145632,
+            "paint_ms": 85.18951399999999,
+            "present_ms": 3.1318930000000003,
+            "scale": 1.0,
+            "sequence": 8,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 21.694366,
+            "success": true,
+            "observed_ms": 222.2953559976304
+          },
+          {
+            "adjusted_layout_ms": 12.121220000000001,
+            "elapsed_ms": 5634,
+            "frame_ms": 106.425524,
+            "paint_ms": 86.24877000000001,
+            "present_ms": 3.163936,
+            "scale": 1.0,
+            "sequence": 9,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 22.954922999999997,
+            "success": true,
+            "observed_ms": 220.5306899995776
+          },
+          {
+            "adjusted_layout_ms": 12.082301,
+            "elapsed_ms": 5855,
+            "frame_ms": 107.259729,
+            "paint_ms": 87.065141,
+            "present_ms": 3.176395,
+            "scale": 1.0,
+            "sequence": 10,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 23.028509,
+            "success": true,
+            "observed_ms": 212.50011600204743
+          },
+          {
+            "adjusted_layout_ms": 11.244264000000001,
+            "elapsed_ms": 6060,
+            "frame_ms": 103.246921,
+            "paint_ms": 83.893996,
+            "present_ms": 3.12656,
+            "scale": 1.0,
+            "sequence": 11,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 20.271467,
+            "success": true,
+            "observed_ms": 225.31424300541403
+          },
+          {
+            "adjusted_layout_ms": 12.234558,
+            "elapsed_ms": 6294,
+            "frame_ms": 107.21172700000001,
+            "paint_ms": 86.90696700000001,
+            "present_ms": 3.1655189999999997,
+            "scale": 1.0,
+            "sequence": 12,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 23.939716999999998,
+            "success": true,
+            "observed_ms": 214.1693090015906
+          },
+          {
+            "adjusted_layout_ms": 11.857206999999999,
+            "elapsed_ms": 6511,
+            "frame_ms": 111.426284,
+            "paint_ms": 91.068981,
+            "present_ms": 3.3306519999999997,
+            "scale": 1.0,
+            "sequence": 13,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 21.722781,
+            "success": true,
+            "observed_ms": 211.02761299698614
+          },
+          {
+            "adjusted_layout_ms": 11.921418,
+            "elapsed_ms": 6716,
+            "frame_ms": 105.924325,
+            "paint_ms": 85.869495,
+            "present_ms": 3.1240590000000004,
+            "scale": 1.0,
+            "sequence": 14,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 22.236555000000003,
+            "success": true,
+            "observed_ms": 212.11016300367191
+          },
+          {
+            "adjusted_layout_ms": 11.766702,
+            "elapsed_ms": 6926,
+            "frame_ms": 104.14311900000001,
+            "paint_ms": 84.401054,
+            "present_ms": 3.1087670000000003,
+            "scale": 1.0,
+            "sequence": 15,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 21.935208000000003,
+            "success": true,
+            "observed_ms": 211.0458219976863
+          }
+        ],
+        "page_bounds": [
+          160,
+          188,
+          640,
+          400
+        ],
+        "median_ms": {
+          "dispatch_ms": 22.085881500000003,
+          "adjusted_layout_ms": 11.889312499999999,
+          "paint_ms": 85.5295045,
+          "frame_ms": 105.5349785,
+          "present_ms": 3.1479145
+        },
+        "continuous_status": [
+          1280,
+          32
+        ],
+        "hit_row": 18,
+        "burst_frames": 19
+      },
+      "comparison": {
+        "page_pixels": [
+          640,
+          400
+        ],
+        "changed_pixels": 0,
+        "page_rgb_sha256": "58ce264541220c057427c8879f8653d8104967905ea217bbb083f1164e25197b"
+      },
+      "artifact_directories": {
+        "before": "before-debug-scale1-run4",
+        "after": "rc-debug-scale1"
+      }
+    },
+    {
+      "profile": "debug",
+      "scale": 2,
+      "before": {
+        "scale": 2,
+        "iterations": 10,
+        "samples": [
+          {
+            "adjusted_layout_ms": 26.881492,
+            "elapsed_ms": 5636,
+            "frame_ms": 157.301131,
+            "paint_ms": 120.047443,
+            "present_ms": 12.316151,
+            "scale": 2.0,
+            "sequence": 5,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 52.671408,
+            "success": true,
+            "observed_ms": 325.2758630042081
+          },
+          {
+            "adjusted_layout_ms": 27.549379,
+            "elapsed_ms": 5968,
+            "frame_ms": 156.437338,
+            "paint_ms": 118.708919,
+            "present_ms": 12.156241,
+            "scale": 2.0,
+            "sequence": 6,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 60.140862000000006,
+            "success": true,
+            "observed_ms": 332.04088999627857
+          },
+          {
+            "adjusted_layout_ms": 26.877076,
+            "elapsed_ms": 6297,
+            "frame_ms": 158.077846,
+            "paint_ms": 121.041273,
+            "present_ms": 12.078161,
+            "scale": 2.0,
+            "sequence": 7,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 56.211956,
+            "success": true,
+            "observed_ms": 323.30770199769177
+          },
+          {
+            "adjusted_layout_ms": 28.754993,
+            "elapsed_ms": 6636,
+            "frame_ms": 171.64436999999998,
+            "paint_ms": 132.179654,
+            "present_ms": 12.424356,
+            "scale": 2.0,
+            "sequence": 8,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 57.374949,
+            "success": true,
+            "observed_ms": 310.3316869965056
+          },
+          {
+            "adjusted_layout_ms": 26.985031,
+            "elapsed_ms": 6930,
+            "frame_ms": 157.701376,
+            "paint_ms": 120.184446,
+            "present_ms": 11.755844,
+            "scale": 2.0,
+            "sequence": 9,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 55.713525,
+            "success": true,
+            "observed_ms": 318.96050600335
+          },
+          {
+            "adjusted_layout_ms": 27.362222,
+            "elapsed_ms": 7253,
+            "frame_ms": 159.85157,
+            "paint_ms": 122.109567,
+            "present_ms": 11.769260000000001,
+            "scale": 2.0,
+            "sequence": 10,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 57.904925000000006,
+            "success": true,
+            "observed_ms": 313.8801529930788
+          },
+          {
+            "adjusted_layout_ms": 26.900911,
+            "elapsed_ms": 7566,
+            "frame_ms": 159.985534,
+            "paint_ms": 122.784504,
+            "present_ms": 11.699181,
+            "scale": 2.0,
+            "sequence": 11,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 56.934511,
+            "success": true,
+            "observed_ms": 318.6940380037413
+          },
+          {
+            "adjusted_layout_ms": 27.644295,
+            "elapsed_ms": 7886,
+            "frame_ms": 160.976906,
+            "paint_ms": 123.04665800000001,
+            "present_ms": 11.630474999999999,
+            "scale": 2.0,
+            "sequence": 12,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 57.116633,
+            "success": true,
+            "observed_ms": 313.4221139989677
+          },
+          {
+            "adjusted_layout_ms": 27.402015,
+            "elapsed_ms": 8198,
+            "frame_ms": 160.367933,
+            "paint_ms": 122.346649,
+            "present_ms": 11.639016999999999,
+            "scale": 2.0,
+            "sequence": 13,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 56.079137,
+            "success": true,
+            "observed_ms": 324.9773429997731
+          },
+          {
+            "adjusted_layout_ms": 26.857705,
+            "elapsed_ms": 8521,
+            "frame_ms": 159.423193,
+            "paint_ms": 122.452985,
+            "present_ms": 12.268656,
+            "scale": 2.0,
+            "sequence": 14,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 54.190514,
+            "success": true,
+            "observed_ms": 321.3922289942275
+          }
+        ],
+        "median_ms": {
+          "dispatch_ms": 56.5732335,
+          "adjusted_layout_ms": 27.173626499999997,
+          "paint_ms": 122.22810799999999,
+          "frame_ms": 159.6373815,
+          "present_ms": 11.9237105
+        },
+        "continuous_status": [
+          1280,
+          32
+        ],
+        "hit_row": 18,
+        "burst_frames": 1
+      },
+      "after": {
+        "scale": 2,
+        "iterations": 10,
+        "samples": [
+          {
+            "adjusted_layout_ms": 11.86505,
+            "elapsed_ms": 5202,
+            "frame_ms": 104.34026200000001,
+            "paint_ms": 84.361615,
+            "present_ms": 11.604581,
+            "scale": 2.0,
+            "sequence": 5,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 22.68018,
+            "success": true,
+            "observed_ms": 214.9111670005368
+          },
+          {
+            "adjusted_layout_ms": 11.466283,
+            "elapsed_ms": 5416,
+            "frame_ms": 103.86774199999999,
+            "paint_ms": 84.36073900000001,
+            "present_ms": 11.767046,
+            "scale": 2.0,
+            "sequence": 6,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 21.76885,
+            "success": true,
+            "observed_ms": 219.9996290000854
+          },
+          {
+            "adjusted_layout_ms": 11.665749,
+            "elapsed_ms": 5638,
+            "frame_ms": 106.005824,
+            "paint_ms": 86.219312,
+            "present_ms": 11.613122,
+            "scale": 2.0,
+            "sequence": 7,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 22.08257,
+            "success": true,
+            "observed_ms": 227.13404699607054
+          },
+          {
+            "adjusted_layout_ms": 11.756003,
+            "elapsed_ms": 5865,
+            "frame_ms": 105.096202,
+            "paint_ms": 85.3414,
+            "present_ms": 12.007722,
+            "scale": 2.0,
+            "sequence": 8,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 22.624968,
+            "success": true,
+            "observed_ms": 213.812185000279
+          },
+          {
+            "adjusted_layout_ms": 11.879090999999999,
+            "elapsed_ms": 6080,
+            "frame_ms": 106.690729,
+            "paint_ms": 86.575202,
+            "present_ms": 11.654207,
+            "scale": 2.0,
+            "sequence": 9,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 22.563048,
+            "success": true,
+            "observed_ms": 226.62544199556578
+          },
+          {
+            "adjusted_layout_ms": 11.858716,
+            "elapsed_ms": 6305,
+            "frame_ms": 104.775731,
+            "paint_ms": 84.867505,
+            "present_ms": 11.708376,
+            "scale": 2.0,
+            "sequence": 10,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 22.571423,
+            "success": true,
+            "observed_ms": 218.92965399456443
+          },
+          {
+            "adjusted_layout_ms": 12.011597,
+            "elapsed_ms": 6528,
+            "frame_ms": 106.955399,
+            "paint_ms": 86.955086,
+            "present_ms": 12.653331,
+            "scale": 2.0,
+            "sequence": 11,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 23.231577,
+            "success": true,
+            "observed_ms": 216.84621599706588
+          },
+          {
+            "adjusted_layout_ms": 11.614829,
+            "elapsed_ms": 6742,
+            "frame_ms": 107.464712,
+            "paint_ms": 87.815289,
+            "present_ms": 11.644872000000001,
+            "scale": 2.0,
+            "sequence": 12,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 21.469208,
+            "success": true,
+            "observed_ms": 210.62194699334214
+          },
+          {
+            "adjusted_layout_ms": 11.579619,
+            "elapsed_ms": 6950,
+            "frame_ms": 103.52025099999999,
+            "paint_ms": 83.82507799999999,
+            "present_ms": 11.561327,
+            "scale": 2.0,
+            "sequence": 13,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 22.389748,
+            "success": true,
+            "observed_ms": 220.50161900551757
+          },
+          {
+            "adjusted_layout_ms": 11.750502,
+            "elapsed_ms": 7172,
+            "frame_ms": 105.069609,
+            "paint_ms": 85.303265,
+            "present_ms": 11.937843,
+            "scale": 2.0,
+            "sequence": 14,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 22.403748,
+            "success": true,
+            "observed_ms": 208.72486700682202
+          }
+        ],
+        "page_bounds": [
+          1,
+          102,
+          1280,
+          800
+        ],
+        "median_ms": {
+          "dispatch_ms": 22.483398,
+          "adjusted_layout_ms": 11.753252499999999,
+          "paint_ms": 85.32233249999999,
+          "frame_ms": 105.08290550000001,
+          "present_ms": 11.6812915
+        },
+        "continuous_status": [
+          1280,
+          32
+        ],
+        "hit_row": 18,
+        "burst_frames": 20
+      },
+      "comparison": {
+        "page_pixels": [
+          1280,
+          800
+        ],
+        "changed_pixels": 0,
+        "page_rgb_sha256": "99dad380676c9f5702110952d60aab85c1ee48da69966c1abc6befc21a7b4214"
+      },
+      "artifact_directories": {
+        "before": "before-debug-scale2",
+        "after": "rc-debug-scale2"
+      }
+    },
+    {
+      "profile": "release",
+      "scale": 1,
+      "before": {
+        "scale": 1,
+        "iterations": 10,
+        "samples": [
+          {
+            "adjusted_layout_ms": 6.087032,
+            "elapsed_ms": 1229,
+            "frame_ms": 30.032964999999997,
+            "paint_ms": 22.092028,
+            "present_ms": 0.30674100000000004,
+            "scale": 1.0,
+            "sequence": 5,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 13.706561,
+            "success": true,
+            "observed_ms": 115.79231599898776
+          },
+          {
+            "adjusted_layout_ms": 6.014242,
+            "elapsed_ms": 1344,
+            "frame_ms": 29.991007,
+            "paint_ms": 22.109027,
+            "present_ms": 0.31299099999999996,
+            "scale": 1.0,
+            "sequence": 6,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 12.833795,
+            "success": true,
+            "observed_ms": 110.73879600007785
+          },
+          {
+            "adjusted_layout_ms": 5.9727440000000005,
+            "elapsed_ms": 1456,
+            "frame_ms": 30.563323999999998,
+            "paint_ms": 22.72376,
+            "present_ms": 0.30145,
+            "scale": 1.0,
+            "sequence": 7,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 13.306782,
+            "success": true,
+            "observed_ms": 110.28835100296419
+          },
+          {
+            "adjusted_layout_ms": 6.156989,
+            "elapsed_ms": 1567,
+            "frame_ms": 30.801275999999998,
+            "paint_ms": 22.682011,
+            "present_ms": 0.31145,
+            "scale": 1.0,
+            "sequence": 8,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 14.012386,
+            "success": true,
+            "observed_ms": 110.32039199926658
+          },
+          {
+            "adjusted_layout_ms": 6.3089,
+            "elapsed_ms": 1678,
+            "frame_ms": 31.035435,
+            "paint_ms": 22.745925,
+            "present_ms": 0.315032,
+            "scale": 1.0,
+            "sequence": 9,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 14.278587,
+            "success": true,
+            "observed_ms": 116.8296619944158
+          },
+          {
+            "adjusted_layout_ms": 6.521268999999999,
+            "elapsed_ms": 1796,
+            "frame_ms": 31.588336,
+            "paint_ms": 23.109207,
+            "present_ms": 0.306991,
+            "scale": 1.0,
+            "sequence": 10,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 14.543163,
+            "success": true,
+            "observed_ms": 106.92490599467419
+          },
+          {
+            "adjusted_layout_ms": 6.098324,
+            "elapsed_ms": 1901,
+            "frame_ms": 30.447036,
+            "paint_ms": 22.449225,
+            "present_ms": 0.312283,
+            "scale": 1.0,
+            "sequence": 11,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 13.382488,
+            "success": true,
+            "observed_ms": 106.85228500369703
+          },
+          {
+            "adjusted_layout_ms": 5.977661,
+            "elapsed_ms": 2006,
+            "frame_ms": 29.541604999999997,
+            "paint_ms": 21.573377,
+            "present_ms": 0.299491,
+            "scale": 1.0,
+            "sequence": 12,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 13.054039,
+            "success": true,
+            "observed_ms": 115.7058240059996
+          },
+          {
+            "adjusted_layout_ms": 6.048408,
+            "elapsed_ms": 2123,
+            "frame_ms": 30.432496,
+            "paint_ms": 22.352521,
+            "present_ms": 0.286075,
+            "scale": 1.0,
+            "sequence": 13,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 13.566524999999999,
+            "success": true,
+            "observed_ms": 116.55850800161716
+          },
+          {
+            "adjusted_layout_ms": 6.460772,
+            "elapsed_ms": 2242,
+            "frame_ms": 31.579379999999997,
+            "paint_ms": 23.160164,
+            "present_ms": 0.307158,
+            "scale": 1.0,
+            "sequence": 14,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 14.461249,
+            "success": true,
+            "observed_ms": 114.99346999335103
+          }
+        ],
+        "page_bounds": [
+          160,
+          188,
+          640,
+          400
+        ],
+        "median_ms": {
+          "dispatch_ms": 13.636543,
+          "adjusted_layout_ms": 6.092677999999999,
+          "paint_ms": 22.565618,
+          "frame_ms": 30.50518,
+          "present_ms": 0.30707450000000003
+        },
+        "continuous_status": [
+          1280,
+          32
+        ],
+        "hit_row": 18,
+        "burst_frames": 1
+      },
+      "after": {
+        "scale": 1,
+        "iterations": 10,
+        "samples": [
+          {
+            "adjusted_layout_ms": 3.424037,
+            "elapsed_ms": 1261,
+            "frame_ms": 22.470496999999998,
+            "paint_ms": 18.403729000000002,
+            "present_ms": 0.29088600000000003,
+            "scale": 1.0,
+            "sequence": 6,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.452559,
+            "success": true,
+            "observed_ms": 107.82453299907502
+          },
+          {
+            "adjusted_layout_ms": 6.235385000000001,
+            "elapsed_ms": 1375,
+            "frame_ms": 27.829393,
+            "paint_ms": 20.525429000000003,
+            "present_ms": 0.288636,
+            "scale": 1.0,
+            "sequence": 7,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.649150000000001,
+            "success": true,
+            "observed_ms": 117.21686300006695
+          },
+          {
+            "adjusted_layout_ms": 3.0106059999999997,
+            "elapsed_ms": 1481,
+            "frame_ms": 19.322928,
+            "paint_ms": 15.724300999999999,
+            "present_ms": 0.259176,
+            "scale": 1.0,
+            "sequence": 8,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 5.445149,
+            "success": true,
+            "observed_ms": 116.78380599914817
+          },
+          {
+            "adjusted_layout_ms": 3.411828,
+            "elapsed_ms": 1602,
+            "frame_ms": 22.342951,
+            "paint_ms": 18.278599999999997,
+            "present_ms": 0.285885,
+            "scale": 1.0,
+            "sequence": 9,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.393849,
+            "success": true,
+            "observed_ms": 107.64952699537389
+          },
+          {
+            "adjusted_layout_ms": 3.430579,
+            "elapsed_ms": 1710,
+            "frame_ms": 22.394869,
+            "paint_ms": 18.315101,
+            "present_ms": 0.283427,
+            "scale": 1.0,
+            "sequence": 10,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.441018,
+            "success": true,
+            "observed_ms": 117.97009500151034
+          },
+          {
+            "adjusted_layout_ms": 3.666045,
+            "elapsed_ms": 1830,
+            "frame_ms": 23.322608000000002,
+            "paint_ms": 18.974581,
+            "present_ms": 0.303969,
+            "scale": 1.0,
+            "sequence": 11,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.841239,
+            "success": true,
+            "observed_ms": 115.52454599586781
+          },
+          {
+            "adjusted_layout_ms": 3.5898760000000003,
+            "elapsed_ms": 1945,
+            "frame_ms": 22.885426,
+            "paint_ms": 18.638778000000002,
+            "present_ms": 0.284593,
+            "scale": 1.0,
+            "sequence": 12,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.869991,
+            "success": true,
+            "observed_ms": 109.0916529938113
+          },
+          {
+            "adjusted_layout_ms": 3.18982,
+            "elapsed_ms": 2050,
+            "frame_ms": 20.425674,
+            "paint_ms": 16.625624,
+            "present_ms": 0.258259,
+            "scale": 1.0,
+            "sequence": 13,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 5.615155000000001,
+            "success": true,
+            "observed_ms": 108.495424996363
+          },
+          {
+            "adjusted_layout_ms": 3.257114,
+            "elapsed_ms": 2159,
+            "frame_ms": 20.012575000000002,
+            "paint_ms": 16.168691,
+            "present_ms": 0.272968,
+            "scale": 1.0,
+            "sequence": 14,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.026503,
+            "success": true,
+            "observed_ms": 112.14109399588779
+          },
+          {
+            "adjusted_layout_ms": 3.088566,
+            "elapsed_ms": 2270,
+            "frame_ms": 19.826861,
+            "paint_ms": 16.172108,
+            "present_ms": 0.259884,
+            "scale": 1.0,
+            "sequence": 15,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 5.920582,
+            "success": true,
+            "observed_ms": 107.50709800049663
+          }
+        ],
+        "page_bounds": [
+          160,
+          188,
+          640,
+          400
+        ],
+        "median_ms": {
+          "dispatch_ms": 6.4174335,
+          "adjusted_layout_ms": 3.4179325,
+          "paint_ms": 18.296850499999998,
+          "frame_ms": 22.36891,
+          "present_ms": 0.28401
+        },
+        "continuous_status": [
+          1280,
+          32
+        ],
+        "hit_row": 18,
+        "burst_frames": 20
+      },
+      "comparison": {
+        "page_pixels": [
+          640,
+          400
+        ],
+        "changed_pixels": 0,
+        "page_rgb_sha256": "58ce264541220c057427c8879f8653d8104967905ea217bbb083f1164e25197b"
+      },
+      "artifact_directories": {
+        "before": "before-release-scale1",
+        "after": "rc-release-scale1"
+      }
+    },
+    {
+      "profile": "release",
+      "scale": 2,
+      "before": {
+        "scale": 2,
+        "iterations": 10,
+        "samples": [
+          {
+            "adjusted_layout_ms": 7.242547,
+            "elapsed_ms": 1564,
+            "frame_ms": 33.901427999999996,
+            "paint_ms": 24.251905,
+            "present_ms": 0.938141,
+            "scale": 2.0,
+            "sequence": 5,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 15.692145000000002,
+            "success": true,
+            "observed_ms": 109.47419000149239
+          },
+          {
+            "adjusted_layout_ms": 7.487291,
+            "elapsed_ms": 1673,
+            "frame_ms": 33.761474,
+            "paint_ms": 23.730754,
+            "present_ms": 0.973056,
+            "scale": 2.0,
+            "sequence": 6,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 15.246739999999999,
+            "success": true,
+            "observed_ms": 105.67471299873432
+          },
+          {
+            "adjusted_layout_ms": 7.113427000000001,
+            "elapsed_ms": 1780,
+            "frame_ms": 34.190044,
+            "paint_ms": 24.688185,
+            "present_ms": 0.991014,
+            "scale": 2.0,
+            "sequence": 7,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 15.551732000000001,
+            "success": true,
+            "observed_ms": 106.3024880058947
+          },
+          {
+            "adjusted_layout_ms": 7.379169,
+            "elapsed_ms": 1888,
+            "frame_ms": 34.758445,
+            "paint_ms": 24.95201,
+            "present_ms": 0.977389,
+            "scale": 2.0,
+            "sequence": 8,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 16.393167000000002,
+            "success": true,
+            "observed_ms": 116.34420700283954
+          },
+          {
+            "adjusted_layout_ms": 7.525040000000001,
+            "elapsed_ms": 2004,
+            "frame_ms": 34.538285,
+            "paint_ms": 24.54673,
+            "present_ms": 0.96314,
+            "scale": 2.0,
+            "sequence": 9,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 16.837987,
+            "success": true,
+            "observed_ms": 108.4621350019006
+          },
+          {
+            "adjusted_layout_ms": 7.550247000000001,
+            "elapsed_ms": 2113,
+            "frame_ms": 34.766278,
+            "paint_ms": 24.796057,
+            "present_ms": 0.975222,
+            "scale": 2.0,
+            "sequence": 10,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 16.552788,
+            "success": true,
+            "observed_ms": 105.99462100071833
+          },
+          {
+            "adjusted_layout_ms": 7.083802,
+            "elapsed_ms": 2217,
+            "frame_ms": 34.343207,
+            "paint_ms": 24.908845999999997,
+            "present_ms": 0.967223,
+            "scale": 2.0,
+            "sequence": 11,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 15.673979000000001,
+            "success": true,
+            "observed_ms": 116.06171500170603
+          },
+          {
+            "adjusted_layout_ms": 7.487083,
+            "elapsed_ms": 2335,
+            "frame_ms": 34.616366,
+            "paint_ms": 24.714976,
+            "present_ms": 0.97164,
+            "scale": 2.0,
+            "sequence": 12,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 16.855112,
+            "success": true,
+            "observed_ms": 107.39299799752189
+          },
+          {
+            "adjusted_layout_ms": 7.089802,
+            "elapsed_ms": 2440,
+            "frame_ms": 34.176255000000005,
+            "paint_ms": 24.744642000000002,
+            "present_ms": 0.986348,
+            "scale": 2.0,
+            "sequence": 13,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 15.460402,
+            "success": true,
+            "observed_ms": 108.60605200286955
+          },
+          {
+            "adjusted_layout_ms": 7.461042,
+            "elapsed_ms": 2550,
+            "frame_ms": 34.392665,
+            "paint_ms": 24.454442,
+            "present_ms": 0.979098,
+            "scale": 2.0,
+            "sequence": 14,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 16.262088000000002,
+            "success": true,
+            "observed_ms": 114.44114000187255
+          }
+        ],
+        "page_bounds": [
+          1,
+          102,
+          1280,
+          800
+        ],
+        "median_ms": {
+          "dispatch_ms": 15.977116500000001,
+          "adjusted_layout_ms": 7.4201055,
+          "paint_ms": 24.7015805,
+          "frame_ms": 34.367936,
+          "present_ms": 0.9741390000000001
+        },
+        "continuous_status": [
+          1280,
+          32
+        ],
+        "hit_row": 18,
+        "burst_frames": 1
+      },
+      "after": {
+        "scale": 2,
+        "iterations": 10,
+        "samples": [
+          {
+            "adjusted_layout_ms": 3.839003,
+            "elapsed_ms": 1403,
+            "frame_ms": 24.357726,
+            "paint_ms": 19.778575,
+            "present_ms": 1.0398269999999998,
+            "scale": 2.0,
+            "sequence": 5,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 7.061818,
+            "success": true,
+            "observed_ms": 111.73646699899109
+          },
+          {
+            "adjusted_layout_ms": 3.5759939999999997,
+            "elapsed_ms": 1512,
+            "frame_ms": 22.888928,
+            "paint_ms": 18.644952999999997,
+            "present_ms": 1.032159,
+            "scale": 2.0,
+            "sequence": 6,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.761392,
+            "success": true,
+            "observed_ms": 108.17393100296613
+          },
+          {
+            "adjusted_layout_ms": 3.378113,
+            "elapsed_ms": 1619,
+            "frame_ms": 21.944313,
+            "paint_ms": 17.934346,
+            "present_ms": 0.956699,
+            "scale": 2.0,
+            "sequence": 7,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.106578,
+            "success": true,
+            "observed_ms": 109.59647900017444
+          },
+          {
+            "adjusted_layout_ms": 3.229857,
+            "elapsed_ms": 1727,
+            "frame_ms": 21.141203,
+            "paint_ms": 17.343076999999997,
+            "present_ms": 0.9261980000000001,
+            "scale": 2.0,
+            "sequence": 8,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 5.823027,
+            "success": true,
+            "observed_ms": 108.4753940012888
+          },
+          {
+            "adjusted_layout_ms": 3.386821,
+            "elapsed_ms": 1838,
+            "frame_ms": 22.616084,
+            "paint_ms": 18.589075,
+            "present_ms": 1.001492,
+            "scale": 2.0,
+            "sequence": 9,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.286875,
+            "success": true,
+            "observed_ms": 107.47202600032324
+          },
+          {
+            "adjusted_layout_ms": 3.4001970000000004,
+            "elapsed_ms": 1945,
+            "frame_ms": 21.78214,
+            "paint_ms": 17.723046,
+            "present_ms": 1.0287009999999999,
+            "scale": 2.0,
+            "sequence": 10,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.750558,
+            "success": true,
+            "observed_ms": 112.2035579974181
+          },
+          {
+            "adjusted_layout_ms": 3.316485,
+            "elapsed_ms": 2058,
+            "frame_ms": 22.697087,
+            "paint_ms": 18.743831,
+            "present_ms": 1.006617,
+            "scale": 2.0,
+            "sequence": 11,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.415171,
+            "success": true,
+            "observed_ms": 108.17471600603312
+          },
+          {
+            "adjusted_layout_ms": 3.477323,
+            "elapsed_ms": 2167,
+            "frame_ms": 22.992805,
+            "paint_ms": 18.820916,
+            "present_ms": 0.988491,
+            "scale": 2.0,
+            "sequence": 12,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.684305,
+            "success": true,
+            "observed_ms": 106.80158699688036
+          },
+          {
+            "adjusted_layout_ms": 2.7418820000000004,
+            "elapsed_ms": 2267,
+            "frame_ms": 18.384569,
+            "paint_ms": 15.118627,
+            "present_ms": 0.978949,
+            "scale": 2.0,
+            "sequence": 13,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 5.078794,
+            "success": true,
+            "observed_ms": 113.5923960027867
+          },
+          {
+            "adjusted_layout_ms": 3.354194,
+            "elapsed_ms": 2386,
+            "frame_ms": 22.440412,
+            "paint_ms": 18.492948,
+            "present_ms": 1.024409,
+            "scale": 2.0,
+            "sequence": 14,
+            "viewport": [
+              640,
+              400
+            ],
+            "delta_x": 0.0,
+            "delta_y": 40.0,
+            "dispatch_ms": 6.055159,
+            "success": true,
+            "observed_ms": 107.14718200324569
+          }
+        ],
+        "page_bounds": [
+          1,
+          102,
+          1280,
+          800
+        ],
+        "median_ms": {
+          "dispatch_ms": 6.351023,
+          "adjusted_layout_ms": 3.382467,
+          "paint_ms": 18.5410115,
+          "frame_ms": 22.528247999999998,
+          "present_ms": 1.0040545
+        },
+        "continuous_status": [
+          1280,
+          32
+        ],
+        "hit_row": 18,
+        "burst_frames": 20
+      },
+      "comparison": {
+        "page_pixels": [
+          1280,
+          800
+        ],
+        "changed_pixels": 0,
+        "page_rgb_sha256": "99dad380676c9f5702110952d60aab85c1ee48da69966c1abc6befc21a7b4214"
+      },
+      "artifact_directories": {
+        "before": "before-release-scale2",
+        "after": "rc-release-scale2"
+      }
+    }
+  ]
+}

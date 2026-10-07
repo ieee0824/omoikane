@@ -1343,7 +1343,7 @@ struct AdjustedLayoutCache {
     scroll_generation: u64,
     style_generation: u64,
     paint_generation: u64,
-    root: LayoutBox,
+    root: Rc<LayoutBox>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4477,7 +4477,7 @@ impl HostState {
             scroll_generation: current.1,
             style_generation: current.2,
             paint_generation: current.3,
-            root,
+            root: Rc::new(root),
         });
         #[cfg(test)]
         {

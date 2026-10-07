@@ -297,7 +297,7 @@ pub(super) fn paint_text_with_context(
                         canvas,
                         fragment_rect,
                         image,
-                        paint.as_ref().unwrap_or(style),
+                        paint.as_deref().unwrap_or(style),
                         clip,
                         _viewport,
                     );
@@ -308,7 +308,7 @@ pub(super) fn paint_text_with_context(
                     super::paint_generated_box(
                         canvas,
                         fragment_rect,
-                        paint.as_ref().unwrap_or(style),
+                        paint.as_deref().unwrap_or(style),
                         clip,
                         _viewport,
                     );
@@ -571,7 +571,7 @@ fn paint_form_control_fragment(
     clip: Option<Rect>,
 ) {
     let paint = fragment_box_paint_style(fragment, resolver);
-    let style = paint.as_ref().unwrap_or(style);
+    let style = paint.as_deref().unwrap_or(style);
     let border = EdgeSizesForPaint::from_style(style);
     // A block control's owning LayoutBox already painted its
     // background and border. Inline controls have no such box.
@@ -755,7 +755,7 @@ fn fragment_text_color(style: &FragmentStyle) -> Option<Color> {
 fn fragment_box_paint_style(
     fragment: &crate::layout::InlineFragment,
     resolver: &mut crate::css::StyleResolver,
-) -> Option<ComputedStyle> {
+) -> Option<Arc<ComputedStyle>> {
     if !resolver.has_visited_paint() {
         return None;
     }
@@ -771,7 +771,7 @@ fn fragment_paint_color(
     fallback: Color,
 ) -> Color {
     if let Some(color) = fragment_box_paint_style(fragment, resolver)
-        .as_ref()
+        .as_deref()
         .and_then(text_color)
     {
         return color;

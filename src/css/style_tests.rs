@@ -7,6 +7,85 @@ use crate::dom::{NodeHandle, ShadowRootMode};
 use super::*;
 
 #[test]
+fn shared_paint_style_preserves_owned_cssom_and_retained_snapshots() {
+    let node = NodeHandle::element("div");
+    node.set_attribute("style", "width: 10px; color: red");
+    let mut resolver = StyleResolver::new();
+    let first = resolver.paint_style(&node);
+    let reused = resolver.paint_style(&node);
+    assert!(Arc::ptr_eq(&first, &reused));
+
+    let mut owned = resolver.computed_style(&node);
+    owned.set_resolved_px("width", 99.0);
+    assert_eq!(owned.get("width"), Some(&ComputedValue::Px(99.0)));
+    assert_eq!(first.get("width"), Some(&ComputedValue::Px(10.0)));
+    assert_eq!(
+        resolver.computed_style(&node).get("width"),
+        first.get("width")
+    );
+
+    node.set_attribute("style", "width: 20px; color: blue");
+    resolver.invalidate_style_cache();
+    let second = resolver.paint_style(&node);
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert_eq!(second.get("width"), Some(&ComputedValue::Px(20.0)));
+    assert_eq!(first.get("width"), Some(&ComputedValue::Px(10.0)));
+    assert_ne!(first.get("color"), second.get("color"));
+}
+
+#[test]
+fn shared_pseudo_paint_style_preserves_owned_values_and_invalidation() {
+    let node = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div::before { content: 'first'; color: red }").unwrap(),
+    );
+    let first = resolver
+        .paint_pseudo_style(&node, PseudoElement::Before)
+        .unwrap();
+    let reused = resolver
+        .paint_pseudo_style(&node, PseudoElement::Before)
+        .unwrap();
+    assert!(Arc::ptr_eq(&first, &reused));
+    let mut owned = resolver
+        .computed_pseudo_style(&node, PseudoElement::Before)
+        .unwrap();
+    owned.set_resolved_px("width", 99.0);
+    assert_ne!(owned.get("width"), first.get("width"));
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div::before { content: 'second'; color: blue }").unwrap(),
+    );
+    let second = resolver
+        .paint_pseudo_style(&node, PseudoElement::Before)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert_ne!(first.get("content"), second.get("content"));
+    assert_ne!(first.get("color"), second.get("color"));
+}
+
+#[test]
+fn shared_paint_style_keeps_visited_snapshots_private_after_the_pass() {
+    let node = NodeHandle::element("a");
+    node.set_attribute("href", "/visited");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("a {color:red} a:visited {color:blue}").unwrap(),
+    );
+    let ordinary = resolver.paint_style(&node);
+    resolver.begin_visited_paint([node.identity()]);
+    let visited = resolver.paint_style(&node);
+    assert_ne!(ordinary.get("color"), visited.get("color"));
+    assert_eq!(resolver.computed_style(&node), *ordinary);
+    resolver.end_visited_paint();
+    let restored = resolver.paint_style(&node);
+    assert!(Arc::ptr_eq(&ordinary, &restored));
+    assert_ne!(restored.get("color"), visited.get("color"));
+}
+
+#[test]
 fn revert_rule_ignores_the_winning_style_rule() {
     let document = crate::html::TreeBuilder::parse(
         "<html><body><div id='ordinary'></div><div id='nested'></div>\
@@ -362,8 +441,8 @@ fn visited_compound_selectors_change_only_link_colors_at_paint() {
     let painted_child = pass.style(&child);
     let painted_sibling = pass.style(&sibling);
 
-    assert_eq!(painted_body, ordinary_body);
-    assert_eq!(painted_sibling, ordinary_sibling);
+    assert_eq!(painted_body.as_ref(), &ordinary_body);
+    assert_eq!(painted_sibling.as_ref(), &ordinary_sibling);
     assert_eq!(painted_link.get("display"), ordinary_link.get("display"));
     assert_eq!(painted_link.get("width"), ordinary_link.get("width"));
     assert_eq!(

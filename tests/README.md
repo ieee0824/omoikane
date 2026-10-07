@@ -263,6 +263,21 @@ Initial page colors differ, so an old frame cannot satisfy navigation readiness.
 /usr/bin/python3 scripts/test-gui-render-demand.py --binary target/debug/omoikane --artifacts .artifacts/gui-idle-cpu --seconds 10
 ```
 
+The long-page scroll scenario (#1225) records ten warmed samples of native wheel
+dispatch, adjusted layout, paint and presentation on a 300-row fixture. It checks
+every wheel delivery, scroll position (including `scrollTop`), continued painting
+under a burst of input, and the final pixel color and click target. Run each build
+at both device scales; the JSON report and original/losslessly compressed PNGs
+are retained in the artifact directory. `--baseline` records the old stalled
+burst for comparison and does not claim the continuous-paint check passed.
+The [2026-10-07 measurements](../docs/performance/gui-scroll-2026-10-07.json)
+retain all samples for debug/release at scales 1/2, along with the method and limits.
+
+```sh
+python3 scripts/test-gui-scroll.py --binary target/debug/omoikane --scale 1 --artifacts .artifacts/gui-scroll-debug-1
+python3 scripts/test-gui-scroll.py --binary target/debug/omoikane --scale 2 --artifacts .artifacts/gui-scroll-debug-2
+```
+
 Xvfb validates the X11 path with synthetic device input; physical devices,
 Wayland and macOS still need desktop validation. `cargo check --locked --features
 gui` only checks compilation. `unadjustedMovement: true` is currently rejected

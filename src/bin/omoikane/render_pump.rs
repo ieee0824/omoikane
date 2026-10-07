@@ -21,20 +21,50 @@ impl PaintTrace {
         }
     }
 
-    fn record(&mut self) {
+    fn record(
+        &mut self,
+        frame: Duration,
+        timings: omoikane::paint::RenderTimings,
+        present: Duration,
+        layout: &ChromeLayout,
+    ) {
         self.sequence += 1;
         let record = json!({
             "sequence": self.sequence,
             "elapsed_ms": self.started_at.elapsed().as_millis(),
+            "frame_ms": frame.as_secs_f64() * 1000.0,
+            "adjusted_layout_ms": timings.layout.as_secs_f64() * 1000.0,
+            "paint_ms": timings.paint.as_secs_f64() * 1000.0,
+            "present_ms": present.as_secs_f64() * 1000.0,
+            "scale": layout.scale().factor(),
+            "viewport": layout.page_viewport(),
         });
         eprintln!("OMOIKANE_PAINT {record}");
     }
 }
 
 impl BrowserApp {
+    /// Present a previously delivered wheel's changes before consuming more
+    /// input when the frame deadline has passed. X11 can drain an entire input
+    /// backlog before delivering its queued RedrawRequested event.
+    pub(super) fn render_before_wheel(&mut self, now: Instant) {
+        if self.window_occluded
+            || self.window_minimized
+            || now < self.wheel_frame_deadline
+            || !self.frame_cache.demand(&self.session).needs_paint
+        {
+            return;
+        }
+        let elapsed_ms = self.begin_page_frame(now);
+        if let Err(error) = self.draw(elapsed_ms, false) {
+            eprintln!("frame failed: {error}");
+        }
+    }
+
     /// Returns elapsed milliseconds since the last clock update, or zero
     /// immediately after switching documents, so old idle time is discarded.
     pub(super) fn begin_page_frame(&mut self, now: Instant) -> u64 {
+        self.wheel_frame_deadline = now + FRAME_INTERVAL;
         let delta = self.frame_scheduler.begin_frame(now);
         self.page_delta_for_document(delta)
     }
@@ -112,10 +142,13 @@ impl BrowserApp {
             return Ok(());
         }
         let layout = self.chrome_layout();
+        let started = self.paint_trace.as_ref().map(|_| {
+            omoikane::paint::take_last_render_timings();
+            Instant::now()
+        });
         let painted = self.update_page_frame(layout.page_viewport(), elapsed_ms)?;
-        if painted && let Some(trace) = &mut self.paint_trace {
-            trace.record();
-        }
+        let frame_time = started.map(|start| start.elapsed()).unwrap_or_default();
+        let timings = started.map(|_| omoikane::paint::take_last_render_timings());
         self.rebase_clock_if_document_changed();
         self.sync_find_document();
         self.sync_url_bar();
@@ -133,9 +166,20 @@ impl BrowserApp {
             layout,
             url_bar: self.url_bar.clone(),
         };
+        let present_started = started.map(|_| Instant::now());
         if self.should_present(painted, os_exposure, &chrome) {
             self.present(&layout)?;
             self.last_chrome = Some(chrome);
+        }
+        if painted && let Some(trace) = &mut self.paint_trace {
+            trace.record(
+                frame_time,
+                timings.unwrap_or_default(),
+                present_started
+                    .map(|start| start.elapsed())
+                    .unwrap_or_default(),
+                &layout,
+            );
         }
         Ok(())
     }

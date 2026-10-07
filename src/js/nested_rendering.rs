@@ -177,7 +177,7 @@ pub(super) fn document_origin(state: &mut HostState, document: &NodeHandle) -> (
                 {
                     crate::paint::apply_scroll_offsets(&mut root, resolver, viewport, scroll);
                 }
-                root
+                Rc::new(root)
             })
         };
         if let Some(layout) = layout
