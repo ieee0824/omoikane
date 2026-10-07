@@ -316,7 +316,16 @@ cargo test --test web_api_surface -- --nocapture
 
 manifestは [`web_api_surface/manifest.json`](web_api_surface/manifest.json) にあります。
 各probeの`baseline_supported`が`true`の機能は非退行対象です。`false`の機能は出力上
-`unsupported`として集計され、後から実装されてprobeが通ると`improvements`に表示されます。
+probeの結果に従って集計され、後から実装されてprobeが通ると`improvements`に表示されます。
+
+`improvements`が出たら、probeが仕様上の振る舞いを確認していることをレビューし、
+該当する`baseline_supported`を`true`へ更新してください。更新後に同じテストを再実行し、
+`regressions`が空であることを確認します。存在確認だけのprobeは機能全体の互換性を
+保証しないため、具体的な振る舞いの回帰テストも維持してください。
+
+Locationのprobeは要求先URLと履歴モード、commit前のURL保持を分けて検査します。
+commit後の文書URLは`committed_document_exposes_navigation_url`で確認します。
+各Location setterとブラウザによるcommitは`location_commit`と`browser_journeys`でも検証します。
 
 machine-readable JSON reportが必要な場合は出力先を指定します。
 

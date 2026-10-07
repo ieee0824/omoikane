@@ -14653,12 +14653,9 @@ fn commit_fragment_url_native(
     }
     with_host_state(|host| {
         let mut state = host.borrow_mut();
-        let (current_base, current_fragment) = state
-            .location_href
-            .split_once('#')
-            .unwrap_or((&state.location_href, ""));
-        let (next_base, next_fragment) = url.split_once('#').unwrap_or((&url, ""));
-        if current_base != next_base || current_fragment == next_fragment {
+        let current_base = state.location_href.split('#').next().unwrap_or("");
+        let next_base = url.split('#').next().unwrap_or("");
+        if current_base != next_base || state.location_href == url {
             return Ok(JsValue::from(false));
         }
         let document = state.document.clone();

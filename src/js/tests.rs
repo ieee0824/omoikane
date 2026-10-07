@@ -5497,7 +5497,7 @@ fn history_api_tracks_state_and_same_origin_urls() {
 fn location_exposes_navigation_methods() {
     let mut runtime = JsRuntime::new().unwrap();
     assert!(runtime
-        .eval(r##"(() => { const result = location.reload(); location.assign("/assigned?q=1"); location.replace("/replaced#ok"); return result === undefined && location.pathname === "/replaced" && location.hash === "#ok"; })()"##)
+        .eval(r##"(() => { const result = location.reload(); location.assign("/assigned?q=1"); location.replace("/replaced#ok"); return result === undefined && location.href === "http://localhost/" && document.URL === location.href; })()"##)
         .unwrap()
         .as_boolean()
         .unwrap());

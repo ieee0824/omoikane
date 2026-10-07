@@ -16085,33 +16085,24 @@
       return __omoikane_navigate_auxiliary_window(auxiliaryNavigationId, value || String(globalThis.location.href));
     }
     if (isChildWindow) return childNavigation(kind, value, extra);
-    if (kind === "assign" || kind === "replace") nativeCommitFragmentURL(value);
+    if ((kind === "assign" || kind === "replace") && nativeCommitFragmentURL(value)) {
+      __applyLocationUrl(value, false);
+    }
     return __omoikane_schedule_navigation(kind, value, extra);
   };
   let __locationHref = String(__omoikane_location_href);
-  const __loc = { protocol: "", hostname: "", pathname: "/", search: "", hash: "", origin: "", host: "" };
-  try {
-    const __m = String(__omoikane_location_href).match(/^(.*?):\/\/([^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/);
-    if (__m) {
-      __loc.protocol = (__m[1] || "") + ":";
-      __loc.host = __m[2] || "";
-      __loc.hostname = (__m[2] || "").replace(/:\d+$/, "");
-      __loc.pathname = __m[3] || "/";
-      __loc.search = __m[4] || "";
-      __loc.hash = __m[5] === "#" ? "" : (__m[5] || "");
-      __loc.origin = __loc.protocol + "//" + __loc.host;
-    }
-  } catch(e) {}
+  const __loc = {};
   Object.defineProperty(__loc, "href", {
     enumerable: true,
     configurable: false,
     get() { return __locationHref; },
     set(url) {
-      const href = __applyLocationUrl(url, false);
-      if (href !== undefined) scheduleWindowNavigation("assign", href);
+      __requestLocationNavigation(url, "assign");
     },
   });
-  let __locationHash = __loc.hash;
+  const initialFragment = __locationHref.indexOf("#");
+  let __locationHash = initialFragment < 0 || initialFragment === __locationHref.length - 1
+    ? "" : __locationHref.slice(initialFragment);
   Object.defineProperty(__loc, "hash", {
     enumerable: true,
     configurable: false,
@@ -16121,6 +16112,16 @@
       if (href !== __loc.href) __loc.assign(href);
     },
   });
+  for (const key of ["protocol", "host", "hostname", "port", "pathname", "search", "origin"]) {
+    Object.defineProperty(__loc, key, {
+      enumerable: true,
+      configurable: false,
+      get() { return new URL(__locationHref)[key]; },
+      ...(key === "origin" ? {} : { set(value) {
+        __loc.assign(locationURLWithComponent(__locationHref, key, value));
+      } }),
+    });
+  }
   const childLocation = {
     get href() { return childNavigation("location"); },
     set href(value) { this.assign(value); },
@@ -16144,7 +16145,7 @@
     get() { return isChildWindow ? childLocation : __loc; },
     set(url) { (isChildWindow ? childLocation : __loc).assign(url); },
   });
-  function __applyLocationUrl(url, requireSameOrigin) {
+  function __parseLocationUrl(url, requireSameOrigin) {
     if (url == null || String(url) === "") return;
     const raw = String(url);
     const href = String(__omoikane_resolve_url(raw));
@@ -16152,26 +16153,28 @@
     if (!match || (requireSameOrigin && (match[1] + "://" + match[2]) !== __loc.origin)) {
       throw new DOMException("History state URL must be same-origin", "SecurityError");
     }
+    return { href, match };
+  }
+  function __requestLocationNavigation(url, kind) {
+    const parsed = __parseLocationUrl(url, false);
+    if (parsed !== undefined) scheduleWindowNavigation(kind, parsed.href);
+  }
+  function __applyLocationUrl(url, requireSameOrigin) {
+    const parsed = __parseLocationUrl(url, requireSameOrigin);
+    if (parsed === undefined) return;
+    const { href, match } = parsed;
     __locationHref = href;
-    __loc.protocol = match[1] + ":";
-    __loc.host = match[2];
-    __loc.hostname = match[2].replace(/:\d+$/, "");
-    __loc.pathname = match[3] || "/";
-    __loc.search = match[4] || "";
     __locationHash = match[5] === "#" ? "" : (match[5] || "");
-    __loc.origin = match[1] + "://" + match[2];
     return href;
   }
   function __applyHistoryUrl(url) {
     return __applyLocationUrl(url, true);
   }
   __loc.assign = function(url) {
-    const href = __applyLocationUrl(url, false);
-    if (href !== undefined) scheduleWindowNavigation("assign", href);
+    __requestLocationNavigation(url, "assign");
   };
   __loc.replace = function(url) {
-    const href = __applyLocationUrl(url, false);
-    if (href !== undefined) scheduleWindowNavigation("replace", href);
+    __requestLocationNavigation(url, "replace");
   };
   __loc.reload = function() {
     scheduleWindowNavigation("reload", __loc.href);

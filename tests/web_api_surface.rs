@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use omoikane::html::TreeBuilder;
-use omoikane::js::JsRuntime;
+use omoikane::js::{JsRuntime, NavigationRequest};
 use serde::{Deserialize, Serialize};
 
 const MANIFEST_PATH: &str = "tests/web_api_surface/manifest.json";
@@ -29,6 +29,7 @@ struct Feature {
     #[serde(default)]
     run_tasks: bool,
     expected_navigation_requests: Option<usize>,
+    expected_navigation_url: Option<String>,
     probe: String,
     baseline_supported: bool,
 }
@@ -139,8 +140,14 @@ fn run_probe(runtime: &mut JsRuntime, feature: &Feature) -> ProbeResult {
                 error: Some(format!("event loop: {error}")),
             };
         }
-        let actual = runtime.take_navigation_requests().len();
-        if actual != expected {
+        let requests = runtime.take_navigation_requests();
+        let actual = requests.len();
+        let destination_matches = feature.expected_navigation_url.as_ref().is_none_or(|url| {
+            matches!(requests.as_slice(), [NavigationRequest::Navigate {
+                url: actual_url, replace: false,
+            }] if actual_url == url)
+        });
+        if actual != expected || !destination_matches {
             return ProbeResult {
                 id: feature.id.clone(),
                 area: feature.area.clone(),
@@ -148,7 +155,8 @@ fn run_probe(runtime: &mut JsRuntime, feature: &Feature) -> ProbeResult {
                 baseline_supported: feature.baseline_supported,
                 status: ProbeStatus::Unsupported,
                 error: Some(format!(
-                    "navigation requests: expected {expected}, got {actual}"
+                    "navigation requests: expected {expected} with URL {:?}, got {requests:?}",
+                    feature.expected_navigation_url
                 )),
             };
         }
@@ -331,6 +339,49 @@ fn report_classifies_regressions_and_improvements() {
 
     assert_eq!(report.regressions, ["stable.feature"]);
     assert_eq!(report.improvements, ["new.feature"]);
+}
+
+#[test]
+fn committed_document_exposes_navigation_url() {
+    let destination = "http://localhost/surface-next?from=probe";
+    let mut runtime = JsRuntime::with_document_and_url(
+        TreeBuilder::parse("<body></body>").document(),
+        destination,
+    )
+    .expect("committed navigation runtime");
+    assert_eq!(runtime.eval(
+        "location.href === 'http://localhost/surface-next?from=probe' && document.URL === location.href"
+    ).expect("committed URL probe").as_boolean(), Some(true));
+}
+
+#[test]
+fn navigation_probe_checks_destination_and_history_mode() {
+    let mut manifest = load_manifest();
+    let feature = manifest
+        .features
+        .iter_mut()
+        .find(|feature| feature.id == "navigation.location-request")
+        .expect("location navigation probe");
+    feature.expected_navigation_url = Some("http://localhost/surface-next?from=probe".into());
+    feature.probe = "true".into();
+    let mut runtime = JsRuntime::with_document(TreeBuilder::parse("<body></body>").document())
+        .expect("navigation runtime");
+    assert_eq!(
+        run_probe(&mut runtime, feature).status,
+        ProbeStatus::Supported
+    );
+
+    feature.setup = Some("location.assign('/wrong-destination')".into());
+    assert_eq!(
+        run_probe(&mut runtime, feature).status,
+        ProbeStatus::Unsupported
+    );
+
+    feature.setup = Some("location.replace('/surface-next?from=probe')".into());
+    assert_eq!(
+        run_probe(&mut runtime, feature).status,
+        ProbeStatus::Unsupported
+    );
 }
 
 #[test]

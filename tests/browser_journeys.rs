@@ -752,3 +752,21 @@ fn record_fonts(case: &str, run: impl FnOnce()) {
     )
     .unwrap();
 }
+
+#[test]
+fn location_assignment_retains_old_url_then_commits_new_document() {
+    let server = FixtureServer::start();
+    let mut browser =
+        PlatformBrowser::with_tab(Some(&format!("{}/app/index.html", server.origin))).unwrap();
+    let before = evaluate(&mut browser, "location.href");
+    let retained = evaluate(
+        &mut browser,
+        "(() => { const before = location.href; location.assign('/assets/style.css'); return location.href === before && document.URL === before; })()",
+    );
+    assert_eq!(retained, json!(true));
+    browser.render_active(640, 480, 16).unwrap();
+    let destination = format!("{}/assets/style.css", server.origin);
+    assert_ne!(before, json!(destination));
+    assert_eq!(evaluate(&mut browser, "location.href"), json!(destination));
+    assert_eq!(evaluate(&mut browser, "document.URL"), json!(destination));
+}
