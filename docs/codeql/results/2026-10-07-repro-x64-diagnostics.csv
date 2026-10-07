@@ -1,0 +1,7 @@
+name,beginLine,beginColumn,severity,tag,message,fullMessage
+src/lib.rs,12,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+src/lib.rs,13,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+src/lib.rs,21,34,30,parse_error,macro expansion failed for 'offset_of',macro expansion failed for 'offset_of'
+src/lib.rs,31,14,30,parse_error,macro expansion failed for '$crate::__Fn',macro expansion failed for '$crate::__Fn'
+src/lib.rs,41,14,30,parse_error,macro expansion failed for '$crate::__Fn',macro expansion failed for '$crate::__Fn'
+src/lib.rs,88,9,30,parse_error,macro expansion failed for '$crate::panic::panic_2021',macro expansion failed for '$crate::panic::panic_2021'

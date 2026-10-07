@@ -1,0 +1,37 @@
+{
+  "date": "2026-10-07",
+  "issue": 1266,
+  "cli": "2.27.1",
+  "rust_library": "0.2.22",
+  "rust": "1.98.1",
+  "host": "aarch64-unknown-linux-gnu",
+  "engine_lock_commit": "903227c78811cdc22dbf473845d17b72ce116cf8",
+  "all_dependency_entries_match_engine_lock": true,
+  "newer_extractor_validation_pending": true,
+  "targets": {
+    "arm64": {
+      "analysis_target": "aarch64-unknown-linux-gnu",
+      "warning_diagnostics": 5,
+      "macro_rows": 26,
+      "ast_zero_rows": 5,
+      "raw_diagnostics_sha256": "a80470c2ac67836bc34c6789fbb87e192f61e3376069418b05193cc892f6f096",
+      "raw_macros_sha256": "66e21338a010939743c4c6662cfa4f0b23088b629cfd7c1be3bd84c808db3c3b",
+      "rust_tests_executed": true
+    },
+    "x64": {
+      "analysis_target": "x86_64-unknown-linux-gnu",
+      "warning_diagnostics": 6,
+      "macro_rows": 24,
+      "ast_zero_rows": 6,
+      "raw_diagnostics_sha256": "c086580e121438a0c85d72a52a89b4573b84735f8d90dff8214c3072bd317d08",
+      "raw_macros_sha256": "0ced49d34e403a0cf3c706f27e5ceda7bbe574d729c5b2969e33bff94c1a142f",
+      "rust_tests_executed": false
+    }
+  },
+  "source_sha256": {
+    "docs/codeql/repros/macro-gaps/Cargo.toml": "6236f92d36a9495321cfbfb1f151c589d035a8f841abd50747d7646bf97da7a2",
+    "docs/codeql/repros/macro-gaps/Cargo.lock": "b48d55baaf29c7e78e09a0e5a11816a3a6d20651d136449d70809d70db94fc81",
+    "docs/codeql/repros/macro-gaps/src/lib.rs": "45ede2bf2c405416d2b25d3d81d6c6d3ae74e90b179e75e3f99633cbce43ab61",
+    "docs/codeql/queries/ReproMacros.ql": "a6d4eefc198e1a4c49b71f73861ddad4289da487869fe35e910b8f81cc9d113d"
+  }
+}

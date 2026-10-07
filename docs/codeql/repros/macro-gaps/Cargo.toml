@@ -1,0 +1,12 @@
+[package]
+name = "omoikane-codeql-macro-gaps"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Independent reproduction; not part of the browser's workspace.
+[workspace]
+
+[dependencies]
+dynify = "=0.1.2"
+static_assertions = "=1.1.0"
