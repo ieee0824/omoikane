@@ -249,7 +249,53 @@ warningの内訳は本体14件と独立再現crate 6件で、embeddedの4件だ�
 DB内ソース8ファイルのhashも照合した。
 [run・版・依存元・DB/CSV/ソースhash・残存制限](results/2026-10-07-main-7a9.json)に記録した。
 CLI/extractorは2.27.1のままであり、新しい公開extractorを検証した結果ではない。
-Issue #1266の最初の更新条件は未完了として保持する。
+この測定時点ではIssue #1266の最初の更新条件は未完了だった。
+
+## 公開版2.27.2でのmain再測定
+
+[#1304](https://github.com/ieee0824/omoikane/pull/1304)をマージした
+`70e078bfab69a21be3145702e3a3a65afec3e5de` の
+[CodeQL run37623483591](https://github.com/ieee0824/omoikane/actions/runs/37623483591)
+は成功した。Rust jobは`112799344198`。DBのSHA・CLI2.27.2・build-mode noneを
+照合し、ZIP337,398,141 bytesのSHA256は
+`53adad30c81d3635b2563248dd1e5ce26eb658292825dde3c315c1342f65dba9`。
+旧DBと同じ9ソースファイルのハッシュを確認し、両DBの比較queryには
+CLI2.27.2・公開library0.2.23を使用した。旧DB上の元の3queryはlibrary更新後も
+全行一致しており、extractor更新による差分と区別できる。
+
+| 比較対象 | CLI2.27.1 DB | CLI2.27.2 DB |
+| --- | ---: | ---: |
+| raw warning / info / error | 20 / 5 / 0 | 21 / 5 / 0 |
+| 元の6ファイルのマクロ行 / AST0 | 591 / 13 | 591 / 13 |
+| platform.rsのマクロ行 / AST0 | 31 / 0 | 31 / 1 |
+| 再現例のマクロ行 / AST0 | 24 / 6 | 24 / 6 |
+
+既存14警告と再現例6警告は残り、`jit/platform.rs:398:13`の
+`format_args_nl`が1警告増えた。元の13 AST欠落位置は同じままである。
+元の6ファイルでは140行、platform.rsでは9行、再現例では4行のASTサイズが
+変わったが、サイズの増加だけを解析改善の証拠にはしない。
+embeddedは両fixtureで配列1・tuple4・fixtureパス4・compile_error0を維持した。
+
+追加警告は既存の`#[cfg(all(target_arch = "aarch64", target_os = "macos"))]`
+付き`eprintln!`内にある。LinuxのDBでは内側のASTが15から0、外側が41から26へ
+変わった。cfgと元テストは保持している。macOSで有効な式のCodeQL抽出結果は
+測定しておらず、macOS実行や型/dataflow全体の解析をこの結果から保証しない。
+
+共有可能な証跡:
+
+- [run・DBハッシュ・依存版・ソースハッシュ・差分集計](results/2026-10-07-main-70e.json)
+- [全26診断](results/2026-10-07-main-70e-diagnostics.csv)
+- [元の591マクロ位置の前後AST](results/2026-10-07-main-70e-macro-comparison.csv)
+- [追加ファイル31位置の前後AST](results/2026-10-07-main-70e-platform-comparison.csv)
+- [再現例24位置の前後AST](results/2026-10-07-main-70e-repro-comparison.csv)
+- [embeddedの展開配列検証](results/2026-10-07-main-70e-embedded.csv)
+- [追加ファイル用query](queries/AdditionalMacros.ql)
+
+更新PRの全5workflowが成功し、通常CIではlocked test/buildを確認した。
+テスト結果のログ集計は3,451成功・失敗0・ignored0。テスト本文内で早期returnする
+utilityの個別実行までは、この集計で保証しない。Native JIT・Browser・Releaseも
+成功した。全体のRust解析が完全になったとは扱わず、残る位置をIssue #1266と
+上記の実行可能な再現例で追跡する。
 
 ### 再測定手順
 
