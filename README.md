@@ -57,7 +57,7 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 - CJK テキストの行折り返し・禁則処理・フォールバック
 - `text-decoration`（underline / overline / line-through、per-fragment 対応）
 - `text-transform`（uppercase / lowercase / capitalize）
-- `letter-spacing` / `word-spacing`
+- `letter-spacing`（`word-spacing` の描画接続は [#1273](https://github.com/ieee0824/omoikane/issues/1273) で管理）
 - `list-style-type`（disc / circle / square / decimal / roman / alpha）
 - `list-style-position`（outside / inside）
 

@@ -10226,3 +10226,47 @@ fn live_animation_display_none_keyword_is_ascii_case_insensitive() {
         );
     }
 }
+
+#[test]
+fn property_registry_rejects_the_same_values_as_the_cascade() {
+    for name in SUPPORTED_PROPERTIES.iter().copied().chain([
+        "rotate",
+        "font-feature-settings",
+        "font-variation-settings",
+        "counter-set",
+        "scrollbar-color",
+        "hyphenate-character",
+        "anchor-name",
+        "made-up-property",
+    ]) {
+        for value in ["__invalid-token__", "inherit", "10deg", "1px", "red blue"] {
+            if supports_declaration(name, value) {
+                continue;
+            }
+            let element = NodeHandle::element("div");
+            let mut resolver = StyleResolver::new();
+            let original = resolver.computed_style(&element);
+            element.set_attribute("style", &format!("{name}: {value}"));
+            resolver.invalidate_style_cache_for_test();
+            let actual = resolver.computed_style(&element);
+            assert_eq!(actual.properties, original.properties, "{name}: {value}");
+        }
+    }
+}
+
+#[test]
+fn implemented_table_layout_is_recognized_and_validated() {
+    for value in ["auto", "fixed", "FiXeD", "inherit", "initial"] {
+        assert!(supports_declaration("table-layout", value), "{value}");
+    }
+    for value in ["__invalid-token__", "fixed auto", "10px", "fixed,auto"] {
+        assert!(!supports_declaration("table-layout", value), "{value}");
+    }
+    let table = NodeHandle::element("table");
+    table.set_attribute("style", "table-layout: FiXeD; table-layout: invalid");
+    let style = StyleResolver::new().computed_style(&table);
+    assert_eq!(
+        style.get("table-layout"),
+        Some(&ComputedValue::Keyword("fixed".to_string()))
+    );
+}

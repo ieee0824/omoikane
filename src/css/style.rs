@@ -3901,6 +3901,39 @@ fn validate_multicol_declaration(name: &str, value: &Value) -> Option<Declaratio
     })
 }
 
+// Feature detection and the cascade share the implemented-property registry.
+// Recognition does not bypass value validation for retained shorthand metadata.
+fn resolved_property_is_supported(name: &str) -> bool {
+    is_supported_property(canonical_property_name(name)) || name.starts_with("--")
+}
+
+fn validate_retained_shorthand(name: &str, value: &Value) -> DeclarationValidation {
+    let expanded = super::shorthand::expand_shorthand(name, value.clone(), false);
+    let longhands: Vec<_> = expanded
+        .iter()
+        .filter(|declaration| declaration.name != name)
+        .collect();
+    if longhands.is_empty()
+        || longhands.iter().any(|declaration| {
+            matches!(
+                validate_declaration(&declaration.name, &declaration.value),
+                DeclarationValidation::Invalid
+            )
+        })
+    {
+        return DeclarationValidation::Invalid;
+    }
+    // Some expansion paths retain a shorthand alongside its longhands for
+    // internal consumers. Keep simple typed values, and serialize every token
+    // of a valid aggregate rather than computing only its first component.
+    match value {
+        Value::List(_) | Value::CommaList(_) => {
+            DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)))
+        }
+        _ => DeclarationValidation::Unvalidated,
+    }
+}
+
 /// Validates a resolved declaration value against the property's grammar.
 ///
 /// This is the single extension point for per-property value validation.
@@ -3909,6 +3942,12 @@ fn validate_multicol_declaration(name: &str, value: &Value) -> Option<Declaratio
 /// property, match its name and return [`DeclarationValidation::Valid`] /
 /// [`DeclarationValidation::Invalid`].
 fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
+    if !resolved_property_is_supported(name) {
+        return DeclarationValidation::Invalid;
+    }
+    if super::shorthand::is_deferred_var_shorthand(name) {
+        return validate_retained_shorthand(name, value);
+    }
     if let Some(validation) = grid_properties::validate(name, value) {
         return validation;
     }
@@ -3967,6 +4006,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     }
     if key == "scroll-behavior" {
         return validate_keyword_value(value, &["auto", "smooth"]);
+    }
+    if key == "table-layout" {
+        return validate_keyword_value(value, &["auto", "fixed"]);
     }
     if let Some(validation) = validate_scroll_snap_declaration(name, value) {
         return validation;
@@ -10072,6 +10114,7 @@ const INITIAL_VALUES: &[(&str, InitialValue)] = &[
     ("cursor", InitialValue::Keyword("auto")),
     ("pointer-events", InitialValue::Keyword("auto")),
     ("scroll-behavior", InitialValue::Keyword("auto")),
+    ("table-layout", InitialValue::Keyword("auto")),
     ("overscroll-behavior-block", InitialValue::Keyword("auto")),
     ("overscroll-behavior-inline", InitialValue::Keyword("auto")),
     ("overscroll-behavior-x", InitialValue::Keyword("auto")),
