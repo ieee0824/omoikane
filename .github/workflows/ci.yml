@@ -240,6 +240,11 @@ jobs:
           WPT_REPORT: .artifacts/wpt/report.json
           WPT_JUNIT: .artifacts/wpt/junit.xml
         run: cargo test --locked --test wpt_smoke -- --nocapture
+      - name: Run individual transform reftests
+        env:
+          WPT_ROOT: .cache/wpt
+          WPT_REQUIRED: "1"
+        run: cargo test --locked --test p1_transform_reftests -- --nocapture
       - name: Run printed page layer reftests
         env:
           WPT_ROOT: .cache/wpt

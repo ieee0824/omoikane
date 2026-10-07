@@ -2279,6 +2279,35 @@ fn paint_cloned_fragment_decorations(
     );
 }
 
+// A 3D singular matrix can have an invertible z=0 projection (scaleZ(0)).
+// Keep layout geometry intact and reject that matrix only for paint and hits.
+fn has_invertible_box_transform(
+    layout: &LayoutBox,
+    style: &ComputedStyle,
+    root_font_size: f32,
+) -> bool {
+    if !has_transform_style(style) {
+        return true;
+    }
+    let bounds = layout.dimensions.border_box();
+    let font_size = match style.get("font-size") {
+        Some(ComputedValue::Px(value)) => *value,
+        _ => 16.0,
+    };
+    crate::css::parse_composed_transform(
+        style,
+        crate::css::TransformReferenceBox {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+            font_size,
+            root_font_size,
+        },
+    )
+    .is_none_or(|matrix| matrix.is_invertible())
+}
+
 fn paint_box_internal_single(
     canvas: &mut Canvas,
     layout: &LayoutBox,
@@ -2286,6 +2315,10 @@ fn paint_box_internal_single(
     context: PaintContext<'_>,
     options: PaintBoxOptions,
 ) {
+    let style = paint_box_style(layout, resolver);
+    if !has_invertible_box_transform(layout, &style, resolver.root_font_size()) {
+        return;
+    }
     if !layout.transform.is_identity() {
         paint_transformed_box(canvas, layout, resolver, context, options);
         return;
@@ -2511,6 +2544,7 @@ pub(crate) fn hit_test_layout(
         x,
         y,
         &mut hits,
+        true,
     );
     let HitCollector::First(hit) = hits else {
         unreachable!();
@@ -2541,6 +2575,7 @@ pub(crate) fn hit_test_layout_all(
         x,
         y,
         &mut hits,
+        true,
     );
     let HitCollector::All { hits, .. } = hits else {
         unreachable!();
@@ -2640,6 +2675,9 @@ fn hit_test_box_geometry(
         Some(transformed_rect_bounds(fragment.source, transform))
     };
     let style = paint_box_style(layout, resolver);
+    if !has_invertible_box_transform(layout, &style, resolver.root_font_size()) {
+        return None;
+    }
     let border_box = border_box_rect(layout);
     let padding_box = padding_box_rect(layout);
     let clip_shape = clip_path_shape(&style, border_box);
@@ -2707,53 +2745,133 @@ fn hit_test_box_geometry(
     })
 }
 
-/// Partitions `layout`'s children into the paint-order groups hit-testing
-/// walks front-to-back: negative z-index, in-flow normal, floats, inline,
-/// auto/zero z-index positioned, and positive z-index.
-fn partition_children_for_hit_test<'a>(
-    layout: &'a LayoutBox,
-    resolver: &mut StyleResolver,
-) -> (
-    Vec<&'a LayoutBox>,
-    Vec<&'a LayoutBox>,
-    Vec<&'a LayoutBox>,
-    Vec<&'a LayoutBox>,
-    Vec<&'a LayoutBox>,
-    Vec<&'a LayoutBox>,
-) {
-    let mut negative = Vec::new();
-    let mut normal = Vec::new();
-    let mut floats = Vec::new();
-    let mut inline = Vec::new();
-    let mut auto_positioned = Vec::new();
-    let mut positive = Vec::new();
-    let item_container = is_flex_or_grid_container(&paint_box_style(layout, resolver));
-    for child in &layout.children {
-        let child_style = paint_box_style(child, resolver);
-        if is_positioned_child_for_paint(child, &child_style, item_container) {
-            if child.z_index < 0 {
-                negative.push(child);
-            } else if child.z_index > 0 {
-                positive.push(child);
-            } else {
-                auto_positioned.push(child);
-            }
-        } else if !item_container && is_float_for_paint(&child_style) {
-            floats.push(child);
-        } else if !item_container && child.lines.is_empty() {
-            normal.push(child);
-        } else {
-            inline.push(child);
-        }
-    }
-    (negative, normal, floats, inline, auto_positioned, positive)
+// Paths keep the ancestor chain available when a descendant participates in
+// an outer paint phase. Geometry and overflow clips still apply along that chain.
+#[derive(Default)]
+struct HitTestPhases {
+    negative: Vec<Vec<usize>>,
+    normal: Vec<Vec<usize>>,
+    floats: Vec<Vec<usize>>,
+    inline: Vec<Vec<usize>>,
+    auto_positioned: Vec<Vec<usize>>,
+    positive: Vec<Vec<usize>>,
 }
 
-/// Hit-tests three paint-order groups of children back-to-front (the reverse
-/// of paint order), stopping as soon as one records a hit.
+fn collect_hit_test_phases(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    path: &mut Vec<usize>,
+    phases: &mut HitTestPhases,
+    include_descendants: bool,
+    direct: bool,
+) {
+    let style = paint_box_style(layout, resolver);
+    if !direct && (!layout.transform.is_identity() || has_transform_style(&style)) {
+        return;
+    }
+    let item_container = is_flex_or_grid_container(&style);
+    for (index, child) in layout.children.iter().enumerate() {
+        path.push(index);
+        let child_style = paint_box_style(child, resolver);
+        if is_positioned_child_for_paint(child, &child_style, item_container) {
+            if include_descendants {
+                let group = if child.z_index < 0 {
+                    &mut phases.negative
+                } else if child.z_index > 0 {
+                    &mut phases.positive
+                } else {
+                    &mut phases.auto_positioned
+                };
+                group.push(path.clone());
+            }
+        } else if !item_container && is_float_for_paint(&child_style) {
+            if include_descendants {
+                phases.floats.push(path.clone());
+            }
+        } else {
+            if direct {
+                if !item_container && child.lines.is_empty() {
+                    phases.normal.push(path.clone());
+                } else {
+                    phases.inline.push(path.clone());
+                }
+            }
+            if include_descendants {
+                collect_hit_test_phases(child, resolver, path, phases, true, false);
+            }
+        }
+        path.pop();
+    }
+}
+
+fn hit_test_path_box<'a>(mut layout: &'a LayoutBox, path: &[usize]) -> &'a LayoutBox {
+    for &index in path {
+        layout = &layout.children[index];
+    }
+    layout
+}
+
+fn partition_children_for_hit_test(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    include_descendants: bool,
+) -> HitTestPhases {
+    let mut phases = HitTestPhases::default();
+    collect_hit_test_phases(
+        layout,
+        resolver,
+        &mut Vec::new(),
+        &mut phases,
+        include_descendants,
+        true,
+    );
+    for group in [&mut phases.negative, &mut phases.positive] {
+        group.sort_by_key(|path| hit_test_path_box(layout, path).z_index);
+    }
+    phases
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hit_test_child_path(
+    mut layout: &LayoutBox,
+    path: &[usize],
+    resolver: &mut StyleResolver,
+    mut transform: AffineTransform,
+    mut clip: Option<Rect>,
+    viewport: Rect,
+    mut point: (f32, f32),
+    hits: &mut HitCollector,
+    include_descendants: bool,
+) -> bool {
+    let (&last, ancestors) = path.split_last().expect("nonempty child path");
+    for &index in ancestors {
+        layout = &layout.children[index];
+        let Some(geometry) = hit_test_box_geometry(
+            layout, resolver, transform, clip, viewport, point.0, point.1,
+        ) else {
+            return false;
+        };
+        transform = geometry.transform;
+        clip = geometry.clip;
+        point = geometry.query_point;
+    }
+    hit_test_box(
+        &layout.children[last],
+        resolver,
+        transform,
+        clip,
+        viewport,
+        point.0,
+        point.1,
+        hits,
+        include_descendants,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn hit_test_child_groups(
-    groups: [&[&LayoutBox]; 3],
+    layout: &LayoutBox,
+    groups: [(&[Vec<usize>], bool); 3],
     resolver: &mut StyleResolver,
     transform: AffineTransform,
     clip: Option<Rect>,
@@ -2762,9 +2880,19 @@ fn hit_test_child_groups(
     y: f32,
     hits: &mut HitCollector,
 ) -> bool {
-    for group in groups {
-        for child in group.iter().rev() {
-            if hit_test_box(child, resolver, transform, clip, viewport, x, y, hits) {
+    for (group, include_descendants) in groups {
+        for path in group.iter().rev() {
+            if hit_test_child_path(
+                layout,
+                path,
+                resolver,
+                transform,
+                clip,
+                viewport,
+                (x, y),
+                hits,
+                include_descendants,
+            ) {
                 return true;
             }
         }
@@ -2920,6 +3048,7 @@ fn hit_test_box(
     x: f32,
     y: f32,
     hits: &mut HitCollector,
+    include_descendants: bool,
 ) -> bool {
     let Some(HitTestGeometry {
         transform,
@@ -2941,11 +3070,15 @@ fn hit_test_box(
         return false;
     };
 
-    let (negative, normal, floats, inline, auto_positioned, positive) =
-        partition_children_for_hit_test(layout, resolver);
+    let phases = partition_children_for_hit_test(layout, resolver, include_descendants);
 
     if hit_test_child_groups(
-        [&positive, &auto_positioned, &inline],
+        layout,
+        [
+            (&phases.positive, true),
+            (&phases.auto_positioned, true),
+            (&phases.inline, false),
+        ],
         resolver,
         transform,
         clip,
@@ -2963,7 +3096,12 @@ fn hit_test_box(
         return result;
     }
     if hit_test_child_groups(
-        [&floats, &normal, &negative],
+        layout,
+        [
+            (&phases.floats, true),
+            (&phases.normal, false),
+            (&phases.negative, true),
+        ],
         resolver,
         transform,
         clip,
@@ -4516,10 +4654,11 @@ fn collect_phase_descendants<'a>(
     auto_positioned_children: &mut Vec<&'a LayoutBox>,
     positive_positioned_children: &mut Vec<&'a LayoutBox>,
 ) {
-    if !layout.transform.is_identity() {
+    let style = paint_box_style(layout, resolver);
+    if !layout.transform.is_identity() || has_transform_style(&style) {
         return;
     }
-    let item_container = is_flex_or_grid_container(&paint_box_style(layout, resolver));
+    let item_container = is_flex_or_grid_container(&style);
     for child in &layout.children {
         let child_style = paint_box_style(child, resolver);
         if is_positioned_child_for_paint(child, &child_style, item_container) {
@@ -4583,7 +4722,17 @@ fn is_positioned_for_paint(style: &ComputedStyle) -> bool {
                 || keyword.eq_ignore_ascii_case("fixed")
                 || keyword.eq_ignore_ascii_case("relative")
                 || keyword.eq_ignore_ascii_case("sticky")
-    )
+    ) || has_transform_style(style)
+}
+
+fn has_transform_style(style: &ComputedStyle) -> bool {
+    style.has_transform_animation_context()
+        || style.get("will-change").is_some_and(|value| {
+            value.css_text().split(',').any(|property| matches!(property.trim(), "transform" | "translate" | "rotate" | "scale"))
+        })
+        || ["transform", "translate", "rotate", "scale"].iter().any(|property| {
+        matches!(style.get(property), Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("none"))
+    })
 }
 
 fn viewport_background_color(layout: &LayoutBox, resolver: &mut StyleResolver) -> Option<Color> {

@@ -1,0 +1,129 @@
+{
+  "wpt_revision": "dc97e7bed3096ac9e0e591ab5fa22e7fb8844ead",
+  "testharness": {
+    "cases": 9,
+    "subtests": 178,
+    "failures": 0
+  },
+  "reftests": {
+    "cases": 11,
+    "viewport": [
+      800,
+      600
+    ],
+    "differing_pixels": 0,
+    "xhtml_references": "parsed as XML",
+    "stacking_context_square": "explicit color assertion in addition to reference comparison"
+  },
+  "source_records": [
+    {
+      "path": "css/css-transforms/parsing/translate-parsing-valid.html",
+      "sha256": "56a47265a00434f7686939d2faa8da6ef42daf9a882b3c167995c7a09a08dd9a",
+      "git_blob": "523bc6d652cc4cbd4e6957618125922800d2a39e"
+    },
+    {
+      "path": "css/css-transforms/parsing/translate-parsing-invalid.html",
+      "sha256": "25b912c5f7e1be29f7655dcb18675be430c21856d8f06e07ab7059017cddd9bc",
+      "git_blob": "d47cd5b6961ecd25092b38f7c1cb947fdf3756b1"
+    },
+    {
+      "path": "css/css-transforms/parsing/translate-parsing-computed.html",
+      "sha256": "51766724b5d322ce95c7a44c14b57a77ad377adaa19e799de729f587a0827ef0",
+      "git_blob": "a88cc652fa4a9d5e59b128a97c81c1a1df5388e7"
+    },
+    {
+      "path": "css/css-transforms/parsing/rotate-parsing-valid.html",
+      "sha256": "7b3b7051580fdc3363cdeba7c3ba0554d59749985b33262ea9633f636d631698",
+      "git_blob": "0485ade2110d9ed5f49528085cd0b37250100eef"
+    },
+    {
+      "path": "css/css-transforms/parsing/rotate-parsing-invalid.html",
+      "sha256": "4f5b2328f9e4034034fd7282d10dafe5a16e4bd6dcb708570bd7f0c744325d8e",
+      "git_blob": "4b6d7cf2ad5f21091e3bd8d47388d28ae964d73a"
+    },
+    {
+      "path": "css/css-transforms/parsing/rotate-parsing-computed.html",
+      "sha256": "fb1de105a9cce2ed92ce80baee507ad6154de8ecbe1fa41eb1c03423c2f17f99",
+      "git_blob": "b52d9987153db34132df5e5b29a97bf0ad214933"
+    },
+    {
+      "path": "css/css-transforms/parsing/scale-parsing-valid.html",
+      "sha256": "7de205e3b94c4846efd66288fe5f732c3b58fe6daf729d6ae5da847906be9f80",
+      "git_blob": "8e0c6c25fe321b05200cba0b1cc0eb68e015da7f"
+    },
+    {
+      "path": "css/css-transforms/parsing/scale-parsing-invalid.html",
+      "sha256": "4dd395624b48b7461fe7843417a899b75ee023960f01454dcd9875a3de86e4b9",
+      "git_blob": "ed75df42cca5a8ff85221f86d351882bf8dd845b"
+    },
+    {
+      "path": "css/css-transforms/parsing/scale-parsing-computed.html",
+      "sha256": "1eafc24219cd14f4ff527f76129f06f0a7361ef8a3e192cd13559015c8b02829",
+      "git_blob": "1b5babe1c77d247d1386ccba61efc13863fd8f8a"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/individual-transform-1.html",
+      "sha256": "738d1d86e14f483a294748b42ef2eae25d9400d1ea5c4d5636e2bda82175266b"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/individual-transform-1-ref.html",
+      "sha256": "2f4f59b7ee7252c5272394ed4e3328b8988f1596e7209727b585c4a3f71bf442"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/individual-transform-2a.html",
+      "sha256": "e55bb6f9d828e0f0a0a542e2449dcc0ec12562c8c75220cd1e9672f37a9fd0d0"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/individual-transform-2b.html",
+      "sha256": "3188c576c669e5683010d39cc1ecc886e993e0d9432fdd66096b8d16d3c5d66a"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/individual-transform-2c.html",
+      "sha256": "393085a2ea9f36d79aaec2efe2c09a4607d6efd601c11f26767ec855f43aa47c"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/individual-transform-2d.html",
+      "sha256": "5e32c236c26453c49e8dcd01186e6a4880294a903e50342b00c037ef55b9a7a1"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/individual-transform-2e.html",
+      "sha256": "4fa549b400bd7d4f18d47e5858b2afd35c5850af9cd1e565aecfd4c3f24694c3"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/individual-transform-2-ref.html",
+      "sha256": "bb479b37700c46696bd55f9dbb885795779dfa3b64e6ff045e4bf7265318d3ec"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/individual-transform-3.html",
+      "sha256": "df7387ff30e3746295bd5367ca11c9e529282de792c39d25d60ce719b9a7d9c7"
+    },
+    {
+      "path": "css/reference/ref-filled-green-200px-square.html",
+      "sha256": "6a0bda50a3e358356fcf79c51b8de1d2d62ceebca0fdfe857f782b7cf4c7391e"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/stacking-context-002.html",
+      "sha256": "595eb9870b0f60b483070b740f4b5bf386be40893c6cd9100ac851523d94b1d6"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/stacking-context-003.html",
+      "sha256": "8d54ae69c0382a5e781955adeb4df2fd6348ce8fb7d4f8dd95584977c24b7b73"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/stacking-context-004.html",
+      "sha256": "f55c3ab995ab4de7cb10e4358cc12f5f98f2bb8bf251d0cd3bd2d4f361f6bda8"
+    },
+    {
+      "path": "css/reference/ref-filled-green-100px-square.xht",
+      "sha256": "b7d98bb3f8b7b70e8f76f0b7e99566bc09ca5e5cbae1cef571d7843be87da4f0"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/stacking-context-001.html",
+      "sha256": "b00a3018679ecdb9ba664a7495904240c04666b62a72a610b45c1cd9e7559724"
+    },
+    {
+      "path": "css/css-transforms/individual-transform/stacking-context-ref.html",
+      "sha256": "270486abc9d947c3d85278d0fb36f509c566309e8698d509781dfda49f492831"
+    }
+  ]
+}

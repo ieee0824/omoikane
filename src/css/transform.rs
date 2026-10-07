@@ -173,15 +173,15 @@ pub(crate) struct TransformReferenceBox {
 
 /// A CSS 4×4 transform matrix in row-major storage.  CSS serializes the
 /// matrix column-major (`matrix3d(m11, m12, …)`), so the parser below performs
-/// the one explicit conversion at the boundary.  Keeping this representation
-/// private avoids leaking a second matrix convention to layout callers.
+/// the one explicit conversion at the boundary.  Keeping the elements private prevents layout callers from mixing matrix
+/// conventions; layout carries this owned value until projection.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Matrix4 {
+pub(crate) struct Matrix4 {
     values: [f32; 16],
 }
 
 impl Matrix4 {
-    const fn identity() -> Self {
+    pub(crate) const fn identity() -> Self {
         Self {
             values: [
                 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -189,7 +189,7 @@ impl Matrix4 {
         }
     }
 
-    fn multiply(self, other: Self) -> Self {
+    pub(crate) fn multiply(self, other: Self) -> Self {
         let mut values = [0.0; 16];
         for row in 0..4 {
             for column in 0..4 {
@@ -245,11 +245,15 @@ impl Matrix4 {
     }
 
     fn rotate_axis(x: f32, y: f32, z: f32, radians: f32) -> Option<Self> {
-        let length = (x * x + y * y + z * z).sqrt();
-        if !length.is_finite() || length <= f32::EPSILON {
+        let length = (f64::from(x).powi(2) + f64::from(y).powi(2) + f64::from(z).powi(2)).sqrt();
+        if !length.is_finite() || length == 0.0 {
             return None;
         }
-        let (x, y, z) = (x / length, y / length, z / length);
+        let (x, y, z) = (
+            (f64::from(x) / length) as f32,
+            (f64::from(y) / length) as f32,
+            (f64::from(z) / length) as f32,
+        );
         let (sin, cos) = radians.sin_cos();
         let one_minus_cos = 1.0 - cos;
         Some(Self {
@@ -303,8 +307,37 @@ impl Matrix4 {
         self == Self::identity()
     }
 
+    /// Tests the full 3D matrix before restricting it to the element plane.
+    pub(crate) fn is_invertible(self) -> bool {
+        let mut rows = [[0.0f64; 4]; 4];
+        for (row, values) in rows.iter_mut().enumerate() {
+            for (column, value) in values.iter_mut().enumerate() {
+                *value = f64::from(self.values[row * 4 + column]);
+                if !value.is_finite() {
+                    return false;
+                }
+            }
+        }
+        for column in 0..4 {
+            let pivot = (column..4)
+                .max_by(|&a, &b| rows[a][column].abs().total_cmp(&rows[b][column].abs()))
+                .unwrap();
+            if rows[pivot][column] == 0.0 {
+                return false;
+            }
+            rows.swap(column, pivot);
+            for row in column + 1..4 {
+                let factor = rows[row][column] / rows[column][column];
+                for index in column + 1..4 {
+                    rows[row][index] -= factor * rows[column][index];
+                }
+            }
+        }
+        true
+    }
+
     /// Restrict the transformed z=0 plane to a 3×3 projective transform.
-    fn to_projective(self) -> AffineTransform {
+    pub(crate) fn to_projective(self) -> AffineTransform {
         AffineTransform {
             a: self.values[0],
             b: self.values[4],
@@ -348,24 +381,64 @@ pub(crate) fn parse_transform_list(
 /// intentionally produce identity; callers can use the same helper for value
 /// validation and layout composition.
 pub(crate) fn parse_perspective_with_origin(
-    perspective: &str,
+    value: &str,
     origin: &str,
     reference: TransformReferenceBox,
 ) -> Option<AffineTransform> {
-    let value = perspective.trim();
-    if value.is_empty() {
-        return None;
-    }
+    Some(parse_perspective_matrix(value, origin, reference)?.to_projective())
+}
+
+/// Retains depth until the parent's perspective is composed with its child.
+pub(crate) fn parse_perspective_matrix(
+    value: &str,
+    origin: &str,
+    reference: TransformReferenceBox,
+) -> Option<Matrix4> {
     if value.eq_ignore_ascii_case("none") || is_css_wide_keyword(value) {
-        return Some(AffineTransform::identity());
+        return Some(Matrix4::identity());
     }
     let distance = parse_length(value, reference)?;
-    let (origin_x, origin_y) = parse_perspective_origin(origin, reference)?;
-    Some(
-        Matrix4::perspective(distance)?
-            .around(origin_x, origin_y, 0.0)
-            .to_projective(),
-    )
+    let (x, y) = parse_perspective_origin(origin, reference)?;
+    Some(Matrix4::perspective(distance)?.around(x, y, 0.0))
+}
+
+/// Composes translate, rotate, scale and the transform list around one origin.
+pub(crate) fn parse_composed_transform(
+    style: &super::ComputedStyle,
+    reference: TransformReferenceBox,
+) -> Option<Matrix4> {
+    use super::style::individual_transform::{IndividualTransform, parse_computed};
+    let keyword = |property| match style.get(property) {
+        Some(super::ComputedValue::Keyword(value)) => value.as_str(),
+        _ => "none",
+    };
+    let mut matrix = Matrix4::identity();
+    for property in ["translate", "rotate", "scale"] {
+        let component = match parse_computed(property, keyword(property))? {
+            IndividualTransform::None => Matrix4::identity(),
+            IndividualTransform::Translate(values) => Matrix4::translate(
+                values[0].resolve_length_percentage(reference.width)?,
+                values[1].resolve_length_percentage(reference.height)?,
+                values[2].resolve_length_percentage(0.0)?,
+            ),
+            IndividualTransform::Scale(values) => Matrix4::scale(values[0], values[1], values[2]),
+            IndividualTransform::Rotate { axis, degrees } => {
+                if axis == [0.0; 3] {
+                    Matrix4::identity()
+                } else {
+                    Matrix4::rotate_axis(axis[0], axis[1], axis[2], degrees.to_radians())?
+                }
+            }
+        };
+        matrix = matrix.multiply(component);
+    }
+    matrix = matrix.multiply(parse_transform_matrix(keyword("transform"), reference)?);
+    let origin = match style.get("transform-origin") {
+        Some(super::ComputedValue::Keyword(value)) => value.as_str(),
+        _ => "50% 50%",
+    };
+    let (x, y, z) = parse_transform_origin_3d(origin, reference)?;
+    Some(matrix.around(x, y, z))
 }
 
 pub(crate) fn parse_perspective_origin(

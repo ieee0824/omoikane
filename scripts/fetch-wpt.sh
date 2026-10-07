@@ -145,6 +145,16 @@ collect_pattern \
   "/html/semantics/forms/constraints/form-validation-willValidate.html" \
   "/html/semantics/forms/constraints/radio-group-valueMissing.html"
 collect_pattern "/css/css-transforms/transform-getBoundingClientRect-001.html"
+collect_pattern "/css/css-transforms/individual-transform/" "/css/reference/ref-filled-green-200px-square.html" "/css/reference/ref-filled-green-100px-square.xht"
+collect_pattern "/css/css-transforms/parsing/translate-parsing-valid.html"
+collect_pattern "/css/css-transforms/parsing/translate-parsing-invalid.html"
+collect_pattern "/css/css-transforms/parsing/translate-parsing-computed.html"
+collect_pattern "/css/css-transforms/parsing/rotate-parsing-valid.html"
+collect_pattern "/css/css-transforms/parsing/rotate-parsing-invalid.html"
+collect_pattern "/css/css-transforms/parsing/rotate-parsing-computed.html"
+collect_pattern "/css/css-transforms/parsing/scale-parsing-valid.html"
+collect_pattern "/css/css-transforms/parsing/scale-parsing-invalid.html"
+collect_pattern "/css/css-transforms/parsing/scale-parsing-computed.html"
 collect_pattern \
   "/css/css-color/parsing/color-invalid.html" \
   "/css/css-color/parsing/color-invalid-rgb.html" \

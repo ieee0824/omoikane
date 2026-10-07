@@ -2,6 +2,7 @@
 
 mod animation;
 pub(crate) mod grid_properties;
+pub(crate) mod individual_transform;
 mod page;
 mod property_id;
 pub(crate) mod text_shadow;
@@ -319,6 +320,7 @@ pub struct ComputedStyle {
     custom_properties: BTreeMap<String, Value>,
     /// Tree scope captured by the declaration that supplied `animation-name`.
     animation_name_scope_root: Option<usize>,
+    transform_animation_context: bool,
     /// Tree scope captured by the declaration that supplied `font-family`.
     font_family_scope_root: Option<usize>,
     /// Decorations propagated through the box tree, separate from inheritance.
@@ -326,6 +328,11 @@ pub struct ComputedStyle {
 }
 
 impl ComputedStyle {
+    /// Animation-created stacking context, independent of the sampled values.
+    pub(crate) fn has_transform_animation_context(&self) -> bool {
+        self.transform_animation_context
+    }
+
     /// Returns a computed property.
     pub fn get(&self, name: &str) -> Option<&ComputedValue> {
         self.properties.get(name)
@@ -2885,9 +2892,17 @@ impl StyleResolver {
             font_family_scope_root,
             (node.identity(), pseudo),
         );
+        let transform_animation_context = individual_transform::context::has_transform_animation(
+            self,
+            node,
+            pseudo,
+            animation_name_scope_root,
+            &properties,
+        );
         ComputedStyle {
             properties,
             component_values,
+            transform_animation_context,
             custom_properties,
             animation_name_scope_root,
             font_family_scope_root,
@@ -2994,6 +3009,8 @@ impl StyleResolver {
         let animation_progress =
             animation_snapshot_progress(properties, fill_mode.as_str(), infinite, paused);
         let shadow_base = animation::snapshot_shadow_base(steps, properties);
+        let transform_base =
+            ["translate", "rotate", "scale"].map(|name| properties.get(name).cloned());
 
         let element_font_size = properties
             .get(&PropertyId::FontSize)
@@ -3051,6 +3068,15 @@ impl StyleResolver {
                 ctx,
                 &custom_properties,
                 important_properties,
+            );
+            individual_transform::snapshot::interpolate(
+                steps,
+                progress,
+                properties,
+                ctx,
+                &custom_properties,
+                important_properties,
+                transform_base,
             );
             self.interpolate_snapshot_text_shadow(
                 steps,
@@ -3909,6 +3935,9 @@ fn validate_multicol_declaration(name: &str, value: &Value) -> Option<Declaratio
 /// property, match its name and return [`DeclarationValidation::Valid`] /
 /// [`DeclarationValidation::Invalid`].
 fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
+    if let Some(validation) = individual_transform::validate(name, value) {
+        return validation;
+    }
     if let Some(validation) = grid_properties::validate(name, value) {
         return validation;
     }
@@ -7872,6 +7901,9 @@ fn resolve_time_calc(value: &Value) -> Option<f32> {
 }
 
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
+    if matches!(property_name, "translate" | "rotate" | "scale") {
+        return ComputedValue::Keyword(individual_transform::compute(property_name, value, ctx));
+    }
     if property_name == "text-shadow" {
         return text_shadow::compute(value, ctx)
             .unwrap_or_else(|| ComputedValue::Keyword(render_value(value)));
@@ -10040,6 +10072,9 @@ impl InitialValue {
 /// depends on another property's resolved value or on the number of layers
 /// in a shorthand — those stay as explicit code in `apply_initial_values`.
 const INITIAL_VALUES: &[(&str, InitialValue)] = &[
+    ("translate", InitialValue::Keyword("none")),
+    ("rotate", InitialValue::Keyword("none")),
+    ("scale", InitialValue::Keyword("none")),
     ("order", InitialValue::Number(0.0)),
     ("grid-auto-flow", InitialValue::Keyword("row")),
     ("grid-auto-columns", InitialValue::Keyword("auto")),

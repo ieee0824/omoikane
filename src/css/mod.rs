@@ -228,8 +228,9 @@ fn is_reserved_layer_name(name: &str) -> bool {
 pub use tokenizer::tokenize;
 pub use transform::AffineTransform;
 pub(crate) use transform::{
-    TransformReferenceBox, interpolate_transform_lists, parse_perspective_origin,
-    parse_perspective_with_origin, parse_transform_list, parse_transform_with_origin,
+    Matrix4, TransformReferenceBox, interpolate_transform_lists, parse_composed_transform,
+    parse_perspective_matrix, parse_perspective_origin, parse_perspective_with_origin,
+    parse_transform_list, parse_transform_with_origin,
 };
 
 mod font_shorthand;

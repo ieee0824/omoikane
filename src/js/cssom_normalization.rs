@@ -103,6 +103,9 @@ const VALIDATED_PROPERTIES: &[&str] = &[
 ];
 
 pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
+    if matches!(property, "translate" | "rotate" | "scale") {
+        return crate::css::style::individual_transform::normalize_specified(property, value);
+    }
     if matches!(
         property,
         "order" | "grid-auto-flow" | "grid-auto-rows" | "grid-auto-columns"

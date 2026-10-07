@@ -631,6 +631,13 @@ fn interpolate_property(
                 start, end, progress,
             )))
         }
+        (ComputedValue::Keyword(start), ComputedValue::Keyword(end))
+            if matches!(property, "translate" | "rotate" | "scale") =>
+        {
+            Some(ComputedValue::Keyword(
+                super::style::individual_transform::interpolate(property, start, end, progress)?,
+            ))
+        }
         (ComputedValue::Keyword(start), ComputedValue::Keyword(end)) if property == "transform" => {
             Some(ComputedValue::Keyword(super::interpolate_transform_lists(
                 start, end, progress,

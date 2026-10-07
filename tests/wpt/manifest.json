@@ -345,6 +345,15 @@
     { "path": "css/css-grid/parsing/grid-auto-columns-valid.html" },
     { "path": "css/css-grid/parsing/grid-auto-columns-invalid.html" },
     { "path": "css/css-grid/parsing/grid-auto-columns-computed.html" },
-    { "path": "css/css-flexbox/hittest-overlapping-order.html" }
+    { "path": "css/css-flexbox/hittest-overlapping-order.html" },
+    { "path": "css/css-transforms/parsing/translate-parsing-valid.html" },
+    { "path": "css/css-transforms/parsing/translate-parsing-invalid.html" },
+    { "path": "css/css-transforms/parsing/translate-parsing-computed.html" },
+    { "path": "css/css-transforms/parsing/rotate-parsing-valid.html" },
+    { "path": "css/css-transforms/parsing/rotate-parsing-invalid.html" },
+    { "path": "css/css-transforms/parsing/rotate-parsing-computed.html" },
+    { "path": "css/css-transforms/parsing/scale-parsing-valid.html" },
+    { "path": "css/css-transforms/parsing/scale-parsing-invalid.html" },
+    { "path": "css/css-transforms/parsing/scale-parsing-computed.html" }
   ]
 }

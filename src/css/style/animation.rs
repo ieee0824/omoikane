@@ -161,6 +161,14 @@ impl AnimationState {
         self.spec
             .progress((self.elapsed_ms(now_ms) / 1000.0) as f32)
     }
+    fn applies_will_change(&self, now_ms: f64) -> bool {
+        (self.elapsed_ms(now_ms) / 1000.0) as f32 - self.spec.delay < self.spec.active_duration()
+            || matches!(
+                self.spec.fill,
+                AnimationFill::Forwards | AnimationFill::Both
+            )
+    }
+
     fn running(&self, now_ms: f64) -> bool {
         self.paused_elapsed_ms.is_none()
             && (self.elapsed_ms(now_ms) / 1000.0) as f32 - self.spec.delay
@@ -175,16 +183,26 @@ pub(crate) struct AnimationTimeline {
 }
 
 impl AnimationTimeline {
+    pub(super) fn applies_will_change(
+        &self,
+        node: usize,
+        pseudo: Option<PseudoElement>,
+    ) -> Option<bool> {
+        self.elements
+            .get(&(node, pseudo))
+            .map(|state| state.applies_will_change(self.now_ms))
+    }
+
     fn set_time(&mut self, now_ms: f64) -> bool {
         let next = if now_ms.is_finite() {
             now_ms.max(self.now_ms)
         } else {
             self.now_ms
         };
-        let changed = self
-            .elements
-            .values()
-            .any(|state| state.progress(self.now_ms) != state.progress(next));
+        let changed = self.elements.values().any(|state| {
+            state.progress(self.now_ms) != state.progress(next)
+                || state.applies_will_change(self.now_ms) != state.applies_will_change(next)
+        });
         self.now_ms = next;
         changed
     }

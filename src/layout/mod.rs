@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::css::{
     AffineTransform, ComputedDirection, ComputedFloat, ComputedPosition, ComputedStyle,
-    ComputedValue, ComputedWritingMode, ContainerContext, PseudoElement, StyleResolver,
-    TransformReferenceBox, parse_perspective_with_origin, parse_transform_with_origin,
+    ComputedValue, ComputedWritingMode, ContainerContext, Matrix4, PseudoElement, StyleResolver,
+    TransformReferenceBox, parse_composed_transform, parse_perspective_matrix,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::error_reporting::{
@@ -1396,7 +1396,7 @@ pub(crate) fn layout_tree_with_content_visibility(
         &mut layout,
         resolver,
         resolver.root_font_size(),
-        AffineTransform::identity(),
+        Matrix4::identity(),
     );
     collect_content_visibility_remembered_sizes(&layout, &report, resolver, false);
     drop(scope);
@@ -1452,19 +1452,16 @@ fn populate_layout_transforms(
     layout: &mut LayoutBox,
     resolver: &mut StyleResolver,
     root_font_size: f32,
-    parent_perspective: AffineTransform,
+    parent_perspective: Matrix4,
 ) {
     let style = layout_box_style(layout, resolver);
-    let transform = computed_keyword(&style, "transform").unwrap_or("none");
-    let origin = computed_keyword(&style, "transform-origin").unwrap_or("50% 50%");
     let perspective_box = layout.dimensions.border_box();
     let font_size = match style.get("font-size") {
         Some(ComputedValue::Px(value)) => *value,
         _ => 16.0,
     };
-    let local_transform = parse_transform_with_origin(
-        transform,
-        origin,
+    let local_transform = parse_composed_transform(
+        &style,
         TransformReferenceBox {
             x: perspective_box.x,
             y: perspective_box.y,
@@ -1474,16 +1471,16 @@ fn populate_layout_transforms(
             root_font_size,
         },
     )
-    .unwrap_or_default();
+    .unwrap_or_else(Matrix4::identity);
     // `perspective` is a parent effect: it projects the immediate child
     // coordinate plane while leaving the parent's own border box untouched.
     // Keeping it in the child's paint-time matrix preserves normal-flow
     // geometry and composes with the child's transform in CSS order.
-    layout.transform = parent_perspective.multiply(local_transform);
+    layout.transform = parent_perspective.multiply(local_transform).to_projective();
     let perspective = computed_keyword(&style, "perspective").unwrap_or("none");
     let perspective_origin = computed_keyword(&style, "perspective-origin").unwrap_or("50% 50%");
     let border_box = layout.dimensions.border_box();
-    let perspective_matrix = parse_perspective_with_origin(
+    let perspective_matrix = parse_perspective_matrix(
         perspective,
         perspective_origin,
         TransformReferenceBox {
@@ -1495,7 +1492,7 @@ fn populate_layout_transforms(
             root_font_size,
         },
     )
-    .unwrap_or_default();
+    .unwrap_or_else(Matrix4::identity);
     for child in &mut layout.children {
         populate_layout_transforms(child, resolver, root_font_size, perspective_matrix);
     }
@@ -1875,7 +1872,7 @@ fn layout_document(
             children.push(positioned);
         }
     }
-    sort_children_by_z_index(&mut children);
+    sort_children_by_z_index_in_tree_order(node, &mut children);
 
     let mut top_layer = Vec::new();
     collect_top_layer_nodes(node, &mut top_layer);
@@ -3372,7 +3369,7 @@ fn layout_block_cell_body(
             children.push(positioned);
         }
     }
-    sort_children_by_z_index(&mut children);
+    sort_children_by_z_index_in_tree_order(node, &mut children);
 
     (dimensions, children, lines, multicol)
 }
@@ -3659,7 +3656,7 @@ fn layout_vertical_block_children(
         &mut inline_bottom,
         &mut children,
     );
-    sort_children_by_z_index(&mut children);
+    sort_children_by_z_index_in_tree_order(node, &mut children);
 
     BlockChildrenResult {
         children,
@@ -4422,9 +4419,13 @@ pub(crate) fn establishes_positioned_containing_block(style: &ComputedStyle) -> 
 /// Whether this box anchors fixed descendants instead of the viewport.
 /// Identity transforms still establish a containing block.
 pub(crate) fn establishes_fixed_containing_block(style: &ComputedStyle) -> bool {
-    ["transform", "perspective"].iter().any(|property| {
-        computed_keyword(style, property).is_some_and(|value| !value.eq_ignore_ascii_case("none"))
-    }) || has_containment(style, "layout")
+    ["transform", "translate", "rotate", "scale", "perspective"]
+        .iter()
+        .any(|property| {
+            computed_keyword(style, property)
+                .is_some_and(|value| !value.eq_ignore_ascii_case("none"))
+        })
+        || has_containment(style, "layout")
         || has_containment(style, "paint")
 }
 
@@ -5129,6 +5130,29 @@ fn relayout_fixed_descendants(
             relayout_fixed_descendants(&mut child.children, resolver, viewport);
         }
     }
+}
+
+// Positioned block children are laid out after in-flow children. Restore tree
+// order for equal z-index instead of using that implementation's append order.
+// Flex keeps its separate order-modified sequence and uses the stable z sort.
+fn sort_children_by_z_index_in_tree_order(node: &NodeHandle, children: &mut [LayoutBox]) {
+    let ranks: HashMap<_, _> = node
+        .layout_child_nodes()
+        .iter()
+        .enumerate()
+        .map(|(index, child)| (child.identity(), index + 1))
+        .collect();
+    children.sort_by_cached_key(|child| {
+        let rank = match child.pseudo {
+            Some(PseudoElement::Before) if child.node == *node => 0,
+            Some(PseudoElement::After) if child.node == *node => usize::MAX,
+            _ => ranks
+                .get(&child.node.identity())
+                .copied()
+                .unwrap_or(usize::MAX - 1),
+        };
+        (child.z_index, rank)
+    });
 }
 
 fn sort_children_by_z_index(children: &mut [LayoutBox]) {
