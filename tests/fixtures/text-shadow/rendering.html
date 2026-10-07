@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Text shadow rendering comparison</title>
+<style>
+@font-face { font-family: ShadowAhem; src: url('../acid3/font.ttf'); }
+html, body { margin: 0; width: 480px; height: 360px; background: white; }
+section { position: absolute; width: 120px; height: 160px; }
+.text { position: absolute; left: 20px; top: 25px; font: 20px/20px ShadowAhem; white-space: pre; }
+</style>
+<!-- Top row: basic, list order/decorations, blur, inherited currentcolor. -->
+<section style="left:0;top:0"><div class="text" style="color:black;text-shadow:red 6px 8px">XX</div></section>
+<section style="left:120px;top:0"><div class="text" style="color:transparent;text-decoration:underline;text-shadow:red 6px 8px,blue 12px 12px">XX</div></section>
+<section style="left:240px;top:0"><div class="text" style="color:transparent;text-shadow:blue 4px 4px 6px">XX</div></section>
+<section style="left:360px;top:0;color:red;text-shadow:6px 8px"><div class="text" style="color:blue">XX</div></section>
+<!-- Bottom row: vertical/decorations, opacity ink overflow, clip, transform. -->
+<section style="left:0;top:180px"><div class="text" style="writing-mode:vertical-rl;color:transparent;text-decoration:underline;text-shadow:red 6px 8px">XX</div></section>
+<section style="left:120px;top:180px"><div class="text" style="width:40px;color:transparent;opacity:.5;text-shadow:red 45px 30px">XX</div></section>
+<section style="left:240px;top:180px;width:65px;height:65px;overflow:hidden"><div class="text" style="color:transparent;text-shadow:blue 30px 20px 4px">XX</div></section>
+<section style="left:360px;top:180px"><div class="text" style="transform:rotate(10deg);transform-origin:0 0;color:transparent;text-shadow:red 8px 8px">XX</div></section>

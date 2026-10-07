@@ -1285,6 +1285,7 @@ impl Parser {
                     | "-webkit-mask-repeat"
                     | "counter-reset"
                     | "counter-increment"
+                    | "text-shadow"
             )
             || contains_var && matches!(name.as_str(), "font" | "transition"))
             && has_top_level_comma(&value_tokens)

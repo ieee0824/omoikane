@@ -857,7 +857,7 @@ pub(crate) fn paint_outer_box_shadow(
     }
 }
 
-fn gaussian_box_blur_radii(blur_radius: f32) -> [u32; 3] {
+pub(super) fn gaussian_box_blur_radii(blur_radius: f32) -> [u32; 3] {
     let sigma = f64::from(blur_radius.max(0.0)) / 2.0;
     if sigma == 0.0 || !sigma.is_finite() {
         return [0; 3];

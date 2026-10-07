@@ -383,6 +383,7 @@
     configurable: false,
   });
   const validatesSpecialStyleProperties = new Set([
+    "text-shadow",
     "all",
     "color", "background-color", "border-color",
     "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",

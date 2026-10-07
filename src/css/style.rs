@@ -3,6 +3,7 @@
 mod animation;
 mod page;
 mod property_id;
+pub(crate) mod text_shadow;
 
 pub use page::{
     PageBoxGeometry, PageMarginContent, PageSelectorContext, PageSide, ResolvedPageStyle,
@@ -2991,6 +2992,7 @@ impl StyleResolver {
         };
         let animation_progress =
             animation_snapshot_progress(properties, fill_mode.as_str(), infinite, paused);
+        let shadow_base = animation::snapshot_shadow_base(steps, properties);
 
         let element_font_size = properties
             .get(&PropertyId::FontSize)
@@ -3048,6 +3050,13 @@ impl StyleResolver {
                 ctx,
                 &custom_properties,
                 important_properties,
+            );
+            self.interpolate_snapshot_text_shadow(
+                steps,
+                progress,
+                properties,
+                important_properties,
+                shadow_base,
             );
         }
     }
@@ -4269,6 +4278,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
                 None => DeclarationValidation::Invalid,
             };
         }
+        "text-shadow" => return text_shadow::validate(value),
         "transform-origin" => return validate_transform_origin_declaration(value),
         "perspective-origin" => return validate_perspective_origin_declaration(value),
         "transition-property"
@@ -7858,6 +7868,10 @@ fn resolve_time_calc(value: &Value) -> Option<f32> {
 }
 
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
+    if property_name == "text-shadow" {
+        return text_shadow::compute(value, ctx)
+            .unwrap_or_else(|| ComputedValue::Keyword(render_value(value)));
+    }
     if property_name.eq_ignore_ascii_case("content") {
         return match value {
             Value::String(value) => ComputedValue::String(value.clone()),
@@ -10031,6 +10045,7 @@ const INITIAL_VALUES: &[(&str, InitialValue)] = &[
     ("unicode-bidi", InitialValue::Keyword("normal")),
     ("text-transform", InitialValue::Keyword("none")),
     ("text-overflow", InitialValue::Keyword("clip")),
+    ("text-shadow", InitialValue::Keyword("none")),
     ("text-decoration-line", InitialValue::Keyword("none")),
     ("text-decoration-style", InitialValue::Keyword("solid")),
     // `text-decoration-color`'s initial value is `currentcolor`.
@@ -10372,6 +10387,7 @@ const INHERITED_PROPERTIES: &[&str] = &[
     "pointer-events",
     "text-align",
     "text-indent",
+    "text-shadow",
     "text-transform",
     "visibility",
     "white-space",

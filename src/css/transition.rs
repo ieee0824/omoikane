@@ -151,7 +151,13 @@ impl TransitionTimeline {
             let interrupted = state.running.get(&property).cloned();
             let start_value = interrupted
                 .as_ref()
-                .and_then(|running| running.sample(&property, now_ms))
+                .and_then(|running| {
+                    running.sample(
+                        &property,
+                        now_ms,
+                        &sampled_current_color(properties, &state.running, now_ms),
+                    )
+                })
                 .or(old_value);
             let Some(start_value) = start_value else {
                 state.running.remove(&property);
@@ -180,7 +186,14 @@ impl TransitionTimeline {
                 continue;
             };
             if parameters.duration_ms + parameters.delay_ms <= 0.0
-                || interpolate_property(&property, &start_value, &end_value, 0.5).is_none()
+                || interpolate_property_with_color(
+                    &property,
+                    &start_value,
+                    &end_value,
+                    0.5,
+                    &sampled_current_color(properties, &state.running, now_ms),
+                )
+                .is_none()
             {
                 if let Some(running) = state.running.remove(&property) {
                     self.events.push(running.event_record(
@@ -248,34 +261,7 @@ impl TransitionTimeline {
             state.running.insert(property, running);
         }
         state.base_values = properties.clone();
-
-        let mut completed = Vec::new();
-        for (property, running) in &mut state.running {
-            if !running.started && now_ms >= running.start_ms {
-                running.started = true;
-                self.events.push(running.event_record(
-                    node_id,
-                    "transitionstart",
-                    property.clone(),
-                    now_ms,
-                ));
-            }
-            if now_ms >= running.end_ms {
-                properties.insert(property.clone(), running.end_value.clone());
-                self.events.push(running.event_record(
-                    node_id,
-                    "transitionend",
-                    property.clone(),
-                    now_ms,
-                ));
-                completed.push(property.clone());
-            } else if let Some(value) = running.sample(property, now_ms) {
-                properties.insert(property.clone(), value);
-            }
-        }
-        for property in completed {
-            state.running.remove(&property);
-        }
+        sample_running_transitions(node_id, now_ms, state, properties, &mut self.events);
     }
 
     pub(crate) fn take_events(&mut self) -> Vec<TransitionEventRecord> {
@@ -343,6 +329,46 @@ impl TransitionTimeline {
     }
 }
 
+fn sampled_current_color(
+    properties: &PropertyMap,
+    running: &HashMap<String, RunningTransition>,
+    now_ms: f64,
+) -> String {
+    running
+        .get("color")
+        .and_then(|transition| transition.sample("color", now_ms, "black"))
+        .or_else(|| properties.get("color").cloned())
+        .map_or_else(|| "black".into(), |value| value.css_text())
+}
+
+fn sample_running_transitions(
+    node_id: usize,
+    now_ms: f64,
+    state: &mut ElementTransitionState,
+    properties: &mut PropertyMap,
+    events: &mut Vec<TransitionEventRecord>,
+) {
+    // Resolve currentcolor from the sampled color independently of map iteration order.
+    let current_color = sampled_current_color(properties, &state.running, now_ms);
+    let mut completed = Vec::new();
+    for (property, running) in &mut state.running {
+        if !running.started && now_ms >= running.start_ms {
+            running.started = true;
+            events.push(running.event_record(node_id, "transitionstart", property.clone(), now_ms));
+        }
+        if now_ms >= running.end_ms {
+            properties.insert(property.clone(), running.end_value.clone());
+            events.push(running.event_record(node_id, "transitionend", property.clone(), now_ms));
+            completed.push(property.clone());
+        } else if let Some(value) = running.sample(property, now_ms, &current_color) {
+            properties.insert(property.clone(), value);
+        }
+    }
+    for property in completed {
+        state.running.remove(&property);
+    }
+}
+
 impl RunningTransition {
     fn input_progress(&self, now_ms: f64) -> f64 {
         if now_ms >= self.end_ms || self.end_ms < self.start_ms {
@@ -354,13 +380,14 @@ impl RunningTransition {
         }
     }
 
-    fn sample(&self, property: &str, now_ms: f64) -> Option<ComputedValue> {
+    fn sample(&self, property: &str, now_ms: f64, current_color: &str) -> Option<ComputedValue> {
         let progress = self.input_progress(now_ms);
-        interpolate_property(
+        interpolate_property_with_color(
             property,
             &self.start_value,
             &self.end_value,
             self.timing.sample(progress) as f32,
+            current_color,
         )
     }
 
@@ -618,6 +645,25 @@ fn interpolate_property(
         }
         _ => None,
     }
+}
+
+pub(crate) fn interpolate_property_with_color(
+    property: &str,
+    start: &ComputedValue,
+    end: &ComputedValue,
+    progress: f32,
+    current_color: &str,
+) -> Option<ComputedValue> {
+    if property == "text-shadow" {
+        return super::style::text_shadow::interpolate(
+            &start.css_text(),
+            &end.css_text(),
+            progress,
+            current_color,
+        )
+        .map(ComputedValue::Keyword);
+    }
+    interpolate_property(property, start, end, progress)
 }
 
 pub(crate) fn interpolate_custom_property(

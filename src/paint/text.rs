@@ -24,6 +24,9 @@ use super::color::{Color, parse_color};
 use super::form_control::paint_textarea_value_with_candidates;
 use super::{Canvas, Image, background_color, length_property, paint_background_image};
 
+mod shadow;
+pub(super) use shadow::text_shadow_paint_bounds;
+
 const MAX_RENDER_GLYPH_CACHE_ENTRIES: usize = 16_384;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -231,6 +234,16 @@ pub(super) fn paint_text_with_context(
             .map_or(line.fragments.as_slice(), |overflow| {
                 overflow.fragments.as_slice()
             });
+        shadow::paint_line_shadows(
+            canvas,
+            line,
+            fragments,
+            resolver,
+            fallback_color,
+            clip,
+            context,
+            offset,
+        );
         // Cache font metrics and placement once per decorating origin on the
         // line; descendants cannot substitute their own font or underline data.
         let mut decorations = HashMap::new();
@@ -252,6 +265,7 @@ pub(super) fn paint_text_with_context(
                         fonts,
                         web_fonts,
                         clip,
+                        None,
                     );
                     paint_text_fragment_decorations(
                         canvas,
@@ -267,6 +281,7 @@ pub(super) fn paint_text_with_context(
                         offset,
                         &mut decorations,
                         &mut decoration_colors,
+                        None,
                     );
                 }
                 InlineFragmentContent::AtomicInline(_) => {
@@ -369,13 +384,15 @@ fn paint_text_fragment_glyphs(
     fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
     clip: Option<Rect>,
+    override_color: Option<Color>,
 ) -> (Color, Option<VerticalPaintMode>) {
     let font_size = fragment.metrics.font_size.max(1.0);
 
     // Per-fragment style is used for text-transform and color so
     // that nested inline elements (e.g. <span>) can have
     // independent styling.
-    let frag_color = fragment_paint_color(fragment, resolver, fallback_color);
+    let frag_color =
+        override_color.unwrap_or_else(|| fragment_paint_color(fragment, resolver, fallback_color));
     let text_transform = fragment_text_transform(&fragment.style);
 
     let transformed = apply_text_transform(text, text_transform);
@@ -527,14 +544,19 @@ fn paint_text_fragment_decorations(
     offset: super::PaintOffset,
     decorations: &mut HashMap<DecorationOrigin, DecorationGeometry>,
     decoration_colors: &mut HashMap<DecorationOrigin, Color>,
+    override_color: Option<Color>,
 ) {
     // Draw every decoration captured at its originating box.
     // Descendant longhands therefore cannot restyle or cancel it.
     for decoration in fragment.style.text_decorations.iter() {
         let lines = decoration_lines(&decoration.line);
-        let color = *decoration_colors
-            .entry(decoration.origin)
-            .or_insert_with(|| decoration_paint_color(fragment, decoration, resolver, frag_color));
+        let color = override_color.unwrap_or_else(|| {
+            *decoration_colors
+                .entry(decoration.origin)
+                .or_insert_with(|| {
+                    decoration_paint_color(fragment, decoration, resolver, frag_color)
+                })
+        });
         let geometry = decorations.entry(decoration.origin).or_insert_with(|| {
             DecorationGeometry::new(decoration, line, vertical_mode.is_some(), fonts, web_fonts)
         });
@@ -572,6 +594,81 @@ fn paint_form_control_fragment(
 ) {
     let paint = fragment_box_paint_style(fragment, resolver);
     let style = paint.as_deref().unwrap_or(style);
+    paint_form_control_background(canvas, layout, fragment, fragment_rect, style, clip);
+    let shadows = shadow::style_shadows(style);
+    if !shadows.is_empty() {
+        let white = Color::rgb(255, 255, 255);
+        let mut probe = Canvas::text_ink_probe();
+        paint_form_control_text(
+            &mut probe,
+            fragment,
+            fragment.rect,
+            style,
+            value,
+            &None,
+            resolver,
+            fallback_color,
+            fonts,
+            web_fonts,
+            None,
+            Some(white),
+        );
+        if let Some(ink) = probe.probed_ink_bounds() {
+            let offset = super::PaintOffset {
+                x: fragment_rect.x - fragment.rect.x,
+                y: fragment_rect.y - fragment.rect.y,
+            };
+            let color = fragment_paint_color(fragment, resolver, fallback_color);
+            shadow::paint_shadow_masks(
+                canvas,
+                ink,
+                &shadows,
+                color,
+                clip,
+                offset,
+                |mask, mask_offset| {
+                    paint_form_control_text(
+                        mask,
+                        fragment,
+                        mask_offset.rect(fragment.rect),
+                        style,
+                        value,
+                        &None,
+                        resolver,
+                        fallback_color,
+                        fonts,
+                        web_fonts,
+                        None,
+                        Some(white),
+                    );
+                },
+            );
+        }
+    }
+    paint_form_control_text(
+        canvas,
+        fragment,
+        fragment_rect,
+        style,
+        value,
+        editing,
+        resolver,
+        fallback_color,
+        fonts,
+        web_fonts,
+        clip,
+        None,
+    );
+}
+
+fn paint_form_control_background(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    fragment: &crate::layout::InlineFragment,
+    fragment_rect: Rect,
+    style: &ComputedStyle,
+    clip: Option<Rect>,
+) {
     let border = EdgeSizesForPaint::from_style(style);
     // A block control's owning LayoutBox already painted its
     // background and border. Inline controls have no such box.
@@ -583,8 +680,26 @@ fn paint_form_control_fragment(
             paint_rect_borders(canvas, fragment_rect, style, border, clip);
         }
     }
+}
+
+fn paint_form_control_text(
+    canvas: &mut Canvas,
+    fragment: &crate::layout::InlineFragment,
+    fragment_rect: Rect,
+    style: &ComputedStyle,
+    value: &str,
+    editing: &Option<crate::layout::TextControlPaintState>,
+    resolver: &mut crate::css::StyleResolver,
+    fallback_color: Color,
+    fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+    clip: Option<Rect>,
+    override_color: Option<Color>,
+) {
+    let border = EdgeSizesForPaint::from_style(style);
     let content_rect = inline_fragment_content_rect(fragment_rect, style, border);
-    let color = fragment_paint_color(fragment, resolver, fallback_color);
+    let color =
+        override_color.unwrap_or_else(|| fragment_paint_color(fragment, resolver, fallback_color));
     // Same font policy as the Text branch: the fragment's
     // resolved installed or web face first, then the global fonts.
     let web_candidates = select_fragment_web_fonts(web_fonts, fragment);
@@ -2218,11 +2333,48 @@ pub(crate) fn paint_list_marker(
     fonts: &[Arc<Font>],
     offset: super::PaintOffset,
 ) {
+    let color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
+    let shadows = shadow::style_shadows(style);
+    if !shadows.is_empty() {
+        let white = Color::rgb(255, 255, 255);
+        let mut probe = Canvas::text_ink_probe();
+        paint_list_marker_glyphs(
+            &mut probe,
+            layout,
+            white,
+            None,
+            fonts,
+            super::PaintOffset::default(),
+        );
+        if let Some(ink) = probe.probed_ink_bounds() {
+            shadow::paint_shadow_masks(
+                canvas,
+                ink,
+                &shadows,
+                color,
+                clip,
+                offset,
+                |mask, mask_offset| {
+                    paint_list_marker_glyphs(mask, layout, white, None, fonts, mask_offset);
+                },
+            );
+        }
+    }
+    paint_list_marker_glyphs(canvas, layout, color, clip, fonts, offset);
+}
+
+fn paint_list_marker_glyphs(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    color: Color,
+    clip: Option<Rect>,
+    fonts: &[Arc<Font>],
+    offset: super::PaintOffset,
+) {
     let Some(marker) = &layout.marker else {
         return;
     };
 
-    let color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
     let font_size = marker.font_size.max(1.0);
     let ascent = font_size * 0.8;
 
