@@ -590,8 +590,8 @@ pub struct StyleResolver {
     next_stylesheet_id: usize,
     layer_orders: HashMap<LayerContextKey, CascadeLayerOrder>,
     rule_indexes: Vec<StylesheetRuleIndex>,
-    cache: HashMap<usize, ComputedStyle>,
-    pseudo_cache: HashMap<(usize, PseudoElement), ComputedStyle>,
+    cache: HashMap<usize, Arc<ComputedStyle>>,
+    pseudo_cache: HashMap<(usize, PseudoElement), Arc<ComputedStyle>>,
     counter_values: HashMap<(usize, Option<PseudoElement>), HashMap<String, Vec<i32>>>,
     selector_match_cache: SelectorMatchCache,
     visited_paint_state: Option<VisitedPaintState>,
@@ -654,8 +654,8 @@ pub struct StyleResolver {
 #[derive(Debug)]
 struct VisitedPaintState {
     selector_match_cache: SelectorMatchCache,
-    styles: HashMap<usize, ComputedStyle>,
-    pseudo_styles: HashMap<(usize, PseudoElement), ComputedStyle>,
+    styles: HashMap<usize, Arc<ComputedStyle>>,
+    pseudo_styles: HashMap<(usize, PseudoElement), Arc<ComputedStyle>>,
     affected_nodes: HashSet<usize>,
 }
 
@@ -664,8 +664,8 @@ struct VisitedPaintState {
 pub(crate) struct VisitedPaintStylePass<'a> {
     resolver: &'a mut StyleResolver,
     selector_match_cache: SelectorMatchCache,
-    styles: HashMap<usize, ComputedStyle>,
-    pseudo_styles: HashMap<(usize, PseudoElement), ComputedStyle>,
+    styles: HashMap<usize, Arc<ComputedStyle>>,
+    pseudo_styles: HashMap<(usize, PseudoElement), Arc<ComputedStyle>>,
     affected_nodes: HashSet<usize>,
 }
 
@@ -704,13 +704,13 @@ impl<'a> VisitedPaintStylePass<'a> {
         }
     }
 
-    pub(crate) fn style(&mut self, node: &NodeHandle) -> ComputedStyle {
+    pub(crate) fn style(&mut self, node: &NodeHandle) -> Arc<ComputedStyle> {
         let key = node.identity();
         if let Some(style) = self.styles.get(&key) {
             return style.clone();
         }
 
-        let ordinary = self.resolver.computed_style(node);
+        let ordinary = self.resolver.computed_style_shared(node);
         let inheritance_parent = flattened_assigned_slot(node).or_else(|| node.parent_node());
         let inherited_identity = inheritance_parent.as_ref().map(|parent| {
             if parent.node_type() == NodeType::DocumentFragment {
@@ -739,8 +739,8 @@ impl<'a> VisitedPaintStylePass<'a> {
             return ordinary;
         }
         self.affected_nodes.insert(key);
-        let visited = self.cascade(node, inherited.as_ref(), None, &ordinary);
-        let paint = ordinary.with_visited_paint_colors(&visited);
+        let visited = self.cascade(node, inherited.as_deref(), None, &ordinary);
+        let paint = Arc::new(ordinary.with_visited_paint_colors(&visited));
         self.styles.insert(key, paint.clone());
         paint
     }
@@ -749,18 +749,18 @@ impl<'a> VisitedPaintStylePass<'a> {
         &mut self,
         node: &NodeHandle,
         pseudo: PseudoElement,
-    ) -> Option<ComputedStyle> {
+    ) -> Option<Arc<ComputedStyle>> {
         let key = (node.identity(), pseudo);
         if let Some(style) = self.pseudo_styles.get(&key) {
             return Some(style.clone());
         }
-        let ordinary = self.resolver.computed_pseudo_style(node, pseudo)?;
+        let ordinary = self.resolver.computed_pseudo_style_shared(node, pseudo)?;
         let parent = self.style(node);
         if !self.affected_nodes.contains(&node.identity()) {
             return Some(ordinary);
         }
         let visited = self.cascade(node, Some(&parent), Some(pseudo), &ordinary);
-        let paint = ordinary.with_visited_paint_colors(&visited);
+        let paint = Arc::new(ordinary.with_visited_paint_colors(&visited));
         self.pseudo_styles.insert(key, paint.clone());
         Some(paint)
     }
@@ -2272,6 +2272,12 @@ impl StyleResolver {
 
     /// Resolves computed style for `node`, using the cache when possible.
     pub fn computed_style(&mut self, node: &NodeHandle) -> ComputedStyle {
+        self.computed_style_shared(node).as_ref().clone()
+    }
+
+    /// Shares an immutable cached style with paint readers. Invalidation
+    /// replaces the cache entry without changing any retained snapshot.
+    fn computed_style_shared(&mut self, node: &NodeHandle) -> Arc<ComputedStyle> {
         let key = node.identity();
         if let Some(style) = self.cache.get(&key) {
             return style.clone();
@@ -2307,7 +2313,8 @@ impl StyleResolver {
             self.root_line_height = used_line_height(Some(&style), self.root_font_size());
         }
 
-        self.cache.insert(key, style.clone());
+        let style = Arc::new(style);
+        self.cache.insert(key, Arc::clone(&style));
         style
     }
 
@@ -2319,7 +2326,7 @@ impl StyleResolver {
         if let Some(style) = self.cache.get(&key) {
             return style.get(name).cloned();
         }
-        self.computed_style(node).get(name).cloned()
+        self.computed_style_shared(node).get(name).cloned()
     }
 
     /// Supplies a fresh, private visit snapshot for the current paint call.
@@ -2356,18 +2363,18 @@ impl StyleResolver {
         Some(result)
     }
 
-    pub(crate) fn paint_style(&mut self, node: &NodeHandle) -> ComputedStyle {
+    pub(crate) fn paint_style(&mut self, node: &NodeHandle) -> Arc<ComputedStyle> {
         self.with_visited_paint_pass(|pass| pass.style(node))
-            .unwrap_or_else(|| self.computed_style(node))
+            .unwrap_or_else(|| self.computed_style_shared(node))
     }
 
     pub(crate) fn paint_pseudo_style(
         &mut self,
         node: &NodeHandle,
         pseudo: PseudoElement,
-    ) -> Option<ComputedStyle> {
+    ) -> Option<Arc<ComputedStyle>> {
         self.with_visited_paint_pass(|pass| pass.pseudo_style(node, pseudo))
-            .unwrap_or_else(|| self.computed_pseudo_style(node, pseudo))
+            .unwrap_or_else(|| self.computed_pseudo_style_shared(node, pseudo))
     }
 
     /// Resolves computed style for a pseudo-element attached to `node`.
@@ -2376,6 +2383,15 @@ impl StyleResolver {
         node: &NodeHandle,
         pseudo: PseudoElement,
     ) -> Option<ComputedStyle> {
+        self.computed_pseudo_style_shared(node, pseudo)
+            .map(|style| style.as_ref().clone())
+    }
+
+    fn computed_pseudo_style_shared(
+        &mut self,
+        node: &NodeHandle,
+        pseudo: PseudoElement,
+    ) -> Option<Arc<ComputedStyle>> {
         let key = (node.identity(), pseudo);
         if let Some(style) = self.pseudo_cache.get(&key) {
             return Some(style.clone());
@@ -2387,7 +2403,8 @@ impl StyleResolver {
             return None;
         }
 
-        self.pseudo_cache.insert(key, style.clone());
+        let style = Arc::new(style);
+        self.pseudo_cache.insert(key, Arc::clone(&style));
         Some(style)
     }
 
