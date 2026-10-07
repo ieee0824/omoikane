@@ -1,0 +1,20 @@
+{
+  "rectangles": {
+    "flex-a": [0, 0, 20, 20],
+    "flex-b": [0, 0, 20, 20],
+    "rows-a": [0, 0, 20, 20],
+    "rows-b": [0, 20, 20, 30],
+    "rows-c": [0, 50, 20, 20],
+    "columns-a": [0, 0, 30, 20],
+    "columns-b": [0, 20, 30, 20],
+    "columns-c": [30, 0, 40, 20],
+    "sparse-c": [40, 20, 20, 20],
+    "dense-c": [40, 0, 20, 20],
+    "negative-a": [0, 0, 30, 20],
+    "negative-b": [30, 0, 40, 20],
+    "negative-c": [70, 0, 10, 20]
+  },
+  "hit": "flex-a",
+  "order": ["flex-a", "flex-b"],
+  "flow": "dense"
+}

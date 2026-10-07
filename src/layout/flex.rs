@@ -15,6 +15,7 @@ mod anonymous;
 #[derive(Debug, Clone)]
 struct FlexItemSpec {
     node: NodeHandle,
+    order: i32,
     text_nodes: Vec<NodeHandle>,
     base_main_size: f32,
     min_main_size: f32,
@@ -200,6 +201,13 @@ pub(super) fn layout_flex_container(
             children.push(positioned);
         }
     }
+    children.sort_by_cached_key(|child| {
+        if child.node.node_type() == NodeType::Element {
+            item_order(&resolver.computed_style(&child.node))
+        } else {
+            0
+        }
+    });
     sort_children_by_z_index(&mut children);
 
     Some(LayoutBox {
@@ -284,6 +292,7 @@ fn collect_flex_items(
         let (main_start_auto, main_end_auto) = main_axis_auto_margins(&child_style, direction);
         items.push(FlexItemSpec {
             node: child,
+            order: item_order(&child_style),
             text_nodes: Vec::new(),
             base_main_size,
             min_main_size,
@@ -305,6 +314,7 @@ fn collect_flex_items(
         width,
     );
 
+    items.sort_by_key(|item| item.order);
     let available_main_size = match direction {
         FlexDirection::Row => width,
         FlexDirection::Column => {
@@ -924,6 +934,15 @@ fn auto_flex_base_main_size(
             intrinsic_width(node, resolver) + edge_sizes(&style, "margin").horizontal()
         }
         FlexDirection::Column => 0.0,
+    }
+}
+
+fn item_order(style: &ComputedStyle) -> i32 {
+    match style.get("order") {
+        Some(ComputedValue::Number(value)) if value.is_finite() && value.fract() == 0.0 => {
+            *value as i32
+        }
+        _ => 0,
     }
 }
 

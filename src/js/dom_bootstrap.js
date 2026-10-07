@@ -383,6 +383,7 @@
     configurable: false,
   });
   const validatesSpecialStyleProperties = new Set([
+    "order", "grid-auto-flow", "grid-auto-rows", "grid-auto-columns",
     "text-shadow",
     "all",
     "color", "background-color", "border-color",

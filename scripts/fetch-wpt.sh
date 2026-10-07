@@ -237,6 +237,20 @@ collect_pattern \
   "/css/css-page/page-name-and-break-004-print.html" \
   "/css/css-page/page-name-and-break-print-ref.html"
 current_revision="$(git_wpt rev-parse HEAD 2>/dev/null || true)"
+collect_pattern \
+  "/css/css-flexbox/parsing/order-valid.html" \
+  "/css/css-flexbox/parsing/order-invalid.html" \
+  "/css/css-flexbox/parsing/order-computed.html" \
+  "/css/css-flexbox/hittest-overlapping-order.html" \
+  "/css/css-grid/parsing/grid-auto-flow-valid.html" \
+  "/css/css-grid/parsing/grid-auto-flow-invalid.html" \
+  "/css/css-grid/parsing/grid-auto-flow-computed.html" \
+  "/css/css-grid/parsing/grid-auto-rows-valid.html" \
+  "/css/css-grid/parsing/grid-auto-rows-invalid.html" \
+  "/css/css-grid/parsing/grid-auto-rows-computed.html" \
+  "/css/css-grid/parsing/grid-auto-columns-valid.html" \
+  "/css/css-grid/parsing/grid-auto-columns-invalid.html" \
+  "/css/css-grid/parsing/grid-auto-columns-computed.html"
 # A pinned revision alone does not prove that newly requested WPT paths exist.
 if [[ "$current_revision" == "$revision" ]] &&
   diff -q <(printf '%s\n' "${patterns[@]}" | LC_ALL=C sort -u) \
