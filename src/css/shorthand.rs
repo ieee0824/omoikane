@@ -2544,9 +2544,14 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
     let mut direction = Value::Keyword("normal".into());
     let mut fill = Value::Keyword("none".into());
     let mut play = Value::Keyword("running".into());
+    let mut time_count = 0;
     for item in values {
         match item {
             Value::Length(_, unit) if unit == "s" || unit == "ms" => {
+                time_count += 1;
+                if time_count > 2 {
+                    return Vec::new();
+                }
                 if duration.is_none() {
                     duration = Some(item.clone());
                 } else {

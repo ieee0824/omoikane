@@ -4,6 +4,7 @@
   // cannot use it to inspect closed shadow trees.
   const internalAssignedSlot = globalThis.__omoikane_internal_assigned_slot;
   let registerCanonicalNodeIdentity = globalThis.__omoikane_register_canonical_node_identity;
+  const nativeStyleSupports = globalThis.__omoikane_css_supports;
   const nativeGetOptionSelected = globalThis.__omoikane_get_option_selected;
   const nativeSetOptionSelected = globalThis.__omoikane_set_option_selected;
   delete globalThis.__omoikane_internal_assigned_slot;
@@ -3003,6 +3004,8 @@
       const normalizeDecls = (declarations) => {
         const normalized = [];
         for (const declaration of declarations) {
+          if (!declaration.name.startsWith("--") &&
+              !nativeStyleSupports(declaration.name, declaration.value)) continue;
           if (declaration.name === "transition" ||
               declaration.name.startsWith("transition-") ||
               validatesSpecialStyleProperties.has(declaration.name)) {
@@ -3089,6 +3092,7 @@
       // single value returned by getValue/getPriority.
       const setValue = (kebab, value, priority) => {
         value = String(value);
+        if (!kebab.startsWith("--") && !nativeStyleSupports(kebab, value)) return;
         if (kebab === "transition" || kebab.startsWith("transition-") || validatesSpecialStyleProperties.has(kebab)) {
           const normalized = __omoikane_normalize_style_value(kebab, value);
           if (normalized === null) return;
@@ -7182,11 +7186,22 @@
     catch (_) { return false; }
   }
 
-  function declarationView(block, onChange = null) {
+  function declarationView(block, onChange = null, validateProperties = true) {
     let source = String(block || "");
-    const declarations = () => JSON.parse(__omoikane_css_declarations(source)).map(
-      ([name, value]) => ({ name, value })
-    );
+    let cachedSource = null;
+    let cachedDeclarations = [];
+    const accepts = (name, value) => !validateProperties || name.startsWith("--") ||
+      nativeStyleSupports(name, value.replace(/\s*!\s*important\s*$/i, ""));
+    const declarations = () => {
+      if (cachedSource !== source) {
+        const parsed = JSON.parse(__omoikane_css_declarations(source)).map(
+          ([name, value]) => ({ name, value })
+        ).filter(declaration => accepts(declaration.name, declaration.value));
+        cachedDeclarations = parsed;
+        cachedSource = source;
+      }
+      return cachedDeclarations;
+    };
     const serialize = values => values.map(
       declaration => declaration.name + ": " + declaration.value + ";"
     ).join(" ");
@@ -7209,6 +7224,7 @@
       const key = propertyName(name);
       value = String(value);
       if (!key || value === "") return removeValue(key);
+      if (!accepts(key, value)) return;
       if (key === "transition" || key.startsWith("transition-") || validatesSpecialStyleProperties.has(key)) {
         const normalized = __omoikane_normalize_style_value(key, value);
         if (normalized === null) return;
@@ -7513,7 +7529,8 @@
           void declarations;
           this.__text = this.__serializeCssText();
           if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
-        }
+        },
+        !this.__selectorText.startsWith("@")
       );
       this.__innerSheet = new CSSStyleSheet(null, {
         rules: contents.rules,
@@ -7593,7 +7610,8 @@
           if (typeof globalThis.__omoikane_font_face_rule_changed === "function") {
             globalThis.__omoikane_font_face_rule_changed(this, name);
           }
-        }
+        },
+        false
       );
       if (this.__sheet) this.__sheet.__registerRuleView(this);
     }
