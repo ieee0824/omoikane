@@ -14729,23 +14729,33 @@ fn indexeddb_rejects_array_key_paths_and_normalizes_boxed_store_names() {
 }
 
 fn serve_visit_documents(first_body: &str) -> (u16, FixtureWorker<Vec<String>>) {
+    serve_visit_documents_with_timeout(first_body, ACCEPT_TIMEOUT)
+}
+
+fn serve_visit_documents_with_timeout(
+    first_body: &str,
+    timeout: Duration,
+) -> (u16, FixtureWorker<Vec<String>>) {
     let listener = bind_loopback().unwrap();
     let port = listener.local_addr().unwrap().port();
     let first_body = first_body.to_owned();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let server = FixtureWorker::spawn(move || {
         let mut paths = Vec::new();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while paths.len() < 2 && std::time::Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            let mut stream = match accept_with_timeout(&listener, remaining) {
-                Ok(stream) => stream,
-                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => break,
-                Err(error) => panic!("visit fixture accept failed: {error}"),
-            };
-            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+        ready_tx.send(()).unwrap();
+        for expected_path in ["/first", "/second"] {
+            // Runtime setup and handling the previous document must not consume
+            // the next request's accept budget.
+            let mut stream = accept_with_timeout(&listener, timeout).unwrap_or_else(|error| {
+                panic!(
+                    "visit fixture waiting for {expected_path} (accept timeout {timeout:?}, received {paths:?}): {error}"
+                )
+            });
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap_or_else(|error| {
+                panic!(
+                    "visit fixture reading {expected_path} headers (received {paths:?}): {error}"
+                )
+            });
             let path = request.split_whitespace().nth(1).unwrap().to_owned();
             let body = if path == "/first" {
                 first_body.as_str()
@@ -14762,7 +14772,42 @@ fn serve_visit_documents(first_body: &str) -> (u16, FixtureWorker<Vec<String>>) 
         }
         paths
     });
+    ready_rx.recv_timeout(ACCEPT_TIMEOUT).unwrap();
     (port, server)
+}
+
+#[test]
+fn visit_fixture_request_processing_does_not_consume_the_next_accept_timeout() {
+    let timeout = Duration::from_millis(500);
+    let (port, server) = serve_visit_documents_with_timeout("first", timeout);
+    let mut first = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    first.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+    first
+        .write_all(b"GET /first HTTP/1.1\r\nHost: localhost\r\n")
+        .unwrap();
+    // Queue the second connection before delaying the first request so that
+    // client scheduling cannot consume its independent accept budget.
+    let mut second = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    second.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+    second
+        .write_all(b"GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    // Keep the first request in progress beyond the old shared deadline.
+    std::thread::sleep(timeout * 2);
+    first.write_all(b"\r\n").unwrap();
+    let mut response = String::new();
+    first.read_to_string(&mut response).unwrap();
+    assert!(response.ends_with("first"));
+
+    response.clear();
+    second
+        .read_to_string(&mut response)
+        .expect("visit fixture must serve the queued second request after processing the first");
+    assert!(response.ends_with("<html><body>second</body></html>"));
+    assert_eq!(
+        server.join(),
+        vec!["/first".to_string(), "/second".to_string()]
+    );
 }
 
 #[test]
