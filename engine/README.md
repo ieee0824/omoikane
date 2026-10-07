@@ -35,6 +35,13 @@ cargo test --locked -p boa_parser -p boa_gc -p boa_engine
 cargo test --locked -p boa_engine --features baseline-jit jit:: -- --nocapture
 ```
 
+When overriding `CARGO_TARGET_DIR`, use separate directories for the root and
+nested workspaces (for example, a worktree-specific `-root` and `-boa` suffix).
+Their independently locked dependency graphs can differ. Keep each workspace's
+build artifacts separate when verifying lockfile updates; the default target
+directories already provide this separation. Apply the root repository's
+capacity guard to each directory.
+
 The original `boa/.github/workflows/` files are retained as history, but GitHub
 does not execute nested workflows. Omoikane's root workflows must exercise the
 engine alongside browser compatibility and release gates. Source placement and

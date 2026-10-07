@@ -1,0 +1,10 @@
+# Maintenance-only exceptions. No vulnerability or unsound exceptions.
+# cargo-deny still prints ignored findings. Dates are enforced by the CI script.
+[advisories]
+ignore = [
+  { id = "RUSTSEC-2024-0384", reason = "Example-only isahc/futures-lite/fastrand; upgrade backend before expanding use. review_by=2027-01-07" },
+  { id = "RUSTSEC-2024-0436", reason = "Build-time Boa paste macros; replacement requires compatibility review. review_by=2027-01-07" },
+  { id = "RUSTSEC-2025-0134", reason = "ICU generator only via ureq; upgrade generator dependency line. review_by=2027-01-07" },
+  { id = "RUSTSEC-2026-0206", reason = "Browser text shaping rustybuzz; replacement requires shaping and rendering comparison. review_by=2027-01-07" },
+  { id = "RUSTSEC-2026-0192", reason = "Browser font parsing via rustybuzz/fontdue; replacement requires font and rendering validation. review_by=2027-01-07" },
+]
