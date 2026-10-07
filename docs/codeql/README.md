@@ -132,6 +132,39 @@ ARM64専用テストの`panic_2021`1件が合算されていた。`jit/mod.rs`�
 
 ## 再測定
 
+### Issue #1266の再現例と追跡
+
+[Issue #1266](https://github.com/ieee0824/omoikane/issues/1266)では、残る欠落を
+[独立した再現crate](repros/macro-gaps/README.md)で縮小した。
+本体のlockと同じ依存を固定し、ABI assertionと借用付きFutureの契約を維持する。
+`offset_of!`の通常式との対照、およびARM64の文単位cfgと関数cfgの対照を含む。
+警告を出す再現ソースはアプリ本体とは別に分類して記録する。
+
+最新main `903227c7`の[run37587266992](https://github.com/ieee0824/omoikane/actions/runs/37587266992)
+が成功し、取得DBのSHA・CLI2.27.1・build-mode:noneを照合した。
+[新しいDBのハッシュと比較結果](results/2026-10-07-main-903227c7.json)に記録したとおり、
+全23診断と対象593マクロ行は上の基準と一致し、15位置の内側AST欠落が残る。
+対象6ファイルのDB内ソースも照合済み。
+
+同じ依存の最小例でも、ABIの`offset_of!`3箇所とtrait/implの`__Fn`2箇所が
+両解析targetでwarningかつAST 0となった。通常式の`offset_of!`は各8 nodeがある。
+文単位cfgのARM64 assertionはx86_64解析で`panic_2021`が欠け、ARM64解析では
+展開された。これをcfg依存の診断として追跡し、既存cfgやassertionは変更しない。
+
+ARM64 hostで再現crateの4テスト・locked build、および
+`cargo test --locked --manifest-path engine/boa/Cargo.toml -p boa_macros_tests --test embedded`
+の`simple` / `compressed_lz4`が成功。元fixtureを保持している。
+`embedded.rs`のCodeQL診断は正常系テストで発生する展開失敗として扱い、
+`compile_error`という文字列だけで意図的な失敗とは分類しない。
+`CARGO_MANIFEST_DIR`とファイルI/Oに依存するproc macroだが、どの環境差が
+失敗を起こすかはこの測定だけでは断定しない。
+workspace外の`engine/boa/tests/src/lib.rs`診断は別分類のまま保持する。
+
+この時点の最新CLIは2.27.1、最新Rust libraryは0.2.22で基準と同じ。
+更新版による改善確認は未完了であり、Issue #1266を継続する。
+
+### 手順
+
 必要なもの: `gh`、測定DBと同じ版のCodeQL CLI、ZIP展開ツール。
 クエリの依存は [qlpack.yml](queries/qlpack.yml) とlockで固定する。
 新しいCLIへ移行するときは同梱のRust libraryの版も比較記録する。

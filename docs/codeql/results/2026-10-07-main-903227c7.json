@@ -1,0 +1,50 @@
+{
+  "issue": 1266,
+  "date": "2026-10-07",
+  "commit": "903227c78811cdc22dbf473845d17b72ce116cf8",
+  "run_id": 37587266992,
+  "rust_job_id": 112680237371,
+  "cli": "2.27.1",
+  "rust_library": "0.2.22",
+  "rust_queries": "0.1.43",
+  "build_mode": "none",
+  "db_zip_bytes": 350220673,
+  "db_zip_sha256": "c5fc3fcaa5a890bfb1dfa05b41f6355ebe106400f551304086bc593248713fb7",
+  "diagnostics": {
+    "warning": 18,
+    "info": 5,
+    "error": 0,
+    "warning_files": 7,
+    "same_as_baseline": true
+  },
+  "macro_query": {
+    "rows": 593,
+    "ast_positive": 578,
+    "ast_zero": 15,
+    "same_as_baseline": true
+  },
+  "scan_metrics": {
+    "scanned": 1025,
+    "extracted_without_error": 1019,
+    "extracted_with_errors": 7
+  },
+  "raw_csv_sha256": {
+    "current-main-diagnostics.csv": "0ffbbe28fcb423c11fb84da73250afd0bf445013c13c0087ad3c52830e2c2ce5",
+    "current-main-macros.csv": "904733d75be551aa2e0b97f908598751ed197edc129dac41895c4caa902bb4ee"
+  },
+  "source_sha256": {
+    "engine/boa/core/engine/src/jit/arithmetic.rs": "5d4424ccf2c922c7a5608bf71bb5bea4a0b22de4e2bac7f10740d5ad065a04a7",
+    "engine/boa/core/engine/src/jit/runtime_call.rs": "d8d6878d70bde2f8152efd532a16e73acb31b5491f2314741c485884689ff526",
+    "engine/boa/core/engine/src/jit/mod.rs": "0161e9aed0908e145d5dc1bab0c3aa8069006a85acfffb5b662fd2a632e5744b",
+    "engine/boa/core/engine/src/module/loader/mod.rs": "747de8fc6f7a6c6d8bd0a703be07a5224e751e06a5ca1ba776cc20cbadaaa92b",
+    "engine/boa/tests/macros/tests/embedded.rs": "3d31256ae4286fa9a059becaad7f0a405970f1d26eed27db7b42d36b3160a14d",
+    "tests/jit_code_memory.rs": "5b2ff18af6bb18381628f8e942d3e16ed4d491e21cbc70b0bdc404bae4f6e9f6"
+  },
+  "source_archive_hashes_verified": true,
+  "newer_extractor_validation_pending": true,
+  "limitations": [
+    "Warnings and missing inner macro AST remain.",
+    "No newer CLI or rust-all was published at measurement time.",
+    "Reproduction AST counts do not establish complete type or dataflow coverage."
+  ]
+}
