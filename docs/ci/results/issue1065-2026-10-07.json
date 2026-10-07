@@ -1,0 +1,526 @@
+{
+  "collected_at": "2026-10-07",
+  "source": "GitHub Actions REST API and downloaded job logs/artifacts",
+  "runner_minutes_definition": "sum(completed_at - started_at) for non-skipped CI and Browser behavior jobs, seconds / 60; queue time excluded",
+  "elapsed_definition": "latest job completed_at - earliest workflow createdAt, across all workflows at the head; cancelled runs are censored",
+  "samples": [
+    {
+      "head": "92125ac6e167018d07d6e6bbc1db347ef6c153f6",
+      "runs": [
+        {
+          "id": 36788656592,
+          "workflow": "JIT release gate",
+          "event": "push",
+          "conclusion": "cancelled"
+        },
+        {
+          "id": 36788656605,
+          "workflow": "CodeQL",
+          "event": "push",
+          "conclusion": "cancelled"
+        },
+        {
+          "id": 36788656598,
+          "workflow": "Native JIT targets",
+          "event": "push",
+          "conclusion": "success"
+        },
+        {
+          "id": 36788656539,
+          "workflow": "Browser behavior",
+          "event": "push",
+          "conclusion": "success"
+        },
+        {
+          "id": 36788656572,
+          "workflow": "CI",
+          "event": "push",
+          "conclusion": "success"
+        }
+      ],
+      "ci_browser_runner_minutes": 122.52,
+      "all_workflow_elapsed_minutes": 19.18,
+      "jobs": [
+        {
+          "name": "Browser (x86_64-unknown-linux-gnu, interpreter)",
+          "id": 110136079209,
+          "minutes": 6.77,
+          "cache_hit_keys": [
+            "v0-rust-browser-x86_64-unknown-linux-gnu-interpreter-browser-Linux-x64-9a6338d5-c08b2360"
+          ]
+        },
+        {
+          "name": "test",
+          "id": 110136072163,
+          "minutes": 13.57,
+          "cache_hit_keys": [
+            "v0-rust-workspace-v1-test-Linux-x64-6ff13d87-c08b2360"
+          ]
+        }
+      ]
+    },
+    {
+      "head": "c3099977d7beb928b2c5268455c0e117d4084b18",
+      "runs": [
+        {
+          "id": 36790299634,
+          "workflow": "CodeQL",
+          "event": "push",
+          "conclusion": "success"
+        },
+        {
+          "id": 36790299403,
+          "workflow": "GUI Pointer Lock",
+          "event": "push",
+          "conclusion": "success"
+        },
+        {
+          "id": 36790299664,
+          "workflow": "Native JIT targets",
+          "event": "push",
+          "conclusion": "success"
+        },
+        {
+          "id": 36790299636,
+          "workflow": "Browser behavior",
+          "event": "push",
+          "conclusion": "success"
+        },
+        {
+          "id": 36790299632,
+          "workflow": "JIT release gate",
+          "event": "push",
+          "conclusion": "success"
+        },
+        {
+          "id": 36790299601,
+          "workflow": "CI",
+          "event": "push",
+          "conclusion": "success"
+        }
+      ],
+      "ci_browser_runner_minutes": 118.3,
+      "all_workflow_elapsed_minutes": 23.02,
+      "jobs": [
+        {
+          "name": "Browser (x86_64-unknown-linux-gnu, interpreter)",
+          "id": 110141566998,
+          "minutes": 5.48,
+          "cache_hit_keys": [
+            "v0-rust-browser-x86_64-unknown-linux-gnu-interpreter-browser-Linux-x64-9a6338d5-c08b2360"
+          ]
+        },
+        {
+          "name": "test",
+          "id": 110141397987,
+          "minutes": 10.8,
+          "cache_hit_keys": [
+            "v0-rust-workspace-v1-test-Linux-x64-6ff13d87-c08b2360"
+          ]
+        }
+      ]
+    },
+    {
+      "head": "0c3a33f6174d122f8eef311a0c1499c76953c3e6",
+      "runs": [
+        {
+          "id": 36791289694,
+          "workflow": "CI",
+          "event": "pull_request",
+          "conclusion": "success"
+        },
+        {
+          "id": 36791289945,
+          "workflow": "CodeQL",
+          "event": "pull_request",
+          "conclusion": "success"
+        },
+        {
+          "id": 36791290209,
+          "workflow": "Release",
+          "event": "pull_request",
+          "conclusion": "success"
+        },
+        {
+          "id": 36791289697,
+          "workflow": "Native JIT targets",
+          "event": "pull_request",
+          "conclusion": "success"
+        },
+        {
+          "id": 36791289972,
+          "workflow": "Browser behavior",
+          "event": "pull_request",
+          "conclusion": "success"
+        }
+      ],
+      "ci_browser_runner_minutes": 111.12,
+      "all_workflow_elapsed_minutes": 21.77,
+      "jobs": [
+        {
+          "name": "test",
+          "id": 110144572403,
+          "minutes": 12.58,
+          "cache_hit_keys": [
+            "v0-rust-workspace-v1-test-Linux-x64-6ff13d87-c08b2360"
+          ]
+        }
+      ]
+    },
+    {
+      "head": "196579e474f3a92c4518910b31efa1239d631193",
+      "runs": [
+        {
+          "id": 36793240947,
+          "workflow": "Native JIT targets",
+          "event": "push",
+          "conclusion": "success"
+        },
+        {
+          "id": 36793240985,
+          "workflow": "Browser behavior",
+          "event": "push",
+          "conclusion": "success"
+        },
+        {
+          "id": 36793241005,
+          "workflow": "CI",
+          "event": "push",
+          "conclusion": "success"
+        },
+        {
+          "id": 36793240968,
+          "workflow": "CodeQL",
+          "event": "push",
+          "conclusion": "success"
+        },
+        {
+          "id": 36793240916,
+          "workflow": "JIT release gate",
+          "event": "push",
+          "conclusion": "success"
+        }
+      ],
+      "ci_browser_runner_minutes": 113.33,
+      "all_workflow_elapsed_minutes": 21.18,
+      "jobs": [
+        {
+          "name": "test",
+          "id": 110150761210,
+          "minutes": 13.23,
+          "cache_hit_keys": [
+            "v0-rust-workspace-v1-test-Linux-x64-6ff13d87-c08b2360"
+          ]
+        }
+      ]
+    }
+  ],
+  "browser_test_ids": [
+    "acid3_page_parses_to_dom_with_scoreboard",
+    "array_workload_resets_at_the_index_period",
+    "benchmark_rejects_incorrect_results_on_every_pass",
+    "browser_float16_conversions_preserve_values_and_order",
+    "css::container::tests::font_relative_queries_use_the_queried_containers_metrics",
+    "css::font_shorthand::tests::keeps_font_families_slashes_variants_and_importance",
+    "css::font_shorthand::tests::rejects_missing_family_and_invalid_line_height_without_partial_updates",
+    "css::media::font_relative_tests::media_query_font_units_use_initial_not_document_metrics",
+    "css::style::style_tests::author_css_overrides_heading_ua_font_size",
+    "css::style::style_tests::author_css_overrides_heading_ua_font_weight",
+    "css::style::style_tests::computed_font_style_preserves_oblique_angle",
+    "css::style::style_tests::expands_var_dependent_all_transition_and_font_shorthands",
+    "css::style::style_tests::font_face_rules_follow_layer_order_and_keep_scoped_variants",
+    "css::style::style_tests::font_face_rules_follow_origin_nested_and_anonymous_layer_order",
+    "css::style::style_tests::font_face_rules_rebuild_for_global_conditions_and_unlayered_priority",
+    "css::style::style_tests::font_family_references_keep_declaration_tree_scope_through_inheritance",
+    "css::style::style_tests::font_relative_line_height_units_use_parent_for_own_font_and_line_height",
+    "css::style::style_tests::font_relative_units_resolve_through_calc_variables_and_registered_lengths",
+    "css::style::style_tests::font_relative_units_use_loaded_font_tables_and_glyph_advances",
+    "css::style::style_tests::font_size_ex_uses_parent_metrics_while_width_uses_own_metrics",
+    "css::style::style_tests::font_size_larger_resolves_to_px",
+    "css::style::style_tests::font_size_smaller_resolves_to_px",
+    "css::style::style_tests::inherits_color_and_font_size",
+    "css::style::style_tests::inherits_font_stretch_from_parent",
+    "css::style::style_tests::inherits_font_style_from_parent",
+    "css::style::style_tests::inherits_font_weight_from_parent",
+    "css::style::style_tests::keeps_comma_separated_font_family_value",
+    "css::style::style_tests::rem_on_root_element_uses_own_computed_font_size",
+    "css::style::style_tests::rem_resolves_from_css_defined_root_font_size",
+    "css::style::style_tests::resolves_clamp_font_size_with_calc_percentage",
+    "css::style::style_tests::resolves_clamp_font_size_with_viewport_units",
+    "css::style::style_tests::resolves_em_and_percentage_font_sizes",
+    "css::style::style_tests::resolves_rem_default_root_font_size",
+    "css::style::style_tests::resolves_rem_in_font_size",
+    "css::style::style_tests::resolves_rem_using_root_font_size",
+    "css::tests::expands_background_and_font_shorthands",
+    "css::tests::extract_font_face_rules_collects_all",
+    "css::tests::font_face_uses_last_source_as_compatible_fallback",
+    "css::tests::font_face_without_src_falls_back_to_at_rule",
+    "css::tests::parses_font_face_unquoted_family",
+    "css::tests::parses_font_face_with_format_hint",
+    "css::tests::parses_font_face_with_weight_and_style",
+    "fixed_benchmark_workloads_preserve_each_computed_result",
+    "font::arabic_tests::default_fonts_shape_arabic_in_a_contextual_fallback_run",
+    "font::arabic_tests::latin_arabic_and_cjk_keep_distinct_fonts_and_complete_clusters",
+    "font::system_tests::collection_selection_keeps_its_face_through_shaping_and_rasterization",
+    "font::system_tests::css_weight_search_preserves_400_500_and_directional_fallback_rules",
+    "font::system_tests::family_lists_preserve_order_and_quoted_commas_for_web_and_system_fonts",
+    "font::system_tests::font_diagnostic_scopes_restore_after_nesting_and_panics",
+    "font::system_tests::installed_faces_match_requested_stretch_before_style_and_weight",
+    "font::system_tests::installed_faces_match_width_weight_and_style_from_metadata",
+    "font::system_tests::registered_web_family_overrides_previously_cached_system_faces",
+    "font::system_tests::selected_system_faces_keep_cjk_and_combining_clusters_in_fallback_runs",
+    "font::system_tests::system_cache_does_not_substitute_an_already_loaded_style",
+    "font::system_tests::system_family_selection_decodes_mac_roman_collection_names",
+    "font::system_tests::web_font_lookup_stays_in_its_tree_scope_then_falls_back_to_ancestors",
+    "font::tests::css_pixel_size_uses_the_em_square_for_shaping_and_rasterization",
+    "font::tests::debug_hello_world_measurement",
+    "font::tests::debug_nbsp_vs_space",
+    "font::tests::decode_woff2_minimal_valid_structure",
+    "font::tests::detect_font_format_otf",
+    "font::tests::detect_font_format_short_data",
+    "font::tests::detect_font_format_ttf",
+    "font::tests::detect_font_format_unknown",
+    "font::tests::detect_font_format_woff",
+    "font::tests::detect_font_format_woff2",
+    "font::tests::detect_font_format_woff2_magic",
+    "font::tests::fallback_runs_never_split_variation_or_zwj_graphemes",
+    "font::tests::fallback_selection_keeps_grapheme_clusters_in_one_font_run",
+    "font::tests::fallback_shaping_keeps_primary_supported_text_in_one_run",
+    "font::tests::font_cache_register_web_font",
+    "font::tests::font_cache_register_web_font_with_variant",
+    "font::tests::font_face_descriptor_ranges_are_normalized",
+    "font::tests::font_family_key_folds_unicode_case_and_trims",
+    "font::tests::font_family_keys_are_distinct_for_different_families",
+    "font::tests::font_style_parse",
+    "font::tests::font_weight_parse_keywords",
+    "font::tests::font_weight_parse_numeric",
+    "font::tests::font_weight_parse_unknown_defaults_to_400",
+    "font::tests::letter_spacing_boundaries_follow_extended_grapheme_clusters",
+    "font::tests::load_from_bytes_invalid_data_returns_error",
+    "font::tests::load_from_bytes_ttf_system_font",
+    "font::tests::load_from_bytes_woff2_truncated_header_returns_error",
+    "font::tests::opentype_shaping_applies_arabic_context_and_ligatures",
+    "font::tests::shaping_controls_have_zero_advance_policy",
+    "font::tests::system_collection_lookup_loads_the_selected_nonzero_face",
+    "font::tests::system_collection_rejects_face_counts_without_an_offset_table",
+    "font::tests::system_family_selection_ignores_directory_order_and_style_in_filename",
+    "font::tests::test_advance_scales_with_size",
+    "font::tests::test_average_advance",
+    "font::tests::test_different_characters_different_advances",
+    "font::tests::test_find_system_font_sans_serif",
+    "font::tests::test_font_cache_creation",
+    "font::tests::test_font_cache_get_or_load",
+    "font::tests::test_generic_family_monospace_has_candidates",
+    "font::tests::test_generic_family_sans_serif_has_candidates",
+    "font::tests::test_generic_family_serif_has_candidates",
+    "font::tests::test_generic_family_unknown_returns_empty",
+    "font::tests::test_glyph_cache_creation",
+    "font::tests::test_glyph_cache_eviction",
+    "font::tests::test_glyph_cache_insert_and_get",
+    "font::tests::test_glyph_cache_size_quantization",
+    "font::tests::test_glyph_raster_empty_is_valid",
+    "font::tests::test_glyph_raster_with_bitmap",
+    "font::tests::test_layout_metrics",
+    "font::tests::test_load_system_font_and_rasterize",
+    "font::tests::test_load_system_font_by_generic_family",
+    "font::tests::test_load_system_font_helvetica",
+    "font::tests::test_measure_text_width",
+    "font::tests::test_measure_text_width_scales",
+    "font::tests::test_rasterize_space_character",
+    "font::tests::underline_position_uses_signed_font_metric_and_scales_with_size",
+    "font::tests::unicode_range_composite_face_splits_grapheme_runs_in_source_order",
+    "font::tests::web_font_registry_bold_selects_700_when_available",
+    "font::tests::web_font_registry_exact_match_weight_400",
+    "font::tests::web_font_registry_fallback_when_no_italic",
+    "font::tests::web_font_registry_italic_selects_italic_over_normal",
+    "font::tests::web_font_registry_matches_oblique_angle_ranges",
+    "font::tests::web_font_registry_matches_stretch_before_style_and_weight",
+    "font::tests::web_font_registry_selects_with_case_insensitive_family_key",
+    "font::tests::web_font_registry_unknown_family_returns_none",
+    "form_submission_and_back_navigation_preserve_saved_state",
+    "generic_system_faces_honor_normal_bold_and_italic_requests",
+    "http_page_input_fetch_and_dom_changes_reach_the_painted_frame",
+    "js::font_descriptors::tests::accepted_sources_drop_only_the_invalid_top_level_rule",
+    "js::font_descriptors::tests::comments_and_escaped_delimiters_do_not_split_declarations",
+    "js::font_descriptors::tests::retains_data_payload_quotes_and_unicode_range_source",
+    "js::font_descriptors::tests::retains_urls_and_top_level_rule_boundaries",
+    "js::font_loading_tests::a_registered_font_used_by_the_document_loads_without_an_explicit_load_call",
+    "js::font_loading_tests::automatic_font_loading_uses_the_computed_stretch",
+    "js::font_loading_tests::binary_source_is_copied_and_used_by_both_layout_and_paint",
+    "js::font_loading_tests::ch_width_recomputes_when_its_web_font_finishes_loading",
+    "js::font_loading_tests::css_connected_face_round_trips_range_descriptors",
+    "js::font_loading_tests::css_unicode_range_faces_contribute_separate_text_runs",
+    "js::font_loading_tests::cssom_can_enumerate_a_large_font_rule_without_a_js_character_loop",
+    "js::font_loading_tests::cssom_font_face_preserves_data_urls_and_live_descriptors",
+    "js::font_loading_tests::cssom_font_src_change_and_rule_removal_disconnect_faces",
+    "js::font_loading_tests::font_policy_is_independent_of_connect_policy_and_errors_are_task_delivered",
+    "js::font_loading_tests::font_requests_enforce_cors_and_send_the_creation_documents_origin",
+    "js::font_loading_tests::font_set_load_starts_in_a_task_and_only_loads_the_matching_weight",
+    "js::font_loading_tests::font_set_matching_applies_oblique_angle_ranges",
+    "js::font_loading_tests::font_set_matching_applies_stretch_before_style_and_weight",
+    "js::font_loading_tests::font_src_blocks_redirect_before_contacting_the_destination",
+    "js::font_loading_tests::font_url_keeps_the_base_used_at_construction",
+    "js::font_loading_tests::layered_css_faces_remain_enumerable_while_layout_uses_the_winner",
+    "js::font_loading_tests::removed_style_updates_font_set_synchronously",
+    "js::font_loading_tests::same_origin_child_can_register_a_parent_face_without_leaking_membership",
+    "js::font_loading_tests::shadow_font_faces_are_scoped_and_nested_shadow_lookup_uses_the_parent_scope",
+    "js::font_loading_tests::stylesheet_faces_are_stable_and_cannot_be_removed_by_clear",
+    "js::font_loading_tests::syntax_and_binary_failures_reject_without_throwing_the_constructor",
+    "js::font_loading_tests::unloaded_faces_are_matched_by_font_and_unicode_range",
+    "js::font_loading_tests::url_face_is_task_loaded_and_membership_controls_layout",
+    "js::tests::cssom_drops_invalid_style_rules_without_breaking_font_face_set",
+    "js::tests::stylesheet_collection_records_shadow_font_scope_parent_chain",
+    "layout::inline_box_tests::inline_box_width_preserves_font_advances_and_records_firefox_rounding",
+    "layout::inline_box_tests::inline_boxes_use_font_height_and_include_padding_and_border",
+    "layout::inline_box_tests::mixed_font_size_line_height_forms_and_vertical_align_use_baseline_extents",
+    "layout::inline_box_tests::mixed_font_sizes_do_not_apply_horizontal_extents_to_vertical_columns",
+    "layout::inline_box_tests::mixed_font_sizes_expand_horizontal_line_from_baseline_extents",
+    "layout::tests::approximates_font_metrics_from_font_size",
+    "layout::tests::container_query_em_uses_each_containers_computed_font_size",
+    "layout::tests::font_metrics_carry_css_web_font_selection",
+    "layout::tests::inline_wrapping_ignores_subpixel_font_fragment_rounding",
+    "layout::tests::intrinsic_width_keywords_measure_text_with_a_registered_web_font",
+    "layout::tests::line_height_percentage_scales_by_font_size",
+    "layout::tests::transform_rem_uses_resolvers_computed_root_font_size_for_body_subtree_layout",
+    "layout::tests::with_layout_fonts_restores_previous_context_on_panic",
+    "linked_stylesheets_share_cascade_geometry_and_paint_across_updates",
+    "normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates",
+    "paint::font_data_url_tests::cascade_layer_font_face_winner_is_used_by_static_layout_and_paint",
+    "paint::font_data_url_tests::embedded_arabic_face_is_used_by_layout_and_paint_without_system_fonts",
+    "paint::font_data_url_tests::embedded_font_loads_without_a_base_and_retries_after_an_invalid_source",
+    "paint::font_selection_tests::css_system_faces_use_the_same_width_and_pixels_in_layout_and_paint",
+    "paint::tests::form_control_label_uses_web_font_variant",
+    "paint::tests::latin_glyph_stays_on_primary_font",
+    "paint::tests::missing_cjk_glyph_uses_cjk_fallback_font",
+    "paint::tests::missing_glyph_in_all_fonts_uses_primary_notdef",
+    "paint::tests::propagated_from_font_thickness_uses_the_originating_box_font",
+    "paint::tests::render_glyph_cache_hits_and_separates_font_identity_and_size",
+    "paint::tests::text_decoration_percentage_calc_and_from_font_resolve_used_thickness",
+    "paint::tests::underline_fixed_font_matrix_matches_firefox_pixels",
+    "paint::tests::underline_nested_fixed_font_keeps_the_origin_line_despite_child_overrides",
+    "paint::tests::underline_origin_offset_is_uniform_across_nested_font_sizes",
+    "paint::tests::webfont_primary_refs_fall_back_for_cjk",
+    "runner_preserves_task_errors_progress_and_termination_reason",
+    "runner_scores_100_in_both_drive_modes",
+    "server_root_serves_acid3_page",
+    "server_serves_fixtures_with_manifest_headers",
+    "string_append_length_keeps_retained_aliases",
+    "string_length_keeps_utf16_and_polymorphic_receiver_semantics",
+    "stylesheet_policy_is_shared_by_geometry_and_paint",
+    "tabs_share_local_storage_but_keep_session_storage_separate",
+    "worker_clone_and_child_realm_complete_through_the_page_event_loop"
+  ],
+  "browser_test_count": 193,
+  "font_filtered_tests": 174,
+  "missing_browser_ids_by_ci_head": {
+    "92125ac6": [],
+    "c3099977": [],
+    "0c3a33f6": [],
+    "196579e4": []
+  },
+  "artifacts": {
+    "before_files": [
+      "Cargo.lock",
+      "acid3/acid3.json",
+      "dependencies.json",
+      "font-tests.log",
+      "journeys/anonymized-browser-journey.inline-form-typed.actual.png",
+      "journeys/anonymized-browser-journey.page-after-back.actual.png",
+      "journeys/anonymized-browser-journey.page-after-input.actual.png",
+      "journeys/anonymized-browser-journey.page-after-submit.actual.png",
+      "journeys/anonymized-browser-journey.page-before-input.actual.png",
+      "journeys/anonymized-browser-journey.stylesheet-updates.actual.png",
+      "journeys/anonymized-font-selection.400-italic.actual.png",
+      "journeys/anonymized-font-selection.400-normal.actual.png",
+      "journeys/anonymized-font-selection.700-italic.actual.png",
+      "journeys/anonymized-font-selection.700-normal.actual.png",
+      "journeys/anonymized-underline-positions.nested.actual.png",
+      "journeys/anonymized-underline-positions.overline.actual.png",
+      "journeys/anonymized-underline-positions.overline.diff.png",
+      "journeys/anonymized-underline-positions.underline.actual.png",
+      "journeys/anonymized-underline-positions.underline.diff.png",
+      "journeys/fonts/form_submission_and_back_navigation_preserve_saved_state.json",
+      "journeys/fonts/http_page_input_fetch_and_dom_changes_reach_the_painted_frame.json",
+      "journeys/fonts/linked_stylesheets_share_cascade_geometry_and_paint_across_updates.json",
+      "journeys/fonts/normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates.json",
+      "journeys/fonts/stylesheet_policy_is_shared_by_geometry_and_paint.json",
+      "journeys/fonts/system-inventory.json",
+      "journeys/fonts/tabs_share_local_storage_but_keep_session_storage_separate.json",
+      "journeys/fonts/worker_clone_and_child_realm_complete_through_the_page_event_loop.json",
+      "journeys/form-history.json",
+      "journeys/inline-form.json",
+      "journeys/input-fetch-paint.json",
+      "journeys/stylesheet-policy.json",
+      "journeys/stylesheet-updates.json",
+      "journeys/tab-storage.json",
+      "journeys/worker-realm-event-loop.json",
+      "revision.txt",
+      "system-font-tests.log",
+      "tests.log",
+      "toolchain.txt"
+    ],
+    "after_main_files": [
+      "Cargo.lock",
+      "acid3/acid3.json",
+      "dependencies.json",
+      "journeys/anonymized-browser-journey.inline-form-typed.actual.png",
+      "journeys/anonymized-browser-journey.page-after-back.actual.png",
+      "journeys/anonymized-browser-journey.page-after-input.actual.png",
+      "journeys/anonymized-browser-journey.page-after-submit.actual.png",
+      "journeys/anonymized-browser-journey.page-before-input.actual.png",
+      "journeys/anonymized-browser-journey.stylesheet-updates.actual.png",
+      "journeys/anonymized-font-selection.400-italic.actual.png",
+      "journeys/anonymized-font-selection.400-normal.actual.png",
+      "journeys/anonymized-font-selection.700-italic.actual.png",
+      "journeys/anonymized-font-selection.700-normal.actual.png",
+      "journeys/anonymized-multicol-basic.actual.png",
+      "journeys/anonymized-text-decoration-thickness.fixed-unscaled.actual.png",
+      "journeys/anonymized-text-decoration-thickness.fixed.actual.png",
+      "journeys/anonymized-underline-positions.nested.actual.png",
+      "journeys/anonymized-underline-positions.overline.actual.png",
+      "journeys/anonymized-underline-positions.overline.diff.png",
+      "journeys/anonymized-underline-positions.underline.actual.png",
+      "journeys/anonymized-underline-positions.underline.diff.png",
+      "journeys/fonts/form_submission_and_back_navigation_preserve_saved_state.json",
+      "journeys/fonts/http_page_input_fetch_and_dom_changes_reach_the_painted_frame.json",
+      "journeys/fonts/linked_stylesheets_share_cascade_geometry_and_paint_across_updates.json",
+      "journeys/fonts/normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates.json",
+      "journeys/fonts/stylesheet_policy_is_shared_by_geometry_and_paint.json",
+      "journeys/fonts/system-inventory.json",
+      "journeys/fonts/tabs_share_local_storage_but_keep_session_storage_separate.json",
+      "journeys/fonts/worker_clone_and_child_realm_complete_through_the_page_event_loop.json",
+      "journeys/form-history.json",
+      "journeys/inline-form.json",
+      "journeys/input-fetch-paint.json",
+      "journeys/multicol-general-block-fragments.actual.png",
+      "journeys/stylesheet-policy.json",
+      "journeys/stylesheet-updates.json",
+      "journeys/tab-storage.json",
+      "journeys/worker-realm-event-loop.json",
+      "revision.txt",
+      "tests.log",
+      "toolchain.txt"
+    ],
+    "missing_files": [
+      "font-tests.log",
+      "system-font-tests.log"
+    ],
+    "additional_files": [
+      "journeys/anonymized-multicol-basic.actual.png",
+      "journeys/anonymized-text-decoration-thickness.fixed-unscaled.actual.png",
+      "journeys/anonymized-text-decoration-thickness.fixed.actual.png",
+      "journeys/multicol-general-block-fragments.actual.png"
+    ],
+    "font_inventory_equal": true,
+    "acid3_scores": {
+      "artifacts-before": {
+        "direct": 100,
+        "faithful": 100
+      },
+      "artifacts-after-main": {
+        "direct": 100,
+        "faithful": 100
+      }
+    }
+  }
+}
