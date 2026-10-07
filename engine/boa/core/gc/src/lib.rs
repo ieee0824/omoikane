@@ -952,7 +952,6 @@ impl Collector {
                 return false;
             }
 
-            node.header.minor_unmark();
             if node.header.promote_if_mature() {
                 remember_young_allocation(*pointer);
                 promoted_strongs.push(*pointer);
@@ -972,7 +971,6 @@ impl Collector {
                 return false;
             }
 
-            eph.header().minor_unmark();
             if eph.header().promote_if_mature() {
                 remember_ephemeron_allocation(*pointer);
                 promoted_ephemerons.push(*pointer);
@@ -981,6 +979,8 @@ impl Collector {
             true
         });
         gc.old_weaks.extend(promoted_ephemerons.iter().copied());
+
+        Self::clear_survivor_minor_marks(gc, &promoted_strongs, &promoted_ephemerons);
 
         // Remove stale remembered pointers before their allocations are freed.
         // Promoted strong children no longer need to be nursery roots. Promoted
@@ -1038,6 +1038,25 @@ impl Collector {
             finalize_elapsed,
             sweep_started.elapsed(),
         );
+    }
+
+    /// Keep this collection's reachability marks until all promotion tracing
+    /// has finished. Clearing a young value before an ephemeron is promoted
+    /// lets the promotion walk mark it again and makes the next minor skip its
+    /// newly written edges.
+    fn clear_survivor_minor_marks(
+        gc: &BoaGc,
+        promoted_strongs: &[GcErasedPointer],
+        promoted_ephemerons: &[EphemeronPointer],
+    ) {
+        for pointer in gc.youngs.iter().chain(promoted_strongs) {
+            // SAFETY: surviving and promoted allocations have not been swept.
+            unsafe { pointer.as_ref() }.header.minor_unmark();
+        }
+        for pointer in gc.young_weaks.iter().chain(promoted_ephemerons) {
+            // SAFETY: surviving and promoted ephemerons have not been swept.
+            unsafe { pointer.as_ref() }.header().minor_unmark();
+        }
     }
 
     /// Seeds and solves the minor strong/ephemeron fixed point.
@@ -1345,7 +1364,7 @@ impl Collector {
         // normal marked-node fast path, so retrace it shallowly and mark the
         // new edges directly. A dirty but unreachable parent is deliberately
         // ignored: remembered entries are hints, not major-collection roots.
-        let mut reachable_dirty_parents = Vec::new();
+        let mut dirty_parents_pending_sweep = Vec::new();
         REMEMBERED_OLD_PARENTS.with(|remembered| {
             let parents = mem::take(&mut *remembered.borrow_mut());
             for pointer in parents {
@@ -1353,17 +1372,18 @@ impl Collector {
                 // pointers are still valid. Only reachable parents are traced.
                 if unsafe { pointer.as_ref() }.is_marked() {
                     unsafe { tracer.trace_shallow_node(pointer) };
-                    reachable_dirty_parents.push(pointer);
                 }
+                dirty_parents_pending_sweep.push(pointer);
             }
         });
         // SAFETY: shallow tracing above emitted edges from live allocations.
         unsafe { tracer.trace_until_empty() };
-        // A major pass resets each cell's dirty bit while tracing it. Keep the
-        // reachable parent hint alive so the following minor pass can
-        // materialize any young edges that the major pass observed.
+        // Ephemeron resolution below can make an as-yet unmarked parent live.
+        // Keep every dirty hint until retain_major_remembered filters against
+        // the final reachability marks before sweep. These hints do not seed
+        // major tracing, but let the next minor retain newly written children.
         REMEMBERED_OLD_PARENTS.with(|remembered| {
-            remembered.borrow_mut().extend(reachable_dirty_parents);
+            remembered.borrow_mut().extend(dirty_parents_pending_sweep);
         });
 
         // Get the naive list of possibly dead nodes.
