@@ -1,5 +1,70 @@
 {
   "tests": [
+    { "path": "dom/interface-objects.html" },
+    { "path": "dom/ranges/StaticRange-constructor.html" },
+    { "path": "dom/collections/HTMLCollection-supported-property-names.html" },
+    { "path": "dom/collections/HTMLCollection-supported-property-indices.html" },
+    { "path": "dom/collections/HTMLCollection-own-props.html" },
+    { "path": "dom/collections/HTMLCollection-delete.html" },
+    { "path": "dom/collections/HTMLCollection-empty-name.html" },
+    { "path": "dom/collections/HTMLCollection-iterator.html" },
+    { "path": "dom/collections/HTMLCollection-as-prototype.html" },
+    { "path": "dom/collections/HTMLCollection-live-mutations.window.js" },
+    { "path": "dom/collections/domstringmap-supported-property-names.html" },
+    { "path": "css/geometry/DOMPoint-001.html" },
+    { "path": "css/geometry/DOMPoint-002.html" },
+    { "path": "css/geometry/DOMRect-001.html" },
+    { "path": "css/geometry/DOMRect-002.html" },
+    { "path": "css/geometry/DOMRectList.html" },
+    { "path": "css/geometry/DOMRect-nan.html" },
+    { "path": "css/geometry/DOMQuad-001.html" },
+    { "path": "css/geometry/DOMQuad-002.html" },
+    { "path": "css/geometry/DOMQuad-nan.html" },
+    { "path": "selection/shadow-dom/tentative/Selection-getComposedRanges.html" },
+    {
+      "path": "selection/shadow-dom/tentative/Selection-getComposedRanges-collapsed.html",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "Pinned tentative test expects getRangeAt() to expose ShadowRoot boundaries; current Selection API requires IndexSizeError outside the document tree. Composed root offsets are independently verified in tests/dom_interfaces.rs; see docs/dom/interfaces.md.",
+        "issue": "https://github.com/ieee0824/omoikane/issues/1285",
+        "expires": "2026-11-07",
+        "failed_subtests": [
+          "Setting the range to nodes in different shadow trees collapses ordinary ranges, but does not collapse composed ranges."
+        ]
+      }
+    },
+    { "path": "selection/shadow-dom/tentative/Selection-getComposedRanges-dom-mutations-removal.html?mode=open" },
+    { "path": "selection/shadow-dom/tentative/Selection-getComposedRanges-dom-mutations-removal.html?mode=closed" },
+    {
+      "path": "selection/shadow-dom/tentative/Selection-getComposedRanges-range-update.html",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "Pinned tentative subtests expect ordinary Range collapse to collapse the composed selection, or expect public shadow-tree anchors. Current Selection API hides non-document anchors and tests/dom_interfaces.rs independently verifies both composed edges, setter order, collapse and mutation; see docs/dom/interfaces.md.",
+        "issue": "https://github.com/ieee0824/omoikane/issues/1285",
+        "expires": "2026-11-07",
+        "failed_subtests": [
+          "modify getRangeAt() range: setEnd() crosses shadow boundary into the shadow DOM and after start, which collapses live range. Composed selection range is not collapsed.",
+          "modify getRangeAt() range: setStart() crosses shadow boundary into the shadow DOM and before end, which collapses live range. Composed selection range is not collapsed.",
+          "modify getRangeAt() range: setStart() crosses shadow boundary into the shadow DOM and after end, which collapses both live range and composed selection range.",
+          "modify getRangeAt() range: selectNode() innerHost for all ranges.",
+          "modify createRange() range: adding to selection sets the selection",
+          "modify createRange() range: added to selection before setStart/setEnd calls."
+        ]
+      }
+    },
+    {
+      "path": "selection/shadow-dom/tentative/Selection-getComposedRanges-slot.html",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "Pinned tentative subtests read a shadow-crossing legacy getRangeAt() range before composed assertions; current Selection API requires IndexSizeError. Slotted and unslotted composed boundary order and rescoping are independently verified in tests/dom_interfaces.rs; see docs/dom/interfaces.md.",
+        "issue": "https://github.com/ieee0824/omoikane/issues/1285",
+        "expires": "2026-11-07",
+        "failed_subtests": [
+          "Setting the range to start on slotted content and end in shadow tree, should follow DOM tree order.",
+          "Setting the range to start on unslotted content and end in shadow tree, should follow DOM tree order."
+        ]
+      }
+    },
     { "path": "css/css-text-decor/text-shadow/parsing/text-shadow-valid.html" },
     { "path": "css/css-text-decor/text-shadow/parsing/text-shadow-invalid.html" },
     { "path": "css/css-text-decor/text-shadow/parsing/text-shadow-computed.html" },

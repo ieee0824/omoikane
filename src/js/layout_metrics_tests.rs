@@ -185,7 +185,20 @@ fn layout_metrics_cache_shares_geometry_for_one_element_and_keeps_rects_independ
     assert_eq!(metric_calls(), 1);
     assert_eq!(number(&mut runtime, "other.offsetWidth"), 60.0);
     assert_eq!(metric_calls(), 2);
-    runtime.eval("target.getBoundingClientRect().width = -1; const rects = target.getClientRects(); rects[0].width = -1; rects.push({width:-1});").unwrap();
+    let independent = runtime
+        .eval(
+            r#"(() => {
+        target.getBoundingClientRect().width = -1;
+        const rects = target.getClientRects();
+        rects[0].width = -1;
+        if (!(rects instanceof DOMRectList) || typeof rects.push !== 'undefined') return false;
+        try { Array.prototype.push.call(rects, {width:-1}); return false; }
+        catch (error) { if (!(error instanceof TypeError)) return false; }
+        return rects.length === 1 && rects[0].width === -1;
+    })()"#,
+        )
+        .unwrap();
+    assert_eq!(independent.as_boolean(), Some(true));
     assert_eq!(
         number(&mut runtime, "target.getClientRects()[0].width"),
         100.0

@@ -238,7 +238,7 @@ const DOM_CONTENT_LOADED_SCRIPT: &str = concat!(
     "__omoikane_performance_navigation_event('domInteractive'); } catch (_) { void 0; } ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
     "__omoikane_performance_navigation_event('domContentLoadedStart'); } catch (_) { void 0; } ",
-    "document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true })); ",
+    "__omoikane_dispatch_lifecycle_event('DOMContentLoaded'); ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
     "__omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) { void 0; }",
 );
@@ -248,8 +248,7 @@ const LOAD_SCRIPT: &str = concat!(
     "__omoikane_performance_navigation_event('domComplete'); } catch (_) { void 0; } ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
     "__omoikane_performance_navigation_event('loadStart'); } catch (_) { void 0; } ",
-    "{ const event = new Event('load', { bubbles: false }); ",
-    "window.dispatchEvent(event); } ",
+    "__omoikane_dispatch_lifecycle_event('load'); ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
     "__omoikane_performance_navigation_event('loadEnd'); } catch (_) { void 0; }",
 );
@@ -452,6 +451,10 @@ impl<F: Future> Future for ActiveDocumentFuture<F> {
 }
 
 const DOM_BOOTSTRAP: &str = concat!(
+    include_str!("geometry_interfaces.js"),
+    "\n",
+    include_str!("dom_interfaces.js"),
+    "\n",
     include_str!("dom_bootstrap.js"),
     "\n",
     include_str!("xpath.js"),

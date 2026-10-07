@@ -83,6 +83,7 @@ impl Fixture {
             .current_dir(&self.root)
             .env("WPT_ROOT", wpt_root)
             .env_remove("WPT_REQUIRED")
+            .env_remove("WPT_MANIFEST")
             .env_remove("WPT_REPORT")
             .env_remove("WPT_JUNIT")
             .env_remove("WPT_RESULTS_DIR")

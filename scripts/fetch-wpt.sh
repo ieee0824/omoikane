@@ -251,6 +251,12 @@ collect_pattern \
   "/css/css-grid/parsing/grid-auto-columns-valid.html" \
   "/css/css-grid/parsing/grid-auto-columns-invalid.html" \
   "/css/css-grid/parsing/grid-auto-columns-computed.html"
+collect_pattern \
+  "/css/geometry/" \
+  "/dom/collections/" \
+  "/dom/ranges/StaticRange-constructor.html" \
+  "/dom/interface-objects.html" \
+  "/selection/shadow-dom/tentative/"
 # A pinned revision alone does not prove that newly requested WPT paths exist.
 if [[ "$current_revision" == "$revision" ]] &&
   diff -q <(printf '%s\n' "${patterns[@]}" | LC_ALL=C sort -u) \

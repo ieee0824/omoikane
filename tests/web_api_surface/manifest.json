@@ -950,6 +950,48 @@
       "setup": "globalThis.__shapeFloat = document.createElement('div'); __shapeFloat.style.cssText = 'float:left;width:100px;height:100px;shape-outside:padding-box circle(40% at 25% 50%);shape-margin:12.5%'; document.body.appendChild(__shapeFloat)",
       "probe": "(() => { const style = getComputedStyle(__shapeFloat); return CSS.supports('shape-outside', 'inset(10%) border-box') && CSS.supports('shape-outside', 'polygon(0 0,100% 0,0 100%)') && !CSS.supports('shape-outside', 'ellipse(20% 40%)') && !CSS.supports('shape-margin', '-1px') && style.shapeOutside === 'circle(40% at 25% 50%) padding-box' && style.shapeMargin === '12.5%'; })()",
       "baseline_supported": true
+    },
+    {
+      "id": "dom.live-html-collection",
+      "area": "dom",
+      "description": "DOM collection identity and mutation tracking",
+      "probe": "(() => { const host = document.createElement('div'); const list = host.children; const child = document.createElement('i'); host.append(child); return list instanceof HTMLCollection && list[0] === child && list.namedItem('') === null; })()",
+      "baseline_supported": true
+    },
+    {
+      "id": "geometry.rect-quad",
+      "area": "geometry",
+      "description": "Geometry instances, dimensions and stable mutable quad points",
+      "probe": "(() => { const rect = new DOMRect(4, 5, -2, -3); const quad = DOMQuad.fromRect(rect); return rect instanceof DOMRectReadOnly && rect.left === 2 && quad.p1 instanceof DOMPoint && quad.p1 === quad.p1 && quad.getBounds().width === 2 && rect.toJSON().height === -3; })()",
+      "baseline_supported": true
+    },
+    {
+      "id": "dom.static-range",
+      "area": "dom",
+      "description": "StaticRange and AbstractRange inheritance",
+      "probe": "(() => { const range = new StaticRange({ startContainer: document, startOffset:0, endContainer:document, endOffset:0 }); return range instanceof AbstractRange && range.collapsed && document.createRange() instanceof AbstractRange && Array.isArray(document.getSelection().getComposedRanges()); })()",
+      "baseline_supported": true
+    },
+    {
+      "id": "dom.platform-interfaces",
+      "area": "dom",
+      "description": "DOMImplementation and DOMStringMap instances",
+      "probe": "document.implementation instanceof DOMImplementation && document.body.dataset instanceof DOMStringMap && document.body.dataset === document.body.dataset",
+      "baseline_supported": true
+    },
+    {
+      "id": "canvas.text-metrics",
+      "area": "canvas",
+      "description": "Canvas returns a TextMetrics platform object",
+      "probe": "document.createElement('canvas').getContext('2d').measureText('abc') instanceof TextMetrics",
+      "baseline_supported": true
+    },
+    {
+      "id": "dom.composed-selection-boundaries",
+      "area": "dom",
+      "description": "Selection hides shadow boundaries and returns authorized StaticRanges",
+      "probe": "(() => { const host=document.createElement('div');document.body.append(host);const root=host.attachShadow({mode:'closed'});root.textContent='text';const selection=getSelection();try {selection.collapse(root.firstChild,1);const hidden=selection.anchorNode===null&&selection.focusNode===null&&selection.rangeCount===0;let rejected=false;try{selection.getRangeAt(0)}catch(error){rejected=error.name==='IndexSizeError'}const range=selection.getComposedRanges({shadowRoots:[root]})[0];return hidden&&rejected&&range instanceof StaticRange&&range.startContainer===root.firstChild&&range.startOffset===1;}finally{selection.removeAllRanges();host.remove();}})()",
+      "baseline_supported": true
     }
   ]
 }
