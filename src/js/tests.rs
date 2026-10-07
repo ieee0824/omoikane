@@ -14785,6 +14785,13 @@ fn visit_fixture_request_processing_does_not_consume_the_next_accept_timeout() {
     first
         .write_all(b"GET /first HTTP/1.1\r\nHost: localhost\r\n")
         .unwrap();
+    // Queue the second connection before delaying the first request so that
+    // client scheduling cannot consume its independent accept budget.
+    let mut second = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    second.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+    second
+        .write_all(b"GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
     // Keep the first request in progress beyond the old shared deadline.
     std::thread::sleep(timeout * 2);
     first.write_all(b"\r\n").unwrap();
@@ -14792,14 +14799,10 @@ fn visit_fixture_request_processing_does_not_consume_the_next_accept_timeout() {
     first.read_to_string(&mut response).unwrap();
     assert!(response.ends_with("first"));
 
-    let mut second = TcpStream::connect(("127.0.0.1", port))
-        .expect("visit fixture must still accept the second request after processing the first");
-    second.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
-    second
-        .write_all(b"GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .unwrap();
     response.clear();
-    second.read_to_string(&mut response).unwrap();
+    second
+        .read_to_string(&mut response)
+        .expect("visit fixture must serve the queued second request after processing the first");
     assert!(response.ends_with("<html><body>second</body></html>"));
     assert_eq!(
         server.join(),
