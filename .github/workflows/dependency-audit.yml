@@ -1,0 +1,36 @@
+name: Dependency audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "31 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - name: Validate exception reasons and review dates
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_advisory_exceptions.py
+          python3 scripts/check-advisory-exceptions.py
+      - name: Fetch advisory database
+        run: cargo deny fetch db
+      - name: Audit root lockfile
+        run: cargo deny --all-features --locked check advisories
+      - name: Audit Boa workspace lockfile
+        if: success() || failure()
+        run: cargo deny --manifest-path engine/boa/Cargo.toml --all-features --locked check advisories
