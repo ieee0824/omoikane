@@ -6,11 +6,17 @@ Issue [#905](https://github.com/ieee0824/omoikane/issues/905) の再測定手順
 
 ## 測定対象
 
-2026-10-07時点の最新安定版は CodeQL CLI 2.27.1。
+以下の基準測定には CodeQL CLI 2.27.1を使用した。
 [2.27.1の変更履歴](https://codeql.github.com/docs/codeql-overview/codeql-changelog/codeql-cli-2.27.1/)
 では Rust extractor 内の rust-analyzer が0.0.347へ更新されている。
 このリポジトリの [CodeQL workflow](../../.github/workflows/codeql.yml) は
 `github/codeql-action` v4、`build-mode: none` を使用する。
+
+2026-10-07公開のCLI 2.27.2への更新では、workflowの`tools`を
+[公式2.27.2 Linux bundle](https://github.com/github/codeql-action/releases/tag/codeql-bundle-v2.27.2)
+のURLに固定する。再測定用query packも公開版`codeql/rust-all` 0.2.23に更新し、
+推移依存の版を[lockfile](queries/codeql-pack.lock.yml)に保存する。
+2.27.1の測定記録は比較基準として保持し、2.27.2で生成されたDBの結果とは区別する。
 
 CLIの版だけでなく、完了したmain run、commit SHA、DBの
 `creationMetadata.sha` / `cliVersion` / `buildMode` を照合する。
