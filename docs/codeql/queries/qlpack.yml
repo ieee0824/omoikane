@@ -1,0 +1,5 @@
+name: omoikane/rust-coverage
+version: 0.0.1
+library: false
+dependencies:
+  codeql/rust-all: 0.2.22

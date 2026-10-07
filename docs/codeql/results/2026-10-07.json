@@ -1,0 +1,73 @@
+{
+  "checked_at": "2026-10-07",
+  "run_url": "https://github.com/ieee0824/omoikane/actions/runs/37577730452",
+  "rust_job_url": "https://github.com/ieee0824/omoikane/actions/runs/37577730452/job/112650326399",
+  "commit": "3462ece60d33e894abb0e01587ae43fc2a4af643",
+  "workflow_conclusion": "success",
+  "cli_version": "2.27.1",
+  "rust_library": "codeql/rust-all@0.2.22",
+  "rust_queries": "codeql/rust-queries@0.1.43",
+  "build_mode": "none",
+  "database_zip_bytes": 350247734,
+  "database_zip_sha256": "eed3a32cb9263bd021f405c0a27fa5ec25d47133997dc79bc1b3ca9c8492f9f5",
+  "job_log_metrics": {
+    "scanned": 1025,
+    "total_scannable": 1025,
+    "extracted_without_error": 1019,
+    "extracted_with_errors": 7
+  },
+  "diagnostics": {
+    "warning": 18,
+    "information": 5,
+    "error": 0,
+    "warning_files": 7,
+    "macro_expansion_warnings": 15
+  },
+  "macro_result_scope": "Six explicitly tracked Rust files; distinct CSV result rows, not whole-project macro coverage",
+  "macro_validation": {
+    "macro_result_rows": 593,
+    "expanded_rows": 578,
+    "unexpanded_rows": 15,
+    "macro_warning_locations_match_unexpanded_AST": 15,
+    "identical_previous_macro_result": true,
+    "source_archive_matches_all_6_tracked_Rust_files": true,
+    "severities": {
+      "30": 18,
+      "20": 5
+    }
+  },
+  "previous_main": {
+    "commit": "6316d61a1bce3973c407950d1ac8ad9e7fb545d7",
+    "run_url": "https://github.com/ieee0824/omoikane/actions/runs/37570105469",
+    "same_diagnostics_ignoring_order": true,
+    "same_macro_rows_ignoring_order": true
+  },
+  "warning_file_counts": {
+    "engine/boa/core/engine/src/jit/arithmetic.rs": 8,
+    "engine/boa/core/engine/src/jit/mod.rs": 1,
+    "engine/boa/core/engine/src/jit/runtime_call.rs": 1,
+    "engine/boa/core/engine/src/module/loader/mod.rs": 2,
+    "engine/boa/tests/macros/tests/embedded.rs": 4,
+    "engine/boa/tests/src/lib.rs": 1,
+    "tests/jit_code_memory.rs": 1
+  },
+  "source_and_query_sha256": {
+    "docs/codeql/queries/RawDiagnostics.ql": "f22360b7c66a15fa583fed4ef2118eb368b5fc13b9d301ab46aeddbc555130ce",
+    "docs/codeql/queries/MacroCoverage.ql": "1be351c1c5c602b7849ab7ef25cd1e83f9af756914288ad4d64b4d3920025dca",
+    "docs/codeql/queries/qlpack.yml": "030a66c1a4e7a05734b5500cbf677cd097fd89f4e684b70bd8b6586f501f0a29",
+    "docs/codeql/queries/codeql-pack.lock.yml": "de3115fac212bf399c701e839a1131c9a262e85c21f37e2242ce9bbd4da92b6f",
+    "engine/boa/core/engine/src/jit/arithmetic.rs": "5d4424ccf2c922c7a5608bf71bb5bea4a0b22de4e2bac7f10740d5ad065a04a7",
+    "engine/boa/core/engine/src/jit/mod.rs": "0161e9aed0908e145d5dc1bab0c3aa8069006a85acfffb5b662fd2a632e5744b",
+    "engine/boa/core/engine/src/jit/runtime_call.rs": "d8d6878d70bde2f8152efd532a16e73acb31b5491f2314741c485884689ff526",
+    "engine/boa/core/engine/src/module/loader/mod.rs": "747de8fc6f7a6c6d8bd0a703be07a5224e751e06a5ca1ba776cc20cbadaaa92b",
+    "engine/boa/tests/macros/tests/embedded.rs": "3d31256ae4286fa9a059becaad7f0a405970f1d26eed27db7b42d36b3160a14d",
+    "tests/jit_code_memory.rs": "5b2ff18af6bb18381628f8e942d3e16ed4d491e21cbc70b0bdc404bae4f6e9f6",
+    "engine/boa/Cargo.toml": "b57d20fa3feed63bd194b9a6d087ac5b8e5ab1864dcfc52617810b04a01387db"
+  },
+  "raw_output_sha256": {
+    "current-main-diagnostics.csv": "57a9b4773ba183e475dd50db97af3bb17d43d20f64bd9e8c9fb87d551841fd04",
+    "current-main-macros.csv": "2e7a25a3ea8065e6ee0af0e9a3207f3ed83164b2111d291ecbbd7522f5f90c4a",
+    "current-main-rust-job.log": "29e67226f16988afcdba3f2e485320c19924171307ae6b1965f7f2de5051ad98"
+  },
+  "scope_note": "Warnings remain. Partial outer expansion does not prove inner expressions or types are analyzed. No Rust source or workflow was changed."
+}
