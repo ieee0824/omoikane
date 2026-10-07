@@ -351,6 +351,46 @@ fn promoted_ephemeron_value_installs_old_graph_barriers() {
 }
 
 #[test]
+fn ephemeron_promotion_leaves_young_value_unmarked_between_collections() {
+    run_test(|| {
+        let key = Rooted::new(0_u32);
+        force_minor_collect();
+        force_minor_collect();
+
+        let edge = crate::EphemeronEdge::new(
+            &key.clone().into_edge(),
+            GcRefCell::new(None::<GcEdge<OldHolder>>),
+        );
+        let _root = Ephemeron::from_edge(edge.clone());
+        force_minor_collect();
+
+        let holder = GcEdge::new(OldHolder {
+            child: GcRefCell::new(None),
+        });
+        // SAFETY: the registered ephemeron root keeps its immutable value
+        // storage alive, and no collection runs while the cell is borrowed.
+        *unsafe { edge.inner().value() }.unwrap().borrow_mut() = Some(holder.clone());
+        force_minor_collect();
+
+        assert!(!edge_is_old(&holder));
+        // SAFETY: the live key and registered ephemeron retain this value.
+        assert!(
+            !unsafe { holder.as_gc().inner_ptr.as_ref() }
+                .header
+                .is_minor_marked(),
+            "promotion tracing must not leave a mark for the next collection"
+        );
+
+        *holder.child.borrow_mut() = Some(GcEdge::new(42));
+        force_minor_collect();
+        assert_eq!(
+            holder.child.borrow().as_ref().map(|value| **value),
+            Some(42)
+        );
+    });
+}
+
+#[test]
 fn retargeting_an_old_weak_edge_reuses_its_ephemeron() {
     run_test(|| {
         let first = Rooted::new(1_u32);
@@ -408,5 +448,63 @@ fn minor_collection_keeps_live_weak_maps_and_clears_dead_keys() {
         drop(key);
         force_minor_collect();
         assert_eq!(map.inner.borrow().len(), 0);
+    });
+}
+
+#[test]
+fn major_collection_preserves_dirty_parent_reached_through_ephemeron() {
+    run_test(|| {
+        let key = Rooted::new(0_u32);
+        let parent = Rooted::new(OldHolder {
+            child: GcRefCell::new(None),
+        });
+        force_minor_collect();
+        force_minor_collect();
+        assert!(is_old(&parent));
+
+        *parent.child.borrow_mut() = Some(GcEdge::new(42_u32));
+        let ephemeron = Ephemeron::new(&key, parent.into_edge());
+        force_collect();
+        force_minor_collect();
+
+        // Check allocation membership before dereferencing a potentially swept
+        // child, so a regression reports a failure instead of invoking UB.
+        let parent = ephemeron.value().expect("live key retains the parent");
+        let child = parent.child.borrow();
+        let pointer = child
+            .as_ref()
+            .expect("parent retains its child")
+            .as_gc()
+            .inner_ptr
+            .cast();
+        crate::BOA_GC.with(|gc| {
+            let gc = gc.borrow();
+            assert!(
+                gc.youngs.contains(&pointer) || gc.old_strongs.contains(&pointer),
+                "ephemeron-reachable old parent must retain its young child"
+            );
+        });
+        assert_eq!(child.as_ref().map(|value| **value), Some(42));
+    });
+}
+
+#[test]
+fn dirty_ephemeron_parent_is_reclaimed_when_its_key_dies() {
+    run_test(|| {
+        let key = Rooted::new(0_u32);
+        let parent = Rooted::new(OldHolder {
+            child: GcRefCell::new(None),
+        });
+        force_minor_collect();
+        force_minor_collect();
+        *parent.child.borrow_mut() = Some(GcEdge::new(42_u32));
+        let ephemeron = Ephemeron::new(&key, parent.into_edge());
+        drop(key);
+
+        force_collect();
+        assert!(!ephemeron.has_value());
+        Harness::assert_strong_allocations(0);
+        force_minor_collect();
+        Harness::assert_strong_allocations(0);
     });
 }
