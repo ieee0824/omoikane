@@ -5497,9 +5497,11 @@ fn explicit_grid_placement_creates_implicit_columns_and_rows() {
     )
     .unwrap();
     let rect = layout.children[0].children[0].dimensions.content;
+    // Firefox: normal alignment stretches the two implicit auto columns to
+    // consume the remaining width; their spanned area includes the inner gap.
     assert_eq!(
         (rect.x, rect.y, rect.width, rect.height),
-        (105.0, 25.0, 5.0, 5.0)
+        (105.0, 25.0, 95.0, 5.0)
     );
 }
 

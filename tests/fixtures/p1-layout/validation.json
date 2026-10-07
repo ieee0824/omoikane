@@ -1,0 +1,320 @@
+{
+  "date": "2026-10-07",
+  "wpt_revision": "dc97e7bed3096ac9e0e591ab5fa22e7fb8844ead",
+  "wpt_total_cases": 13,
+  "wpt_total_subtests": 168,
+  "wpt_cases": [
+    {
+      "path": "css/css-flexbox/parsing/order-valid.html",
+      "status": "PASS",
+      "passed_subtests": 3
+    },
+    {
+      "path": "css/css-flexbox/parsing/order-invalid.html",
+      "status": "PASS",
+      "passed_subtests": 3
+    },
+    {
+      "path": "css/css-flexbox/parsing/order-computed.html",
+      "status": "PASS",
+      "passed_subtests": 3
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-flow-valid.html",
+      "status": "PASS",
+      "passed_subtests": 7
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-flow-invalid.html",
+      "status": "PASS",
+      "passed_subtests": 3
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-flow-computed.html",
+      "status": "PASS",
+      "passed_subtests": 7
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-rows-valid.html",
+      "status": "PASS",
+      "passed_subtests": 30
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-rows-invalid.html",
+      "status": "PASS",
+      "passed_subtests": 15
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-rows-computed.html",
+      "status": "PASS",
+      "passed_subtests": 25
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-columns-valid.html",
+      "status": "PASS",
+      "passed_subtests": 30
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-columns-invalid.html",
+      "status": "PASS",
+      "passed_subtests": 16
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-columns-computed.html",
+      "status": "PASS",
+      "passed_subtests": 25
+    },
+    {
+      "path": "css/css-flexbox/hittest-overlapping-order.html",
+      "status": "PASS",
+      "passed_subtests": 1
+    }
+  ],
+  "upstream_sources": [
+    {
+      "path": "css/css-flexbox/parsing/order-valid.html",
+      "sha256": "7eb000f1a7309d0e17f311793027e704c50f43d18183e752cac03cf049dd03bf",
+      "git_blob": "fa101d7ee8d532e8de516ff9ab0f1147aefaf328"
+    },
+    {
+      "path": "css/css-flexbox/parsing/order-invalid.html",
+      "sha256": "8cf56a42e92e06ec3b894319a9b02eb29d51fb1960089d9914f24cebf138b0f1",
+      "git_blob": "7a60396b681a5fa56c541439ea7882ff8a81e39a"
+    },
+    {
+      "path": "css/css-flexbox/parsing/order-computed.html",
+      "sha256": "0b24256b4f4e54da712c614e6f43889152888fcd235c5792969d070d73a36c3f",
+      "git_blob": "95719961999aa98192eb00e266af5c021df11d81"
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-flow-valid.html",
+      "sha256": "d5d971813c316feae988704d7a91c903ff680429101363bc8f4fd81ece88a5e6",
+      "git_blob": "7db8b189a28e5bbd06fd11fbb856f0a727269933"
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-flow-invalid.html",
+      "sha256": "63c7bc5fc0e0f48b21f6c9aead14a340301ae8f736b554dfab74804df523c709",
+      "git_blob": "a261e8eba11fd295eb33c9288a7e30f589374331"
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-flow-computed.html",
+      "sha256": "d409735171c5e81b6632b4a2549aabd4890ced0cd2fd8daf4ad1efe5f169f815",
+      "git_blob": "330956c493c865b0f1b261a070f2738ddfb694a0"
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-rows-valid.html",
+      "sha256": "90332be518afa379a8c10e8ecf88374a242a92d9edb1d91330f224f64c95e76c",
+      "git_blob": "d4dcdb12b177cf97c3aa030cbb19c2ce2ae6d25d"
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-rows-invalid.html",
+      "sha256": "8c0b5898112380bf04a872bd126c3f9b82753202764b6b37e78cae786380f7fd",
+      "git_blob": "3c30fd5990371e1c6d970b209a6cb57bbfca8158"
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-rows-computed.html",
+      "sha256": "829ec742279fbdb957526f262f6cb842975f6bf82b921ff2ba53b8123478032a",
+      "git_blob": "761c5d785d2732f869dc07c7f40bb469bc16ebba"
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-columns-valid.html",
+      "sha256": "0c067df2b06345253e56f6abb9d89163b9c48a518a9e8dfded569e30a79153d1",
+      "git_blob": "e26d085a2d95c2ad06a77b25ca2ab0b90c294fc6"
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-columns-invalid.html",
+      "sha256": "b748f521726141bc72f4188843a3609aab8a9c60fc1810a8b7335faec1ebfec5",
+      "git_blob": "338ee2cee2c1a7ec73ac76567b42eb88aca362b6"
+    },
+    {
+      "path": "css/css-grid/parsing/grid-auto-columns-computed.html",
+      "sha256": "9537078807c1216467088bd8338a9fcc9544e49fcd77dd232e59f08b7d785219",
+      "git_blob": "ac8a9fb4ef0c1647979fbbc3d1b24c23905b9644"
+    },
+    {
+      "path": "css/css-flexbox/hittest-overlapping-order.html",
+      "sha256": "50d22f85aadf348fed7b1c4b4212e5d3887a41d78f351a760bdcc9661e690292",
+      "git_blob": "f52a37c181cf8bd7b16f8ca962fcfef96f216d79"
+    },
+    {
+      "path": "resources/testharness.js",
+      "sha256": "d2399236c2a09c429804ff2299ad6629e17e2b53f17a74dd341e936adb11ae3e",
+      "git_blob": "c7ce4f51e1db075809f861255417c27478b2c179"
+    },
+    {
+      "path": "resources/testharnessreport.js",
+      "sha256": "3777176fc736b0a78cf7617b9613b220f635daae7536ec7ebb99c61dbb525aae",
+      "git_blob": "405a2d8b06f00fe8292e0e9d5b917e193cfd416c"
+    },
+    {
+      "path": "css/support/parsing-testcommon.js",
+      "sha256": "75df9e3143fae40a060e7a1439d13454e822477c18a5390b268ef381c80adfc6",
+      "git_blob": "93fd0090770b548c5116b59b037114616f541b14"
+    },
+    {
+      "path": "css/support/computed-testcommon.js",
+      "sha256": "20bd767e8a8bd9e4857a29aecfd52cad305ed4af1cf73a5064916a8a1d38ab01",
+      "git_blob": "8e746258061009f29f6ccdde164241729cf065b0"
+    }
+  ],
+  "firefox": {
+    "version": "157.0.1",
+    "geckodriver_version": "0.37.1",
+    "geometry": {
+      "flow": "dense",
+      "hit": "flex-a",
+      "order": [
+        "flex-a",
+        "flex-b"
+      ],
+      "rectangles": {
+        "columns-a": [
+          0,
+          0,
+          30,
+          20
+        ],
+        "columns-b": [
+          0,
+          20,
+          30,
+          20
+        ],
+        "columns-c": [
+          30,
+          0,
+          40,
+          20
+        ],
+        "dense-c": [
+          40,
+          0,
+          20,
+          20
+        ],
+        "flex-a": [
+          0,
+          0,
+          20,
+          20
+        ],
+        "flex-b": [
+          0,
+          0,
+          20,
+          20
+        ],
+        "negative-a": [
+          0,
+          0,
+          30,
+          20
+        ],
+        "negative-b": [
+          30,
+          0,
+          40,
+          20
+        ],
+        "negative-c": [
+          70,
+          0,
+          10,
+          20
+        ],
+        "rows-a": [
+          0,
+          0,
+          20,
+          20
+        ],
+        "rows-b": [
+          0,
+          20,
+          20,
+          30
+        ],
+        "rows-c": [
+          0,
+          50,
+          20,
+          20
+        ],
+        "sparse-c": [
+          40,
+          20,
+          20,
+          20
+        ]
+      }
+    },
+    "geometry_matches": true,
+    "dimensions": [
+      300,
+      320
+    ],
+    "changed_pixels": 0,
+    "max_channel_delta": 0,
+    "fixture_sha256": "4d41115b89092f724713856b1e0462a7c66c0838443ae5d1dfaf762dd5946496"
+  },
+  "implicit_auto_stretch_reference": {
+    "firefox_rect": [
+      105,
+      25,
+      95,
+      5
+    ],
+    "css": "display:grid;width:200px;grid-template-columns:100px;grid-template-rows:20px;gap:5px",
+    "item_css": "grid-column:2 / 4;grid-row:2 / 4;height:100%",
+    "evidence": ".artifacts/p1/firefox-implicit-check/report.json"
+  },
+  "intrinsic_track_reference": {
+    "firefox_version": "157.0.1",
+    "container_css": "display:grid;width:200px;grid-auto-flow:column;justify-content:start;grid-auto-rows:20px",
+    "item_css": "font-size:0",
+    "content": "two inline-block spans, each width:30px;height:10px, separated by a space",
+    "cases": [
+      {
+        "grid_auto_columns": "min-content",
+        "width": 30
+      },
+      {
+        "grid_auto_columns": "max-content",
+        "width": 60
+      },
+      {
+        "grid_auto_columns": "fit-content(40px)",
+        "width": 40
+      },
+      {
+        "grid_auto_columns": "fit-content(20px)",
+        "width": 30
+      },
+      {
+        "grid_auto_columns": "fit-content(25%)",
+        "width": 50
+      }
+    ]
+  },
+  "placement_phase_reference": {
+    "container_css": "display:grid;width:100px;grid-template-columns:20px 20px 20px;grid-auto-columns:20px;grid-auto-rows:20px",
+    "fixed_item_css": "grid-column:3;grid-row:1",
+    "automatic_item_css": "grid-row:1",
+    "firefox_rect": [
+      0,
+      0,
+      20,
+      20
+    ]
+  },
+  "local_validation": {
+    "cargo_test_locked": {
+      "passed": 3452,
+      "failed": 0,
+      "ignored": 15
+    },
+    "cargo_build_locked": "PASS",
+    "p1_layout_tests": 15,
+    "wpt_report": ".artifacts/p1/wpt-report6.json"
+  }
+}

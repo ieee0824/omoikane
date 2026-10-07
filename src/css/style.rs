@@ -1,6 +1,7 @@
 //! CSS cascade and computed style resolution.
 
 mod animation;
+pub(crate) mod grid_properties;
 mod page;
 mod property_id;
 pub(crate) mod text_shadow;
@@ -3908,6 +3909,9 @@ fn validate_multicol_declaration(name: &str, value: &Value) -> Option<Declaratio
 /// property, match its name and return [`DeclarationValidation::Valid`] /
 /// [`DeclarationValidation::Invalid`].
 fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
+    if let Some(validation) = grid_properties::validate(name, value) {
+        return validation;
+    }
     // Color shorthands are expanded before entering the cascade. Validate all
     // resulting longhands here, after var() substitution and before selecting
     // a winner, so one malformed color cannot hide an earlier valid candidate.
@@ -7943,6 +7947,11 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
     if property_name.eq_ignore_ascii_case("grid-template-areas") {
         return ComputedValue::Keyword(render_grid_template_areas(value));
     }
+    if property_name.eq_ignore_ascii_case("grid-auto-columns")
+        || property_name.eq_ignore_ascii_case("grid-auto-rows")
+    {
+        return ComputedValue::Keyword(grid_properties::compute(value, ctx));
+    }
     if property_name.eq_ignore_ascii_case("grid-template-columns")
         || property_name.eq_ignore_ascii_case("grid-template-rows")
     {
@@ -10031,6 +10040,10 @@ impl InitialValue {
 /// depends on another property's resolved value or on the number of layers
 /// in a shorthand — those stay as explicit code in `apply_initial_values`.
 const INITIAL_VALUES: &[(&str, InitialValue)] = &[
+    ("order", InitialValue::Number(0.0)),
+    ("grid-auto-flow", InitialValue::Keyword("row")),
+    ("grid-auto-columns", InitialValue::Keyword("auto")),
+    ("grid-auto-rows", InitialValue::Keyword("auto")),
     ("counter-reset", InitialValue::Keyword("none")),
     ("counter-increment", InitialValue::Keyword("none")),
     ("shape-outside", InitialValue::Keyword("none")),

@@ -68,6 +68,7 @@ pub(super) fn append(
     };
     items.push(FlexItemSpec {
         node: nodes[0].clone(),
+        order: 0,
         text_nodes: nodes,
         base_main_size: if direction == FlexDirection::Row {
             maximum

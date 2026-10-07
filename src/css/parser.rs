@@ -1286,6 +1286,10 @@ impl Parser {
                     | "counter-reset"
                     | "counter-increment"
                     | "text-shadow"
+                    | "order"
+                    | "grid-auto-flow"
+                    | "grid-auto-rows"
+                    | "grid-auto-columns"
             )
             || contains_var && matches!(name.as_str(), "font" | "transition"))
             && has_top_level_comma(&value_tokens)

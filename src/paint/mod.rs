@@ -2727,9 +2727,10 @@ fn partition_children_for_hit_test<'a>(
     let mut inline = Vec::new();
     let mut auto_positioned = Vec::new();
     let mut positive = Vec::new();
+    let item_container = is_flex_or_grid_container(&paint_box_style(layout, resolver));
     for child in &layout.children {
         let child_style = paint_box_style(child, resolver);
-        if is_positioned_for_paint(&child_style) {
+        if is_positioned_child_for_paint(child, &child_style, item_container) {
             if child.z_index < 0 {
                 negative.push(child);
             } else if child.z_index > 0 {
@@ -2737,9 +2738,9 @@ fn partition_children_for_hit_test<'a>(
             } else {
                 auto_positioned.push(child);
             }
-        } else if is_float_for_paint(&child_style) {
+        } else if !item_container && is_float_for_paint(&child_style) {
             floats.push(child);
-        } else if child.lines.is_empty() {
+        } else if !item_container && child.lines.is_empty() {
             normal.push(child);
         } else {
             inline.push(child);
@@ -4256,62 +4257,14 @@ fn paint_box_internal_to(
 
     paint_column_rules(canvas, layout, style, clip, offset);
 
-    let mut negative_positioned_children = Vec::new();
-    let mut normal_block_children = Vec::new();
-    let mut float_children = Vec::new();
-    let mut inline_children = Vec::new();
-    let mut auto_positioned_children = Vec::new();
-    let mut positive_positioned_children = Vec::new();
-    for child in &layout.children {
-        if layout.lines.iter().any(|line| {
-            line.fragments.iter().any(|fragment| {
-                matches!(fragment.content, InlineFragmentContent::AtomicInline(_))
-                    && fragment.node == child.node
-            })
-        }) {
-            continue;
-        }
-        let child_style = paint_box_style(child, resolver);
-        if is_positioned_for_paint(&child_style) {
-            if include_phase_descendants {
-                if child.z_index < 0 {
-                    negative_positioned_children.push(child);
-                } else if child.z_index > 0 {
-                    positive_positioned_children.push(child);
-                } else {
-                    auto_positioned_children.push(child);
-                }
-            }
-            continue;
-        }
-
-        if is_float_for_paint(&child_style) {
-            if include_phase_descendants {
-                float_children.push(child);
-            }
-            continue;
-        }
-
-        if include_phase_descendants {
-            collect_phase_descendants(
-                child,
-                resolver,
-                &mut float_children,
-                &mut negative_positioned_children,
-                &mut auto_positioned_children,
-                &mut positive_positioned_children,
-            );
-        }
-
-        if child.lines.is_empty() {
-            normal_block_children.push(child);
-        } else {
-            inline_children.push(child);
-        }
-    }
-
-    negative_positioned_children.sort_by_key(|child| child.z_index);
-    positive_positioned_children.sort_by_key(|child| child.z_index);
+    let (
+        negative_positioned_children,
+        normal_block_children,
+        float_children,
+        inline_children,
+        auto_positioned_children,
+        positive_positioned_children,
+    ) = partition_children_for_paint(layout, resolver, include_phase_descendants);
 
     let phase_options = PaintBoxOptions {
         inherited_clip: clip,
@@ -4343,6 +4296,89 @@ fn paint_box_internal_to(
     for child in positive_positioned_children {
         paint_box_internal(canvas, child, resolver, context, phase_options);
     }
+}
+
+/// Uses the same child categories as hit-testing. Atomic inline boxes are
+/// painted by their line fragments; ordinary flow boxes contribute descendants
+/// to the surrounding positioned/float phases.
+fn partition_children_for_paint<'a>(
+    layout: &'a LayoutBox,
+    resolver: &mut StyleResolver,
+    include_phase_descendants: bool,
+) -> (
+    Vec<&'a LayoutBox>,
+    Vec<&'a LayoutBox>,
+    Vec<&'a LayoutBox>,
+    Vec<&'a LayoutBox>,
+    Vec<&'a LayoutBox>,
+    Vec<&'a LayoutBox>,
+) {
+    let mut negative_positioned_children = Vec::new();
+    let mut normal_block_children = Vec::new();
+    let mut float_children = Vec::new();
+    let mut inline_children = Vec::new();
+    let mut auto_positioned_children = Vec::new();
+    let mut positive_positioned_children = Vec::new();
+    let item_container = is_flex_or_grid_container(&paint_box_style(layout, resolver));
+    for child in &layout.children {
+        if layout.lines.iter().any(|line| {
+            line.fragments.iter().any(|fragment| {
+                matches!(fragment.content, InlineFragmentContent::AtomicInline(_))
+                    && fragment.node == child.node
+            })
+        }) {
+            continue;
+        }
+        let child_style = paint_box_style(child, resolver);
+        if is_positioned_child_for_paint(child, &child_style, item_container) {
+            if include_phase_descendants {
+                if child.z_index < 0 {
+                    negative_positioned_children.push(child);
+                } else if child.z_index > 0 {
+                    positive_positioned_children.push(child);
+                } else {
+                    auto_positioned_children.push(child);
+                }
+            }
+            continue;
+        }
+
+        if !item_container && is_float_for_paint(&child_style) {
+            if include_phase_descendants {
+                float_children.push(child);
+            }
+            continue;
+        }
+
+        if include_phase_descendants {
+            collect_phase_descendants(
+                child,
+                resolver,
+                &mut float_children,
+                &mut negative_positioned_children,
+                &mut auto_positioned_children,
+                &mut positive_positioned_children,
+            );
+        }
+
+        if !item_container && child.lines.is_empty() {
+            normal_block_children.push(child);
+        } else {
+            inline_children.push(child);
+        }
+    }
+
+    negative_positioned_children.sort_by_key(|child| child.z_index);
+    positive_positioned_children.sort_by_key(|child| child.z_index);
+
+    (
+        negative_positioned_children,
+        normal_block_children,
+        float_children,
+        inline_children,
+        auto_positioned_children,
+        positive_positioned_children,
+    )
 }
 
 fn paint_column_rules(
@@ -4483,9 +4519,10 @@ fn collect_phase_descendants<'a>(
     if !layout.transform.is_identity() {
         return;
     }
+    let item_container = is_flex_or_grid_container(&paint_box_style(layout, resolver));
     for child in &layout.children {
         let child_style = paint_box_style(child, resolver);
-        if is_positioned_for_paint(&child_style) {
+        if is_positioned_child_for_paint(child, &child_style, item_container) {
             if child.z_index < 0 {
                 negative_positioned_children.push(child);
             } else if child.z_index > 0 {
@@ -4496,7 +4533,7 @@ fn collect_phase_descendants<'a>(
             continue;
         }
 
-        if is_float_for_paint(&child_style) {
+        if !item_container && is_float_for_paint(&child_style) {
             float_children.push(child);
             continue;
         }
@@ -4518,6 +4555,24 @@ fn is_float_for_paint(style: &ComputedStyle) -> bool {
         Some(ComputedValue::Keyword(keyword))
             if keyword.eq_ignore_ascii_case("left") || keyword.eq_ignore_ascii_case("right")
     )
+}
+
+fn is_flex_or_grid_container(style: &ComputedStyle) -> bool {
+    matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if matches!(value.to_ascii_lowercase().as_str(), "flex" | "inline-flex" | "grid" | "inline-grid"))
+}
+
+fn is_positioned_child_for_paint(
+    child: &LayoutBox,
+    style: &ComputedStyle,
+    item_container: bool,
+) -> bool {
+    let explicit_z_index = match style.get("z-index") {
+        Some(ComputedValue::Number(_)) => true,
+        Some(ComputedValue::Keyword(value)) => value.parse::<i32>().is_ok(),
+        _ => false,
+    };
+    is_positioned_for_paint(style)
+        || (item_container && child.node.node_type() == NodeType::Element && explicit_z_index)
 }
 
 fn is_positioned_for_paint(style: &ComputedStyle) -> bool {

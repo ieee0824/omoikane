@@ -332,6 +332,19 @@
     { "path": "page-visibility/iframe-session-history.html" },
     { "path": "page-visibility/visibility-state-entry.tentative.html" },
     { "path": "page-visibility/unload.html" },
-    { "path": "page-visibility/unload-bubbles.html" }
+    { "path": "page-visibility/unload-bubbles.html" },
+    { "path": "css/css-flexbox/parsing/order-valid.html" },
+    { "path": "css/css-flexbox/parsing/order-invalid.html" },
+    { "path": "css/css-flexbox/parsing/order-computed.html" },
+    { "path": "css/css-grid/parsing/grid-auto-flow-valid.html" },
+    { "path": "css/css-grid/parsing/grid-auto-flow-invalid.html" },
+    { "path": "css/css-grid/parsing/grid-auto-flow-computed.html" },
+    { "path": "css/css-grid/parsing/grid-auto-rows-valid.html" },
+    { "path": "css/css-grid/parsing/grid-auto-rows-invalid.html" },
+    { "path": "css/css-grid/parsing/grid-auto-rows-computed.html" },
+    { "path": "css/css-grid/parsing/grid-auto-columns-valid.html" },
+    { "path": "css/css-grid/parsing/grid-auto-columns-invalid.html" },
+    { "path": "css/css-grid/parsing/grid-auto-columns-computed.html" },
+    { "path": "css/css-flexbox/hittest-overlapping-order.html" }
   ]
 }

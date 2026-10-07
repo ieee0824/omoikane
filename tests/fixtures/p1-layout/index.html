@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Flex order and implicit grid placement</title>
+<style>
+html, body { margin: 0; min-height: 320px; background: white; }
+.grid { position: absolute; display: grid; grid-auto-rows: 20px; }
+#flex { display: flex; width: 40px; }
+#flex > div { width: 20px; height: 20px; flex-shrink: 0; }
+#flex-a { order: 2; margin-left: -20px; background: red; }
+#flex-b { order: 1; background: blue; }
+#rows { top: 40px; width: 40px; grid-template-columns: 20px 20px; grid-auto-rows: 20px 30px; }
+#columns { top: 130px; width: 70px; grid-template-rows: 20px 20px; grid-auto-flow: column; grid-auto-columns: 30px 40px; }
+#sparse, #dense { top: 200px; width: 60px; grid-template-columns: 20px 20px 20px; }
+#dense { left: 100px; grid-auto-flow: dense; }
+.span { grid-column: span 2; }
+#negative { top: 270px; width: 100px; grid-template-columns: 10px 20px; grid-auto-columns: 30px 40px; }
+#negative-a { grid-column: -5 / -4; grid-row: 1; }
+#negative-b { grid-column: -4 / -3; grid-row: 1; }
+#negative-c { grid-column: 1 / 2; grid-row: 1; }
+.grid > div { background: green; }
+.grid > div:nth-child(2) { background: blue; }
+.grid > div:nth-child(3) { background: red; }
+</style>
+<div id="flex"><div id="flex-a"></div><div id="flex-b"></div></div>
+<div id="rows" class="grid"><div id="rows-a"></div><div></div><div id="rows-b"></div><div></div><div id="rows-c"></div></div>
+<div id="columns" class="grid"><div id="columns-a"></div><div id="columns-b"></div><div id="columns-c"></div></div>
+<div id="sparse" class="grid"><div class="span"></div><div class="span"></div><div id="sparse-c"></div></div>
+<div id="dense" class="grid"><div class="span"></div><div class="span"></div><div id="dense-c"></div></div>
+<div id="negative" class="grid"><div id="negative-a"></div><div id="negative-b"></div><div id="negative-c"></div></div>
