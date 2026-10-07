@@ -1,0 +1,253 @@
+{
+  "sha": "70e078bfab69a21be3145702e3a3a65afec3e5de",
+  "run": 37623483591,
+  "zip_sha256": "53adad30c81d3635b2563248dd1e5ce26eb658292825dde3c315c1342f65dba9",
+  "zip_bytes": 337398141,
+  "archive": "database-attempt-0.zip",
+  "extractor_cli": "2.27.2",
+  "build_mode": "none",
+  "library": "0.2.23",
+  "diagnostics": {
+    "warning": 21,
+    "info": 5,
+    "error": 0
+  },
+  "original_warning": 14,
+  "repro_warning": 6,
+  "macro_rows": 591,
+  "AST_zero": 13,
+  "missing_macro_locations": [
+    [
+      "engine/boa/core/engine/src/jit/arithmetic.rs",
+      "2195",
+      "9",
+      "...::panic_2021!...",
+      "0"
+    ],
+    [
+      "engine/boa/core/engine/src/jit/arithmetic.rs",
+      "64",
+      "34",
+      "offset_of!...",
+      "0"
+    ],
+    [
+      "engine/boa/core/engine/src/jit/arithmetic.rs",
+      "69",
+      "34",
+      "offset_of!...",
+      "0"
+    ],
+    [
+      "engine/boa/core/engine/src/jit/arithmetic.rs",
+      "74",
+      "34",
+      "offset_of!...",
+      "0"
+    ],
+    [
+      "engine/boa/core/engine/src/jit/arithmetic.rs",
+      "79",
+      "34",
+      "offset_of!...",
+      "0"
+    ],
+    [
+      "engine/boa/core/engine/src/jit/arithmetic.rs",
+      "84",
+      "34",
+      "offset_of!...",
+      "0"
+    ],
+    [
+      "engine/boa/core/engine/src/jit/arithmetic.rs",
+      "89",
+      "34",
+      "offset_of!...",
+      "0"
+    ],
+    [
+      "engine/boa/core/engine/src/jit/arithmetic.rs",
+      "94",
+      "34",
+      "offset_of!...",
+      "0"
+    ],
+    [
+      "engine/boa/core/engine/src/jit/mod.rs",
+      "356",
+      "9",
+      "...::panic_2021!...",
+      "0"
+    ],
+    [
+      "engine/boa/core/engine/src/jit/runtime_call.rs",
+      "222",
+      "34",
+      "offset_of!...",
+      "0"
+    ],
+    [
+      "engine/boa/core/engine/src/module/loader/mod.rs",
+      "214",
+      "14",
+      "...::__Fn!...",
+      "0"
+    ],
+    [
+      "engine/boa/core/engine/src/module/loader/mod.rs",
+      "234",
+      "14",
+      "...::__Fn!...",
+      "0"
+    ],
+    [
+      "tests/jit_code_memory.rs",
+      "53",
+      "5",
+      "...::panic_2021!...",
+      "0"
+    ]
+  ],
+  "additional_file_macro_rows": 31,
+  "additional_file_missing_macros": [
+    [
+      "engine/boa/core/engine/src/jit/platform.rs",
+      "398",
+      "13",
+      "...::format_args_nl!...",
+      "0"
+    ]
+  ],
+  "embedded_regression_verified": true,
+  "source_archive_hashes": {
+    "engine/boa/core/engine/src/jit/arithmetic.rs": "5d4424ccf2c922c7a5608bf71bb5bea4a0b22de4e2bac7f10740d5ad065a04a7",
+    "engine/boa/core/engine/src/jit/runtime_call.rs": "d8d6878d70bde2f8152efd532a16e73acb31b5491f2314741c485884689ff526",
+    "engine/boa/core/engine/src/jit/mod.rs": "0161e9aed0908e145d5dc1bab0c3aa8069006a85acfffb5b662fd2a632e5744b",
+    "engine/boa/core/engine/src/module/loader/mod.rs": "747de8fc6f7a6c6d8bd0a703be07a5224e751e06a5ca1ba776cc20cbadaaa92b",
+    "engine/boa/tests/macros/tests/embedded.rs": "3d31256ae4286fa9a059becaad7f0a405970f1d26eed27db7b42d36b3160a14d",
+    "tests/jit_code_memory.rs": "5b2ff18af6bb18381628f8e942d3e16ed4d491e21cbc70b0bdc404bae4f6e9f6",
+    "engine/boa/core/macros/src/embedded_module_loader.rs": "5a5d52a9e0fb05c33022982979e5c1c88790a85168af0d2858151810230136fa",
+    "engine/boa/core/engine/src/module/loader/embedded.rs": "395d2fe40ed97d35b050cbe17bc18b6a56cdd158531e0a694ba5c7698027a3fc",
+    "engine/boa/core/engine/src/jit/platform.rs": "89f364b7db356b3a815b50cf109ca3289039104f280b4feace047322b4b88ae8"
+  },
+  "csv_sha256": {
+    "RawDiagnostics": "f76dd4fcff09e5312c443d0ffa915e23ec5de4458a66a30751bd187c0f0ce3e4",
+    "MacroCoverage": "766b4508f50f7f0f27c2dedf7c26fd245aa505dcd45335b5b40695005b7accd8",
+    "EmbeddedExpansion": "4dadcaac20132969def44ea4cdce105f35f4c1ab5fa82f7d7595ecd7b72681b9",
+    "ReproMacros": "1516ed7c67de14b4d86d9f3c94724e22d8d70dae5c7a3ac9fc03d7ffbd4fad50",
+    "AdditionalMacros": "de10bcc9a0c44a6ad945994eaf6c88140b562faa1f8d9d355cd197778f166a25"
+  },
+  "new_warning": 1,
+  "source_warning_total": 15,
+  "rust_job": 112799344198,
+  "baseline_sha": "7a9a1e3ab79ba2a2d922e868dfbfbb3571e7b657",
+  "baseline_extractor": "2.27.1",
+  "comparison_query_cli": "2.27.2",
+  "comparison_library": "0.2.23",
+  "normalized_csv_sha256": {
+    "2026-10-07-main-70e-diagnostics.csv": "e4b529f180dbcb31e324cdcdd18c9c7a26bfb4d366695b93638fb63e416a072e",
+    "2026-10-07-main-70e-embedded.csv": "8104d7fc025fd11ec04662e3166b8c92280a3063ebe50395dc438285e36e22d4",
+    "2026-10-07-main-70e-macro-comparison.csv": "eea849ba0281045c40f055a83776504bd670b4eceaa5b028a5dc39d7daa25b18",
+    "2026-10-07-main-70e-platform-comparison.csv": "2c564e34f764595aa2eb44a95f52f8d808f2118245e0cf7aa8c127ae30386a5e",
+    "2026-10-07-main-70e-repro-comparison.csv": "3d1b79d861505aff83268120a9f7c2ac46d5430709b54b77590a183679362ab6"
+  },
+  "macro_comparison": {
+    "MacroCoverage": {
+      "rows": 591,
+      "changed_AST_count": 140,
+      "before_AST_zero": 13,
+      "after_AST_zero": 13,
+      "location_keys_unchanged": true
+    },
+    "AdditionalMacros": {
+      "rows": 31,
+      "changed_AST_count": 9,
+      "before_AST_zero": 0,
+      "after_AST_zero": 1,
+      "location_keys_unchanged": true
+    },
+    "ReproMacros": {
+      "rows": 24,
+      "changed_AST_count": 4,
+      "before_AST_zero": 6,
+      "after_AST_zero": 6,
+      "location_keys_unchanged": true
+    }
+  },
+  "diagnostic_delta": {
+    "added": [
+      [
+        "engine/boa/core/engine/src/jit/platform.rs",
+        "398",
+        "13",
+        "30",
+        "parse_error",
+        "macro expansion failed for '$crate::format_args_nl'",
+        "macro expansion failed for '$crate::format_args_nl'"
+      ]
+    ],
+    "removed": [],
+    "identical": false
+  },
+  "limitations": [
+    "Original13 AST gaps persist; no complete Rust type/dataflow coverage claimed.",
+    "Additional inactive aarch64-macOS statement macro format_args_nl loses AST15->0 in Linux CodeQL DB; active macOS CodeQL extraction was not measured.",
+    "AST node-count changes alone do not prove improved analysis."
+  ],
+  "resolved_dependencies": {
+    "codeql/rust-all": {
+      "version": "0.2.23",
+      "manifest_sha256": "348c531d2a8400dff85020597616ac3265f3d6fa90832213c9720aa6965341db"
+    },
+    "codeql/concepts": {
+      "version": "0.0.33",
+      "manifest_sha256": "4688077a09275159eb83d740fec5259093f50ceaef55c8ea46b5d44d5e2d083f"
+    },
+    "codeql/controlflow": {
+      "version": "2.0.43",
+      "manifest_sha256": "88038e8eb205082d1bed976fb92cfe8f4bc75f67bb41cf4da76c957299ee237e"
+    },
+    "codeql/dataflow": {
+      "version": "2.1.15",
+      "manifest_sha256": "9da95c04be494406c46e7253edb5e3e479f4d1a59bdf9274c3a583fd2c3ad404"
+    },
+    "codeql/mad": {
+      "version": "1.0.59",
+      "manifest_sha256": "3b8f446ee34716c05fd7f68b2d9c90a47aa9d6b67b1ef138460536a44c5f5c96"
+    },
+    "codeql/namebinding": {
+      "version": "0.0.8",
+      "manifest_sha256": "77c7ed73239ab0c00658f2887a4b9362a5e34322fa8100a37fae0bbda63bcb0f"
+    },
+    "codeql/regex": {
+      "version": "1.0.59",
+      "manifest_sha256": "617796a9e1612ac03898c15c7d47c57de34835d2e437e30dd5e7d02b2642a539"
+    },
+    "codeql/ssa": {
+      "version": "2.0.35",
+      "manifest_sha256": "ee279b7a7bb768c324f42146c61a087363d4e52ad873999b76e75caa87ce526b"
+    },
+    "codeql/threat-models": {
+      "version": "1.0.59",
+      "manifest_sha256": "28b2f52b4dc949dad6ef7159eafee5ebacc8046d3554e474645f0c7ba509933d"
+    },
+    "codeql/tutorial": {
+      "version": "1.0.59",
+      "manifest_sha256": "c64fbfc1bd10f234f1abf96a94ebf334675c955f7ba7db2ce9a5acfdc31a2b80"
+    },
+    "codeql/typeinference": {
+      "version": "0.0.40",
+      "manifest_sha256": "55d52d67f7defe9b515024d761f2b4ef8293b1302a1ac1588456abb2a05ebbf4"
+    },
+    "codeql/typetracking": {
+      "version": "2.0.43",
+      "manifest_sha256": "119dbf979b6c496d19f6b36c2f413768183649a3f0261cd4d35e21e5e1a16f1a"
+    },
+    "codeql/util": {
+      "version": "2.0.46",
+      "manifest_sha256": "5a60bdaa07836842c1885b2b781552a8abd2fce511d60a50e75ce98e58b145fb"
+    }
+  },
+  "query_pack_lock_sha256": "57a4b1e98ad4be3605ffcfb218499f5e44a02164ee27fb70ed1c230a481c2743"
+}
