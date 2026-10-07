@@ -5,6 +5,9 @@ use super::*;
 
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+/// Maximum payload accepted in a CDP WebSocket frame (16 MiB).
+const MAX_WEBSOCKET_PAYLOAD: usize = 16 * 1024 * 1024;
+
 /// A parsed HTTP upgrade request for the WebSocket handshake.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebSocketUpgradeRequest {
@@ -121,6 +124,7 @@ impl WebSocketFrame {
     }
 
     /// Decodes a single frame from bytes and returns the frame plus the consumed length.
+    /// Payloads above 16 MiB are rejected before allocating the decoded payload.
     pub fn decode(bytes: &[u8]) -> Result<(Self, usize), CdpError> {
         if bytes.len() < 2 {
             return Err(CdpError::InvalidWebSocketFrame("frame too short"));
@@ -149,10 +153,19 @@ impl WebSocketFrame {
                 let mut len_bytes = [0u8; 8];
                 len_bytes.copy_from_slice(&bytes[cursor..cursor + 8]);
                 cursor += 8;
-                u64::from_be_bytes(len_bytes) as usize
+                let length = u64::from_be_bytes(len_bytes);
+                if length >> 63 != 0 {
+                    return Err(CdpError::InvalidWebSocketFrame("invalid 64-bit length"));
+                }
+                usize::try_from(length)
+                    .map_err(|_| CdpError::InvalidWebSocketFrame("length out of range"))?
             }
             _ => unreachable!(),
         };
+
+        if payload_len > MAX_WEBSOCKET_PAYLOAD {
+            return Err(CdpError::InvalidWebSocketFrame("payload limit exceeded"));
+        }
 
         let mask = if masked {
             if bytes.len() < cursor + 4 {
@@ -166,11 +179,14 @@ impl WebSocketFrame {
             None
         };
 
-        if bytes.len() < cursor + payload_len {
+        let end = cursor
+            .checked_add(payload_len)
+            .ok_or(CdpError::InvalidWebSocketFrame("length overflow"))?;
+        if bytes.len() < end {
             return Err(CdpError::InvalidWebSocketFrame("payload truncated"));
         }
 
-        let mut payload = bytes[cursor..cursor + payload_len].to_vec();
+        let mut payload = bytes[cursor..end].to_vec();
         if let Some(mask) = mask {
             for (index, byte) in payload.iter_mut().enumerate() {
                 *byte ^= mask[index % 4];
@@ -183,8 +199,18 @@ impl WebSocketFrame {
                 opcode,
                 payload,
             },
-            cursor + payload_len,
+            end,
         ))
+    }
+
+    /// Decodes a client frame, enforcing RFC 6455 masking requirements.
+    pub fn decode_client(bytes: &[u8]) -> Result<(Self, usize), CdpError> {
+        if bytes.get(1).is_some_and(|byte| byte & 0x80 == 0) {
+            return Err(CdpError::InvalidWebSocketFrame(
+                "client frame must be masked",
+            ));
+        }
+        Self::decode(bytes)
     }
 }
 
@@ -251,4 +277,55 @@ pub fn parse_upgrade_request(request: &str) -> Result<WebSocketUpgradeRequest, C
         path: path.to_string(),
         websocket_key: key,
     })
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn client_mask_is_required_but_server_frames_remain_decodable() {
+        let frame = WebSocketFrame::text("hello");
+        assert!(WebSocketFrame::decode_client(&frame.encode(false)).is_err());
+        assert_eq!(
+            WebSocketFrame::decode(&frame.encode(false)).unwrap().0,
+            frame
+        );
+        assert_eq!(
+            WebSocketFrame::decode_client(&frame.encode(true))
+                .unwrap()
+                .0,
+            frame
+        );
+    }
+
+    #[test]
+    fn payload_limit_is_checked_before_reading_payload() {
+        for length in [MAX_WEBSOCKET_PAYLOAD, MAX_WEBSOCKET_PAYLOAD + 1] {
+            let mut header = vec![0x82, 127];
+            header.extend_from_slice(&(length as u64).to_be_bytes());
+            let error = WebSocketFrame::decode(&header).unwrap_err();
+            let expected = if length == MAX_WEBSOCKET_PAYLOAD {
+                "payload truncated"
+            } else {
+                "payload limit exceeded"
+            };
+            assert!(
+                matches!(error, CdpError::InvalidWebSocketFrame(message) if message == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn maximum_allowed_payload_round_trips() {
+        let frame = WebSocketFrame {
+            fin: true,
+            opcode: WebSocketOpcode::Binary,
+            payload: vec![42; MAX_WEBSOCKET_PAYLOAD],
+        };
+        let encoded = frame.encode(true);
+        let (decoded, consumed) = WebSocketFrame::decode_client(&encoded).unwrap();
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded, frame);
+    }
 }

@@ -181,7 +181,7 @@ impl CdpServer {
             return Err(CdpError::UnknownClient(client_id));
         }
 
-        let (frame, _) = WebSocketFrame::decode(bytes)?;
+        let (frame, _) = WebSocketFrame::decode_client(bytes)?;
         match frame.opcode {
             WebSocketOpcode::Text => self.handle_text_frame(client_id, &frame.payload),
             WebSocketOpcode::Ping => {
