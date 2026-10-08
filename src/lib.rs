@@ -22,6 +22,7 @@ pub mod paint;
 pub mod platform_browser;
 pub mod platform_dialog;
 pub mod platform_input;
+pub mod platform_media;
 pub mod realtime;
 mod screenshot;
 pub mod svg;

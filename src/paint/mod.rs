@@ -1184,7 +1184,8 @@ pub fn paint_layout_with_web_fonts(
     let width = viewport.width.ceil().max(1.0) as u32;
     let height = viewport.height.ceil().max(1.0) as u32;
     let mut canvas = Canvas::new(width, height);
-    if let Some(background) = viewport_background_color(layout, resolver) {
+    let viewport_background = viewport_background_color(layout, resolver);
+    if let Some(background) = viewport_background.color {
         canvas.fill_rect(viewport, background);
     }
     text::with_render_glyph_cache(|| {
@@ -1196,6 +1197,7 @@ pub fn paint_layout_with_web_fonts(
             viewport,
             &fonts,
             web_fonts,
+            viewport_background.propagated_node,
         );
     });
     canvas
@@ -1239,7 +1241,8 @@ pub(crate) fn paint_layout_with_document_snapshots(
         viewport.width.ceil().max(1.0) as u32,
         viewport.height.ceil().max(1.0) as u32,
     );
-    if let Some(background) = viewport_background_color(layout, resolver) {
+    let viewport_background = viewport_background_color(layout, resolver);
+    if let Some(background) = viewport_background.color {
         canvas.fill_rect(viewport, background);
     }
     text::with_render_glyph_cache(|| {
@@ -1252,6 +1255,7 @@ pub(crate) fn paint_layout_with_document_snapshots(
                 text_fonts: &fonts,
                 web_fonts,
                 nested_documents: Some(nested_documents),
+                propagated_background_node: viewport_background.propagated_node,
             },
             PaintBoxOptions {
                 inherited_clip: None,
@@ -1389,7 +1393,8 @@ fn paint_printed_page(
             }
         });
     });
-    if let Some(background) = viewport_background_color(layout, resolver) {
+    let viewport_background = viewport_background_color(layout, resolver);
+    if let Some(background) = viewport_background.color {
         canvas.fill_rect(page.content, background);
     }
     let page_border = border::EdgeSizesForPaint::from_style(&page_paint_style);
@@ -1401,7 +1406,15 @@ fn paint_printed_page(
         None,
     );
     text::with_render_glyph_cache(|| {
-        paint_page_content_fragments(&mut canvas, layout, page, resolver, fonts, web_fonts);
+        paint_page_content_fragments(
+            &mut canvas,
+            layout,
+            page,
+            resolver,
+            fonts,
+            web_fonts,
+            viewport_background.propagated_node,
+        );
         crate::layout::with_image_base_url(effective_base.cloned(), || {
             for &(z_index, margin_box, rect) in &margin_boxes {
                 if z_index >= 0 {
@@ -1420,6 +1433,7 @@ fn paint_page_content_fragments(
     resolver: &mut StyleResolver,
     fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
+    propagated_background_node: Option<usize>,
 ) {
     for fragment in &page.fragments {
         let painted_area = Rect {
@@ -1445,6 +1459,7 @@ fn paint_page_content_fragments(
             page.sheet,
             fonts,
             web_fonts,
+            propagated_background_node,
         );
     }
 }
@@ -2089,6 +2104,7 @@ struct PaintContext<'a> {
     text_fonts: &'a [Arc<Font>],
     web_fonts: Option<&'a WebFontRegistry>,
     nested_documents: Option<&'a HashMap<usize, Image>>,
+    propagated_background_node: Option<usize>,
 }
 
 /// Per-box traversal state in the destination surface's coordinate system.
@@ -2114,6 +2130,7 @@ fn paint_box(
     viewport: Rect,
     text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
+    propagated_background_node: Option<usize>,
 ) {
     paint_box_internal(
         canvas,
@@ -2124,6 +2141,7 @@ fn paint_box(
             text_fonts,
             web_fonts,
             nested_documents: None,
+            propagated_background_node,
         },
         PaintBoxOptions {
             inherited_clip,
@@ -4315,7 +4333,11 @@ fn paint_box_internal_to(
             None => Some(background_clip_rect),
         };
         if let Some(background_clip) = background_clip {
-            if let Some(background) = background_color(style) {
+            if let Some(background) = background_color(style).filter(|_| {
+                layout.pseudo.is_some()
+                    || layout.node.is_fullscreen()
+                    || context.propagated_background_node != Some(layout.node.identity())
+            }) {
                 if background_radii != (0.0, 0.0, 0.0, 0.0) {
                     let (tl, tr, br, bl) = background_radii;
                     canvas.fill_rounded_rect(
@@ -4735,27 +4757,63 @@ fn has_transform_style(style: &ComputedStyle) -> bool {
     })
 }
 
-fn viewport_background_color(layout: &LayoutBox, resolver: &mut StyleResolver) -> Option<Color> {
-    if layout.node.node_type() != NodeType::Document {
-        return None;
-    }
+#[derive(Default)]
+struct ViewportBackground {
+    color: Option<Color>,
+    propagated_node: Option<usize>,
+}
 
-    let root = layout
+fn viewport_background_color(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+) -> ViewportBackground {
+    if layout.node.node_type() != NodeType::Document {
+        return ViewportBackground::default();
+    }
+    let Some(root) = layout
         .children
         .iter()
         .find(|child| child.node.tag_name().as_deref() == Some("html"))
-        .or_else(|| layout.children.first())?;
+        .or_else(|| layout.children.first())
+    else {
+        return ViewportBackground::default();
+    };
     let root_style = resolver.computed_style(&root.node);
-    if let Some(color) = background_color(&root_style) {
-        return Some(color);
+    let root_transparent = background_color(&root_style).is_none_or(|color| color.a == 0);
+    let no_root_image = root_style
+        .get("background-image")
+        .is_none_or(|value| value.css_text().eq_ignore_ascii_case("none"));
+    let html_root = root.node.local_name().as_deref() == Some("html")
+        && (root.node.is_html_element()
+            || root.node.namespace_uri().as_deref() == Some("http://www.w3.org/1999/xhtml"));
+    let source = if html_root && root_transparent && no_root_image {
+        root.children
+            .iter()
+            .find(|child| child.node.tag_name().as_deref() == Some("body"))
+            .unwrap_or(root)
+    } else {
+        root
+    };
+    let viewport = resolver.viewport_paint_style(&root.node, &source.node);
+    let background = background_color(&viewport.style);
+    let color = if let Some(rgb) = viewport.canvas_color {
+        let mut pixel = [rgb[0], rgb[1], rgb[2], 255];
+        if let Some(background) = background {
+            blend_pixel(&mut pixel, background);
+        }
+        Some(Color {
+            r: pixel[0],
+            g: pixel[1],
+            b: pixel[2],
+            a: pixel[3],
+        })
+    } else {
+        background
+    };
+    ViewportBackground {
+        color,
+        propagated_node: Some(source.node.identity()),
     }
-
-    let body = root
-        .children
-        .iter()
-        .find(|child| child.node.tag_name().as_deref() == Some("body"))?;
-    let body_style = resolver.computed_style(&body.node);
-    background_color(&body_style)
 }
 
 fn paint_generated_box(

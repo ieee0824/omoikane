@@ -735,7 +735,15 @@ impl CdpSession {
                 eprintln!("{line}");
             }
         }
-        let runtime = completed.runtime;
+        let mut runtime = completed.runtime;
+        let (width, height) = self.runtime.presentation_viewport();
+        runtime.set_viewport(width, height);
+        // The presentation host can change while startup is suspended. Adopt
+        // its latest snapshot before replacing the committed document so live
+        // query lists in the new runtime observe the intervening update.
+        runtime
+            .set_media_environment(self.runtime.media_environment())
+            .map_err(CdpSessionError::JavaScript)?;
 
         // Teardown is delayed until the replacement runtime has completed its
         // startup work, so cancellation or startup setup failure keeps the old

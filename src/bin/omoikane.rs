@@ -42,6 +42,8 @@ mod chrome_layout;
 mod device_scale;
 #[path = "omoikane/input_routing.rs"]
 mod input_routing;
+#[path = "omoikane/media_environment.rs"]
+mod media_environment;
 #[path = "omoikane/pointer_lock_host.rs"]
 mod pointer_lock_host;
 #[path = "omoikane/render_pump.rs"]
@@ -153,6 +155,8 @@ struct FindUi {
 
 struct BrowserApp {
     session: CdpSession,
+    initial_url: Option<String>,
+    initial_navigation_error: Option<omoikane::cdp::JsonRpcError>,
     error_reporter: Option<Arc<ErrorReporter>>,
     window: Option<Arc<Window>>,
     context: Option<Context<Arc<Window>>>,
@@ -172,6 +176,9 @@ struct BrowserApp {
     window_occluded: bool,
     window_minimized: bool,
     native_fullscreen: bool,
+    pointer_devices: omoikane::platform_media::PointerDeviceTracker<DeviceId>,
+    media_preferences: omoikane::platform_media::PlatformMediaPreferences,
+    media_preference_monitor: Option<omoikane::platform_media::MediaPreferenceMonitor>,
     native_pointer_lock: bool,
     native_pointer_lock_raw_buttons: bool,
     /// Window logical position to restore the cursor to after Pointer Lock.
@@ -195,11 +202,17 @@ impl BrowserApp {
         let mut session =
             CdpSession::new().map_err(|error| std::io::Error::other(error.to_string()))?;
         session.set_pointer_lock_deferred(true);
-        session.dispatch("Page.navigate", json!({ "url": url }))?;
+        let media_preferences = omoikane::platform_media::capture_media_preferences();
+        let mut environment = session.host_media_environment();
+        media_preferences.apply_to(&mut environment);
+        session.set_host_media_environment(environment)?;
+
         let started_at = Instant::now();
         let clock_document = session.document_generation();
         Ok(Self {
             session,
+            initial_url: Some(url.into()),
+            initial_navigation_error: None,
             error_reporter: None,
             window: None,
             context: None,
@@ -219,6 +232,11 @@ impl BrowserApp {
             window_occluded: false,
             window_minimized: false,
             native_fullscreen: false,
+            pointer_devices: omoikane::platform_media::PointerDeviceTracker::new(
+                media_preferences.pointers,
+            ),
+            media_preferences,
+            media_preference_monitor: None,
             native_pointer_lock: false,
             native_pointer_lock_raw_buttons: false,
             pointer_restore: (0.0, 0.0),
@@ -253,6 +271,7 @@ impl BrowserApp {
                 }
             }
         }
+        self.sync_media_environment();
     }
 
     fn unlock_native_pointer(&mut self) {
@@ -853,8 +872,18 @@ impl ApplicationHandler for BrowserApp {
         self.frame_scheduler
             .request_rendering_opportunity(Instant::now());
         self.window = Some(window);
+        self.start_media_preference_monitor();
+        self.sync_media_environment();
         self.context = Some(context);
         self.surface = Some(surface);
+        let (width, height) = self.chrome_layout().page_viewport();
+        self.session.set_viewport(width, height);
+        if let Err(error) = self.start_initial_navigation() {
+            report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Input, &error);
+            eprintln!("initial navigation failed: {error}");
+            self.initial_navigation_error = Some(error);
+            event_loop.exit();
+        }
     }
 
     fn window_event(
@@ -870,6 +899,7 @@ impl ApplicationHandler for BrowserApp {
         {
             return;
         }
+        self.update_media_environment_for_event(&event);
         if !matches!(event, WindowEvent::RedrawRequested) {
             if matches!(event, WindowEvent::MouseWheel { .. }) {
                 self.render_before_wheel(Instant::now());
@@ -929,9 +959,10 @@ impl ApplicationHandler for BrowserApp {
     fn device_event(
         &mut self,
         _event_loop: &ActiveEventLoop,
-        _device_id: DeviceId,
+        device_id: DeviceId,
         event: DeviceEvent,
     ) {
+        self.update_media_environment_for_device(device_id, &event);
         if !self.native_pointer_lock {
             return;
         }
@@ -1023,6 +1054,40 @@ mod tests {
     use winit::keyboard::{KeyCode, NativeKeyCode};
 
     use super::*;
+
+    #[test]
+    fn initial_scripts_wait_for_the_presentation_environment() {
+        let mut app = BrowserApp::new("data:text/html,<script>globalThis.initialDisplay={dpr:devicePixelRatio,width:screen.width,height:screen.height,inner:innerHeight}</script>").unwrap();
+        let result = app
+            .session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({"expression":"typeof initialDisplay === 'undefined'"}),
+            )
+            .unwrap();
+        assert_eq!(result["result"]["value"], json!(true));
+        let mut environment = app.session.host_media_environment();
+        environment.resolution_dppx = 2.0;
+        environment.device_width = Some(1920.0);
+        environment.device_height = Some(1080.0);
+        app.session.set_host_media_environment(environment).unwrap();
+        app.session.set_viewport(640, 400);
+        app.start_initial_navigation().unwrap();
+        let result = app
+            .session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({"expression":"JSON.stringify(initialDisplay)"}),
+            )
+            .unwrap();
+        assert_eq!(
+            result["result"]["value"],
+            json!("{\"dpr\":2,\"width\":1920,\"height\":1080,\"inner\":400}")
+        );
+        let generation = app.session.document_generation();
+        app.start_initial_navigation().unwrap();
+        assert_eq!(app.session.document_generation(), generation);
+    }
 
     #[test]
     fn translates_winit_keys_to_dom_key_and_code_names() {
@@ -1162,6 +1227,7 @@ mod tests {
     #[test]
     fn find_shortcut_edits_query_navigates_and_releases_page_keys() {
         let mut app = BrowserApp::new("data:text/html,<p>needle needle</p>").unwrap();
+        app.start_initial_navigation().unwrap();
         app.modifiers.control = true;
         assert!(app.handle_find_key("f", Some("f"), true));
         app.modifiers.control = false;
@@ -1216,6 +1282,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         app.set_error_reporter(reporter);
     }
     event_loop.run_app(&mut app)?;
+    if let Some(error) = app.initial_navigation_error.take() {
+        return Err(error.into());
+    }
     Ok(())
 }
 

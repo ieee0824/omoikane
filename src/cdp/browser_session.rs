@@ -476,6 +476,7 @@ impl BrowserSession {
             "Accessibility.getAXNodeAndAncestors",
             "Accessibility.getChildAXNodes",
             "Accessibility.queryAXTree",
+            "Emulation.setEmulatedMedia",
             "Runtime.callFunctionOn",
             "Target.createBrowserContext",
             "Target.getBrowserContexts",

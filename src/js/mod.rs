@@ -57,6 +57,7 @@ mod child_document;
 #[cfg(test)]
 mod child_document_tests;
 mod cssom_normalization;
+mod media_environment;
 use child_document::{FetchedChildResource, LoadedChildDocument};
 mod compression_stream;
 #[cfg(test)]
@@ -1501,6 +1502,8 @@ struct HostState {
     /// Viewport used when resolving computed styles and running layout for the
     /// `getComputedStyle` / layout-metrics bindings (issues 016-8 and 044-2).
     viewport: Rect,
+    media_environment: crate::css::MediaEnvironment,
+    pending_media_query_report: bool,
     /// Top-level visual viewport supplied by the presentation host. It follows
     /// the layout viewport until the host reports a zoomed or occluded view.
     visual_viewport: VisualViewportState,
@@ -2068,6 +2071,8 @@ impl HostState {
             websocket_clients: HashMap::new(),
             next_websocket_id: 1,
             cors_preflight_cache: PreflightCache::default(),
+            media_environment: crate::css::MediaEnvironment::default(),
+            pending_media_query_report: false,
             viewport: Rect {
                 x: 0.0,
                 y: 0.0,
@@ -3933,6 +3938,7 @@ impl HostState {
             resolver.set_animation_time_ms(transition_time_ms);
         }
         resolver.set_viewport(viewport.width, viewport.height);
+        resolver.set_media_environment(self.presentation_media_environment());
         let policy = self.csp_policy_for_document(document);
         let base = crate::paint::stylesheet::extract_document_base_url(
             document,
@@ -5360,12 +5366,19 @@ impl JsRuntime {
         if document_id == self.document().identity() {
             return None;
         }
-        self.host_state
-            .borrow()
+        let state = self.host_state.borrow();
+        state
             .iframe_documents
             .values()
             .find(|entry| entry.document.identity() == document_id)
             .and_then(|entry| entry.realm.clone())
+            .or_else(|| {
+                state
+                    .auxiliary_contexts
+                    .values()
+                    .find(|entry| entry.document.identity() == document_id)
+                    .and_then(|entry| entry.realm.clone())
+            })
     }
 
     /// Executes a classic script in the Realm that owns its Document. This is
@@ -6014,7 +6027,7 @@ impl JsRuntime {
                 state.set_window_scroll(scroll_x, scroll_y);
             }
         }
-        // `window.innerWidth`/`screen.width` are CSSOM integers, so round to the
+        // `window.innerWidth`/`innerHeight` are CSSOM integers, so round to the
         // nearest pixel. For integer viewports this exactly matches the `vw`/`vh`
         // resolution (which divides the same dimension by 100). `width`/`height`
         // are already finite and non-negative, so the round/cast cannot overflow.
@@ -6023,11 +6036,6 @@ impl JsRuntime {
         let sync = format!(
             "globalThis.innerWidth = {w}; globalThis.innerHeight = {h}; \
              globalThis.outerWidth = {w}; globalThis.outerHeight = {h}; \
-             if (globalThis.screen) {{ \
-             globalThis.screen.width = {w}; globalThis.screen.height = {h}; \
-             globalThis.screen.availWidth = {w}; globalThis.screen.availHeight = {h}; }} \
-             if (typeof globalThis.__omoikane_media_query_viewport_changed === 'function') \
-             globalThis.__omoikane_media_query_viewport_changed(); \
              if (typeof globalThis.__omoikane_layout_observers_changed === 'function') \
              globalThis.__omoikane_layout_observers_changed();"
         );
@@ -7760,10 +7768,11 @@ impl JsRuntime {
     /// callbacks receive the accumulated, absolute page timestamp.
     ///
     /// Pending macrotasks and promise jobs are drained before the frame starts.
-    /// All callbacks present at the start of the frame receive the same
-    /// monotonically increasing timestamp and run in registration order.
-    /// Callbacks registered while the frame is running are retained for the
-    /// next explicit call; [`run_jobs`](Self::run_jobs) alone never invokes
+    /// Media query changes are reported before the animation-frame phase.
+    /// Callbacks present when that phase begins receive the same monotonically
+    /// increasing timestamp and run in registration order. Callbacks registered
+    /// by an animation-frame callback are retained for the next explicit call;
+    /// [`run_jobs`](Self::run_jobs) alone never invokes
     /// animation-frame callbacks.
     pub fn run_animation_frame(&mut self, elapsed_ms: u64) -> JsResult<usize> {
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
@@ -7791,6 +7800,7 @@ impl JsRuntime {
             return Ok(0);
         }
 
+        self.report_media_query_changes()?;
         let (timestamp, callback_ids) = self
             .host_state
             .borrow_mut()
@@ -7909,6 +7919,7 @@ impl JsRuntime {
         if self.host_state.borrow().page_hidden {
             return Ok(0);
         }
+        self.report_media_query_changes()?;
         let (timestamp, callback_ids) = self
             .host_state
             .borrow_mut()
@@ -8107,7 +8118,9 @@ impl JsRuntime {
     }
 
     fn has_pending_viewport_steps(&self) -> bool {
-        self.has_pending_viewport_resize_steps() || self.has_pending_visual_viewport_scroll_steps()
+        self.host_state.borrow().pending_media_query_report
+            || self.has_pending_viewport_resize_steps()
+            || self.has_pending_visual_viewport_scroll_steps()
     }
 
     fn has_pending_viewport_resize_steps(&self) -> bool {
@@ -10324,6 +10337,7 @@ fn register_host_bindings(
     font_loading::register(context, host_state, &mut bindings)?;
     pointer_lock::register(context, &mut bindings)?;
     input_bridge::register(context, &mut bindings)?;
+    media_environment::register(context, host_state, &mut bindings)?;
     form_state::register(context, &mut bindings)?;
     iframe_navigation::register(context, &mut bindings)?;
     form_validation::register(context, &mut bindings)?;
@@ -15686,10 +15700,22 @@ fn match_media_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
         .to_string(context)?
         .to_std_string_escaped();
     with_host_state(|state| {
-        let viewport = state.borrow().viewport;
+        let mut state = state.borrow_mut();
+        let document_id = context_document_id(context, &state);
+        let document = state
+            .get_node(document_id)
+            .filter(|node| node.node_type() == NodeType::Document)
+            .unwrap_or_else(|| state.document.clone());
+        let viewport = state.viewport_for_document(&document);
+        let environment = state.presentation_media_environment();
         let matches = crate::css::parse_media_query_list(&query).is_some_and(|queries| {
             queries.iter().any(|query| {
-                crate::css::evaluate_media_query(query, viewport.width, viewport.height, false)
+                crate::css::evaluate_media_query_with_environment(
+                    query,
+                    viewport.width,
+                    viewport.height,
+                    &environment,
+                )
             })
         });
         Ok(JsValue::from(matches))

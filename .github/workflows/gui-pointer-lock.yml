@@ -3,10 +3,10 @@ name: GUI Pointer Lock
 on:
   pull_request:
     branches: [main]
-    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'scripts/test-gui-scroll.py', 'tests/fixtures/gui-scroll/**', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
+    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'scripts/test-gui-media-environment.py', 'scripts/test-gui-scroll.py', 'tests/fixtures/gui-scroll/**', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
   push:
     branches: [main]
-    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'scripts/test-gui-scroll.py', 'tests/fixtures/gui-scroll/**', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
+    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'scripts/test-gui-media-environment.py', 'scripts/test-gui-scroll.py', 'tests/fixtures/gui-scroll/**', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
   workflow_dispatch:
 
 permissions:
@@ -46,6 +46,8 @@ jobs:
         run: |
           cargo build --locked --features gui --bin omoikane
           cargo test --locked --features gui --bin omoikane
+      - name: Verify first-script media settings on a scaled display
+        run: /usr/bin/python3 scripts/test-gui-media-environment.py --binary target/debug/omoikane --artifacts .artifacts/gui-media-environment
       - name: Verify harness failure cleanup and scaled native hit testing
         run: |
           /usr/bin/python3 -m unittest discover -s scripts/tests -p test_gui_x11.py
@@ -77,6 +79,7 @@ jobs:
           path: |
             .artifacts/gui-pointer-lock/
             .artifacts/gui-scale/
+            .artifacts/gui-media-environment/
             .artifacts/gui-render-demand/
             .artifacts/gui-scroll-1/
             .artifacts/gui-scroll-2/

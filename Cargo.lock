@@ -1965,6 +1965,7 @@ version = "0.4.0"
 dependencies = [
  "ab_glyph",
  "base64",
+ "block2",
  "boa_engine",
  "boa_gc",
  "brotli",
@@ -1977,6 +1978,9 @@ dependencies = [
  "hmac",
  "image-webp",
  "jpeg-decoder",
+ "objc2 0.5.2",
+ "objc2-app-kit",
+ "objc2-foundation 0.2.2",
  "png",
  "psl",
  "rcgen",
@@ -1993,6 +1997,7 @@ dependencies = [
  "unicode-vo",
  "url",
  "webpki-roots",
+ "windows-sys 0.61.2",
  "winit",
  "x11-dl",
 ]

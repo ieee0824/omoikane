@@ -2527,7 +2527,11 @@ fn expand_flex_flow_shorthand(value: Value, important: bool) -> Vec<Declaration>
 }
 
 fn is_background_color_keyword(keyword: &str) -> bool {
-    crate::paint::color::parse_color(keyword).is_some()
+    keyword.eq_ignore_ascii_case("currentcolor")
+        || crate::paint::color::parse_color(keyword).is_some()
+        || crate::css::ForcedColorPalette::for_color_scheme(false)
+            .system_color(keyword)
+            .is_some()
 }
 
 /// Expands a single animation's clock and playback longhands.

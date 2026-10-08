@@ -69,7 +69,8 @@ impl JsRuntime {
     pub(crate) fn next_rendering(&self) -> NextRendering {
         let state = self.host_state.borrow();
         let visual_work = !state.page_hidden
-            && (state.event_loop.has_pending_animation_frames()
+            && (state.pending_media_query_report
+                || state.event_loop.has_pending_animation_frames()
                 || !state.smooth_scrolls.is_empty()
                 || state
                     .visible_image_playbacks

@@ -471,6 +471,7 @@ fn collect_page_candidates(
     viewport_height: f32,
     color_scheme_dark: bool,
     media_type: crate::css::MediaType,
+    media_environment: &crate::css::MediaEnvironment,
     source_order: &mut usize,
     candidates: &mut Vec<PageCandidate>,
 ) {
@@ -543,8 +544,7 @@ fn collect_page_candidates(
             at_rule,
             viewport_width,
             viewport_height,
-            color_scheme_dark,
-            media_type,
+            media_environment,
         ) {
             continue;
         }
@@ -571,6 +571,7 @@ fn collect_page_candidates(
             viewport_height,
             color_scheme_dark,
             media_type,
+            media_environment,
             source_order,
             candidates,
         );
@@ -608,6 +609,7 @@ impl StyleResolver {
                 self.viewport_height,
                 self.color_scheme_dark,
                 self.media_type,
+                &self.media_environment,
                 &mut source_order,
                 &mut candidates,
             );

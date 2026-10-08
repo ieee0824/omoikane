@@ -1,0 +1,59 @@
+name: Native Media Environment
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'examples/media_native_probe.rs', '.github/workflows/media-native.yml']
+  push:
+    branches: [main]
+    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'examples/media_native_probe.rs', '.github/workflows/media-native.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: media-native-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native Media (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CI: '1'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: media-native-${{ runner.arch }}
+          cache-workspace-crates: true
+      - name: Build native GUI and media probe
+        run: |
+          mkdir -p .artifacts/media-native
+          cargo build --locked --features gui --bin omoikane --example media_native_probe 2>&1 | tee .artifacts/media-native/build.log
+      - name: Verify owned media contracts
+        run: |
+          cargo test --locked --features gui --lib platform_media:: -- --nocapture 2>&1 | tee .artifacts/media-native/contracts.log
+      - name: Verify native capture and monitor on the main thread
+        run: cargo run --locked --features gui --example media_native_probe 2>&1 | tee .artifacts/media-native/native.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: media-native-${{ matrix.os }}
+          path: .artifacts/media-native
+          if-no-files-found: warn

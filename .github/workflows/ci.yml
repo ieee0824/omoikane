@@ -252,6 +252,11 @@ jobs:
           WPT_ROOT: .cache/wpt
           WPT_REQUIRED: "1"
         run: cargo test --locked --test p1_transform_reftests -- --nocapture
+      - name: Run media query reftests
+        env:
+          WPT_ROOT: .cache/wpt
+          WPT_REQUIRED: "1"
+        run: cargo test --locked --test p1_media_reftests -- --nocapture
       - name: Run printed page layer reftests
         env:
           WPT_ROOT: .cache/wpt
