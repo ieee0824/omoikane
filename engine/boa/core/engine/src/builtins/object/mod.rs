@@ -474,6 +474,8 @@ impl OrdinaryObject {
             }
         };
 
+        obj.set_associated_realm(context.realm());
+
         if !properties.is_undefined() {
             object_define_properties(&obj, properties, context)?;
             return Ok(obj.into());

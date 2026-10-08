@@ -3,6 +3,48 @@
     { "path": "css/css-will-change/parsing/will-change-valid.html" },
     { "path": "css/css-will-change/parsing/will-change-invalid.html" },
     { "path": "css/css-will-change/parsing/will-change-computed.html" },
+    {
+      "path": "html/semantics/forms/form-submission-0/SubmitEvent.window.js"
+    },
+    {
+      "path": "html/semantics/forms/form-submission-0/FormDataEvent.window.js"
+    },
+    {
+      "path": "dom/events/Body-FrameSet-Event-Handlers.html"
+    },
+    {
+      "path": "dom/events/event-global-set-before-handleEvent-lookup.window.js"
+    },
+    {
+      "path": "dom/events/window-event-restored-after-throwing-onerror.html"
+    },
+    {
+      "path": "dom/events/event-handler-attribute-replace-preserves-passive.html"
+    },
+    {
+      "path": "dom/events/Event-dispatch-handlers-changed.html"
+    },
+    {
+      "path": "touch-events/touch-touchevent-constructor.html"
+    },
+    {
+      "path": "touch-events/idlharness.window.js",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "Pinned mixin test demands inherited Window touch handler attributes, while Web IDL Global attributes must be own properties (and the same test separately requires own Window attributes). Only these four contradictory mixin assertions are expected; global descriptors and undefined-receiver semantics are independently checked in tests/event_interfaces.rs. See docs/dom/events.md.",
+        "issue": "https://github.com/ieee0824/omoikane/issues/1290",
+        "expires": "2026-11-07",
+        "failed_subtests": [
+          "GlobalEventHandlers interface: window must inherit property \"ontouchstart\" with the proper type",
+          "GlobalEventHandlers interface: window must inherit property \"ontouchend\" with the proper type",
+          "GlobalEventHandlers interface: window must inherit property \"ontouchmove\" with the proper type",
+          "GlobalEventHandlers interface: window must inherit property \"ontouchcancel\" with the proper type"
+        ]
+      }
+    },
+    {
+      "path": "html/dom/idlharness.https.html?include=(PopStateEvent|HashChangeEvent|PageTransitionEvent|BeforeUnloadEvent|SubmitEvent|FormDataEvent)"
+    },
     { "path": "dom/interface-objects.html" },
     { "path": "dom/ranges/StaticRange-constructor.html" },
     { "path": "dom/collections/HTMLCollection-supported-property-names.html" },

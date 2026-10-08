@@ -149,9 +149,11 @@ impl<'ctx> BuiltInBuilder<'ctx, OrdinaryObject> {
     pub(crate) fn with_intrinsic<I: IntrinsicObject>(
         realm: &'ctx Realm,
     ) -> BuiltInBuilder<'ctx, OrdinaryObject> {
+        let object = I::get(realm.intrinsics());
+        object.set_associated_realm(realm);
         BuiltInBuilder {
             realm,
-            object: I::get(realm.intrinsics()),
+            object,
             kind: OrdinaryObject,
             prototype: realm.intrinsics().constructors().object().prototype(),
         }
@@ -380,6 +382,8 @@ impl BuiltInConstructorWithPrototype<'_> {
 
     #[track_caller]
     pub(crate) fn build(mut self) {
+        self.prototype.set_associated_realm(self.realm);
+        self.constructor.set_associated_realm(self.realm);
         let length = self.length;
         let name = self.name.clone();
         let prototype = self.prototype.clone();

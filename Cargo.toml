@@ -126,3 +126,7 @@ opt-level = 1
 debug = "line-tables-only"
 debug-assertions = true
 overflow-checks = true
+
+# Retain full-input sticky matching without scanning later positions.
+[patch.crates-io]
+regress = { path = "engine/regress" }

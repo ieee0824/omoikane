@@ -1413,6 +1413,36 @@ pub(crate) struct ObjectTemplates {
 }
 
 impl ObjectTemplates {
+    pub(crate) fn associate_realm(&self, realm: &crate::realm::Realm) {
+        for template in [
+            &self.iterator_result,
+            &self.ordinary_object,
+            &self.array,
+            &self.number,
+            &self.string,
+            &self.symbol,
+            &self.bigint,
+            &self.boolean,
+            &self.regexp,
+            &self.regexp_without_proto,
+            &self.unmapped_arguments,
+            &self.mapped_arguments,
+            &self.function_with_prototype,
+            &self.function_prototype,
+            &self.function,
+            &self.async_function,
+            &self.generator_function,
+            &self.async_generator_function,
+            &self.function_without_proto,
+            &self.function_with_prototype_without_proto,
+            &self.namespace,
+            &self.with_resolvers,
+            &self.wait_async,
+        ] {
+            template.associate_realm(realm);
+        }
+    }
+
     pub(crate) fn new(root_shape: &RootShape, constructors: &StandardConstructors) -> Self {
         let root_shape = root_shape.shape();
 

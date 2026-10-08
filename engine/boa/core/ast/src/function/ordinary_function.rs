@@ -5,7 +5,7 @@ use crate::{
     join_nodes,
     operations::{ContainsSymbol, contains},
     scope::{FunctionScopes, Scope},
-    scope_analyzer::{analyze_binding_escapes, collect_bindings},
+    scope_analyzer::{analyze_binding_escapes, collect_bindings, optimize_scope_indicies},
     visitor::{VisitWith, Visitor, VisitorMut},
 };
 use boa_interner::{Interner, ToIndentedString};
@@ -280,8 +280,37 @@ impl FunctionExpression {
         scope: &Scope,
         interner: &Interner,
     ) -> Result<(), &'static str> {
+        self.analyze_scope_with_environment(strict, scope, interner, false)
+    }
+
+    /// Analyze a dynamically constructed function with its required environment.
+    ///
+    /// The compiler's function environment must also be included when assigning
+    /// indices to nested lexical and class-name environments.
+    ///
+    /// # Errors
+    /// Returns any scope or binding errors found during analysis.
+    pub fn analyze_dynamic_scope(
+        &mut self,
+        strict: bool,
+        scope: &Scope,
+        interner: &Interner,
+    ) -> Result<(), &'static str> {
+        self.analyze_scope_with_environment(strict, scope, interner, true)
+    }
+
+    fn analyze_scope_with_environment(
+        &mut self,
+        strict: bool,
+        scope: &Scope,
+        interner: &Interner,
+        requires_function_scope: bool,
+    ) -> Result<(), &'static str> {
         collect_bindings(self, strict, false, scope, interner)?;
-        analyze_binding_escapes(self, false, scope.clone(), interner)
+        analyze_binding_escapes(self, false, scope.clone(), interner)?;
+        self.scopes.requires_function_scope = requires_function_scope;
+        optimize_scope_indicies(self, scope);
+        Ok(())
     }
 }
 

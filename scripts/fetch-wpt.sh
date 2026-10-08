@@ -247,6 +247,8 @@ collect_pattern \
   "/css/css-page/page-name-and-break-003-print.html" \
   "/css/css-page/page-name-and-break-004-print.html" \
   "/css/css-page/page-name-and-break-print-ref.html"
+collect_pattern "/interfaces/" "/html/dom/" "/html/semantics/forms/form-submission-0/SubmitEvent.window.js" "/html/semantics/forms/form-submission-0/FormDataEvent.window.js" "/touch-events/" "/dom/events/Body-FrameSet-Event-Handlers.html" "/dom/events/event-global-set-before-handleEvent-lookup.window.js" "/dom/events/window-event-restored-after-throwing-onerror.html" "/dom/events/event-handler-attribute-replace-preserves-passive.html" "/dom/events/Event-dispatch-handlers-changed.html" "/common/utils.js"
+collect_pattern "/common/subset-tests-by-key.js" "/common/get-host-info.sub.js"
 current_revision="$(git_wpt rev-parse HEAD 2>/dev/null || true)"
 collect_pattern \
   "/css/css-flexbox/parsing/order-valid.html" \

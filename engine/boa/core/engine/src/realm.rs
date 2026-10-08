@@ -56,6 +56,26 @@ pub struct Realm<H: RealmHandle = Rooted<RealmInner>> {
 
 pub(crate) type RealmEdge = Realm<GcEdge<RealmInner>>;
 
+/// A traced heap edge to an object's creation realm, with opaque debug output.
+#[derive(Clone, Trace, Finalize)]
+pub(crate) struct AssociatedRealm(RealmEdge);
+
+impl AssociatedRealm {
+    pub(crate) fn new(realm: &Realm) -> Self {
+        Self(realm.to_edge())
+    }
+
+    pub(crate) fn to_rooted(&self) -> Realm {
+        self.0.to_rooted()
+    }
+}
+
+impl std::fmt::Debug for AssociatedRealm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AssociatedRealm")
+    }
+}
+
 impl Finalize for RealmEdge {}
 
 // SAFETY: Heap-owned realms contain only an explicitly traced GC edge.
@@ -157,6 +177,9 @@ impl Realm {
             }
         };
 
+        realm.intrinsics().templates().associate_realm(&realm);
+        realm.global_object().set_associated_realm(&realm);
+        realm.global_this().set_associated_realm(&realm);
         realm.initialize();
 
         Ok(realm)

@@ -20,6 +20,7 @@ use crate::{
     error::JsNativeError,
     js_string,
     property::{PropertyDescriptor, PropertyKey},
+    realm::{AssociatedRealm, Realm},
     value::PreferredType,
 };
 use boa_gc::{self, Finalize, GcEdge, GcRef, GcRefCell, GcRefMut, Rooted, Trace, Tracer};
@@ -180,10 +181,30 @@ impl JsObject {
     #[inline]
     #[must_use]
     pub fn with_object_proto(intrinsics: &Intrinsics) -> Self {
-        Self::from_proto_and_data(
+        let object = Self::from_proto_and_data(
             intrinsics.constructors().object().prototype(),
             OrdinaryObject,
-        )
+        );
+        object.borrow_mut().associated_realm =
+            intrinsics.templates().ordinary_object().associated_realm();
+        object
+    }
+
+    /// Returns the recorded creation realm without accessing author-visible
+    /// properties or the mutable prototype.
+    pub fn associated_realm(&self) -> Option<Realm> {
+        self.borrow()
+            .associated_realm
+            .as_ref()
+            .map(AssociatedRealm::to_rooted)
+    }
+
+    /// Associates a newly allocated object with its creation realm.
+    ///
+    /// Embedders should call this before exposing objects allocated without a
+    /// realm-affiliated intrinsic template. JavaScript cannot modify this slot.
+    pub fn set_associated_realm(&self, realm: &Realm) {
+        self.borrow_mut().associated_realm = Some(AssociatedRealm::new(realm));
     }
 
     /// Creates a new ordinary object, with its prototype set to null.
@@ -216,6 +237,7 @@ impl JsObject {
                 properties: PropertyMap::from_prototype_unique_shape(prototype.into()),
                 extensible: true,
                 private_elements: ThinVec::new(),
+                associated_realm: None,
             }),
             vtable: internal_methods,
         });
@@ -245,6 +267,7 @@ impl JsObject {
                 ),
                 extensible: true,
                 private_elements: ThinVec::new(),
+                associated_realm: None,
             }),
             vtable: internal_methods,
         });
@@ -884,6 +907,7 @@ impl<T: NativeObject> JsObject<T> {
                 ),
                 extensible: true,
                 private_elements: ThinVec::new(),
+                associated_realm: None,
             }),
             vtable: internal_methods,
         });
@@ -903,6 +927,7 @@ impl<T: NativeObject> JsObject<T> {
                 properties: PropertyMap::from_prototype_unique_shape(prototype.into()),
                 extensible: true,
                 private_elements: ThinVec::new(),
+                associated_realm: None,
             }),
             vtable: internal_methods,
         });

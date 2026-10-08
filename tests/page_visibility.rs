@@ -111,6 +111,36 @@ fn removing_iframe_hides_departing_document_before_teardown() {
 }
 
 #[test]
+fn removing_container_retires_loaded_and_unloaded_frame_proxies() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            "const container = document.createElement('div'); \
+             const loaded = document.createElement('iframe'); \
+             const unloaded = document.createElement('iframe'); \
+             loaded.srcdoc = '<p>child</p>'; \
+             container.append(loaded, unloaded); document.body.appendChild(container); \
+             globalThis.loadedProxy = loaded.contentWindow; \
+             globalThis.unloadedProxy = unloaded.contentWindow; \
+             globalThis.childDocument = loaded.contentDocument; \
+             globalThis.departure = []; \
+             childDocument.addEventListener('visibilitychange', () => \
+               departure.push(childDocument.visibilityState)); \
+             container.remove();",
+        )
+        .unwrap();
+    assert!(
+        runtime
+            .eval(
+                "loadedProxy.closed && unloadedProxy.closed && \
+                 childDocument.visibilityState === 'hidden' && departure.join() === 'hidden'",
+            )
+            .unwrap()
+            .to_boolean()
+    );
+}
+
+#[test]
 fn nested_iframe_loads_then_hides_all_departing_documents() {
     let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
@@ -380,7 +410,7 @@ fn cross_origin_iframe_receives_departure_events_in_its_own_realm() {
 }
 
 #[test]
-fn iframe_window_load_handler_can_initiate_visibility_work() {
+fn iframe_script_onload_replaces_the_body_load_handler() {
     let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();
     let server = FixtureWorker::spawn(move || {
@@ -416,7 +446,7 @@ fn iframe_window_load_handler_can_initiate_visibility_work() {
     let errors = runtime.take_task_errors();
     assert!(
         runtime
-            .eval("childLoaded === true && childBodyLoaded === true")
+            .eval("childLoaded === true && childBodyLoaded === false")
             .unwrap()
             .to_boolean(),
         "{diagnostic}, errors={errors:?}"

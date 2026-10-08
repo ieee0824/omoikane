@@ -88,6 +88,7 @@ mod iframe_navigation;
 mod input_bridge;
 mod nested_rendering;
 pub(crate) mod render_demand;
+mod window_event;
 pub use form_state::{FormStateRestoreMode, FormStateSnapshot};
 #[cfg(test)]
 mod layout_metrics_tests;
@@ -251,6 +252,7 @@ const LOAD_SCRIPT: &str = concat!(
     "__omoikane_dispatch_lifecycle_event('load'); ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
     "__omoikane_performance_navigation_event('loadEnd'); } catch (_) { void 0; }",
+    "__omoikane_dispatch_lifecycle_event('pageshow');",
 );
 
 thread_local! {
@@ -456,6 +458,14 @@ const DOM_BOOTSTRAP: &str = concat!(
     include_str!("dom_interfaces.js"),
     "\n",
     include_str!("dom_bootstrap.js"),
+    "\n",
+    include_str!("event_interfaces.js"),
+    "\n",
+    include_str!("touch_events.js"),
+    "\n",
+    include_str!("device_events.js"),
+    "\n",
+    include_str!("event_handlers.js"),
     "\n",
     include_str!("xpath.js"),
     "\n",
@@ -1453,6 +1463,9 @@ struct HostState {
     /// Bootstrap-private resolver that accepts only canonical DOM wrappers and
     /// returns their native node identity.
     canonical_node_identity_resolver: Option<JsValue>,
+    /// Legacy Window.event slots, isolated by the callback's Document realm.
+    current_window_events: HashMap<usize, JsValue>,
+    window_proxy_registry: Option<window_event::ProxyRegistry>,
     /// Keeps newly constructed native capabilities rooted until the trusted
     /// bootstrap module receives them through its private import.meta hook.
     bootstrap_bindings: HashMap<usize, JsObject>,
@@ -1719,6 +1732,12 @@ unsafe impl Trace for HostState {
         }
         for value in self.remote_objects.values() {
             unsafe { value.trace(tracer) };
+        }
+        for event in self.current_window_events.values() {
+            unsafe { event.trace(tracer) };
+        }
+        if let Some(registry) = &self.window_proxy_registry {
+            unsafe { registry.trace(tracer) };
         }
         if let Some(owner) = &self.worker_owner_object {
             unsafe { owner.trace(tracer) };
@@ -2027,6 +2046,8 @@ impl HostState {
             iframe_navigation: iframe_navigation::State::default(),
             form_validation: form_validation::State::default(),
             canonical_node_identity_resolver: None,
+            current_window_events: HashMap::new(),
+            window_proxy_registry: None,
             bootstrap_bindings: HashMap::new(),
             remote_objects: HashMap::new(),
             console_logs: Vec::new(),
@@ -5124,7 +5145,11 @@ impl JsRuntime {
         self.host_state.borrow().error_reporter.clone()
     }
 
-    fn with_document_sandbox_and_url(
+    /// Creates a runtime with an explicit document URL and execution limits.
+    ///
+    /// The URL establishes the initial origin and secure-context exposure before
+    /// the platform bootstrap runs. Limits apply to page evaluations and tasks.
+    pub fn with_document_sandbox_and_url(
         document: NodeHandle,
         sandbox: SandboxConfig,
         url: &str,
@@ -10285,6 +10310,7 @@ fn register_host_bindings(
     host_state: &Rc<RefCell<HostState>>,
 ) -> JsResult<BootstrapBindings> {
     let mut bindings = BootstrapBindings::new();
+    window_event::register(context, host_state, &mut bindings)?;
     let document_id = context
         .realm()
         .host_defined()
@@ -10740,8 +10766,13 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_call_event_listener"),
-            3,
+            4,
             NativeFunction::from_copy_closure(call_event_listener_native),
+        ),
+        (
+            js_string!("__omoikane_current_window_event"),
+            1,
+            NativeFunction::from_copy_closure(current_window_event_native),
         ),
         (
             js_string!("setTimeout"),
@@ -13824,6 +13855,51 @@ fn set_timeout_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     schedule_timer_from_js(args, context, false)
 }
 
+fn current_window_event_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = window_event::receiver_document_id(args.first(), context)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        Ok(state
+            .current_window_events
+            .get(&document_id)
+            .cloned()
+            .unwrap_or_default())
+    })
+}
+
+fn restore_current_window_event(document_id: usize, previous: &JsValue) -> JsResult<()> {
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        if previous.is_undefined() {
+            state.current_window_events.remove(&document_id);
+        } else {
+            state
+                .current_window_events
+                .insert(document_id, previous.clone());
+        }
+        Ok(())
+    })
+}
+
+fn event_listener_callback(listener: &JsValue, context: &mut Context) -> JsResult<JsObject> {
+    if let Some(callback) = listener.as_callable() {
+        return Ok(callback.clone());
+    }
+    let listener = listener
+        .as_object()
+        .ok_or_else(|| JsNativeError::typ().with_message("event listener is not an object"))?;
+    let handle_event = listener.get(js_string!("handleEvent"), context)?;
+    handle_event.as_callable().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("event listener handleEvent is not callable")
+            .into()
+    })
+}
+
 fn call_event_listener_native(
     _: &JsValue,
     args: &[JsValue],
@@ -13832,38 +13908,54 @@ fn call_event_listener_native(
     let listener = args.first().cloned().unwrap_or_default();
     let this = args.get(1).cloned().unwrap_or_default();
     let event = args.get(2).cloned().unwrap_or_default();
-    let callback = if let Some(callback) = listener.as_callable() {
-        callback.clone()
-    } else {
-        let Some(listener) = listener.as_object() else {
-            return Ok(JsValue::undefined());
-        };
-        let handle_event = listener
-            .get(js_string!("handleEvent"), context)
-            .map_err(|error| {
-                report_active_js_task_failure("JS_EVENT_LISTENER_FAILED", "event-listener");
-                error
-            })?;
-        let Some(callback) = handle_event.as_callable() else {
+    let in_shadow_tree = args.get(3).and_then(JsValue::as_boolean).unwrap_or(false);
+    let realm = match listener.as_callable() {
+        Some(callback) => callback.get_function_realm(context)?,
+        None => listener
+            .as_object()
+            .and_then(|object| object.associated_realm())
+            .unwrap_or_else(|| context.realm().clone()),
+    };
+    let (document_id, previous) = with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let document_id = realm
+            .host_defined()
+            .get::<ModuleDocumentId>()
+            .map(|document| document.0)
+            .unwrap_or_else(|| state.document.identity());
+        let previous = state
+            .current_window_events
+            .get(&document_id)
+            .cloned()
+            .unwrap_or_default();
+        if !in_shadow_tree {
+            state
+                .current_window_events
+                .insert(document_id, event.clone());
+        }
+        Ok((document_id, previous))
+    })?;
+    let callback = match event_listener_callback(&listener, context) {
+        Ok(callback) => callback,
+        Err(error) => {
+            restore_current_window_event(document_id, &previous)?;
             report_active_js_task_failure("JS_EVENT_LISTENER_FAILED", "event-listener");
-            return Err(JsNativeError::typ()
-                .with_message("event listener handleEvent is not callable")
-                .into());
-        };
-        callback.clone()
+            return Err(error);
+        }
     };
     context.call_with_native_continuation(
         &callback,
         &this,
         &[event],
         NativeCallContinuation::from_copy_closure_with_captures(
-            |result, (), _| {
+            |result, (document_id, previous), _| {
+                restore_current_window_event(*document_id, previous)?;
                 if result.is_err() {
                     report_active_js_task_failure("JS_EVENT_LISTENER_FAILED", "event-listener");
                 }
                 result
             },
-            (),
+            (document_id, previous),
         ),
     )
 }

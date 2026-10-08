@@ -185,6 +185,8 @@ impl Proxy {
             Self::new(target.clone(), handler.clone()),
         );
 
+        p.set_associated_realm(context.realm());
+
         // 8. Return P.
         Ok(p)
     }

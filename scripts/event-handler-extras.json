@@ -1,0 +1,16 @@
+{
+  "global": {
+    "contentvisibilityautostatechange": {
+      "reason": "Convenience handler for the implemented event; the event IDL has no handler member.",
+      "source": "https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change"
+    },
+    "scrollsnapchange": {
+      "reason": "Current event-handler table; the same specification still lists snapchanged in its IDL.",
+      "source": "https://drafts.csswg.org/css-scroll-snap-2/#event-handlers"
+    },
+    "scrollsnapchanging": {
+      "reason": "Current event-handler table; retain the pinned IDL names too.",
+      "source": "https://drafts.csswg.org/css-scroll-snap-2/#event-handlers"
+    }
+  }
+}
