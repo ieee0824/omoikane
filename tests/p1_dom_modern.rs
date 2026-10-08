@@ -2,6 +2,29 @@
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
 
+#[test]
+fn parsed_processing_instruction_observers_preserve_actual_old_data() {
+    check(
+        r#"(() => {
+        const host = document.createElement('div');
+        host.setHTMLUnsafe('<?processing data?><!--ordinary-->');
+        const instruction = host.firstChild;
+        if (instruction.nodeType !== 7 || instruction.target !== 'processing' ||
+            instruction.data !== 'data' || host.lastChild.nodeType !== 8) return false;
+        const observer = new MutationObserver(() => {});
+        observer.observe(instruction, {characterData:true, characterDataOldValue:true});
+        instruction.data = 'CHANGED';
+        instruction.data = 'CHANGED';
+        instruction.replaceData(0, 7, 'DONE');
+        const records = observer.takeRecords();
+        return records.length === 3 && records.every(record =>
+            record.type === 'characterData' && record.target === instruction) &&
+            records.map(record => record.oldValue).join('|') === 'data|CHANGED|CHANGED' &&
+            instruction.data === 'DONE';
+    })()"#,
+    );
+}
+
 fn check(script: &str) {
     let document = TreeBuilder::parse("<!doctype html><html><body></body></html>").document();
     let mut runtime = JsRuntime::with_document(document).unwrap();

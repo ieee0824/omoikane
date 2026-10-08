@@ -334,7 +334,16 @@
     { "path": "dom/nodes/MutationObserver-takeRecords.html" },
     { "path": "dom/nodes/MutationObserver-disconnect.html" },
     { "path": "dom/nodes/MutationObserver-attributes.html" },
-    { "path": "dom/nodes/MutationObserver-characterData.html" },
+    {
+      "path": "dom/nodes/MutationObserver-characterData.html",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "The 2014 fixture expects <?processing data?> to be a bogus comment with data ?processing data?. Current HTML processing-instruction tokenization produces a ProcessingInstruction with data data. Keep the original fixture and assertions; only this named subtest is a tracked specification mismatch.",
+        "issue": "#1323",
+        "expires": "2026-11-08",
+        "failed_subtests": ["characterData ProcessingInstruction: data mutations"]
+      }
+    },
     { "path": "html/semantics/popovers/toggleevent-interface.html" },
     { "path": "html/semantics/popovers/togglePopover.html" },
     { "path": "fullscreen/api/document-fullscreen-enabled.html" },
