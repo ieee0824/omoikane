@@ -19,7 +19,7 @@ use crate::{
     js_string,
     native_function::{NativeFunction, NativeFunctionObject},
     property::{Attribute, PropertyDescriptor, PropertyKey},
-    realm::Realm,
+    realm::{AssociatedRealm, Realm},
     string::StaticJsStrings,
 };
 
@@ -181,6 +181,8 @@ pub struct Object<T: ?Sized> {
     pub(crate) extensible: bool,
     /// The `[[PrivateElements]]` internal slot.
     private_elements: ThinVec<(PrivateName, PrivateElement)>,
+    /// Creation realm, independent of mutable prototype and properties.
+    associated_realm: Option<AssociatedRealm>,
     /// The inner object data
     data: ObjectData<T>,
 }
@@ -191,6 +193,7 @@ impl<T: Default> Default for Object<T> {
             properties: PropertyMap::default(),
             extensible: true,
             private_elements: ThinVec::new(),
+            associated_realm: None,
             data: ObjectData::default(),
         }
     }
@@ -657,6 +660,7 @@ impl<'ctx> ConstructorBuilder<'ctx> {
     /// Create a new `ConstructorBuilder`.
     #[inline]
     pub fn new(context: &'ctx mut Context, function: NativeFunction) -> ConstructorBuilder<'ctx> {
+        let associated_realm = Some(AssociatedRealm::new(context.realm()));
         Self {
             context,
             _no_gc: boa_gc::NoGcScope::new(),
@@ -666,12 +670,14 @@ impl<'ctx> ConstructorBuilder<'ctx> {
                 properties: PropertyMap::default(),
                 extensible: true,
                 private_elements: ThinVec::new(),
+                associated_realm: associated_realm.clone(),
             },
             prototype: Object {
                 data: ObjectData::new(OrdinaryObject),
                 properties: PropertyMap::default(),
                 extensible: true,
                 private_elements: ThinVec::new(),
+                associated_realm,
             },
             length: 0,
             name: js_string!(),
@@ -938,6 +944,7 @@ impl<'ctx> ConstructorBuilder<'ctx> {
                 properties: self.constructor_object.properties,
                 extensible: self.constructor_object.extensible,
                 private_elements: self.constructor_object.private_elements,
+                associated_realm: Some(AssociatedRealm::new(self.context.realm())),
                 data: ObjectData::new(data),
             };
 

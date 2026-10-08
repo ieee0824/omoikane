@@ -602,6 +602,14 @@ fn native_function_construct(
                         .into())
                 }
             }
+        })
+        .inspect(|object| {
+            // Native constructors allocate in their own Realm, even when
+            // new.target supplies a prototype from another Realm. Preserve
+            // an existing affiliation when a constructor returns an object.
+            if object.associated_realm().is_none() {
+                object.set_associated_realm(context.realm());
+            }
         });
 
     context.vm.native_active_function = previous_active_function;

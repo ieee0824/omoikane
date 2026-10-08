@@ -1,4 +1,4 @@
-use boa_gc::{Finalize, GcEdge, Trace};
+use boa_gc::{Finalize, GcEdge, GcRefCell, Trace};
 use thin_vec::ThinVec;
 
 use crate::{
@@ -8,6 +8,7 @@ use crate::{
         shape::slot::SlotAttributes,
     },
     property::{Attribute, PropertyKey},
+    realm::{AssociatedRealm, Realm},
 };
 
 use super::{Inner, SharedShape, TransitionKey};
@@ -17,13 +18,23 @@ use super::{Inner, SharedShape, TransitionKey};
 #[derive(Debug, Clone, Trace, Finalize)]
 pub(crate) struct ObjectTemplate {
     shape: SharedShape<GcEdge<Inner>>,
+    associated_realm: GcRefCell<Option<AssociatedRealm>>,
 }
 
 impl ObjectTemplate {
+    pub(crate) fn associate_realm(&self, realm: &Realm) {
+        *self.associated_realm.borrow_mut() = Some(AssociatedRealm::new(realm));
+    }
+
+    pub(crate) fn associated_realm(&self) -> Option<AssociatedRealm> {
+        self.associated_realm.borrow().clone()
+    }
+
     /// Create a new [`ObjectTemplate`]
     pub(crate) fn new(shape: &SharedShape) -> Self {
         Self {
             shape: shape.clone().into_edge(),
+            associated_realm: GcRefCell::default(),
         }
     }
 
@@ -32,6 +43,7 @@ impl ObjectTemplate {
         let shape = shape.change_prototype_transition(Some(prototype.to_edge()));
         Self {
             shape: shape.into_edge(),
+            associated_realm: GcRefCell::default(),
         }
     }
 
@@ -138,6 +150,7 @@ impl ObjectTemplate {
                 IndexedProperties::default(),
             ),
             private_elements: ThinVec::new(),
+            associated_realm: self.associated_realm(),
         };
 
         object.properties.storage = storage;
@@ -161,6 +174,7 @@ impl ObjectTemplate {
             extensible: true,
             properties: PropertyMap::new(self.shape.root_handle().into(), indexed_properties),
             private_elements: ThinVec::new(),
+            associated_realm: self.associated_realm(),
         };
 
         object.properties.storage = storage;

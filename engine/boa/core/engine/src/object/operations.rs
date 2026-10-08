@@ -882,8 +882,13 @@ impl JsObject {
 
     /// Abstract operation [`GetFunctionRealm`][spec].
     ///
+    /// Resolves bound functions and callable proxies without reading
+    /// author-visible properties. A revoked proxy returns an error.
+    /// Embedders can use this to associate a callback with its global object.
+    /// Non-function objects fall back to the current context's realm.
+    ///
     /// [spec]: https://tc39.es/ecma262/#sec-getfunctionrealm
-    pub(crate) fn get_function_realm(&self, context: &mut Context) -> JsResult<Realm> {
+    pub fn get_function_realm(&self, context: &mut Context) -> JsResult<Realm> {
         if let Some(fun) = self.downcast_ref::<OrdinaryFunction>() {
             return Ok(fun.realm());
         }
