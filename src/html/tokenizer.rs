@@ -5,10 +5,16 @@
 
 use std::fmt;
 
+mod input;
+mod processing_instruction;
+
+use input::{InputCodePoint, InputDecoder, TextBuffer};
+
 /// A parsed HTML attribute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attribute {
     name: String,
+    utf16: Option<Vec<u16>>,
     value: String,
 }
 
@@ -17,8 +23,31 @@ impl Attribute {
     pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            utf16: None,
             value: value.into(),
         }
+    }
+
+    fn from_utf16(name: String, units: Vec<u16>) -> Self {
+        match String::from_utf16(&units) {
+            Ok(value) => Self {
+                name,
+                value,
+                utf16: None,
+            },
+            Err(_) => Self {
+                name,
+                value: String::from_utf16_lossy(&units),
+                utf16: Some(units),
+            },
+        }
+    }
+
+    /// Returns the exact attribute value code units, including unpaired surrogates.
+    pub fn value_utf16(&self) -> Vec<u16> {
+        self.utf16
+            .clone()
+            .unwrap_or_else(|| self.value.encode_utf16().collect())
     }
 
     /// Returns the attribute name.
@@ -77,8 +106,22 @@ pub enum Token {
         name: String,
     },
     Comment(String),
+    /// Exact comment data containing unpaired UTF-16 surrogates.
+    CommentUtf16(Vec<u16>),
+    /// Exact processing-instruction data containing unpaired surrogates.
+    ProcessingInstructionUtf16 {
+        target: String,
+        data: Vec<u16>,
+    },
+    /// A processing instruction with a case-sensitive target and literal data.
+    ProcessingInstruction {
+        target: String,
+        data: String,
+    },
     Doctype(DoctypeToken),
     Character(String),
+    /// A single unpaired UTF-16 surrogate character from the source.
+    Surrogate(u16),
     Eof,
 }
 
@@ -89,6 +132,10 @@ pub enum HtmlParseError {
     MissingTagName,
     InvalidCharacterReference,
     InvalidDoctype,
+    /// A target has an invalid first or subsequent character.
+    InvalidProcessingInstructionTarget,
+    /// XML-specific instructions are treated as bogus comments in HTML.
+    DisallowedProcessingInstructionTarget,
 }
 
 impl fmt::Display for HtmlParseError {
@@ -98,6 +145,12 @@ impl fmt::Display for HtmlParseError {
             Self::MissingTagName => write!(f, "missing tag name"),
             Self::InvalidCharacterReference => write!(f, "invalid character reference"),
             Self::InvalidDoctype => write!(f, "invalid doctype"),
+            Self::InvalidProcessingInstructionTarget => {
+                write!(f, "invalid processing instruction target")
+            }
+            Self::DisallowedProcessingInstructionTarget => {
+                write!(f, "disallowed processing instruction target")
+            }
         }
     }
 }
@@ -198,13 +251,44 @@ enum State {
 /// ```
 #[derive(Debug, Clone)]
 pub struct Tokenizer<'a> {
-    input: &'a str,
+    input: InputSource<'a>,
+    scripting_enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+enum InputSource<'a> {
+    Scalar(&'a str),
+    Utf16(&'a [u16]),
 }
 
 impl<'a> Tokenizer<'a> {
     /// Creates a tokenizer for the given input.
     pub fn new(input: &'a str) -> Self {
-        Self { input }
+        Self {
+            input: InputSource::Scalar(input),
+            scripting_enabled: true,
+        }
+    }
+
+    /// Creates a short-lived tokenizer view over exact UTF-16 input.
+    pub(crate) fn from_utf16(input: &'a [u16]) -> Self {
+        Self {
+            input: InputSource::Utf16(input),
+            scripting_enabled: true,
+        }
+    }
+
+    fn push_source(&self, tokenizer: &mut IncrementalTokenizer) {
+        match self.input {
+            InputSource::Scalar(input) => tokenizer.push_input(input),
+            InputSource::Utf16(input) => tokenizer.push_input_utf16(input),
+        }
+    }
+
+    /// Configures whether noscript uses the scripting-enabled content model.
+    pub(crate) fn with_scripting(mut self, enabled: bool) -> Self {
+        self.scripting_enabled = enabled;
+        self
     }
 
     /// Tokenizes the full input and returns the produced tokens.
@@ -215,7 +299,8 @@ impl<'a> Tokenizer<'a> {
     /// Tokenizes the full input and also returns recoverable parse errors.
     pub fn tokenize_with_errors(&self) -> (Vec<Token>, Vec<HtmlParseError>) {
         let mut tokenizer = IncrementalTokenizer::new();
-        tokenizer.push_input(self.input);
+        tokenizer.scripting_enabled = self.scripting_enabled;
+        self.push_source(&mut tokenizer);
         tokenizer.drain(true, false)
     }
 
@@ -226,12 +311,13 @@ impl<'a> Tokenizer<'a> {
         context_name: &str,
     ) -> (Vec<Token>, Vec<HtmlParseError>) {
         let mut tokenizer = IncrementalTokenizer::new();
+        tokenizer.scripting_enabled = self.scripting_enabled;
         let context_name = context_name.to_ascii_lowercase();
-        tokenizer.state = raw_next_state(&context_name, false);
+        tokenizer.state = raw_next_state(&context_name, false, self.scripting_enabled);
         if tokenizer.state != State::Data {
             tokenizer.last_start_tag_name = context_name;
         }
-        tokenizer.push_input(self.input);
+        self.push_source(&mut tokenizer);
         tokenizer.drain(true, false)
     }
 }
@@ -239,16 +325,18 @@ impl<'a> Tokenizer<'a> {
 /// Retains lexical state across writes; only an explicit finish emits EOF.
 #[derive(Debug)]
 pub(crate) struct IncrementalTokenizer {
-    pending: Vec<char>,
+    scripting_enabled: bool,
+    pending: Vec<InputCodePoint>,
+    input_decoder: InputDecoder,
     state: State,
-    text_buffer: String,
+    text_buffer: TextBuffer,
     current_tag_name: String,
     current_end_tag_name: String,
     current_attributes: Vec<Attribute>,
     current_attr_name: String,
-    current_attr_value: String,
+    current_attr_value: TextBuffer,
     current_self_closing: bool,
-    current_comment: String,
+    current_comment: TextBuffer,
     current_doctype_name: String,
     current_doctype_public_id: Option<String>,
     current_doctype_system_id: Option<String>,
@@ -260,16 +348,18 @@ pub(crate) struct IncrementalTokenizer {
 impl IncrementalTokenizer {
     pub(crate) fn new() -> Self {
         Self {
+            scripting_enabled: true,
             pending: Vec::new(),
+            input_decoder: InputDecoder::default(),
             state: State::Data,
-            text_buffer: String::new(),
+            text_buffer: TextBuffer::default(),
             current_tag_name: String::new(),
             current_end_tag_name: String::new(),
             current_attributes: Vec::new(),
             current_attr_name: String::new(),
-            current_attr_value: String::new(),
+            current_attr_value: TextBuffer::default(),
             current_self_closing: false,
-            current_comment: String::new(),
+            current_comment: TextBuffer::default(),
             current_doctype_name: String::new(),
             current_doctype_public_id: None,
             current_doctype_system_id: None,
@@ -280,12 +370,31 @@ impl IncrementalTokenizer {
     }
 
     pub(crate) fn push_input(&mut self, input: &str) {
-        self.pending.extend(input.chars());
+        self.push_input_utf16(&input.encode_utf16().collect::<Vec<u16>>());
     }
 
-    /// Temporarily hide the outer write's tail during reentrant parsing.
+    pub(crate) fn push_input_utf16(&mut self, units: &[u16]) {
+        self.input_decoder.push(units, &mut self.pending);
+    }
+
+    pub(crate) fn finish_input_chunk(&mut self) {
+        self.input_decoder.finish(&mut self.pending);
+    }
+
+    /// Takes unconsumed source units, including a pending high surrogate.
+    pub(crate) fn take_pending_input_utf16(&mut self) -> Vec<u16> {
+        self.input_decoder.finish(&mut self.pending);
+        let mut units = Vec::new();
+        for point in std::mem::take(&mut self.pending) {
+            point.append_utf16(&mut units);
+        }
+        units
+    }
+
+    /// Temporarily hide the outer scalar write's tail during reentrant parsing.
     pub(crate) fn take_pending_input(&mut self) -> String {
-        std::mem::take(&mut self.pending).into_iter().collect()
+        String::from_utf16(&self.take_pending_input_utf16())
+            .expect("scalar write input must contain valid UTF-16")
     }
 
     pub(crate) fn drain(
@@ -293,7 +402,10 @@ impl IncrementalTokenizer {
         eof: bool,
         stop_at_script: bool,
     ) -> (Vec<Token>, Vec<HtmlParseError>) {
-        let mut cursor = Cursor::new(std::mem::take(&mut self.pending));
+        if eof {
+            self.input_decoder.finish(&mut self.pending);
+        }
+        let mut cursor = Cursor::from_code_points(std::mem::take(&mut self.pending));
         let mut tokens = Vec::new();
         let mut errors = Vec::new();
         let mut state = self.state;
@@ -334,9 +446,11 @@ impl IncrementalTokenizer {
                             text_buffer.push('&');
                         }
                     },
-                    _ => text_buffer.push(ch),
+                    _ => text_buffer.push_code_point(cursor.consumed_code_point().unwrap()),
                 },
-                State::PlainText => text_buffer.push(ch),
+                State::PlainText => {
+                    text_buffer.push_code_point(cursor.consumed_code_point().unwrap())
+                }
                 State::TagOpen => match ch {
                     '/' => {
                         current_end_tag_name.clear();
@@ -344,15 +458,11 @@ impl IncrementalTokenizer {
                     }
                     '!' => state = State::MarkupDeclarationOpen,
                     '?' => {
-                        current_comment.clear();
-                        current_comment.push('?');
-                        while let Some(next) = cursor.consume() {
-                            if next == '>' {
-                                break;
-                            }
-                            current_comment.push(next);
+                        if let Some(token) =
+                            processing_instruction::consume(&mut cursor, &mut errors)
+                        {
+                            tokens.push(token);
                         }
-                        tokens.push(Token::Comment(std::mem::take(&mut current_comment)));
                         state = State::Data;
                     }
                     c if is_tag_name_start(c) => {
@@ -365,7 +475,7 @@ impl IncrementalTokenizer {
                     _ => {
                         errors.push(HtmlParseError::MissingTagName);
                         text_buffer.push('<');
-                        text_buffer.push(ch);
+                        text_buffer.push_code_point(cursor.consumed_code_point().unwrap());
                         state = State::Data;
                     }
                 },
@@ -382,7 +492,7 @@ impl IncrementalTokenizer {
                     _ => {
                         errors.push(HtmlParseError::MissingTagName);
                         text_buffer.push_str("</");
-                        text_buffer.push(ch);
+                        text_buffer.push_code_point(cursor.consumed_code_point().unwrap());
                         state = State::Data;
                     }
                 },
@@ -401,6 +511,7 @@ impl IncrementalTokenizer {
                             &mut current_attributes,
                             &mut current_self_closing,
                             &mut last_start_tag_name,
+                            self.scripting_enabled,
                         );
                     }
                     c => {
@@ -422,6 +533,7 @@ impl IncrementalTokenizer {
                             &mut current_attributes,
                             &mut current_self_closing,
                             &mut last_start_tag_name,
+                            self.scripting_enabled,
                         );
                     }
                     _ => {
@@ -457,6 +569,7 @@ impl IncrementalTokenizer {
                             &mut current_attributes,
                             &mut current_self_closing,
                             &mut last_start_tag_name,
+                            self.scripting_enabled,
                         );
                     }
                     c => current_attr_name.push(c.to_ascii_lowercase()),
@@ -485,6 +598,7 @@ impl IncrementalTokenizer {
                             &mut current_attributes,
                             &mut current_self_closing,
                             &mut last_start_tag_name,
+                            self.scripting_enabled,
                         );
                     }
                     _ => {
@@ -514,10 +628,11 @@ impl IncrementalTokenizer {
                             &mut current_attributes,
                             &mut current_self_closing,
                             &mut last_start_tag_name,
+                            self.scripting_enabled,
                         );
                     }
                     _ => {
-                        current_attr_value.push(ch);
+                        current_attr_value.push_code_point(cursor.consumed_code_point().unwrap());
                         state = State::AttributeValueUnquoted;
                     }
                 },
@@ -537,7 +652,7 @@ impl IncrementalTokenizer {
                             current_attr_value.push('&');
                         }
                     },
-                    _ => current_attr_value.push(ch),
+                    _ => current_attr_value.push_code_point(cursor.consumed_code_point().unwrap()),
                 },
                 State::AttributeValueSingleQuoted => match ch {
                     '\'' => {
@@ -555,7 +670,7 @@ impl IncrementalTokenizer {
                             current_attr_value.push('&');
                         }
                     },
-                    _ => current_attr_value.push(ch),
+                    _ => current_attr_value.push_code_point(cursor.consumed_code_point().unwrap()),
                 },
                 State::AttributeValueUnquoted => match ch {
                     c if is_html_whitespace(c) => {
@@ -586,9 +701,10 @@ impl IncrementalTokenizer {
                             &mut current_attributes,
                             &mut current_self_closing,
                             &mut last_start_tag_name,
+                            self.scripting_enabled,
                         );
                     }
-                    _ => current_attr_value.push(ch),
+                    _ => current_attr_value.push_code_point(cursor.consumed_code_point().unwrap()),
                 },
                 State::AfterAttributeValueQuoted => match ch {
                     c if is_html_whitespace(c) => state = State::BeforeAttributeName,
@@ -601,6 +717,7 @@ impl IncrementalTokenizer {
                             &mut current_attributes,
                             &mut current_self_closing,
                             &mut last_start_tag_name,
+                            self.scripting_enabled,
                         );
                     }
                     _ => {
@@ -621,6 +738,7 @@ impl IncrementalTokenizer {
                             &mut current_attributes,
                             &mut current_self_closing,
                             &mut last_start_tag_name,
+                            self.scripting_enabled,
                         );
                     }
                     _ => {
@@ -635,10 +753,14 @@ impl IncrementalTokenizer {
                         state = State::CommentStart;
                     } else if ch.eq_ignore_ascii_case(&'d') {
                         let mut lookahead = String::from(ch);
+                        let mut lookahead_data = TextBuffer::default();
+                        lookahead_data.push_code_point(cursor.consumed_code_point().unwrap());
                         let mut doctype_candidate_complete = true;
                         for _ in 0..6 {
                             if let Some(next) = cursor.consume() {
                                 lookahead.push(next);
+                                lookahead_data
+                                    .push_code_point(cursor.consumed_code_point().unwrap());
                             } else {
                                 errors.push(HtmlParseError::InvalidDoctype);
                                 doctype_candidate_complete = false;
@@ -656,12 +778,12 @@ impl IncrementalTokenizer {
                             if doctype_candidate_complete {
                                 errors.push(HtmlParseError::InvalidDoctype);
                             }
-                            current_comment = lookahead;
+                            current_comment = lookahead_data;
                             state = State::Comment;
                         }
                     } else {
                         current_comment.clear();
-                        current_comment.push(ch);
+                        current_comment.push_code_point(cursor.consumed_code_point().unwrap());
                         state = State::Comment;
                     }
                 }
@@ -672,7 +794,7 @@ impl IncrementalTokenizer {
                         state = State::Data;
                     }
                     _ => {
-                        current_comment.push(ch);
+                        current_comment.push_code_point(cursor.consumed_code_point().unwrap());
                         state = State::Comment;
                     }
                 },
@@ -684,31 +806,31 @@ impl IncrementalTokenizer {
                     }
                     _ => {
                         current_comment.push('-');
-                        current_comment.push(ch);
+                        current_comment.push_code_point(cursor.consumed_code_point().unwrap());
                         state = State::Comment;
                     }
                 },
                 State::Comment => match ch {
                     '-' => state = State::CommentEndDash,
-                    _ => current_comment.push(ch),
+                    _ => current_comment.push_code_point(cursor.consumed_code_point().unwrap()),
                 },
                 State::CommentEndDash => match ch {
                     '-' => state = State::CommentEnd,
                     _ => {
                         current_comment.push('-');
-                        current_comment.push(ch);
+                        current_comment.push_code_point(cursor.consumed_code_point().unwrap());
                         state = State::Comment;
                     }
                 },
                 State::CommentEnd => match ch {
                     '>' => {
-                        tokens.push(Token::Comment(std::mem::take(&mut current_comment)));
+                        tokens.push(comment_token(std::mem::take(&mut current_comment)));
                         state = State::Data;
                     }
                     '-' => current_comment.push('-'),
                     _ => {
                         current_comment.push_str("--");
-                        current_comment.push(ch);
+                        current_comment.push_code_point(cursor.consumed_code_point().unwrap());
                         state = State::Comment;
                     }
                 },
@@ -748,7 +870,7 @@ impl IncrementalTokenizer {
                 // --- RAWTEXT (§13.2.5.3–13.2.5.6) ---
                 State::RawText => match ch {
                     '<' => state = State::RawTextLessThanSign,
-                    _ => text_buffer.push(ch),
+                    _ => text_buffer.push_code_point(cursor.consumed_code_point().unwrap()),
                 },
                 State::RawTextLessThanSign => match ch {
                     '/' => {
@@ -804,7 +926,7 @@ impl IncrementalTokenizer {
                         }
                     },
                     '<' => state = State::RcDataLessThanSign,
-                    _ => text_buffer.push(ch),
+                    _ => text_buffer.push_code_point(cursor.consumed_code_point().unwrap()),
                 },
                 State::RcDataLessThanSign => match ch {
                     '/' => {
@@ -853,7 +975,7 @@ impl IncrementalTokenizer {
                 // --- Script data (§13.2.5.4, 13.2.5.14–13.2.5.34) ---
                 State::ScriptData => match ch {
                     '<' => state = State::ScriptDataLessThanSign,
-                    _ => text_buffer.push(ch),
+                    _ => text_buffer.push_code_point(cursor.consumed_code_point().unwrap()),
                 },
                 State::ScriptDataLessThanSign => match ch {
                     '/' => {
@@ -929,7 +1051,7 @@ impl IncrementalTokenizer {
                         state = State::ScriptDataEscapedDash;
                     }
                     '<' => state = State::ScriptDataEscapedLessThanSign,
-                    _ => text_buffer.push(ch),
+                    _ => text_buffer.push_code_point(cursor.consumed_code_point().unwrap()),
                 },
                 State::ScriptDataEscapedDash => match ch {
                     '-' => {
@@ -938,7 +1060,7 @@ impl IncrementalTokenizer {
                     }
                     '<' => state = State::ScriptDataEscapedLessThanSign,
                     _ => {
-                        text_buffer.push(ch);
+                        text_buffer.push_code_point(cursor.consumed_code_point().unwrap());
                         state = State::ScriptDataEscaped;
                     }
                 },
@@ -950,7 +1072,7 @@ impl IncrementalTokenizer {
                         state = State::ScriptData;
                     }
                     _ => {
-                        text_buffer.push(ch);
+                        text_buffer.push_code_point(cursor.consumed_code_point().unwrap());
                         state = State::ScriptDataEscaped;
                     }
                 },
@@ -1030,7 +1152,7 @@ impl IncrementalTokenizer {
                         text_buffer.push('<');
                         state = State::ScriptDataDoubleEscapedLessThanSign;
                     }
-                    _ => text_buffer.push(ch),
+                    _ => text_buffer.push_code_point(cursor.consumed_code_point().unwrap()),
                 },
                 State::ScriptDataDoubleEscapedDash => match ch {
                     '-' => {
@@ -1042,7 +1164,7 @@ impl IncrementalTokenizer {
                         state = State::ScriptDataDoubleEscapedLessThanSign;
                     }
                     _ => {
-                        text_buffer.push(ch);
+                        text_buffer.push_code_point(cursor.consumed_code_point().unwrap());
                         state = State::ScriptDataDoubleEscaped;
                     }
                 },
@@ -1057,7 +1179,7 @@ impl IncrementalTokenizer {
                         state = State::ScriptData;
                     }
                     _ => {
-                        text_buffer.push(ch);
+                        text_buffer.push_code_point(cursor.consumed_code_point().unwrap());
                         state = State::ScriptDataDoubleEscaped;
                     }
                 },
@@ -1100,7 +1222,7 @@ impl IncrementalTokenizer {
         }
 
         flush_text(&mut text_buffer, &mut tokens);
-        self.pending = cursor.chars.split_off(cursor.index);
+        self.pending = cursor.source.split_off(cursor.index);
         self.state = state;
         self.text_buffer = text_buffer;
         self.current_tag_name = current_tag_name;
@@ -1269,17 +1391,36 @@ mod incremental_tests {
 #[derive(Debug, Clone)]
 struct Cursor {
     chars: Vec<char>,
+    source: Vec<InputCodePoint>,
     index: usize,
     can_reconsume: bool,
 }
 
 impl Cursor {
     fn new(chars: Vec<char>) -> Self {
+        Self::from_code_points(chars.into_iter().map(InputCodePoint::Scalar).collect())
+    }
+
+    fn from_code_points(source: Vec<InputCodePoint>) -> Self {
+        let chars = source
+            .iter()
+            .map(|point| match point {
+                InputCodePoint::Scalar(value) => *value,
+                InputCodePoint::Surrogate(_) => '\u{fffd}',
+            })
+            .collect();
         Self {
             chars,
+            source,
             index: 0,
             can_reconsume: false,
         }
+    }
+
+    fn consumed_code_point(&self) -> Option<InputCodePoint> {
+        self.index
+            .checked_sub(1)
+            .and_then(|index| self.source.get(index).copied())
     }
 
     fn consume(&mut self) -> Option<char> {
@@ -1309,15 +1450,41 @@ fn is_html_whitespace(ch: char) -> bool {
     matches!(ch, '\t' | '\n' | '\x0C' | '\r' | ' ')
 }
 
-fn flush_text(buffer: &mut String, tokens: &mut Vec<Token>) {
-    if !buffer.is_empty() {
-        tokens.push(Token::Character(std::mem::take(buffer)));
+fn comment_token(mut data: TextBuffer) -> Token {
+    let units = data.take().unwrap_or_default();
+    match String::from_utf16(&units) {
+        Ok(data) => Token::Comment(data),
+        Err(_) => Token::CommentUtf16(units),
     }
 }
 
-fn push_attribute(attributes: &mut Vec<Attribute>, name: &mut String, value: &mut String) {
+fn flush_text(buffer: &mut TextBuffer, tokens: &mut Vec<Token>) {
+    let Some(units) = buffer.take() else {
+        return;
+    };
+    let mut scalar = String::new();
+    for point in char::decode_utf16(units) {
+        match point {
+            Ok(value) => scalar.push(value),
+            Err(error) => {
+                if !scalar.is_empty() {
+                    tokens.push(Token::Character(std::mem::take(&mut scalar)));
+                }
+                tokens.push(Token::Surrogate(error.unpaired_surrogate()));
+            }
+        }
+    }
+    if !scalar.is_empty() {
+        tokens.push(Token::Character(scalar));
+    }
+}
+
+fn push_attribute(attributes: &mut Vec<Attribute>, name: &mut String, value: &mut TextBuffer) {
     if !name.is_empty() {
-        attributes.push(Attribute::new(std::mem::take(name), std::mem::take(value)));
+        attributes.push(Attribute::from_utf16(
+            std::mem::take(name),
+            value.take().unwrap_or_default(),
+        ));
     }
 }
 
@@ -1359,6 +1526,7 @@ fn close_current_tag(
     current_attributes: &mut Vec<Attribute>,
     current_self_closing: &mut bool,
     last_start_tag_name: &mut String,
+    scripting_enabled: bool,
 ) -> State {
     emit_tag(
         tokens,
@@ -1368,7 +1536,7 @@ fn close_current_tag(
         *current_self_closing,
     );
     let next_state = if current_end_tag_name.is_empty() {
-        let next = raw_next_state(current_tag_name, *current_self_closing);
+        let next = raw_next_state(current_tag_name, *current_self_closing, scripting_enabled);
         if next != State::Data {
             *last_start_tag_name = current_tag_name.clone();
         }
@@ -1389,13 +1557,14 @@ fn close_current_tag(
 /// completion before tree construction, the (deterministic, tag-name-driven)
 /// rule lives here instead. Non-raw elements and any self-closing start tag
 /// stay in the [`State::Data`] content model.
-fn raw_next_state(tag_name: &str, self_closing: bool) -> State {
+fn raw_next_state(tag_name: &str, self_closing: bool, scripting_enabled: bool) -> State {
     if self_closing {
         return State::Data;
     }
     match tag_name {
         "script" => State::ScriptData,
-        "style" | "xmp" | "noembed" | "noframes" | "noscript" => State::RawText,
+        "style" | "xmp" | "noembed" | "noframes" => State::RawText,
+        "noscript" if scripting_enabled => State::RawText,
         "title" | "textarea" => State::RcData,
         "plaintext" => State::PlainText,
         _ => State::Data,
@@ -1423,7 +1592,7 @@ fn raw_end_tag_name_step(
     ch: char,
     temp_buffer: &mut String,
     last_start_tag_name: &str,
-    text_buffer: &mut String,
+    text_buffer: &mut TextBuffer,
     tokens: &mut Vec<Token>,
     current_end_tag_name: &mut String,
     current_tag_name: &mut String,
@@ -1826,6 +1995,17 @@ fn step_doctype_state(
 }
 
 fn consume_character_reference(cursor: &mut Cursor) -> Result<String, HtmlParseError> {
+    let index = cursor.index;
+    let can_reconsume = cursor.can_reconsume;
+    let result = consume_character_reference_impl(cursor);
+    if result.is_err() {
+        cursor.index = index;
+        cursor.can_reconsume = can_reconsume;
+    }
+    result
+}
+
+fn consume_character_reference_impl(cursor: &mut Cursor) -> Result<String, HtmlParseError> {
     let mut entity = String::new();
 
     while let Some(ch) = cursor.peek() {
@@ -1930,7 +2110,7 @@ mod tests {
     }
 
     #[test]
-    fn question_mark_markup_is_a_bogus_comment() {
+    fn question_mark_markup_produces_a_processing_instruction() {
         assert_eq!(
             Tokenizer::new("<p><?processing data?></p>").tokenize(),
             vec![
@@ -1939,7 +2119,10 @@ mod tests {
                     attributes: vec![],
                     self_closing: false
                 },
-                Token::Comment("?processing data?".into()),
+                Token::ProcessingInstruction {
+                    target: "processing".into(),
+                    data: "data".into()
+                },
                 Token::EndTag { name: "p".into() },
                 Token::Eof,
             ]
@@ -2230,5 +2413,80 @@ mod tests {
         // following markup is parsed normally.
         let html = "<script src=x />text<b>bold</b>";
         assert_eq!(count_start_tags(html, "b"), 1);
+    }
+}
+
+#[cfg(test)]
+mod utf16_source_tests {
+    use super::*;
+
+    #[test]
+    fn reconsumption_keeps_surrogate_provenance_separate_from_replacement() {
+        let mut cursor = Cursor::from_code_points(vec![
+            InputCodePoint::Surrogate(0xd800),
+            InputCodePoint::Scalar('\u{fffd}'),
+        ]);
+        assert_eq!(cursor.consume(), Some('\u{fffd}'));
+        assert_eq!(
+            cursor.consumed_code_point(),
+            Some(InputCodePoint::Surrogate(0xd800))
+        );
+        cursor.reconsume();
+        assert_eq!(cursor.consume(), Some('\u{fffd}'));
+        assert_eq!(
+            cursor.consumed_code_point(),
+            Some(InputCodePoint::Surrogate(0xd800))
+        );
+        cursor.consume();
+        assert_eq!(
+            cursor.consumed_code_point(),
+            Some(InputCodePoint::Scalar('\u{fffd}'))
+        );
+    }
+
+    #[test]
+    fn taking_and_restoring_pending_input_preserves_split_surrogates() {
+        let mut tokenizer = IncrementalTokenizer::new();
+        let units = [0xfffd, 0xdc00, 0xd800];
+        tokenizer.push_input_utf16(&units);
+        let pending = tokenizer.take_pending_input_utf16();
+        assert_eq!(pending, units);
+        tokenizer.push_input_utf16(&pending);
+        tokenizer.push_input_utf16(&[0xdc00]);
+        assert_eq!(
+            tokenizer.take_pending_input_utf16(),
+            [0xfffd, 0xdc00, 0xd800, 0xdc00]
+        );
+    }
+}
+
+#[cfg(test)]
+mod utf16_character_token_tests {
+    use super::*;
+
+    #[test]
+    fn character_tokens_preserve_source_units_in_all_text_content_models() {
+        for context in ["body", "title", "textarea", "style", "script", "plaintext"] {
+            let source = [0xd800, 0xfffd, 0xdc00, 0xd83d, 0xde00, 0x26, 0x78, 0x3b];
+            for boundary in 0..=source.len() {
+                let mut tokenizer = IncrementalTokenizer::new();
+                tokenizer.state = raw_next_state(context, false, true);
+                tokenizer.last_start_tag_name = context.to_owned();
+                tokenizer.push_input_utf16(&source[..boundary]);
+                let (mut tokens, _) = tokenizer.drain(false, false);
+                tokenizer.push_input_utf16(&source[boundary..]);
+                tokens.extend(tokenizer.drain(true, false).0);
+                let mut units = Vec::new();
+                for token in tokens {
+                    match token {
+                        Token::Character(text) => units.extend(text.encode_utf16()),
+                        Token::Surrogate(unit) => units.push(unit),
+                        Token::Eof => {}
+                        other => panic!("unexpected token: {other:?}"),
+                    }
+                }
+                assert_eq!(units, source, "{context} split{boundary}");
+            }
+        }
     }
 }

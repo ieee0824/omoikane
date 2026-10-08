@@ -22,6 +22,8 @@ mod report;
 mod server;
 #[path = "wpt_smoke/summary.rs"]
 mod summary;
+#[path = "wpt_smoke/testdriver.rs"]
+mod testdriver;
 use case_runner::{CaseExecution, run_case};
 use classification::classify_with_subtests;
 use manifest::validate_manifest;

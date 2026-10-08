@@ -44,6 +44,147 @@ fn sample_document() -> NodeHandle {
 }
 
 #[test]
+fn native_host_call_identifies_the_immediate_javascript_caller_realm() {
+    let mut context = Context::default();
+    context
+        .realm()
+        .host_defined_mut()
+        .insert(ModuleDocumentId(10));
+    context
+        .register_global_builtin_callable(
+            js_string!("probeCaller"),
+            0,
+            NativeFunction::from_copy_closure(|_, _, context| {
+                let id = context.caller_realm().and_then(|realm| {
+                    realm
+                        .host_defined()
+                        .get::<ModuleDocumentId>()
+                        .map(|id| id.0)
+                });
+                Ok(id.map_or_else(JsValue::undefined, |id| JsValue::from(id as f64)))
+            }),
+        )
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "globalThis.direct = () => probeCaller(); globalThis.nested = () => direct();",
+        ))
+        .unwrap();
+    let parent = context.global_object();
+    let probe = parent.get(js_string!("probeCaller"), &mut context).unwrap();
+    let direct = parent.get(js_string!("direct"), &mut context).unwrap();
+    let nested = parent.get(js_string!("nested"), &mut context).unwrap();
+    let child = context.create_realm().unwrap();
+    child.host_defined_mut().insert(ModuleDocumentId(20));
+    context.enter_realm(child);
+    for (name, value) in [
+        ("parentProbe", probe),
+        ("parentDirect", direct),
+        ("parentNested", nested),
+    ] {
+        context
+            .register_global_property(
+                js_string!(name),
+                value,
+                boa_engine::property::Attribute::all(),
+            )
+            .unwrap();
+    }
+    let value = context
+        .eval(Source::from_bytes(
+            "JSON.stringify([parentProbe(), parentDirect(), parentNested()])",
+        ))
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        "[20,20,10]"
+    );
+}
+
+#[test]
+fn host_global_this_is_used_by_scripts_eval_and_sloppy_functions() {
+    let mut context = Context::default();
+    let original = context.global_object();
+    let host_this = JsObject::with_null_proto();
+    context
+        .register_global_property(
+            js_string!("expectedThis"),
+            host_this.clone(),
+            boa_engine::property::Attribute::all(),
+        )
+        .unwrap();
+    context.set_global_this(host_this).unwrap();
+    let source = r#"
+        JSON.stringify([
+            this === expectedThis,
+            globalThis === expectedThis,
+            (0, eval)('this') === expectedThis,
+            Function('return this')() === expectedThis,
+            (function() { return this; })() === expectedThis,
+            (function() { 'use strict'; return this; })() === undefined,
+            Object.getOwnPropertyDescriptor(this === expectedThis ? expectedThis : this,
+                'expectedThis') === undefined
+        ])
+    "#;
+    let value = context.eval(Source::from_bytes(source)).unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        "[true,true,true,true,true,true,true]"
+    );
+    boa_gc::force_collect();
+    assert_eq!(
+        context
+            .eval(Source::from_bytes("this === expectedThis"))
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert_eq!(context.global_object(), original);
+}
+
+#[test]
+fn host_global_this_initialization_preserves_creation_realm_and_is_atomic() {
+    let mut context = Context::default();
+    let creator = context.realm().clone();
+    let host_this = JsObject::with_null_proto();
+    host_this.set_associated_realm(&creator);
+    let child = context.create_realm().unwrap();
+    context.enter_realm(child);
+    context.set_global_this(host_this.clone()).unwrap();
+    assert_eq!(host_this.associated_realm(), Some(creator));
+    let global = context.global_object();
+    global
+        .define_property_or_throw(
+            js_string!("globalThis"),
+            boa_engine::property::PropertyDescriptor::builder()
+                .value(host_this.clone())
+                .writable(false)
+                .configurable(false),
+            &mut context,
+        )
+        .unwrap();
+    assert!(
+        context
+            .set_global_this(JsObject::with_null_proto())
+            .is_err()
+    );
+    assert_eq!(
+        context
+            .eval(Source::from_bytes("this === globalThis"))
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        global
+            .get(js_string!("globalThis"), &mut context)
+            .unwrap()
+            .as_object(),
+        Some(host_this)
+    );
+}
+
+#[test]
 fn creates_runtime_and_evaluates_scripts() {
     let mut runtime = JsRuntime::new().unwrap();
     let value = runtime.eval("1 + 2 + 3").unwrap();
@@ -3410,7 +3551,7 @@ fn range_set_start_and_end_reroot_across_documents() {
                 document.body.appendChild(frame);
                 const foreign = frame.contentDocument;
                 const root = foreign.createElement('root');
-                foreign.appendChild(root);
+                foreign.body.appendChild(root);
                 const text = foreign.createTextNode('foreign');
                 root.appendChild(text);
                 const range = document.createRange();
@@ -7605,7 +7746,7 @@ fn style_color_properties_ignore_invalid_assignments() {
                 target.style.outlineColor = "red, green";
                 const sheetNode = document.createElement("style");
                 sheetNode.textContent = "div { color: green; }";
-                document.appendChild(sheetNode);
+                document.documentElement.appendChild(sheetNode);
                 const rule = sheetNode.sheet.cssRules[0];
                 rule.style.color = "not-a-color";
                 globalThis.ruleColor = rule.style.color;
@@ -13637,7 +13778,8 @@ fn failed_custom_elements_are_not_retried_and_iframe_registry_is_isolated() {
                   const childRegistry = frame.contentWindow.customElements;
                   const childDocument = frame.contentDocument;
                   const beforeDefinition = childDocument.createElement("x-isolated");
-                  class ChildElement extends HTMLElement {}
+                  // HTMLConstructor resolves the registry of its own Realm.
+                  class ChildElement extends frame.contentWindow.HTMLElement {}
                   childRegistry.define("x-isolated", ChildElement);
                   const remainedUndefined = !(beforeDefinition instanceof ChildElement);
                   childRegistry.upgrade(beforeDefinition);
@@ -14846,6 +14988,11 @@ fn iframe_visits_use_the_navigating_frame_origin_and_top_level_site() {
     runtime.run_until_idle().unwrap();
 
     assert_eq!(
+        runtime.take_task_errors(),
+        Vec::<String>::new(),
+        "iframe tasks must succeed"
+    );
+    assert_eq!(
         server.join(),
         vec!["/first".to_string(), "/second".to_string()]
     );
@@ -14853,6 +15000,32 @@ fn iframe_visits_use_the_navigating_frame_origin_and_top_level_site() {
     assert!(!storage.has_visited_url(&first, &child_source));
     assert!(storage.has_visited_url(&second, &child_source));
     assert!(!storage.has_visited_url(&second, &owner_source));
+}
+
+#[test]
+fn popup_document_default_view_and_window_event_targets_are_its_window_proxy() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"(() => {
+        const popup = window.open('', 'window-identity');
+        const doc = popup.document;
+        let calls = 0;
+        let identity = false;
+        popup.addEventListener('popup-event', function(event) {
+            calls++;
+            identity = this === popup && event.currentTarget === popup;
+        }, {once:true});
+        doc.dispatchEvent(new Event('popup-event', {bubbles:true}));
+        doc.dispatchEvent(new Event('popup-event', {bubbles:true}));
+        return [doc.defaultView === popup, calls, identity].join('|');
+    })()"#,
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(value, "true|1|true");
 }
 
 #[test]
@@ -14954,6 +15127,11 @@ fn named_iframe_link_visit_uses_the_child_initiator_partition() {
         .unwrap();
     runtime.run_until_idle().unwrap();
 
+    assert_eq!(
+        runtime.take_task_errors(),
+        Vec::<String>::new(),
+        "iframe tasks must succeed"
+    );
     assert_eq!(
         server.join(),
         vec!["/first".to_string(), "/second".to_string()]
@@ -21732,7 +21910,7 @@ fn range_contextual_fragment_uses_html_and_foreign_contexts() {
           ].join('|');
         })()"#,
         ),
-        "tbody|tr|2|option|span|http://www.w3.org/2000/svg|foreignObject||http://www.w3.org/1998/Math/MathML||true"
+        "tbody|tr|2|option|span|http://www.w3.org/2000/svg|foreignObject|http://www.w3.org/1999/xhtml|http://www.w3.org/1998/Math/MathML|http://www.w3.org/1999/xhtml|true"
     );
 }
 
@@ -22363,14 +22541,16 @@ fn embedded_svg_documents_are_exposed_by_iframe_and_object() {
                        document.body.appendChild(frame); document.body.appendChild(object);
                        [frame.getSVGDocument() === frame.contentDocument,
                         object.getSVGDocument() === object.contentDocument,
-                        frame.getSVGDocument().documentElement instanceof SVGSVGElement,
-                        object.getSVGDocument().getElementsByTagName('text')[0] instanceof SVGTextElement].join('|')"#,
+                        frame.getSVGDocument().documentElement instanceof frame.contentWindow.SVGSVGElement,
+                        object.getSVGDocument().getElementsByTagName('text')[0] instanceof object.contentDocument.defaultView.SVGTextElement,
+                        !(frame.getSVGDocument().documentElement instanceof SVGSVGElement),
+                        !(object.getSVGDocument().getElementsByTagName('text')[0] instanceof SVGTextElement)].join('|')"#,
             )
             .unwrap()
             .as_string()
             .map(|s| s.to_std_string_escaped())
             .as_deref(),
-        Some("true|true|true|true")
+        Some("true|true|true|true|true|true")
     );
 
     assert_eq!(
@@ -25087,6 +25267,84 @@ fn page_scripts_cannot_reach_host_bindings_or_change_the_private_document_id() {
         PromiseState::Fulfilled(_)
     ));
     assert_eq!(eval_str(&mut runtime, "pageImportMetaPrivate"), "undefined");
+}
+
+#[test]
+fn cross_origin_iframe_document_events_reach_its_own_window_listeners() {
+    use crate::html::TreeBuilder;
+    let (port, _server) = spawn_static_http_server(
+        "text/html",
+        r#"<html><body onload='document.documentElement.setAttribute("data-window-load", "yes")'><script>
+          let calls = 0;
+          let identity = false;
+          window.addEventListener('child-event', function(event) {
+            calls++;
+            identity = this === document.defaultView && event.currentTarget === document.defaultView;
+          }, {once:true});
+          document.dispatchEvent(new Event('child-event', {bubbles:true}));
+          document.dispatchEvent(new Event('child-event', {bubbles:true}));
+          document.documentElement.setAttribute('data-window-events', calls + '|' + identity);
+          document.documentElement.setAttribute('data-window-this', [
+            this === window,
+            globalThis === window,
+            self === window,
+            frames === window,
+            (0, eval)('this') === window,
+            Function('return this')() === window,
+            window.document === document,
+            window.localStorage === localStorage,
+          ].join('|'));
+          let directIdentity = false;
+          window.addEventListener('direct-event', function(event) {
+            directIdentity = this === window && event.target === window && event.currentTarget === window;
+          }, {once:true});
+          window.dispatchEvent(new Event('direct-event'));
+          document.documentElement.setAttribute('data-direct-window-event', String(directIdentity));
+        </script></body></html>"#,
+    );
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe id='child' src='http://127.0.0.1:{port}/child.html'></iframe></body></html>"
+    )).document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "http://other-origin.test/page").unwrap();
+    pump_zero_delay_tasks(&mut runtime);
+    pump_zero_delay_tasks(&mut runtime);
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    let state = runtime.host_state.borrow();
+    let frame = state.document.query_selector("#child").unwrap();
+    let child = &state.iframe_documents[&frame.identity()].document;
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-window-load")
+            .as_deref(),
+        Some("yes")
+    );
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-window-events")
+            .as_deref(),
+        Some("1|true")
+    );
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-window-this")
+            .as_deref(),
+        Some("true|true|true|true|true|true|true|true")
+    );
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-direct-window-event")
+            .as_deref(),
+        Some("true")
+    );
 }
 
 #[test]

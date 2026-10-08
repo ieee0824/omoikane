@@ -524,11 +524,11 @@ impl CdpSession {
         method: Method,
         body: Option<Vec<u8>>,
         content_type: Option<String>,
-    ) -> Result<(String, u16, String, Vec<String>), CdpSessionError> {
+    ) -> Result<(DecodedHtml, u16, String, Vec<String>), CdpSessionError> {
         if method == Method::Get {
             if url == "about:blank" {
                 return Ok((
-                    "<html><head></head><body></body></html>".to_string(),
+                    DecodedHtml::from_string("<html><head></head><body></body></html>"),
                     200,
                     url.to_string(),
                     Vec::new(),
@@ -538,7 +538,7 @@ impl CdpSession {
                 && data.mime_type.eq_ignore_ascii_case("text/html")
             {
                 return Ok((
-                    String::from_utf8_lossy(&data.data).into_owned(),
+                    crate::html::encoding::decode_html_bytes(&data.data, Some(&data.mime_type)),
                     200,
                     url.to_string(),
                     Vec::new(),
@@ -583,19 +583,26 @@ impl CdpSession {
         history_length: usize,
         history_state_json: &str,
     ) -> Result<(), CdpSessionError> {
-        self.install_document_with_csp(url, html, history_length, history_state_json, &[], None)
+        self.install_document_with_csp(
+            url,
+            &DecodedHtml::from_string(html),
+            history_length,
+            history_state_json,
+            &[],
+            None,
+        )
     }
 
     fn install_document_with_csp(
         &mut self,
         url: &str,
-        html: &str,
+        html: &DecodedHtml,
         history_length: usize,
         history_state_json: &str,
         csp_headers: &[String],
         form_state: Option<&FormStateSnapshot>,
     ) -> Result<(), CdpSessionError> {
-        let document = TreeBuilder::parse(html).document();
+        let document = TreeBuilder::parse_decoded(html).document();
         let mut runtime = JsRuntime::with_document_url_and_storage(
             document,
             url,
@@ -649,7 +656,7 @@ impl CdpSession {
         self.document_generation = self.document_generation.saturating_add(1);
         self.remote_object_generations.clear();
         self.current_url = url.to_string();
-        self.last_html = html.to_string();
+        self.last_html = html.text.clone();
         self.rebuild_node_index();
         Ok(())
     }
@@ -659,13 +666,13 @@ impl CdpSession {
     pub(crate) fn prepare_document_page_task(
         &mut self,
         url: &str,
-        html: &str,
+        html: &DecodedHtml,
         history_length: usize,
         history_state_json: &str,
         csp_headers: &[String],
         form_state: Option<&FormStateSnapshot>,
     ) -> Result<(OwnedPageTask, PendingDocumentCommit), CdpSessionError> {
-        let document = TreeBuilder::parse(html).document();
+        let document = TreeBuilder::parse_decoded(html).document();
         let mut runtime = JsRuntime::with_document_url_and_storage(
             document,
             url,
@@ -694,7 +701,7 @@ impl CdpSession {
             task,
             PendingDocumentCommit {
                 url: url.to_string(),
-                html: html.to_string(),
+                html: html.text.clone(),
                 generation,
                 history_commit: NavigationCommit::Replace,
                 loader_id: String::new(),

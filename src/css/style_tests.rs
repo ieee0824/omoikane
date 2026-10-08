@@ -10270,3 +10270,40 @@ fn implemented_table_layout_is_recognized_and_validated() {
         Some(&ComputedValue::Keyword("fixed".to_string()))
     );
 }
+
+#[test]
+fn hidden_attribute_uses_overridable_user_agent_styles() {
+    for (hidden, property, expected) in [
+        ("", "display", "none"),
+        ("hidden", "display", "none"),
+        ("invalid", "display", "none"),
+        ("UNTIL-FOUND", "content-visibility", "hidden"),
+    ] {
+        let node = NodeHandle::element("div");
+        node.set_attribute("hidden", hidden);
+        let mut resolver = StyleResolver::new();
+        assert_eq!(
+            resolver.computed_style(&node).get(property),
+            Some(&ComputedValue::Keyword(expected.to_owned()))
+        );
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("div { display:block; content-visibility:visible }").unwrap(),
+        );
+        let keyword = if property == "display" {
+            "block"
+        } else {
+            "visible"
+        };
+        assert_eq!(
+            resolver.computed_style(&node).get(property),
+            Some(&ComputedValue::Keyword(keyword.to_owned()))
+        );
+        node.set_attribute("style", format!("{property}:revert"));
+        resolver.invalidate_style_cache();
+        assert_eq!(
+            resolver.computed_style(&node).get(property),
+            Some(&ComputedValue::Keyword(expected.to_owned()))
+        );
+    }
+}

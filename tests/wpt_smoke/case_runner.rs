@@ -210,14 +210,20 @@ fn drive_case_tasks(
         if js_bool(runtime, "globalThis.__wpt_complete === true") {
             return;
         }
-        runtime.run_timers(STEP_MS, STEP_MS, 128);
+        let action_duration = super::testdriver::drive_action_tick(runtime, errors);
+        let tick_ms = action_duration.unwrap_or(STEP_MS).max(STEP_MS);
+        runtime.run_timers(tick_ms, STEP_MS, 128);
         // Timers advance the virtual clock; the rendering opportunity must
         // share that timestamp rather than advance it a second time.
         if let Err(error) = runtime.run_animation_frame(0) {
             errors.push(format!("render WPT frame: {error}"));
             return;
         }
-        if !committed && !runtime.has_pending_timers() && !runtime.has_pending_animation_frames() {
+        if !committed
+            && action_duration.is_none()
+            && !runtime.has_pending_timers()
+            && !runtime.has_pending_animation_frames()
+        {
             // Give any non-timer tasks run by this tick one more checkpoint.
             if let Err(error) = history.drive(runtime) {
                 errors.push(error);
@@ -278,21 +284,21 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
         path
     );
     let javascript = path.ends_with(".any.js") || path.ends_with(".window.js");
-    let document_source = if javascript {
+    let document = if javascript {
         let dependencies = script_dependencies(response.body(), &path)
             .into_iter()
             .map(|path| format!("<script src=\"{path}\"></script>"))
             .collect::<String>();
-        format!(
+        let document_source = format!(
             "<!doctype html><script src=\"/resources/testharness.js\"></script>\
                  <script src=\"/resources/testharnessreport.js\"></script>{dependencies}\
                  <script src=\"/{0}\"></script>",
             path
-        )
+        );
+        TreeBuilder::parse(&document_source).document()
     } else {
-        String::from_utf8_lossy(response.body()).into_owned()
+        TreeBuilder::parse_bytes(response.body(), response.header("content-type")).document()
     };
-    let document = TreeBuilder::parse(&document_source).document();
     let timeout = case_timeout(response.body(), &document, javascript);
     let base: Url = url.parse().expect("parse WPT URL");
     let mut runtime = JsRuntime::with_document_sandbox_and_url(

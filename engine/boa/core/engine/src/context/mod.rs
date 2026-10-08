@@ -602,6 +602,16 @@ impl Context {
         self.vm.realm.global_object().clone()
     }
 
+    /// Returns the active Realm's internal global `this` value.
+    ///
+    /// Unlike reading the writable `globalThis` property, this also remains
+    /// authoritative after page code replaces that property's value.
+    #[inline]
+    #[must_use]
+    pub fn global_this(&self) -> JsObject {
+        self.vm.realm.global_this()
+    }
+
     /// Returns the currently active intrinsic constructors and objects.
     #[inline]
     #[must_use]
@@ -633,7 +643,10 @@ impl Context {
     /// frame exists below the currently executing function.
     #[must_use]
     pub fn caller_realm(&self) -> Option<Realm> {
-        self.vm.frames.last().map(|frame| frame.realm.clone())
+        // push_frame swaps the active Realm into the new frame's saved
+        // Realm. Thus the current frame stores its caller's Realm; an older
+        // suspended frame stores the caller of that earlier invocation.
+        (!self.vm.frames.is_empty()).then(|| self.vm.frame.realm.clone())
     }
 
     /// Set the value of trace on the context
@@ -733,6 +746,33 @@ impl Context {
         builtins::set_default_global_bindings(self)?;
 
         Ok(self.enter_realm(old_realm))
+    }
+
+    /// Sets the active Realm's global `this` value and its `globalThis` binding.
+    ///
+    /// Hosts whose global object and global `this` are distinct can use this
+    /// during initialization, after constructing a forwarding object and before
+    /// evaluating user code. Script-level `this`, indirect eval, and sloppy
+    /// function calls subsequently use this value; global bindings continue to
+    /// reside on the Realm's existing global object. Strict function calls and
+    /// module-level `this` are unaffected.
+    ///
+    /// This does not change the supplied object's creation Realm. In particular,
+    /// a host proxy can survive replacement of its target Realm without retaining
+    /// that Realm through an incorrectly reassigned creation-Realm association.
+    /// If defining `globalThis` fails, the internal global `this` is unchanged.
+    pub fn set_global_this(&mut self, global_this: JsObject) -> JsResult<()> {
+        self.global_object().define_property_or_throw(
+            js_string!("globalThis"),
+            PropertyDescriptor::builder()
+                .value(global_this.clone())
+                .writable(true)
+                .enumerable(false)
+                .configurable(true),
+            self,
+        )?;
+        self.realm().set_global_this(global_this);
+        Ok(())
     }
 
     /// Get the [`RootShape`].

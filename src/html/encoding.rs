@@ -1,24 +1,43 @@
-use encoding_rs::Encoding;
+use encoding_rs::{Encoding, UTF_8};
 
-pub(crate) fn decode_html_response(response: &crate::http::HttpResponse) -> String {
+/// A decoded resource and the canonical encoding actually used, including BOM
+/// overrides. Both values are owned and survive into document construction.
+#[derive(Debug)]
+pub(crate) struct DecodedHtml {
+    pub(crate) text: String,
+    pub(crate) encoding: String,
+}
+
+impl DecodedHtml {
+    /// Unicode markup supplied by an API has UTF-8 document encoding.
+    pub(crate) fn from_string(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            encoding: "UTF-8".to_owned(),
+        }
+    }
+}
+
+pub(crate) fn decode_html_response(response: &crate::http::HttpResponse) -> DecodedHtml {
     decode_html_bytes(response.body(), response.header("content-type"))
 }
 
 /// Decodes an HTML resource using its transport charset or in-document meta.
-/// Top-level and nested browsing contexts share this decision.
-pub(crate) fn decode_html_bytes(body: &[u8], content_type: Option<&str>) -> String {
+/// Top-level and nested browsing contexts share this decision. The returned
+/// encoding is the one used by the decoder, rather than a later DOM query.
+pub(crate) fn decode_html_bytes(body: &[u8], content_type: Option<&str>) -> DecodedHtml {
     let charset = content_type
         .and_then(parse_charset_from_content_type)
         .or_else(|| detect_charset_from_html_meta(body));
-
-    if let Some(label) = charset.as_deref()
-        && let Some(encoding) = Encoding::for_label(label.as_bytes())
-    {
-        let (decoded, _, _) = encoding.decode(body);
-        return decoded.into_owned();
+    let selected = charset
+        .as_deref()
+        .and_then(|label| Encoding::for_label(label.as_bytes()))
+        .unwrap_or(UTF_8);
+    let (decoded, used, _) = selected.decode(body);
+    DecodedHtml {
+        text: decoded.into_owned(),
+        encoding: used.name().to_owned(),
     }
-
-    String::from_utf8_lossy(body).to_string()
 }
 
 pub(crate) fn detect_charset_from_html_meta(body: &[u8]) -> Option<String> {
@@ -174,7 +193,24 @@ mod tests {
             encoded.into_owned(),
         );
         let decoded = decode_html_response(&response);
-        assert_eq!(decoded, "阿部寛");
+        assert_eq!(decoded.text, "阿部寛");
+        assert_eq!(decoded.encoding, "Shift_JIS");
+    }
+
+    #[test]
+    fn decoder_records_bom_override_and_header_precedence() {
+        let bom = decode_html_bytes(
+            b"\xef\xbb\xbf<p>UTF-8</p>",
+            Some("text/html; charset=windows-1252"),
+        );
+        assert_eq!(bom.encoding, "UTF-8");
+        assert_eq!(bom.text, "<p>UTF-8</p>");
+        let header = decode_html_bytes(
+            b"<meta charset=utf-8><p>\xe9</p>",
+            Some("text/html; charset=ISO-8859-1"),
+        );
+        assert_eq!(header.encoding, "windows-1252");
+        assert!(header.text.ends_with("<p>é</p>"));
     }
 
     #[test]

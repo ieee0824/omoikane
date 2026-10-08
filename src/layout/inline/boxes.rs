@@ -10,6 +10,7 @@ pub(super) fn edge(
 ) {
     out.push(InlineSegment {
         node: node.clone(),
+        text_source: Vec::new(),
         content: InlineSegmentContent::InlineEdge(style.clone(), start),
         metrics: font_metrics(style),
         line_height: line_height(style),
@@ -230,6 +231,7 @@ pub(super) fn finish(
             let owner = &owners[&id];
             fragments.push(InlineFragment {
                 node: owner.node.clone(),
+                text_source: Vec::new(),
                 content: InlineFragmentContent::InlineBox(owner.style.clone()),
                 rect,
                 metrics: owner.metrics,

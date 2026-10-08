@@ -108,6 +108,7 @@ mod query_tests;
 mod scroll_snap;
 mod shared_worker;
 use shared_worker::terminate_shared_worker_connections;
+mod text_selection;
 mod text_stream;
 mod web_locks;
 mod worklet;
@@ -123,6 +124,9 @@ use module_fetch::{ModuleFetch, ModuleFetchPool};
 
 mod csp;
 mod event_loop;
+mod html_parsing;
+mod html_sanitizer;
+mod html_serialization;
 mod storage;
 mod stylesheet;
 use csp::{CspPolicy, CspViolation, ResourceType};
@@ -458,6 +462,8 @@ const DOM_BOOTSTRAP: &str = concat!(
     "\n",
     include_str!("dom_interfaces.js"),
     "\n",
+    include_str!("html_sanitizer.js"),
+    "\n",
     include_str!("dom_bootstrap.js"),
     "\n",
     include_str!("event_interfaces.js"),
@@ -589,7 +595,8 @@ impl BootstrapBindings {
         let names: HashSet<&str> = self.names.iter().map(String::as_str).collect();
         let mut source = format!(
             "const {{ {} }} = import.meta.__omoikane_private_bindings;\n\
-             delete import.meta.__omoikane_private_bindings;\n",
+             delete import.meta.__omoikane_private_bindings;\n\
+             const globalThis = __omoikane_window_object;\n",
             self.names.join(", ")
         );
         // Legacy bootstrap files refer to some bindings as globalThis.name.
@@ -2336,6 +2343,22 @@ impl HostState {
             .insert(self.document.identity(), url);
     }
 
+    /// Consumes one pending external script when its resource task starts.
+    fn begin_inserted_external_script(&mut self, node: &NodeHandle) -> bool {
+        let id = node.identity();
+        if !is_html_script_node(node)
+            || node.get_attribute("src").is_none()
+            || !self.node_is_in_active_document(node)
+            || !self.runnable_inserted_scripts.contains(&id)
+            || self.started_inserted_scripts.contains(&id)
+        {
+            return false;
+        }
+        self.runnable_inserted_scripts.remove(&id);
+        self.started_inserted_scripts.insert(id);
+        true
+    }
+
     /// Queue loads for iframe and data-bearing object descendants when a
     /// detached subtree first becomes connected to a document.
     fn schedule_connected_resource_loads(&mut self, root: &NodeHandle, include_scripts: bool) {
@@ -2353,6 +2376,8 @@ impl HostState {
                 || style_has_import
                 || (include_scripts
                     && tag.eq_ignore_ascii_case("script")
+                    && state.runnable_inserted_scripts.contains(&node.identity())
+                    && !state.started_inserted_scripts.contains(&node.identity())
                     && node
                         .attributes()
                         .is_some_and(|attrs| attrs.contains_key("src")))
@@ -2370,6 +2395,9 @@ impl HostState {
             }
             for child in node.child_nodes() {
                 visit(state, &child, include_scripts);
+            }
+            if let Some(root) = node.shadow_root() {
+                visit(state, &root, include_scripts);
             }
         }
         visit(self, root, include_scripts);
@@ -2397,6 +2425,12 @@ impl HostState {
         resource_attr: &str,
     ) {
         if !self.node_is_in_active_document(node) {
+            return;
+        }
+        if is_html_script_node(node)
+            && (!self.runnable_inserted_scripts.contains(&node.identity())
+                || self.started_inserted_scripts.contains(&node.identity()))
+        {
             return;
         }
         let attributes = node.attributes().unwrap_or_default();
@@ -7547,6 +7581,9 @@ impl JsRuntime {
                 }
                 let document_id = document_root_for_node(&node)?.identity();
                 let src = node.get_attribute("src")?;
+                if !state.begin_inserted_external_script(&node) {
+                    return None;
+                }
                 Some((
                     node.clone(),
                     src,
@@ -8805,6 +8842,9 @@ impl JsRuntime {
             Ok(Some((false, Vec::new(), None, resource_document_id)))
         } else {
             let mut initial_scripts: Vec<NodeHandle> = Vec::new();
+            if is_html_script_node(&node) && !state.begin_inserted_external_script(&node) {
+                return Ok(None);
+            }
             // A dynamically inserted external script is classified by
             // the same `type` gate the parsed-document path uses, so a
             // script runs the same way however it reached the tree.
@@ -8861,7 +8901,13 @@ impl JsRuntime {
                     .into_iter()
                     .filter_map(|id| state.get_node(id))
                     .filter(|script| document_root_for_node(script).as_ref() == Some(&document))
-                    .filter(is_inline_classic_script)
+                    .filter(|script| {
+                        is_inline_classic_script(script)
+                            || script.get_attribute("src").is_some()
+                                && ScriptKind::from_type_attribute(
+                                    script.get_attribute("type").as_deref(),
+                                ) != ScriptKind::NotExecutable
+                    })
                     .collect();
             }
             Ok(Some((
@@ -8904,6 +8950,10 @@ impl JsRuntime {
             if !sandbox_allowed {
                 continue;
             }
+            if let Some(src) = script.get_attribute("src") {
+                self.run_initial_iframe_external_script(&script, src);
+                continue;
+            }
             if !csp_allowed {
                 self.host_state.borrow_mut().record_csp_violation_for_node(
                     &script,
@@ -8928,6 +8978,27 @@ impl JsRuntime {
                 self.eval(&source).and_then(|_| self.run_jobs())
             };
             self.record_error_from("iframe inline script", result);
+        }
+    }
+
+    /// Loads a parser-authored child script in its owning Realm, sharing
+    /// fetch, MIME type, CSP, redirect and resource-event handling with the
+    /// external-script path used by resource tasks.
+    fn run_initial_iframe_external_script(&mut self, script: &NodeHandle, src: String) {
+        let Some(document) = document_root_for_node(script) else {
+            return;
+        };
+        let document_id = document.identity();
+        let kind = ScriptKind::from_type_attribute(script.get_attribute("type").as_deref());
+        let base = self.host_state.borrow().base_url_for_document(document_id);
+        let (loaded, timing) = self.run_dynamic_timer_script(
+            script.identity(),
+            document_id,
+            (script.clone(), src, kind, base, document_id),
+            true,
+        );
+        if loaded && self.host_state.borrow().node_is_in_active_document(script) {
+            self.dispatch_resource_load_event(script.identity(), document_id, timing);
         }
     }
 
@@ -9954,6 +10025,58 @@ fn is_javascript_mime_type(mime: &str) -> bool {
     )
 }
 
+/// Owned initialization snapshot; the host-state borrow ends before Realm creation.
+struct IframeRealmSettings {
+    document_url: String,
+    same_origin: bool,
+    owner_document_id: usize,
+}
+
+fn iframe_realm_settings(
+    host_state: &Rc<RefCell<HostState>>,
+    iframe_id: usize,
+    document_id: usize,
+) -> JsResult<IframeRealmSettings> {
+    let state = host_state.borrow();
+    let entry = state
+        .iframe_documents
+        .get(&iframe_id)
+        .filter(|entry| entry.document.identity() == document_id)
+        .ok_or_else(|| {
+            JsNativeError::reference().with_message("iframe document is no longer live")
+        })?;
+    let sandbox = state
+        .document_sandbox
+        .get(&document_id)
+        .copied()
+        .unwrap_or_default();
+    let child_origin = state.document_origins.get(&document_id).cloned().flatten();
+    let owner_document = owner_document_for_node(
+        &state
+            .get_node(iframe_id)
+            .ok_or_else(|| JsNativeError::reference().with_message("iframe is detached"))?,
+    )
+    .ok_or_else(|| JsNativeError::reference().with_message("iframe owner is detached"))?;
+    let owner_origin = state
+        .document_origins
+        .get(&owner_document.identity())
+        .cloned()
+        .flatten();
+    // A non-sandboxed iframe is not automatically same-origin: the
+    // effective child origin must match the embedding Document's
+    // origin.  `about:blank` inherits that origin when it is loaded,
+    // while opaque resources (for example `data:`) deliberately carry
+    // `None` and can never match it.
+    let same_origin = (!sandbox.active || sandbox.allow_same_origin)
+        && child_origin.is_some()
+        && child_origin == owner_origin;
+    Ok(IframeRealmSettings {
+        document_url: entry.document_url.clone(),
+        same_origin,
+        owner_document_id: owner_document.identity(),
+    })
+}
+
 /// Initializes the iframe Realm for both script execution and synchronous
 /// same-origin WindowProxy access. Bootstrap itself queues no Promise jobs;
 /// callers retain their existing microtask checkpoint instead of running the
@@ -9974,46 +10097,11 @@ fn ensure_iframe_realm(
         return Ok(realm);
     }
 
-    let (document_url, same_origin, owner_document_id) = {
-        let state = host_state.borrow();
-        let entry = state
-            .iframe_documents
-            .get(&iframe_id)
-            .filter(|entry| entry.document.identity() == document_id)
-            .ok_or_else(|| {
-                JsNativeError::reference().with_message("iframe document is no longer live")
-            })?;
-        let sandbox = state
-            .document_sandbox
-            .get(&document_id)
-            .copied()
-            .unwrap_or_default();
-        let child_origin = state.document_origins.get(&document_id).cloned().flatten();
-        let owner_document = owner_document_for_node(
-            &state
-                .get_node(iframe_id)
-                .ok_or_else(|| JsNativeError::reference().with_message("iframe is detached"))?,
-        )
-        .ok_or_else(|| JsNativeError::reference().with_message("iframe owner is detached"))?;
-        let owner_origin = state
-            .document_origins
-            .get(&owner_document.identity())
-            .cloned()
-            .flatten();
-        // A non-sandboxed iframe is not automatically same-origin: the
-        // effective child origin must match the embedding Document's
-        // origin.  `about:blank` inherits that origin when it is loaded,
-        // while opaque resources (for example `data:`) deliberately carry
-        // `None` and can never match it.
-        let same_origin = (!sandbox.active || sandbox.allow_same_origin)
-            && child_origin.is_some()
-            && child_origin == owner_origin;
-        (
-            entry.document_url.clone(),
-            same_origin,
-            owner_document.identity(),
-        )
-    };
+    let IframeRealmSettings {
+        document_url,
+        same_origin,
+        owner_document_id,
+    } = iframe_realm_settings(host_state, iframe_id, document_id)?;
 
     let caller_global = context.global_object();
     let top = caller_global.get(js_string!("top"), context)?;
@@ -10038,7 +10126,7 @@ fn ensure_iframe_realm(
                 .and_then(|entry| entry.realm.clone());
             if let Some(owner_realm) = owner_realm {
                 let old_realm = context.enter_realm(owner_realm);
-                let global: JsValue = context.global_object().into();
+                let global: JsValue = context.global_this().into();
                 context.enter_realm(old_realm);
                 global
             } else {
@@ -10145,6 +10233,14 @@ fn ensure_iframe_realm(
     entry.realm = Some(realm.clone());
     let document = entry.document.clone();
     drop(state);
+    if let Err(error) = install_browsing_context_global_this(context, &realm, document_id) {
+        if let Some(entry) = host_state.borrow_mut().iframe_documents.get_mut(&iframe_id) {
+            if entry.document.identity() == document_id {
+                entry.realm = None;
+            }
+        }
+        return Err(error);
+    }
     let viewport = host_state
         .borrow_mut()
         .visual_viewport_for_document(&document);
@@ -10220,7 +10316,7 @@ fn ensure_auxiliary_realm(
             JsNativeError::reference().with_message("popup opener is no longer live")
         })?;
         let previous = context.enter_realm(owner_realm);
-        let global: JsValue = context.global_object().into();
+        let global: JsValue = context.global_this().into();
         context.enter_realm(previous);
         global
     };
@@ -10285,7 +10381,43 @@ fn ensure_auxiliary_realm(
         .get_mut(&auxiliary_id)
         .ok_or_else(|| JsNativeError::reference().with_message("auxiliary context was closed"))?;
     entry.realm = Some(realm.clone());
+    drop(state);
+    if let Err(error) = install_browsing_context_global_this(context, &realm, document_id) {
+        if let Some(entry) = host_state
+            .borrow_mut()
+            .auxiliary_contexts
+            .get_mut(&auxiliary_id)
+        {
+            if entry.document.identity() == document_id {
+                entry.realm = None;
+            }
+        }
+        return Err(error);
+    }
     Ok(realm)
+}
+
+/// Finishes the host's Window initialization before evaluating author scripts.
+/// Bootstrap closures retain the private backing Window for internal slots;
+/// the Realm and the public Window aliases expose the stable WindowProxy.
+fn install_browsing_context_global_this(
+    context: &mut Context,
+    realm: &Realm,
+    document_id: usize,
+) -> JsResult<()> {
+    let previous = context.enter_realm(realm.clone());
+    let result = (|| {
+        let proxy = window_event::window_for_document(document_id, context)?
+            .as_object()
+            .ok_or_else(|| JsNativeError::typ().with_message("WindowProxy is unavailable"))?;
+        let global = context.global_object();
+        for name in ["window", "self", "frames"] {
+            global.set(js_string!(name), proxy.clone(), true, context)?;
+        }
+        context.set_global_this(proxy)
+    })();
+    context.enter_realm(previous);
+    result
 }
 
 fn register_private_callable(
@@ -10323,7 +10455,6 @@ fn register_host_bindings(
     host_state: &Rc<RefCell<HostState>>,
 ) -> JsResult<BootstrapBindings> {
     let mut bindings = BootstrapBindings::new();
-    window_event::register(context, host_state, &mut bindings)?;
     let document_id = context
         .realm()
         .host_defined()
@@ -10334,6 +10465,15 @@ fn register_host_bindings(
         .borrow_mut()
         .bootstrap_bindings
         .insert(document_id, bindings.object.clone());
+    // JsObject is a heap edge, not an external root. Link this private object
+    // into the registered host roots before installing any property: allocation
+    // during property-shape transitions can otherwise collect the object.
+    bindings.value(
+        js_string!("__omoikane_window_object"),
+        context.global_object(),
+        context,
+    )?;
+    window_event::register(context, host_state, &mut bindings)?;
     font_loading::register(context, host_state, &mut bindings)?;
     pointer_lock::register(context, &mut bindings)?;
     input_bridge::register(context, &mut bindings)?;
@@ -11044,9 +11184,54 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(remove_child_native),
         ),
         (
+            js_string!("__omoikane_sanitizer_configuration"),
+            2,
+            NativeFunction::from_copy_closure(html_sanitizer::configuration_native),
+        ),
+        (
+            js_string!("__omoikane_sanitizer_modify"),
+            3,
+            NativeFunction::from_copy_closure(html_sanitizer::modify_native),
+        ),
+        (
+            js_string!("__omoikane_document_encoding"),
+            1,
+            NativeFunction::from_copy_closure(html_parsing::encoding_native),
+        ),
+        (
+            js_string!("__omoikane_parse_unsafe_fragment"),
+            2,
+            NativeFunction::from_copy_closure(html_parsing::fragment_native),
+        ),
+        (
+            js_string!("__omoikane_parse_unsafe_document"),
+            1,
+            NativeFunction::from_copy_closure(html_parsing::document_native),
+        ),
+        (
+            js_string!("__omoikane_get_html"),
+            3,
+            NativeFunction::from_copy_closure(html_serialization::get_html_native),
+        ),
+        (
+            js_string!("__omoikane_shadow_settings"),
+            1,
+            NativeFunction::from_copy_closure(html_serialization::settings_native),
+        ),
+        (
+            js_string!("__omoikane_set_shadow_settings"),
+            5,
+            NativeFunction::from_copy_closure(html_serialization::set_settings_native),
+        ),
+        (
             js_string!("__omoikane_insert_before"),
             3,
             NativeFunction::from_copy_closure(insert_before_native),
+        ),
+        (
+            js_string!("__omoikane_move_before"),
+            3,
+            NativeFunction::from_copy_closure(move_before_native),
         ),
         (
             js_string!("__omoikane_query_selector_all"),
@@ -11252,6 +11437,11 @@ fn register_host_bindings(
             js_string!("__omoikane_hit_test_point"),
             4,
             NativeFunction::from_copy_closure(hit_test_point_native),
+        ),
+        (
+            js_string!("__omoikane_caret_hit_test"),
+            4,
+            NativeFunction::from_copy_closure(text_selection::caret_hit_test_native),
         ),
         (
             js_string!("__omoikane_element_scroll_offset"),
@@ -11585,10 +11775,10 @@ fn caller_document_origin(context: &Context, document_id: usize) -> Option<Docum
     from_realm(&context.realm())
 }
 
-fn ensure_same_origin_document(context: &mut Context, target_document_id: usize) -> JsResult<()> {
+fn same_origin_document(context: &Context, target_document_id: usize) -> JsResult<bool> {
     let caller = caller_document_id(context);
     let saved_caller_origin = caller.and_then(|id| caller_document_origin(context, id));
-    let allowed = with_host_state(|host| {
+    with_host_state(|host| {
         let state = host.borrow();
         Ok(caller.is_some_and(|caller| {
             let source_origin = state.document_security_origins.get(&caller).or_else(|| {
@@ -11611,8 +11801,11 @@ fn ensure_same_origin_document(context: &mut Context, target_document_id: usize)
                 _ => false,
             }
         }))
-    })?;
-    if allowed {
+    })
+}
+
+fn ensure_same_origin_document(context: &mut Context, target_document_id: usize) -> JsResult<()> {
+    if same_origin_document(context, target_document_id)? {
         Ok(())
     } else {
         Err(cross_origin_access_error(context)?)
@@ -14927,7 +15120,7 @@ fn attribute_records_native(
         Ok(state
             .borrow()
             .get_node(node_id)
-            .and_then(|node| node.attribute_records())
+            .and_then(|node| node.attribute_records_utf16())
             .unwrap_or_default())
     })?;
     let rows: Vec<(JsValue, JsValue, JsValue, JsValue)> = records
@@ -14939,7 +15132,7 @@ fn attribute_records_native(
                     .map(|namespace| js_string!(namespace.as_str()).into())
                     .unwrap_or_else(JsValue::null),
                 js_string!(local_name.as_str()).into(),
-                js_string!(value.as_str()).into(),
+                JsString::from(value.as_slice()).into(),
             )
         })
         .collect();
@@ -14984,7 +15177,7 @@ fn attribute_record_at_native(
         Ok(state
             .borrow()
             .get_node(node_id)
-            .and_then(|node| node.attribute_record_at(index)))
+            .and_then(|node| node.attribute_record_utf16_at(index)))
     })?;
     let Some((name, namespace, local_name, value)) = record else {
         return Ok(JsValue::null());
@@ -14995,7 +15188,7 @@ fn attribute_record_at_native(
             .map(|namespace| js_string!(namespace.as_str()).into())
             .unwrap_or_else(JsValue::null),
         js_string!(local_name.as_str()).into(),
-        js_string!(value.as_str()).into(),
+        JsString::from(value.as_slice()).into(),
     );
     row.try_into_js(context)
 }
@@ -15026,8 +15219,8 @@ fn attribute_value_ns_native(
         Ok(state
             .borrow()
             .get_node(node_id)
-            .and_then(|node| node.attribute_value_ns(namespace.as_deref(), &local_name))
-            .map(|value| js_string!(value.as_str()).into())
+            .and_then(|node| node.attribute_value_ns_utf16(namespace.as_deref(), &local_name))
+            .map(|value| JsString::from(value.as_slice()).into())
             .unwrap_or_else(JsValue::null))
     })
 }
@@ -15195,20 +15388,9 @@ fn get_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         .to_std_string_escaped();
     with_host_state(|state| {
         let node = state.borrow().get_node(node_id);
-        let value = node
-            .and_then(|node| {
-                let is_html = node.is_html_element();
-                node.attributes().map(|attributes| (attributes, is_html))
-            })
-            .and_then(|(attributes, is_html)| {
-                attributes.get(&name).cloned().or_else(|| {
-                    is_html
-                        .then(|| attributes.get(&name.to_ascii_lowercase()).cloned())
-                        .flatten()
-                })
-            });
+        let value = node.and_then(|node| node.get_attribute_utf16(&name));
         Ok(match value {
-            Some(value) => js_string!(value.as_str()).into(),
+            Some(value) => JsString::from(value.as_slice()).into(),
             None => JsValue::null(),
         })
     })
@@ -15735,8 +15917,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         .get(2)
         .cloned()
         .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
+        .to_string(context)?;
     let is_name_attribute = name.eq_ignore_ascii_case("name");
     let is_style_attribute = name.eq_ignore_ascii_case("style");
     with_host_state(|state| {
@@ -15760,7 +15941,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
                 None
             }
         });
-        node.set_attribute(name, value);
+        node.set_attribute_utf16(&name, &value.iter().collect::<Vec<u16>>());
         if is_name_attribute {
             state.borrow_mut().refresh_iframe_context_name(&node);
         }
@@ -15813,8 +15994,9 @@ fn set_attribute_ns_native(
         .get(4)
         .cloned()
         .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
+        .to_string(context)?;
+    let value_units: Vec<u16> = value.iter().collect();
+    let value = String::from_utf16_lossy(&value_units);
     let replace_qualified_name = args.get(5).and_then(JsValue::as_boolean).unwrap_or(false);
     let is_name_attribute = namespace.is_none() && qualified_name == "name";
     let is_style_attribute = namespace.is_none() && qualified_name == "style";
@@ -15839,10 +16021,16 @@ fn set_attribute_ns_native(
             })
         });
         if replace_qualified_name {
-            node.replace_xml_attribute_ns(qualified_name, namespace, local_name, value);
+            node.replace_xml_attribute_ns(
+                qualified_name,
+                namespace.clone(),
+                local_name.clone(),
+                value,
+            );
         } else {
-            node.set_xml_attribute_ns(qualified_name, namespace, local_name, value);
+            node.set_xml_attribute_ns(qualified_name, namespace.clone(), local_name.clone(), value);
         }
+        node.set_attribute_value_ns_utf16(namespace.as_deref(), &local_name, &value_units);
         if is_name_attribute {
             state.borrow_mut().refresh_iframe_context_name(&node);
         }
@@ -17806,16 +17994,34 @@ fn get_text_content_native(
             crate::dom::NodeType::Text
             | crate::dom::NodeType::Comment
             | crate::dom::NodeType::ProcessingInstruction => {
-                let data = node.data().unwrap_or_default();
-                Ok(js_string!(data.as_str()).into())
+                let data = node.data_utf16().unwrap_or_default();
+                Ok(JsString::from(data.as_slice()).into())
             }
             // Element, Document, DocumentFragment: concatenate descendant text
             _ => {
-                let text = collect_text_recursive(&node);
-                Ok(js_string!(text.as_str()).into())
+                let text = collect_text_recursive_utf16(&node);
+                Ok(JsString::from(text.as_slice()).into())
             }
         }
     })
+}
+
+fn collect_text_recursive_utf16(node: &NodeHandle) -> Vec<u16> {
+    fn append(node: &NodeHandle, units: &mut Vec<u16>) {
+        for child in node.child_nodes() {
+            if child.node_type() == NodeType::Text {
+                units.extend(child.data_utf16().unwrap_or_default());
+            } else if matches!(
+                child.node_type(),
+                NodeType::Element | NodeType::DocumentFragment
+            ) {
+                append(&child, units);
+            }
+        }
+    }
+    let mut units = Vec::new();
+    append(node, &mut units);
+    units
 }
 
 fn collect_text_recursive(node: &NodeHandle) -> String {
@@ -17837,8 +18043,8 @@ fn set_text_content_native(
         .get(1)
         .cloned()
         .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
+        .to_string(context)?;
+    let units: Vec<u16> = text.iter().collect();
     let creator = caller_document_id(context);
     with_host_state(|state| {
         let node = state
@@ -17858,7 +18064,7 @@ fn set_text_content_native(
                 .is_some_and(|tag| tag.eq_ignore_ascii_case("style"));
         // For text/comment leaf nodes, update data directly
         if is_character_data {
-            node.set_data(&text);
+            node.set_data_utf16(&units);
         } else {
             // Remove all children
             let removed_children = node.child_nodes();
@@ -17874,7 +18080,8 @@ fn set_text_content_native(
             }
             // Add single text node
             if !text.is_empty() {
-                let text_node = NodeHandle::text(&text);
+                let text_node = NodeHandle::text("");
+                text_node.set_data_utf16(&units);
                 node.append_child(text_node.clone());
                 state
                     .borrow_mut()
@@ -17909,104 +18116,13 @@ fn get_inner_html_native(
         let node = state
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        let html = serialize_inner_html(&node);
-        Ok(js_string!(html.as_str()).into())
+        if args.get(1).is_some_and(JsValue::to_boolean) {
+            let units = crate::xml::serialize_children_utf16(&node);
+            return Ok(JsString::from(units.as_slice()).into());
+        }
+        let units = html_serialization::fragment_utf16(&node, &state);
+        Ok(JsString::from(units.as_slice()).into())
     })
-}
-
-fn escape_html_text(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-fn escape_html_attr(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-fn serialize_inner_html(node: &NodeHandle) -> String {
-    let mut html = String::new();
-    let children = node
-        .template_content()
-        .map(|content| content.child_nodes())
-        .unwrap_or_else(|| node.child_nodes());
-    for child in children {
-        serialize_node(&child, &mut html);
-    }
-    html
-}
-
-fn serialize_node(node: &NodeHandle, html: &mut String) {
-    match node.node_type() {
-        crate::dom::NodeType::Text => {
-            if let Some(data) = node.data() {
-                html.push_str(&escape_html_text(&data));
-            }
-        }
-        crate::dom::NodeType::Comment => {
-            if let Some(data) = node.data() {
-                html.push_str("<!--");
-                html.push_str(&data);
-                html.push_str("-->");
-            }
-        }
-        crate::dom::NodeType::ProcessingInstruction => {
-            html.push_str("<?");
-            html.push_str(&node.node_name());
-            if let Some(data) = node.data()
-                && !data.is_empty()
-            {
-                html.push(' ');
-                html.push_str(&data);
-            }
-            html.push_str("?>");
-        }
-        crate::dom::NodeType::DocumentType => {
-            if let Some(name) = node.data() {
-                html.push_str("<!DOCTYPE ");
-                html.push_str(&name);
-                if let Some(public_id) = node.public_id() {
-                    html.push_str(" PUBLIC \"");
-                    html.push_str(&public_id);
-                    html.push_str("\" \"");
-                    html.push_str(node.system_id().as_deref().unwrap_or(""));
-                    html.push('"');
-                } else if let Some(system_id) = node.system_id() {
-                    html.push_str(" SYSTEM \"");
-                    html.push_str(&system_id);
-                    html.push('"');
-                }
-                html.push('>');
-            }
-        }
-        crate::dom::NodeType::Element => {
-            if let Some(tag) = node.tag_name() {
-                html.push('<');
-                html.push_str(&tag);
-                if let Some(attrs) = node.attributes() {
-                    for (name, value) in &attrs {
-                        html.push(' ');
-                        html.push_str(name);
-                        html.push_str("=\"");
-                        html.push_str(&escape_html_attr(value));
-                        html.push('"');
-                    }
-                }
-                html.push('>');
-                html.push_str(&serialize_inner_html(node));
-                html.push_str("</");
-                html.push_str(&tag);
-                html.push('>');
-            }
-        }
-        _ => {
-            // Document/DocumentFragment: serialize children
-            html.push_str(&serialize_inner_html(node));
-        }
-    }
 }
 
 fn set_inner_html_native(
@@ -18133,6 +18249,9 @@ fn mark_inserted_scripts_in_tree(state: &mut HostState, root: &NodeHandle) {
             state.runnable_inserted_scripts.insert(node.identity());
         }
         pending.extend(node.child_nodes().into_iter().rev());
+        if let Some(shadow) = node.shadow_root() {
+            pending.push(shadow);
+        }
     }
 }
 
@@ -18157,6 +18276,9 @@ fn collect_inserted_scripts_native(
                     ids.push(JsValue::from(node.identity() as f64));
                 }
                 pending.extend(node.child_nodes().into_iter().rev());
+                if let Some(shadow) = node.shadow_root() {
+                    pending.push(shadow);
+                }
             }
         }
         Ok(JsValue::from(
@@ -18190,6 +18312,11 @@ fn prepare_inserted_inline_script_native(
         };
         if !state.node_is_in_active_document(&node) {
             return Ok(JsValue::undefined());
+        }
+        // External scripts are prepared by their resource task. Looking for
+        // synchronous inline source must not consume their pending state.
+        if node.get_attribute("src").is_some() {
+            return Ok(JsValue::null());
         }
         state.runnable_inserted_scripts.remove(&id);
         state.started_inserted_scripts.insert(id);
@@ -18377,6 +18504,20 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
 }
 
 fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    insert_before_native_impl(args, context, false)
+}
+
+fn move_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    insert_before_native_impl(args, context, true)
+}
+
+// Both operations update tree/style ownership. A state-preserving move keeps
+// browsing contexts, resource loads and playback associated with the subtree.
+fn insert_before_native_impl(
+    args: &[JsValue],
+    context: &mut Context,
+    preserve_state: bool,
+) -> JsResult<JsValue> {
     let parent_id = args
         .first()
         .cloned()
@@ -18419,7 +18560,11 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         let target_document = document_root_for_node(&parent);
         match ref_node {
             Some(ref_node) => {
-                let _ = parent.insert_before(new_node.clone(), &ref_node);
+                parent
+                    .insert_before(new_node.clone(), &ref_node)
+                    .map_err(|error| {
+                        JsError::from(JsNativeError::error().with_message(error.to_string()))
+                    })?;
             }
             None => parent.append_child(new_node.clone()),
         }
@@ -18431,12 +18576,12 @@ fn insert_before_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             if let Some(document) = &target_document {
                 state.mark_document_style_dirty(document);
             }
-            if source_document.is_some() {
+            if !preserve_state && source_document.is_some() {
                 state.destroy_iframe_contexts_in_subtree(&new_node);
             }
             // See `append_child_native`: insertion into a live document creates
             // a fresh iframe/object context, including an in-document reorder.
-            if target_document.is_some() {
+            if !preserve_state && target_document.is_some() {
                 state.schedule_connected_resource_loads(
                     &new_node,
                     source_document != target_document,
@@ -18714,26 +18859,49 @@ fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
             } else {
                 NodeHandle::xml_element(&tag, node.namespace_uri())
             };
-            if let Some(attributes) = node.attribute_records() {
+            if let Some(attributes) = node.attribute_records_utf16() {
                 for (qualified_name, namespace, local_name, value) in attributes {
                     if node.is_html_element() && namespace.is_none() {
-                        el.set_attribute(qualified_name, value);
+                        el.set_attribute_utf16(&qualified_name, &value);
                     } else {
-                        el.set_xml_attribute_ns(qualified_name, namespace, local_name, value);
+                        el.set_xml_attribute_ns(
+                            qualified_name,
+                            namespace.clone(),
+                            local_name.clone(),
+                            String::from_utf16_lossy(&value),
+                        );
+                        el.set_attribute_value_ns_utf16(namespace.as_deref(), &local_name, &value);
                     }
                 }
             }
             el
         }
-        crate::dom::NodeType::Text if node.is_cdata_section() => {
-            NodeHandle::cdata_section(node.data().unwrap_or_default())
+        crate::dom::NodeType::Text => {
+            let clone = if node.is_cdata_section() {
+                NodeHandle::cdata_section("")
+            } else {
+                NodeHandle::text("")
+            };
+            clone.set_data_utf16(&node.data_utf16().unwrap_or_default());
+            clone
         }
-        crate::dom::NodeType::Text => NodeHandle::text(node.data().unwrap_or_default()),
-        crate::dom::NodeType::Comment => NodeHandle::comment(node.data().unwrap_or_default()),
+        crate::dom::NodeType::Comment => {
+            let clone = NodeHandle::comment("");
+            clone.set_data_utf16(&node.data_utf16().unwrap_or_default());
+            clone
+        }
         crate::dom::NodeType::ProcessingInstruction => {
-            NodeHandle::processing_instruction(node.node_name(), node.data().unwrap_or_default())
+            let clone = NodeHandle::processing_instruction(node.node_name(), "");
+            clone.set_data_utf16(&node.data_utf16().unwrap_or_default());
+            clone
         }
-        crate::dom::NodeType::Document => NodeHandle::document(),
+        crate::dom::NodeType::Document => {
+            let document = NodeHandle::document();
+            if let Some(encoding) = node.document_character_encoding() {
+                document.set_document_character_encoding(encoding);
+            }
+            document
+        }
         crate::dom::NodeType::DocumentFragment => NodeHandle::document_fragment(),
         crate::dom::NodeType::DocumentType => NodeHandle::document_type(
             node.data().unwrap_or_default(),
@@ -18956,9 +19124,9 @@ fn create_text_node_native(
         .first()
         .cloned()
         .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
-    let node = NodeHandle::text(&text);
+        .to_string(context)?;
+    let node = NodeHandle::text("");
+    node.set_data_utf16(&text.iter().collect::<Vec<u16>>());
     let id = node.identity() as f64;
     let creator = caller_document_id(context);
     with_host_state(|state| {
@@ -18978,9 +19146,9 @@ fn create_cdata_section_native(
         .first()
         .cloned()
         .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
-    let node = NodeHandle::cdata_section(text);
+        .to_string(context)?;
+    let node = NodeHandle::cdata_section("");
+    node.set_data_utf16(&text.iter().collect::<Vec<u16>>());
     let id = node.identity() as f64;
     let creator = caller_document_id(context);
     with_host_state(|state| {
@@ -19231,8 +19399,8 @@ fn serialize_xml_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             .borrow()
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        let serialized = crate::xml::serialize(&node);
-        Ok(js_string!(serialized.as_str()).into())
+        let serialized = crate::xml::serialize_utf16(&node);
+        Ok(JsString::from(serialized.as_slice()).into())
     })
 }
 
@@ -19287,9 +19455,9 @@ fn create_processing_instruction_native(
         .get(1)
         .cloned()
         .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
-    let node = NodeHandle::processing_instruction(target, data);
+        .to_string(context)?;
+    let node = NodeHandle::processing_instruction(target, "");
+    node.set_data_utf16(&data.iter().collect::<Vec<u16>>());
     let id = node.identity() as f64;
     let creator = caller_document_id(context);
     with_host_state(|state| {
@@ -19309,9 +19477,9 @@ fn create_comment_native(
         .first()
         .cloned()
         .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
-    let node = NodeHandle::comment(&data);
+        .to_string(context)?;
+    let node = NodeHandle::comment("");
+    node.set_data_utf16(&data.iter().collect::<Vec<u16>>());
     let id = node.identity() as f64;
     let creator = caller_document_id(context);
     with_host_state(|state| {
@@ -19724,8 +19892,8 @@ fn document_write_native(
         .get(1)
         .cloned()
         .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
+        .to_string(context)?;
+    let text: Vec<u16> = text.iter().collect();
     with_host_state(|state| document_write::write(state, target_id, &text, false, context))
 }
 
@@ -19736,7 +19904,7 @@ fn document_close_native(
 ) -> JsResult<JsValue> {
     let target_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_document(context, target_id)?;
-    with_host_state(|state| document_write::write(state, target_id, "", true, context))
+    with_host_state(|state| document_write::write(state, target_id, &[], true, context))
 }
 
 /// `__omoikane_iframe_content_document(iframeId)` — returns the node id of the

@@ -156,16 +156,17 @@ fn retained_old_node_keeps_document_ancestors_and_expandos_alive() {
 fn old_document_generations_are_kept_by_references_without_an_eviction_limit() {
     let mut runtime = runtime();
     runtime
-        .eval(
-            r#"
-        var frame = document.getElementById('f'); var held = [];
-        for (var i = 0; i < 80; i++) {
-            frame.srcdoc = '<p>' + i + '</p>';
-            held.push(frame.contentDocument);
-        }
-    "#,
-        )
+        .eval("var frame = document.getElementById('f'); var held = [];")
         .unwrap();
+    // Each navigation is a separate script job, as it would be when initiated
+    // by successive page tasks. Keep all 80 generations reachable throughout.
+    for index in 0..80 {
+        runtime
+            .eval(&format!(
+                "frame.srcdoc = '<p>{index}</p>'; held.push(frame.contentDocument);"
+            ))
+            .unwrap();
+    }
     collect(&mut runtime);
     assert_eq!(
         runtime
@@ -228,12 +229,13 @@ fn inert_and_cloned_document_style_caches_follow_javascript_lifetime() {
 }
 
 #[test]
-fn adopting_retained_old_node_releases_its_previous_document() {
+fn adopted_node_keeps_its_creation_realm_until_references_are_released() {
     let mut runtime = runtime();
     runtime
         .eval(
             r#"
         var frame = document.getElementById('f');
+        var oldDocumentId = frame.contentDocument.__id;
         var held = frame.contentDocument.getElementById('old'); held.marker = 42;
         frame.srcdoc = '<p>new</p>'; void frame.contentDocument;
         document.body.appendChild(held);
@@ -242,6 +244,22 @@ fn adopting_retained_old_node_releases_its_previous_document() {
         .unwrap();
     collect(&mut runtime);
     assert_eq!(runtime.eval("held.ownerDocument === document && held.marker === 42 && document.getElementById('old') === held").unwrap().as_boolean(), Some(true));
+    assert_eq!(
+        runtime
+            .eval("held.constructor.constructor('return document')().__id === oldDocumentId")
+            .unwrap()
+            .as_boolean(),
+        Some(true),
+        "the adopted wrapper keeps the constructors from its creation Realm"
+    );
+    assert_eq!(
+        runtime.host_state.borrow().node_lifetimes.document_count(),
+        3
+    );
+    runtime.eval("held.remove(); held = null").unwrap();
+    // Pending Promise reactions are real Realm roots until the checkpoint.
+    runtime.run_jobs().unwrap();
+    collect(&mut runtime);
     assert!(runtime.host_state.borrow().node_lifetimes.document_count() <= 2);
 }
 
@@ -401,6 +419,8 @@ fn retained_document_groups_trace_new_wrappers_after_minor_collection() {
         );
     }
     runtime.eval("oldDoc = null").unwrap();
+    // Check reclamation after the last script's microtask checkpoint.
+    runtime.run_jobs().unwrap();
     collect(&mut runtime);
     assert_eq!(
         runtime.host_state.borrow().node_lifetimes.document_count(),
@@ -465,9 +485,19 @@ fn adoption_updates_all_realm_aliases_across_minor_collection() {
         .unwrap();
     runtime.context.clear_kept_objects();
     boa_gc::force_minor_collect();
-    assert_eq!(runtime.eval("mainAlias.__id === childAlias.__id && childAlias.ownerDocument.__id === document.__id && mainAlias.marker.value === 41 && childAlias.marker.value === 42").unwrap().as_boolean(), Some(true));
+    assert_eq!(runtime.eval("mainAlias === childAlias && childAlias.ownerDocument === document && mainAlias.marker.value === 42 && childAlias.marker.value === 42").unwrap().as_boolean(), Some(true));
     runtime.eval("childAlias = null").unwrap();
     collect(&mut runtime);
     assert_eq!(runtime.eval("document.getElementById('old') === mainAlias && mainAlias.ownerDocument === document").unwrap().as_boolean(), Some(true));
+    assert_eq!(
+        runtime.host_state.borrow().node_lifetimes.document_count(),
+        3
+    );
+    runtime
+        .eval("mainAlias.remove(); mainAlias = null")
+        .unwrap();
+    // Pending Promise reactions are real Realm roots until the checkpoint.
+    runtime.run_jobs().unwrap();
+    collect(&mut runtime);
     assert!(runtime.host_state.borrow().node_lifetimes.document_count() <= 2);
 }

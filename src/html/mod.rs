@@ -4,10 +4,12 @@
 //! into HTML5-style tokens for later tree construction.
 
 pub(crate) mod encoding;
+mod foreign_attributes;
+mod quirks;
 mod tokenizer;
 mod tree_builder;
 
-pub(crate) use encoding::decode_html_response;
+pub(crate) use encoding::{DecodedHtml, decode_html_response};
 pub use tokenizer::{Attribute, DoctypeToken, HtmlParseError, Token, Tokenizer};
 pub(crate) use tree_builder::WriteParser;
 pub use tree_builder::{FragmentParseResult, InsertionMode, ParseResult, TreeBuilder};

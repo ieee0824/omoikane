@@ -30,6 +30,7 @@ pub enum InsertionMode {
 #[derive(Debug, Clone)]
 pub struct ParseResult {
     document: NodeHandle,
+    quirks_mode: bool,
     errors: Vec<HtmlParseError>,
 }
 
@@ -37,10 +38,16 @@ pub struct ParseResult {
 #[derive(Debug, Clone)]
 pub struct FragmentParseResult {
     fragment: NodeHandle,
+    context_shadow_root: Option<NodeHandle>,
     errors: Vec<HtmlParseError>,
 }
 
 impl FragmentParseResult {
+    /// Returns a declarative shadow root parsed on the synthetic context host.
+    pub(crate) fn context_shadow_root(&self) -> Option<NodeHandle> {
+        self.context_shadow_root.clone()
+    }
+
     /// Returns the detached fragment containing the parsed nodes.
     pub fn fragment(&self) -> NodeHandle {
         self.fragment.clone()
@@ -53,6 +60,11 @@ impl FragmentParseResult {
 }
 
 impl ParseResult {
+    /// Returns whether the initial parsing rules selected quirks mode.
+    pub fn quirks_mode(&self) -> bool {
+        self.quirks_mode
+    }
+
     /// Returns the parsed document root.
     pub fn document(&self) -> NodeHandle {
         self.document.clone()
@@ -69,19 +81,86 @@ impl ParseResult {
 pub struct TreeBuilder;
 
 impl TreeBuilder {
+    /// Decodes and parses HTML resource bytes, preserving the selected encoding.
+    ///
+    /// A transport charset takes precedence over an in-document meta label;
+    /// a byte order mark can override the selected decoder. Unicode strings
+    /// supplied to [`Self::parse`] retain the default UTF-8 document encoding.
+    pub fn parse_bytes(input: &[u8], content_type: Option<&str>) -> ParseResult {
+        Self::parse_decoded(&super::encoding::decode_html_bytes(input, content_type))
+    }
+
+    /// Constructs a document from an already decoded resource.
+    pub(crate) fn parse_decoded(input: &super::DecodedHtml) -> ParseResult {
+        let result = Self::parse(&input.text);
+        result
+            .document
+            .set_document_character_encoding(input.encoding.clone());
+        result
+    }
+
     /// Parses an HTML string into a DOM document and collected errors.
     pub fn parse(input: &str) -> ParseResult {
-        let (tokens, mut errors) = Tokenizer::new(input).tokenize_with_errors();
+        Self::parse_with_scripting(input, true)
+    }
+
+    /// Parses an inert document whose browsing context has scripting disabled.
+    pub(crate) fn parse_inert(input: &str) -> ParseResult {
+        Self::parse_with_scripting(input, false)
+    }
+
+    /// Parses exact UTF-16 source for an inert HTML document.
+    pub(crate) fn parse_inert_utf16(input: &[u16]) -> ParseResult {
+        let (tokens, mut errors) = Tokenizer::from_utf16(input)
+            .with_scripting(false)
+            .tokenize_with_errors();
         let mut builder = Builder::new();
         builder.process_tokens(tokens, &mut errors);
         ParseResult {
             document: builder.document,
+            quirks_mode: builder.quirks_mode,
+            errors,
+        }
+    }
+
+    fn parse_with_scripting(input: &str, scripting_enabled: bool) -> ParseResult {
+        let (tokens, mut errors) = Tokenizer::new(input)
+            .with_scripting(scripting_enabled)
+            .tokenize_with_errors();
+        let mut builder = Builder::new();
+        builder.process_tokens(tokens, &mut errors);
+        ParseResult {
+            document: builder.document,
+            quirks_mode: builder.quirks_mode,
             errors,
         }
     }
 
     /// Parses HTML relative to `context` and returns only the resulting nodes.
     pub fn parse_fragment(input: &str, context: &NodeHandle) -> FragmentParseResult {
+        Self::parse_fragment_impl(Tokenizer::new(input), context, false)
+    }
+
+    /// Parses a fragment with declarative shadow roots enabled.
+    pub(crate) fn parse_fragment_with_shadow_roots(
+        input: &str,
+        context: &NodeHandle,
+    ) -> FragmentParseResult {
+        Self::parse_fragment_impl(Tokenizer::new(input), context, true)
+    }
+
+    pub(crate) fn parse_fragment_utf16_with_shadow_roots(
+        input: &[u16],
+        context: &NodeHandle,
+    ) -> FragmentParseResult {
+        Self::parse_fragment_impl(Tokenizer::from_utf16(input), context, true)
+    }
+
+    fn parse_fragment_impl(
+        tokenizer: Tokenizer<'_>,
+        context: &NodeHandle,
+        allow_shadow_roots: bool,
+    ) -> FragmentParseResult {
         let context_name = context
             .local_name()
             .or_else(|| context.tag_name())
@@ -91,12 +170,26 @@ impl TreeBuilder {
             .as_deref()
             .is_none_or(|value| value == HTML_NAMESPACE);
         let (tokens, mut errors) = if html_context {
-            Tokenizer::new(input).tokenize_fragment_with_errors(&context_name)
+            tokenizer.tokenize_fragment_with_errors(&context_name)
         } else {
-            Tokenizer::new(input).tokenize_with_errors()
+            tokenizer.tokenize_with_errors()
         };
         let (mut builder, container) = Builder::new_fragment(context);
+        builder.allow_declarative_shadow_roots = allow_shadow_roots;
+        let existing_shadow = context.shadow_root();
+        if allow_shadow_roots {
+            if let Some(root) = &existing_shadow {
+                if let Some(mode) = root.shadow_root_mode() {
+                    container.attach_shadow(mode);
+                }
+            }
+        }
         builder.process_tokens(tokens, &mut errors);
+        let context_shadow_root = if allow_shadow_roots && existing_shadow.is_none() {
+            container.shadow_root()
+        } else {
+            None
+        };
         // Flatten the artificial context element at its position in the
         // synthetic root. Foster-parented nodes can precede it, and a token
         // matching the context's end tag can make later nodes its siblings.
@@ -129,7 +222,11 @@ impl TreeBuilder {
         for child in source {
             fragment.append_child(child);
         }
-        FragmentParseResult { fragment, errors }
+        FragmentParseResult {
+            fragment,
+            context_shadow_root,
+            errors,
+        }
     }
 }
 
@@ -192,6 +289,15 @@ impl WriteParser {
         self.tokenizer.push_input(input);
     }
 
+    pub(crate) fn push_input_utf16(&mut self, units: &[u16]) {
+        self.tokenizer.push_input_utf16(units);
+        self.tokenizer.finish_input_chunk();
+    }
+
+    pub(crate) fn take_pending_input_utf16(&mut self) -> Vec<u16> {
+        self.tokenizer.take_pending_input_utf16()
+    }
+
     pub(crate) fn take_pending_input(&mut self) -> String {
         self.tokenizer.take_pending_input()
     }
@@ -216,6 +322,8 @@ impl WriteParser {
 
 #[derive(Debug)]
 struct Builder {
+    character_surrogate: Option<u16>,
+    leaf_data_utf16: Option<Vec<u16>>,
     document: NodeHandle,
     open_elements: Vec<NodeHandle>,
     active_formatting_elements: Vec<NodeHandle>,
@@ -226,11 +334,14 @@ struct Builder {
     created_nodes: Option<std::cell::RefCell<Vec<NodeHandle>>>,
     fragment: bool,
     allow_declarative_shadow_roots: bool,
+    quirks_mode: bool,
 }
 
 impl Builder {
     fn new() -> Self {
         Self {
+            character_surrogate: None,
+            leaf_data_utf16: None,
             document: NodeHandle::document(),
             open_elements: Vec::new(),
             active_formatting_elements: Vec::new(),
@@ -241,6 +352,7 @@ impl Builder {
             created_nodes: None,
             fragment: false,
             allow_declarative_shadow_roots: true,
+            quirks_mode: true,
         }
     }
 
@@ -300,6 +412,33 @@ impl Builder {
     }
 
     fn process_token(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
+        let token = match token {
+            Token::CommentUtf16(units) => {
+                let projected = Token::Comment(String::from_utf16_lossy(&units));
+                self.process_utf16_leaf(projected, units, errors);
+                return;
+            }
+            Token::ProcessingInstructionUtf16 { target, data } => {
+                let projected = Token::ProcessingInstruction {
+                    target,
+                    data: String::from_utf16_lossy(&data),
+                };
+                self.process_utf16_leaf(projected, data, errors);
+                return;
+            }
+            token => token,
+        };
+        if let Token::Surrogate(unit) = token {
+            let previous = self.character_surrogate.replace(unit);
+            self.process_token(Token::Character("\u{fffd}".to_owned()), errors);
+            self.character_surrogate = previous;
+            return;
+        }
+
+        if let Token::ProcessingInstruction { target, data } = &token {
+            self.insert_processing_instruction(target, data);
+            return;
+        }
         if self.process_foreign_token(&token, errors) {
             return;
         }
@@ -320,10 +459,41 @@ impl Builder {
         }
     }
 
+    fn process_utf16_leaf(
+        &mut self,
+        token: Token,
+        units: Vec<u16>,
+        errors: &mut Vec<HtmlParseError>,
+    ) {
+        let previous = self.leaf_data_utf16.replace(units);
+        self.process_token(token, errors);
+        self.leaf_data_utf16 = previous;
+    }
+
+    fn insert_processing_instruction(&self, target: &str, data: &str) {
+        let parent = match self.mode {
+            InsertionMode::Initial | InsertionMode::BeforeHtml | InsertionMode::AfterAfterBody => {
+                self.document.clone()
+            }
+            InsertionMode::AfterBody => self
+                .open_elements
+                .first()
+                .cloned()
+                .unwrap_or_else(|| self.document.clone()),
+            _ => self.insertion_parent(),
+        };
+        self.append_node(&parent, NodeHandle::processing_instruction(target, data));
+    }
+
     fn handle_initial(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
+            Token::ProcessingInstruction { target, data } => {
+                self.insert_processing_instruction(&target, &data)
+            }
             Token::Comment(data) => self.append_node(&self.document, NodeHandle::comment(data)),
             Token::Doctype(doctype) => {
+                self.quirks_mode = super::quirks::is_quirks(&doctype);
+                self.mode = InsertionMode::BeforeHtml;
                 if let Some(name) = doctype.name() {
                     self.append_node(
                         &self.document,
@@ -350,6 +520,9 @@ impl Builder {
 
     fn handle_before_html(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
+            Token::ProcessingInstruction { target, data } => {
+                self.insert_processing_instruction(&target, &data)
+            }
             Token::Comment(data) => self.append_node(&self.document, NodeHandle::comment(data)),
             Token::Character(data) if data.trim().is_empty() => {}
             Token::StartTag {
@@ -375,6 +548,9 @@ impl Builder {
     fn handle_before_head(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
             Token::Character(data) if data.trim().is_empty() => {}
+            Token::ProcessingInstruction { target, data } => {
+                self.insert_processing_instruction(&target, &data)
+            }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
             }
@@ -400,7 +576,10 @@ impl Builder {
     fn handle_in_head(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
             Token::Character(data) => {
-                self.insert_text(&data);
+                self.handle_head_text(&data, errors);
+            }
+            Token::ProcessingInstruction { target, data } => {
+                self.insert_processing_instruction(&target, &data)
             }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
@@ -457,12 +636,48 @@ impl Builder {
         }
     }
 
+    fn handle_head_text(&mut self, data: &str, errors: &mut Vec<HtmlParseError>) {
+        // Text-only head elements use the tokenizer's raw-text/RCDATA state.
+        if matches!(
+            self.current_node().tag_name().as_deref(),
+            Some("title" | "style" | "script")
+        ) {
+            self.insert_text(data);
+            return;
+        }
+        // Character tokens can contain a run of characters. Only HTML space
+        // characters stay in head; the first other character starts the body.
+        let whitespace_end = data
+            .char_indices()
+            .find_map(|(offset, ch)| {
+                (!matches!(ch, '\t' | '\n' | '\u{000c}' | '\r' | ' ')).then_some(offset)
+            })
+            .unwrap_or(data.len());
+        if whitespace_end > 0 {
+            self.insert_text(&data[..whitespace_end]);
+        }
+        if whitespace_end < data.len() {
+            self.pop_matching("head");
+            self.mode = InsertionMode::InBody;
+            self.ensure_body_element();
+            self.process_token(Token::Character(data[whitespace_end..].to_owned()), errors);
+        }
+    }
+
     fn handle_in_body(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
+            Token::Surrogate(_)
+            | Token::CommentUtf16(_)
+            | Token::ProcessingInstructionUtf16 { .. } => {
+                unreachable!("UTF-16 tokens are normalized before dispatch")
+            }
             Token::Character(data) => {
                 if !data.is_empty() {
                     self.insert_text(&data);
                 }
+            }
+            Token::ProcessingInstruction { target, data } => {
+                self.insert_processing_instruction(&target, &data)
             }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
@@ -638,6 +853,9 @@ impl Builder {
         match token {
             Token::Character(data) if data.trim().is_empty() => self.insert_text(&data),
             Token::Character(data) => self.foster_parent_text(&data),
+            Token::ProcessingInstruction { target, data } => {
+                self.insert_processing_instruction(&target, &data)
+            }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
             }
@@ -753,6 +971,9 @@ impl Builder {
     fn handle_in_column_group(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
             Token::Character(data) if data.trim().is_empty() => self.insert_text(&data),
+            Token::ProcessingInstruction { target, data } => {
+                self.insert_processing_instruction(&target, &data)
+            }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
             }
@@ -948,6 +1169,9 @@ impl Builder {
                     self.insert_text(&data);
                 }
             }
+            Token::ProcessingInstruction { target, data } => {
+                self.insert_processing_instruction(&target, &data)
+            }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
             }
@@ -1074,10 +1298,18 @@ impl Builder {
         }
 
         match token {
+            Token::Surrogate(_)
+            | Token::CommentUtf16(_)
+            | Token::ProcessingInstructionUtf16 { .. } => {
+                unreachable!("UTF-16 tokens are normalized before dispatch")
+            }
             Token::Character(data) => {
                 if !data.is_empty() {
                     self.insert_text(data);
                 }
+            }
+            Token::ProcessingInstruction { target, data } => {
+                self.insert_processing_instruction(&target, &data)
             }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
@@ -1126,7 +1358,24 @@ impl Builder {
         };
         let element = NodeHandle::xml_element(adjusted_name, Some(namespace.to_string()));
         for attribute in attributes {
-            element.set_attribute(attribute.name(), attribute.value());
+            let name = super::foreign_attributes::adjusted_name(attribute.name(), namespace);
+            let attribute_namespace = super::foreign_attributes::namespace(name);
+            let local_name = if attribute_namespace.is_some() {
+                name.rsplit_once(':').map_or(name, |(_, local)| local)
+            } else {
+                name
+            };
+            element.set_xml_attribute_ns(
+                name,
+                attribute_namespace.map(str::to_owned),
+                local_name,
+                attribute.value(),
+            );
+            element.set_attribute_value_ns_utf16(
+                attribute_namespace,
+                local_name,
+                &attribute.value_utf16(),
+            );
         }
         self.append_node(parent, element.clone());
         element
@@ -1135,6 +1384,9 @@ impl Builder {
     fn handle_after_body(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
             Token::Character(data) if data.trim().is_empty() => {}
+            Token::ProcessingInstruction { target, data } => {
+                self.insert_processing_instruction(&target, &data)
+            }
             Token::Comment(data) => self.append_node(&self.document, NodeHandle::comment(data)),
             Token::EndTag { name } if name == "html" => {
                 self.pop_matching("html");
@@ -1150,6 +1402,9 @@ impl Builder {
 
     fn handle_after_after_body(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
+            Token::ProcessingInstruction { target, data } => {
+                self.insert_processing_instruction(&target, &data)
+            }
             Token::Comment(data) => self.append_node(&self.document, NodeHandle::comment(data)),
             Token::Character(data) if data.trim().is_empty() => {}
             Token::Eof => {}
@@ -1252,9 +1507,9 @@ impl Builder {
         name: &str,
         attributes: &[super::Attribute],
     ) -> NodeHandle {
-        let node = NodeHandle::element(name);
+        let node = NodeHandle::html_element_ns(name, HTML_NAMESPACE);
         for attribute in attributes {
-            node.set_attribute(attribute.name(), attribute.value());
+            node.set_attribute_utf16(attribute.name(), &attribute.value_utf16());
         }
         self.append_node(&self.document, node.clone());
         node
@@ -1303,6 +1558,23 @@ impl Builder {
         let Some(root) = host.attach_shadow(mode) else {
             return template;
         };
+        let has = |name: &str| {
+            attributes
+                .iter()
+                .any(|attribute| attribute.name().eq_ignore_ascii_case(name))
+        };
+        root.set_shadow_root_settings(crate::dom::ShadowRootSettings {
+            serializable: has("shadowrootserializable"),
+            delegates_focus: has("shadowrootdelegatesfocus"),
+            clonable: has("shadowrootclonable"),
+            declarative: true,
+            manual_slot_assignment: attributes.iter().any(|attribute| {
+                attribute
+                    .name()
+                    .eq_ignore_ascii_case("shadowrootslotassignment")
+                    && attribute.value().eq_ignore_ascii_case("manual")
+            }),
+        });
         if !template.set_template_content(root.clone()) {
             return template;
         }
@@ -1321,9 +1593,9 @@ impl Builder {
         name: &str,
         attributes: &[super::Attribute],
     ) -> NodeHandle {
-        let element = NodeHandle::element(name);
+        let element = NodeHandle::html_element_ns(name, HTML_NAMESPACE);
         for attribute in attributes {
-            element.set_attribute(attribute.name(), attribute.value());
+            element.set_attribute_utf16(attribute.name(), &attribute.value_utf16());
         }
         self.append_node(parent, element.clone());
         self.associate_parser_form(&element);
@@ -1358,12 +1630,21 @@ impl Builder {
         let existing = element.attributes().unwrap_or_default();
         for attribute in attributes {
             if !existing.contains_key(attribute.name()) {
-                element.set_attribute(attribute.name(), attribute.value());
+                element.set_attribute_utf16(attribute.name(), &attribute.value_utf16());
             }
         }
     }
 
     fn append_node(&self, parent: &NodeHandle, child: NodeHandle) {
+        if let Some(units) = &self.leaf_data_utf16
+            && matches!(
+                child.node_type(),
+                crate::dom::NodeType::Comment | crate::dom::NodeType::ProcessingInstruction
+            )
+        {
+            child.set_data_utf16(units);
+        }
+
         if let Some(created) = &self.created_nodes {
             created.borrow_mut().push(child.clone());
         }
@@ -1377,11 +1658,26 @@ impl Builder {
         }
     }
 
+    fn character_units(&self, text: &str) -> Vec<u16> {
+        if let Some(unit) = self.character_surrogate {
+            assert_eq!(text, "\u{fffd}");
+            vec![unit]
+        } else {
+            text.encode_utf16().collect()
+        }
+    }
+
+    fn character_node(&self, text: &str) -> NodeHandle {
+        let node = NodeHandle::text("");
+        node.set_data_utf16(&self.character_units(text));
+        node
+    }
+
     fn insert_text(&mut self, text: &str) {
         let parent = self.current_node_or_document();
         // Writes can split a character run at arbitrary input boundaries.
         // Keep the live Text node when more characters arrive at the same point.
-        if self.created_nodes.is_some() {
+        {
             let children = parent.child_nodes();
             let index = self
                 .write_boundary
@@ -1393,18 +1689,33 @@ impl Builder {
             if let Some(previous) = index.checked_sub(1).and_then(|index| children.get(index))
                 && previous.node_type() == crate::dom::NodeType::Text
             {
-                previous.set_data(&(previous.data().unwrap_or_default() + text));
+                let mut units = previous.data_utf16().unwrap_or_default();
+                units.extend(self.character_units(text));
+                previous.set_data_utf16(&units);
                 return;
             }
         }
-        self.append_node(&parent, NodeHandle::text(text));
+        self.append_node(&parent, self.character_node(text));
     }
 
     fn foster_parent_text(&mut self, text: &str) {
         if let Some(table) = self.current_table()
             && let Some(parent) = table.parent_node()
         {
-            let text_node = NodeHandle::text(text);
+            let children = parent.child_nodes();
+            if let Some(previous) = children
+                .iter()
+                .position(|child| child == &table)
+                .and_then(|index| index.checked_sub(1))
+                .and_then(|index| children.get(index))
+                && previous.node_type() == crate::dom::NodeType::Text
+            {
+                let mut units = previous.data_utf16().unwrap_or_default();
+                units.extend(self.character_units(text));
+                previous.set_data_utf16(&units);
+                return;
+            }
+            let text_node = self.character_node(text);
             if let Some(created) = &self.created_nodes {
                 created.borrow_mut().push(text_node.clone());
             }
@@ -1871,6 +2182,37 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_fragment_parser_returns_context_shadow_and_nested_roots() {
+        let context = NodeHandle::element("div");
+        let result = TreeBuilder::parse_fragment_with_shadow_roots(
+            "<template shadowrootmode='closed' shadowrootserializable><span id='inside'></span></template><section><template shadowrootmode='open'><b></b></template></section>",
+            &context,
+        );
+        let root = result.context_shadow_root().unwrap();
+        assert_eq!(root.shadow_root_mode(), Some(ShadowRootMode::Closed));
+        assert!(root.shadow_root_settings().unwrap().serializable);
+        assert!(root.query_selector("#inside").is_some());
+        assert!(context.shadow_root().is_none());
+        let section = result.fragment().query_selector("section").unwrap();
+        assert!(section.shadow_root().unwrap().query_selector("b").is_some());
+    }
+
+    #[test]
+    fn unsafe_fragment_parser_preserves_existing_context_shadow() {
+        let context = NodeHandle::element("div");
+        let existing = context.attach_shadow(ShadowRootMode::Open).unwrap();
+        existing.append_child(NodeHandle::element("span"));
+        let result = TreeBuilder::parse_fragment_with_shadow_roots(
+            "<template shadowrootmode='closed'><b></b></template>",
+            &context,
+        );
+        assert!(result.context_shadow_root().is_none());
+        assert!(result.fragment().query_selector("template").is_some());
+        assert_eq!(context.shadow_root().unwrap(), existing);
+        assert!(existing.query_selector("span").is_some());
+    }
+
+    #[test]
     fn fragment_parser_does_not_enable_declarative_shadow_roots() {
         let context = NodeHandle::element("div");
         let fragment = TreeBuilder::parse_fragment(
@@ -2088,6 +2430,33 @@ mod tests {
             Some("The Second Acid Test".to_string())
         );
         assert_eq!(body.child_nodes()[0].tag_name().as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn text_after_head_metadata_starts_the_body() {
+        for markup in [
+            "<meta charset=latin2>é",
+            "<meta charset=latin2> \t\né",
+            "<meta>\u{00a0}text",
+        ] {
+            let document = TreeBuilder::parse_inert(markup).document();
+            let head = document.query_selector("head").unwrap();
+            let body = document.query_selector("body").unwrap();
+            let expected = if markup.contains('\u{00a0}') {
+                "\u{00a0}text"
+            } else {
+                "é"
+            };
+            assert_eq!(body.child_nodes()[0].data().as_deref(), Some(expected));
+            for child in head.child_nodes() {
+                if let Some(text) = child.data() {
+                    assert!(
+                        text.chars()
+                            .all(|ch| matches!(ch, '\t' | '\n' | '\u{000c}' | '\r' | ' '))
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -2451,13 +2820,19 @@ mod tests {
         assert_eq!(children[0].namespace_uri().as_deref(), Some(SVG_NAMESPACE));
         assert_eq!(children[1].tag_name().as_deref(), Some("foreignObject"));
         assert_eq!(children[1].namespace_uri().as_deref(), Some(SVG_NAMESPACE));
-        assert_eq!(children[1].child_nodes()[0].namespace_uri(), None);
+        assert_eq!(
+            children[1].child_nodes()[0].namespace_uri().as_deref(),
+            Some(HTML_NAMESPACE)
+        );
 
         let math = NodeHandle::xml_element("math", Some(MATHML_NAMESPACE.to_string()));
         let fragment = TreeBuilder::parse_fragment("<mi><span>html</span></mi>", &math).fragment();
         let mi = &fragment.child_nodes()[0];
         assert_eq!(mi.namespace_uri().as_deref(), Some(MATHML_NAMESPACE));
-        assert_eq!(mi.child_nodes()[0].namespace_uri(), None);
+        assert_eq!(
+            mi.child_nodes()[0].namespace_uri().as_deref(),
+            Some(HTML_NAMESPACE)
+        );
     }
 
     #[test]

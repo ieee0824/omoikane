@@ -2,6 +2,8 @@
 
 pub(crate) mod animation;
 pub(crate) mod border;
+mod caret;
+pub(crate) use caret::{TextCaretPoint, hit_test_caret_layout};
 pub(crate) mod color;
 pub(crate) mod color4;
 pub(crate) mod form_control;

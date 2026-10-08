@@ -20,12 +20,13 @@ use crate::paint::{DataUri, Image, parse_data_uri};
 use super::{
     BoxDimensions, EdgeSizes, FontMetrics, FragmentStyle, HTTP_CLIENT, IMAGE_ANIMATION_CACHE,
     IMAGE_BASE_URL, IMAGE_CACHE, IMAGE_COOKIE_CONTEXT, InlineFragment, InlineFragmentContent,
-    LAYOUT_FONTS, LayoutBox, LineBox, Rect, TextControlPaintState, TextOverflowPaint,
-    VerticalAlign, border_box_adjust_length, edge_sizes, explicit_length, is_border_box,
-    is_non_rendered_html_element,
+    InlineTextSource, LAYOUT_FONTS, LayoutBox, LineBox, Rect, TextControlPaintState,
+    TextOverflowPaint, VerticalAlign, border_box_adjust_length, edge_sizes, explicit_length,
+    is_border_box, is_non_rendered_html_element,
 };
 
 mod boxes;
+mod text_source;
 
 thread_local! {
     static PRINT_INLINE_SKIP: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
@@ -77,7 +78,12 @@ fn skip_inline_prefix(segments: &mut Vec<InlineSegment>, token_offset: usize) {
             return false;
         }
         if let InlineSegmentContent::Text(text) = &mut segment.content {
-            *text = text.graphemes(true).skip(remaining).collect();
+            let start = text
+                .grapheme_indices(true)
+                .nth(remaining)
+                .map_or(text.len(), |(i, _)| i);
+            segment.text_source = text_source::slice(&segment.text_source, text, start..text.len());
+            *text = text[start..].to_owned();
             remaining = 0;
             return true;
         }
@@ -613,6 +619,17 @@ fn apply_text_overflow(
                 else {
                     break;
                 };
+                let original = match &fragment.content {
+                    InlineFragmentContent::Text(text) => text,
+                    _ => unreachable!(),
+                };
+                let start = if keep_prefix {
+                    0
+                } else {
+                    original.len() - text.len()
+                };
+                painted.text_source =
+                    text_source::slice(&fragment.text_source, original, start..start + text.len());
                 painted.content = InlineFragmentContent::Text(text);
                 painted.rect.width = width;
             }
@@ -636,6 +653,7 @@ fn apply_text_overflow(
         marker_style.resolved_bidi_level = Some(if direction_rtl { 1 } else { 0 });
         let marker = InlineFragment {
             node: marker_node.clone(),
+            text_source: Vec::new(),
             content: InlineFragmentContent::Text("…".to_string()),
             rect: Rect {
                 x: if direction_rtl {
@@ -764,6 +782,11 @@ fn coalesce_adjacent_text_segments(segments: &mut Vec<InlineSegment>) {
             && let (InlineSegmentContent::Text(previous_text), InlineSegmentContent::Text(text)) =
                 (&mut previous.content, &segment.content)
         {
+            text_source::append(
+                &mut previous.text_source,
+                segment.text_source,
+                previous_text.len(),
+            );
             previous_text.push_str(text);
             continue;
         }
@@ -823,6 +846,7 @@ pub(super) fn overflow_wrap(style: &ComputedStyle) -> OverflowWrap {
 #[derive(Debug, Clone)]
 pub(super) struct InlineSegment {
     pub(super) node: NodeHandle,
+    pub(super) text_source: Vec<InlineTextSource>,
     pub(super) content: InlineSegmentContent,
     pub(super) metrics: FontMetrics,
     pub(super) line_height: f32,
@@ -861,13 +885,13 @@ pub(super) enum InlineSegmentContent {
 /// Creates a text `InlineSegment` from a node, text content, and resolved style.
 /// Returns `None` when the normalized + transformed text is empty.
 fn make_text_segment(node: NodeHandle, text: &str, style: &ComputedStyle) -> Option<InlineSegment> {
-    let text = normalize_text(text, white_space(style));
-    let text = apply_text_transform_layout(&text, style);
+    let (text, text_source) = text_source::prepare(&node, text, style);
     if text.is_empty() {
         return None;
     }
     Some(InlineSegment {
         node,
+        text_source,
         content: InlineSegmentContent::Text(text),
         metrics: font_metrics(style),
         line_height: line_height(style),
@@ -924,6 +948,7 @@ fn collect_element_inline_segments(
             // handling of literal newlines. Reuse the forced-break path.
             out.push(InlineSegment {
                 node: node.clone(),
+                text_source: Vec::new(),
                 content: InlineSegmentContent::Text("\n".to_string()),
                 metrics: font_metrics(&style),
                 line_height: line_height(&style),
@@ -983,6 +1008,7 @@ fn collect_element_inline_segments(
     {
         out.push(InlineSegment {
             node: node.clone(),
+            text_source: Vec::new(),
             content: InlineSegmentContent::Text(alt_text),
             metrics: font_metrics(&style),
             line_height: line_height(&style),
@@ -1043,6 +1069,7 @@ fn collect_element_inline_segments(
             atomic_boxes.push(layout);
             out.push(InlineSegment {
                 node: node.clone(),
+                text_source: Vec::new(),
                 content: InlineSegmentContent::AtomicInline(width, height, baseline),
                 metrics: font_metrics(&style),
                 line_height: height,
@@ -1165,6 +1192,7 @@ fn collect_button_segment(
             content_height + padding.top + padding.bottom + border.top + border.bottom;
         out.push(InlineSegment {
             node: node.clone(),
+            text_source: Vec::new(),
             content: InlineSegmentContent::IconFormControl(
                 style.clone(),
                 image,
@@ -1379,6 +1407,7 @@ fn push_form_control_segment(
 
     out.push(InlineSegment {
         node: node.clone(),
+        text_source: Vec::new(),
         content: InlineSegmentContent::FormControl(
             style.clone(),
             value,
@@ -1486,6 +1515,7 @@ fn collect_image_segment(
         resolve_image_rendered_size(image_node, image, &image_style);
     out.push(InlineSegment {
         node: image_node.clone(),
+        text_source: Vec::new(),
         content: InlineSegmentContent::Image(
             image.clone(),
             image_style.clone(),
@@ -1535,6 +1565,7 @@ pub(super) fn generated_inline_segments(
     ) {
         Some(GeneratedContent::Text(text)) => vec![InlineSegment {
             node: node.clone(),
+            text_source: Vec::new(),
             content: if text.is_empty() {
                 InlineSegmentContent::GeneratedBox(style.clone())
             } else {
@@ -1554,6 +1585,7 @@ pub(super) fn generated_inline_segments(
         }],
         Some(GeneratedContent::Image(image)) => vec![InlineSegment {
             node: node.clone(),
+            text_source: Vec::new(),
             content: InlineSegmentContent::Image(
                 image.clone(),
                 style.clone(),
@@ -2358,63 +2390,10 @@ pub(super) fn white_space(style: &ComputedStyle) -> WhiteSpaceMode {
 }
 
 pub(super) fn normalize_text(text: &str, mode: WhiteSpaceMode) -> String {
-    if mode.collapses_whitespace() {
-        if mode.preserves_newlines() {
-            // pre-line: collapse whitespace but keep newlines
-            collapse_white_space_preserve_newlines(text)
-        } else {
-            collapse_white_space(text)
-        }
-    } else {
-        // pre, pre-wrap: preserve all whitespace
-        text.to_string()
-    }
-}
-
-fn collapse_white_space_preserve_newlines(text: &str) -> String {
-    // First pass: collapse whitespace within lines, preserving newlines.
-    let mut out = String::new();
-    let mut previous_was_space = false;
-    for ch in text.chars() {
-        if ch == '\n' {
-            // Drop trailing space before newline
-            if out.ends_with(' ') {
-                out.pop();
-            }
-            out.push('\n');
-            previous_was_space = true; // suppress leading space after newline
-        } else if ch.is_ascii_whitespace() {
-            if !previous_was_space {
-                out.push(' ');
-            }
-            previous_was_space = true;
-        } else {
-            out.push(ch);
-            previous_was_space = false;
-        }
-    }
-    out
-}
-
-fn collapse_white_space(text: &str) -> String {
-    let mut out = String::new();
-    let mut previous_was_space = false;
-
-    for ch in text.chars() {
-        // CSS 2.1 §16.6.1: only ASCII whitespace (space, tab, newline, etc.)
-        // is collapsible. Non-breaking space (U+00A0) is NOT collapsible.
-        if ch != '\u{00A0}' && ch.is_whitespace() {
-            if !previous_was_space {
-                out.push(' ');
-                previous_was_space = true;
-            }
-        } else {
-            out.push(ch);
-            previous_was_space = false;
-        }
-    }
-
-    out
+    text_source::normalized_chars(text, mode)
+        .into_iter()
+        .map(|(ch, _)| ch)
+        .collect()
 }
 
 pub(super) fn font_size(style: &ComputedStyle) -> f32 {
@@ -2630,6 +2609,39 @@ impl InlineCursor {
         self.x = self.start_x;
         self.line_height = self.strut_line_height;
     }
+    fn finish_line(
+        &self,
+        lines: &mut Vec<LineBox>,
+        fragments: &mut Vec<InlineFragment>,
+        align: TextAlign,
+    ) {
+        if !fragments.is_empty() {
+            let final_height = if fragments.iter().all(|fragment| {
+                matches!(
+                    fragment.content,
+                    InlineFragmentContent::InlineEdge(_, _)
+                        | InlineFragmentContent::InlineSpacing(_)
+                ) && fragment.rect.width == 0.0
+            }) {
+                0.0
+            } else {
+                self.line_height.max(0.0)
+            };
+            push_line(
+                lines,
+                fragments,
+                self.start_x,
+                self.y,
+                self.x - self.start_x,
+                final_height,
+                self.available_width,
+                align,
+                self.direction_rtl,
+                self.strut_line_height,
+                self.strut_metrics,
+            );
+        }
+    }
 }
 
 /// Determines whether a text fragment needs emergency character-by-character
@@ -2667,6 +2679,7 @@ fn break_text_by_characters(
     text: &str,
     segment: &InlineSegment,
     source_start_token: usize,
+    text_source: &[InlineTextSource],
     height: f32,
     cursor: &mut InlineCursor,
     lines: &mut Vec<LineBox>,
@@ -2674,7 +2687,10 @@ fn break_text_by_characters(
     align: TextAlign,
     line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
 ) {
+    let mut text_byte = 0;
     for (index, ch_str) in split_chars(text).into_iter().enumerate() {
+        let source = text_source::slice(text_source, text, text_byte..text_byte + ch_str.len());
+        text_byte += ch_str.len();
         let ch_width = measure_text_width(&ch_str, segment.metrics);
         if cursor.x > cursor.start_x
             && exceeds_available_inline_width(
@@ -2686,6 +2702,7 @@ fn break_text_by_characters(
         }
         fragments.push(InlineFragment {
             node: segment.node.clone(),
+            text_source: source,
             content: InlineFragmentContent::Text(ch_str),
             rect: Rect {
                 x: cursor.x,
@@ -2701,6 +2718,193 @@ fn break_text_by_characters(
         cursor.x += ch_width;
         cursor.line_height = cursor.line_height.max(segment.line_height.max(height));
     }
+}
+
+/// A prepared inline piece with independent DOM and pagination positions.
+struct InlineFragmentInput {
+    content: InlineFragmentContent,
+    width: f32,
+    height: f32,
+    token_range: std::ops::Range<usize>,
+    text_source: Vec<InlineTextSource>,
+}
+
+impl InlineFragmentInput {
+    fn new(
+        segment: &InlineSegment,
+        piece: InlinePiece,
+        text_byte: &mut usize,
+        source_token: &mut usize,
+    ) -> Self {
+        let InlinePiece::Fragment {
+            content,
+            width,
+            height,
+        } = piece
+        else {
+            unreachable!()
+        };
+        let start_byte = *text_byte;
+        let text_source = match (&segment.content, &content) {
+            (InlineSegmentContent::Text(original), InlineFragmentContent::Text(text)) => {
+                *text_byte += text.len();
+                text_source::slice(&segment.text_source, original, start_byte..*text_byte)
+            }
+            _ => Vec::new(),
+        };
+        let start_token = *source_token;
+        *source_token += match &content {
+            InlineFragmentContent::Text(text) => text.graphemes(true).count(),
+            InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_) => 0,
+            _ => 1,
+        };
+        Self {
+            content,
+            width,
+            height,
+            token_range: start_token..*source_token,
+            text_source,
+        }
+    }
+}
+
+fn layout_inline_fragment(
+    input: InlineFragmentInput,
+    segment: &InlineSegment,
+    prev_segment_allows_wrapping: bool,
+    is_first_piece_in_segment: &mut bool,
+    cursor: &mut InlineCursor,
+    lines: &mut Vec<LineBox>,
+    fragments: &mut Vec<InlineFragment>,
+    align: TextAlign,
+    line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
+) {
+    let InlineFragmentInput {
+        content,
+        width,
+        height,
+        token_range,
+        text_source: piece_source,
+    } = input;
+    let piece_start_token = token_range.start;
+    let source_token = token_range.end;
+    let overflow_wrap = segment.overflow_wrap;
+    let allows_wrapping = segment.white_space_mode.allows_wrapping();
+    let collapsible_whitespace = segment.white_space_mode.collapses_whitespace()
+        && matches!(&content, InlineFragmentContent::Text(text) if text
+            .chars()
+            .all(|ch| ch != '\u{00A0}' && ch.is_whitespace()));
+    if cursor.x == cursor.start_x && collapsible_whitespace {
+        return;
+    }
+    let can_wrap = if *is_first_piece_in_segment {
+        prev_segment_allows_wrapping
+    } else {
+        allows_wrapping
+    };
+    *is_first_piece_in_segment = false;
+
+    if can_wrap
+        && !matches!(
+            content,
+            InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+        )
+        && cursor.x > cursor.start_x
+        && exceeds_available_inline_width(cursor.x + width - cursor.start_x, cursor.available_width)
+    {
+        // Collapsible whitespace at the end of a line is
+        // discarded. Do not let it create an otherwise empty
+        // continuation line before an inline closing edge.
+        if collapsible_whitespace {
+            return;
+        }
+        let pending_starts = take_trailing_inline_starts(fragments, &mut cursor.x);
+        cursor.wrap_line(lines, fragments, 0.0, align, line_constraints);
+        for mut fragment in pending_starts {
+            fragment.rect.x = cursor.x;
+            fragment.rect.y = cursor.y;
+            cursor.x += fragment.rect.width;
+            fragments.push(fragment);
+        }
+    }
+
+    if needs_character_break(
+        overflow_wrap,
+        segment.word_break,
+        allows_wrapping,
+        cursor.x,
+        cursor.start_x,
+        width,
+        cursor.available_width,
+    ) && let InlineFragmentContent::Text(text) = content
+    {
+        break_text_by_characters(
+            &text,
+            segment,
+            piece_start_token,
+            &piece_source,
+            height,
+            cursor,
+            lines,
+            fragments,
+            align,
+            line_constraints,
+        );
+        return;
+    }
+
+    fragments.push(InlineFragment {
+        node: segment.node.clone(),
+        text_source: piece_source,
+        content,
+        rect: Rect {
+            x: cursor.x,
+            y: cursor.y,
+            width,
+            height,
+        },
+        metrics: segment.metrics,
+        vertical_align: segment.vertical_align,
+        source_end_token: source_token,
+        style: segment.style.clone(),
+    });
+    cursor.x += width;
+    cursor.line_height = cursor.line_height.max(segment.line_height.max(height));
+}
+
+fn layout_inline_newline(
+    segment: &InlineSegment,
+    source_token: usize,
+    cursor: &mut InlineCursor,
+    lines: &mut Vec<LineBox>,
+    fragments: &mut Vec<InlineFragment>,
+    align: TextAlign,
+    line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
+) {
+    // An explicit line break occupies a line even when no
+    // glyph precedes it. Retain its owner for empty pre lines.
+    fragments.push(InlineFragment {
+        node: segment.node.clone(),
+        text_source: Vec::new(),
+        content: InlineFragmentContent::Text(String::new()),
+        rect: Rect {
+            x: cursor.x,
+            y: cursor.y,
+            width: 0.0,
+            height: segment.line_height,
+        },
+        metrics: segment.metrics,
+        vertical_align: segment.vertical_align,
+        source_end_token: source_token,
+        style: segment.style.clone(),
+    });
+    cursor.wrap_line(
+        lines,
+        fragments,
+        segment.line_height,
+        align,
+        line_constraints,
+    );
 }
 
 fn layout_inline_segments(
@@ -2729,169 +2933,45 @@ fn layout_inline_segments(
     let mut prev_segment_allows_wrapping = true;
     let mut source_token = source_start_token;
     for segment in segments {
-        let overflow_wrap = segment.overflow_wrap;
         let allows_wrapping = segment.white_space_mode.allows_wrapping();
         let mut is_first_piece_in_segment = true;
+        let mut text_byte = 0;
         for piece in split_segment(segment) {
             match piece {
                 InlinePiece::Newline => {
+                    text_byte += 1;
                     source_token += 1;
-                    // An explicit line break occupies a line even when no
-                    // glyph precedes it. Retain its owner for empty pre lines.
-                    current_fragments.push(InlineFragment {
-                        node: segment.node.clone(),
-                        content: InlineFragmentContent::Text(String::new()),
-                        rect: Rect {
-                            x: cursor.x,
-                            y: cursor.y,
-                            width: 0.0,
-                            height: segment.line_height,
-                        },
-                        metrics: segment.metrics,
-                        vertical_align: segment.vertical_align,
-                        source_end_token: source_token,
-                        style: segment.style.clone(),
-                    });
-                    cursor.wrap_line(
+                    layout_inline_newline(
+                        segment,
+                        source_token,
+                        &mut cursor,
                         &mut lines,
                         &mut current_fragments,
-                        segment.line_height,
                         align,
                         line_constraints,
                     );
                 }
-                InlinePiece::Fragment {
-                    content,
-                    width,
-                    height,
-                } => {
-                    let piece_start_token = source_token;
-                    source_token += match &content {
-                        InlineFragmentContent::Text(text) => text.graphemes(true).count(),
-                        InlineFragmentContent::InlineEdge(_, _)
-                        | InlineFragmentContent::InlineSpacing(_) => 0,
-                        _ => 1,
-                    };
-                    let collapsible_whitespace = segment.white_space_mode.collapses_whitespace()
-                        && matches!(&content, InlineFragmentContent::Text(text) if text
-                            .chars()
-                            .all(|ch| ch != '\u{00A0}' && ch.is_whitespace()));
-                    if cursor.x == cursor.start_x && collapsible_whitespace {
-                        continue;
-                    }
-                    let can_wrap = if is_first_piece_in_segment {
-                        prev_segment_allows_wrapping
-                    } else {
-                        allows_wrapping
-                    };
-                    is_first_piece_in_segment = false;
-
-                    if can_wrap
-                        && !matches!(
-                            content,
-                            InlineFragmentContent::InlineEdge(_, _)
-                                | InlineFragmentContent::InlineSpacing(_)
-                        )
-                        && cursor.x > cursor.start_x
-                        && exceeds_available_inline_width(
-                            cursor.x + width - cursor.start_x,
-                            cursor.available_width,
-                        )
-                    {
-                        // Collapsible whitespace at the end of a line is
-                        // discarded. Do not let it create an otherwise empty
-                        // continuation line before an inline closing edge.
-                        if collapsible_whitespace {
-                            continue;
-                        }
-                        let pending_starts =
-                            take_trailing_inline_starts(&mut current_fragments, &mut cursor.x);
-                        cursor.wrap_line(
-                            &mut lines,
-                            &mut current_fragments,
-                            0.0,
-                            align,
-                            line_constraints,
-                        );
-                        for mut fragment in pending_starts {
-                            fragment.rect.x = cursor.x;
-                            fragment.rect.y = cursor.y;
-                            cursor.x += fragment.rect.width;
-                            current_fragments.push(fragment);
-                        }
-                    }
-
-                    if needs_character_break(
-                        overflow_wrap,
-                        segment.word_break,
-                        allows_wrapping,
-                        cursor.x,
-                        cursor.start_x,
-                        width,
-                        cursor.available_width,
-                    ) && let InlineFragmentContent::Text(text) = content
-                    {
-                        break_text_by_characters(
-                            &text,
-                            segment,
-                            piece_start_token,
-                            height,
-                            &mut cursor,
-                            &mut lines,
-                            &mut current_fragments,
-                            align,
-                            line_constraints,
-                        );
-                        continue;
-                    }
-
-                    current_fragments.push(InlineFragment {
-                        node: segment.node.clone(),
-                        content,
-                        rect: Rect {
-                            x: cursor.x,
-                            y: cursor.y,
-                            width,
-                            height,
-                        },
-                        metrics: segment.metrics,
-                        vertical_align: segment.vertical_align,
-                        source_end_token: source_token,
-                        style: segment.style.clone(),
-                    });
-                    cursor.x += width;
-                    cursor.line_height = cursor.line_height.max(segment.line_height.max(height));
+                piece @ InlinePiece::Fragment { .. } => {
+                    let input =
+                        InlineFragmentInput::new(segment, piece, &mut text_byte, &mut source_token);
+                    layout_inline_fragment(
+                        input,
+                        segment,
+                        prev_segment_allows_wrapping,
+                        &mut is_first_piece_in_segment,
+                        &mut cursor,
+                        &mut lines,
+                        &mut current_fragments,
+                        align,
+                        line_constraints,
+                    );
                 }
             }
         }
         prev_segment_allows_wrapping = allows_wrapping;
     }
 
-    if !current_fragments.is_empty() {
-        let final_height = if current_fragments.iter().all(|fragment| {
-            matches!(
-                fragment.content,
-                InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
-            ) && fragment.rect.width == 0.0
-        }) {
-            0.0
-        } else {
-            cursor.line_height.max(0.0)
-        };
-        push_line(
-            &mut lines,
-            &mut current_fragments,
-            cursor.start_x,
-            cursor.y,
-            cursor.x - cursor.start_x,
-            final_height,
-            cursor.available_width,
-            align,
-            direction_rtl,
-            strut_line_height,
-            strut_metrics,
-        );
-    }
+    cursor.finish_line(&mut lines, &mut current_fragments, align);
 
     lines
 }

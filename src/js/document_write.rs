@@ -92,7 +92,7 @@ impl Drop for WriteDepth {
 pub(super) fn write(
     state: &Rc<RefCell<HostState>>,
     document_id: usize,
-    input: &str,
+    input: &[u16],
     eof: bool,
     context: &mut Context,
 ) -> JsResult<JsValue> {
@@ -142,7 +142,7 @@ pub(super) fn write(
         (document, parser)
     };
     let _depth = WriteDepth(state.clone());
-    parser.borrow_mut().parser.push_input(input);
+    parser.borrow_mut().parser.push_input_utf16(input);
     loop {
         if !state
             .borrow()
@@ -177,12 +177,12 @@ pub(super) fn write(
         let Some(prepared) = prepare_script(state, &document, &script, &parser) else {
             continue;
         };
-        let tail = parser.borrow_mut().parser.take_pending_input();
+        let tail = parser.borrow_mut().parser.take_pending_input_utf16();
         let result = {
             let _execution = ScriptExecution::new(parser.clone());
             execute_classic(state, &prepared, context)
         };
-        parser.borrow_mut().parser.push_input(&tail);
+        parser.borrow_mut().parser.push_input_utf16(&tail);
         if let Err(error) = result {
             if is_wall_clock_timeout(&error) {
                 return Err(error);
@@ -470,7 +470,7 @@ impl JsRuntime {
         let tail = resume.as_ref().map(|parser| {
             let mut parser = parser.borrow_mut();
             parser.blocking_script = None;
-            parser.parser.take_pending_input()
+            parser.parser.take_pending_input_utf16()
         });
         let kind = prepared.kind;
         let result = if kind == ScriptKind::Module {
@@ -495,7 +495,7 @@ impl JsRuntime {
             parser
                 .borrow_mut()
                 .parser
-                .push_input(tail.as_deref().unwrap_or_default());
+                .push_input_utf16(tail.as_deref().unwrap_or_default());
             let eof = parser.borrow().finish_requested;
             // Do not let the checkpoint's absent insertion ref replace this stream.
             let state = self.host_state.clone();
@@ -504,11 +504,11 @@ impl JsRuntime {
             // Finishing is delayed until after the resume so close's reentrant
             // no-op rule does not discard an earlier close request.
             let resumed =
-                self.with_active_host(|context| write(&state, document_id, "", false, context));
+                self.with_active_host(|context| write(&state, document_id, &[], false, context));
             drop(depth);
             resumed?;
             if eof {
-                self.with_active_host(|context| write(&state, document_id, "", true, context))?;
+                self.with_active_host(|context| write(&state, document_id, &[], true, context))?;
             }
         }
         if let Err(error) = result {

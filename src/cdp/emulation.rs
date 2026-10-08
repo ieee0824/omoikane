@@ -95,6 +95,7 @@ impl CdpSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::html::encoding::DecodedHtml;
 
     #[test]
     fn cdp_media_overrides_update_queries_and_validate_atomically() {
@@ -138,7 +139,7 @@ mod tests {
 
         let mut session = CdpSession::new().unwrap();
         let (task, pending) = session.prepare_document_page_task(
-            "http://example.test/", "<script>globalThis.mediaChanges = 0; matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', () => mediaChanges++);</script>",
+            "http://example.test/", &DecodedHtml::from_string("<script>globalThis.mediaChanges = 0; matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', () => mediaChanges++);</script>"),
             1, "null", &[], None,
         ).unwrap();
         let mut task = Box::pin(task);
@@ -185,7 +186,7 @@ mod tests {
         session.set_viewport(640, 480);
         let (task, pending) = session.prepare_document_page_task(
             "http://example.test/",
-            "<style>#probe {color:red} @media (min-width:1000px) {#probe {color:green}}</style><div id=probe>viewport</div><script>globalThis.initialWidth = innerWidth; globalThis.viewportChanges = 0; globalThis.viewportQuery = matchMedia('(width:640px)'); viewportQuery.onchange = () => viewportChanges++;</script>",
+            &DecodedHtml::from_string("<style>#probe {color:red} @media (min-width:1000px) {#probe {color:green}}</style><div id=probe>viewport</div><script>globalThis.initialWidth = innerWidth; globalThis.viewportChanges = 0; globalThis.viewportQuery = matchMedia('(width:640px)'); viewportQuery.onchange = () => viewportChanges++;</script>"),
             1, "null", &[], None,
         ).unwrap();
         let mut task = Box::pin(task);

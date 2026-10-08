@@ -6,6 +6,22 @@ const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
 const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
 
+#[derive(Default)]
+struct XmlOutput(Vec<u16>);
+
+impl XmlOutput {
+    fn push_str(&mut self, value: &str) {
+        self.0.extend(value.encode_utf16());
+    }
+    fn push(&mut self, value: char) {
+        let mut units = [0; 2];
+        self.0.extend_from_slice(value.encode_utf16(&mut units));
+    }
+    fn push_units(&mut self, units: &[u16]) {
+        self.0.extend_from_slice(units);
+    }
+}
+
 type Namespace = Option<String>;
 
 #[derive(Clone, Debug)]
@@ -14,6 +30,7 @@ struct AttributeRecord {
     namespace: Namespace,
     local_name: String,
     value: String,
+    value_utf16: Vec<u16>,
 }
 
 impl AttributeRecord {
@@ -93,15 +110,44 @@ impl NamespacePrefixMap {
 ///
 /// The Web-facing `XMLSerializer` invokes this with `require well-formed` set
 /// to false, so every node representable by Omoikane's native DOM has a string
-/// result. Namespace declarations may be rewritten to preserve the namespace
+/// result. This scalar Rust API replaces unpaired surrogates; use
+/// [`serialize_utf16`] for exact DOM strings. Namespace declarations may be rewritten to preserve the namespace
 /// identity of elements and attributes when the result is parsed again.
 pub fn serialize(node: &NodeHandle) -> String {
+    String::from_utf16_lossy(&serialize_utf16(node))
+}
+
+/// Serializes a DOM node while retaining all original UTF-16 code units.
+/// This is the exact output used by the Web-facing XMLSerializer.
+pub fn serialize_utf16(node: &NodeHandle) -> Vec<u16> {
     let mut namespaces = NamespacePrefixMap::default();
     namespaces.add(Some(XML_NAMESPACE.to_string()), "xml");
     let mut prefix_index = 1;
-    let mut output = String::new();
+    let mut output = XmlOutput::default();
     serialize_node(node, None, &mut namespaces, &mut prefix_index, &mut output);
-    output
+    output.0
+}
+
+/// Serializes a node's children as an XML fragment, preserving namespaces.
+pub(crate) fn serialize_children_utf16(node: &NodeHandle) -> Vec<u16> {
+    let mut namespaces = NamespacePrefixMap::default();
+    namespaces.add(Some(XML_NAMESPACE.to_string()), "xml");
+    let mut prefix_index = 1;
+    let mut output = XmlOutput::default();
+    let children = node
+        .template_content()
+        .map(|content| content.child_nodes())
+        .unwrap_or_else(|| node.child_nodes());
+    for child in children {
+        serialize_node(
+            &child,
+            None,
+            &mut namespaces,
+            &mut prefix_index,
+            &mut output,
+        );
+    }
+    output.0
 }
 
 fn serialize_node(
@@ -109,11 +155,11 @@ fn serialize_node(
     inherited_namespace: Namespace,
     namespaces: &mut NamespacePrefixMap,
     prefix_index: &mut usize,
-    output: &mut String,
+    output: &mut XmlOutput,
 ) {
     if node.is_cdata_section() {
         output.push_str("<![CDATA[");
-        output.push_str(&node.data().unwrap_or_default());
+        output.push_units(&node.data_utf16().unwrap_or_default());
         output.push_str("]]>");
         return;
     }
@@ -133,17 +179,17 @@ fn serialize_node(
                 );
             }
         }
-        NodeType::Text => append_escaped_text(&node.data().unwrap_or_default(), output),
+        NodeType::Text => append_escaped_text(&node.data_utf16().unwrap_or_default(), output),
         NodeType::Comment => {
             output.push_str("<!--");
-            output.push_str(&node.data().unwrap_or_default());
+            output.push_units(&node.data_utf16().unwrap_or_default());
             output.push_str("-->");
         }
         NodeType::ProcessingInstruction => {
             output.push_str("<?");
             output.push_str(&node.node_name());
             output.push(' ');
-            output.push_str(&node.data().unwrap_or_default());
+            output.push_units(&node.data_utf16().unwrap_or_default());
             output.push_str("?>");
         }
         NodeType::DocumentType => serialize_document_type(node, output),
@@ -155,10 +201,10 @@ fn serialize_element(
     inherited_namespace: Namespace,
     namespaces: &mut NamespacePrefixMap,
     prefix_index: &mut usize,
-    output: &mut String,
+    output: &mut XmlOutput,
 ) {
     let attributes = node
-        .attribute_records()
+        .attribute_records_utf16()
         .unwrap_or_default()
         .into_iter()
         .map(
@@ -166,7 +212,8 @@ fn serialize_element(
                 qualified_name,
                 namespace,
                 local_name,
-                value,
+                value: String::from_utf16_lossy(&value),
+                value_utf16: value,
             },
         )
         .collect::<Vec<_>>();
@@ -180,7 +227,7 @@ fn serialize_element(
     let original_prefix = node.prefix();
     let mut child_namespace = inherited_namespace.clone();
     let mut ignore_default_namespace_attribute = false;
-    let mut generated_declaration = String::new();
+    let mut generated_declaration = XmlOutput::default();
 
     let qualified_name = if inherited_namespace == namespace {
         if local_default_namespace.is_some() && !has_empty_namespace_prefix {
@@ -245,7 +292,7 @@ fn serialize_element(
 
     output.push('<');
     output.push_str(&qualified_name);
-    output.push_str(&generated_declaration);
+    output.push_units(&generated_declaration.0);
     serialize_attributes(
         &attributes,
         output,
@@ -324,7 +371,7 @@ fn record_namespace_information(
 
 fn serialize_attributes(
     attributes: &[AttributeRecord],
-    output: &mut String,
+    output: &mut XmlOutput,
     map: &mut NamespacePrefixMap,
     prefix_index: &mut usize,
     local_prefixes: &mut HashMap<String, String>,
@@ -385,7 +432,7 @@ fn serialize_attributes(
         }
         output.push_str(&attribute.local_name);
         output.push_str("=\"");
-        append_escaped_attribute(&attribute.value, output);
+        append_escaped_attribute_utf16(&attribute.value_utf16, output);
         output.push('"');
     }
 }
@@ -410,33 +457,37 @@ fn generate_prefix(
     prefix
 }
 
-fn append_escaped_text(value: &str, output: &mut String) {
-    for character in value.chars() {
-        match character {
-            '&' => output.push_str("&amp;"),
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            _ => output.push(character),
+fn append_escaped_text(value: &[u16], output: &mut XmlOutput) {
+    for &unit in value {
+        match unit {
+            0x26 => output.push_str("&amp;"),
+            0x3c => output.push_str("&lt;"),
+            0x3e => output.push_str("&gt;"),
+            _ => output.0.push(unit),
         }
     }
 }
 
-fn append_escaped_attribute(value: &str, output: &mut String) {
-    for character in value.chars() {
-        match character {
-            '&' => output.push_str("&amp;"),
-            '"' => output.push_str("&quot;"),
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            '\t' => output.push_str("&#9;"),
-            '\n' => output.push_str("&#xA;"),
-            '\r' => output.push_str("&#xD;"),
-            _ => output.push(character),
+fn append_escaped_attribute(value: &str, output: &mut XmlOutput) {
+    append_escaped_attribute_utf16(&value.encode_utf16().collect::<Vec<u16>>(), output);
+}
+
+fn append_escaped_attribute_utf16(value: &[u16], output: &mut XmlOutput) {
+    for &unit in value {
+        match unit {
+            0x26 => output.push_str("&amp;"),
+            0x22 => output.push_str("&quot;"),
+            0x3c => output.push_str("&lt;"),
+            0x3e => output.push_str("&gt;"),
+            0x09 => output.push_str("&#9;"),
+            0x0a => output.push_str("&#xA;"),
+            0x0d => output.push_str("&#xD;"),
+            _ => output.0.push(unit),
         }
     }
 }
 
-fn serialize_document_type(node: &NodeHandle, output: &mut String) {
+fn serialize_document_type(node: &NodeHandle, output: &mut XmlOutput) {
     output.push_str("<!DOCTYPE ");
     output.push_str(&node.node_name());
     if let Some(public_id) = node.public_id() {
