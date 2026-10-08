@@ -1655,7 +1655,8 @@ impl ScopeIndexVisitor {
             self.index += 1;
         } else if !arrow {
             assert!(scopes.function_scope().is_function());
-            scopes.requires_function_scope = scopes.function_scope().escaped_this()
+            scopes.requires_function_scope = scopes.requires_function_scope
+                || scopes.function_scope().escaped_this()
                 || contains(parameters, ContainsSymbol::Super)
                 || contains(body, ContainsSymbol::Super)
                 || contains(parameters, ContainsSymbol::NewTarget)

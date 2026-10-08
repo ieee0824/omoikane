@@ -10,6 +10,24 @@ use crate::{
 use boa_macros::js_str;
 use indoc::indoc;
 
+#[test]
+fn dynamic_function_preserves_nested_class_environment_indices() {
+    run_test_actions([
+        TestAction::assert_eq(
+            r#"Function('const listener = new (class Listener { self() { return Listener; } })(); return listener.self() === listener.constructor;')()"#,
+            true,
+        ),
+        TestAction::assert_eq(
+            r#"Function('let value = 7; { const make = () => new (class Named { read() { return value; } })(); return make().read(); }')()"#,
+            7,
+        ),
+        TestAction::assert_eq(
+            r#"Function('value', 'const read = () => value; return read();')(42)"#,
+            42,
+        ),
+    ]);
+}
+
 #[allow(clippy::float_cmp)]
 #[test]
 fn arguments_object() {

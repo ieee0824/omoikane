@@ -659,7 +659,7 @@ impl BuiltInFunctionObject {
             Span::new(function_span_start, function_span_end),
         );
         if let Err(reason) =
-            function.analyze_scope(strict, context.realm().scope(), context.interner())
+            function.analyze_dynamic_scope(strict, context.realm().scope(), context.interner())
         {
             return Err(js_error!(SyntaxError: "failed to analyze function scope: {}", reason));
         }
@@ -1136,6 +1136,7 @@ fn function_construct(
             OrdinaryObject,
         );
         _this_root = Some(this.clone().root());
+        this.set_associated_realm(&realm);
 
         this.initialize_instance_elements(this_function_object, context)?;
 
