@@ -1,4 +1,22 @@
 (() => {
+  let platformEventInterfaces;
+  let platformHandlerTypes;
+  function windowHandlerReceiver(window, property, receiver, proxy) {
+    // IDL handlers operate on the backing Window's slots, not the JS facade.
+    // Preserve an explicitly supplied receiver for ordinary Reflect operations.
+    return receiver === proxy && typeof property === "string" && property.startsWith("on") &&
+      platformHandlerTypes?.has(property.slice(2)) ? window : receiver;
+  }
+  const nativeCurrentWindowEvent = globalThis.__omoikane_current_window_event;
+  delete globalThis.__omoikane_current_window_event;
+  const nativeRegisterWindowProxy = globalThis.__omoikane_register_window_proxy;
+  delete globalThis.__omoikane_register_window_proxy;
+  const nativeRegisterPlatformEventFactory = globalThis.__omoikane_register_platform_event_factory;
+  delete globalThis.__omoikane_register_platform_event_factory;
+  const nativePlatformInterfaceBrand = globalThis.__omoikane_platform_interface_brand;
+  delete globalThis.__omoikane_platform_interface_brand;
+  const nativeIframePlatformEvent = globalThis.__omoikane_iframe_platform_event;
+  delete globalThis.__omoikane_iframe_platform_event;
   // Native bindings are installed before this bootstrap runs. Keep the
   // unfiltered slot lookup private to the event dispatcher so page scripts
   // cannot use it to inspect closed shadow trees.
@@ -143,6 +161,8 @@
   const nativeIframeGlobal = globalThis.__omoikane_iframe_global;
   const nativeExistingIframeDocument = globalThis.__omoikane_existing_iframe_document;
   delete globalThis.__omoikane_existing_iframe_document;
+  const nativeIframeNodesInSubtree = globalThis.__omoikane_iframe_nodes_in_subtree;
+  delete globalThis.__omoikane_iframe_nodes_in_subtree;
   const nativeDispatchIframeDeparture =
     globalThis.__omoikane_dispatch_iframe_departure_native;
   delete globalThis.__omoikane_dispatch_iframe_departure_native;
@@ -1303,9 +1323,7 @@
     }
     reportingEventListenerError = true;
     try {
-      const report = new Event("error", { cancelable: true });
-      report.error = error;
-      report.message = String(error?.message ?? error);
+      const report = new platformEventInterfaces.ErrorEvent("error", { cancelable: true, error, message: String(error?.message ?? error) });
       if (typeof globalThis.dispatchEvent === "function") {
         globalThis.dispatchEvent(report);
       } else {
@@ -1325,7 +1343,8 @@
       __omoikane_call_event_listener(
         entry.listener,
         typeof entry.listener === "function" ? target : entry.listener,
-        event
+        event,
+        target instanceof Node && nodeRoot(target) instanceof ShadowRoot
       );
     } catch (error) {
       reportEventListenerError(error);
@@ -5003,6 +5022,7 @@
   class HTMLHtmlElement extends HTMLElement {}
   class HTMLHeadElement extends HTMLElement {}
   class HTMLBodyElement extends HTMLElement {}
+  class HTMLFrameSetElement extends HTMLElement {}
   class HTMLDivElement extends HTMLElement {}
   class HTMLSpanElement extends HTMLElement {}
   class HTMLParagraphElement extends HTMLElement {}
@@ -6957,6 +6977,8 @@
         evt = new KeyboardEvent("");
       } else if (t === "CustomEvent") {
         evt = new CustomEvent("");
+      } else if (t.toLowerCase() === "beforeunloadevent") {
+        evt = platformEventInterfaces.makeBeforeUnload("", {});
       } else {
         evt = new Event("");
       }
@@ -8686,15 +8708,9 @@
   }
   function retireIframeWindowProxies(root) {
     if (!root || !browsingInput.removalMayAffectIframeWindowProxy) return;
-    const rootType = root.nodeType;
-    if (rootType !== 1 && rootType !== 9 && rootType !== 11) return;
-    if (rootType === 1 &&
-        ["iframe", "frame"].includes(asciiLowercase(internalNodeLocalName(root) || ""))) {
-      retireIframeWindowProxy(root);
-    }
-    const children = root.childNodes || [];
-    for (let index = 0; index < children.length; index += 1) {
-      retireIframeWindowProxies(children[index]);
+    const frames = nativeIframeNodesInSubtree(root.__id);
+    for (let index = 0; index < frames.length; index++) {
+      retireIframeWindowProxy(wrapNode(frames[index]));
     }
   }
 
@@ -8703,26 +8719,21 @@
   // does not run under event dispatch.
   function markIframeDocumentsHidden(root, affectedDocuments) {
     if (!root) return;
-    const rootType = root.nodeType;
-    if (rootType !== 1 && rootType !== 9 && rootType !== 11) return;
-    if (rootType === 1 &&
-        ["iframe", "frame"].includes(asciiLowercase(internalNodeLocalName(root) || ""))) {
-      const documentId = nativeExistingIframeDocument(root.__id);
+    const frames = nativeIframeNodesInSubtree(root.__id);
+    for (let index = 0; index < frames.length; index++) {
+      const id = frames[index];
+      const documentId = nativeExistingIframeDocument(id);
       if (documentId !== null && documentId !== undefined &&
           !browsingInput.visibilityHiddenDocumentIds.has(documentId)) {
-        const accessibleId = nativeIframeContentDocument(root.__id);
+        const accessibleId = nativeIframeContentDocument(id);
         const childDocument = accessibleId === documentId ? wrapNode(documentId) : null;
-        if (!childDocument) nativeDispatchIframeDeparture(root.__id);
+        if (!childDocument) nativeDispatchIframeDeparture(id);
         browsingInput.visibilityHiddenDocumentIds.add(documentId);
         if (childDocument) {
           affectedDocuments.push(childDocument);
           markIframeDocumentsHidden(childDocument, affectedDocuments);
         }
       }
-    }
-    const children = root.childNodes || [];
-    for (let index = 0; index < children.length; index += 1) {
-      markIframeDocumentsHidden(children[index], affectedDocuments);
     }
   }
 
@@ -8741,7 +8752,7 @@
     const departingDocument = sameOriginDocumentId !== null ? wrapNode(documentId) : null;
     browsingInput.departingIframeDocumentIds.add(documentId);
     if (departingDocument) {
-      departingDocument.dispatchEvent(new Event("pagehide", {
+      departingDocument.dispatchEvent(new platformEventInterfaces.PageTransitionEvent("pagehide", {
         bubbles: true, cancelable: true,
       }));
     }
@@ -8756,7 +8767,7 @@
     const documentId = __omoikane_document_id;
     if (browsingInput.departingIframeDocumentIds.has(documentId)) return;
     browsingInput.departingIframeDocumentIds.add(documentId);
-    document.dispatchEvent(new Event("pagehide", { bubbles: true, cancelable: true }));
+    document.dispatchEvent(new platformEventInterfaces.PageTransitionEvent("pagehide", { bubbles: true, cancelable: true }));
     if (!browsingInput.visibilityHiddenDocumentIds.has(documentId)) {
       browsingInput.visibilityHiddenDocumentIds.add(documentId);
       recordVisibilityStateEntry("hidden", nativePerformanceNow());
@@ -9011,14 +9022,15 @@
           }
           return activeWindow;
         };
-        const dispatchWindowEvent = event => {
+        const dispatchWindowEvent = (type, init) => {
           if (access === "same") {
-            proxy.dispatchEvent(event);
+            const event = nativeIframePlatformEvent(iframe.__id, type, init);
+            getActiveWindow().dispatchEvent(event);
           } else {
             // Cross-origin WindowProxy event APIs are not readable by the parent.
             // An already-live child Realm can still receive its own event.
             const global = getActiveWindow(false);
-            if (typeof global.dispatchEvent === "function") global.dispatchEvent(event);
+            if (typeof global.dispatchEvent === "function") global.dispatchEvent(makePlatformWindowEvent(type, init));
           }
         };
         const captureActiveHistory = () => {
@@ -9066,10 +9078,7 @@
               safeWeakMapSet(documentHistoryURLs,
                 safeWeakMapGet(nodeEventStates, currentDocument), destination);
             }
-            const event = new Event("hashchange");
-            event.oldURL = currentURL;
-            event.newURL = destination;
-            dispatchWindowEvent(event);
+            dispatchWindowEvent("hashchange", { oldURL: currentURL, newURL: destination });
             return;
           }
           captureActiveHistory();
@@ -9137,14 +9146,9 @@
               safeWeakMapSet(documentHistoryURLs, safeWeakMapGet(nodeEventStates, currentDocument), entry.href);
             }
             restoreHistoryState(entry, false);
-            const event = new Event("popstate");
-            event.state = globalThis.structuredClone(entry.state);
-            dispatchWindowEvent(event);
+            dispatchWindowEvent("popstate", { state: globalThis.structuredClone(entry.state) });
             if (fragmentChanged) {
-              const hashEvent = new Event("hashchange");
-              hashEvent.oldURL = previousURL;
-              hashEvent.newURL = entry.href;
-              dispatchWindowEvent(hashEvent);
+              dispatchWindowEvent("hashchange", { oldURL: previousURL, newURL: entry.href });
             }
             return;
           }
@@ -9343,7 +9347,8 @@
             if (property === "history") return activeHistory;
             if (property === "getComputedStyle") return globalThis.getComputedStyle;
             if (Object.prototype.hasOwnProperty.call(methods, property)) return methods[property];
-            return Reflect.get(getActiveWindow(), property, receiver);
+            const window = getActiveWindow();
+            return Reflect.get(window, property, windowHandlerReceiver(window, property, receiver, proxy));
           },
           set(_target, property, value, receiver) {
             refresh();
@@ -9352,7 +9357,8 @@
               return true;
             }
             if (access !== "same") throw securityError();
-            return Reflect.set(getActiveWindow(), property, value, receiver);
+            const window = getActiveWindow();
+            return Reflect.set(window, property, value, windowHandlerReceiver(window, property, receiver, proxy));
           },
           has(_target, property) {
             refresh();
@@ -9394,6 +9400,7 @@
           },
         };
         proxy = new Proxy({}, handler);
+        nativeRegisterWindowProxy(proxy, iframe.__id);
         this.__contentWindowFacade = proxy;
         this.__contentWindowRefresh = refresh;
         safeWeakMapSet(iframeChildNavigators, this, (documentId, kind, value, extra, committedURL, eventState) => {
@@ -10968,10 +10975,25 @@
     return String(value);
   }
 
+  const constructingFormEntries = new WeakSet();
   class FormData {
-    constructor(form = undefined) {
+    constructor(form = undefined, submitter = null) {
       if (form !== undefined && !(form instanceof HTMLFormElement)) throw new TypeError("FormData argument must be a form");
-      safeWeakMapSet(formDataObjects, this, form ? collectFormEntries(form) : []);
+      if (submitter !== null && !(submitter instanceof HTMLElement)) throw new TypeError("submitter must be an HTMLElement");
+      if (!form) { safeWeakMapSet(formDataObjects, this, []); return; }
+      if (submitter !== null) {
+        const type = String(submitter.type || "").toLowerCase();
+        if (!((submitter.tagName === "INPUT" && ["submit", "image"].includes(type)) || (submitter.tagName === "BUTTON" && type === "submit"))) {
+          throw new TypeError("Not a submit button");
+        }
+        if (submitter.__owningForm() !== form) throw new DOMException("Submitter is not owned by this form", "NotFoundError");
+      }
+      if (constructingFormEntries.has(form)) throw new DOMException("The form entry list is already being constructed", "InvalidStateError");
+      constructingFormEntries.add(form);
+      try {
+        safeWeakMapSet(formDataObjects, this, collectFormEntries(form, submitter));
+        form.dispatchEvent(new platformEventInterfaces.FormDataEvent("formdata", { bubbles: true, formData: this }));
+      } finally { constructingFormEntries.delete(form); }
     }
     append(name, value, filename = undefined) {
       formDataEntries(this).push([String(name), formDataEntryValue(value, filename)]);
@@ -11537,7 +11559,7 @@
       };
       const target = submitter?.getAttribute("formtarget") ?? this.getAttribute("target") ??
         this.ownerDocument.querySelector("base[target]")?.getAttribute("target") ?? "";
-      const data = collectFormEntries(this, submitter);
+      const data = formDataEntries(new FormData(this, submitter));
       let url = nativeResolveFormAction(internalNodeId(this), this.action);
       if (this.method === "get") {
         const hashIndex = url.indexOf("#");
@@ -11559,8 +11581,7 @@
       if (!this.noValidate && !(submitter && submitter.formNoValidate) && !this.__validate(true)) {
         return;
       }
-      const event = new Event("submit", { bubbles: true, cancelable: true });
-      event.submitter = submitter || null;
+      const event = new platformEventInterfaces.SubmitEvent("submit", { bubbles: true, cancelable: true, submitter: submitter || null });
       if (this.dispatchEvent(event)) this.__navigate(submitter || null);
     }
     submit() { this.__navigate(null); }
@@ -14422,6 +14443,7 @@
     html: HTMLHtmlElement,
     head: HTMLHeadElement,
     body: HTMLBodyElement,
+    frameset: HTMLFrameSetElement,
     div: HTMLDivElement,
     span: HTMLSpanElement,
     p: HTMLParagraphElement,
@@ -14964,7 +14986,7 @@
   globalThis.__omoikane_close_auxiliary_document = function() {
     if (browsingInput.visibilityHiddenDocumentIds.has(__omoikane_document_id)) return;
     browsingInput.visibilityHiddenDocumentIds.add(__omoikane_document_id);
-    globalThis.dispatchEvent(new Event("pagehide"));
+    globalThis.dispatchEvent(new platformEventInterfaces.PageTransitionEvent("pagehide"));
     recordVisibilityStateEntry("hidden", nativePerformanceNow());
     document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
     globalThis.dispatchEvent(new Event("unload"));
@@ -14984,6 +15006,7 @@
   globalThis.HTMLHtmlElement = HTMLHtmlElement;
   globalThis.HTMLHeadElement = HTMLHeadElement;
   globalThis.HTMLBodyElement = HTMLBodyElement;
+  globalThis.HTMLFrameSetElement = HTMLFrameSetElement;
   globalThis.HTMLDivElement = HTMLDivElement;
   globalThis.HTMLSpanElement = HTMLSpanElement;
   globalThis.HTMLParagraphElement = HTMLParagraphElement;
@@ -15501,8 +15524,8 @@
   globalThis.SVGTextPathElement = SVGTextPathElement;
   globalThis.Event = Event;
   globalThis.__omoikane_dispatch_lifecycle_event = function(type) {
-    const event = new Event(type, { bubbles: type === "DOMContentLoaded" });
-    if (type === "load") globalThis.dispatchEvent(event);
+    const event = type === "pageshow" ? new platformEventInterfaces.PageTransitionEvent(type) : new Event(type, { bubbles: type === "DOMContentLoaded" });
+    if (type === "load" || type === "pageshow") globalThis.dispatchEvent(event);
     else globalThis.document.dispatchEvent(event);
   };
   globalThis.CustomEvent = CustomEvent;
@@ -15715,7 +15738,8 @@
   function inlineHandlerEventType(name) {
     const lower = String(name).toLowerCase();
     if (lower.length <= 2 || lower.slice(0, 2) !== "on") return null;
-    return lower.slice(2);
+    const type = lower.slice(2);
+    return platformHandlerTypes?.has(type) ? type : null;
   }
   // (Re)wires a single `on*` content attribute on `node` to a real event
   // listener, keeping the current attribute value authoritative. This is the
@@ -15729,7 +15753,7 @@
   // compiled and attached, so re-setting the attribute — or the initial pass
   // followed by a later `setAttribute` — never leaves two listeners registered.
   // Removing the attribute (value becomes `null`) just detaches the handler.
-  function applyInlineHandlerAttribute(node, name) {
+  function applyInlineHandlerAttribute(node, name, initial = false) {
     if (!node || node.nodeType !== 1) return;
     const type = inlineHandlerEventType(name);
     if (!type) return;
@@ -15745,23 +15769,29 @@
       node.__contentAttrHandlers ||
       (node.__contentAttrHandlers = Object.create(null));
     const previous = store[type];
-    if (previous) {
-      previous.target.removeEventListener(type, previous.handler);
-      delete store[type];
-    }
     const source = __omoikane_get_attribute(node.__id, name);
-    if (source == null) return;
+    if (source == null) {
+      if (previous) {
+        delete store[type];
+        previous.target["on" + type] = null;
+      }
+      return;
+    }
+    const target = reflectToWindow ? node.ownerDocument?.defaultView : node;
+    if (!target) return;
+    // Repeated initialization must not undo a subsequent IDL assignment.
+    // Explicit setAttribute calls still reinstall even an unchanged value.
+    if (initial && previous?.source === source && previous.target === target) return;
     const handler = compileInlineHandler(source);
     if (!handler) return;
-    const target = reflectToWindow ? globalThis : node;
-    target.addEventListener(type, handler);
-    store[type] = { handler, target };
+    target["on" + type] = handler;
+    store[type] = { handler, target, source };
   }
   function wireInlineHandlers(node) {
     if (node && node.nodeType === 1) {
       const names = __omoikane_attribute_names(node.__id) || [];
       for (const name of names) {
-        applyInlineHandlerAttribute(node, name);
+        applyInlineHandlerAttribute(node, name, true);
       }
     }
     const kids = node ? node.childNodes : [];
@@ -16128,22 +16158,25 @@
                (type === "touchend" && !(init.touches || []).length)) {
       nativeSetUserActionTarget("active", null, false);
     }
-    const event = new Event(type, {
+    const convertTouches = touches => (touches || []).map((touch, index) => {
+      const record = { ...touch };
+      if (record.identifier === undefined) record.identifier = index;
+      record.target = wrapNode(record.target) || target;
+      return new platformEventInterfaces.Touch(record);
+    });
+    const touches = convertTouches(init.touches), changedTouches = convertTouches(init.changedTouches);
+    const event = new platformEventInterfaces.TouchEvent(type, {
       bubbles: true,
       cancelable: type === "touchstart" || type === "touchmove",
       composed: true,
-    });
-    for (const [name, value] of Object.entries({
-      touches: init.touches || [],
-      targetTouches: init.touches || [],
-      changedTouches: init.changedTouches || [],
+      touches,
+      targetTouches: touches.filter(touch => touch.target === target),
+      changedTouches,
       altKey: !!init.altKey,
       ctrlKey: !!init.ctrlKey,
       metaKey: !!init.metaKey,
       shiftKey: !!init.shiftKey,
-    })) {
-      Object.defineProperty(event, name, { configurable: true, enumerable: true, value });
-    }
+    });
     const notCanceled = target.dispatchEvent(event);
     if (!notCanceled) return 0;
     if (type !== "touchmove" || init.defaultAllowed === false) return 1;
@@ -16412,11 +16445,9 @@
     const oldURL = previousURL === undefined ? __loc.href : String(previousURL);
     __applyLocationUrl(href, false);
     const dispatchNavigationEvent = type => {
-      const event = new Event(type);
-      if (type === "hashchange") {
-        event.oldURL = oldURL;
-        event.newURL = __loc.href;
-      }
+      const event = type === "hashchange"
+        ? new platformEventInterfaces.HashChangeEvent(type, { oldURL, newURL: __loc.href })
+        : new platformEventInterfaces.PopStateEvent(type, { state: __historyEntries[__historyIndex].state });
       globalThis.dispatchEvent(event);
     };
     dispatchNavigationEvent("popstate");
@@ -18076,9 +18107,6 @@
     const target = viewport ? document : wrapNode(nodeId);
     if (!target) return;
     const event = new Event("scroll", { bubbles: !!viewport });
-    if (viewport && typeof globalThis.onscroll === "function") {
-      __omoikane_call_event_listener(globalThis.onscroll, globalThis, event);
-    }
     target.dispatchEvent(event);
   };
   function isScrollOptions(value) {
@@ -18683,7 +18711,7 @@
               event.currentTarget = performance;
               event.eventPhase = 2;
               event.__dispatching = true;
-              try { handler.call(performance, event); } catch (_) {} finally {
+              try { __omoikane_call_event_listener(handler, performance, event); } catch (_) {} finally {
                 event.__dispatching = false;
                 event.currentTarget = null;
                 event.eventPhase = 0;
@@ -19180,7 +19208,7 @@
       dispatched.target = this;
       dispatched.currentTarget = this;
       const handler = this["on" + dispatched.type];
-      if (typeof handler === "function") handler.call(this, dispatched);
+      if (typeof handler === "function") __omoikane_call_event_listener(handler, this, dispatched);
       for (const entry of (this._listeners[dispatched.type] || []).slice()) {
         if (entry.removed) continue;
         if (entry.once) this.removeEventListener(dispatched.type, entry.listener, entry.capture);
@@ -19581,7 +19609,7 @@
       dispatched.target = this;
       dispatched.currentTarget = this;
       const handler = this["on" + dispatched.type];
-      if (typeof handler === "function") handler.call(this, dispatched);
+      if (typeof handler === "function") __omoikane_call_event_listener(handler, this, dispatched);
       for (const entry of (this._listeners[dispatched.type] || []).slice()) {
         if (entry.removed) continue;
         if (entry.once) this.removeEventListener(dispatched.type, entry.listener, entry.capture);
@@ -20169,8 +20197,12 @@
     return stream;
   }
 
+  const eventTargetBrands = new WeakMap();
   class EventTarget {
-    constructor() { this._listeners = new Map(); }
+    constructor() {
+      safeWeakMapSet(eventTargetBrands, this, true);
+      this._listeners = new Map();
+    }
     addEventListener(type, callback, options = {}) {
       addListener(this, this._listeners, type, callback, options);
     }
@@ -20570,7 +20602,7 @@
       this.__stopTimer = null;
       audioTask(() => {
         const event = new Event("ended");
-        if (typeof this.onended === "function") this.onended.call(this, event);
+        if (typeof this.onended === "function") __omoikane_call_event_listener(this.onended, this, event);
         this.dispatchEvent(event);
       });
     }
@@ -20624,7 +20656,7 @@
         const event = new Event("statechange");
         try {
           const handler = context.onstatechange;
-          if (typeof handler === "function") handler.call(context, event);
+          if (typeof handler === "function") __omoikane_call_event_listener(handler, context, event);
           context.dispatchEvent(event);
         } finally {
           resolve();
@@ -20642,7 +20674,7 @@
         const event = new Event("statechange");
         try {
           const handler = context.onstatechange;
-          if (typeof handler === "function") handler.call(context, event);
+          if (typeof handler === "function") __omoikane_call_event_listener(handler, context, event);
           context.dispatchEvent(event);
         } finally {
           resolve();
@@ -20659,7 +20691,7 @@
         const event = new Event("statechange");
         try {
           const handler = context.onstatechange;
-          if (typeof handler === "function") handler.call(context, event);
+          if (typeof handler === "function") __omoikane_call_event_listener(handler, context, event);
           context.dispatchEvent(event);
         } finally {
           resolve();
@@ -20784,6 +20816,7 @@
   let permissionLifecycleActive = true;
   const supportedPermissionNames = Object.freeze([
     "notifications", "geolocation", "clipboard-read", "clipboard-write", "persistent-storage",
+    "accelerometer", "gyroscope", "magnetometer",
   ]);
 
   function permissionDescriptorName(descriptor) {
@@ -20799,6 +20832,9 @@
   }
 
   function permissionStateFor(name) {
+    // No platform sensor provider is installed, so motion permission cannot
+    // be granted. This is also the state reported by Permissions.query.
+    if (["accelerometer", "gyroscope", "magnetometer"].includes(name)) return "denied";
     if (name === "persistent-storage") {
       try {
         if (!storageManagerAvailable) return "denied";
@@ -20959,7 +20995,7 @@
       this._finishedResolve(this);
       const event = new Event("finish");
       this.dispatchEvent(event);
-      if (typeof this.onfinish === "function") this.onfinish.call(this, event);
+      if (typeof this.onfinish === "function") __omoikane_call_event_listener(this.onfinish, this, event);
     }
     play() {
       if (this._timer !== null) clearTimeout(this._timer);
@@ -20984,7 +21020,7 @@
       this.playState = "idle";
       const event = new Event("cancel");
       this.dispatchEvent(event);
-      if (typeof this.oncancel === "function") this.oncancel.call(this, event);
+      if (typeof this.oncancel === "function") __omoikane_call_event_listener(this.oncancel, this, event);
     }
     updatePlaybackRate(rate) { this.playbackRate = Number(rate); }
     persist() { this.replaceState = "persisted"; }
@@ -21050,7 +21086,7 @@
       this.signal.reason = reason;
       const event = new Event("abort");
       this.signal.dispatchEvent(event);
-      if (typeof this.signal.onabort === "function") this.signal.onabort.call(this.signal, event);
+      if (typeof this.signal.onabort === "function") __omoikane_call_event_listener(this.signal.onabort, this.signal, event);
     }
   }
 
@@ -21305,15 +21341,19 @@
   ) {
     if (windowResize) {
       const event = new Event("resize");
-      if (typeof globalThis.onresize === "function") {
-        __omoikane_call_event_listener(globalThis.onresize, globalThis, event);
-      }
       globalThis.dispatchEvent(event);
     }
     if (visualResize) visualViewport.dispatchEvent(new Event("resize"));
     if (visualScroll) visualViewport.dispatchEvent(new Event("scroll"));
   };
   globalThis.EventTarget = EventTarget;
+  // DOM nodes and the Window inherit the EventTarget interface. Their own
+  // listener operations retain the document-backed event dispatch state.
+  Object.setPrototypeOf(Node.prototype, EventTarget.prototype);
+  Object.setPrototypeOf(Node, EventTarget);
+  Object.setPrototypeOf(Window.prototype, EventTarget.prototype);
+  Object.setPrototypeOf(Window, EventTarget);
+  Object.setPrototypeOf(globalThis, Window.prototype);
   // XMLHttpRequestUpload is declared beside XMLHttpRequest so the latter can
   // construct it before this general EventTarget definition is reached.  Link
   // the prototype chain once EventTarget is initialized so standard brand
@@ -22697,7 +22737,7 @@
     __dispatchState() {
       const event = new Event("statechange");
       this.dispatchEvent(event);
-      if (typeof this.__onstatechange === "function") this.__onstatechange.call(this, event);
+      if (typeof this.__onstatechange === "function") __omoikane_call_event_listener(this.__onstatechange, this, event);
     }
     __connect(peer) {
       if (this.__closed || !peer || peer.__closed) return;
@@ -22849,7 +22889,7 @@
       queueMicrotask(() => {
         const event = new Event("close");
         this.dispatchEvent(event);
-        if (typeof this.__onclose === "function") this.__onclose.call(this, event);
+        if (typeof this.__onclose === "function") __omoikane_call_event_listener(this.__onclose, this, event);
       });
       if (this.__peer && !this.__peer.__closed) this.__peer.__closeFromPeer(closeInfo);
       this.__peer = null;
@@ -22878,7 +22918,7 @@
       queueMicrotask(() => {
         const event = new Event("close");
         this.dispatchEvent(event);
-        if (typeof this.__onclose === "function") this.__onclose.call(this, event);
+        if (typeof this.__onclose === "function") __omoikane_call_event_listener(this.__onclose, this, event);
       });
       this.__peer = null;
     }
@@ -23289,6 +23329,28 @@
   };
 
   const auxiliaryWindowProxies = new Map();
+  function auxiliaryWindowReflection(activeWindow) {
+    const target = () => {
+      const window = activeWindow();
+      if (window === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+      return window;
+    };
+    return {
+      defineProperty(_target, property, descriptor) {
+        if (descriptor.configurable !== true) {
+          throw new TypeError("WindowProxy does not support non-configurable properties");
+        }
+        return Reflect.defineProperty(target(), property, descriptor);
+      },
+      deleteProperty(_target, property) { return Reflect.deleteProperty(target(), property); },
+      getOwnPropertyDescriptor(_target, property) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(target(), property);
+        return descriptor ? { ...descriptor, configurable: true } : undefined;
+      },
+      ownKeys() { return Reflect.ownKeys(target()); },
+      preventExtensions() { throw new TypeError("WindowProxy cannot be made non-extensible"); },
+    };
+  }
   function auxiliaryWindowProxy(id) {
     if (auxiliaryWindowProxies.has(id)) return auxiliaryWindowProxies.get(id);
     let proxy;
@@ -23306,6 +23368,7 @@
       reload() { this.href = this.href; },
     };
     const handler = {
+      ...auxiliaryWindowReflection(activeWindow),
       get(_target, property) {
         const state = access();
         if (property === Symbol.toStringTag) return "Window";
@@ -23337,6 +23400,7 @@
       },
     };
     proxy = new Proxy(Object.create(null), handler);
+    nativeRegisterWindowProxy(proxy, id, true);
     auxiliaryWindowProxies.set(id, proxy);
     return proxy;
   }
@@ -23593,6 +23657,8 @@
   globalThis.Worker = Worker;
 
   globalThis.__omoikane_install_worker_global = function(url, workerId) {
+    // A worker inherits EventTarget without the Window interface.
+    Object.setPrototypeOf(globalThis, EventTarget.prototype);
     // A worker global is not a Window and cannot reach the page DOM. The
     // bootstrap has already installed shared language primitives (Event,
     // MessageEvent, structuredClone, timers, URL, and navigator); remove the
@@ -23603,7 +23669,7 @@
     try { delete globalThis.open; } catch (_) { globalThis.open = undefined; }
     try { delete globalThis.customElements; } catch (_) { globalThis.customElements = undefined; }
     for (const domName of [
-      "Node", "Element", "HTMLElement", "Document", "DocumentFragment", "Text",
+      "Window", "Node", "Element", "HTMLElement", "Document", "DocumentFragment", "Text",
       "CharacterData", "Attr", "ShadowRoot", "HTMLCollection", "NodeList", "Range",
       "AbstractRange", "StaticRange", "DOMImplementation", "DOMStringMap", "DOMRectList",
       "MutationObserver", "ResizeObserver", "IntersectionObserver", "CustomElementRegistry",
@@ -23617,10 +23683,16 @@
       "Geolocation", "GeolocationCoordinates", "GeolocationPosition",
       "GeolocationPositionError",
       "Notification",
+      "PopStateEvent", "HashChangeEvent", "PageTransitionEvent", "BeforeUnloadEvent", "SubmitEvent", "FormDataEvent",
+      "Touch", "TouchList", "TouchEvent", "ContentVisibilityAutoStateChangeEvent", "DeviceOrientationEvent", "DeviceMotionEvent",
+      "DeviceMotionEventAcceleration", "DeviceMotionEventRotationRate", "HTMLFrameSetElement", "event",
     ]) {
       try { delete globalThis[domName]; } catch (_) { globalThis[domName] = undefined; }
     }
     try { delete globalThis.getComputedStyle; } catch (_) { globalThis.getComputedStyle = undefined; }
+    for (const type of platformHandlerTypes || []) {
+      if (!["error", "message", "messageerror", "rejectionhandled", "unhandledrejection"].includes(type)) delete globalThis["on" + type];
+    }
     try { delete globalThis.history; } catch (_) { globalThis.history = undefined; }
     Object.defineProperty(globalThis, "name", { configurable:true, enumerable:true, value:"", writable:false });
     for (const name of ["ElementInternals", "RadioNodeList"]) {
@@ -23914,7 +23986,7 @@
       this._matches = matches;
       const event = new MediaQueryListEvent("change", { matches, media: this.media });
       this.dispatchEvent(event);
-      if (typeof this.onchange === "function") this.onchange.call(this, event);
+      if (typeof this.onchange === "function") __omoikane_call_event_listener(this.onchange, this, event);
     }
   }
 
@@ -24375,7 +24447,7 @@
     __fire(type, loaded, total) {
       const event = new ProgressEvent(type, { lengthComputable: true, loaded, total });
       const handler = this["on" + type];
-      if (typeof handler === "function") handler.call(this, event);
+      if (typeof handler === "function") __omoikane_call_event_listener(handler, this, event);
       this.dispatchEvent(event);
     }
   }
@@ -24426,7 +24498,7 @@
 
   function fireRealtimeEvent(target, event) {
     const handler = target["on" + event.type];
-    if (typeof handler === "function") handler.call(target, event);
+    if (typeof handler === "function") __omoikane_call_event_listener(handler, target, event);
     target.dispatchEvent(event);
   }
 
@@ -26382,4 +26454,70 @@
     if (Object.hasOwn(globalThis, name)) Object.defineProperty(globalThis, name, { enumerable: false });
   }
 
+  function makePlatformWindowEvent(type, init) {
+    switch (type) {
+      case "popstate": return new platformEventInterfaces.PopStateEvent(type, init);
+      case "hashchange": return new platformEventInterfaces.HashChangeEvent(type, init);
+      case "pageshow": case "pagehide": return new platformEventInterfaces.PageTransitionEvent(type, init);
+      default: throw new IntrinsicTypeError("Unsupported Window event type");
+    }
+  }
+  globalThis.__omoikane_install_event_interfaces = factory => {
+    platformEventInterfaces = factory({
+      Event, UIEvent,
+      isHTMLElement: node => nativePlatformInterfaceBrand(node, "HTMLElement"),
+      isFormData: value => safeWeakMapHas(formDataObjects, value),
+      isEventTarget: value => nativePlatformInterfaceBrand(value, "EventTarget"),
+    });
+    nativeRegisterPlatformEventFactory(makePlatformWindowEvent, (value, name) => {
+      if (name === "EventTarget") {
+        return value === globalThis || safeWeakMapHas(nodeEventStates, value) ||
+          safeWeakMapHas(eventTargetBrands, value);
+      }
+      if (name === "HTMLElement") {
+        const id = getWrapperNodeId(wrapperNodeIds, value);
+        return id !== undefined && nativeNodeIsHtmlElement(id);
+      }
+      return false;
+    });
+  };
+  globalThis.__omoikane_install_touch_events = factory => {
+    Object.assign(platformEventInterfaces, factory({ UIEvent, isTouch: platformEventInterfaces.isTouch }));
+  };
+  globalThis.__omoikane_install_device_events = factory => {
+    Object.assign(platformEventInterfaces, factory({
+      Event, secure: nativeIsSecureContext(),
+      sensorPermission: names => Promise.resolve().then(() => names.every(name => permissionStateFor(name) === "granted") ? "granted" : "denied"),
+    }));
+  };
+  Object.defineProperty(globalThis, "event", {
+    configurable: true, enumerable: true,
+    get() { return nativeCurrentWindowEvent(this); },
+    set(value) {
+      nativeCurrentWindowEvent(this);
+      Object.defineProperty(this ?? globalThis, "event", { value, writable: true, configurable: true, enumerable: true });
+    },
+  });
+  globalThis.__omoikane_install_event_handlers = factory => {
+    const globalTargets = [HTMLElement.prototype, Document.prototype, SVGElement.prototype, globalThis];
+    platformHandlerTypes = factory({
+      secure: nativeIsSecureContext(),
+      globalTargets,
+      windowTargets: [globalThis, HTMLBodyElement.prototype, HTMLFrameSetElement.prototype],
+      windowTarget: globalThis,
+      reflectWindowTypes: types => { for (const type of types) WINDOW_REFLECTED_HANDLERS.add(type); },
+      resolveTarget(receiver, type) {
+        if (receiver === globalThis) return receiver;
+        const id = getWrapperNodeId(wrapperNodeIds, receiver);
+        if (id === undefined) throw new IntrinsicTypeError("Illegal invocation");
+        const tag = internalNodeLocalName(receiver);
+        if ((tag === "body" || tag === "frameset") && WINDOW_REFLECTED_HANDLERS.has(type)) {
+          return receiver.ownerDocument?.defaultView;
+        }
+        return receiver;
+      },
+    });
+    // Parser-authored attributes precede author scripts in a newly created Realm.
+    wireInlineHandlers(globalThis.document);
+  };
 })();

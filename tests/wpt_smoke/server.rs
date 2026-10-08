@@ -143,7 +143,7 @@ globalThis.__wpt_results = [];
 globalThis.__wpt_harness_status = -1;
 globalThis.__wpt_complete = false;
 add_result_callback(test => globalThis.__wpt_results.push({name:String(test.name),status:Number(test.status),message:String(test.message||"")}));
-add_completion_callback((tests,status) => { globalThis.__wpt_harness_status=Number(status.status); globalThis.__wpt_complete=true; });
+add_completion_callback((tests,status) => { globalThis.__wpt_harness_status=Number(status.status); globalThis.__wpt_harness_message=String(status.message||""); globalThis.__wpt_complete=true; });
 "#;
         respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
         return;
@@ -164,6 +164,12 @@ test_driver_internal.set_window_rect = () => new Promise(resolve => {
         respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
         return;
     }
+    // wptserve's canonical rewrite supports the historical IDL parser URL.
+    let path = if path == "/resources/WebIDLParser.js" {
+        "/resources/webidl2/lib/webidl2.js"
+    } else {
+        path
+    };
     let relative = path.trim_start_matches("/");
     if relative.split("/").any(|part| part == "..") {
         respond(&mut stream, 403, "text/plain", b"forbidden");
@@ -238,6 +244,12 @@ mod tests {
         ));
         fs::create_dir(&root).unwrap();
         fs::write(root.join("hello.html"), b"hello").unwrap();
+        fs::create_dir_all(root.join("resources/webidl2/lib")).unwrap();
+        fs::write(
+            root.join("resources/webidl2/lib/webidl2.js"),
+            b"var WebIDL2 = {};",
+        )
+        .unwrap();
         let server = StaticServer::start(root.clone());
         assert!(server.base_url.starts_with("http://127.0.0.1:"));
 
@@ -247,6 +259,10 @@ mod tests {
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 5\r\nConnection: close"
         );
         assert_eq!(body, b"hello");
+        let (header, body) = get(&server, "/resources/WebIDLParser.js");
+        assert!(header.starts_with("HTTP/1.1 200 OK"));
+        assert!(header.contains("Content-Type: text/javascript"));
+        assert_eq!(body, b"var WebIDL2 = {};");
 
         for (path, expected_header, expected_body) in [
             (

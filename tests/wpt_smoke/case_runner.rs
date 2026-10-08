@@ -1,9 +1,11 @@
 //! Execute one WPT smoke case and return its raw harness result.
 use super::model::ActualStatus;
+use omoikane::dom::{Node, NodeHandle};
 use omoikane::html::TreeBuilder;
 use omoikane::http::{Client, Url};
-use omoikane::js::{JsRuntime, NavigationRequest};
+use omoikane::js::{JsRuntime, NavigationRequest, SandboxConfig};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub(super) struct CaseExecution {
     pub(super) actual: ActualStatus,
@@ -43,6 +45,30 @@ fn js_bool(runtime: &mut JsRuntime, source: &str) -> bool {
         .ok()
         .and_then(|value| value.as_boolean())
         .unwrap_or(false)
+}
+
+fn case_timeout(source: &[u8], document: &NodeHandle, javascript: bool) -> Duration {
+    // Pinned testharness.js defines 10 seconds for normal and 60 for long.
+    // Use upstream metadata rather than an unrelated embedder's 5-second limit.
+    let mut long = javascript
+        && String::from_utf8_lossy(source)
+            .lines()
+            .any(|line| line.trim() == "// META: timeout=long");
+    let mut pending = vec![document.clone()];
+    while let Some(node) = pending.pop() {
+        if node.local_name().as_deref() == Some("meta")
+            && node
+                .get_attribute("name")
+                .is_some_and(|value| value.eq_ignore_ascii_case("timeout"))
+            && node
+                .get_attribute("content")
+                .is_some_and(|value| value.eq_ignore_ascii_case("long"))
+        {
+            long = true;
+        }
+        pending.extend(node.child_nodes());
+    }
+    Duration::from_secs(if long { 60 } else { 10 })
 }
 
 /// The smoke runner owns one Document, so it only commits requests that keep
@@ -170,10 +196,10 @@ fn drive_case_tasks(
     runtime: &mut JsRuntime,
     history: &mut SameDocumentHistory,
     errors: &mut Vec<String>,
+    timeout: Duration,
 ) {
-    const STEP_MS: u64 = 10;
-    const MAX_VIRTUAL_MS: u64 = 5_000;
-    for _ in 0..MAX_VIRTUAL_MS / STEP_MS {
+    const STEP_MS: u64 = 16;
+    for _ in 0..timeout.as_millis() / u128::from(STEP_MS) {
         let committed = match history.drive(runtime) {
             Ok(committed) => committed,
             Err(error) => {
@@ -185,7 +211,13 @@ fn drive_case_tasks(
             return;
         }
         runtime.run_timers(STEP_MS, STEP_MS, 128);
-        if !committed && !runtime.has_pending_timers() {
+        // Timers advance the virtual clock; the rendering opportunity must
+        // share that timestamp rather than advance it a second time.
+        if let Err(error) = runtime.run_animation_frame(0) {
+            errors.push(format!("render WPT frame: {error}"));
+            return;
+        }
+        if !committed && !runtime.has_pending_timers() && !runtime.has_pending_animation_frames() {
             // Give any non-timer tasks run by this tick one more checkpoint.
             if let Err(error) = history.drive(runtime) {
                 errors.push(error);
@@ -245,7 +277,8 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
         "WPT resource missing: {}",
         path
     );
-    let document_source = if path.ends_with(".any.js") || path.ends_with(".window.js") {
+    let javascript = path.ends_with(".any.js") || path.ends_with(".window.js");
+    let document_source = if javascript {
         let dependencies = script_dependencies(response.body(), &path)
             .into_iter()
             .map(|path| format!("<script src=\"{path}\"></script>"))
@@ -260,8 +293,17 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
         String::from_utf8_lossy(response.body()).into_owned()
     };
     let document = TreeBuilder::parse(&document_source).document();
+    let timeout = case_timeout(response.body(), &document, javascript);
     let base: Url = url.parse().expect("parse WPT URL");
-    let mut runtime = JsRuntime::with_document_and_url(document, &url).expect("create WPT runtime");
+    let mut runtime = JsRuntime::with_document_sandbox_and_url(
+        document,
+        SandboxConfig {
+            timeout,
+            ..SandboxConfig::default()
+        },
+        &url,
+    )
+    .expect("create WPT runtime");
     // The bootstrap itself creates a large graph of host API constructors.
     // Collect its short-lived initialization temporaries before page code
     // starts allocating, keeping each WPT case's GC pressure bounded.
@@ -275,7 +317,7 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
     if path == "page-visibility/visibility-state-entry.tentative.html" {
         drive_visibility_state_testdriver(&mut runtime, &mut errors);
     } else {
-        drive_case_tasks(&mut runtime, &mut history, &mut errors);
+        drive_case_tasks(&mut runtime, &mut history, &mut errors, timeout);
     }
     // WPTs commonly observe rendering steps through nested
     // requestAnimationFrame callbacks. Drive a bounded number of explicit
@@ -300,6 +342,12 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
         .and_then(|value| value.as_string().map(|text| text.to_std_string_escaped()))
         .unwrap_or_else(|| "[]".to_string());
     let subtests = serde_json::from_str(&details).unwrap_or(serde_json::Value::Null);
+    let harness = runtime
+        .eval("JSON.stringify({status: globalThis.__wpt_harness_status, message: globalThis.__wpt_harness_message || ''})")
+        .ok()
+        .and_then(|value| value.as_string().map(|text| text.to_std_string_escaped()))
+        .unwrap_or_default();
+    let details = format!("{details}; harness={harness}");
     // Each WPT case uses a fresh Boa realm.  The main branch's expanded
     // bootstrap creates considerably more short-lived objects than the
     // original smoke set, so dropping the runtime alone can leave enough
@@ -320,6 +368,45 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_driver_runs_rendering_opportunities_before_harness_timeout() {
+        let document = TreeBuilder::parse("<!doctype html><html><body></body></html>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime
+            .eval(
+                "globalThis.__wpt_complete = false; globalThis.timedOut = false; \
+                 setTimeout(() => { timedOut = true; __wpt_complete = true; }, 80); \
+                 requestAnimationFrame(() => requestAnimationFrame(() => { __wpt_complete = true; }));",
+            )
+            .unwrap();
+        let mut history = SameDocumentHistory::new("about:blank".to_string());
+        let mut errors = Vec::new();
+        drive_case_tasks(
+            &mut runtime,
+            &mut history,
+            &mut errors,
+            Duration::from_secs(10),
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(js_bool(&mut runtime, "__wpt_complete && !timedOut"));
+    }
+
+    #[test]
+    fn timeout_metadata_uses_pinned_harness_normal_and_long_budgets() {
+        let document = TreeBuilder::parse("<html><head></head></html>").document();
+        assert_eq!(case_timeout(b"", &document, false), Duration::from_secs(10));
+        assert_eq!(
+            case_timeout(b"// META: timeout=long\n", &document, true),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            case_timeout(b"// META: timeout=long\n", &document, false),
+            Duration::from_secs(10)
+        );
+        let long = TreeBuilder::parse("<meta name='timeout' content='long'>").document();
+        assert_eq!(case_timeout(b"", &long, false), Duration::from_secs(60));
+    }
 
     #[test]
     fn fragment_requests_commit_hashchange_target_and_history() {

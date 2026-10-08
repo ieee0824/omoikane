@@ -238,6 +238,8 @@ jobs:
         env:
           WPT_ROOT: .cache/wpt
         run: scripts/fetch-wpt.sh
+      - name: Verify generated event handler inventory
+        run: python3 scripts/generate-event-handler-inventory.py --wpt-root .cache/wpt --check
       - name: Run WPT smoke subset
         env:
           WPT_ROOT: .cache/wpt
