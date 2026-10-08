@@ -16880,6 +16880,11 @@ fn match_media_notifies_when_viewport_changes_result() {
         .unwrap();
 
     runtime.set_viewport(800.0, 768.0);
+    assert_eq!(
+        runtime.eval("mediaChanges.length").unwrap().as_number(),
+        Some(0.0)
+    );
+    runtime.run_animation_frame(16).unwrap();
     assert!(runtime
         .eval("!viewportQuery.matches && mediaChanges.length === 1 && mediaChanges[0][0] === false && mediaChanges[0][1] === '(min-width: 900px)'")
         .unwrap()
@@ -16887,6 +16892,7 @@ fn match_media_notifies_when_viewport_changes_result() {
         .unwrap());
 
     runtime.set_viewport(700.0, 768.0);
+    runtime.run_animation_frame(16).unwrap();
     assert_eq!(
         runtime.eval("mediaChanges.length").unwrap().as_number(),
         Some(1.0),

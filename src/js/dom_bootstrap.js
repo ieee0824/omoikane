@@ -1252,6 +1252,8 @@
     return { capture, once, passive, signal };
   }
 
+  const listenerStoreChanges = new WeakMap();
+
   function isListenerMap(store) {
     return typeof store.get === "function" && typeof store.set === "function";
   }
@@ -1285,6 +1287,7 @@
     const entry = { listener, capture, once, passive, signal, abortHandler: null, removed: false };
     list.push(entry);
     setListenerList(store, key, list);
+    safeWeakMapGet(listenerStoreChanges, store)?.();
     if (signal) {
       entry.abortHandler = () => removeListener(store, key, listener, capture);
       signal.addEventListener("abort", entry.abortHandler, { once: true });
@@ -1301,6 +1304,7 @@
     entry.removed = true;
     detachAbortListener(entry);
     setListenerList(store, key, list);
+    safeWeakMapGet(listenerStoreChanges, store)?.();
   }
 
   function clearListeners(store) {
@@ -1313,6 +1317,7 @@
     }
     if (isListenerMap(store)) store.clear();
     else for (const key of Object.keys(store)) delete store[key];
+    safeWeakMapGet(listenerStoreChanges, store)?.();
   }
 
   let reportingEventListenerError = false;
@@ -1574,10 +1579,18 @@
   const ATTR_CONSTRUCTION = {};
 
   const passiveListenerState = new WeakMap();
+  // Reuse the private, host-rooted browsing state across Window Realms. The
+  // weak registry accepts foreign Event instances without retaining them.
+  const eventInstances = browsingInput.eventInstances ||
+    (browsingInput.eventInstances = new WeakSet());
+  const registerEventInstance = WeakSet.prototype.add;
+  const hasEventInstance = WeakSet.prototype.has;
+  const isEventInstance = event => safeApply(hasEventInstance, eventInstances, [event]);
 
   class Event {
     constructor(type, init = {}) {
       init = init ?? {};
+      safeApply(registerEventInstance, eventInstances, [this]);
       this.type = String(type);
       this.bubbles = !!init.bubbles;
       this.cancelable = !!init.cancelable;
@@ -1968,7 +1981,7 @@
   }
 
   function dispatchEventOnTarget(target, event, activationInfo = null) {
-    if (!(event instanceof Event)) throw new TypeError("dispatchEvent requires an Event");
+    if (!isEventInstance(event)) throw new TypeError("dispatchEvent requires an Event");
     if (event.__dispatching || event.type === "") {
       throw new DOMException("The event is already being dispatched or has no type.", "InvalidStateError");
     }
@@ -8786,6 +8799,11 @@
   }
 
   class HTMLIFrameElement extends HTMLElement {
+    get width() { return this.getAttribute("width") ?? ""; }
+    set width(value) { this.setAttribute("width", String(value)); }
+    get height() { return this.getAttribute("height") ?? ""; }
+    set height(value) { this.setAttribute("height", String(value)); }
+
     __prepareResourceNavigation() {
       if (!this.isConnected) return;
       const events = safeWeakMapGet(nodeEventStates, this);
@@ -9506,7 +9524,7 @@
   // distinct interface or iframe-only sandbox/srcdoc attributes.
   class HTMLFrameElement extends HTMLElement {}
   for (const name of Object.getOwnPropertyNames(HTMLIFrameElement.prototype)) {
-    if (["constructor", "sandbox", "srcdoc", "allowFullscreen"].includes(name)) continue;
+    if (["constructor", "sandbox", "srcdoc", "allowFullscreen", "width", "height"].includes(name)) continue;
     Object.defineProperty(HTMLFrameElement.prototype, name,
       Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, name));
   }
@@ -18092,7 +18110,7 @@
   globalThis.outerHeight = 720;
   globalThis.screenX = 0;
   globalThis.screenY = 0;
-  globalThis.devicePixelRatio = 1;
+  globalThis.devicePixelRatio = __omoikane_initial_device_pixel_ratio;
   function windowScrollOffset() {
     try {
       return JSON.parse(__omoikane_window_scroll_offset());
@@ -18156,7 +18174,17 @@
     pageXOffset: { configurable: true, enumerable: true, get() { return windowScrollOffset().x; } },
     pageYOffset: { configurable: true, enumerable: true, get() { return windowScrollOffset().y; } },
   });
-  globalThis.screen = { width: 1280, height: 720, availWidth: 1280, availHeight: 720, colorDepth: 24, pixelDepth: 24 };
+  const nativeScreenMetrics = __omoikane_screen_metrics;
+  const parseScreenMetrics = JSON.parse;
+  const screenMetric = name => parseScreenMetrics(nativeScreenMetrics())[name];
+  globalThis.screen = Object.defineProperties({}, {
+    width: {enumerable: true, configurable: true, get() { return screenMetric('width'); }},
+    height: {enumerable: true, configurable: true, get() { return screenMetric('height'); }},
+    availWidth: {enumerable: true, configurable: true, get() { return screenMetric('width'); }},
+    availHeight: {enumerable: true, configurable: true, get() { return screenMetric('height'); }},
+    colorDepth: {enumerable: true, configurable: true, get() { return screenMetric('colorDepth'); }},
+    pixelDepth: {enumerable: true, configurable: true, get() { return screenMetric('pixelDepth'); }},
+  });
 
   // Origin-scoped Web Storage. The backing areas live in the browser host so
   // localStorage survives Runtime replacement and sessionStorage follows the
@@ -20210,16 +20238,31 @@
       removeListener(this._listeners, type, callback, options);
     }
     dispatchEvent(event) {
-      if (!(event instanceof Event)) throw new TypeError("dispatchEvent requires an Event");
+      if (!isEventInstance(event)) throw new TypeError("dispatchEvent requires an Event");
+      if (event.__dispatching || event.type === "") {
+        throw new DOMException("The event is already being dispatched or has no type.", "InvalidStateError");
+      }
+      event.__dispatching = true;
+      event.__stopped = false;
+      event.__stoppedImmediate = false;
       event.target = this;
       event.currentTarget = this;
-      for (const entry of (this._listeners.get(event.type) || []).slice()) {
-        if (entry.removed) continue;
-        if (entry.once) this.removeEventListener(event.type, entry.listener, entry.capture);
-        callListener(entry, this, event);
-        if (event.__stoppedImmediate) break;
+      event.eventPhase = 2;
+      try {
+        for (const capture of [true, false]) {
+          for (const entry of (this._listeners.get(event.type) || []).slice()) {
+            if (entry.removed || !!entry.capture !== capture) continue;
+            if (entry.once) this.removeEventListener(event.type, entry.listener, entry.capture);
+            callListener(entry, this, event);
+            if (event.__stoppedImmediate) break;
+          }
+          if (event.__stoppedImmediate) break;
+        }
+      } finally {
+        event.__dispatching = false;
+        event.currentTarget = null;
+        event.eventPhase = 0;
       }
-      event.currentTarget = null;
       return !event.defaultPrevented;
     }
   }
@@ -23957,6 +24000,26 @@
   };
 
   const mediaQueryListRefs = [];
+  const mediaQueryListConstructionToken = {};
+  const mediaQueryListMedia = new WeakMap();
+
+  function mediaQueryText(list) {
+    const media = safeWeakMapGet(mediaQueryListMedia, list);
+    if (media === undefined) throw new TypeError("Invalid MediaQueryList receiver");
+    return media;
+  }
+  // A document must continue reporting changes to subscribed lists even when
+  // page code holds no reference. Release them as soon as the last change
+  // listener is removed, including once listeners and AbortSignal removal.
+  const subscribedMediaQueryLists = new Set();
+
+  function updateMediaQueryListRetention(list) {
+    if ((list._listeners.get("change") || []).some(entry => !entry.removed)) {
+      subscribedMediaQueryLists.add(list);
+    } else {
+      subscribedMediaQueryLists.delete(list);
+    }
+  }
 
   class MediaQueryListEvent extends Event {
     constructor(type, init = {}) {
@@ -23971,36 +24034,65 @@
   }
 
   class MediaQueryList extends EventTarget {
-    constructor(query) {
+    constructor(query, token) {
+      if (token !== mediaQueryListConstructionToken) throw new TypeError("Illegal constructor");
       super();
-      this.media = String(query);
-      this.onchange = null;
-      this._matches = __omoikane_match_media(this.media);
+      safeWeakMapSet(mediaQueryListMedia, this, String(query));
+      this.__onchange = null;
+      this.__changeHandler = null;
+      this._matches = __omoikane_match_media(mediaQueryText(this));
+      safeWeakMapSet(listenerStoreChanges, this._listeners,
+        () => updateMediaQueryListRetention(this));
     }
-    get matches() { return this._matches; }
+    get media() { return mediaQueryText(this); }
+    get matches() { return __omoikane_match_media(mediaQueryText(this)); }
+    get onchange() { return this.__onchange; }
+    set onchange(callback) {
+      const next = typeof callback === "function" ? callback : null;
+      this.__onchange = next;
+      if (!next) {
+        if (this.__changeHandler) this.removeEventListener("change", this.__changeHandler);
+        this.__changeHandler = null;
+      } else if (!this.__changeHandler) {
+        this.__changeHandler = event => {
+          const handler = this.__onchange;
+          if (handler && __omoikane_call_event_listener(handler, this, event) === false) {
+            event.preventDefault();
+          }
+        };
+        this.addEventListener("change", this.__changeHandler);
+      }
+    }
     addListener(callback) { this.addEventListener("change", callback); }
     removeListener(callback) { this.removeEventListener("change", callback); }
     __reevaluate() {
-      const matches = __omoikane_match_media(this.media);
+      const media = mediaQueryText(this);
+      const matches = __omoikane_match_media(media);
       if (matches === this._matches) return;
       this._matches = matches;
-      const event = new MediaQueryListEvent("change", { matches, media: this.media });
+      const event = new MediaQueryListEvent("change", { matches, media });
+      event.isTrusted = true;
       this.dispatchEvent(event);
-      if (typeof this.onchange === "function") __omoikane_call_event_listener(this.onchange, this, event);
     }
   }
 
   globalThis.matchMedia = function(query) {
-    const list = new MediaQueryList(query);
+    const list = new MediaQueryList(query, mediaQueryListConstructionToken);
     mediaQueryListRefs.push(typeof WeakRef === "function" ? new WeakRef(list) : list);
     return list;
   };
   globalThis.__omoikane_media_query_viewport_changed = function() {
-    for (let index = mediaQueryListRefs.length - 1; index >= 0; index--) {
+    // Do not process lists created by a callback until the next report cycle.
+    let limit = mediaQueryListRefs.length;
+    for (let index = 0; index < limit; index++) {
       const entry = mediaQueryListRefs[index];
       const list = typeof WeakRef === "function" ? entry.deref() : entry;
       if (list) list.__reevaluate();
-      else mediaQueryListRefs.splice(index, 1);
+      else {
+        mediaQueryListRefs.splice(index, 1);
+        index--;
+        limit--;
+      }
     }
   };
   globalThis.MediaQueryList = MediaQueryList;

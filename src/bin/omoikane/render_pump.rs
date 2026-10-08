@@ -86,7 +86,7 @@ impl BrowserApp {
         }
     }
 
-    fn rebase_clock_if_document_changed(&mut self) {
+    pub(super) fn rebase_clock_if_document_changed(&mut self) {
         if self.clock_document != self.session.document_generation() {
             self.advance_page_clock(Instant::now());
         }
@@ -206,6 +206,7 @@ mod tests {
                 ErrorReporter::new(&config, database.clone(), RetentionPolicy::default()).unwrap(),
             );
             let mut app = BrowserApp::new("data:text/html,<body>initial</body>").unwrap();
+            app.start_initial_navigation().unwrap();
             app.error_reporter = Some(Arc::clone(&reporter));
             app.session
                 .dispatch(
@@ -230,6 +231,7 @@ mod tests {
     #[test]
     fn navigation_after_idle_rebases_new_document_timers() {
         let mut app = BrowserApp::new("data:text/html,<body>initial</body>").unwrap();
+        app.start_initial_navigation().unwrap();
         let initial = Instant::now();
         app.begin_page_frame(initial);
         app.session.dispatch("Page.navigate", json!({"url":

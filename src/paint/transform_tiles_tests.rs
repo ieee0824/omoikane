@@ -208,6 +208,7 @@ pub(super) fn paint_reference(
         text_fonts,
         web_fonts,
         nested_documents: None,
+        propagated_background_node: None,
     };
     let Some(source_region) = intersect(
         subtree_paint_bounds(layout, resolver, context),
@@ -251,6 +252,7 @@ pub(super) fn paint_reference(
                     text_fonts,
                     web_fonts,
                     nested_documents: None,
+                    propagated_background_node: None,
                 },
                 PaintBoxOptions {
                     inherited_clip: None,

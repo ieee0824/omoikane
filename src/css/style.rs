@@ -1,6 +1,7 @@
 //! CSS cascade and computed style resolution.
 
 mod animation;
+mod forced_colors;
 pub(crate) mod grid_properties;
 pub(crate) mod individual_transform;
 mod page;
@@ -32,8 +33,9 @@ use crate::font::{
 use rusqlite::{Connection, params};
 
 use super::{
-    Combinator, CssToken, Declaration, MediaQuery, MediaType, PseudoElement, Rule, Selector,
-    SelectorPart, SimpleSelector, Specificity, Stylesheet, Value, evaluate_media_query_for_type,
+    Combinator, CssToken, Declaration, MediaEnvironment, MediaQuery, MediaType, PseudoElement,
+    Rule, Selector, SelectorPart, SimpleSelector, Specificity, Stylesheet, Value,
+    evaluate_media_query_with_environment,
     is_css_wide_keyword_with_revert_rule as is_css_wide_keyword, parse_media_query_list,
     specificity,
 };
@@ -328,6 +330,12 @@ pub struct ComputedStyle {
     text_decorations: Arc<[PropagatedTextDecoration]>,
 }
 
+/// Owned values for the document canvas, with the root's adjustment policy.
+pub(crate) struct ViewportPaintStyle {
+    pub(crate) style: Arc<ComputedStyle>,
+    pub(crate) canvas_color: Option<[u8; 3]>,
+}
+
 impl ComputedStyle {
     /// Animation-created stacking context, independent of the sampled values.
     pub(crate) fn has_transform_animation_context(&self) -> bool {
@@ -370,6 +378,10 @@ impl ComputedStyle {
 
         let mut paint = self.clone();
         for name in VISITED_COLOR_PROPERTIES {
+            let system_name = visited
+                .properties
+                .system_color_name(name)
+                .map(str::to_owned);
             let (Some(ordinary), Some(visited)) = (self.get(name), visited.get(name)) else {
                 continue;
             };
@@ -389,6 +401,9 @@ impl ComputedStyle {
                 visited.r, visited.g, visited.b, ordinary.a
             );
             paint.properties.insert(*name, ComputedValue::Color(value));
+            if let Some(system_name) = system_name {
+                paint.properties.mark_system_color(name, &system_name);
+            }
         }
         paint
     }
@@ -621,6 +636,7 @@ pub struct StyleResolver {
     color_scheme_dark: bool,
     /// Output medium used for `@media` evaluation.
     media_type: MediaType,
+    media_environment: MediaEnvironment,
     /// Cache of parsed media query lists keyed by the normalized (trimmed) prelude string.
     ///
     /// Avoids re-parsing the same `@media` prelude string for every node that
@@ -1303,6 +1319,7 @@ impl CascadeLayerOrder {
         viewport_height: f32,
         color_scheme_dark: bool,
         media_type: MediaType,
+        media_environment: &MediaEnvironment,
     ) {
         self.register_rules(
             rules,
@@ -1312,6 +1329,7 @@ impl CascadeLayerOrder {
             viewport_height,
             color_scheme_dark,
             media_type,
+            media_environment,
         );
     }
 
@@ -1324,6 +1342,7 @@ impl CascadeLayerOrder {
         viewport_height: f32,
         color_scheme_dark: bool,
         media_type: MediaType,
+        media_environment: &MediaEnvironment,
     ) {
         for rule in rules {
             let Rule::At(at_rule) = rule else {
@@ -1334,8 +1353,7 @@ impl CascadeLayerOrder {
                     at_rule,
                     viewport_width,
                     viewport_height,
-                    color_scheme_dark,
-                    media_type,
+                    media_environment,
                 )
             {
                 continue;
@@ -1354,6 +1372,7 @@ impl CascadeLayerOrder {
                         viewport_height,
                         color_scheme_dark,
                         media_type,
+                        media_environment,
                     );
                 } else if let Some(names) = super::parse_layer_name_list(&at_rule.prelude) {
                     for name in names {
@@ -1371,6 +1390,7 @@ impl CascadeLayerOrder {
                     viewport_height,
                     color_scheme_dark,
                     media_type,
+                    media_environment,
                 );
             }
         }
@@ -1413,20 +1433,18 @@ fn layer_group_rule_is_active(
     at_rule: &super::AtRule,
     viewport_width: f32,
     viewport_height: f32,
-    color_scheme_dark: bool,
-    media_type: MediaType,
+    media_environment: &MediaEnvironment,
 ) -> bool {
     if at_rule.name.eq_ignore_ascii_case("media") {
         return parse_media_query_list(&at_rule.prelude)
             .unwrap_or_default()
             .iter()
             .any(|query| {
-                evaluate_media_query_for_type(
+                evaluate_media_query_with_environment(
                     query,
                     viewport_width,
                     viewport_height,
-                    color_scheme_dark,
-                    media_type,
+                    media_environment,
                 )
             });
     }
@@ -1767,13 +1785,15 @@ impl StyleResolver {
 
     /// Sets whether the system is in dark mode.
     ///
-    /// When `true`, `@media (prefers-color-scheme: dark)` queries match and
-    /// `@media (prefers-color-scheme: light)` queries do not.  Defaults to
-    /// `false` (light mode).  Clears the style cache so that subsequent calls
+    /// Defaults to `false` (light mode). An active forced-color palette can
+    /// override this preference when its Canvas is clearly dark or light.
+    /// Clears the style cache so that subsequent calls
     /// to [`StyleResolver::computed_style`] reflect the new scheme.
     pub fn set_color_scheme_dark(&mut self, dark: bool) {
-        let layer_order_changed = self.color_scheme_dark != dark;
-        self.color_scheme_dark = dark;
+        self.media_environment.color_scheme_dark = dark;
+        let effective_dark = self.media_environment.preferred_color_scheme_dark();
+        let layer_order_changed = self.color_scheme_dark != effective_dark;
+        self.color_scheme_dark = effective_dark;
         if layer_order_changed {
             self.rebuild_layer_orders();
             self.rebuild_keyframes();
@@ -1795,6 +1815,24 @@ impl StyleResolver {
             return;
         }
         self.media_type = media_type;
+        self.media_environment.media_type = media_type;
+        self.rebuild_layer_orders();
+        self.rebuild_keyframes();
+        self.rebuild_font_faces();
+        self.rebuild_counter_styles();
+        self.rebuild_registered_custom_properties();
+        self.invalidate_style_cache();
+    }
+
+    /// Installs an owned presentation-settings snapshot for all conditional rules.
+    /// Rebuilds conditional registries and invalidates cached styles.
+    pub fn set_media_environment(&mut self, environment: MediaEnvironment) {
+        if self.media_environment == environment {
+            return;
+        }
+        self.color_scheme_dark = environment.preferred_color_scheme_dark();
+        self.media_type = environment.media_type;
+        self.media_environment = environment;
         self.rebuild_layer_orders();
         self.rebuild_keyframes();
         self.rebuild_font_faces();
@@ -1970,6 +2008,7 @@ impl StyleResolver {
                 self.viewport_height,
                 self.color_scheme_dark,
                 self.media_type,
+                &self.media_environment,
             );
         stylesheet_id
     }
@@ -1993,6 +2032,7 @@ impl StyleResolver {
                 self.viewport_height,
                 self.color_scheme_dark,
                 self.media_type,
+                &self.media_environment,
             );
         }
         self.layer_orders = orders;
@@ -2028,6 +2068,7 @@ impl StyleResolver {
                 self.viewport_height,
                 self.color_scheme_dark,
                 self.media_type,
+                &self.media_environment,
             );
         }
         self.keyframes = keyframes;
@@ -2059,6 +2100,7 @@ impl StyleResolver {
             self.viewport_height,
             self.color_scheme_dark,
             self.media_type,
+            &self.media_environment,
         );
     }
 
@@ -2094,6 +2136,7 @@ impl StyleResolver {
                 self.viewport_height,
                 self.color_scheme_dark,
                 self.media_type,
+                &self.media_environment,
             );
         }
         self.font_faces = font_faces;
@@ -2127,6 +2170,7 @@ impl StyleResolver {
             self.viewport_height,
             self.color_scheme_dark,
             self.media_type,
+            &self.media_environment,
         );
     }
 
@@ -2160,6 +2204,7 @@ impl StyleResolver {
                 self.viewport_height,
                 self.color_scheme_dark,
                 self.media_type,
+                &self.media_environment,
             );
         }
         self.counter_styles = counter_styles;
@@ -2198,6 +2243,7 @@ impl StyleResolver {
             self.viewport_height,
             self.color_scheme_dark,
             self.media_type,
+            &self.media_environment,
         );
     }
 
@@ -2251,6 +2297,7 @@ impl StyleResolver {
                 self.viewport_height,
                 self.color_scheme_dark,
                 self.media_type,
+                &self.media_environment,
             );
         }
         registrations.extend(self.script_registered_custom_properties.clone());
@@ -2374,8 +2421,51 @@ impl StyleResolver {
     }
 
     pub(crate) fn paint_style(&mut self, node: &NodeHandle) -> Arc<ComputedStyle> {
-        self.with_visited_paint_pass(|pass| pass.style(node))
-            .unwrap_or_else(|| self.computed_style_shared(node))
+        let style = self
+            .with_visited_paint_pass(|pass| pass.style(node))
+            .unwrap_or_else(|| self.computed_style_shared(node));
+        forced_colors::paint_style(node, style, &self.media_environment)
+    }
+
+    /// Propagates background values without propagating the body's opt-out.
+    /// The cached computed styles remain unchanged, including currentColor.
+    pub(crate) fn viewport_paint_style(
+        &mut self,
+        root: &NodeHandle,
+        background_source: &NodeHandle,
+    ) -> ViewportPaintStyle {
+        let root_style = self.computed_style_shared(root);
+        let mut viewport = self
+            .computed_style_shared(background_source)
+            .as_ref()
+            .clone();
+        if viewport
+            .get("background-color")
+            .is_some_and(|value| value.css_text().eq_ignore_ascii_case("currentcolor"))
+        {
+            viewport
+                .properties
+                .copy_property("color", "background-color");
+        }
+        viewport
+            .properties
+            .insert_from("color", &root_style.properties);
+        viewport
+            .properties
+            .insert_from("forced-color-adjust", &root_style.properties);
+        let canvas_color = root_style
+            .get("forced-color-adjust")
+            .is_some_and(|value| value.css_text().eq_ignore_ascii_case("auto"))
+            .then(|| {
+                self.media_environment
+                    .used_forced_color_palette()
+                    .map(|palette| palette.canvas)
+            })
+            .flatten();
+        ViewportPaintStyle {
+            style: forced_colors::paint_style(root, Arc::new(viewport), &self.media_environment),
+            canvas_color,
+        }
     }
 
     pub(crate) fn paint_pseudo_style(
@@ -2383,8 +2473,10 @@ impl StyleResolver {
         node: &NodeHandle,
         pseudo: PseudoElement,
     ) -> Option<Arc<ComputedStyle>> {
-        self.with_visited_paint_pass(|pass| pass.pseudo_style(node, pseudo))
-            .unwrap_or_else(|| self.computed_pseudo_style_shared(node, pseudo))
+        let style = self
+            .with_visited_paint_pass(|pass| pass.pseudo_style(node, pseudo))
+            .unwrap_or_else(|| self.computed_pseudo_style_shared(node, pseudo));
+        style.map(|style| forced_colors::paint_style(node, style, &self.media_environment))
     }
 
     /// Resolves computed style for a pseudo-element attached to `node`.
@@ -2478,6 +2570,7 @@ impl StyleResolver {
                 viewport_height,
                 color_scheme_dark,
                 self.media_type,
+                &self.media_environment,
                 &mut self.media_query_cache,
                 &mut self.scope_prelude_cache,
                 &mut self.container_query_cache,
@@ -2852,11 +2945,22 @@ impl StyleResolver {
 
         apply_ua_defaults(node, &mut properties, pseudo, parent_style);
         apply_presentational_hints(node, &mut properties, pseudo);
+        let color_inherits =
+            forced_colors::capture_color_inheritance(&mut component_values, &properties);
+        forced_colors::resolve_system_colors(&mut properties, &self.media_environment);
         resolve_current_color_on_color_property(&mut properties, parent_style);
         resolve_inherit_and_unset(&mut properties, parent_style);
         resolve_component_css_wide_keywords(&mut component_values, parent_style);
         apply_inheritance(&mut properties, parent_style);
         resolve_initial_css_wide_keywords(&mut properties);
+        forced_colors::preserve_parent_color(
+            node,
+            pseudo.is_some(),
+            parent_style,
+            &mut properties,
+            color_inherits,
+            &self.media_environment,
+        );
         apply_initial_values(&mut properties);
         if pseudo.is_none() && node.node_type() == NodeType::Element {
             // The initial display value applies to elements without a more
@@ -2887,6 +2991,11 @@ impl StyleResolver {
                 .sample(node.identity(), &mut properties);
         }
 
+        forced_colors::compute_presentation_adjustments(
+            &mut properties,
+            &mut component_values,
+            &self.media_environment,
+        );
         let text_decorations = propagated_text_decorations(
             &properties,
             parent_style,
@@ -3218,7 +3327,7 @@ fn record_component_value(
     let name = property_name.to_ascii_lowercase();
     if matches!(
         name.as_str(),
-        "content" | "counter-reset" | "counter-increment"
+        "content" | "counter-reset" | "counter-increment" | "color"
     ) || color_uses_container_units(value)
     {
         values.insert(name, value.clone());
@@ -3774,7 +3883,10 @@ fn validate_color_value(value: &Value) -> DeclarationValidation {
 
 /// Validates Color 4 syntax without performing conversion or gamut mapping.
 fn is_valid_css_color_text(text: &str) -> bool {
-    crate::paint::color4::CssColor::parse(text).is_some()
+    crate::css::ForcedColorPalette::for_color_scheme(false)
+        .system_color(text)
+        .is_some()
+        || crate::paint::color4::CssColor::parse(text).is_some()
         || crate::paint::color::parse_color(text).is_some()
 }
 
@@ -3974,6 +4086,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     }
     if super::shorthand::is_deferred_var_shorthand(name) {
         return validate_retained_shorthand(name, value);
+    }
+    if let Some(validation) = forced_colors::validate(name, value) {
+        return validation;
     }
     if let Some(validation) = will_change::validate(name, value) {
         return validation;
@@ -5721,6 +5836,7 @@ fn collect_indexed_rule_candidates(
     viewport_height: f32,
     color_scheme_dark: bool,
     media_type: MediaType,
+    media_environment: &MediaEnvironment,
     media_cache: &mut HashMap<String, Vec<MediaQuery>>,
     scope_cache: &mut HashMap<String, Option<super::ScopePrelude>>,
     container_cache: &mut HashMap<String, Option<super::ContainerQuery>>,
@@ -5746,6 +5862,7 @@ fn collect_indexed_rule_candidates(
             viewport_height,
             color_scheme_dark,
             media_type,
+            media_environment,
             media_cache,
             scope_cache,
             container_cache,
@@ -5778,6 +5895,7 @@ fn collect_indexed_rule_candidates(
             viewport_height,
             color_scheme_dark,
             media_type,
+            media_environment,
             media_cache,
             scope_cache,
             container_cache,
@@ -5810,6 +5928,7 @@ fn collect_indexed_rule_candidates(
             viewport_height,
             color_scheme_dark,
             media_type,
+            media_environment,
             media_cache,
             scope_cache,
             container_cache,
@@ -5840,6 +5959,7 @@ fn collect_rule_candidates(
     viewport_height: f32,
     color_scheme_dark: bool,
     media_type: MediaType,
+    media_environment: &MediaEnvironment,
     media_cache: &mut HashMap<String, Vec<MediaQuery>>,
     scope_cache: &mut HashMap<String, Option<super::ScopePrelude>>,
     container_cache: &mut HashMap<String, Option<super::ContainerQuery>>,
@@ -5960,6 +6080,7 @@ fn collect_rule_candidates(
                         viewport_height,
                         color_scheme_dark,
                         media_type,
+                        media_environment,
                         media_cache,
                         scope_cache,
                         container_cache,
@@ -5999,6 +6120,7 @@ fn collect_rule_candidates(
                             viewport_height,
                             color_scheme_dark,
                             media_type,
+                            media_environment,
                             media_cache,
                             scope_cache,
                             container_cache,
@@ -6045,6 +6167,7 @@ fn collect_rule_candidates(
                             viewport_height,
                             color_scheme_dark,
                             media_type,
+                            media_environment,
                             media_cache,
                             scope_cache,
                             container_cache,
@@ -6065,8 +6188,7 @@ fn collect_rule_candidates(
                             &at_rule.prelude,
                             viewport_width,
                             viewport_height,
-                            color_scheme_dark,
-                            media_type,
+                            media_environment,
                             media_cache,
                         )
                     } else if at_rule.name.eq_ignore_ascii_case("supports") {
@@ -6102,6 +6224,7 @@ fn collect_rule_candidates(
                             viewport_height,
                             color_scheme_dark,
                             media_type,
+                            media_environment,
                             media_cache,
                             scope_cache,
                             container_cache,
@@ -6386,8 +6509,7 @@ fn media_query_matches(
     prelude: &str,
     viewport_width: f32,
     viewport_height: f32,
-    color_scheme_dark: bool,
-    media_type: MediaType,
+    media_environment: &MediaEnvironment,
     cache: &mut HashMap<String, Vec<MediaQuery>>,
 ) -> bool {
     let prelude = prelude.trim();
@@ -6398,12 +6520,11 @@ fn media_query_matches(
         .entry(prelude.to_owned())
         .or_insert_with(|| parse_media_query_list(prelude).unwrap_or_default());
     queries.iter().any(|query| {
-        evaluate_media_query_for_type(
+        evaluate_media_query_with_environment(
             query,
             viewport_width,
             viewport_height,
-            color_scheme_dark,
-            media_type,
+            media_environment,
         )
     })
 }
@@ -6533,6 +6654,7 @@ fn collect_keyframes(
     viewport_height: f32,
     color_scheme_dark: bool,
     media_type: MediaType,
+    media_environment: &MediaEnvironment,
 ) {
     for rule in rules {
         match rule {
@@ -6579,8 +6701,7 @@ fn collect_keyframes(
                     at_rule,
                     viewport_width,
                     viewport_height,
-                    color_scheme_dark,
-                    media_type,
+                    media_environment,
                 ) {
                     continue;
                 }
@@ -6606,6 +6727,7 @@ fn collect_keyframes(
                         viewport_height,
                         color_scheme_dark,
                         media_type,
+                        media_environment,
                     );
                 } else {
                     collect_keyframes(
@@ -6621,6 +6743,7 @@ fn collect_keyframes(
                         viewport_height,
                         color_scheme_dark,
                         media_type,
+                        media_environment,
                     );
                 }
             }
@@ -6636,6 +6759,7 @@ fn collect_registered_custom_properties(
     viewport_height: f32,
     color_scheme_dark: bool,
     media_type: MediaType,
+    media_environment: &MediaEnvironment,
 ) {
     for rule in rules {
         match rule {
@@ -6649,8 +6773,7 @@ fn collect_registered_custom_properties(
                     at_rule,
                     viewport_width,
                     viewport_height,
-                    color_scheme_dark,
-                    media_type,
+                    media_environment,
                 ) {
                     continue;
                 }
@@ -6661,6 +6784,7 @@ fn collect_registered_custom_properties(
                     viewport_height,
                     color_scheme_dark,
                     media_type,
+                    media_environment,
                 );
             }
             _ => {}
@@ -6695,6 +6819,7 @@ fn collect_font_faces(
     viewport_height: f32,
     color_scheme_dark: bool,
     media_type: MediaType,
+    media_environment: &MediaEnvironment,
 ) {
     for rule in rules {
         match rule {
@@ -6744,8 +6869,7 @@ fn collect_font_faces(
                     at_rule,
                     viewport_width,
                     viewport_height,
-                    color_scheme_dark,
-                    media_type,
+                    media_environment,
                 ) {
                     continue;
                 }
@@ -6772,6 +6896,7 @@ fn collect_font_faces(
                         viewport_height,
                         color_scheme_dark,
                         media_type,
+                        media_environment,
                     );
                 } else {
                     collect_font_faces(
@@ -6788,6 +6913,7 @@ fn collect_font_faces(
                         viewport_height,
                         color_scheme_dark,
                         media_type,
+                        media_environment,
                     );
                 }
             }
@@ -6810,6 +6936,7 @@ fn collect_counter_styles(
     viewport_height: f32,
     color_scheme_dark: bool,
     media_type: MediaType,
+    media_environment: &MediaEnvironment,
 ) {
     for rule in rules {
         match rule {
@@ -6840,8 +6967,7 @@ fn collect_counter_styles(
                     at_rule,
                     viewport_width,
                     viewport_height,
-                    color_scheme_dark,
-                    media_type,
+                    media_environment,
                 ) {
                     continue;
                 }
@@ -6868,6 +6994,7 @@ fn collect_counter_styles(
                     viewport_height,
                     color_scheme_dark,
                     media_type,
+                    media_environment,
                 );
             }
             _ => {}
@@ -9425,6 +9552,7 @@ fn apply_ua_defaults(
     if pseudo.is_some() {
         return;
     }
+    forced_colors::apply_svg_ua_defaults(node, properties);
     let tag = match node.tag_name() {
         Some(tag) => tag.to_ascii_lowercase(),
         None => return,
@@ -10150,6 +10278,7 @@ const INITIAL_VALUES: &[(&str, InitialValue)] = &[
     // `cursor` initial value is `auto` (CSS UI). Ensuring it is always
     // present lets a dropped/absent `cursor` declaration serialize as `auto`
     // in getComputedStyle (Acid3 test 47).
+    ("forced-color-adjust", InitialValue::Keyword("auto")),
     ("will-change", InitialValue::Keyword("auto")),
     ("cursor", InitialValue::Keyword("auto")),
     ("pointer-events", InitialValue::Keyword("auto")),
@@ -10224,21 +10353,19 @@ fn apply_initial_values(properties: &mut PropertyMap) {
         if matches!(initial, InitialValue::CurrentColor) {
             continue;
         }
-        properties
-            .entry((*name).to_string())
-            .or_insert_with(|| initial.resolve());
+        if !properties.contains_key(*name) {
+            properties
+                .entry((*name).to_string())
+                .or_insert_with(|| initial.resolve());
+        }
     }
     // `currentcolor`-valued initial values are resolved once `color` (set by
     // the author or defaulted above) is known.
-    let current_color = properties
-        .get(&PropertyId::Color)
-        .cloned()
-        .unwrap_or_else(|| ComputedValue::Color("black".to_string()));
     for (name, initial) in INITIAL_VALUES {
         if matches!(initial, InitialValue::CurrentColor) {
-            properties
-                .entry((*name).to_string())
-                .or_insert_with(|| current_color.clone());
+            if !properties.contains_key(*name) {
+                properties.copy_property("color", name);
+            }
         }
     }
     for side in [
@@ -10388,8 +10515,8 @@ fn resolve_current_color_on_color_property(
     );
     if is_current_color {
         if let Some(parent) = parent_style {
-            if let Some(parent_color) = parent.get("color") {
-                properties.insert(PropertyId::Color, parent_color.clone());
+            if parent.get("color").is_some() {
+                properties.insert_from("color", &parent.properties);
             } else {
                 // Root element with color: currentColor → initial value (black)
                 properties.insert(PropertyId::Color, ComputedValue::Color("black".to_string()));
@@ -10401,16 +10528,16 @@ fn resolve_current_color_on_color_property(
 }
 
 fn resolve_column_rule_current_color(properties: &mut PropertyMap) {
-    let Some(current_color) = properties.get(&PropertyId::Color).cloned() else {
+    if properties.get(&PropertyId::Color).is_none() {
         return;
-    };
+    }
     let is_current_color = matches!(
         properties.get(&PropertyId::ColumnRuleColor),
         Some(ComputedValue::Color(value) | ComputedValue::Keyword(value))
             if value.eq_ignore_ascii_case("currentcolor")
     );
     if is_current_color {
-        properties.insert(PropertyId::ColumnRuleColor, current_color);
+        properties.copy_property("color", "column-rule-color");
     }
 }
 
@@ -10430,9 +10557,9 @@ fn resolve_inherit_and_unset(properties: &mut PropertyMap, parent_style: Option<
 
     for name in inherited_names {
         if let Some(parent_style) = parent_style
-            && let Some(parent_value) = parent_style.get(&name)
+            && parent_style.get(&name).is_some()
         {
-            properties.insert(name, parent_value.clone());
+            properties.insert_from(&name, &parent_style.properties);
             continue;
         }
         properties.remove(&name);
@@ -10445,10 +10572,8 @@ fn apply_inheritance(properties: &mut PropertyMap, parent_style: Option<&Compute
     };
 
     for &inherited_name in INHERITED_PROPERTIES {
-        if !properties.contains_key(inherited_name)
-            && let Some(value) = parent_style.get(inherited_name)
-        {
-            properties.insert(inherited_name.to_string(), value.clone());
+        if !properties.contains_key(inherited_name) && parent_style.get(inherited_name).is_some() {
+            properties.insert_from(inherited_name, &parent_style.properties);
         }
     }
 
@@ -10463,6 +10588,7 @@ fn apply_inheritance(properties: &mut PropertyMap, parent_style: Option<&Compute
 // Inherited CSS properties supported by this engine. Keeping this as shared
 // metadata lets both natural inheritance and `all: unset` use the same rule.
 const INHERITED_PROPERTIES: &[&str] = &[
+    "forced-color-adjust",
     "border-collapse",
     "border-spacing",
     "color",
@@ -10584,7 +10710,11 @@ fn value_has_font_metric_unit(value: &Value) -> bool {
 }
 
 pub(crate) fn is_color_keyword(keyword: &str) -> bool {
-    if keyword.eq_ignore_ascii_case("currentcolor") {
+    if keyword.eq_ignore_ascii_case("currentcolor")
+        || crate::css::ForcedColorPalette::for_color_scheme(false)
+            .system_color(keyword)
+            .is_some()
+    {
         return true;
     }
     matches!(

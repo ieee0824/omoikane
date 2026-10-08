@@ -9,7 +9,7 @@ build = "build.rs"
 crate-type = ["rlib", "cdylib"]
 
 [features]
-gui = ["dep:softbuffer", "dep:winit", "dep:x11-dl"]
+gui = ["dep:softbuffer", "dep:winit", "dep:x11-dl", "dep:windows-sys", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:block2"]
 # Test-only Gate 2 comparison harness. This never selects a production
 # JavaScript engine; it compares the existing Boa embedding with a standalone
 # Boa interpreter context over the same source programs.
@@ -92,6 +92,19 @@ url = "2.5.8"
 # Pure Rust Public Suffix List for rejecting supercookies and computing schemeful sites.
 psl = "2.1.236"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Typed AppKit read-only accessibility settings and notification ownership.
+# These binding versions are already used by the GUI dependency tree.
+objc2 = { version = "0.5.2", optional = true }
+objc2-app-kit = { version = "0.2.2", optional = true, default-features = false, features = ["std", "NSWorkspace", "NSAccessibility"] }
+objc2-foundation = { version = "0.2.2", optional = true, default-features = false, features = ["std", "NSObject", "NSThread", "NSNotification", "NSOperation", "NSTimer", "NSDate", "block2"] }
+block2 = { version = "0.5.1", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Native accessibility settings need the same Win32 bindings already present
+# transitively; no browser feature implementation is delegated to this crate.
+windows-sys = { version = "0.61.2", optional = true, features = ["Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input", "Win32_UI_Input_Pointer", "Win32_UI_Controls", "Win32_Graphics_Gdi"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # Use an exclusive X11 grab so raw input is delivered exactly once while locked.
 x11-dl = { version = "2.21.0", optional = true }
@@ -130,3 +143,8 @@ overflow-checks = true
 # Retain full-input sticky matching without scanning later positions.
 [patch.crates-io]
 regress = { path = "engine/regress" }
+
+[[example]]
+name = "media_native_probe"
+path = "examples/media_native_probe.rs"
+required-features = ["gui"]

@@ -40,6 +40,7 @@ pub use render_demand::{NextRendering, PaintStateKey, RenderDemand};
 mod accessibility;
 mod browser_session;
 mod dom;
+mod emulation;
 mod input;
 mod page;
 mod runtime;
@@ -183,6 +184,7 @@ pub(crate) struct SessionSettleTimings {
 #[derive(Debug)]
 pub struct CdpSession {
     runtime: JsRuntime,
+    media_emulation: emulation::State,
     _storage_lifetime: TabStorageLifetime,
     storage_manager: StorageManager,
     storage_session_id: u64,
@@ -344,6 +346,7 @@ impl CdpSession {
             }],
             history_index: 0,
             document_generation: 0,
+            media_emulation: emulation::State::default(),
             accessibility_enabled: false,
             fullscreen_supported: true,
             fullscreen_transition_allowed: true,
@@ -382,7 +385,12 @@ impl CdpSession {
         }
         Self::configure_runtime_playback(runtime, &self.cookie_store);
         runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
+        let (width, height) = self.runtime.presentation_viewport();
+        runtime.set_viewport(width, height);
         runtime.set_user_agent(self.http_client.user_agent().to_string());
+        runtime
+            .set_media_environment(self.runtime.media_environment())
+            .map_err(CdpSessionError::JavaScript)?;
         runtime.set_fullscreen_supported(self.fullscreen_supported);
         runtime.set_pointer_lock_deferred(self.pointer_lock_deferred);
         runtime
@@ -423,6 +431,7 @@ impl CdpSession {
             }
             "Accessibility.getChildAXNodes" => self.accessibility_get_child_nodes(&params),
             "Accessibility.queryAXTree" => self.accessibility_query_tree(&params),
+            "Emulation.setEmulatedMedia" => self.emulation_set_media(&params),
             "Runtime.evaluate" => self.runtime_evaluate(&params),
             "Runtime.callFunctionOn" => self.runtime_call_function_on(&params),
             "Runtime.releaseObject" => self.runtime_release_object(&params),

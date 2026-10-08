@@ -79,7 +79,7 @@ fn printed_content_uses_each_fragment_destination_and_clip() {
     let layout = paged.layout_for_page(page);
     let mut canvas = Canvas::new(60, 60);
     canvas.fill_rect(sheet, Color::rgb(255, 255, 255));
-    paint_page_content_fragments(&mut canvas, layout, page, &mut resolver, &[], None);
+    paint_page_content_fragments(&mut canvas, layout, page, &mut resolver, &[], None, None);
 
     assert_eq!(canvas.pixel(10, 10), Some(Color::rgb(0, 0, 255)));
     assert_eq!(canvas.pixel(10, 30), Some(Color::rgb(255, 255, 255)));

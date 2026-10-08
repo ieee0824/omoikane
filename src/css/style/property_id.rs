@@ -189,6 +189,7 @@ define_properties! {
         "font-stretch" => FontStretch,
         "font-style" => FontStyle,
         "font-weight" => FontWeight,
+        "forced-color-adjust" => ForcedColorAdjust,
         "grid-auto-columns" => GridAutoColumns,
         "grid-auto-flow" => GridAutoFlow,
         "grid-auto-rows" => GridAutoRows,
@@ -469,11 +470,14 @@ impl IntoPropertyKey for String {
 /// a string-keyed fallback, so no stored name is ever dropped or rejected.
 ///
 /// A given name always resolves to the same side, so the representation is
-/// canonical and the derived equality matches string-keyed map equality.
+/// canonical. Equality also compares owned system-color source identities,
+/// because equal RGB values can produce different used colors.
 #[derive(Clone, PartialEq, Default)]
 pub(crate) struct PropertyMap {
     known: BTreeMap<PropertyId, ComputedValue>,
     other: BTreeMap<Box<str>, ComputedValue>,
+    /// Owned source identity; equal RGB values can have different forcing rules.
+    system_colors: BTreeMap<Box<str>, Box<str>>,
 }
 
 impl PropertyMap {
@@ -500,6 +504,11 @@ impl PropertyMap {
 
     /// Removes and returns the value stored for `key`.
     pub(crate) fn remove<K: PropertyKeyRef + ?Sized>(&mut self, key: &K) -> Option<ComputedValue> {
+        let name = match key.resolve() {
+            Ok(id) => id.as_str(),
+            Err(name) => name,
+        };
+        self.system_colors.remove(name);
         match key.resolve() {
             Ok(id) => self.known.remove(&id),
             Err(name) => self.other.remove(name),
@@ -513,16 +522,62 @@ impl PropertyMap {
         value: ComputedValue,
     ) -> Option<ComputedValue> {
         match key.into_key() {
-            Ok(id) => self.known.insert(id, value),
-            Err(name) => self.other.insert(name, value),
+            Ok(id) => {
+                self.system_colors.remove(id.as_str());
+                self.known.insert(id, value)
+            }
+            Err(name) => {
+                self.system_colors.remove(name.as_ref());
+                self.other.insert(name, value)
+            }
         }
     }
 
     /// Returns the entry for `key` for in-place insertion.
     pub(crate) fn entry(&mut self, key: impl IntoPropertyKey) -> PropertyEntry<'_> {
         match key.into_key() {
-            Ok(id) => PropertyEntry::Known(self.known.entry(id)),
-            Err(name) => PropertyEntry::Other(self.other.entry(name)),
+            Ok(id) => {
+                self.system_colors.remove(id.as_str());
+                PropertyEntry::Known(self.known.entry(id))
+            }
+            Err(name) => {
+                self.system_colors.remove(name.as_ref());
+                PropertyEntry::Other(self.other.entry(name))
+            }
+        }
+    }
+
+    /// Returns the original system keyword, independent of its resolved RGB.
+    pub(crate) fn system_color_name(&self, name: &str) -> Option<&str> {
+        self.system_colors.get(name).map(AsRef::as_ref)
+    }
+
+    /// Marks an existing value as coming from an explicit system color.
+    pub(crate) fn mark_system_color(&mut self, name: &str, system_name: &str) {
+        if self.contains_key(name) {
+            self.system_colors
+                .insert(name.into(), system_name.to_ascii_lowercase().into());
+        }
+    }
+
+    /// Copies a value and its owned source identity from another snapshot.
+    pub(crate) fn insert_from(&mut self, name: &str, source: &Self) {
+        if let Some(value) = source.get(name) {
+            self.insert(name, value.clone());
+            if let Some(system_name) = source.system_color_name(name) {
+                self.mark_system_color(name, system_name);
+            }
+        }
+    }
+
+    /// Resolves a reference to another property while retaining source identity.
+    pub(crate) fn copy_property(&mut self, from: &str, to: &str) {
+        let system_name = self.system_color_name(from).map(str::to_owned);
+        if let Some(value) = self.get(from).cloned() {
+            self.insert(to, value);
+            if let Some(system_name) = system_name {
+                self.mark_system_color(to, &system_name);
+            }
         }
     }
 

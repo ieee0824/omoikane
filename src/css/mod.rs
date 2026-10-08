@@ -33,7 +33,8 @@ pub(crate) use matcher::{
     SelectorMatchCache, matches_selector_boundary_cached, matches_selector_cached,
 };
 pub use media::{
-    MediaType, evaluate_media_query, evaluate_media_query_for_type, parse_media_query_list,
+    ForcedColorPalette, MediaEnvironment, MediaType, evaluate_media_query,
+    evaluate_media_query_for_type, evaluate_media_query_with_environment, parse_media_query_list,
 };
 pub use parser::{
     extract_font_face_rules, parse_selector_list, parse_style_attribute, parse_stylesheet,
@@ -454,6 +455,12 @@ pub struct MediaQuery {
 /// A single `@media` feature condition, e.g. `(max-width: 768px)`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MediaCondition {
+    /// Logical negation, preserving an unknown operand.
+    Not(Box<MediaCondition>),
+    /// Conjunction of nested media conditions.
+    All(Vec<MediaCondition>),
+    /// Disjunction of nested media conditions.
+    Any(Vec<MediaCondition>),
     /// `(max-width: <length>)` -- viewport width <= value.
     MaxWidth(f32),
     /// `(min-width: <length>)` -- viewport width >= value.
@@ -480,15 +487,38 @@ pub enum MediaCondition {
     PrefersColorSchemeLight,
     /// `(color)` or `(min/max-color: <integer>)`, in bits per color component.
     Color {
-        minimum: Option<u32>,
-        maximum: Option<u32>,
+        minimum: Option<i64>,
+        maximum: Option<i64>,
     },
     /// `(monochrome)` or `(min/max-monochrome: <integer>)`, in bits per pixel.
     Monochrome {
-        minimum: Option<u32>,
-        maximum: Option<u32>,
+        minimum: Option<i64>,
+        maximum: Option<i64>,
     },
-    /// An unrecognised condition -- never matches.
+    /// A numeric display or viewport feature comparison.
+    NumericFeature {
+        /// Canonical media feature name.
+        name: String,
+        /// Requested numeric value in CSS pixels, integer feature units, or a ratio.
+        value: f64,
+        /// Comparison operator (`=`, `<`, `<=`, `>`, or `>=`).
+        operator: String,
+    },
+    /// A resolution comparison expressed in dots per CSS pixel.
+    Resolution {
+        /// Requested resolution in dppx.
+        value: f32,
+        /// Comparison operator (`=`, `<`, `<=`, `>`, or `>=`).
+        operator: String,
+    },
+    /// A device or preference feature evaluated against an environment snapshot.
+    EnvironmentFeature {
+        /// Canonical feature name.
+        name: String,
+        /// Requested keyword, or an empty string for boolean syntax.
+        value: String,
+    },
+    /// An unrecognised condition, evaluated as unknown until final boolean conversion.
     Unknown,
 }
 

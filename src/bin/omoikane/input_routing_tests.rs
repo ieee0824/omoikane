@@ -8,6 +8,7 @@ const START_URL: &str = "data:text/html,<input id=field><div id=target></div>";
 
 fn app() -> BrowserApp {
     let mut app = BrowserApp::new(START_URL).unwrap();
+    app.start_initial_navigation().unwrap();
     render_browser_frame(&mut app.session, 320, 200, 0).unwrap();
     evaluate(
         &mut app,

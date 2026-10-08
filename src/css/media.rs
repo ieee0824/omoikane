@@ -1,6 +1,15 @@
 //! CSS `@media` query parsing and evaluation.
 
 use super::{MediaCondition, MediaQuery};
+mod comments;
+mod environment;
+mod logical;
+mod numeric_range;
+mod palette;
+mod resolution_math;
+mod resolution_range;
+pub use environment::MediaEnvironment;
+pub use palette::ForcedColorPalette;
 
 /// Media type used while evaluating conditional CSS rules.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -40,18 +49,51 @@ pub fn evaluate_media_query_for_type(
     color_scheme_dark: bool,
     media_type: MediaType,
 ) -> bool {
+    let mut environment = MediaEnvironment::default();
+    environment.color_scheme_dark = color_scheme_dark;
+    environment.media_type = media_type;
+    evaluate_media_query_with_environment(query, viewport_width, viewport_height, &environment)
+}
+
+/// Evaluates a query against an explicit, immutable device-settings snapshot.
+pub fn evaluate_media_query_with_environment(
+    query: &MediaQuery,
+    viewport_width: f32,
+    viewport_height: f32,
+    environment: &MediaEnvironment,
+) -> bool {
     let type_matches = match query.media_type.as_deref() {
         None | Some("all") => true,
-        Some("screen") => media_type == MediaType::Screen,
-        Some("print") => media_type == MediaType::Print,
+        Some("screen") => environment.media_type == MediaType::Screen,
+        Some("print") => environment.media_type == MediaType::Print,
         Some(_) => false,
     };
-
     if !type_matches {
         return query.negated;
     }
+    let result = logical::and(query.conditions.iter().map(|condition| {
+        evaluate_condition(condition, viewport_width, viewport_height, environment)
+    }));
+    (if query.negated {
+        result.map(|value| !value)
+    } else {
+        result
+    }) == Some(true)
+}
 
-    let conditions_match = query.conditions.iter().all(|cond| match cond {
+fn evaluate_condition(
+    condition: &MediaCondition,
+    viewport_width: f32,
+    viewport_height: f32,
+    environment: &MediaEnvironment,
+) -> Option<bool> {
+    let evaluate = |condition: &MediaCondition| {
+        evaluate_condition(condition, viewport_width, viewport_height, environment)
+    };
+    Some(match condition {
+        MediaCondition::Not(inner) => return evaluate(inner).map(|value| !value),
+        MediaCondition::All(items) => return logical::and(items.iter().map(evaluate)),
+        MediaCondition::Any(items) => return logical::or(items.iter().map(evaluate)),
         MediaCondition::MaxWidth(px) => viewport_width <= *px,
         MediaCondition::MinWidth(px) => viewport_width >= *px,
         MediaCondition::MaxWidthExclusive(px) => viewport_width < *px,
@@ -62,131 +104,121 @@ pub fn evaluate_media_query_for_type(
         MediaCondition::MinHeightExclusive(px) => viewport_height > *px,
         MediaCondition::OrientationPortrait => viewport_height >= viewport_width,
         MediaCondition::OrientationLandscape => viewport_width > viewport_height,
-        MediaCondition::PrefersColorSchemeDark => color_scheme_dark,
-        MediaCondition::PrefersColorSchemeLight => !color_scheme_dark,
-        // Omoikane models a color display with 8 bits per color component and
-        // no monochrome framebuffer. These are the MQ3 values exposed by the
-        // rendering backend rather than user preferences.
-        MediaCondition::Color { minimum, maximum } => {
-            numeric_feature_matches(8, *minimum, *maximum, true)
+        MediaCondition::PrefersColorSchemeDark => environment.preferred_color_scheme_dark(),
+        MediaCondition::PrefersColorSchemeLight => !environment.preferred_color_scheme_dark(),
+        // Display capabilities come from the same immutable snapshot as
+        // preferences; defaults describe the direct-color software backend.
+        MediaCondition::Color { minimum, maximum } => numeric_feature_matches(
+            environment.color_bits_per_component.into(),
+            *minimum,
+            *maximum,
+            environment.color_bits_per_component != 0,
+        ),
+        MediaCondition::Monochrome { minimum, maximum } => numeric_feature_matches(
+            environment.monochrome_bits_per_pixel.into(),
+            *minimum,
+            *maximum,
+            environment.monochrome_bits_per_pixel != 0,
+        ),
+        MediaCondition::NumericFeature {
+            name,
+            value,
+            operator,
+        } => {
+            return numeric_range::evaluate(
+                name,
+                *value,
+                operator,
+                viewport_width,
+                viewport_height,
+                environment,
+            );
         }
-        MediaCondition::Monochrome { minimum, maximum } => {
-            numeric_feature_matches(0, *minimum, *maximum, false)
+        MediaCondition::Resolution { value, operator } => match operator.as_str() {
+            "=" => environment.resolution_dppx == *value,
+            ">=" => environment.resolution_dppx >= *value,
+            "<=" => environment.resolution_dppx <= *value,
+            ">" => environment.resolution_dppx > *value,
+            "<" => environment.resolution_dppx < *value,
+            _ => return None,
+        },
+        MediaCondition::EnvironmentFeature { name, value } => {
+            return environment.matches(name, value);
         }
-        MediaCondition::Unknown => false,
-    });
-
-    if query.negated {
-        !conditions_match
-    } else {
-        conditions_match
-    }
+        MediaCondition::Unknown => return None,
+    })
 }
 
 /// Parses a `@media` prelude string (the part between `@media` and `{`) into a list
 /// of [`MediaQuery`] values separated by commas.
 ///
-/// Returns `None` on parse failure.
+/// Invalid individual queries become `not all`; an empty prelude returns `None`.
 pub fn parse_media_query_list(prelude: &str) -> Option<Vec<MediaQuery>> {
-    let prelude = prelude.trim();
+    let without_comments = comments::normalize(prelude);
+    let prelude = without_comments.trim();
     if prelude.is_empty() {
         return None;
     }
-    let queries: Option<Vec<MediaQuery>> = super::split_top_level_commas(prelude)
-        .into_iter()
-        .map(|part| parse_single_media_query(part.trim()))
-        .collect();
-    queries
+    Some(
+        super::split_top_level_commas(prelude)
+            .into_iter()
+            .map(|part| {
+                parse_single_media_query(part.trim()).unwrap_or_else(|| MediaQuery {
+                    negated: true,
+                    media_type: Some("all".into()),
+                    conditions: Vec::new(),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn parse_single_media_query(input: &str) -> Option<MediaQuery> {
     let input = input.trim();
-    let (negated, rest) = if input.len() >= 3 && input[..3].eq_ignore_ascii_case("not") {
-        let after = &input[3..];
-        let next = after.chars().next();
-        if next.is_none() || next == Some(' ') || next == Some('\t') || next == Some('(') {
-            (true, after.trim_start())
-        } else {
-            (false, input)
-        }
+    let after_not = strip_keyword_prefix(input, "not");
+    if input.starts_with('(') || after_not.is_some_and(|rest| rest.trim_start().starts_with('(')) {
+        let condition = logical::parse_condition(input, true)?;
+        return Some(MediaQuery {
+            negated: false,
+            media_type: None,
+            conditions: unpack_conjunction(condition),
+        });
+    }
+    let negated = after_not.is_some();
+    let rest = after_not
+        .or_else(|| strip_keyword_prefix(input, "only"))
+        .unwrap_or(input)
+        .trim_start();
+    let end = rest
+        .find(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
+        .unwrap_or(rest.len());
+    let name = rest.get(..end)?;
+    if name.is_empty()
+        || ["not", "only", "and", "or"]
+            .iter()
+            .any(|word| name.eq_ignore_ascii_case(word))
+    {
+        return None;
+    }
+    let remaining = rest[end..].trim_start();
+    let conditions = if remaining.is_empty() {
+        Vec::new()
     } else {
-        (false, input)
+        let condition = strip_keyword_prefix(remaining, "and")?;
+        unpack_conjunction(logical::parse_condition(condition.trim_start(), false)?)
     };
-
-    // Collect tokens: media type idents and feature conditions in parentheses.
-    let mut media_type: Option<String> = None;
-    let mut conditions = Vec::new();
-    let mut remaining = rest.trim();
-
-    // Try to read leading media type (an ident before any `(` or `and`).
-    if !remaining.starts_with('(') {
-        let end = remaining
-            .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
-            .unwrap_or(remaining.len());
-        let word = &remaining[..end];
-        if !word.is_empty() && !word.eq_ignore_ascii_case("and") {
-            // Strip the CSS `only` modifier (e.g. `only screen and ...`).
-            // `only` is a syntactic hint for older user agents; we ignore it
-            // and continue parsing the actual media type that follows.
-            if word.eq_ignore_ascii_case("only") {
-                remaining = remaining[end..].trim_start();
-                // Read the actual media type after `only`.
-                let end2 = remaining
-                    .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
-                    .unwrap_or(remaining.len());
-                let type_word = &remaining[..end2];
-                if !type_word.is_empty() && !type_word.eq_ignore_ascii_case("and") {
-                    media_type = Some(type_word.to_ascii_lowercase());
-                    remaining = remaining[end2..].trim_start();
-                }
-            } else {
-                media_type = Some(word.to_ascii_lowercase());
-                remaining = remaining[end..].trim_start();
-            }
-            // Consume optional `and` keyword.
-            if let Some(after_and) = strip_keyword_prefix(remaining, "and") {
-                let after_and = after_and.trim_start();
-                if after_and.starts_with('(') || after_and.is_empty() {
-                    remaining = after_and;
-                }
-            }
-        }
-    }
-
-    // Parse zero or more feature conditions joined by `and`.
-    loop {
-        remaining = remaining.trim_start();
-        if remaining.is_empty() {
-            break;
-        }
-        if !remaining.starts_with('(') {
-            // Skip unknown tokens (e.g. bare `and`).
-            if let Some(after_and) = strip_keyword_prefix(remaining, "and") {
-                remaining = after_and.trim_start();
-                continue;
-            }
-            // A feature outside parentheses is invalid MQ3 syntax. Preserve a
-            // false condition so a malformed query cannot accidentally match.
-            conditions.push(MediaCondition::Unknown);
-            break;
-        }
-        // Find matching closing paren.
-        let close = find_matching_paren(remaining)?;
-        let inner = remaining[1..close].trim();
-        conditions.push(parse_media_feature(inner));
-        remaining = &remaining[close + 1..];
-        remaining = remaining.trim_start();
-        // Consume optional `and` between features.
-        if let Some(after_and) = strip_keyword_prefix(remaining, "and") {
-            remaining = after_and.trim_start();
-        }
-    }
-
     Some(MediaQuery {
         negated,
-        media_type,
+        media_type: Some(name.to_ascii_lowercase()),
         conditions,
     })
+}
+
+fn unpack_conjunction(condition: MediaCondition) -> Vec<MediaCondition> {
+    match condition {
+        MediaCondition::All(conditions) => conditions,
+        condition => vec![condition],
+    }
 }
 
 /// Returns the index of the closing `)` that matches the opening `(` at index 0.
@@ -215,10 +247,48 @@ fn parse_media_feature(inner: &str) -> MediaCondition {
     // inner is e.g. "max-width: 768px" or "orientation: portrait"
     let mut parts = inner.splitn(2, ':');
     let feature = parts.next().unwrap_or("").trim().to_ascii_lowercase();
-    let value_str = parts.next().unwrap_or("").trim();
+    let value = parts.next();
+    // A colon requires a value; only the colon-free form is boolean syntax.
+    if value.is_some_and(|value| value.trim().is_empty()) {
+        return MediaCondition::Unknown;
+    }
+    let value_str = value.unwrap_or("").trim();
 
-    match feature.as_str() {
+    if let Some(condition) = parse_resolution_feature(&feature, value_str) {
+        return condition;
+    }
+    if MediaEnvironment::recognizes(&feature) {
+        return MediaCondition::EnvironmentFeature {
+            name: feature,
+            value: value_str.to_ascii_lowercase(),
+        };
+    }
+
+    if let Some(condition) = numeric_range::parse_legacy(&feature, value_str) {
+        return condition;
+    }
+    parse_legacy_media_feature(&feature, value_str)
+}
+
+fn parse_legacy_media_feature(feature: &str, value_str: &str) -> MediaCondition {
+    match feature {
         // A size feature in boolean context is true for a non-zero size.
+        "width" | "height" if !value_str.is_empty() => {
+            if let Some(px) = parse_length_to_px(value_str) {
+                return if feature == "width" {
+                    MediaCondition::All(vec![
+                        MediaCondition::MinWidth(px),
+                        MediaCondition::MaxWidth(px),
+                    ])
+                } else {
+                    MediaCondition::All(vec![
+                        MediaCondition::MinHeight(px),
+                        MediaCondition::MaxHeight(px),
+                    ])
+                };
+            }
+        }
+        "prefers-color-scheme" if value_str.is_empty() => return MediaCondition::All(Vec::new()),
         "width" if value_str.is_empty() => return MediaCondition::MinWidthExclusive(0.0),
         "height" if value_str.is_empty() => return MediaCondition::MinHeightExclusive(0.0),
         "max-width" => {
@@ -258,7 +328,7 @@ fn parse_media_feature(inner: &str) -> MediaCondition {
             };
         }
         "min-color" => {
-            if let Some(value) = parse_non_negative_integer(value_str) {
+            if let Some(value) = parse_signed_integer(value_str) {
                 return MediaCondition::Color {
                     minimum: Some(value),
                     maximum: None,
@@ -266,7 +336,7 @@ fn parse_media_feature(inner: &str) -> MediaCondition {
             }
         }
         "max-color" => {
-            if let Some(value) = parse_non_negative_integer(value_str) {
+            if let Some(value) = parse_signed_integer(value_str) {
                 return MediaCondition::Color {
                     minimum: None,
                     maximum: Some(value),
@@ -280,7 +350,7 @@ fn parse_media_feature(inner: &str) -> MediaCondition {
             };
         }
         "min-monochrome" => {
-            if let Some(value) = parse_non_negative_integer(value_str) {
+            if let Some(value) = parse_signed_integer(value_str) {
                 return MediaCondition::Monochrome {
                     minimum: Some(value),
                     maximum: None,
@@ -288,7 +358,7 @@ fn parse_media_feature(inner: &str) -> MediaCondition {
             }
         }
         "max-monochrome" => {
-            if let Some(value) = parse_non_negative_integer(value_str) {
+            if let Some(value) = parse_signed_integer(value_str) {
                 return MediaCondition::Monochrome {
                     minimum: None,
                     maximum: Some(value),
@@ -300,9 +370,40 @@ fn parse_media_feature(inner: &str) -> MediaCondition {
     MediaCondition::Unknown
 }
 
+fn parse_resolution_feature(feature: &str, value_str: &str) -> Option<MediaCondition> {
+    if matches!(feature, "resolution" | "min-resolution" | "max-resolution") {
+        if feature == "resolution" && value_str.is_empty() {
+            return Some(MediaCondition::EnvironmentFeature {
+                name: feature.into(),
+                value: String::new(),
+            });
+        }
+        return Some(
+            parse_resolution(value_str).map_or(MediaCondition::Unknown, |value| {
+                MediaCondition::Resolution {
+                    value,
+                    operator: match feature {
+                        "min-resolution" => ">=",
+                        "max-resolution" => "<=",
+                        _ => "=",
+                    }
+                    .into(),
+                }
+            }),
+        );
+    }
+    None
+}
+
 /// Parses the Media Queries Level 4 range syntax used by utility CSS frameworks,
 /// for example `(width >= 851px)` and `(48rem <= width)`.
 fn parse_range_media_feature(inner: &str) -> Option<MediaCondition> {
+    if let Some(condition) = resolution_range::parse(inner) {
+        return Some(condition);
+    }
+    if let Some(condition) = numeric_range::parse_range(inner) {
+        return Some(condition);
+    }
     let compact: String = inner.chars().filter(|ch| !ch.is_whitespace()).collect();
     for operator in [">=", "<=", ">", "<"] {
         let Some((left, right)) = compact.split_once(operator) else {
@@ -350,14 +451,33 @@ fn parse_range_media_feature(inner: &str) -> Option<MediaCondition> {
     None
 }
 
-fn parse_non_negative_integer(value: &str) -> Option<u32> {
+fn parse_resolution(value: &str) -> Option<f32> {
+    if value.contains('(') {
+        return resolution_math::parse(value);
+    }
+    let value = value.trim().to_ascii_lowercase();
+    // MQ4 defines infinite as a keyword above every numeric resolution.
+    if value == "infinite" {
+        return Some(f32::INFINITY);
+    }
+    for &(unit, factor) in resolution_math::UNITS {
+        if let Some(number) = value.strip_suffix(unit) {
+            let number: f32 = number.parse().ok()?;
+            return (number.is_finite() && (number * factor).is_finite())
+                .then_some(number * factor);
+        }
+    }
+    None
+}
+
+fn parse_signed_integer(value: &str) -> Option<i64> {
     value.trim().parse().ok()
 }
 
 fn numeric_feature_matches(
-    actual: u32,
-    minimum: Option<u32>,
-    maximum: Option<u32>,
+    actual: i64,
+    minimum: Option<i64>,
+    maximum: Option<i64>,
     boolean_value: bool,
 ) -> bool {
     match (minimum, maximum) {
@@ -371,10 +491,13 @@ fn numeric_feature_matches(
 /// Strips a case-insensitive keyword prefix with word boundary check.
 fn strip_keyword_prefix<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
     let len = keyword.len();
-    if input.len() >= len && input[..len].eq_ignore_ascii_case(keyword) {
+    if input
+        .get(..len)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
+    {
         let after = &input[len..];
         let next = after.chars().next();
-        if next.is_none() || next == Some(' ') || next == Some('\t') || next == Some('(') {
+        if next.is_none() || next.is_some_and(char::is_whitespace) {
             Some(after)
         } else {
             None
@@ -387,7 +510,30 @@ fn strip_keyword_prefix<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
 /// Parses a media-query length using the initial font and line-height metrics.
 /// Media queries are outside any element, so document font styles do not apply.
 fn parse_length_to_px(s: &str) -> Option<f32> {
+    if s.contains('(') {
+        return resolution_math::parse_length(s);
+    }
     let lower = s.trim().to_ascii_lowercase();
+    // A dimension is one CSS token; whitespace cannot separate its unit.
+    if lower.chars().any(char::is_whitespace) {
+        return None;
+    }
+    for (unit, factor) in [
+        ("in", 96.0),
+        ("cm", 96.0 / 2.54),
+        ("mm", 96.0 / 25.4),
+        ("q", 96.0 / 101.6),
+        ("pt", 96.0 / 72.0),
+        ("pc", 16.0),
+    ] {
+        if let Some(number) = lower.strip_suffix(unit) {
+            return number
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .map(|number| number * factor);
+        }
+    }
     if let Some(num_str) = lower.strip_suffix("px") {
         return num_str.trim().parse::<f32>().ok();
     }

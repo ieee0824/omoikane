@@ -198,8 +198,20 @@ fn text_shadow_is_transformed_with_the_ancestor() {
 
 #[test]
 fn text_shadow_blur_expands_ink_beyond_the_unblurred_glyph() {
-    let sharp = render("<div style='color:transparent;text-shadow:red 0 0'>Shadow</div>");
-    let blurred = render("<div style='color:transparent;text-shadow:red 0 0 8px'>Shadow</div>");
+    // Isolate red shadow coverage on black: blurred red over a propagated
+    // white canvas becomes pink, so testing for zero green would miss it.
+    let sharp = render(
+        "<style>body{background:black}</style><div style='color:transparent;text-shadow:red 0 0'>Shadow</div>",
+    );
+    let blurred = render(
+        "<style>body{background:black}</style><div style='color:transparent;text-shadow:red 0 0 8px'>Shadow</div>",
+    );
+    for canvas in [&sharp, &blurred] {
+        assert_eq!(
+            canvas.pixel(0, 0),
+            Some(omoikane::paint::Color::rgb(0, 0, 0))
+        );
+    }
     let extents = |canvas: &Canvas| {
         let positions = canvas
             .pixels()
