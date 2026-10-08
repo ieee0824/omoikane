@@ -2608,7 +2608,7 @@
   // The DOM insertion algorithm is an internal operation. Resolve tree state
   // from native ids so changing a genuine wrapper's JavaScript prototype does
   // not make insertAdjacentElement/Text lose its platform-object identity.
-  function insertNodeBeforeInternal(parent, newNode, refNode, suppressObservers = false, reactions = null) {
+  function insertNodeBeforeInternal(parent, newNode, refNode, suppressObservers = false, reactions = null, validityChecked = false) {
     const parentId = internalNodeId(parent);
     const newId = internalNodeId(newNode);
     if (parentId === undefined || newId === undefined) {
@@ -2627,7 +2627,9 @@
         );
       }
     }
-    if (__omoikane_node_type(newId) !== 11) {
+    // Legacy append/insert callers already performed the complete pre-insert
+    // check. Other internal callers retain this local cycle guard.
+    if (!validityChecked && __omoikane_node_type(newId) !== 11) {
       for (let ancestor = parent; ancestor; ancestor = internalHostIncludingParent(ancestor)) {
         if (internalNodeId(ancestor) === newId) {
           throw new DOMException(
@@ -2906,7 +2908,7 @@
       requireLegacyNodeReceiver(this);
       requireNodeReceiver(child);
       ensureAppendValidity(this, child);
-      return insertNodeBeforeInternal(this, child, null);
+      return insertNodeBeforeInternal(this, child, null, false, null, true);
     }
 
     querySelector(selector) {
@@ -3542,7 +3544,7 @@
       requireNodeReceiver(newNode);
       const reference = convertNullableNode(refNode);
       ensureAppendValidity(this, newNode, reference);
-      return insertNodeBeforeInternal(this, newNode, reference);
+      return insertNodeBeforeInternal(this, newNode, reference, false, null, true);
     }
 
     querySelectorAll(selector) {
@@ -4509,7 +4511,10 @@
     if (![1, 3, 4, 7, 8, 10, 11].includes(nodeType)) fail();
     // Validate the entire fragment before inserting any of its children.
     const children = nodeType === 11 ? internalChildNodes(node) : [node];
-    for (const child of [node, ...children]) {
+    // A non-fragment is already the sole child; checking it twice repeats
+    // every native ancestor lookup without strengthening validation.
+    const cycleCandidates = nodeType === 11 ? [node, ...children] : children;
+    for (const child of cycleCandidates) {
       for (let ancestor = parent; ancestor; ancestor = internalHostIncludingParent(ancestor)) {
         if (internalNodeId(ancestor) === internalNodeId(child)) fail();
       }
