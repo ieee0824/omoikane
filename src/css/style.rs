@@ -10156,7 +10156,11 @@ fn collect_builtin_ua_candidates(
     source_order: &mut usize,
     candidates: &mut Vec<Candidate>,
 ) {
-    if pseudo.is_some() || !node.is_html_element() {
+    let html_namespace = node.namespace_uri().map_or_else(
+        || node.is_html_element(),
+        |namespace| namespace == "http://www.w3.org/1999/xhtml",
+    );
+    if pseudo.is_some() || !html_namespace {
         return;
     }
     if let Some(hidden) = node.get_attribute("hidden") {
@@ -10179,10 +10183,7 @@ fn collect_builtin_ua_candidates(
             candidates,
         );
     }
-    if node
-        .tag_name()
-        .is_some_and(|tag| tag.eq_ignore_ascii_case("body"))
-    {
+    if node.local_name().as_deref() == Some("body") {
         let rule_order = *source_order;
         for side in ["top", "right", "bottom", "left"] {
             push_builtin_ua_candidate(
