@@ -225,3 +225,55 @@ fn regular_expression_construction_independant_of_global_reg_exp() {
         TestAction::run(regex),
     ]);
 }
+
+#[test]
+fn sticky_exact_position_preserves_original_input_and_last_index() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            const sticky = /(?<=a)(b)(c)\1/dy;
+            sticky.lastIndex = 1;
+            const match = sticky.exec('abcb');
+            const failed = /b/y;
+            const failure = failed.exec('ab');
+            const global = /b/g;
+            const ahead = global.exec('ab');
+            const anchored = /^b/y;
+            anchored.lastIndex = 1;
+            const anchoredFailure = anchored.exec('ab');
+            const unicode = /./uy;
+            unicode.lastIndex = 1;
+            const unicodeMatch = unicode.exec('a😀z');
+            const units = /./y;
+            units.lastIndex = 1;
+            const unitMatch = units.exec('a😀z');
+        "#}),
+        TestAction::assert("match[0] === 'bcb' && match[1] === 'b' && match[2] === 'c'"),
+        TestAction::assert("match.index === 1 && match.input === 'abcb' && sticky.lastIndex === 4"),
+        TestAction::assert("match.indices[0][0] === 1 && match.indices[0][1] === 4"),
+        TestAction::assert("failure === null && failed.lastIndex === 0"),
+        TestAction::assert("ahead.index === 1 && global.lastIndex === 2"),
+        TestAction::assert("anchoredFailure === null && anchored.lastIndex === 0"),
+        TestAction::assert("unicodeMatch[0] === '😀' && unicode.lastIndex === 3"),
+        TestAction::assert("unitMatch[0].length === 1 && units.lastIndex === 2"),
+    ]);
+}
+
+#[test]
+fn match_indices_are_created_only_with_d_and_share_named_capture_pairs() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            const plain = /(?<outer>(?<inner>a))(?<missing>b)?/y.exec('a');
+            const indexed = /(?<outer>(?<inner>a))(?<missing>b)?/dy.exec('a');
+        "#}),
+        TestAction::assert("!Object.hasOwn(plain, 'indices') && plain.groups.outer === 'a'"),
+        TestAction::assert("plain.groups.missing === undefined && plain[3] === undefined"),
+        TestAction::assert("indexed.indices.groups.outer === indexed.indices[1]"),
+        TestAction::assert("indexed.indices.groups.inner === indexed.indices[2]"),
+        TestAction::assert("indexed.indices[1] !== indexed.indices[2]"),
+        TestAction::assert(
+            "indexed.indices.groups.missing === undefined && indexed.indices[3] === undefined",
+        ),
+        TestAction::assert("Object.getPrototypeOf(indexed.indices.groups) === null"),
+        TestAction::assert("Object.getPrototypeOf(plain.groups) === null"),
+    ]);
+}

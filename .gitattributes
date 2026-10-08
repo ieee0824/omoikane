@@ -1,0 +1,2 @@
+# Keep the imported regress workflow byte-identical to its published archive.
+engine/regress/.github/workflows/autofix.yml -whitespace

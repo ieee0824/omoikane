@@ -46,3 +46,28 @@ The original `boa/.github/workflows/` files are retained as history, but GitHub
 does not execute nested workflows. Omoikane's root workflows must exercise the
 engine alongside browser compatibility and release gates. Source placement and
 successful dependency resolution alone are not completion of #552/#515.
+
+## RegExp exact-position matching
+
+[`regress/`](regress/) preserves the published regress 0.10.5 package, including
+its MIT/Apache licenses and tests. [`regress-origin.json`](regress-origin.json)
+records the crate archive checksum verified against the root Cargo.lock before
+import and the original file hashes. Keep this origin record unchanged when
+reviewing local modifications. Both root and Boa workspaces patch regress to
+this same local source; the nested lock previously used 0.10.4 and now uses 0.10.5.
+
+The local change adds UTF-16/UCS-2 exact-position matching to the existing
+backtracking executor. Boa uses it for sticky regexes, preserving the entire
+input for lookbehind, anchors, captures and backreferences. Ordinary global
+search continues to use the existing iterator. This avoids scanning the rest
+of an input after every failed sticky token match in WebIDL parsers.
+
+In the Boa workspace, validate regress and the embedding with a separate target:
+
+```sh
+cargo test --locked -p boa_parser -p boa_gc -p boa_engine -p regress
+cargo test --locked -p boa_engine builtins::regexp::tests
+```
+
+The regular parser/GC/engine and browser test suites remain required. Adding this
+API does not change the production interpreter or enable a JIT feature.

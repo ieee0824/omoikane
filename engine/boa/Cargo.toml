@@ -254,3 +254,7 @@ style = { level = "warn", priority = -1 }
 complexity = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+
+# Retain full-input sticky matching without scanning later positions.
+[patch.crates-io]
+regress = { path = "../regress" }

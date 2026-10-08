@@ -960,21 +960,7 @@ impl RegExp {
 
         // 13.b. Let inputIndex be the index into input of the character that was obtained from element lastIndex of S.
         // 13.c. Let r be matcher(input, inputIndex).
-        let r: Option<regress::Match> = match (full_unicode, input.as_str().variant()) {
-            (true | false, JsStrVariant::Latin1(_)) => {
-                // TODO: Currently regress does not support latin1 encoding.
-                let input = input.to_vec();
-
-                // NOTE: We can use the faster ucs2 variant since there will never be two byte unicode.
-                matcher.find_from_ucs2(&input, last_index as usize).next()
-            }
-            (true, JsStrVariant::Utf16(input)) => {
-                matcher.find_from_utf16(input, last_index as usize).next()
-            }
-            (false, JsStrVariant::Utf16(input)) => {
-                matcher.find_from_ucs2(input, last_index as usize).next()
-            }
-        };
+        let r = Self::match_input(matcher, &input, last_index as usize, full_unicode, sticky);
 
         let Some(match_value) = r else {
             // d. If r is failure, then
@@ -987,8 +973,8 @@ impl RegExp {
                 this.set(js_string!("lastIndex"), 0, true, context)?;
             }
 
-            // MOVE: ii. Set lastIndex to AdvanceStringIndex(S, lastIndex, fullUnicode).
-            // NOTE: Handled within the regress matches iterator, see below for last_index assignment.
+            // AdvanceStringIndex is handled by the non-sticky search iterator.
+            // Sticky failure returns directly without scanning subsequent positions.
 
             // NOTE: Merged  and  steps:
             //       13.a.ii.  Return null.
@@ -1000,7 +986,7 @@ impl RegExp {
         // SKIP: i. Assert: r is a MatchState.
         // SKIP: ii. Set matchSucceeded to true.
 
-        // NOTE: regress currently doesn't support the sticky flag so we have to emulate it.
+        // Sticky execution must preserve the exact requested start offset.
         if sticky && match_value.start() != last_index as usize {
             // 1. Perform ? Set(R, "lastIndex", +0𝔽, true).
             this.set(js_string!("lastIndex"), 0, true, context)?;
@@ -1011,7 +997,6 @@ impl RegExp {
 
         // 13.d.ii. Set lastIndex to AdvanceStringIndex(S, lastIndex, fullUnicode).
         // NOTE: Calculation of last_index is done in regress.
-        last_index = match_value.start() as u64;
 
         // 14. Let e be r's endIndex value.
         // 15. If fullUnicode is true, set e to GetStringIndex(S, e).
@@ -1024,173 +1009,127 @@ impl RegExp {
             this.set(js_string!("lastIndex"), e, true, context)?;
         }
 
-        // 17. Let n be the number of elements in r's captures List.
-        let n = match_value.captures.len() as u64;
-        // 18. Assert: n = R.[[RegExpRecord]].[[CapturingGroupsCount]].
-        // 19. Assert: n < 232 - 1.
-        debug_assert!(n < (1u64 << 32) - 1);
-
-        // 20. Let A be ! ArrayCreate(n + 1).
-        // 21. Assert: The mathematical value of A's "length" property is n + 1.
-        let a = Array::array_create(n + 1, None, context)?;
-        let _a_root = a.clone().root();
-
-        // 22. Perform ! CreateDataPropertyOrThrow(A, "index", 𝔽(lastIndex)).
-        a.create_data_property_or_throw(js_string!("index"), last_index, context)
-            .expect("this CreateDataPropertyOrThrow call must not fail");
-
-        // 23. Perform ! CreateDataPropertyOrThrow(A, "input", S).
-        a.create_data_property_or_throw(js_string!("input"), input.clone(), context)
-            .expect("this CreateDataPropertyOrThrow call must not fail");
-
-        // 24. Let match be the Match Record { [[StartIndex]]: lastIndex, [[EndIndex]]: e }.
-        // Immediately convert it to an array according to 22.2.7.7 GetMatchIndexPair(S, match)
-        // 1. Assert: match.[[StartIndex]] ≤ match.[[EndIndex]] ≤ the length of S.
-        // 2. Return CreateArrayFromList(« 𝔽(match.[[StartIndex]]), 𝔽(match.[[EndIndex]]) »).
-        let match_record = Array::create_array_from_list(
-            [match_value.start().into(), match_value.end().into()],
+        Ok(Some(Self::match_result(
+            &input,
+            &match_value,
+            has_indices,
             context,
-        );
-        let _match_record_root = match_record.clone().root();
+        )?))
+    }
 
-        // 25. Let indices be a new empty List.
-        let indices = Array::array_create(n + 1, None, context)?;
-        let _indices_root = indices.clone().root();
-
-        // 27. Append match to indices.
-        indices
-            .create_data_property_or_throw(0, match_record, context)
-            .expect("this CreateDataPropertyOrThrow call must not fail");
-
-        // 28. Let matchedSubstr be GetMatchString(S, match).
-        let matched_substr = input.get_expect((last_index as usize)..(e));
-
-        // 29. Perform ! CreateDataPropertyOrThrow(A, "0", matchedSubstr).
-        a.create_data_property_or_throw(0, matched_substr, context)
-            .expect("this CreateDataPropertyOrThrow call must not fail");
-
-        let mut named_groups = match_value
-            .named_groups()
-            .collect::<Vec<(&str, Option<Range>)>>();
-        // Strict mode requires groups to be created in a sorted order
-        named_groups.sort_by_key(|(name_x, _)| *name_x);
-
-        // Combines:
-        // 26. Let groupNames be a new empty List.
-        // 30. If R contains any GroupName, then
-        // 31. Else,
-        // 33. For each integer i such that 1 ≤ i ≤ n, in ascending order, do
-        #[allow(clippy::if_not_else)]
-        let (groups, group_names) = if !named_groups.clone().is_empty() {
-            // a. Let groups be OrdinaryObjectCreate(null).
-            let groups = JsObject::with_null_proto();
-            let _groups_root = groups.clone().root();
-            let group_names = JsObject::with_null_proto();
-            let _group_names_root = group_names.clone().root();
-
-            // e. If the ith capture of R was defined with a GroupName, then
-            // i. Let s be the CapturingGroupName of that GroupName.
-            // ii. Perform ! CreateDataPropertyOrThrow(groups, s, capturedValue).
-            // iii. Append s to groupNames.
-            for (name, range) in named_groups {
-                let name = js_string!(name);
-                if let Some(range) = range {
-                    let value = input.get_expect(range.clone());
-
-                    groups
-                        .create_data_property_or_throw(name.clone(), value, context)
-                        .expect("this CreateDataPropertyOrThrow call must not fail");
-
-                    // 22.2.7.8 MakeMatchIndicesIndexPairArray ( S, indices, groupNames, hasGroups )
-                    // a. Let matchIndices be indices[i].
-                    // b. If matchIndices is not undefined, then
-                    // i. Let matchIndexPair be GetMatchIndexPair(S, matchIndices).
-                    // d. Perform ! CreateDataPropertyOrThrow(A, ! ToString(𝔽(i)), matchIndexPair).
-                    group_names
-                        .create_data_property_or_throw(
-                            name.clone(),
-                            Array::create_array_from_list(
-                                [range.start.into(), range.end.into()],
-                                context,
-                            ),
-                            context,
-                        )
-                        .expect("this CreateDataPropertyOrThrow call must not fail");
+    /// Match the original input, selecting exact-position execution for sticky
+    /// regexes and retaining lookbehind/boundary context in all encodings.
+    fn match_input(
+        matcher: &Regex,
+        input: &JsString,
+        start: usize,
+        full_unicode: bool,
+        sticky: bool,
+    ) -> Option<regress::Match> {
+        match input.as_str().variant() {
+            JsStrVariant::Latin1(_) => {
+                let units = input.to_vec();
+                if sticky {
+                    matcher.match_at_ucs2(&units, start)
                 } else {
-                    groups
-                        .create_data_property_or_throw(name.clone(), JsValue::undefined(), context)
-                        .expect("this CreateDataPropertyOrThrow call must not fail");
-
-                    // 22.2.7.8 MakeMatchIndicesIndexPairArray ( S, indices, groupNames, hasGroups )
-                    // c. Else,
-                    // i. Let matchIndexPair be undefined.
-                    // d. Perform ! CreateDataPropertyOrThrow(A, ! ToString(𝔽(i)), matchIndexPair).
-                    group_names
-                        .create_data_property_or_throw(name, JsValue::undefined(), context)
-                        .expect("this CreateDataPropertyOrThrow call must not fail");
+                    matcher.find_from_ucs2(&units, start).next()
                 }
             }
-
-            (groups.into(), group_names.into())
-        } else {
-            // a. Let groups be undefined.
-            (JsValue::undefined(), JsValue::undefined())
-        };
-
-        // 22.2.7.8 MakeMatchIndicesIndexPairArray ( S, indices, groupNames, hasGroups )
-        // 8. Perform ! CreateDataPropertyOrThrow(A, "groups", groups).
-        indices
-            .create_data_property_or_throw(js_string!("groups"), group_names, context)
-            .expect("this CreateDataPropertyOrThrow call must not fail");
-
-        // 32. Perform ! CreateDataPropertyOrThrow(A, "groups", groups).
-        a.create_data_property_or_throw(js_string!("groups"), groups, context)
-            .expect("this CreateDataPropertyOrThrow call must not fail");
-
-        // 27. For each integer i such that i ≥ 1 and i ≤ n, in ascending order, do
-        for i in 1..=n {
-            // a. Let captureI be ith element of r's captures List.
-            let capture = match_value.group(i as usize);
-
-            // b. If captureI is undefined, let capturedValue be undefined.
-            // c. Else if fullUnicode is true, then
-            // d. Else,
-            let captured_value = capture.clone().map_or_else(JsValue::undefined, |range| {
-                js_string!(input.get_expect(range)).into()
-            });
-
-            // e. Perform ! CreateDataPropertyOrThrow(A, ! ToString(𝔽(i)), capturedValue).
-            a.create_data_property_or_throw(i, captured_value.clone(), context)
-                .expect("this CreateDataPropertyOrThrow call must not fail");
-
-            // 22.2.7.8 MakeMatchIndicesIndexPairArray ( S, indices, groupNames, hasGroups )
-            if has_indices {
-                // b. If matchIndices is not undefined, then
-                // i. Let matchIndexPair be GetMatchIndexPair(S, matchIndices).
-                // c. Else,
-                // i. Let matchIndexPair be undefined.
-                let indices_range = capture.map_or_else(JsValue::undefined, |range| {
-                    Array::create_array_from_list([range.start.into(), range.end.into()], context)
-                        .into()
-                });
-
-                // d. Perform ! CreateDataPropertyOrThrow(A, ! ToString(𝔽(i)), matchIndexPair).
-                indices
-                    .create_data_property_or_throw(i, indices_range, context)
-                    .expect("this CreateDataPropertyOrThrow call must not fail");
+            JsStrVariant::Utf16(units) if full_unicode => {
+                if sticky {
+                    matcher.match_at_utf16(units, start)
+                } else {
+                    matcher.find_from_utf16(units, start).next()
+                }
+            }
+            JsStrVariant::Utf16(units) => {
+                if sticky {
+                    matcher.match_at_ucs2(units, start)
+                } else {
+                    matcher.find_from_ucs2(units, start).next()
+                }
             }
         }
+    }
 
-        // 34. If hasIndices is true, then
-        // a. Let indicesArray be MakeMatchIndicesIndexPairArray(S, indices, groupNames, hasGroups).
-        // b. Perform ! CreateDataPropertyOrThrow(A, "indices", indicesArray).
-        if has_indices {
-            a.create_data_property_or_throw(js_string!("indices"), indices, context)
-                .expect("this CreateDataPropertyOrThrow call must not fail");
+    fn match_groups(
+        input: &JsString,
+        matched: &regress::Match,
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        let mut names = matched
+            .named_groups()
+            .collect::<Vec<(&str, Option<Range>)>>();
+        if names.is_empty() {
+            return Ok(JsValue::undefined());
         }
+        names.sort_by_key(|(name, _)| *name);
+        let groups = JsObject::with_null_proto();
+        groups.set_associated_realm(context.realm());
+        let _groups_root = groups.clone().root();
+        for (name, range) in names {
+            let value = range.map_or_else(JsValue::undefined, |range| {
+                js_string!(input.get_expect(range)).into()
+            });
+            groups.create_data_property_or_throw(js_string!(name), value, context)?;
+        }
+        Ok(groups.into())
+    }
 
-        // 35. Return A.
-        Ok(Some(a))
+    fn match_indices(matched: &regress::Match, context: &mut Context) -> JsResult<JsObject> {
+        let indices = Array::array_create(matched.captures.len() as u64 + 1, None, context)?;
+        let _indices_root = indices.clone().root();
+        for (index, range) in matched.groups().enumerate() {
+            let pair = range.map_or_else(JsValue::undefined, |range| {
+                Array::create_array_from_list([range.start.into(), range.end.into()], context)
+                    .into()
+            });
+            let _pair_root = pair.as_object().map(JsObject::root);
+            indices.create_data_property_or_throw(index as u64, pair, context)?;
+        }
+        let mut names = matched.named_group_indices().collect::<Vec<_>>();
+        let groups = if names.is_empty() {
+            JsValue::undefined()
+        } else {
+            names.sort_by_key(|(name, _)| *name);
+            let groups = JsObject::with_null_proto();
+            groups.set_associated_realm(context.realm());
+            let _groups_root = groups.clone().root();
+            for (name, index) in names {
+                let pair = indices.get(index as u64, context)?;
+                groups.create_data_property_or_throw(js_string!(name), pair, context)?;
+            }
+            groups.into()
+        };
+        let _groups_root = groups.as_object().map(JsObject::root);
+        indices.create_data_property_or_throw(js_string!("groups"), groups, context)?;
+        Ok(indices)
+    }
+
+    fn match_result(
+        input: &JsString,
+        matched: &regress::Match,
+        has_indices: bool,
+        context: &mut Context,
+    ) -> JsResult<JsObject> {
+        let captures = matched.groups().map(|range| {
+            range.map_or_else(JsValue::undefined, |range| {
+                js_string!(input.get_expect(range)).into()
+            })
+        });
+        let result = Array::create_array_from_list(captures, context);
+        let _result_root = result.clone().root();
+        result.create_data_property_or_throw(js_string!("index"), matched.start(), context)?;
+        result.create_data_property_or_throw(js_string!("input"), input.clone(), context)?;
+        let groups = Self::match_groups(input, matched, context)?;
+        let _groups_root = groups.as_object().map(JsObject::root);
+        result.create_data_property_or_throw(js_string!("groups"), groups, context)?;
+        if has_indices {
+            let indices = Self::match_indices(matched, context)?;
+            let _indices_root = indices.clone().root();
+            result.create_data_property_or_throw(js_string!("indices"), indices, context)?;
+        }
+        Ok(result)
     }
 
     /// `RegExp.prototype[ @@match ]( string )`
