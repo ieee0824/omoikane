@@ -73,6 +73,32 @@ pub(super) fn register(
     register_private_callable(
         context,
         bindings,
+        js_string!("__omoikane_retained_window_global"),
+        1,
+        NativeFunction::from_copy_closure(|_, args, context| {
+            let Some(window) = args.first().and_then(JsValue::as_object) else {
+                return Ok(JsValue::null());
+            };
+            let Some(realm) = window.associated_realm() else {
+                return Ok(JsValue::null());
+            };
+            let Some(document) = realm
+                .host_defined()
+                .get::<ModuleDocumentId>()
+                .map(|value| value.0)
+            else {
+                return Ok(JsValue::null());
+            };
+            if same_origin_document(context, document)? {
+                Ok(window.into())
+            } else {
+                Ok(JsValue::null())
+            }
+        }),
+    )?;
+    register_private_callable(
+        context,
+        bindings,
         js_string!("__omoikane_register_platform_event_factory"),
         2,
         NativeFunction::from_copy_closure(register_event_factory_native),

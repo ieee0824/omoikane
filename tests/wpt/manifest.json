@@ -487,6 +487,18 @@
     { "path": "css/css-transforms/parsing/rotate-parsing-computed.html" },
     { "path": "css/css-transforms/parsing/scale-parsing-valid.html" },
     { "path": "css/css-transforms/parsing/scale-parsing-invalid.html" },
-    { "path": "css/css-transforms/parsing/scale-parsing-computed.html" }
+    { "path": "css/css-transforms/parsing/scale-parsing-computed.html" },
+    {"path": "html/webappapis/scripting/processing-model-2/addEventListener.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/runtime-error-in-setTimeout.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/runtime-error.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/promise-rejection-event-constructor.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/promise-rejection-event-during-parse.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/promise-rejection-events-attached-in-event.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/promise-rejection-events.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/window-onerror-runtime-error.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/promise-rejection-events-iframe.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/promise-rejection-events.dedicatedworker.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/allow-crossorigin.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/disallow-crossorigin.html"}
   ]
 }

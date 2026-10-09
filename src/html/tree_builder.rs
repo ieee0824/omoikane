@@ -111,11 +111,11 @@ impl TreeBuilder {
 
     /// Parses exact UTF-16 source for an inert HTML document.
     pub(crate) fn parse_inert_utf16(input: &[u16]) -> ParseResult {
-        let (tokens, mut errors) = Tokenizer::from_utf16(input)
+        let (tokens, mut errors, positions) = Tokenizer::from_utf16(input)
             .with_scripting(false)
-            .tokenize_with_errors();
+            .tokenize_with_script_positions();
         let mut builder = Builder::new();
-        builder.process_tokens(tokens, &mut errors);
+        builder.process_tokens_with_script_positions(tokens, &positions, &mut errors);
         ParseResult {
             document: builder.document,
             quirks_mode: builder.quirks_mode,
@@ -124,11 +124,11 @@ impl TreeBuilder {
     }
 
     fn parse_with_scripting(input: &str, scripting_enabled: bool) -> ParseResult {
-        let (tokens, mut errors) = Tokenizer::new(input)
+        let (tokens, mut errors, positions) = Tokenizer::new(input)
             .with_scripting(scripting_enabled)
-            .tokenize_with_errors();
+            .tokenize_with_script_positions();
         let mut builder = Builder::new();
-        builder.process_tokens(tokens, &mut errors);
+        builder.process_tokens_with_script_positions(tokens, &positions, &mut errors);
         ParseResult {
             document: builder.document,
             quirks_mode: builder.quirks_mode,
@@ -310,7 +310,16 @@ impl WriteParser {
     pub(crate) fn advance(&mut self, eof: bool) -> Option<NodeHandle> {
         let (tokens, mut errors) = self.tokenizer.drain(eof, true);
         let mut script = None;
-        for token in tokens {
+        let positions = self.tokenizer.script_source_positions();
+        let mut positions = positions.iter().peekable();
+        for (index, token) in tokens.into_iter().enumerate() {
+            self.builder.script_source_position =
+                if positions.peek().is_some_and(|(at, _)| *at == index) {
+                    let (_, position) = positions.next().unwrap();
+                    Some((position.line, position.column))
+                } else {
+                    None
+                };
             if matches!(&token, Token::EndTag { name } if name == "script") {
                 script = self.builder.find_open_element("script");
             }
@@ -322,6 +331,7 @@ impl WriteParser {
 
 #[derive(Debug)]
 struct Builder {
+    script_source_position: Option<(u32, u32)>,
     character_surrogate: Option<u16>,
     leaf_data_utf16: Option<Vec<u16>>,
     document: NodeHandle,
@@ -340,6 +350,7 @@ struct Builder {
 impl Builder {
     fn new() -> Self {
         Self {
+            script_source_position: None,
             character_surrogate: None,
             leaf_data_utf16: None,
             document: NodeHandle::document(),
@@ -403,6 +414,25 @@ impl Builder {
             builder.template_insertion_modes.push(InsertionMode::InBody);
         }
         (builder, container)
+    }
+
+    fn process_tokens_with_script_positions(
+        &mut self,
+        tokens: Vec<Token>,
+        positions: &[(usize, super::tokenizer::SourcePosition)],
+        errors: &mut Vec<HtmlParseError>,
+    ) {
+        let mut positions = positions.iter().peekable();
+        for (index, token) in tokens.into_iter().enumerate() {
+            self.script_source_position = if positions.peek().is_some_and(|(at, _)| *at == index) {
+                let (_, position) = positions.next().unwrap();
+                Some((position.line, position.column))
+            } else {
+                None
+            };
+            self.process_token(token, errors);
+        }
+        self.script_source_position = None;
     }
 
     fn process_tokens(&mut self, tokens: Vec<Token>, errors: &mut Vec<HtmlParseError>) {
@@ -1594,6 +1624,9 @@ impl Builder {
         attributes: &[super::Attribute],
     ) -> NodeHandle {
         let element = NodeHandle::html_element_ns(name, HTML_NAMESPACE);
+        if name == "script" {
+            element.set_script_source_position(self.script_source_position);
+        }
         for attribute in attributes {
             element.set_attribute_utf16(attribute.name(), &attribute.value_utf16());
         }
@@ -2988,5 +3021,23 @@ mod tests {
             10,
             "acid3.html must tokenize into exactly 10 script elements"
         );
+    }
+}
+
+#[cfg(test)]
+mod script_position_tests {
+    use super::*;
+    #[test]
+    fn parsed_script_retains_content_position_without_matching_comment_markup() {
+        let doc =
+            TreeBuilder::parse("<!-- <script> -->\r\n😀<script data-x='>'>throw 42;</script>")
+                .document();
+        fn find(node: &NodeHandle) -> Option<NodeHandle> {
+            if node.tag_name().as_deref() == Some("script") {
+                return Some(node.clone());
+            }
+            node.child_nodes().iter().find_map(find)
+        }
+        assert_eq!(find(&doc).unwrap().script_source_position(), Some((2, 22)));
     }
 }

@@ -639,6 +639,18 @@ impl Context {
             })
     }
 
+    /// Returns the active classic script, including in its retained callbacks.
+    ///
+    /// Returns `None` when the active runnable is a module or no JavaScript
+    /// script is executing. Hosts can inspect the script's owned metadata.
+    #[must_use]
+    pub fn active_script(&self) -> Option<crate::Script> {
+        match self.get_active_script_or_module()? {
+            ActiveRunnable::Script(script) => Some(script),
+            ActiveRunnable::Module(_) => None,
+        }
+    }
+
     /// Returns the immediate JavaScript caller's Realm, if a suspended caller
     /// frame exists below the currently executing function.
     #[must_use]

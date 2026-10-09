@@ -87,6 +87,10 @@ impl<R: ReadChar> Cursor<R> {
         }
     }
 
+    pub(super) fn set_start_position(&mut self, position: Position) {
+        self.pos = position;
+    }
+
     /// Peeks the next n bytes, the maximum number of peeked bytes is 4 (n <= 4).
     pub(super) fn peek_n(&mut self, n: u8) -> Result<&[Option<u32>; 4], Error> {
         let peeked = self.peeked.iter().filter(|c| c.is_some()).count();

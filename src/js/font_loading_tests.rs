@@ -745,3 +745,47 @@ fn removed_style_updates_font_set_synchronously() {
         json!([false, 0, "loading"])
     );
 }
+
+#[test]
+fn invalid_font_promise_is_exposed_lazily_and_keeps_its_rejection() {
+    let mut runtime = runtime();
+    runtime
+        .eval(
+            r#"
+        globalThis.rejections = [];
+        addEventListener('unhandledrejection', event => {
+            rejections.push(event.reason.name);
+            event.preventDefault();
+        });
+        globalThis.invalidFace = new FontFace('Bad', 'src');
+        globalThis.invalidBinary = new FontFace('Bad', new Uint8Array([0,1,2,3]));
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "[invalidFace.status,invalidBinary.status,rejections]"
+        ),
+        json!(["error", "error", []])
+    );
+    runtime
+        .eval(
+            r#"
+        globalThis.exposed = invalidFace.loaded;
+        globalThis.identity = exposed === invalidFace.loaded && exposed === invalidFace.load();
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_json(&mut runtime, "[identity,rejections]"),
+        json!([true, ["SyntaxError"]])
+    );
+    runtime
+        .eval("globalThis.observed = ''; exposed.catch(error => observed = error.name);")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_json(&mut runtime, "observed"), json!("SyntaxError"));
+}

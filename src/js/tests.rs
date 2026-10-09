@@ -458,28 +458,29 @@ fn shared_worker_is_shared_across_same_origin_runtimes() {
 #[test]
 fn shared_worker_startup_failure_is_observable_without_stopping_page() {
     let mut runtime = JsRuntime::new().unwrap();
-    runtime
-        .eval(
-            r#"globalThis.sharedWorkerErrors = [];
-                   const source = encodeURIComponent('throw new Error("shared boom");');
-                   const worker = new SharedWorker('data:text/javascript,' + source);
-                   worker.onerror = event => sharedWorkerErrors.push(event.message);"#,
-        )
-        .unwrap();
+    runtime.eval(r#"globalThis.sharedWorkerErrors = []; globalThis.sharedWorkerReports = [];
+        const source = encodeURIComponent(`const errors = [];
+            onerror = (message, filename, line, column, error) => {
+                errors.push([message, filename === location.href, line > 0, column > 0, error.message]);
+                return false;
+            };
+            onconnect = event => event.ports[0].postMessage(errors);
+            throw new Error('shared boom');`);
+        const worker = new SharedWorker('data:text/javascript,' + source);
+        worker.onerror = event => sharedWorkerErrors.push(event.message);
+        worker.port.onmessage = event => sharedWorkerReports.push(event.data);
+    "#).unwrap();
     runtime.run_until_idle().unwrap();
     assert_eq!(
         runtime
             .eval("sharedWorkerErrors.length")
             .unwrap()
             .as_number(),
-        Some(1.0)
+        Some(0.0)
     );
-    assert!(
-        runtime
-            .eval("sharedWorkerErrors[0].includes('shared boom')")
-            .unwrap()
-            .as_boolean()
-            .unwrap_or(false)
+    assert_eq!(
+        eval_str(&mut runtime, "JSON.stringify(sharedWorkerReports)"),
+        r#"[[["shared boom",true,true,true,"shared boom"]]]"#
     );
     assert_eq!(runtime.eval("3 * 7").unwrap().as_number(), Some(21.0));
 }
@@ -1285,6 +1286,9 @@ fn dedicated_worker_startup_failure_is_observable_without_stopping_page() {
         runtime.eval("workerErrors.length").unwrap().as_number(),
         Some(1.0)
     );
+    assert_eq!(eval_str(&mut runtime, "workerErrors[0]"), "boom");
+    assert_eq!(runtime.host_state.borrow().workers.len(), 1);
+    runtime.eval("worker.terminate()").unwrap();
     assert_eq!(runtime.host_state.borrow().workers.len(), 0);
     assert_eq!(runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
 }
@@ -22794,7 +22798,7 @@ fn same_document_direct_reinsertion_replaces_iframe_context() {
     assert_eq!(
         eval_string_value(
             &mut runtime,
-            "[firstWindow.closed, firstWindow.document === null, firstDocument.defaultView === null, frame.contentWindow !== firstWindow].join('|')"
+            "[firstWindow.closed, firstWindow.document === firstDocument, firstDocument.defaultView === null, frame.contentWindow !== firstWindow].join('|')"
         )
         .as_deref(),
         Some("true|true|true|true"),
@@ -24904,7 +24908,7 @@ fn outer_iframe_navigation_retires_saved_descendant_window_proxy() {
                   const replacement = outer.contentDocument;
                   return [
                     nestedProxy.closed,
-                    nestedProxy.document === null,
+                    nestedProxy.document === nestedDocument,
                     nestedDocument.defaultView === null,
                     oldOuterDocument.defaultView === null,
                     replacement.getElementById('replacement').textContent,
@@ -26344,7 +26348,7 @@ fn removing_parent_iframe_recursively_discards_descendant_context_state() {
     assert_eq!(
         eval_string_value(
             &mut runtime,
-            "[outerWindow.closed, outerWindow.document === null, innerWindow.closed, innerWindow.document === null, outerDocument.defaultView === null, innerDocument.defaultView === null].join('|')"
+            "[outerWindow.closed, outerWindow.document === outerDocument, innerWindow.closed, innerWindow.document === innerDocument, outerDocument.defaultView === null, innerDocument.defaultView === null].join('|')"
         )
         .as_deref(),
         Some("true|true|true|true|true|true")
@@ -26388,14 +26392,17 @@ fn detached_iframe_closes_nested_context_until_reconnected() {
                 "var f = document.getElementById('f'); \
                      var first = f.contentDocument; \
                      var win = f.contentWindow; \
+                     var oldRegistry = win.customElements; \
+                     var oldLocal = win.localStorage; \
+                     var oldSession = win.sessionStorage; \
                      var oldHistory = win.history; \
                      oldHistory.pushState({ detached: true }, ''); \
                      document.body.removeChild(f); \
                      var oldHistoryError = 'none'; \
                      try { oldHistory.length; } catch (error) { oldHistoryError = error.name; } \
-                     [f.contentDocument === null, win.document === null, win.closed, \
-                      win.customElements === null, win.localStorage === null, \
-                      win.sessionStorage === null, win.history === undefined, \
+                     [f.contentDocument === null, win.document === first, win.closed, \
+                      win.customElements === oldRegistry, win.localStorage === oldLocal, \
+                      win.sessionStorage === oldSession, win.history === oldHistory, \
                       oldHistoryError].join('|')",
             )
             .unwrap()
@@ -26409,7 +26416,7 @@ fn detached_iframe_closes_nested_context_until_reconnected() {
     pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         runtime
-            .eval("[f.contentWindow !== win, f.contentDocument !== first, f.contentWindow.document === f.contentDocument, f.contentWindow.closed, f.contentWindow.history.length, win.closed, win.document === null, first.defaultView === null].join('|')")
+            .eval("[f.contentWindow !== win, f.contentDocument !== first, f.contentWindow.document === f.contentDocument, f.contentWindow.closed, f.contentWindow.history.length, win.closed, win.document === first, first.defaultView === null].join('|')")
             .unwrap()
             .as_string()
             .map(|value| value.to_std_string_escaped())
@@ -27197,7 +27204,7 @@ fn document_open_retires_nested_browsing_contexts_and_owned_tasks() {
     assert_eq!(
         eval_string_value(
             &mut runtime,
-            "[oldWindow.closed, oldWindow.document === null, oldDocument.defaultView === null, oldDocument.URL].join('|')"
+            "[oldWindow.closed, oldWindow.document === oldDocument, oldDocument.defaultView === null, oldDocument.URL].join('|')"
         )
         .as_deref(),
         Some("true|true|true|about:blank")
@@ -27297,7 +27304,7 @@ fn discarded_wrapper_cleanup_uses_pristine_collection_intrinsics() {
                     staleNode.__id !== null,
                     frame.__id !== null,
                     staleWindow.closed,
-                    staleWindow.document === null,
+                    staleWindow.document === staleDocument,
                     staleDocument.nodeType === 9,
                     staleChildNode.nodeName === "HTML" && staleChildNode.ownerDocument === staleDocument,
                     staleDocument.defaultView === null,
@@ -30780,4 +30787,86 @@ fn cache_storage_snapshots_match_options_and_delivers_on_networking_tasks() {
     assert_eq!(eval_str(&mut opaque_origin, "cacheError"), "");
     opaque_origin.run_until_idle().unwrap();
     assert_eq!(eval_str(&mut opaque_origin, "cacheError"), "SecurityError");
+}
+
+#[test]
+fn async_dynamic_non_cors_script_mutes_exception_and_rejection() {
+    let listener = bind_loopback().unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+        let body = "Promise.reject('private');throw new Error('private');";
+        write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+    });
+    let doc = crate::html::TreeBuilder::parse("<!doctype html><body></body>").document();
+    let mut runtime = JsRuntime::with_document_and_url(doc, "http://127.0.0.1:1/page").unwrap();
+    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    runtime.eval("globalThis.reports=[];addEventListener('error',e=>{reports.push(e.message+':'+(e.error===null));e.preventDefault()});addEventListener('unhandledrejection',e=>{reports.push('leaked');e.preventDefault()});").unwrap();
+    runtime.eval(&format!("const s=document.createElement('script');s.src='http://{address}/private.js';document.body.appendChild(s);")).unwrap();
+    {
+        let mut future = Box::pin(runtime.run_until_idle_async());
+        let mut context = FutureContext::from_waker(Waker::noop());
+        let mut completed = false;
+        for _ in 0..100 {
+            if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
+                result.unwrap();
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "async task must complete");
+    }
+    runtime.run_until_idle().unwrap();
+    server.join();
+    assert_eq!(
+        runtime
+            .eval("reports.join(',')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "Script error.:true"
+    );
+}
+
+#[test]
+fn initial_owned_document_task_mutes_cross_origin_script_reports() {
+    let listener = bind_loopback().unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+        let body = "Promise.reject('private');throw new Error('private');";
+        write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+    });
+    let doc = crate::html::TreeBuilder::parse(&format!(
+        "<!doctype html><script src='http://{address}/private.js'></script>"
+    ))
+    .document();
+    let mut runtime = JsRuntime::with_document_and_url(doc, "http://127.0.0.1:1/page").unwrap();
+    runtime.eval("globalThis.reports=[];addEventListener('error',e=>{reports.push(e.message+':'+(e.error===null));e.preventDefault()});addEventListener('unhandledrejection',e=>{reports.push('leaked');e.preventDefault()});").unwrap();
+    let base = format!("http://{address}/").parse().unwrap();
+    let mut task = Box::pin(runtime.into_document_page_task(1, Some(base)));
+    let mut context = FutureContext::from_waker(Waker::noop());
+    let mut completed = None;
+    for _ in 0..100 {
+        if let Poll::Ready(result) = task.as_mut().poll(&mut context) {
+            completed = Some(result);
+            break;
+        }
+    }
+    let completed = completed.expect("page task must complete");
+    assert_eq!(completed.result.unwrap().len(), 1);
+    let mut runtime = completed.runtime;
+    server.join();
+    assert_eq!(
+        runtime
+            .eval("reports.join(',')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "Script error.:true"
+    );
 }

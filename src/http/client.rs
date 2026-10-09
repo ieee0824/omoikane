@@ -15,6 +15,20 @@ use std::time::Duration;
 /// Maximum number of redirects to follow before aborting.
 const DEFAULT_MAX_REDIRECTS: u32 = 10;
 
+/// An explicitly supplied transport for one HTTP exchange.
+///
+/// The client still handles cookies, redirects, and CORS callers still validate
+/// responses. Implementations own connection policy, including destination
+/// restrictions and TLS. A client without this override uses the normal transport.
+pub trait HttpTransport: Send + Sync {
+    /// Sends one request without following redirects or changing its URL.
+    fn send(
+        &self,
+        request: &HttpRequest,
+        timeout: Option<Duration>,
+    ) -> Result<HttpResponse, HttpParseError>;
+}
+
 /// A high-level HTTP client that automatically manages cookies and follows
 /// redirects.
 ///
@@ -34,6 +48,7 @@ pub struct Client {
     user_agent: String,
     insecure: bool,
     connections: connection::ConnectionPool,
+    transport: Option<Arc<dyn HttpTransport>>,
     error_reporter: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
 }
 
@@ -60,8 +75,18 @@ impl Client {
             user_agent: default_user_agent(),
             insecure: false,
             connections: connection::ConnectionPool::default(),
+            transport: None,
             error_reporter: None,
         }
+    }
+
+    /// Uses an explicitly supplied transport for future exchanges.
+    ///
+    /// Its connection policy replaces the built-in transport policy. Cookie and
+    /// redirect processing remains enabled. Use `None` to restore the default.
+    pub fn set_transport(&mut self, transport: Option<Arc<dyn HttpTransport>>) {
+        self.connections = connection::ConnectionPool::default();
+        self.transport = transport;
     }
 
     /// Sends sanitized transport and redirect failures to the optional reporter.
@@ -237,7 +262,10 @@ impl Client {
                 request.add_header("Cookie", cookie_header);
             }
 
-            let mut response = self.connections.send(&request, self.insecure)?;
+            let mut response = match &self.transport {
+                Some(transport) => transport.send(&request, None)?,
+                None => self.connections.send(&request, self.insecure)?,
+            };
 
             // Store Set-Cookie headers
             {
@@ -352,10 +380,13 @@ impl Client {
             request.add_header("Cookie", cookie_header);
         }
 
-        let response = self
-            .connections
-            .send_with_timeout(&request, self.insecure, timeout)
-            .inspect_err(|error| self.report_failure(error))?;
+        let response = match &self.transport {
+            Some(transport) => transport.send(&request, timeout),
+            None => self
+                .connections
+                .send_with_timeout(&request, self.insecure, timeout),
+        }
+        .inspect_err(|error| self.report_failure(error))?;
         if credentials {
             let origin = request.url().clone();
             let mut shared_jar = shared.as_ref().map(|store| store.lock().unwrap());
@@ -424,6 +455,131 @@ pub(crate) fn resolve_redirect_url(base: &Url, location: &str) -> Result<Url, Ht
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RecordingTransport {
+        requests: Mutex<Vec<(HttpRequest, Option<Duration>)>>,
+        responses: Mutex<std::collections::VecDeque<HttpResponse>>,
+    }
+
+    impl RecordingTransport {
+        fn new(responses: Vec<HttpResponse>) -> Arc<Self> {
+            Arc::new(Self {
+                requests: Mutex::new(Vec::new()),
+                responses: Mutex::new(responses.into()),
+            })
+        }
+    }
+
+    impl HttpTransport for RecordingTransport {
+        fn send(
+            &self,
+            request: &HttpRequest,
+            timeout: Option<Duration>,
+        ) -> Result<HttpResponse, HttpParseError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((request.clone(), timeout));
+            Ok(self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected exchange"))
+        }
+    }
+
+    #[test]
+    fn transport_reset_restores_public_ip_connection_restriction() {
+        let transport = RecordingTransport::new(vec![HttpResponse::new(
+            200,
+            "OK",
+            vec![],
+            b"fixture".to_vec(),
+        )]);
+        let mut client = Client::new();
+        client.set_transport(Some(transport.clone()));
+        let mut request = HttpRequest::new(Method::Get, "http://127.0.0.1:1/test".parse().unwrap());
+        request.require_public_ip();
+        assert_eq!(client.send(request.clone()).unwrap().body(), b"fixture");
+        assert!(transport.requests.lock().unwrap()[0].0.requires_public_ip());
+        client.set_transport(None);
+        assert!(
+            matches!(client.send(request), Err(HttpParseError::Io(error)) if error.kind()==std::io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(transport.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn transport_redirect_preserves_policy_and_strips_cross_origin_authorization() {
+        let transport = RecordingTransport::new(vec![
+            HttpResponse::new(
+                302,
+                "Found",
+                vec![("Location".into(), "http://second.test/final".into())],
+                vec![],
+            ),
+            HttpResponse::new(200, "OK", vec![], b"final".to_vec()),
+        ]);
+        let mut client = Client::new();
+        client.set_transport(Some(transport.clone()));
+        let mut request = HttpRequest::new(Method::Get, "http://first.test/start".parse().unwrap());
+        request.require_public_ip();
+        request.set_header("Authorization", "secret");
+        let response = client.send(request).unwrap();
+        assert_eq!(
+            response.effective_url().unwrap().to_string(),
+            "http://second.test/final"
+        );
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0.url().to_string(), "http://first.test/start");
+        assert_eq!(requests[0].0.header("authorization"), Some("secret"));
+        assert_eq!(requests[1].0.header("authorization"), None);
+        assert!(
+            requests
+                .iter()
+                .all(|(request, _)| request.requires_public_ip())
+        );
+    }
+
+    #[test]
+    fn transport_cors_validation_cookies_and_timeout_remain_enabled() {
+        use crate::http::cors::*;
+        let transport = RecordingTransport::new(vec![HttpResponse::new(
+            200,
+            "OK",
+            vec![("Access-Control-Allow-Origin".into(), "*".into())],
+            vec![],
+        )]);
+        let mut client = Client::new();
+        client.set_transport(Some(transport.clone()));
+        client
+            .cookie_jar_mut()
+            .add_from_header("session=value", "resource.test");
+        let request = HttpRequest::new(Method::Get, "http://resource.test/script".parse().unwrap());
+        let origin = Origin::from_url(&"http://owner.test/".parse().unwrap());
+        let timeout = Some(Duration::from_millis(25));
+        let result = fetch_with_timeout(
+            &mut client,
+            request,
+            &origin,
+            RequestMode::Cors,
+            CredentialsMode::Include,
+            RedirectMode::Follow,
+            &mut PreflightCache::default(),
+            timeout,
+        );
+        assert!(
+            matches!(result, Err(CorsError::CorsCheck)),
+            "wildcard cannot authorize a credentialed response"
+        );
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].1, timeout);
+        assert_eq!(requests[0].0.header("origin"), Some("http://owner.test"));
+        assert_eq!(requests[0].0.header("cookie"), Some("session=value"));
+    }
 
     #[test]
     fn tls_failure_is_classified_from_its_typed_source() {

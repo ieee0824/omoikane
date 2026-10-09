@@ -89,7 +89,9 @@ mod iframe_navigation;
 mod input_bridge;
 mod nested_rendering;
 pub(crate) mod render_demand;
+mod script_errors;
 mod window_event;
+mod worker_imports;
 pub use form_state::{FormStateRestoreMode, FormStateSnapshot};
 #[cfg(test)]
 mod layout_metrics_tests;
@@ -240,6 +242,7 @@ fn report_active_js_task_failure(code: &'static str, kind: &'static str) {
 
 const DOM_CONTENT_LOADED_SCRIPT: &str = concat!(
     "document.__readyState = 'interactive'; ",
+    "__omoikane_dispatch_lifecycle_event('readystatechange'); ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
     "__omoikane_performance_navigation_event('domInteractive'); } catch (_) { void 0; } ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
@@ -250,6 +253,7 @@ const DOM_CONTENT_LOADED_SCRIPT: &str = concat!(
 );
 const LOAD_SCRIPT: &str = concat!(
     "document.__readyState = 'complete'; ",
+    "__omoikane_dispatch_lifecycle_event('readystatechange'); ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
     "__omoikane_performance_navigation_event('domComplete'); } catch (_) { void 0; } ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
@@ -331,9 +335,43 @@ fn active_document_id() -> Option<usize> {
     })
 }
 
+/// Owns the current-event state at an embedding boundary. Host aborts skip
+/// JavaScript finally blocks and native continuations, so restore it on exit.
+struct WindowEventScope {
+    host_state: Rc<RefCell<HostState>>,
+    previous: HashMap<usize, JsValue>,
+}
+
+impl WindowEventScope {
+    fn new(host_state: Rc<RefCell<HostState>>) -> Self {
+        let previous = host_state.borrow().current_window_events.clone();
+        Self {
+            host_state,
+            previous,
+        }
+    }
+}
+
+impl Drop for WindowEventScope {
+    fn drop(&mut self) {
+        self.host_state.borrow_mut().current_window_events = std::mem::take(&mut self.previous);
+    }
+}
+
 struct ActiveHostFuture<F> {
     future: Pin<Box<F>>,
     host_state: Rc<RefCell<HostState>>,
+    event_scope: Option<WindowEventScope>,
+}
+
+impl<F> ActiveHostFuture<F> {
+    fn new(future: F, host_state: Rc<RefCell<HostState>>) -> Self {
+        Self {
+            future: Box::pin(future),
+            host_state,
+            event_scope: None,
+        }
+    }
 }
 
 impl<F> Drop for ActiveHostFuture<F> {
@@ -347,6 +385,9 @@ impl<F: Future> Future for ActiveHostFuture<F> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
         let _guard = activate_host_state(Rc::clone(&self.host_state));
+        if self.event_scope.is_none() {
+            self.event_scope = Some(WindowEventScope::new(Rc::clone(&self.host_state)));
+        }
         self.future.as_mut().poll(cx)
     }
 }
@@ -491,6 +532,7 @@ impl HostHooks for BrowserHostHooks {
         operation: OperationType,
         _context: &mut Context,
     ) {
+        script_errors::track(promise, operation, _context);
         if operation != OperationType::Reject || std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_none()
         {
             return;
@@ -1200,6 +1242,25 @@ pub enum PageTaskSource {
     },
 }
 
+/// Owned source provenance for the browser's initial page execution.
+struct PreparedPageSource {
+    source: PageTaskSource,
+    filename: Option<String>,
+    start_position: (u32, u32),
+    muted_errors: bool,
+}
+
+impl From<PageTaskSource> for PreparedPageSource {
+    fn from(source: PageTaskSource) -> Self {
+        Self {
+            source,
+            filename: None,
+            start_position: (1, 1),
+            muted_errors: false,
+        }
+    }
+}
+
 /// Terminal failure of an owned page task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PageTaskError {
@@ -1447,6 +1508,20 @@ impl VisualViewportState {
     }
 }
 
+struct TaskErrorRecord {
+    message: String,
+    forward_to_worker_owner: bool,
+}
+
+impl From<String> for TaskErrorRecord {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            forward_to_worker_owner: true,
+        }
+    }
+}
+
 struct HostState {
     runtime_identity: Rc<()>,
     /// Monotonic clock origin used by `performance.now()` for this global.
@@ -1477,6 +1552,7 @@ struct HostState {
     /// Keeps newly constructed native capabilities rooted until the trusted
     /// bootstrap module receives them through its private import.meta hook.
     bootstrap_bindings: HashMap<usize, JsObject>,
+    promise_reports: script_errors::PromiseReports,
     /// CDP remote object handles are retained by the host rather than by a
     /// page-visible global property.  Keeping these values in HostState also
     /// lets the runtime root provider trace them across Boa collections.
@@ -1488,7 +1564,7 @@ struct HostState {
     /// is collected here and the loop continues. Draining is the embedder's job
     /// (see [`JsRuntime::take_task_errors`]); leaving them unreported is how the
     /// navigation-aborting bug in issue #303 stayed invisible.
-    task_errors: Vec<String>,
+    task_errors: Vec<TaskErrorRecord>,
     /// Optional shared sink for already sanitized browser error events.
     error_reporter: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
     /// How many task errors were dropped once `task_errors` hit its cap.
@@ -1721,6 +1797,7 @@ impl Finalize for HostState {}
 unsafe impl Trace for HostState {
     unsafe fn trace(&self, tracer: &mut Tracer) {
         unsafe { self.event_loop.trace(tracer) };
+        unsafe { self.promise_reports.trace(tracer) };
         unsafe { self.node_lifetimes.trace(tracer) };
         unsafe { self.pointer_lock.trace(tracer) };
         unsafe { self.input_bridge.trace(tracer) };
@@ -1809,7 +1886,7 @@ struct WorkerRuntime {
     owner_state: Rc<RefCell<HostState>>,
     owner_object: Option<JsValue>,
     outgoing: VecDeque<String>,
-    startup_error: Option<String>,
+    startup_error: Option<script_errors::WorkerErrorNotification>,
     terminated: bool,
 }
 
@@ -2059,6 +2136,7 @@ impl HostState {
             current_window_events: HashMap::new(),
             window_proxy_registry: None,
             bootstrap_bindings: HashMap::new(),
+            promise_reports: script_errors::PromiseReports::default(),
             remote_objects: HashMap::new(),
             console_logs: Vec::new(),
             task_errors: Vec::new(),
@@ -3064,6 +3142,7 @@ impl HostState {
     /// contexts, or document-scoped native state alive after close/navigation.
     fn retire_document_tree(&mut self, document: &NodeHandle) {
         let document_id = document.identity();
+        self.promise_reports.retire_document(document_id);
         self.pointer_lock.retire_document(document_id);
         self.input_bridge.retire_document(document_id);
         self.form_state.retire_document(document_id);
@@ -3153,6 +3232,8 @@ impl HostState {
         let Some(previous) = self.iframe_documents.remove(&iframe_id) else {
             return;
         };
+        self.promise_reports
+            .retire_document(previous.document.identity());
         self.pointer_lock
             .retire_document(previous.document.identity());
         self.input_bridge
@@ -5424,6 +5505,8 @@ impl JsRuntime {
         document_id: usize,
         script_id: usize,
         source: &str,
+        filename: &str,
+        muted_errors: bool,
     ) -> JsResult<()> {
         let realm = self.realm_for_document(document_id)?;
         if document_id != self.document().identity() && realm.is_none() {
@@ -5436,7 +5519,27 @@ impl JsRuntime {
         self.host_state.borrow_mut().write_insertion_ref = script_node;
         let result = (|| {
             self.eval(&format!("__omoikane_set_current_script({script_id})"))?;
-            self.eval(source)?;
+            let evaluated = self.with_active_host(|context| {
+                let metadata = script_errors::classic_script_metadata(muted_errors);
+                Script::parse_with_host_defined(
+                    Source::from_reader(source.as_bytes(), Some(Path::new(filename))),
+                    None,
+                    metadata,
+                    context,
+                )?
+                .evaluate(context)
+            });
+            if let Err(error) = &evaluated {
+                let _ = self.with_active_host(|context| {
+                    script_errors::report_exception_with_muting(
+                        context,
+                        error,
+                        document_id,
+                        muted_errors,
+                    )
+                });
+            }
+            evaluated?;
             self.run_jobs()
         })();
         let _ = self.eval("__omoikane_set_current_script(null)");
@@ -5751,6 +5854,7 @@ impl JsRuntime {
     }
 
     fn advance_worker_clocks(&mut self, elapsed_ms: u64) {
+        self.advance_shared_worker_clocks(elapsed_ms);
         let workers: Vec<_> = self.host_state.borrow().workers.values().cloned().collect();
         for entry in workers {
             let worker = entry.borrow_mut();
@@ -5782,7 +5886,7 @@ impl JsRuntime {
                     continue;
                 }
                 let result = worker.runtime.run_until_idle();
-                let errors = worker.runtime.take_task_errors();
+                let errors = worker.runtime.take_task_errors_filtered(true);
                 let worker_state = worker.runtime.host_state.borrow();
                 let owner_realm = worker_state.worker_owner_realm.clone();
                 let terminated = worker_state.worker_terminated;
@@ -5816,12 +5920,17 @@ impl JsRuntime {
                     "WORKER_RUNTIME_FAILED",
                     "execute",
                 );
-                owner_state.borrow_mut().event_loop.enqueue_worker_error(
-                    worker_id,
-                    None,
-                    owner_realm.clone(),
-                    error.to_string(),
-                );
+                if !error
+                    .as_native()
+                    .is_some_and(|error| error.is_runtime_limit())
+                {
+                    owner_state.borrow_mut().event_loop.enqueue_worker_error(
+                        worker_id,
+                        None,
+                        owner_realm.clone(),
+                        error.to_string(),
+                    );
+                }
             }
             for error in errors {
                 report_safe_worker_or_module_failure(
@@ -6162,6 +6271,21 @@ impl JsRuntime {
         }
     }
 
+    /// Sets an explicit transport for this runtime's script and module resources.
+    ///
+    /// The transport owns connection policy; URL, cookie, redirect and CORS
+    /// processing still run normally. This does not configure independent fetch,
+    /// WebSocket or Worker runtimes. `None` restores the default transport.
+    pub fn set_http_resource_transport(
+        &mut self,
+        transport: Option<Arc<dyn crate::http::HttpTransport>>,
+    ) {
+        self.host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(transport);
+    }
+
     /// Uses the browsing session's Cookie store across this Document and its resources.
     pub(crate) fn set_shared_cookie_store(&mut self, store: Arc<Mutex<crate::http::CookieJar>>) {
         let mut state = self.host_state.borrow_mut();
@@ -6453,17 +6577,35 @@ impl JsRuntime {
         &'a mut self,
         source: &str,
     ) -> impl Future<Output = JsResult<JsValue>> + 'a {
+        self.eval_async_source(source, None, false, (1, 1))
+    }
+
+    fn eval_async_source<'a>(
+        &'a mut self,
+        source: &str,
+        filename: Option<&str>,
+        muted_errors: bool,
+        start_position: (u32, u32),
+    ) -> impl Future<Output = JsResult<JsValue>> + 'a {
+        let filename = filename.map(str::to_owned);
         let source = source.to_owned();
         let deadline = execution_deadline(self.sandbox.timeout);
         let host_state = Rc::clone(&self.host_state);
-        let future = ActiveHostFuture {
-            future: Box::pin(async move {
+        let future = ActiveHostFuture::new(
+            async move {
                 let mut context = self.context.enter_runtime_deadline(deadline);
-                let script = Script::parse(Source::from_bytes(&source), None, &mut context)?;
+                let metadata = script_errors::classic_script_metadata(muted_errors);
+                let script = Script::parse_with_host_defined(
+                    Source::from_reader(source.as_bytes(), filename.as_deref().map(Path::new))
+                        .with_start_position(start_position.0, start_position.1),
+                    None,
+                    metadata,
+                    &mut context,
+                )?;
                 script.evaluate_async(&mut context).await
-            }),
+            },
             host_state,
-        };
+        );
         TimedJsFuture::new(future, deadline)
     }
 
@@ -6502,8 +6644,8 @@ impl JsRuntime {
         let deadline = execution_deadline(self.sandbox.timeout);
         let host_state = Rc::clone(&self.host_state);
         let module_host_state = Rc::clone(&host_state);
-        let future = ActiveHostFuture {
-            future: Box::pin(async move {
+        let future = ActiveHostFuture::new(
+            async move {
                 let mut context = self.context.enter_runtime_deadline(deadline);
                 let module = Module::parse(
                     Source::from_reader(source.as_bytes(), Some(Path::new(&url))),
@@ -6512,9 +6654,9 @@ impl JsRuntime {
                 )?;
                 let _module_document = activate_module_document(&module_host_state, document_id);
                 module.load_link_evaluate_async(&mut context).await
-            }),
-            host_state: Rc::clone(&host_state),
-        };
+            },
+            Rc::clone(&host_state),
+        );
         let document_future = ActiveDocumentFuture {
             future: Box::pin(future),
             host_state,
@@ -6546,82 +6688,38 @@ impl JsRuntime {
         let scripts = collect_script_elements(&self.document());
         let mut immediate = Vec::new();
         let mut deferred = Vec::new();
+        let mut fetch_errors = Vec::new();
         for (script_index, script) in scripts.iter().enumerate() {
-            let attrs = script.attributes().unwrap_or_default();
-            let is_module = attrs
-                .get("type")
-                .is_some_and(|value| value.trim().eq_ignore_ascii_case("module"));
-            if !is_module
-                && !is_executable_classic_script_type(attrs.get("type").map(String::as_str))
-            {
-                continue;
-            }
-            let src = attrs.get("src").cloned();
-            let has_src = src.is_some();
-            let policy = self.host_state.borrow().csp_policy_for_node(script);
-            if let Some(src_url) = src.as_deref() {
-                if !policy.allows_reference(ResourceType::Script, src_url) {
-                    self.host_state.borrow_mut().record_csp_violation_for_node(
-                        script,
-                        ResourceType::Script,
-                        src_url,
-                    );
-                    continue;
-                }
-            } else if !policy.allows_inline(ResourceType::Script) {
-                self.host_state.borrow_mut().record_csp_violation_for_node(
+            let Some((is_module, is_defer, has_src, source, label, muted_errors)) = self
+                .fetch_or_inline_document_script_source(
                     script,
-                    ResourceType::Script,
-                    "inline",
-                );
-                continue;
-            }
-            let (source, label) = if let Some(src) = src {
-                let fetched = {
-                    let mut state = self.host_state.borrow_mut();
-                    fetch_script_resource_with_client(
-                        &src,
-                        base_url.as_ref(),
-                        &mut state.http_client,
-                    )
-                };
-                let (effective_url, source, redirect_count) = match fetched {
-                    Some((effective_url, source, redirect_count)) => {
-                        (Some(effective_url), source, redirect_count)
-                    }
-                    None => {
-                        let message = format!("failed to fetch script: {src}");
-                        let quoted = serde_json::to_string(&message)
-                            .expect("JavaScript error messages must serialize as JSON strings");
-                        (None, format!("throw new Error({quoted})"), 0)
-                    }
-                };
-                if let Some(effective_url) = effective_url
-                    && !policy.allows_reference_after_redirects(
-                        ResourceType::Script,
-                        &effective_url,
-                        redirect_count,
-                    )
-                {
-                    self.host_state.borrow_mut().record_csp_violation_for_node(
-                        script,
-                        ResourceType::Script,
-                        effective_url,
-                    );
-                    continue;
-                }
-                (source, src)
-            } else {
-                (
-                    collect_text_content(script),
-                    format!("inline-script-{}", script_index + 1),
+                    script_index,
+                    base_url.as_ref(),
+                    false,
+                    &mut fetch_errors,
                 )
+            else {
+                continue;
             };
             if source.trim().is_empty() {
                 continue;
             }
+            let filename = if has_src {
+                Some(label.clone())
+            } else {
+                self.host_state
+                    .borrow()
+                    .document_urls
+                    .get(&self.document().identity())
+                    .cloned()
+            };
+            let start_position = if has_src {
+                (1, 1)
+            } else {
+                script.script_source_position().unwrap_or((1, 1))
+            };
             let script_node_id = Some(script.identity());
-            let task_source = if is_module {
+            let source = if is_module {
                 PageTaskSource::Module {
                     source,
                     url: module_script_url(&label, base_url.as_ref(), !has_src),
@@ -6634,24 +6732,30 @@ impl JsRuntime {
                     script_node_id,
                 }
             };
-            if is_module || (attrs.contains_key("defer") && has_src) {
-                deferred.push(task_source);
+            let prepared = PreparedPageSource {
+                source,
+                filename,
+                start_position,
+                muted_errors,
+            };
+            if is_defer {
+                deferred.push(prepared);
             } else {
-                immediate.push(task_source);
+                immediate.push(prepared);
             }
         }
         immediate.extend(deferred);
-        immediate.push(PageTaskSource::Classic {
+        immediate.push(PreparedPageSource::from(PageTaskSource::Classic {
             source: DOM_CONTENT_LOADED_SCRIPT.to_string(),
             label: "DOMContentLoaded".to_string(),
             script_node_id: None,
-        });
-        immediate.push(PageTaskSource::Classic {
+        }));
+        immediate.push(PreparedPageSource::from(PageTaskSource::Classic {
             source: LOAD_SCRIPT.to_string(),
             label: "load".to_string(),
             script_node_id: None,
-        });
-        self.into_page_task(generation, immediate)
+        }));
+        self.into_prepared_page_task(generation, immediate, fetch_errors)
     }
 
     fn complete_page_task_with_error(
@@ -6673,17 +6777,31 @@ impl JsRuntime {
 
     /// Moves this runtime into a FIFO page-script task that can outlive a
     /// single host pump iteration without storing a future that borrows `self`.
-    pub fn into_page_task(
+    pub fn into_page_task(self, generation: u64, sources: Vec<PageTaskSource>) -> OwnedPageTask {
+        self.into_prepared_page_task(
+            generation,
+            sources.into_iter().map(PreparedPageSource::from).collect(),
+            Vec::new(),
+        )
+    }
+
+    fn into_prepared_page_task(
         mut self,
         generation: u64,
-        sources: Vec<PageTaskSource>,
+        sources: Vec<PreparedPageSource>,
+        mut errors: Vec<String>,
     ) -> OwnedPageTask {
         let controller = self.javascript_dialog_controller();
         let cancelled = Rc::new(Cell::new(false));
         let task_cancelled = Rc::clone(&cancelled);
         let future = Box::pin(async move {
-            let mut errors = Vec::new();
-            for source in sources {
+            for prepared in sources {
+                let PreparedPageSource {
+                    source,
+                    filename,
+                    start_position,
+                    muted_errors,
+                } = prepared;
                 if task_cancelled.get() {
                     return self
                         .complete_page_task_with_error(generation, PageTaskError::Cancelled);
@@ -6729,7 +6847,12 @@ impl JsRuntime {
                                 .unwrap_or_else(|| self.document());
                             Box::pin(self.eval_module_async(&source, url, module_document))
                         } else {
-                            Box::pin(self.eval_async(&source))
+                            Box::pin(self.eval_async_source(
+                                &source,
+                                filename.as_deref(),
+                                muted_errors,
+                                start_position,
+                            ))
                         };
                     std::future::poll_fn(|context| {
                         if task_cancelled.get() {
@@ -6757,6 +6880,17 @@ impl JsRuntime {
                     if is_wall_clock_timeout(&error) {
                         return self
                             .complete_page_task_with_error(generation, PageTaskError::TimedOut);
+                    }
+                    if module_url.is_none() {
+                        let document_id = self.document().identity();
+                        let _ = self.with_active_host(|context| {
+                            script_errors::report_exception_with_muting(
+                                context,
+                                &error,
+                                document_id,
+                                muted_errors,
+                            )
+                        });
                     }
                     errors.push(format!("[script: {label}] {error}"));
                 }
@@ -6819,9 +6953,27 @@ impl JsRuntime {
         std::time::Duration,
         std::time::Duration,
     ) {
+        self.eval_safe_timed_source(source, None, (1, 1), false)
+    }
+
+    fn eval_safe_timed_source(
+        &mut self,
+        source: &str,
+        filename: Option<&str>,
+        start_position: (u32, u32),
+        muted_errors: bool,
+    ) -> (
+        Result<JsValue, JsEvaluationError>,
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    ) {
         let result = self.with_active_host_value(|context| {
             let parse_start = std::time::Instant::now();
-            let script = match Script::parse(Source::from_bytes(source), None, context) {
+            let input = Source::from_reader(source.as_bytes(), filename.map(Path::new))
+                .with_start_position(start_position.0, start_position.1);
+            let metadata = script_errors::classic_script_metadata(muted_errors);
+            let script = match Script::parse_with_host_defined(input, None, metadata, context) {
                 Ok(script) => script,
                 Err(error) => {
                     return (
@@ -6913,6 +7065,9 @@ impl JsRuntime {
     /// Runs pending promise jobs.
     pub fn run_jobs(&mut self) -> JsResult<()> {
         let result = self.with_active_host(|context| context.run_jobs());
+        if result.is_ok() {
+            self.with_active_host(script_errors::flush)?;
+        }
         if result.is_ok() && self.host_state.borrow().document_write_depth == 0 {
             self.run_written_scripts(false)?;
         }
@@ -7134,13 +7289,13 @@ impl JsRuntime {
                         let this = JsValue::undefined();
                         let deadline = execution_deadline(self.sandbox.timeout);
                         let host_state = Rc::clone(&self.host_state);
-                        let future = ActiveHostFuture {
-                            future: Box::pin(async {
+                        let future = ActiveHostFuture::new(
+                            async {
                                 let mut context = self.context.enter_runtime_deadline(deadline);
                                 callable.call_async(&this, &args, &mut context).await
-                            }),
-                            host_state: Rc::clone(&host_state),
-                        };
+                            },
+                            Rc::clone(&host_state),
+                        );
                         let result = if let Some(document_id) = owner_document_id {
                             let document_future = ActiveDocumentFuture {
                                 future: Box::pin(future),
@@ -7632,10 +7787,22 @@ impl JsRuntime {
         let fetch_start = std::time::Instant::now();
         let fetched = {
             let mut state = self.host_state.borrow_mut();
-            fetch_script_resource_with_client(&src, base_url.as_ref(), &mut state.http_client)
+            let origin = script_errors::document_fetch_origin(&state, document_id);
+            if kind == ScriptKind::Module {
+                fetch_script_resource_with_client(&src, base_url.as_ref(), &mut state.http_client)
+                    .map(|(url, source, redirects)| (url, source, redirects, false))
+            } else {
+                script_errors::fetch_classic_source(
+                    &src,
+                    base_url.as_ref(),
+                    &origin,
+                    script_node.get_attribute("crossorigin").as_deref(),
+                    &mut state.http_client,
+                )
+            }
         };
         let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
-        let Some((effective_url, source, redirect_count)) = fetched else {
+        let Some((effective_url, source, redirect_count, muted_errors)) = fetched else {
             self.record_task_error(format!("[dynamic script: {src}] failed to fetch"));
             let dispatch =
                 dispatch_resource_timing_script("error", node_id, &timing_name, false, elapsed_ms);
@@ -7700,12 +7867,35 @@ impl JsRuntime {
                 )
                 .await
             }
-            _ => self.eval_async_for_document(&source, document_id).await,
+            _ => {
+                let host_state = Rc::clone(&self.host_state);
+                ActiveDocumentFuture {
+                    future: Box::pin(self.eval_async_source(
+                        &source,
+                        Some(&effective_url),
+                        muted_errors,
+                        (1, 1),
+                    )),
+                    host_state,
+                    document_id,
+                }
+                .await
+            }
         };
         let _ = self.eval("__omoikane_set_current_script(null)");
         if let Err(error) = result {
             if is_wall_clock_timeout(&error) {
                 return Err(error);
+            }
+            if kind != ScriptKind::Module {
+                let _ = self.with_active_host(|context| {
+                    script_errors::report_exception_with_muting(
+                        context,
+                        &error,
+                        document_id,
+                        muted_errors,
+                    )
+                });
             }
             let context = script_source_context(&source);
             self.record_task_error(format!("[dynamic script: {src}; {context}] {error}"));
@@ -7738,31 +7928,79 @@ impl JsRuntime {
     /// most useful error under thousands of repeats. The overflow is counted, so
     /// the drained report never understates how much went wrong.
     fn record_task_error(&mut self, error: String) {
+        self.record_task_error_with_forwarding(error, true);
+    }
+
+    fn record_task_error_with_forwarding(&mut self, error: String, forward: bool) {
         let mut state = self.host_state.borrow_mut();
         if state.task_errors.len() < MAX_TASK_ERRORS {
-            state.task_errors.push(error);
+            state.task_errors.push(TaskErrorRecord {
+                message: error,
+                forward_to_worker_owner: forward,
+            });
         } else {
             state.suppressed_task_errors = state.suppressed_task_errors.saturating_add(1);
         }
     }
 
-    /// Records `result`'s error, if any, against `label`.
+    /// Records host execution limits without dispatching an author exception event.
+    fn record_worker_host_abort(&self, error: &JsError) -> bool {
+        if !error
+            .as_native()
+            .is_some_and(|error| error.is_runtime_limit())
+        {
+            return false;
+        }
+        let state = self.host_state.borrow();
+        if let Some(owner) = &state.worker_owner {
+            report_safe_worker_or_module_failure(
+                owner.borrow().error_reporter.clone(),
+                ErrorCategory::Worker,
+                "WORKER_RUNTIME_FAILED",
+                "execute",
+            );
+        } else if state.shared_worker.is_global() {
+            state.shared_worker.record_failure(false);
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// Records a task failure while preserving the global error cancellation result.
     fn record_error_from<T>(&mut self, label: &str, result: JsResult<T>) {
         if let Err(error) = result {
+            if self.record_worker_host_abort(&error) {
+                self.record_task_error_with_forwarding(format!("[{label}] {error}"), false);
+                return;
+            }
+            let mut forward = true;
             if matches!(label, "timer" | "timer callback") {
+                forward = self
+                    .with_active_host(|context| script_errors::report_exception(context, &error))
+                    .unwrap_or(true);
+                // Worker exceptions already queued their owned report above;
+                // keep raw task diagnostics without forwarding them a second time.
+                let state = self.host_state.borrow();
+                forward &= state.worker_owner.is_none() && !state.shared_worker.is_global();
                 self.record_js_task_failure("JS_TIMER_CALLBACK_FAILED", "timer");
             }
-            self.record_task_error(format!("[{label}] {error}"));
+            self.record_task_error_with_forwarding(format!("[{label}] {error}"), forward);
         }
     }
 
-    /// Drains the page-script errors collected while tasks ran.
-    ///
-    /// Embedders call this after pumping the event loop and report them the same
-    /// way they report the errors `execute_document_scripts` returns.
+    /// Drains raw page-task failures, including failures canceled by page handlers.
     pub fn take_task_errors(&mut self) -> Vec<String> {
+        self.take_task_errors_filtered(false)
+    }
+
+    fn take_task_errors_filtered(&mut self, for_worker_owner: bool) -> Vec<String> {
         let mut state = self.host_state.borrow_mut();
-        let mut errors = std::mem::take(&mut state.task_errors);
+        let mut errors: Vec<_> = std::mem::take(&mut state.task_errors)
+            .into_iter()
+            .filter(|error| !for_worker_owner || error.forward_to_worker_owner)
+            .map(|error| error.message)
+            .collect();
         let suppressed = std::mem::take(&mut state.suppressed_task_errors);
         if suppressed > 0 {
             errors.push(format!("{suppressed} further task errors suppressed"));
@@ -7988,13 +8226,13 @@ impl JsRuntime {
                 let this = JsValue::undefined();
                 let deadline = execution_deadline(self.sandbox.timeout);
                 let host_state = Rc::clone(&self.host_state);
-                let future = ActiveHostFuture {
-                    future: Box::pin(async {
+                let future = ActiveHostFuture::new(
+                    async {
                         let mut context = self.context.enter_runtime_deadline(deadline);
                         callable.call_async(&this, &args, &mut context).await
-                    }),
-                    host_state: Rc::clone(&host_state),
-                };
+                    },
+                    Rc::clone(&host_state),
+                );
                 if let Some(document_id) = document_id {
                     let document_future = ActiveDocumentFuture {
                         future: Box::pin(future),
@@ -8434,8 +8672,8 @@ impl JsRuntime {
                 worker_id,
                 owner,
                 realm,
-                message,
-            } => self.run_worker_error(worker_id, owner, realm, message),
+                report,
+            } => self.run_worker_error(worker_id, owner, realm, report),
             Task::SharedWorkerMessage {
                 connection_id,
                 data,
@@ -8446,6 +8684,17 @@ impl JsRuntime {
                 data,
                 origin,
             } => self.run_shared_worker_owner_message(connection_id, port, data, origin),
+        }
+    }
+
+    /// Keeps host-abort diagnostics separate from legacy owner notifications.
+    fn collect_worker_task_error(&mut self, label: &str, error: JsError, errors: &mut Vec<String>) {
+        let host_abort = self.record_worker_host_abort(&error);
+        let message = format!("[{label}] {error}");
+        if host_abort {
+            self.record_task_error_with_forwarding(message, false);
+        } else {
+            errors.push(message);
         }
     }
 
@@ -8468,23 +8717,27 @@ impl JsRuntime {
             let runtime = &mut worker.runtime;
             let mut errors = Vec::new();
             if let Err(error) = runtime.install_worker_message_values(data, owner_origin) {
-                errors.push(format!("[worker message setup] {error}"));
+                runtime.collect_worker_task_error("worker message setup", error, &mut errors);
                 if let Err(cleanup_error) = runtime.clear_worker_message_values() {
-                    errors.push(format!("[worker message cleanup] {cleanup_error}"));
+                    runtime.collect_worker_task_error(
+                        "worker message cleanup",
+                        cleanup_error,
+                        &mut errors,
+                    );
                 }
             } else {
                 if let Err(error) = runtime.eval(
                     "__omoikane_worker_message_data = __omoikane_decode_worker_message(__omoikane_worker_message_wire); self.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_message_data, origin: __omoikane_worker_message_origin, source: null, ports: [] }));",
                 ) {
-                    errors.push(format!("[worker message] {error}"));
+                    runtime.collect_worker_task_error("worker message", error, &mut errors);
                 }
                 if let Err(error) = runtime.clear_worker_message_values() {
-                    errors.push(format!("[worker message cleanup] {error}"));
+                    runtime.collect_worker_task_error("worker message cleanup", error, &mut errors);
                 }
                 if !runtime.is_terminated_worker()
                     && let Err(error) = runtime.run_jobs()
                 {
-                    errors.push(format!("[worker message jobs] {error}"));
+                    runtime.collect_worker_task_error("worker message jobs", error, &mut errors);
                 }
             }
             let owner_realm = runtime.host_state.borrow().worker_owner_realm.clone();
@@ -8551,7 +8804,7 @@ impl JsRuntime {
         worker_id: u64,
         owner: Option<JsValue>,
         owner_realm: Option<Realm>,
-        message: String,
+        report: script_errors::WorkerErrorNotification,
     ) -> JsResult<()> {
         let owner_realm = owner_realm.or_else(|| {
             self.host_state
@@ -8579,20 +8832,9 @@ impl JsRuntime {
             return Ok(());
         };
         let old_realm = owner_realm.map(|realm| self.context.enter_realm(realm));
-        if let Err(error) = self.install_worker_owner_values(owner_object, message) {
-            self.record_task_error(format!("[worker error setup] {error}"));
-            let cleanup = self.clear_worker_owner_values();
-            self.record_error_from("worker error cleanup", cleanup);
-            if let Some(old_realm) = old_realm {
-                self.context.enter_realm(old_realm);
-            }
-            return Ok(());
-        }
-        let result = self.eval(
-            "if (!__omoikane_worker_owner.__terminated) { const event = new Event('error'); event.message = String(__omoikane_worker_owner_wire); event.error = __omoikane_worker_owner_wire; __omoikane_worker_owner.dispatchEvent(event); }",
-        );
-        let cleanup = self.clear_worker_owner_values();
-        self.record_error_from("worker error cleanup", cleanup);
+        let result = self.with_active_host(|context| {
+            script_errors::report_worker_owner_error(context, owner_object, report)
+        });
         self.record_error_from("worker error", result);
         if let Some(old_realm) = old_realm {
             self.context.enter_realm(old_realm);
@@ -9060,7 +9302,23 @@ impl JsRuntime {
             let fetch_start = std::time::Instant::now();
             let fetched = {
                 let mut state = self.host_state.borrow_mut();
-                fetch_script_resource_with_client(&src, base_url.as_ref(), &mut state.http_client)
+                let origin = script_errors::document_fetch_origin(&state, dispatch_document_id);
+                if kind == ScriptKind::Module {
+                    fetch_script_resource_with_client(
+                        &src,
+                        base_url.as_ref(),
+                        &mut state.http_client,
+                    )
+                    .map(|(url, source, redirects)| (url, source, redirects, false))
+                } else {
+                    script_errors::fetch_classic_source(
+                        &src,
+                        base_url.as_ref(),
+                        &origin,
+                        script_node.get_attribute("crossorigin").as_deref(),
+                        &mut state.http_client,
+                    )
+                }
             };
             let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
             match fetched {
@@ -9087,7 +9345,7 @@ impl JsRuntime {
                     );
                     self.record_error_from(&src, dispatched);
                 }
-                Some((effective_url, _source, redirect_count))
+                Some((effective_url, _source, redirect_count, _muted_errors))
                     if !self
                         .host_state
                         .borrow()
@@ -9118,10 +9376,10 @@ impl JsRuntime {
                     );
                     self.record_error_from(&src, dispatched);
                 }
-                Some((effective_url, source, _redirect_count)) => {
+                Some((effective_url, source, _redirect_count, muted_errors)) => {
                     let redirected =
                         resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
-                    dispatch_timing = Some((effective_url, redirected, elapsed_ms));
+                    dispatch_timing = Some((effective_url.clone(), redirected, elapsed_ms));
                     let result = match kind {
                         ScriptKind::Module => {
                             self.eval_module_in_document_realm_timed(
@@ -9139,6 +9397,8 @@ impl JsRuntime {
                                 dispatch_document_id,
                                 script_node.identity(),
                                 &source,
+                                &effective_url,
+                                muted_errors,
                             )
                             .map(|_| JsValue::undefined())
                             .map_err(JsEvaluationError::JavaScript),
@@ -9284,9 +9544,20 @@ impl JsRuntime {
     /// [`wire_inline_event_handlers`](Self::wire_inline_event_handlers), a
     /// page's `<body onload="...">` handler runs at this point.
     pub fn fire_load(&mut self) -> JsResult<()> {
-        // The load event does not bubble.
-        self.eval(LOAD_SCRIPT)?;
-        self.run_jobs()
+        // Completion follows the parsing checkpoint's DOM manipulation tasks,
+        // including promise rejection notifications. Preserve FIFO ordering on
+        // that task source instead of firing load synchronously ahead of them.
+        let payload = self.with_active_host(|context| {
+            Ok(bind_timer_payload_to_current_realm(
+                context,
+                TimerPayload::Source(LOAD_SCRIPT.to_owned()),
+            ))
+        })?;
+        self.host_state
+            .borrow_mut()
+            .event_loop
+            .enqueue_dom_manipulation(payload);
+        self.run_until_idle()
     }
 
     fn record_document_script_failure(&self, code: &'static str) {
@@ -9363,8 +9634,8 @@ impl JsRuntime {
         let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
 
         for (script_index, script) in scripts.iter().enumerate() {
-            let Some((is_module, is_defer, has_src, source_code, script_label)) = self
-                .fetch_or_inline_document_script_source(
+            let Some((is_module, is_defer, has_src, source_code, script_label, muted_errors)) =
+                self.fetch_or_inline_document_script_source(
                     script,
                     script_index,
                     base_url,
@@ -9394,13 +9665,20 @@ impl JsRuntime {
                 // reference at this script (exactly like the inline path), rather
                 // than letting a deferred write() fall back to appending at
                 // <body>.
-                deferred.push((source_code, script.clone(), script_label, module_url));
+                deferred.push((
+                    source_code,
+                    script.clone(),
+                    script_label,
+                    module_url,
+                    muted_errors,
+                ));
                 continue;
             }
             self.run_document_script_now(
                 script,
                 &source_code,
                 &script_label,
+                muted_errors,
                 log_scripts,
                 &mut errors,
             );
@@ -9433,7 +9711,7 @@ impl JsRuntime {
         base_url: Option<&crate::http::Url>,
         log_scripts: bool,
         errors: &mut Vec<String>,
-    ) -> Option<(bool, bool, bool, String, String)> {
+    ) -> Option<(bool, bool, bool, String, String, bool)> {
         let attrs = script.attributes().unwrap_or_default();
         let is_module = attrs
             .get("type")
@@ -9480,15 +9758,30 @@ impl JsRuntime {
             return None;
         }
 
-        let (source_code, script_label) = if let Some(src_url) = src {
+        let (source_code, script_label, muted_errors) = if let Some(src_url) = src {
             // External script: fetch
             let fetch_start = std::time::Instant::now();
             let fetched = {
                 let mut state = self.host_state.borrow_mut();
-                fetch_script_resource_with_client(&src_url, base_url, &mut state.http_client)
+                let owner = document_root_for_node(script)
+                    .map(|doc| doc.identity())
+                    .unwrap_or_else(|| state.document.identity());
+                let origin = script_errors::document_fetch_origin(&state, owner);
+                if is_module {
+                    fetch_script_resource_with_client(&src_url, base_url, &mut state.http_client)
+                        .map(|(url, code, redirects)| (url, code, redirects, false))
+                } else {
+                    script_errors::fetch_classic_source(
+                        &src_url,
+                        base_url,
+                        &origin,
+                        attrs.get("crossorigin").map(String::as_str),
+                        &mut state.http_client,
+                    )
+                }
             };
             match fetched {
-                Some((effective_url, code, redirect_count)) => {
+                Some((effective_url, code, redirect_count, muted)) => {
                     if !policy.allows_reference_after_redirects(
                         ResourceType::Script,
                         &effective_url,
@@ -9515,7 +9808,7 @@ impl JsRuntime {
                             elapsed_ms,
                         );
                     }
-                    (code, src_url.clone())
+                    (code, effective_url, muted)
                 }
                 None => {
                     let timing_name = resource_reference_timing_name(&src_url, base_url);
@@ -9534,9 +9827,17 @@ impl JsRuntime {
             (
                 collect_text_content(script),
                 format!("inline-script-{}", script_index + 1),
+                false,
             )
         };
-        Some((is_module, is_defer, has_src, source_code, script_label))
+        Some((
+            is_module,
+            is_defer,
+            has_src,
+            source_code,
+            script_label,
+            muted_errors,
+        ))
     }
 
     /// Runs one non-deferred document script immediately: wires up
@@ -9547,6 +9848,7 @@ impl JsRuntime {
         script: &NodeHandle,
         source_code: &str,
         script_label: &str,
+        muted_errors: bool,
         log_scripts: bool,
         errors: &mut Vec<String>,
     ) {
@@ -9561,9 +9863,33 @@ impl JsRuntime {
         ));
         // Execute immediately
         let script_context = script_source_context(source_code);
-        let (eval_result, parse_elapsed, compile_elapsed, execute_elapsed) =
-            self.eval_safe_timed(source_code);
+        let external = script.get_attribute("src").is_some();
+        let owner = document_root_for_node(script)
+            .map(|document| document.identity())
+            .unwrap_or_else(|| self.host_state.borrow().document.identity());
+        let filename = if external {
+            Some(script_label.to_owned())
+        } else {
+            self.host_state.borrow().document_urls.get(&owner).cloned()
+        };
+        let start_position = if external {
+            (1, 1)
+        } else {
+            script.script_source_position().unwrap_or((1, 1))
+        };
+        let (eval_result, parse_elapsed, compile_elapsed, execute_elapsed) = self
+            .eval_safe_timed_source(
+                source_code,
+                filename.as_deref(),
+                start_position,
+                muted_errors,
+            );
         if let Err(err) = eval_result {
+            if let JsEvaluationError::JavaScript(error) = &err {
+                let _ = self.with_active_host(|context| {
+                    script_errors::report_exception_with_muting(context, error, owner, muted_errors)
+                });
+            }
             self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
             errors.push(format!("[script: {script_label}; {script_context}] {err}"));
         }
@@ -9594,17 +9920,28 @@ impl JsRuntime {
     /// as the immediate-execution path above.
     fn run_deferred_document_scripts(
         &mut self,
-        deferred: Vec<(String, NodeHandle, String, Option<String>)>,
+        deferred: Vec<(String, NodeHandle, String, Option<String>, bool)>,
         log_scripts: bool,
         errors: &mut Vec<String>,
     ) {
-        for (source_code, script, script_label, module_url) in deferred {
+        for (source_code, script, script_label, module_url, muted_errors) in deferred {
             if let Err(error) = self.run_written_scripts_before(&script) {
                 self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
                 errors.push(format!("[written scripts] {error}"));
             }
             if log_scripts {
                 eprintln!("[omoikane][script] running deferred {script_label}");
+            }
+            if module_url.is_none() {
+                self.run_document_script_now(
+                    &script,
+                    &source_code,
+                    &script_label,
+                    muted_errors,
+                    log_scripts,
+                    errors,
+                );
+                continue;
             }
             self.host_state.borrow_mut().write_insertion_ref = Some(script.clone());
             let _ = self.eval(&format!(
@@ -9626,7 +9963,12 @@ impl JsRuntime {
                         execute_elapsed,
                     )
                 } else {
-                    self.eval_safe_timed(&source_code)
+                    self.eval_safe_timed_source(
+                        &source_code,
+                        Some(&script_label),
+                        (1, 1),
+                        muted_errors,
+                    )
                 };
             if let Err(err) = result {
                 if is_module {
@@ -9664,6 +10006,7 @@ impl JsRuntime {
     fn with_active_host_value<T>(&mut self, f: impl FnOnce(&mut Context) -> T) -> T {
         let _guard = activate_host_state(Rc::clone(&self.host_state));
         self.host_state.borrow_mut().sweep_node_lifetimes();
+        let _event_scope = WindowEventScope::new(Rc::clone(&self.host_state));
         let deadline = execution_deadline(self.sandbox.timeout);
         let mut context = self.context.enter_runtime_deadline(deadline);
         f(&mut context)
@@ -10474,6 +10817,8 @@ fn register_host_bindings(
         context,
     )?;
     window_event::register(context, host_state, &mut bindings)?;
+    script_errors::register(context, &mut bindings)?;
+    worker_imports::register(context, &mut bindings)?;
     font_loading::register(context, host_state, &mut bindings)?;
     pointer_lock::register(context, &mut bindings)?;
     input_bridge::register(context, &mut bindings)?;
@@ -11547,7 +11892,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_existing_iframe_document"),
-            1,
+            2,
             NativeFunction::from_copy_closure(existing_iframe_document_native),
         ),
         (
@@ -14146,8 +14491,15 @@ fn call_event_listener_native(
         Ok(callback) => callback,
         Err(error) => {
             restore_current_window_event(document_id, &previous)?;
+            if error
+                .as_native()
+                .is_some_and(|error| error.is_runtime_limit())
+            {
+                return Err(error);
+            }
             report_active_js_task_failure("JS_EVENT_LISTENER_FAILED", "event-listener");
-            return Err(error);
+            script_errors::report_exception_for_document(context, &error, document_id)?;
+            return Ok(JsValue::undefined());
         }
     };
     context.call_with_native_continuation(
@@ -14155,12 +14507,26 @@ fn call_event_listener_native(
         &this,
         &[event],
         NativeCallContinuation::from_copy_closure_with_captures(
-            |result, (document_id, previous), _| {
+            |result, (document_id, previous), context| {
                 restore_current_window_event(*document_id, previous)?;
-                if result.is_err() {
-                    report_active_js_task_failure("JS_EVENT_LISTENER_FAILED", "event-listener");
+                match result {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
+                        if error
+                            .as_native()
+                            .is_some_and(|error| error.is_runtime_limit())
+                        {
+                            return Err(error);
+                        }
+                        report_active_js_task_failure("JS_EVENT_LISTENER_FAILED", "event-listener");
+                        script_errors::report_exception_for_document(
+                            context,
+                            &error,
+                            *document_id,
+                        )?;
+                        Ok(JsValue::undefined())
+                    }
                 }
-                result
             },
             (document_id, previous),
         ),
@@ -16946,11 +17312,79 @@ fn worker_id_argument(args: &[JsValue], context: &mut Context) -> JsResult<u64> 
     Ok(number as u64)
 }
 
-fn create_worker_for_owner_state(
-    owner_state: Rc<RefCell<HostState>>,
+/// Evaluates startup without retaining a registry borrow across author code.
+/// Closed entries remain available until owner binding flushes queued delivery.
+fn evaluate_dedicated_worker_startup(
+    owner_state: &Rc<RefCell<HostState>>,
+    worker_id: u64,
+    source: &str,
+    worker_url: &str,
+) -> JsResult<Option<()>> {
+    // Keep the entry out of the owner map while evaluating worker
+    // startup. This lets self.close() remove the entry immediately
+    // without recursively borrowing the entry currently executing.
+    let entry_for_eval = owner_state
+        .borrow_mut()
+        .workers
+        .remove(&worker_id)
+        .expect("new worker entry must be present");
+    let result = entry_for_eval
+        .borrow_mut()
+        .runtime
+        .with_active_host(|context| {
+            use script_errors::WorkerScriptOutcome;
+            match script_errors::evaluate_worker_initial_script(context, source, worker_url)? {
+                WorkerScriptOutcome::Completed => Ok(Some(())),
+                WorkerScriptOutcome::ParseFailure => Ok(None),
+                WorkerScriptOutcome::Exception(error) => {
+                    script_errors::report_worker_startup_exception(context, &error)?;
+                    Ok(Some(()))
+                }
+            }
+        });
+    let parse_failed = result.as_ref().is_ok_and(|outcome| outcome.is_none());
+    let terminated = result.is_err()
+        || parse_failed
+        || entry_for_eval
+            .borrow()
+            .runtime
+            .host_state
+            .borrow()
+            .worker_terminated;
+    if result.is_err() || parse_failed {
+        entry_for_eval
+            .borrow()
+            .runtime
+            .host_state
+            .borrow_mut()
+            .worker_terminated = true;
+    }
+    entry_for_eval.borrow_mut().terminated = terminated;
+    // Keep a startup-closed entry until the owner endpoint binds. Any
+    // postMessage queued before close() must still be flushed to that
+    // endpoint; bind_worker_owner_native removes the terminated entry
+    // immediately after that flush.
+    owner_state
+        .borrow_mut()
+        .workers
+        .insert(worker_id, Rc::clone(&entry_for_eval));
+    result
+}
+
+/// Owned preparation result; no registry entry exists until initialization ends.
+struct PreparedDedicatedWorker {
+    id: u64,
+    url: String,
+    source: Option<String>,
+    runtime: JsRuntime,
+}
+
+/// Fetches the source and initializes the private global before author code runs.
+fn prepare_dedicated_worker(
+    owner_state: &Rc<RefCell<HostState>>,
     requested_url: &str,
-) -> JsResult<u64> {
-    let active_owner_document_id = active_document_id();
+    active_owner_document_id: Option<usize>,
+) -> JsResult<PreparedDedicatedWorker> {
     let (
         owner_url,
         base_url,
@@ -17020,7 +17454,7 @@ fn create_worker_for_owner_state(
             state.document_security_origins.insert(document_id, origin);
         }
         state.secure_context_override = Some(owner_secure_context);
-        state.worker_owner = Some(Rc::clone(&owner_state));
+        state.worker_owner = Some(Rc::clone(owner_state));
         state.worker_id = Some(worker_id);
         state.worker_terminated = false;
         state.worker_owner_bound = false;
@@ -17028,6 +17462,24 @@ fn create_worker_for_owner_state(
     worker_runtime.eval(&format!(
         "__omoikane_install_worker_global({worker_url:?}, {worker_id:?})"
     ))?;
+    Ok(PreparedDedicatedWorker {
+        id: worker_id,
+        url: worker_url,
+        source,
+        runtime: worker_runtime,
+    })
+}
+
+fn create_worker_for_owner_state(
+    owner_state: Rc<RefCell<HostState>>,
+    requested_url: &str,
+) -> JsResult<u64> {
+    let PreparedDedicatedWorker {
+        id: worker_id,
+        url: worker_url,
+        source,
+        runtime: worker_runtime,
+    } = prepare_dedicated_worker(&owner_state, requested_url, active_document_id())?;
     let entry = Rc::new(RefCell::new(WorkerRuntime {
         runtime: worker_runtime,
         owner_state: Rc::clone(&owner_state),
@@ -17043,40 +17495,23 @@ fn create_worker_for_owner_state(
     let source_loaded = source.is_some();
     let startup_error = match source {
         Some(source) => {
-            // Keep the entry out of the owner map while evaluating worker
-            // startup. This lets self.close() remove the entry immediately
-            // without recursively borrowing the entry currently executing.
-            let entry_for_eval = owner_state
-                .borrow_mut()
-                .workers
-                .remove(&worker_id)
-                .expect("new worker entry must be present");
-            let result = entry_for_eval.borrow_mut().runtime.eval(&source);
-            let terminated = result.is_err()
-                || entry_for_eval
-                    .borrow()
-                    .runtime
-                    .host_state
-                    .borrow()
-                    .worker_terminated;
-            if result.is_err() {
-                entry_for_eval
-                    .borrow()
-                    .runtime
-                    .host_state
-                    .borrow_mut()
-                    .worker_terminated = true;
+            let result =
+                evaluate_dedicated_worker_startup(&owner_state, worker_id, &source, &worker_url);
+            match result {
+                Ok(Some(())) => None,
+                Ok(None) => Some(script_errors::WorkerErrorNotification::LoadFailure),
+                Err(_) => {
+                    // Host execution aborts terminate startup without turning
+                    // an implementation limit into an author ErrorEvent.
+                    report_safe_worker_or_module_failure(
+                        owner_state.borrow().error_reporter.clone(),
+                        ErrorCategory::Worker,
+                        "WORKER_STARTUP_FAILED",
+                        "execute",
+                    );
+                    None
+                }
             }
-            entry_for_eval.borrow_mut().terminated = terminated;
-            // Keep a startup-closed entry until the owner endpoint binds. Any
-            // postMessage queued before close() must still be flushed to that
-            // endpoint; bind_worker_owner_native removes the terminated entry
-            // immediately after that flush.
-            owner_state
-                .borrow_mut()
-                .workers
-                .insert(worker_id, Rc::clone(&entry_for_eval));
-            result.err().map(|error| error.to_string())
         }
         None => {
             entry.borrow_mut().terminated = true;
@@ -17086,9 +17521,14 @@ fn create_worker_for_owner_state(
                 .host_state
                 .borrow_mut()
                 .worker_terminated = true;
-            Some(format!("failed to fetch Worker script: {requested_url}"))
+            Some(script_errors::WorkerErrorNotification::LoadFailure)
         }
     };
+    if let Some(message) = startup_error.as_ref()
+        && std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some()
+    {
+        eprintln!("[omoikane][worker-startup-error] {message:?}");
+    }
     if startup_error.is_some() {
         report_safe_worker_or_module_failure(
             owner_state.borrow().error_reporter.clone(),
@@ -17133,6 +17573,10 @@ fn bind_worker_owner_native(
             .borrow_mut()
             .worker_owner_objects
             .insert(id, owner_object.clone());
+        state
+            .borrow_mut()
+            .event_loop
+            .bind_worker_error_owner(id, &owner_object, &owner_realm);
         let mut worker = entry.borrow_mut();
         worker.owner_object = Some(owner_object.clone());
         {
@@ -18357,7 +18801,7 @@ fn record_inserted_script_error_native(
         if state.task_errors.len() < MAX_TASK_ERRORS {
             state
                 .task_errors
-                .push(format!("[dynamic inline script {id}] {message}"));
+                .push(format!("[dynamic inline script {id}] {message}").into());
         } else {
             state.suppressed_task_errors = state.suppressed_task_errors.saturating_add(1);
         }
@@ -20009,8 +20453,8 @@ fn dispatch_iframe_departure_native(
     })
 }
 
-/// Private visibility-dispatch lookup. Unlike `contentDocument`, this neither
-/// starts an iframe load nor applies script-origin access checks.
+/// Private lookup that never starts an iframe load. The optional second
+/// argument limits the result to a same-origin Document for wrapper traversal.
 fn existing_iframe_document_native(
     _: &JsValue,
     args: &[JsValue],
@@ -20018,14 +20462,22 @@ fn existing_iframe_document_native(
 ) -> JsResult<JsValue> {
     let iframe_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, iframe_id)?;
-    with_host_state(|state| {
+    let document = with_host_state(|state| {
         Ok(state
             .borrow()
             .iframe_documents
             .get(&iframe_id)
-            .map(|entry| JsValue::from(entry.document.identity() as f64))
-            .unwrap_or_else(JsValue::null))
-    })
+            .map(|entry| entry.document.identity()))
+    })?;
+    if let Some(document) = document {
+        if args.get(1).and_then(JsValue::as_boolean) == Some(true)
+            && !same_origin_document(context, document)?
+        {
+            return Ok(JsValue::null());
+        }
+        return Ok(JsValue::from(document as f64));
+    }
+    Ok(JsValue::null())
 }
 
 /// Returns `same:<context>:<generation>`, `cross:<context>:<generation>`, or

@@ -17,6 +17,80 @@ fn empty() {
 }
 
 #[test]
+fn deeply_nested_scopes_restore_each_enclosing_position() {
+    let mut builder = SourceMapBuilder::default();
+    builder.push_source_position(0, Some((1, 1).into()));
+    builder.push_source_position(0, Some((2, 1).into()));
+    builder.push_source_position(0, Some((3, 1).into()));
+    builder.pop_source_position(5);
+    builder.pop_source_position(10);
+    builder.pop_source_position(15);
+    assert_eq!(
+        builder.build(20),
+        vec![
+            Entry {
+                pc: 0,
+                position: Some((3, 1).into())
+            },
+            Entry {
+                pc: 5,
+                position: Some((2, 1).into())
+            },
+            Entry {
+                pc: 10,
+                position: Some((1, 1).into())
+            },
+            Entry {
+                pc: 15,
+                position: None
+            },
+        ]
+        .into()
+    );
+}
+
+#[test]
+fn deeply_nested_scopes_keep_prefixes_and_suffixes_disjoint() {
+    let mut builder = SourceMapBuilder::default();
+    builder.push_source_position(0, Some((1, 1).into()));
+    builder.push_source_position(2, Some((2, 1).into()));
+    builder.push_source_position(4, Some((3, 1).into()));
+    builder.pop_source_position(6);
+    builder.pop_source_position(8);
+    builder.pop_source_position(10);
+    assert_eq!(
+        builder.build(12),
+        vec![
+            Entry {
+                pc: 0,
+                position: Some((1, 1).into())
+            },
+            Entry {
+                pc: 2,
+                position: Some((2, 1).into())
+            },
+            Entry {
+                pc: 4,
+                position: Some((3, 1).into())
+            },
+            Entry {
+                pc: 6,
+                position: Some((2, 1).into())
+            },
+            Entry {
+                pc: 8,
+                position: Some((1, 1).into())
+            },
+            Entry {
+                pc: 10,
+                position: None
+            },
+        ]
+        .into()
+    );
+}
+
+#[test]
 fn single_source_non_overlapping() {
     let mut builder = SourceMapBuilder::default();
     builder.push_source_position(0, Some((1, 1).into()));

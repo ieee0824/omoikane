@@ -19,6 +19,8 @@ pub(super) struct State {
     /// Shared-worker globals identify themselves so the event-loop pump does
     /// not recursively execute the registry entry currently being serviced.
     id: Option<u64>,
+    /// Owned recorder configuration inherited from the creating page.
+    error_destination: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
     /// Page-owned `SharedWorkerPort` endpoint references keyed by a
     /// process-local connection id.  The endpoint remains in its own Boa
     /// realm; native delivery only retains it until the port is closed.
@@ -26,6 +28,26 @@ pub(super) struct State {
 }
 
 impl State {
+    pub(super) fn is_global(&self) -> bool {
+        self.id.is_some()
+    }
+
+    /// Records a failure diagnostic without exporting its author payload.
+    pub(super) fn record_failure(&self, startup: bool) {
+        if self.is_global() {
+            report_safe_worker_or_module_failure(
+                self.error_destination.clone(),
+                ErrorCategory::Worker,
+                if startup {
+                    "SHARED_WORKER_STARTUP_FAILED"
+                } else {
+                    "SHARED_WORKER_RUNTIME_FAILED"
+                },
+                "execute",
+            );
+        }
+    }
+
     /// Traces the page-owned port endpoints retained for delivery.
     pub(super) unsafe fn trace(&self, tracer: &mut Tracer) {
         for port in self.ports.values() {
@@ -57,7 +79,7 @@ struct SharedWorkerConnection {
     /// object.  Keeping it on the connection lets every caller observe the
     /// same failed shared runtime without exposing a native error directly
     /// from the constructor.
-    startup_error: Option<String>,
+    startup_error: Option<script_errors::WorkerErrorNotification>,
     closed: bool,
 }
 
@@ -67,7 +89,7 @@ struct SharedWorkerConnection {
 struct SharedWorkerRuntime {
     key: SharedWorkerKey,
     runtime: Rc<RefCell<JsRuntime>>,
-    startup_error: Option<String>,
+    startup_error: Option<script_errors::WorkerErrorNotification>,
     connections: HashMap<u64, SharedWorkerConnection>,
 }
 
@@ -185,6 +207,7 @@ fn shared_worker_bind_port_native(
             .with_message("SharedWorker owner must be an object")
             .into());
     }
+    let owner_realm = context.realm().clone();
     with_host_state(|state| {
         let Some(entry) = shared_worker_entry_for_connection(connection_id) else {
             return Ok(JsValue::undefined());
@@ -232,7 +255,7 @@ fn shared_worker_bind_port_native(
             state.borrow_mut().event_loop.enqueue_worker_error(
                 connection_id,
                 Some(owner_object),
-                None,
+                Some(owner_realm.clone()),
                 message,
             );
         }
@@ -411,15 +434,51 @@ fn create_shared_worker_for_owner_state(
         )?;
         runtime.set_user_agent(user_agent);
         runtime.host_state.borrow_mut().shared_worker.id = Some(shared_id);
+        runtime
+            .host_state
+            .borrow_mut()
+            .shared_worker
+            .error_destination = owner_state.borrow().error_reporter.clone();
         runtime.eval(&format!(
             "__omoikane_install_shared_worker_global({worker_url:?}, {shared_id:?})"
         ))?;
         let source_loaded = source.is_some();
         let startup_error = match source {
-            Some(source) => runtime.eval(&source).err().map(|error| error.to_string()),
-            None => Some(format!(
-                "failed to fetch SharedWorker script: {requested_url}"
-            )),
+            Some(source) => {
+                let result = runtime.with_active_host(|context| {
+                    use script_errors::WorkerScriptOutcome;
+                    match script_errors::evaluate_worker_initial_script(
+                        context,
+                        &source,
+                        &worker_url,
+                    )? {
+                        WorkerScriptOutcome::Completed => Ok(Some(())),
+                        WorkerScriptOutcome::ParseFailure => Ok(None),
+                        WorkerScriptOutcome::Exception(error) => {
+                            script_errors::report_worker_startup_exception(context, &error)
+                                .map(|()| Some(()))
+                        }
+                    }
+                });
+                match result {
+                    Ok(Some(())) => {
+                        // SharedWorker runtime exceptions are reported at its
+                        // global, and do not stop subsequent connect tasks.
+                        None
+                    }
+                    Ok(None) => Some(script_errors::WorkerErrorNotification::LoadFailure),
+                    Err(_) => {
+                        runtime
+                            .host_state
+                            .borrow()
+                            .shared_worker
+                            .record_failure(true);
+                        runtime.host_state.borrow_mut().worker_terminated = true;
+                        None
+                    }
+                }
+            }
+            None => Some(script_errors::WorkerErrorNotification::LoadFailure),
         };
         if startup_error.is_some() {
             report_safe_worker_or_module_failure(
@@ -461,7 +520,9 @@ fn create_shared_worker_for_owner_state(
     // The runtime is borrowed independently from the registry entry so
     // `postMessage` calls made synchronously by an onconnect handler can
     // safely look the connection up again.
-    if entry.borrow().startup_error.is_none() {
+    if entry.borrow().startup_error.is_none()
+        && !runtime.borrow().host_state.borrow().worker_terminated
+    {
         let _ = runtime.borrow_mut().eval(&format!(
             "__omoikane_dispatch_shared_worker_connect({connection_id:?})"
         ));
@@ -499,6 +560,41 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
 }
 
 impl JsRuntime {
+    /// Advances each connected shared runtime once for this owner's clock step.
+    pub(super) fn advance_shared_worker_clocks(&self, elapsed_ms: u64) {
+        if self.host_state.borrow().shared_worker.is_global() {
+            return;
+        }
+        let runtimes = SHARED_WORKER_REGISTRY.with(|registry| {
+            registry
+                .borrow()
+                .iter()
+                .filter_map(|entry| {
+                    let shared = entry.borrow();
+                    shared
+                        .connections
+                        .values()
+                        .any(|connection| {
+                            !connection.closed
+                                && connection
+                                    .owner_state
+                                    .upgrade()
+                                    .is_some_and(|owner| Rc::ptr_eq(&owner, &self.host_state))
+                        })
+                        .then(|| Rc::clone(&shared.runtime))
+                })
+                .collect::<Vec<_>>()
+        });
+        for runtime in runtimes {
+            runtime
+                .borrow()
+                .host_state
+                .borrow_mut()
+                .event_loop
+                .advance(elapsed_ms);
+        }
+    }
+
     /// Pumps every live shared worker owned by this Boa thread.  A shared
     /// worker has its own runtime and therefore cannot be serviced by the
     /// page's event-loop queues directly; running it between page tasks keeps
@@ -532,14 +628,13 @@ impl JsRuntime {
             // for subsequent tasks unless the worker explicitly closes.
             let mut runtime = runtime.borrow_mut();
             let result = runtime.run_until_idle();
-            let errors = runtime.take_task_errors();
+            let errors = runtime.take_task_errors_filtered(true);
             for _ in 0..usize::from(result.is_err()) + errors.len() {
-                report_safe_worker_or_module_failure(
-                    self.host_state.borrow().error_reporter.clone(),
-                    ErrorCategory::Worker,
-                    "SHARED_WORKER_RUNTIME_FAILED",
-                    "execute",
-                );
+                runtime
+                    .host_state
+                    .borrow()
+                    .shared_worker
+                    .record_failure(false);
             }
         }
         SHARED_WORKER_REGISTRY

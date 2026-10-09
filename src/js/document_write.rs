@@ -200,7 +200,7 @@ fn record_error(state: &Rc<RefCell<HostState>>, error: &JsError) {
     let mut host = state.borrow_mut();
     if host.task_errors.len() < MAX_TASK_ERRORS {
         host.task_errors
-            .push(format!("[document.write script] {error}"));
+            .push(format!("[document.write script] {error}").into());
     } else {
         host.suppressed_task_errors = host.suppressed_task_errors.saturating_add(1);
     }

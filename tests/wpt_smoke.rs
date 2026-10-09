@@ -9,6 +9,8 @@ mod http_fixture;
 mod case_runner;
 #[path = "wpt_smoke/classification.rs"]
 mod classification;
+#[path = "wpt_smoke/cross_origin.rs"]
+mod cross_origin;
 #[cfg(test)]
 #[path = "wpt_smoke/failure_modes.rs"]
 mod failure_modes;

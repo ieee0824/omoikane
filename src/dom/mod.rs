@@ -302,6 +302,7 @@ pub struct Element {
     selected: bool,
     dirty_selectedness: bool,
     form_associated_custom: bool,
+    script_source_position: Option<(u32, u32)>,
     css_validity: Option<bool>,
     /// Dynamic selector state shared by style resolution and DOM queries.
     user_action_state: u8,
@@ -401,6 +402,7 @@ impl Element {
             selected: false,
             dirty_selectedness: false,
             form_associated_custom: false,
+            script_source_position: None,
             css_validity: None,
             user_action_state: 0,
             parser_form_owner: None,
@@ -434,6 +436,7 @@ impl Element {
             selected: false,
             dirty_selectedness: false,
             form_associated_custom: false,
+            script_source_position: None,
             css_validity: None,
             user_action_state: 0,
             parser_form_owner: None,
@@ -683,6 +686,20 @@ impl NodeHandle {
     /// Creates an XML element, preserving its qualified name and namespace.
     pub fn xml_element(tag_name: impl Into<String>, namespace_uri: Option<String>) -> Self {
         Self::new(NodeData::Element(Element::new_xml(tag_name, namespace_uri)))
+    }
+
+    /// Retains the parser's one-based script content coordinates as owned data.
+    pub(crate) fn set_script_source_position(&self, position: Option<(u32, u32)>) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.script_source_position = position;
+        }
+    }
+
+    pub(crate) fn script_source_position(&self) -> Option<(u32, u32)> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.script_source_position,
+            _ => None,
+        }
     }
 
     /// Creates a text node.

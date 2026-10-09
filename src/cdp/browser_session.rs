@@ -106,6 +106,9 @@ pub(super) fn page_task_script_error_lines(
 
 pub(super) fn take_page_task_script_error_lines(completed: &mut CompletedPageTask) -> Vec<String> {
     let mut lines = page_task_script_error_lines(&completed.result);
+    if let Ok(errors) = &mut completed.result {
+        errors.clear();
+    }
     lines.extend(
         completed
             .runtime

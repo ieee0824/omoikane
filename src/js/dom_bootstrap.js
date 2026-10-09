@@ -19,6 +19,10 @@
     }
     return window;
   }
+  const nativeImportScripts = globalThis.__omoikane_import_scripts;
+  const nativeReportError = globalThis.__omoikane_report_error;
+  const nativeRunMicrotaskCallback = globalThis.__omoikane_run_microtask_callback;
+  delete globalThis.__omoikane_import_scripts;
   const nativeCurrentWindowEvent = globalThis.__omoikane_current_window_event;
   delete globalThis.__omoikane_current_window_event;
   const nativeRegisterWindowProxy = globalThis.__omoikane_register_window_proxy;
@@ -26,6 +30,8 @@
   const nativeDocumentWindow = globalThis.__omoikane_document_window;
   const nativeWindowEventDocument = globalThis.__omoikane_window_event_document;
   const nativeWindowProxyGlobal = globalThis.__omoikane_window_proxy_global;
+  const nativeRetainedWindowGlobal = globalThis.__omoikane_retained_window_global;
+  delete globalThis.__omoikane_retained_window_global;
   delete globalThis.__omoikane_document_window;
   delete globalThis.__omoikane_window_event_document;
   delete globalThis.__omoikane_window_proxy_global;
@@ -305,6 +311,8 @@
   const safeMapGet = Function.prototype.call.bind(Map.prototype.get);
   const safeMapSet = Function.prototype.call.bind(Map.prototype.set);
   const safeMapDelete = Function.prototype.call.bind(Map.prototype.delete);
+  const safeMapClear = Function.prototype.call.bind(Map.prototype.clear);
+  const safeMapForEach = Function.prototype.call.bind(Map.prototype.forEach);
   const safeWeakMapHas = Function.prototype.call.bind(WeakMap.prototype.has);
   const safeWeakMapGet = Function.prototype.call.bind(WeakMap.prototype.get);
   const safeWeakMapSet = Function.prototype.call.bind(WeakMap.prototype.set);
@@ -312,6 +320,7 @@
   const safeSetDelete = Function.prototype.call.bind(Set.prototype.delete);
   const safeWeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add);
   const safeWeakSetHas = Function.prototype.call.bind(WeakSet.prototype.has);
+  const safeWeakSetDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
   const safeDefineProperty = Object.defineProperty;
   const safeSetPrototypeOf = Object.setPrototypeOf;
   // One JS identity per native node across browsing-context Realms. The
@@ -665,20 +674,24 @@
   // lookup and built-in prototype chain.
   const windowObjects = new WeakSet([globalThis]);
   const hasWeakWindowRegistry = typeof WeakRef === "function";
-  const browsingWindowRefs = [];
+  // Storage changes can originate in any Realm in this browsing session.
+  // Keep the registry shared and weak so sibling/parent recipients are visible
+  // without retaining discarded WindowProxy objects.
+  const browsingWindowRefs = browsingInput.browsingWindowRefs ||
+    (browsingInput.browsingWindowRefs = []);
   const MAX_STRONG_WINDOW_ENTRIES = 1024;
   function registerBrowsingWindow(window) {
-    if (hasWeakWindowRegistry) browsingWindowRefs.push(new WeakRef(window));
+    if (hasWeakWindowRegistry) browsingWindowRefs.push(createNodeWeakRef(window));
     else {
       if (browsingWindowRefs.length >= MAX_STRONG_WINDOW_ENTRIES) browsingWindowRefs.shift();
       browsingWindowRefs.push(window);
     }
   }
   function liveBrowsingWindows() {
-    const windows = [globalThis];
+    const windows = [topWindow];
     for (let index = browsingWindowRefs.length - 1; index >= 0; index--) {
       const window = hasWeakWindowRegistry
-        ? browsingWindowRefs[index].deref()
+        ? weakRefDeref(browsingWindowRefs[index])
         : browsingWindowRefs[index];
       if (window) windows.push(window);
       else browsingWindowRefs.splice(index, 1);
@@ -1416,25 +1429,82 @@
   }
 
   let reportingEventListenerError = false;
-  function reportEventListenerError(error) {
+  const nativeIsPromise = globalThis.__omoikane_is_promise;
+  const promiseHandledDuringNotification = globalThis.__omoikane_promise_handled_during_notification;
+  const markPromiseHandled = globalThis.__omoikane_mark_promise_handled;
+  delete globalThis.__omoikane_mark_promise_handled;
+  delete globalThis.__omoikane_promise_handled_during_notification;
+  const registerPromiseReporter = globalThis.__omoikane_register_promise_reporter;
+  delete globalThis.__omoikane_is_promise;
+  delete globalThis.__omoikane_register_promise_reporter;
+  const queuePromiseReport = __omoikane_queue_dom_manipulation_task;
+  const pendingPromiseReports = new Map();
+  const queuedPromiseReports = new WeakSet();
+  const outstandingPromiseReports = new WeakSet();
+  registerPromiseReporter((operation, promise, reason) => {
+    if (operation === 0) {
+      safeMapSet(pendingPromiseReports, promise, reason);
+    } else if (operation === 1) {
+      safeMapDelete(pendingPromiseReports, promise);
+      safeWeakSetDelete(queuedPromiseReports, promise);
+      if (safeWeakSetDelete(outstandingPromiseReports, promise)) {
+        queuePromiseReport(() => {
+          const event = new platformEventInterfaces.PromiseRejectionEvent('rejectionhandled', {promise, reason});
+          event.isTrusted = true;
+          dispatchReportedError(event);
+        });
+      }
+    } else {
+      safeMapForEach(pendingPromiseReports, (reason, promise) => {
+        safeWeakSetAdd(queuedPromiseReports, promise);
+        queuePromiseReport(() => {
+          if (!safeWeakSetHas(queuedPromiseReports, promise)) return;
+          if (promiseHandledDuringNotification(promise)) {
+            safeWeakSetDelete(queuedPromiseReports, promise);
+            return;
+          }
+          const event = new platformEventInterfaces.PromiseRejectionEvent('unhandledrejection', {promise, reason, cancelable:true});
+          event.isTrusted = true;
+          dispatchReportedError(event);
+          if (safeWeakSetDelete(queuedPromiseReports, promise) &&
+              !promiseHandledDuringNotification(promise)) {
+            safeWeakSetAdd(outstandingPromiseReports, promise);
+          }
+        });
+      });
+      safeMapClear(pendingPromiseReports);
+    }
+  });
+  let dispatchReportedError = event => dispatchEventOnTarget(globalThis, event);
+  let dispatchReportedWorkerError;
+  function exceptionMessage(error) {
+    try { return intrinsicString(error?.message ?? error); }
+    catch (_) { return ""; }
+  }
+  function reportEventListenerError(error, filename = "", lineno = 0, colno = 0, muted = false, workerOwner = null, loadFailure = false, omitError = false) {
     if (reportingEventListenerError) {
       try { console.error(error); } catch (_) {}
       return;
     }
     reportingEventListenerError = true;
     try {
-      const report = new platformEventInterfaces.ErrorEvent("error", { cancelable: true, error, message: String(error?.message ?? error) });
-      if (typeof globalThis.dispatchEvent === "function") {
-        globalThis.dispatchEvent(report);
-      } else {
-        console.error(error);
-      }
+      const message = muted ? "Script error." : exceptionMessage(error);
+      if (muted) { filename = ""; lineno = 0; colno = 0; }
+      const report = loadFailure ? new Event("error") : new platformEventInterfaces.ErrorEvent("error", { cancelable: true, error: muted || workerOwner || omitError ? null : error, message, filename, lineno, colno });
+      report.isTrusted = true;
+      if (workerOwner) dispatchReportedWorkerError(workerOwner, report);
+      else dispatchReportedError(report);
+      // Snapshot the original fields without re-reading author Error getters
+      // or retaining the thrown value in another runtime's task queue.
+      return {notCanceled: !report.defaultPrevented, message, filename, lineno, colno};
     } catch (reportError) {
       try { console.error(reportError); } catch (_) {}
     } finally {
       reportingEventListenerError = false;
     }
   }
+
+  __omoikane_register_error_reporter(reportEventListenerError);
 
   function callListener(entry, target, event) {
     const previousPassive = passiveListenerState.get(event);
@@ -2525,6 +2595,7 @@
 
   function preRemove(parent, removed) {
     if (internalParentNode(removed) === parent) {
+      if (internalIsConnected(removed)) prepareIframeWindowProxyDiscard(removed);
       const id = internalNodeId(removed);
       if (browsingInput.removalMayAffectPointerLock && id !== undefined) {
         nativePointerLockRemoving(id);
@@ -5601,6 +5672,28 @@
     }
   }
 
+  const pendingDetailsToggles = new WeakMap();
+  function detailsAttributeChanged(element, name, oldValue, newValue, namespace) {
+    if (name !== "open" || namespace != null || !(element instanceof HTMLDetailsElement)) return;
+    const oldState = oldValue === null ? "closed" : "open";
+    const newState = newValue === null ? "closed" : "open";
+    if (oldState === newState) return;
+    const previous = safeWeakMapGet(pendingDetailsToggles, element);
+    if (previous) {
+      previous.newState = newState;
+      return;
+    }
+    const pending = {oldState, newState};
+    safeWeakMapSet(pendingDetailsToggles, element, pending);
+    __omoikane_queue_dom_manipulation_task(() => {
+      if (safeWeakMapGet(pendingDetailsToggles, element) !== pending) return;
+      safeWeakMapDelete(pendingDetailsToggles, element);
+      const event = new ToggleEvent("toggle", {oldState:pending.oldState, newState:pending.newState});
+      event.isTrusted = true;
+      dispatchEventOnTarget(element, event);
+    });
+  }
+
   class HTMLDetailsElement extends HTMLElement {
     get open() { return this.hasAttribute("open"); }
     set open(value) {
@@ -7642,7 +7735,11 @@
     // the currently executing parser's document leaves its stream intact.
     open() {
       const removedNodes = this.childNodes.slice();
-      if (__omoikane_document_reset(this.__id) === false) return this;
+      for (const child of removedNodes) prepareIframeWindowProxyDiscard(child);
+      if (__omoikane_document_reset(this.__id) === false) {
+        for (const child of removedNodes) prepareIframeWindowProxyDiscard(child, "cancel");
+        return this;
+      }
       for (const child of removedNodes) retireIframeWindowProxies(child);
       forgetDiscardedNodeWrappers();
       return this;
@@ -9271,6 +9368,22 @@
   const iframeChildNavigators = browsingInput.iframeChildNavigators || (browsingInput.iframeChildNavigators = new WeakMap());
   const iframeWindowProxyRetirers = browsingInput.iframeWindowProxyRetirers || (browsingInput.iframeWindowProxyRetirers = new WeakMap());
   const iframeHistoryCapturers = browsingInput.iframeHistoryCapturers || (browsingInput.iframeHistoryCapturers = new WeakMap());
+  function prepareIframeWindowProxyDiscard(root, action = "prepare") {
+    if (!root || !browsingInput.removalMayAffectIframeWindowProxy) return;
+    const pending = [root];
+    while (pending.length) {
+      const current = pending.pop();
+      const frames = nativeIframeNodesInSubtree(current.__id);
+      for (let index = 0; index < frames.length; index++) {
+        const callback = safeWeakMapGet(iframeWindowProxyRetirers, wrapNode(frames[index]));
+        if (callback) callback(action);
+        // Snapshot only loaded, accessible child Documents; cleanup must not
+        // start a load or expose a cross-origin document to the parent Realm.
+        const documentId = nativeExistingIframeDocument(frames[index], true);
+        if (documentId !== null) pending.push(wrapNode(documentId));
+      }
+    }
+  }
   function retireIframeWindowProxy(iframe) {
     const retire = safeWeakMapGet(iframeWindowProxyRetirers, iframe);
     if (!retire) return;
@@ -9368,6 +9481,10 @@
 
     __prepareResourceNavigation() {
       if (!this.isConnected) return;
+      const outgoingDocument = nativeExistingIframeDocument(this.__id, true);
+      if (outgoingDocument !== null) {
+        prepareIframeWindowProxyDiscard(wrapNode(outgoingDocument));
+      }
       const events = safeWeakMapGet(nodeEventStates, this);
       let captures = events.iframeHistoryCapturers;
       if (captures) {
@@ -9450,6 +9567,7 @@
         let activeGeneration = null;
         let access = "closed";
         let activeWindow = { __listeners: new Map() };
+        let retainedWindow = null;
         let activeRealmReady = false;
         let activeHistory = null;
         const historyEntries = [];
@@ -9593,9 +9711,8 @@
                 liveListeners.set(type, liveEntries);
               }
             }
-            // The native live Realm roots its global. Keeping only a weak
-            // cache here also releases the last backing Window immediately
-            // after navigation, even when no later proxy property is read.
+            // Live proxies must not pin a replaced Window between property
+            // reads. Discard promotes this weak edge before native teardown.
             activeWindow = new IntrinsicWeakRef(global);
             activeRealmReady = true;
             return global;
@@ -9892,7 +10009,7 @@
             if (property === "window" || property === "self" || property === "frames") return proxy;
             // Check in the trap itself: a helper in the facade's creator Realm
             // would replace the author caller whose origin must be checked.
-            const window = access === "closed" ? null : nativeWindowProxyGlobal(proxy);
+            const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) : nativeWindowProxyGlobal(proxy);
             if (property === "top") return window !== null ? window.top : topWindow;
             if (property === "parent") return window !== null && access === "cross" ? window.parent : parentWindow();
             if (property === "opener") return null;
@@ -9900,14 +10017,13 @@
               const document = iframe.contentDocument;
               return document ? document.querySelectorAll("iframe, frame").length : 0;
             }
-            if (property === "location") return window !== null && access === "cross" ? window.location : locationFacade;
+            if (property === "location") return window !== null && (access === "cross" || access === "closed") ? window.location : locationFacade;
             if (property === "close" || property === "focus" || property === "blur") return () => {};
             if (property === "postMessage") return postMessage;
             if (access === "closed") {
-              if (property === "document" || property === "customElements" ||
-                  property === "localStorage" || property === "sessionStorage" ||
-                  property === "frameElement") return null;
-              return undefined;
+              if (property === "frameElement") return null;
+              if (window === null) throw securityError();
+              return Reflect.get(window, property, windowHandlerReceiver(window, property, receiver, proxy));
             }
             if (window === null) {
               if (property === "frameElement") return null;
@@ -9922,10 +10038,7 @@
             }
             const document = iframe.contentDocument;
             if (property === "document") return document;
-            if (property === "localStorage") return storageForDocument("local", document, proxy);
-            if (property === "sessionStorage") return storageForDocument("session", document, proxy);
             if (property === "frameElement") return iframe;
-            if (property === "history") return activeHistory;
             if (property === "getComputedStyle") return globalThis.getComputedStyle;
             if (Object.prototype.hasOwnProperty.call(methods, property)) return methods[property];
             return Reflect.get(window, property, windowHandlerReceiver(window, property, receiver, proxy));
@@ -9936,23 +10049,20 @@
               navigate(value, "push");
               return true;
             }
-            if (access === "closed") throw securityError();
-            const window = nativeWindowProxyGlobal(proxy);
+            const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) : nativeWindowProxyGlobal(proxy);
             if (window === null) throw securityError();
             return Reflect.set(window, property, value, windowSetReceiver(window, property, receiver, proxy));
           },
           has(_target, property) {
             refresh();
             if (safeCrossOriginProperties.has(property)) return true;
-            if (access === "closed") throw securityError();
-            const window = nativeWindowProxyGlobal(proxy);
+            const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) : nativeWindowProxyGlobal(proxy);
             if (window === null) throw securityError();
             return property in window || Object.prototype.hasOwnProperty.call(methods, property);
           },
           defineProperty(_target, property, descriptor) {
             refresh();
-            if (access === "closed") throw securityError();
-            const window = nativeWindowProxyGlobal(proxy);
+            const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) : nativeWindowProxyGlobal(proxy);
             if (window === null) throw securityError();
             if (!descriptor || descriptor.configurable === false ||
                 (descriptor.configurable !== true && !Reflect.getOwnPropertyDescriptor(window, property))) {
@@ -9962,15 +10072,13 @@
           },
           deleteProperty(_target, property) {
             refresh();
-            if (access === "closed") throw securityError();
-            const window = nativeWindowProxyGlobal(proxy);
+            const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) : nativeWindowProxyGlobal(proxy);
             if (window === null) throw securityError();
             return Reflect.deleteProperty(window, property);
           },
           ownKeys() {
             refresh();
-            if (access === "closed") throw securityError();
-            const window = nativeWindowProxyGlobal(proxy);
+            const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) : nativeWindowProxyGlobal(proxy);
             if (window === null) throw securityError();
             return Reflect.ownKeys(window);
           },
@@ -9979,8 +10087,7 @@
             if (property === "postMessage") {
               return { value: postMessage, writable: false, enumerable: true, configurable: true };
             }
-            if (access === "closed") throw securityError();
-            const window = nativeWindowProxyGlobal(proxy);
+            const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) : nativeWindowProxyGlobal(proxy);
             if (window === null) throw securityError();
             const descriptor = Reflect.getOwnPropertyDescriptor(window, property);
             // This JS Proxy has an empty, extensible target. Its forwarded
@@ -9992,14 +10099,12 @@
           },
           getPrototypeOf() {
             refresh();
-            if (access === "closed") return null;
-            const window = nativeWindowProxyGlobal(proxy);
+            const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) : nativeWindowProxyGlobal(proxy);
             return window === null ? null : safeGetPrototypeOf(window);
           },
           setPrototypeOf(_target, prototype) {
             refresh();
-            if (access === "closed") throw securityError();
-            const window = nativeWindowProxyGlobal(proxy);
+            const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) : nativeWindowProxyGlobal(proxy);
             if (window === null) throw securityError();
             return Reflect.setPrototypeOf(window, prototype);
           },
@@ -10045,12 +10150,17 @@
         const captures = events.iframeHistoryCapturers || (events.iframeHistoryCapturers = new Set());
         const captureReference = new IntrinsicWeakRef(captureActiveHistory);
         captures.add(captureReference);
-        safeWeakMapSet(iframeWindowProxyRetirers, this, () => {
+        safeWeakMapSet(iframeWindowProxyRetirers, this, (action = "retire") => {
+          if (action === "cancel") { retainedWindow = null; return; }
+          if (action === "prepare") {
+            retainedWindow = getActiveWindow(false);
+            return;
+          }
           captures.delete(captureReference);
           retired = true;
           access = "closed";
-          activeWindow = { __listeners: new Map() };
-          activeRealmReady = false;
+          // Keep the last backing Window available to retained same-origin
+          // proxies. Native origin checks still guard every forwarded access.
           historyEntries.splice(0);
           historyIndex = -1;
           pendingHistoryAction = null;
@@ -12945,6 +13055,15 @@
     set type(value) {
       this.setAttribute("type", String(value));
     }
+    get crossOrigin() {
+      const value = this.getAttribute("crossorigin");
+      if (value === null) return null;
+      return value.toLowerCase() === "use-credentials" ? "use-credentials" : "anonymous";
+    }
+    set crossOrigin(value) {
+      if (value === null) this.removeAttribute("crossorigin");
+      else this.setAttribute("crossorigin", intrinsicString(value));
+    }
     get async() {
       return this.hasAttribute("async");
     }
@@ -15154,6 +15273,7 @@
     namespace,
   ) {
     if (!element) return;
+    detailsAttributeChanged(element, name, oldValue, newValue, namespace);
     const definition = element.__customElementDefinition;
     if (element.__customElementState === "custom" && definition?.observedAttributes.has(name)) {
       invokeCustomElementCallback(element, "attributeChangedCallback", [
@@ -18704,8 +18824,12 @@
     if (typeof callback !== "function") {
       throw new TypeError("queueMicrotask requires a callback function");
     }
-    Promise.resolve().then(() => callback());
+    Promise.resolve().then(() => {
+      nativeRunMicrotaskCallback(callback);
+    });
   };
+  globalThis.reportError = nativeReportError;
+  Object.defineProperty(nativeReportError, "name", { value: "reportError", configurable: true });
   globalThis.alert = function alert(message) {
     return __omoikane_open_javascript_dialog(
       "alert",
@@ -18825,14 +18949,20 @@
     for (const targetWindow of liveBrowsingWindows()) {
       if (targetWindow === sourceWindow) continue;
       let targetDocument;
+      let storageArea;
       try {
+        if (targetWindow.closed) continue;
         targetDocument = targetWindow.document;
+        if (!targetDocument || targetDocument.__id === sourceDocument.__id ||
+            __omoikane_storage_origin(targetDocument.__id) !== origin) continue;
+        // Each recipient's Window owns its Storage wrapper, including when the
+        // recipient is reached through a WindowProxy from another Realm.
+        storageArea = kind === "local"
+          ? targetWindow.localStorage : targetWindow.sessionStorage;
       } catch (error) {
         if (error && error.name === "SecurityError") continue;
         throw error;
       }
-      if (!targetDocument || __omoikane_storage_origin(targetDocument.__id) !== origin) continue;
-      const storageArea = storageForDocument(kind, targetDocument, targetWindow);
       targetWindow.dispatchEvent(new StorageEvent("storage", {
         key,
         oldValue,
@@ -20299,6 +20429,9 @@
   globalThis.XMLHttpRequest.LOADING = 3;
   globalThis.XMLHttpRequest.DONE = 4;
 
+  // Streams sets the internal handled flag without invoking author code.
+  const handleStreamPromise = markPromiseHandled;
+
   class ReadableStreamDefaultController {
     constructor(stream) { this._stream = stream; }
     enqueue(chunk) {
@@ -20335,6 +20468,7 @@
       stream._queue.length = 0;
       if (stream._closedReject) {
         stream._closedReject(reason);
+        handleStreamPromise(stream._reader.closed);
         stream._closedResolve = null;
         stream._closedReject = null;
       }
@@ -20355,6 +20489,7 @@
             stream._closedResolve = resolve;
             stream._closedReject = reject;
           });
+      if (stream._errorSet) handleStreamPromise(this.closed);
     }
     read() {
       const stream = this._stream;
@@ -20384,6 +20519,7 @@
         stream._closedReject = null;
         if (reject && !stream._closed && !stream._errorSet) {
           reject(new TypeError("Reader lock was released"));
+          handleStreamPromise(this.closed);
         }
       }
       this._stream = null;
@@ -20440,7 +20576,10 @@
       return pump().catch(error => Promise.resolve(writer.abort(error)).then(() => { throw error; }))
         .finally(() => reader.releaseLock());
     }
-    pipeThrough(pair) { this.pipeTo(pair.writable); return pair.readable; }
+    pipeThrough(pair) {
+      handleStreamPromise(this.pipeTo(pair.writable));
+      return pair.readable;
+    }
   }
   class WritableStreamDefaultWriter {
     constructor(stream) { this._stream = stream; this.closed = stream._closedPromise; }
@@ -20473,6 +20612,7 @@
       if (this._state === "closed" || this._state === "errored") return;
       this._state = "errored"; this._storedError = reason; this._closed = true;
       this._closedReject(reason);
+      handleStreamPromise(this._closedPromise);
     }
     _write(chunk) {
       if (this._state !== "writable") {
@@ -20889,6 +21029,11 @@
       return !event.defaultPrevented;
     }
   }
+
+  const dispatchWorkerErrorEvent = EventTarget.prototype.dispatchEvent;
+  dispatchReportedWorkerError = (owner, event) => {
+    if (!owner.__terminated) safeApply(dispatchWorkerErrorEvent, owner, [event]);
+  };
 
   // Notifications are modeled as a deterministic, task-queued lifecycle.
   // Omoikane does not own an OS notification backend, so permission and
@@ -24405,9 +24550,26 @@
     });
     globalThis.self = globalThis;
     globalThis.WorkerGlobalScope = Object;
-    globalThis.addEventListener = EventTarget.prototype.addEventListener;
-    globalThis.removeEventListener = EventTarget.prototype.removeEventListener;
-    globalThis.dispatchEvent = EventTarget.prototype.dispatchEvent;
+    const WorkerDOMException = DOMException;
+    globalThis.importScripts = function(...urls) {
+      if (!nativeImportScripts(...urls)) {
+        throw new WorkerDOMException("Failed to fetch imported script", "NetworkError");
+      }
+    };
+    const workerAddListener = EventTarget.prototype.addEventListener;
+    const workerRemoveListener = EventTarget.prototype.removeEventListener;
+    const workerDispatch = EventTarget.prototype.dispatchEvent;
+    globalThis.addEventListener = function(...args) {
+      return safeApply(workerAddListener, this == null ? globalThis : this, args);
+    };
+    globalThis.removeEventListener = function(...args) {
+      return safeApply(workerRemoveListener, this == null ? globalThis : this, args);
+    };
+    globalThis.dispatchEvent = function(...args) {
+      return safeApply(workerDispatch, this == null ? globalThis : this, args);
+    };
+    const workerErrorDispatch = EventTarget.prototype.dispatchEvent;
+    dispatchReportedError = event => safeApply(workerErrorDispatch, globalThis, [event]);
     const workerLocation = Object.freeze({
       href: String(url),
       origin: (() => { try { return new URL(String(url)).origin; } catch (_) { return ""; } })(),
@@ -27203,6 +27365,7 @@
       isHTMLElement: node => nativePlatformInterfaceBrand(node, "HTMLElement"),
       isFormData: value => safeWeakMapHas(formDataObjects, value),
       isEventTarget: value => nativePlatformInterfaceBrand(value, "EventTarget"),
+      isPromise: nativeIsPromise,
     });
     nativeRegisterPlatformEventFactory(makePlatformWindowEvent, (value, name) => {
       if (name === "EventTarget") {

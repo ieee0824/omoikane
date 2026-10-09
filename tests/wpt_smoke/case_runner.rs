@@ -212,24 +212,22 @@ fn drive_case_tasks(
         }
         let action_duration = super::testdriver::drive_action_tick(runtime, errors);
         let tick_ms = action_duration.unwrap_or(STEP_MS).max(STEP_MS);
-        runtime.run_timers(tick_ms, STEP_MS, 128);
+        if runtime.has_pending_timers() {
+            runtime.run_timers(tick_ms, STEP_MS, 128);
+        } else if let Err(error) = runtime.tick(tick_ms) {
+            errors.push(format!("advance WPT background tasks: {error}"));
+            return;
+        }
         // Timers advance the virtual clock; the rendering opportunity must
         // share that timestamp rather than advance it a second time.
         if let Err(error) = runtime.run_animation_frame(0) {
             errors.push(format!("render WPT frame: {error}"));
             return;
         }
-        if !committed
-            && action_duration.is_none()
-            && !runtime.has_pending_timers()
-            && !runtime.has_pending_animation_frames()
-        {
-            // Give any non-timer tasks run by this tick one more checkpoint.
-            if let Err(error) = history.drive(runtime) {
-                errors.push(error);
-            }
-            return;
-        }
+        // An idle parent can still have worker timers or child-origin tasks.
+        // Continue until the harness completes or the bounded virtual-time
+        // budget expires; parent timers alone do not prove the case is idle.
+        let _ = committed;
     }
 }
 
@@ -260,7 +258,27 @@ fn drive_visibility_state_testdriver(runtime: &mut JsRuntime, errors: &mut Vec<S
 }
 
 fn actual_status(errors: &[String], complete: bool, passed: bool) -> ActualStatus {
-    if !errors.is_empty() {
+    actual_status_with_allowed_exceptions(errors, complete, passed, false)
+}
+
+fn actual_status_with_allowed_exceptions(
+    errors: &[String],
+    complete: bool,
+    passed: bool,
+    allow_uncaught: bool,
+) -> ActualStatus {
+    // Only an explicitly configured, successfully completed testharness may
+    // allow page exceptions. Driver, loader, job and execution-limit failures
+    // retain their existing ERROR classification, and all logs remain intact.
+    let unallowed_error = errors.iter().any(|error| {
+        let page_exception = error.starts_with("[script: ")
+            || error.starts_with("[timer] ")
+            || error.starts_with("[timer callback] ");
+        let execution_limit =
+            error.contains("RuntimeLimit:") || error.contains("wall-clock timeout");
+        !(allow_uncaught && complete && page_exception && !execution_limit)
+    });
+    if unallowed_error {
         ActualStatus::Error
     } else if passed {
         ActualStatus::Pass
@@ -310,6 +328,9 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
         &url,
     )
     .expect("create WPT runtime");
+    if path.ends_with("/allow-crossorigin.html") || path.ends_with("/disallow-crossorigin.html") {
+        runtime.set_http_resource_transport(Some(super::cross_origin::transport(base_url)));
+    }
     // The bootstrap itself creates a large graph of host API constructors.
     // Collect its short-lived initialization temporaries before page code
     // starts allocating, keeping each WPT case's GC pressure bounded.
@@ -341,7 +362,11 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
         &mut runtime,
         "__wpt_complete===true && __wpt_harness_status===0 && __wpt_results.length>0 && __wpt_results.every(test=>test.status===0)",
     );
-    let actual = actual_status(&errors, complete, passed);
+    let allow_uncaught = js_bool(
+        &mut runtime,
+        "globalThis.__wpt_allow_uncaught_exception === true && __wpt_harness_status === 0",
+    );
+    let actual = actual_status_with_allowed_exceptions(&errors, complete, passed, allow_uncaught);
     let details = runtime
         .eval("JSON.stringify(globalThis.__wpt_results||[])")
         .ok()
@@ -461,6 +486,39 @@ mod tests {
         assert_eq!(actual_status(&[], true, true), ActualStatus::Pass);
         assert_eq!(actual_status(&[], true, false), ActualStatus::Fail);
         assert_eq!(actual_status(&[], false, false), ActualStatus::Timeout);
+    }
+
+    #[test]
+    fn allowed_page_exceptions_keep_failures_and_unrelated_errors_visible() {
+        let expected = vec!["[script: inline-script-1] ReferenceError: deliberate".to_owned()];
+        assert_eq!(
+            actual_status_with_allowed_exceptions(&expected, true, true, true),
+            ActualStatus::Pass
+        );
+        assert_eq!(
+            actual_status_with_allowed_exceptions(&expected, true, false, true),
+            ActualStatus::Fail
+        );
+        assert_eq!(
+            actual_status_with_allowed_exceptions(&expected, false, false, true),
+            ActualStatus::Error
+        );
+        assert_eq!(
+            actual_status_with_allowed_exceptions(&expected, true, true, false),
+            ActualStatus::Error
+        );
+        for error in [
+            "[script fetch: missing.js] failed",
+            "[script jobs: inline-script-1] failed",
+            "driver failed",
+            "[timer] RuntimeLimit: JavaScript evaluation exceeded wall-clock timeout",
+        ] {
+            assert_eq!(
+                actual_status_with_allowed_exceptions(&[error.to_owned()], true, true, true),
+                ActualStatus::Error,
+                "{error}"
+            );
+        }
     }
 
     #[test]

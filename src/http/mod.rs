@@ -21,7 +21,7 @@ mod request_tests;
 #[cfg(test)]
 mod response_tests;
 
-pub use client::Client;
+pub use client::{Client, HttpTransport};
 pub(crate) use connection::is_public_ip;
 pub use connection::{send, send_with_options};
 pub use cookie::{Cookie, CookieJar, SameSite};

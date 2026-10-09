@@ -8,7 +8,7 @@ git_wpt() { git -c safe.directory="$destination" -C "$destination" "$@"; }
 collect_pattern() { patterns+=("$@"); }
 if [[ ! -d "$destination/.git" ]]; then
   mkdir -p "$(dirname "$destination")"
-  git clone --filter=blob:none --no-checkout "$repo" "$destination"
+  git clone --depth 1 --filter=blob:none --no-checkout "$repo" "$destination"
 fi
 collect_pattern "/resources/" "/html/resources/common.js" "/shadow-dom/resources/event-path-test-helpers.js" "/shadow-dom/Element-interface-attachShadow.html" "/shadow-dom/Element-interface-shadowRoot-attribute.html" "/shadow-dom/HTMLSlotElement-interface.html" "/shadow-dom/Slottable-mixin.html" "/shadow-dom/Extensions-to-Event-Interface.html" "/shadow-dom/event-inside-shadow-tree.html" "/shadow-dom/event-inside-slotted-node.html" "/custom-elements/registries/upgrade.html" "/custom-elements/connected-callbacks-template.html" "/dom/nodes/Element-childElement-null.html" "/dom/nodes/Element-childElementCount-nochild.html" "/dom/nodes/Node-isConnected.html" "/dom/nodes/Element-childElementCount.html" "/dom/nodes/Element-childElementCount-dynamic-add.html" "/dom/nodes/Element-childElementCount-dynamic-remove.html" "/dom/nodes/CharacterData-remove.html" "/dom/nodes/ChildNode-remove.js" "/dom/nodes/Element-remove.html" "/dom/nodes/DocumentType-remove.html" "/dom/nodes/Text-splitText.html" "/dom/nodes/CharacterData-data.html" "/dom/nodes/CharacterData-appendData.html" "/dom/nodes/CharacterData-substringData.html" "/dom/nodes/CharacterData-insertData.html" "/dom/nodes/CharacterData-deleteData.html" "/dom/nodes/CharacterData-replaceData.html" "/dom/nodes/CharacterData-surrogates.html" "/dom/nodes/Node-nodeValue.html" "/dom/nodes/Node-normalize.html" "/dom/nodes/Node-textContent.html" "/dom/nodes/MutationObserver-sanity.html" "/dom/nodes/MutationObserver-callback-arguments.html" "/dom/nodes/MutationObserver-takeRecords.html" "/dom/nodes/MutationObserver-disconnect.html" "/dom/nodes/mutationobservers.js" "/dom/nodes/MutationObserver-attributes.html" "/dom/nodes/MutationObserver-characterData.html"
 collect_pattern "/css/css-shadow/shadow-cascade-order-001.html"
@@ -63,6 +63,7 @@ collect_pattern \
   "/css/css-shadow/part/simple-important-important.html" \
   "/css/css-shadow/part/invalidation-change-part-name.html" \
   "/css/css-shadow/part/invalidation-change-exportparts-forward.html"
+collect_pattern "/html/webappapis/scripting/processing-model-2/" "/cors/support.js"
 collect_pattern "/compression/"
 collect_pattern "/encoding/streams/" "/common/sab.js"
 collect_pattern "/css/selectors/is-where-error-recovery.html"

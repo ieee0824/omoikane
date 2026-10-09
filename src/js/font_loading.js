@@ -127,9 +127,21 @@
       if (state.failed.length) set.dispatchEvent(state.event('loadingerror', state.failed));
     });
   }
+  function fontStatusPromise(face) {
+    const state = faceState(face);
+    if (!state.promise) {
+      state.promise = new Promise((resolve, reject) => {
+        state.resolve = resolve;
+        state.reject = reject;
+      });
+      if (state.status === 'loaded') state.resolve(face);
+      else if (state.status === 'error') state.reject(state.error);
+    }
+    return state.promise;
+  }
   function start(face) {
     const state = faceState(face);
-    if (state.status !== 'unloaded') return state.promise;
+    if (state.status !== 'unloaded') return;
     state.status = 'loading';
     for (const set of state.sets) beginSet(set, face);
     task(() => {
@@ -142,13 +154,14 @@
         finishSet(set);
       }
     });
-    return state.promise;
   }
   class FontFace {
     constructor(family, source, descriptors = {}) {
       if (arguments.length < 2) throw new TypeError('FontFace requires family and source');
       const state = { descriptors: {...defaults}, status: 'unloaded', sets: new Set(), id: null, binary: false };
-      state.promise = new Promise((resolve, reject) => { state.resolve = resolve; state.reject = reject; });
+      // Expose a promise only when loaded/load is requested, as browser engines do.
+      state.resolve = () => {};
+      state.reject = error => { state.error = error; };
       faces.set(this, state);
       let bytes = null;
       if (ArrayBuffer.isView(source)) bytes = new Uint8Array(source.buffer, source.byteOffset, source.byteLength).slice();
@@ -168,8 +181,8 @@
       if (state.binary && state.status === 'unloaded') task(() => start(this));
     }
     get status() { return faceState(this).status; }
-    get loaded() { return faceState(this).promise; }
-    load() { return start(this); }
+    get loaded() { return fontStatusPromise(this); }
+    load() { start(this); return fontStatusPromise(this); }
   }
   for (const name of Object.keys(defaults)) {
     Object.defineProperty(FontFace.prototype, name, {

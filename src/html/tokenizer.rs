@@ -7,6 +7,9 @@ use std::fmt;
 
 mod input;
 mod processing_instruction;
+mod source_position;
+
+pub(crate) use source_position::SourcePosition;
 
 use input::{InputCodePoint, InputDecoder, TextBuffer};
 
@@ -298,10 +301,22 @@ impl<'a> Tokenizer<'a> {
 
     /// Tokenizes the full input and also returns recoverable parse errors.
     pub fn tokenize_with_errors(&self) -> (Vec<Token>, Vec<HtmlParseError>) {
+        let (tokens, errors, _) = self.tokenize_with_script_positions();
+        (tokens, errors)
+    }
+
+    pub(crate) fn tokenize_with_script_positions(
+        &self,
+    ) -> (
+        Vec<Token>,
+        Vec<HtmlParseError>,
+        Vec<(usize, SourcePosition)>,
+    ) {
         let mut tokenizer = IncrementalTokenizer::new();
         tokenizer.scripting_enabled = self.scripting_enabled;
         self.push_source(&mut tokenizer);
-        tokenizer.drain(true, false)
+        let (tokens, errors) = tokenizer.drain(true, false);
+        (tokens, errors, tokenizer.script_source_positions)
     }
 
     /// Tokenizes a fragment using the content model selected by its HTML
@@ -325,6 +340,8 @@ impl<'a> Tokenizer<'a> {
 /// Retains lexical state across writes; only an explicit finish emits EOF.
 #[derive(Debug)]
 pub(crate) struct IncrementalTokenizer {
+    source_position: SourcePosition,
+    script_source_positions: Vec<(usize, SourcePosition)>,
     scripting_enabled: bool,
     pending: Vec<InputCodePoint>,
     input_decoder: InputDecoder,
@@ -349,6 +366,8 @@ impl IncrementalTokenizer {
     pub(crate) fn new() -> Self {
         Self {
             scripting_enabled: true,
+            source_position: SourcePosition::default(),
+            script_source_positions: Vec::new(),
             pending: Vec::new(),
             input_decoder: InputDecoder::default(),
             state: State::Data,
@@ -367,6 +386,10 @@ impl IncrementalTokenizer {
             temp_buffer: String::new(),
             last_start_tag_name: String::new(),
         }
+    }
+
+    pub(crate) fn script_source_positions(&self) -> &[(usize, SourcePosition)] {
+        &self.script_source_positions
     }
 
     pub(crate) fn push_input(&mut self, input: &str) {
@@ -408,6 +431,8 @@ impl IncrementalTokenizer {
         let mut cursor = Cursor::from_code_points(std::mem::take(&mut self.pending));
         let mut tokens = Vec::new();
         let mut errors = Vec::new();
+        let mut scanned = 0;
+        self.script_source_positions.clear();
         let mut state = self.state;
         let mut text_buffer = std::mem::take(&mut self.text_buffer);
         let mut current_tag_name = std::mem::take(&mut self.current_tag_name);
@@ -1212,6 +1237,16 @@ impl IncrementalTokenizer {
                         cursor.reconsume();
                     }
                 },
+            }
+            for point in &cursor.source[scanned..cursor.index] {
+                self.source_position.advance(*point);
+            }
+            scanned = cursor.index;
+            if tokens.len() > previous_token_count
+                && matches!(tokens.last(), Some(Token::StartTag { name, .. }) if name == "script")
+            {
+                self.script_source_positions
+                    .push((tokens.len() - 1, self.source_position));
             }
             if stop_at_script
                 && tokens.len() > previous_token_count
