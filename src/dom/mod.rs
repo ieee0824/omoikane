@@ -257,12 +257,14 @@ pub struct Document;
 #[derive(Debug, Clone)]
 struct DocumentMetadata {
     character_encoding: String,
+    content_type: String,
 }
 
 impl Default for DocumentMetadata {
     fn default() -> Self {
         Self {
             character_encoding: "UTF-8".to_owned(),
+            content_type: "text/html".to_owned(),
         }
     }
 }
@@ -423,12 +425,24 @@ impl Element {
             .split_once(':')
             .map(|(prefix, local)| (Some(prefix.to_string()), local.to_string()))
             .unwrap_or_else(|| (None, tag_name.clone()));
+        Self::new_named(tag_name, namespace_uri, prefix, local_name, false)
+    }
+
+    fn new_named(
+        tag_name: String,
+        namespace_uri: Option<String>,
+        prefix: Option<String>,
+        local_name: String,
+        html: bool,
+    ) -> Self {
+        let template_content = (html && local_name.eq_ignore_ascii_case("template"))
+            .then(NodeHandle::document_fragment);
         Self {
             tag_name,
             namespace_uri,
             prefix,
             local_name,
-            html: false,
+            html,
             attributes: BTreeMap::new(),
             attribute_records: Vec::new(),
             checked: false,
@@ -442,7 +456,7 @@ impl Element {
             parser_form_owner: None,
             text_control_state: None,
             scroll_offset: (0.0, 0.0),
-            template_content: None,
+            template_content,
             shadow_root: None,
             popover_open: false,
             modal_dialog: false,
@@ -662,6 +676,28 @@ impl NodeHandle {
         }
     }
 
+    /// Returns the parser or creation API's MIME type for this Document.
+    /// Other node types return `None`; changes to the tree do not change it.
+    pub fn document_content_type(&self) -> Option<String> {
+        match &self.0.borrow().data {
+            NodeData::Document(_, metadata) => Some(metadata.content_type.clone()),
+            _ => None,
+        }
+    }
+
+    /// Returns whether this node is an HTML Document, independent of its tree.
+    pub fn is_html_document(&self) -> bool {
+        matches!(&self.0.borrow().data,
+            NodeData::Document(_, metadata) if metadata.content_type == "text/html")
+    }
+
+    /// Records the MIME type selected by a parser or trusted creation API.
+    pub(crate) fn set_document_content_type(&self, content_type: String) {
+        if let NodeData::Document(_, metadata) = &mut self.0.borrow_mut().data {
+            metadata.content_type = content_type;
+        }
+    }
+
     /// Creates a document fragment node.
     pub fn document_fragment() -> Self {
         Self::new(NodeData::DocumentFragment)
@@ -670,6 +706,26 @@ impl NodeHandle {
     /// Creates an element node.
     pub fn element(tag_name: impl Into<String>) -> Self {
         Self::new(NodeData::Element(Element::new(tag_name)))
+    }
+
+    /// Creates an element from separated name metadata without case folding.
+    pub(crate) fn element_with_name(
+        local_name: String,
+        namespace_uri: Option<String>,
+        prefix: Option<String>,
+        html: bool,
+    ) -> Self {
+        let tag_name = prefix.as_ref().map_or_else(
+            || local_name.clone(),
+            |prefix| format!("{prefix}:{local_name}"),
+        );
+        Self::new(NodeData::Element(Element::new_named(
+            tag_name,
+            namespace_uri,
+            prefix,
+            local_name,
+            html,
+        )))
     }
 
     /// Creates an HTML element with explicit namespace metadata.

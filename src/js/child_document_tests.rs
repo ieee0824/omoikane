@@ -41,6 +41,11 @@ fn rendered_child_resources_parse_by_content_type() {
             .as_deref(),
         Some("svg")
     );
+    assert_eq!(
+        svg.document_content_type().as_deref(),
+        Some("image/svg+xml")
+    );
+    assert!(!svg.is_html_document());
 
     let text = parse_child_document("Text/Plain; charset=utf-8", b"<b>markup</b>").unwrap();
     assert_eq!(text_of(&text, "pre").as_deref(), Some("<b>markup</b>"));
@@ -54,6 +59,7 @@ fn rendered_child_resources_parse_by_content_type() {
         is_blank(&malformed),
         "malformed XML falls back to an empty document"
     );
+    assert!(malformed.is_html_document());
 
     assert!(parse_child_document("image/png", b"\x89PNG").is_none());
 }

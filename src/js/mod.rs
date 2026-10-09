@@ -102,6 +102,8 @@ mod node_lifetime;
 mod pointer_lock;
 pub use pointer_lock::PointerLockTransition;
 #[cfg(test)]
+mod attribute_normalization_tests;
+#[cfg(test)]
 mod node_lifetime_tests;
 #[cfg(test)]
 mod popover_tests;
@@ -11120,7 +11122,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_create_element"),
-            1,
+            2,
             NativeFunction::from_copy_closure(create_element_native),
         ),
         (
@@ -11544,6 +11546,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(html_parsing::encoding_native),
         ),
         (
+            js_string!("__omoikane_document_content_type"),
+            1,
+            NativeFunction::from_copy_closure(document_content_type_native),
+        ),
+        (
+            js_string!("__omoikane_set_document_content_type"),
+            2,
+            NativeFunction::from_copy_closure(set_document_content_type_native),
+        ),
+        (
             js_string!("__omoikane_parse_unsafe_fragment"),
             2,
             NativeFunction::from_copy_closure(html_parsing::fragment_native),
@@ -11602,6 +11614,11 @@ fn register_host_bindings(
             js_string!("__omoikane_node_is_html_element"),
             1,
             NativeFunction::from_copy_closure(node_is_html_element_native),
+        ),
+        (
+            js_string!("__omoikane_html_element_in_html_document"),
+            1,
+            NativeFunction::from_copy_closure(html_element_in_html_document_native),
         ),
         (
             js_string!("__omoikane_clone_node"),
@@ -15024,15 +15041,29 @@ fn create_element_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
     let tag_name = args
         .first()
         .cloned()
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    // The legacy one-argument call creates a lowercase HTML element. The
+    // Document API passes its namespace and already-normalized local name.
+    let namespace = match args.get(1) {
+        None => Some(HTML_NAMESPACE.to_owned()),
+        Some(value) if value.is_null() || value.is_undefined() => None,
+        Some(value) => Some(value.to_string(context)?.to_std_string_escaped()),
+    };
+    let tag_name = if args.get(1).is_none() {
+        tag_name.to_ascii_lowercase()
+    } else {
+        tag_name
+    };
+    let html = namespace.as_deref() == Some(HTML_NAMESPACE);
     let creator = caller_document_id(context);
     with_host_state(|state| {
-        let node = NodeHandle::element(tag_name);
+        let node = NodeHandle::element_with_name(tag_name, namespace, None, html);
         let id = node.identity();
         state
             .borrow_mut()
@@ -15362,11 +15393,20 @@ fn node_name_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     let node_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, node_id)?;
     with_host_state(|state| {
+        let state = state.borrow();
         let node = state
-            .borrow()
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        Ok(js_string!(node.node_name().as_str()).into())
+        let name = if let Some(qualified_name) = node.tag_name() {
+            if html_element_in_html_document(&state, &node) {
+                qualified_name.to_ascii_uppercase()
+            } else {
+                qualified_name
+            }
+        } else {
+            node.node_name()
+        };
+        Ok(js_string!(name.as_str()).into())
     })
 }
 
@@ -19291,35 +19331,98 @@ fn node_is_html_element_native(
     })
 }
 
+/// Inspects native element/document state without invoking author JS getters.
+fn html_element_in_html_document(state: &HostState, node: &NodeHandle) -> bool {
+    let html_element = node.is_html_element()
+        || node.namespace_uri().as_deref() == Some("http://www.w3.org/1999/xhtml");
+    html_element
+        && owner_document_for_node(node)
+            .or_else(|| state.node_lifetime_owner(node.identity()))
+            .is_some_and(|document| document.is_html_document())
+}
+
+fn html_element_in_html_document_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let node = state
+            .get_node(id)
+            .ok_or_else(|| JsNativeError::typ().with_message("node not found"))?;
+        Ok(JsValue::from(html_element_in_html_document(&state, &node)))
+    })
+}
+
+/// Reads the MIME type owned by native Document metadata.
+fn document_content_type_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, id)?;
+    with_host_state(|state| {
+        let content_type = state
+            .borrow()
+            .get_node(id)
+            .and_then(|document| document.document_content_type())
+            .ok_or_else(|| JsNativeError::typ().with_message("Document required"))?;
+        Ok(js_string!(content_type.as_str()).into())
+    })
+}
+
+/// Updates native metadata during trusted Document creation, without author JS.
+fn set_document_content_type_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    let content_type = args
+        .get(1)
+        .and_then(JsValue::as_string)
+        .ok_or_else(|| JsNativeError::typ().with_message("Document MIME type required"))?;
+    ensure_same_origin_document(context, id)?;
+    with_host_state(|state| {
+        let document = state
+            .borrow()
+            .get_node(id)
+            .filter(|node| node.node_type() == NodeType::Document)
+            .ok_or_else(|| JsNativeError::typ().with_message("Document required"))?;
+        document.set_document_content_type(content_type.to_std_string_escaped());
+        Ok(JsValue::undefined())
+    })
+}
+
+/// Copies element names and attributes without parsing or normalizing them again.
+fn clone_element_node(node: &NodeHandle) -> NodeHandle {
+    let clone = NodeHandle::element_with_name(
+        node.local_name().unwrap_or_default(),
+        node.namespace_uri(),
+        node.prefix(),
+        node.is_html_element(),
+    );
+    if let Some(attributes) = node.attribute_records_utf16() {
+        for (qualified_name, namespace, local_name, value) in attributes {
+            clone.set_xml_attribute_ns(
+                qualified_name,
+                namespace.clone(),
+                local_name.clone(),
+                String::from_utf16_lossy(&value),
+            );
+            clone.set_attribute_value_ns_utf16(namespace.as_deref(), &local_name, &value);
+        }
+    }
+    clone
+}
+
 fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
     let clone = match node.node_type() {
-        crate::dom::NodeType::Element => {
-            let tag = node.tag_name().unwrap_or_default();
-            let el = if node.is_html_element() {
-                match node.namespace_uri() {
-                    Some(namespace) => NodeHandle::html_element_ns(&tag, namespace),
-                    None => NodeHandle::element(&tag),
-                }
-            } else {
-                NodeHandle::xml_element(&tag, node.namespace_uri())
-            };
-            if let Some(attributes) = node.attribute_records_utf16() {
-                for (qualified_name, namespace, local_name, value) in attributes {
-                    if node.is_html_element() && namespace.is_none() {
-                        el.set_attribute_utf16(&qualified_name, &value);
-                    } else {
-                        el.set_xml_attribute_ns(
-                            qualified_name,
-                            namespace.clone(),
-                            local_name.clone(),
-                            String::from_utf16_lossy(&value),
-                        );
-                        el.set_attribute_value_ns_utf16(namespace.as_deref(), &local_name, &value);
-                    }
-                }
-            }
-            el
-        }
+        crate::dom::NodeType::Element => clone_element_node(node),
         crate::dom::NodeType::Text => {
             let clone = if node.is_cdata_section() {
                 NodeHandle::cdata_section("")
@@ -19343,6 +19446,9 @@ fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
             let document = NodeHandle::document();
             if let Some(encoding) = node.document_character_encoding() {
                 document.set_document_character_encoding(encoding);
+            }
+            if let Some(content_type) = node.document_content_type() {
+                document.set_document_content_type(content_type);
             }
             document
         }

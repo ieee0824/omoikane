@@ -102,6 +102,7 @@
   const nativeTransferArrayBuffer = globalThis.__omoikane_transfer_array_buffer;
   const nativeArrayBufferViewInfo = globalThis.__omoikane_array_buffer_view_info;
   const nativeNodeIsHtmlElement = globalThis.__omoikane_node_is_html_element;
+  const nativeHtmlElementInHtmlDocument = globalThis.__omoikane_html_element_in_html_document;
   // Node equality is a platform operation. Capture every host hook it needs
   // before page code can replace the public bootstrap globals.
   const nativeNodeType = globalThis.__omoikane_node_type;
@@ -238,6 +239,10 @@
   delete globalThis.__omoikane_collected_nodes;
   const nativeDocumentEncoding = globalThis.__omoikane_document_encoding;
   delete globalThis.__omoikane_document_encoding;
+  const nativeDocumentContentType = globalThis.__omoikane_document_content_type;
+  const nativeSetDocumentContentType = globalThis.__omoikane_set_document_content_type;
+  delete globalThis.__omoikane_document_content_type;
+  delete globalThis.__omoikane_set_document_content_type;
   const nativeDocumentURL = globalThis.__omoikane_document_url;
   const nativeCommitHistoryApiURL = globalThis.__omoikane_commit_history_api_url;
   const nativeCommitFragmentURL = globalThis.__omoikane_commit_fragment_url;
@@ -270,6 +275,7 @@
   delete globalThis.__omoikane_transfer_array_buffer;
   delete globalThis.__omoikane_array_buffer_view_info;
   delete globalThis.__omoikane_node_is_html_element;
+  delete globalThis.__omoikane_html_element_in_html_document;
   delete globalThis.__omoikane_attribute_records;
   delete globalThis.__omoikane_attribute_record_count;
   delete globalThis.__omoikane_attribute_record_at;
@@ -1097,8 +1103,8 @@
   }
 
   function isHtmlElementInHtmlDocument(element) {
-    return element instanceof HTMLElement &&
-      element.ownerDocument && element.ownerDocument.contentType === "text/html";
+    const id = internalNodeId(element);
+    return id !== undefined && nativeHtmlElementInHtmlDocument(id);
   }
 
   function attributeCacheFor(element, namespace, create = true) {
@@ -1332,7 +1338,8 @@
     const previous = safeWeakMapGet(templateContentsOwnerDocuments, doc);
     if (previous) return previous;
     const owner = wrapNode(__omoikane_create_document());
-    owner.__contentType = doc.contentType === "text/html" ? "text/html" : "application/xml";
+    nativeSetDocumentContentType(internalNodeId(owner),
+      nativeDocumentContentType(documentId) === "text/html" ? "text/html" : "application/xml");
     owner.__documentURL = "about:blank";
     const ownerId = internalNodeId(owner);
     if (documentId !== undefined && ownerId !== undefined) {
@@ -3090,8 +3097,14 @@
 
     getAttribute(name) {
       let attr = String(name);
-      if (isHtmlElementInHtmlDocument(this)) attr = asciiLowercase(attr);
-      return __omoikane_get_attribute(this.__id, attr);
+      if (isHtmlElementInHtmlDocument(this)) {
+        return __omoikane_get_attribute(this.__id, asciiLowercase(attr));
+      }
+      // A node adopted into an XML Document keeps its HTML element identity.
+      // Native convenience getters fold by that identity, so match records
+      // directly when the current owner requires case-sensitive lookup.
+      const record = attributeRecordByName(this, attr);
+      return record ? record[3] : null;
     }
 
     getAttributeNode(name) {
@@ -3757,8 +3770,10 @@
 
     hasAttribute(name) {
       let attr = String(name);
-      if (isHtmlElementInHtmlDocument(this)) attr = asciiLowercase(attr);
-      return __omoikane_get_attribute(this.__id, attr) !== null;
+      if (isHtmlElementInHtmlDocument(this)) {
+        return __omoikane_get_attribute(this.__id, asciiLowercase(attr)) !== null;
+      }
+      return attributeRecordByName(this, attr) !== null;
     }
 
     hasAttributeNS(namespace, localName) {
@@ -7195,7 +7210,7 @@
         return;
       }
       const created = wrapNode(__omoikane_create_document());
-      created.__contentType = "application/xml";
+      nativeSetDocumentContentType(internalNodeId(created), "application/xml");
       created.__documentURL = "about:blank";
       return created;
     }
@@ -7241,9 +7256,12 @@
           "InvalidCharacterError"
         );
       }
-      const nativeId = this.contentType === "text/html"
-        ? __omoikane_create_element(name)
-        : nativeCreateElementNS(null, name);
+      // HTML documents fold the local name. XHTML documents also select the
+      // HTML namespace, while retaining XML's case-sensitive local names.
+      const contentType = nativeDocumentContentType(internalNodeId(this));
+      const htmlDocument = contentType === "text/html";
+      const namespace = htmlDocument || contentType === "application/xhtml+xml" ? HTML_NAMESPACE : null;
+      const nativeId = __omoikane_create_element(htmlDocument ? asciiLowercase(name) : name, namespace);
       const element = this.__own(wrapNode(nativeId));
       if (name.toLowerCase() === "script") {
         __omoikane_mark_inserted_script(element.__id);
@@ -7381,8 +7399,9 @@
           if (qname !== "") validateAndExtractNS(ns, qname);
 
           const doc = wrapNode(__omoikane_create_document());
-          doc.__contentType = ns === "http://www.w3.org/1999/xhtml" ? "application/xhtml+xml" :
-            ns === "http://www.w3.org/2000/svg" ? "image/svg+xml" : "application/xml";
+          nativeSetDocumentContentType(internalNodeId(doc),
+            ns === "http://www.w3.org/1999/xhtml" ? "application/xhtml+xml" :
+              ns === "http://www.w3.org/2000/svg" ? "image/svg+xml" : "application/xml");
           doc.__documentURL = "about:blank";
           let root = null;
           if (qname !== "") root = doc.createElementNS(ns, qname);
@@ -7647,7 +7666,8 @@
     }
 
     get contentType() {
-      return this.__contentType || "text/html";
+      requireNodeReceiver(this);
+      return nativeDocumentContentType(internalNodeId(this));
     }
 
     // Omoikane's enforced CSP core exposes a stable per-Document snapshot for
@@ -7904,7 +7924,7 @@
     const doc = wrapNode(parsed.id);
     doc.__compatMode = parsed.quirks ? "BackCompat" : "CSS1Compat";
     doc.__documentURL = "about:blank";
-    doc.__contentType = "text/html";
+    nativeSetDocumentContentType(internalNodeId(doc), "text/html");
     for (const child of doc.childNodes) stampOwnerDoc(child, doc);
     return doc;
   }
@@ -9604,10 +9624,16 @@
           const value = iframe.getAttribute(attribute) || "";
           const documentId = nativeIframeContentDocument(iframe.__id);
           forgetDiscardedNodeWrappers();
-          const committedDocument = nextAccess === "same" ? wrapNode(documentId) : null;
+          // A history snapshot needs the committed URL, not a new Document
+          // wrapper/Realm. Reuse private same-document history state only when
+          // its wrapper already exists; public URL getters are author-controlled.
+          const existingDocument = nextAccess === "same" ? cachedNode(documentId) : null;
+          const eventState = existingDocument && safeWeakMapGet(nodeEventStates, existingDocument);
+          const historyURL = eventState ? safeWeakMapGet(documentHistoryURLs, eventState) : undefined;
+          const committedURL = nativeIframeDocumentURL(iframe.__id);
           let href = attribute === "srcdoc" ? "about:srcdoc" : "about:blank";
-          if (committedDocument) href = committedDocument.URL;
-          else if (nativeIframeDocumentURL(iframe.__id) !== null) href = nativeIframeDocumentURL(iframe.__id);
+          if (historyURL !== undefined) href = historyURL;
+          else if (committedURL !== null) href = committedURL;
           else if (value) {
             try { href = new URL(value, creatorBaseURL()).href; }
             catch (_) { href = value; }
@@ -19898,7 +19924,7 @@
       if (parsedId !== null && parsedId !== undefined) {
         const parsed = wrapNode(parsedId);
         parsed.__documentURL = "about:blank";
-        parsed.__contentType = mime;
+        nativeSetDocumentContentType(parsedId, mime);
         return parsed;
       }
       const error = document.implementation.createDocument("", "parsererror", null);

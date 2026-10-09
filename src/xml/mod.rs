@@ -124,10 +124,12 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn new(input: &'a str) -> Self {
+        let document = NodeHandle::document();
+        document.set_document_content_type("application/xml".to_owned());
         Self {
             input,
             pos: 0,
-            document: NodeHandle::document(),
+            document,
             stack: Vec::new(),
         }
     }

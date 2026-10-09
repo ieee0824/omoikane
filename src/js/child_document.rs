@@ -96,7 +96,14 @@ pub(super) fn parse_child_document(mime_type: &str, body: &[u8]) -> Option<NodeH
         return Some(crate::html::TreeBuilder::parse_decoded(&html).document());
     }
     if is_xml_mime_type(mime_type) {
-        return Some(crate::xml::parse(body).unwrap_or_else(|_| blank_html_document()));
+        return Some(match crate::xml::parse(body) {
+            Ok(document) => {
+                let essence = mime_type.split(';').next().unwrap_or("").trim();
+                document.set_document_content_type(essence.to_ascii_lowercase());
+                document
+            }
+            Err(_) => blank_html_document(),
+        });
     }
     let essence = mime_type.split(';').next().unwrap_or("").trim();
     essence

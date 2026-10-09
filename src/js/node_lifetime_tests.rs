@@ -16,6 +16,166 @@ fn collect(runtime: &mut JsRuntime) {
 }
 
 #[test]
+fn iframe_history_snapshot_does_not_initialize_a_scriptless_realm() {
+    let mut runtime = runtime();
+    assert_eq!(
+        runtime
+            .eval("var frame = document.getElementById('f'); var child = frame.contentWindow; child.closed")
+            .unwrap()
+            .as_boolean(),
+        Some(false)
+    );
+    let state = runtime.host_state.borrow();
+    assert_eq!(state.iframe_documents.len(), 1);
+    assert!(
+        state
+            .iframe_documents
+            .values()
+            .all(|entry| entry.realm.is_none()),
+        "recording the initial history entry must not bootstrap a child Realm"
+    );
+    drop(state);
+
+    assert_eq!(
+        runtime
+            .eval("frame.srcdoc = '<p>replacement</p>'; child === frame.contentWindow && !child.closed")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    let state = runtime.host_state.borrow();
+    assert_eq!(state.iframe_documents.len(), 1);
+    let entry = state.iframe_documents.values().next().unwrap();
+    assert_eq!(entry.document_url, "about:srcdoc");
+    assert!(
+        entry.realm.is_none(),
+        "snapshotting a new history generation must keep its Realm lazy"
+    );
+    drop(state);
+
+    assert_eq!(
+        runtime
+            .eval("Object.getPrototypeOf(child.document) === child.Document.prototype && child.document.defaultView === child")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert!(
+        runtime
+            .host_state
+            .borrow()
+            .iframe_documents
+            .values()
+            .all(|entry| entry.realm.is_some()),
+        "explicit Document access still creates the owning child Realm"
+    );
+}
+
+#[test]
+fn iframe_history_snapshot_ignores_public_document_url_getters() {
+    let mut runtime = runtime();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"
+                var frame = document.getElementById('f');
+                var childDocument = frame.contentDocument;
+                var urlReads = 0;
+                Object.defineProperty(childDocument, 'URL', {
+                    get() { urlReads++; throw new Error('author getter must not run'); },
+                    configurable: true,
+                });
+                var child = frame.contentWindow;
+                !child.closed && urlReads === 0;
+                "#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
+fn iframe_history_snapshot_preserves_state_urls_across_navigation_and_detachment() {
+    let document = TreeBuilder::parse("<iframe id=f></iframe>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://history.example/parent.html").unwrap();
+    runtime
+        .eval(
+            r#"
+            var frame = document.getElementById('f');
+            var child = frame.contentWindow;
+            child.history.pushState({ step: 1 }, '', '/one');
+            child.history.pushState({ step: 2 }, '', '/two');
+            frame.srcdoc = '<p>new generation</p>';
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        runtime
+            .eval("child.history.length === 4 && child.document.URL === 'about:srcdoc'")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        runtime
+            .eval(
+                r#"
+                child.history.back();
+                var restored = child.document;
+                var restoredState = child.history.state.step === 2 &&
+                    restored.URL === 'https://history.example/two';
+                child.history.back();
+                restoredState && child.document === restored && child.history.state.step === 1 &&
+                    restored.URL === 'https://history.example/one';
+                "#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        runtime
+            .eval("frame.remove(); child.closed && frame.contentDocument === null && frame.contentWindow === null && restored.URL === 'https://history.example/one'")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
+fn iframe_history_snapshot_keeps_opaque_documents_private_without_bootstrap() {
+    let document =
+        TreeBuilder::parse("<iframe id=f sandbox srcdoc='<p>opaque</p>'></iframe>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://history.example/parent.html").unwrap();
+    assert_eq!(
+        runtime
+            .eval("var frame = document.getElementById('f'); var child = frame.contentWindow; !child.closed && frame.contentDocument === null")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    let state = runtime.host_state.borrow();
+    assert_eq!(state.iframe_documents.len(), 1);
+    assert!(
+        state
+            .iframe_documents
+            .values()
+            .all(|entry| entry.realm.is_none())
+    );
+    drop(state);
+    assert_eq!(
+        runtime
+            .eval("try { child.document; false } catch (error) { error.name === 'SecurityError' }")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
 fn shared_listener_state_survives_retirement_only_while_referenced() {
     let mut runtime = runtime();
     runtime.eval(r#"
