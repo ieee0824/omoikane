@@ -873,6 +873,52 @@ mod tests {
     }
 
     #[test]
+    fn failed_cycle_link_preserves_prelinked_source_for_a_second_attempt() {
+        use super::MapModuleLoader;
+        use std::rc::Rc;
+
+        let loader = Rc::new(MapModuleLoader::default());
+        let mut context = Context::builder()
+            .module_loader(loader.clone())
+            .build()
+            .unwrap();
+        let a = Module::parse(
+            Source::from_bytes(
+                "import { missing } from 'b.js'; export function answer() { return 42; }",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap();
+        let b = Module::parse(
+            Source::from_bytes(
+                "import { answer } from 'a.js'; export function present() { return answer(); }",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap();
+        loader.insert("a.js", a.clone());
+        loader.insert("b.js", b);
+        let loaded = a.load(&mut context);
+        context.run_jobs().unwrap();
+        assert!(loaded.state().as_fulfilled().is_some());
+
+        // B initializes before A fails, but neither member has committed this SCC.
+        let first_error = a.link(&mut context).unwrap_err();
+        assert!(first_error.try_native(&mut context).unwrap().is_syntax());
+        let first = first_error.to_string();
+        assert!(first.contains("missing"), "{first}");
+        boa_gc::force_minor_collect();
+        boa_gc::force_collect();
+        // A failed link must leave B able to compile its tree again. Releasing a
+        // PreLinked tree would panic instead of reporting the same missing export.
+        let second_error = a.link(&mut context).unwrap_err();
+        assert!(second_error.try_native(&mut context).unwrap().is_syntax());
+        assert_eq!(second_error.to_string(), first);
+    }
+
+    #[test]
     fn native_capture_keeps_module_alive_across_collection() {
         let mut context = Context::default();
         let module = Module::parse(

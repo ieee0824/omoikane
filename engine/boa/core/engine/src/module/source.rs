@@ -1,5 +1,9 @@
 use std::{
-    cell::Cell, collections::HashSet, hash::BuildHasherDefault, mem::MaybeUninit, path::PathBuf,
+    cell::{Cell, RefCell},
+    collections::HashSet,
+    hash::BuildHasherDefault,
+    mem::MaybeUninit,
+    path::PathBuf,
     rc::Rc,
 };
 
@@ -238,7 +242,8 @@ impl std::fmt::Debug for SourceTextModule {
 struct ModuleCode {
     has_tla: bool,
     requested_modules: IndexSet<JsString, BuildHasherDefault<FxHasher>>,
-    source: boa_ast::Module,
+    // Retain the parsed tree only until this module commits its linked environment.
+    source: RefCell<Option<boa_ast::Module>>,
     source_text: SourceText,
     path: Option<PathBuf>,
     import_entries: Vec<ImportEntry>,
@@ -348,7 +353,7 @@ impl SourceTextModule {
             async_parent_modules: GcRefCell::default(),
             import_meta: GcRefCell::default(),
             code: ModuleCode {
-                source: code,
+                source: RefCell::new(Some(code)),
                 source_text,
                 path,
                 requested_modules,
@@ -715,7 +720,10 @@ impl SourceTextModule {
             // a. For each Cyclic Module Record m of stack, do
             for m in stack.iter().filter_map(|cmr| cmr.kind().as_source_text()) {
                 // i. Assert: m.[[Status]] is linking.
-                debug_assert!(matches!(&*m.status.borrow(), ModuleStatus::Linking { .. }));
+                debug_assert!(matches!(
+                    &*m.status.borrow(),
+                    ModuleStatus::Linking { .. } | ModuleStatus::PreLinked { .. }
+                ));
                 // ii. Set m.[[Status]] to unlinked.
                 *m.status.borrow_mut() = ModuleStatus::Unlinked;
             }
@@ -887,6 +895,12 @@ impl SourceTextModule {
                             )
                         }
                     });
+
+                // An unsuccessful SCC must retain its AST for another link attempt.
+                // Only committed linked modules can execute from the compiled context
+                // and import/export tables without initializing their environment again.
+                let source = last_src.code.source.borrow_mut().take();
+                drop(source);
 
                 //    v. If requiredModule and module are the same Module Record, set done to true.
                 if &last == module_self {
@@ -1517,15 +1531,19 @@ impl SourceTextModule {
         // 5. Let env be NewModuleEnvironment(realm.[[GlobalEnv]]).
         // 6. Set module.[[Environment]] to env.
         let global_env = realm.environment().clone();
-        let env = self.code.source.scope().clone();
+        let source = self.code.source.borrow();
+        let source = source
+            .as_ref()
+            .expect("an unlinked module must retain its parsed source");
+        let env = source.scope().clone();
 
         let spanned_source_text = SpannedSourceText::new_source_only(self.code.source_text.clone());
         let mut compiler = ByteCompiler::new(
             js_string!("<main>"),
             true,
             false,
-            self.code.source.scope().clone(),
-            self.code.source.scope().clone(),
+            source.scope().clone(),
+            source.scope().clone(),
             true,
             false,
             context.interner_mut(),
@@ -1603,7 +1621,7 @@ impl SourceTextModule {
 
             // 18. Let code be module.[[ECMAScriptCode]].
             // 19. Let varDeclarations be the VarScopedDeclarations of code.
-            let var_declarations = var_scoped_declaration_refs(&self.code.source);
+            let var_declarations = var_scoped_declaration_refs(source);
             // 20. Let declaredVarNames be a new empty List.
             let mut declared_var_names = Vec::new();
             // 21. For each element d of varDeclarations, do
@@ -1637,7 +1655,7 @@ impl SourceTextModule {
 
             // 22. Let lexDeclarations be the LexicallyScopedDeclarations of code.
             // 23. Let privateEnv be null.
-            let lex_declarations = lexically_scoped_declarations(&self.code.source);
+            let lex_declarations = lexically_scoped_declarations(source);
             let mut functions = Vec::new();
             // 24. For each element d of lexDeclarations, do
             for declaration in lex_declarations {
@@ -1693,14 +1711,14 @@ impl SourceTextModule {
                 .map(|(spec, locator)| (compiler.function(spec), locator))
                 .collect::<Vec<_>>();
 
-            compiler.compile_module_item_list(self.code.source.items());
+            compiler.compile_module_item_list(source.items());
 
             (Rooted::new(compiler.finish()), functions)
         };
 
         // 8. Let moduleContext be a new ECMAScript code execution context.
         let mut envs = EnvironmentStack::new(global_env);
-        envs.push_module(self.code.source.scope().clone());
+        envs.push_module(source.scope().clone());
 
         // 9. Set the Function of moduleContext to null.
         // 10. Assert: module.[[Realm]] is not undefined.
@@ -2131,4 +2149,233 @@ fn async_module_execution_rejected(module: &Module, error: &JsError, context: &m
             .expect("default `reject` function cannot fail");
     }
     // 9. Return unused.
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{path::Path, rc::Rc};
+
+    use crate::{
+        Context, JsValue, Module, Source, js_string, module::MapModuleLoader, property::Attribute,
+    };
+
+    use super::{ModuleStatus, SourceTextModule};
+
+    fn source(module: &Module) -> &SourceTextModule {
+        module.kind().as_source_text().expect("source text module")
+    }
+
+    fn parse(text: &str, context: &mut Context) -> Module {
+        Module::parse(Source::from_bytes(text), None, context).unwrap()
+    }
+
+    fn load(module: &Module, context: &mut Context) {
+        let result = module.load(context);
+        context.run_jobs().unwrap();
+        assert!(
+            result.state().as_fulfilled().is_some(),
+            "{:?}",
+            result.state()
+        );
+    }
+
+    fn evaluate(module: &Module, context: &mut Context) {
+        let result = module.evaluate(context);
+        context.run_jobs().unwrap();
+        assert!(
+            result.state().as_fulfilled().is_some(),
+            "{:?}",
+            result.state()
+        );
+    }
+
+    #[test]
+    fn linked_source_is_released_without_losing_closures_reflection_or_imports() {
+        let loader = Rc::new(MapModuleLoader::default());
+        let mut context = Context::builder()
+            .module_loader(loader.clone())
+            .build()
+            .unwrap();
+        let dependency = parse("export const answer = 42;", &mut context);
+        loader.insert("dependency.js", dependency.clone());
+        let module = Module::parse(
+            Source::from_bytes(
+                r"let count = 40;
+                export function bump(delta = 1) { count += delta; return count; }
+                export function meta() { return import.meta; }
+                export function load() { return import('dependency.js'); }
+                export function fail() { throw new Error('linked source'); }
+                export const unpaired = '\uD800';
+                await Promise.resolve();",
+            )
+            .with_path(Path::new("linked-source.js")),
+            None,
+            &mut context,
+        )
+        .unwrap();
+        assert!(source(&module).code.source.borrow().is_some());
+        load(&module, &mut context);
+        module.link(&mut context).unwrap();
+        assert!(source(&module).code.source.borrow().is_none());
+        module.link(&mut context).unwrap();
+        boa_gc::force_minor_collect();
+        boa_gc::force_collect();
+        evaluate(&module, &mut context);
+        let namespace = module.namespace(&mut context);
+        context
+            .register_global_property(js_string!("linked"), namespace, Attribute::all())
+            .unwrap();
+        context
+            .eval(Source::from_bytes(
+                "linked.load().then(a => linked.load().then(b => {
+                    globalThis.importsMatch = a === b && a.answer === 42;
+                }));",
+            ))
+            .unwrap();
+        context.run_jobs().unwrap();
+        assert!(source(&dependency).code.source.borrow().is_none());
+        loader.clear();
+        drop(dependency);
+        drop(module);
+        boa_gc::force_minor_collect();
+        boa_gc::force_collect();
+        assert_eq!(
+            context
+                .eval(Source::from_bytes(
+                    r"linked.meta().marker = 7;
+                    importsMatch && linked.bump() === 41 && linked.bump(1) === 42
+                        && linked.bump.name === 'bump' && linked.bump.length === 0
+                        && linked.bump.toString()
+                            === 'function bump(delta = 1) { count += delta; return count; }'
+                        && linked.meta() === linked.meta() && linked.meta().marker === 7
+                        && linked.unpaired.charCodeAt(0) === 0xD800;",
+                ))
+                .unwrap(),
+            JsValue::from(true)
+        );
+        let error = context
+            .eval(Source::from_bytes("linked.fail()"))
+            .unwrap_err();
+        let (filename, line, column) = error.source_location().unwrap();
+        assert_eq!(filename.as_deref(), Some("linked-source.js"));
+        assert_eq!(line, 5);
+        assert!(column > 0);
+    }
+
+    #[test]
+    fn a_committed_cycle_relinks_and_preserves_live_bindings_after_collection() {
+        let loader = Rc::new(MapModuleLoader::default());
+        let mut context = Context::builder()
+            .module_loader(loader.clone())
+            .build()
+            .unwrap();
+        let a = parse(
+            "import { read } from 'b.js'; export let value = 40;
+             export function answer() { return read() + 2; }
+             export function add() { value += 1; }",
+            &mut context,
+        );
+        let b = parse(
+            "import { value } from 'a.js'; export function read() { return value; }",
+            &mut context,
+        );
+        loader.insert("a.js", a.clone());
+        loader.insert("b.js", b.clone());
+        load(&a, &mut context);
+        a.link(&mut context).unwrap();
+        for module in [&a, &b] {
+            assert!(source(module).code.source.borrow().is_none());
+            module.link(&mut context).unwrap();
+        }
+        boa_gc::force_minor_collect();
+        boa_gc::force_collect();
+        evaluate(&a, &mut context);
+        let namespace = a.namespace(&mut context);
+        context
+            .register_global_property(js_string!("cycle"), namespace, Attribute::all())
+            .unwrap();
+        loader.clear();
+        drop(a);
+        drop(b);
+        boa_gc::force_minor_collect();
+        boa_gc::force_collect();
+        assert_eq!(
+            context
+                .eval(Source::from_bytes(
+                    "const before = cycle.answer(); cycle.add();
+                     before === 42 && cycle.answer() === 43;",
+                ))
+                .unwrap(),
+            JsValue::from(true)
+        );
+    }
+
+    #[test]
+    fn failed_initialization_retains_its_ast_and_keeps_a_committed_dependency() {
+        let loader = Rc::new(MapModuleLoader::default());
+        let mut context = Context::builder()
+            .module_loader(loader.clone())
+            .build()
+            .unwrap();
+        let dependency = parse("export const present = 42;", &mut context);
+        loader.insert("dependency.js", dependency.clone());
+        let module = parse(
+            "import { missing } from 'dependency.js'; export const answer = missing;",
+            &mut context,
+        );
+        load(&module, &mut context);
+        let first = module.link(&mut context).unwrap_err().to_string();
+        assert!(first.contains("missing"), "{first}");
+        assert!(matches!(
+            *source(&module).status.borrow(),
+            ModuleStatus::Unlinked
+        ));
+        assert!(source(&module).code.source.borrow().is_some());
+        assert!(source(&dependency).code.source.borrow().is_none());
+        boa_gc::force_minor_collect();
+        boa_gc::force_collect();
+        // The dependency is already linked and must not need its discarded tree again.
+        dependency.link(&mut context).unwrap();
+        assert_eq!(module.link(&mut context).unwrap_err().to_string(), first);
+        assert!(source(&module).code.source.borrow().is_some());
+        evaluate(&dependency, &mut context);
+        assert_eq!(
+            dependency
+                .namespace(&mut context)
+                .get(js_string!("present"), &mut context)
+                .unwrap(),
+            JsValue::from(42)
+        );
+    }
+
+    #[test]
+    fn a_failed_load_can_be_retried_then_commit_its_parsed_source() {
+        let loader = Rc::new(MapModuleLoader::default());
+        let mut context = Context::builder()
+            .module_loader(loader.clone())
+            .build()
+            .unwrap();
+        let module = parse(
+            "import { value } from 'ready.js'; export const answer = value + 1;",
+            &mut context,
+        );
+        let failure = module.load(&mut context);
+        context.run_jobs().unwrap();
+        assert!(failure.state().as_rejected().is_some());
+        assert!(source(&module).code.source.borrow().is_some());
+        let dependency = parse("export const value = 41;", &mut context);
+        loader.insert("ready.js", dependency.clone());
+        load(&module, &mut context);
+        module.link(&mut context).unwrap();
+        assert!(source(&module).code.source.borrow().is_none());
+        assert!(source(&dependency).code.source.borrow().is_none());
+        evaluate(&module, &mut context);
+        assert_eq!(
+            module
+                .namespace(&mut context)
+                .get(js_string!("answer"), &mut context)
+                .unwrap(),
+            JsValue::from(42)
+        );
+    }
 }
