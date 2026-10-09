@@ -1,5 +1,5 @@
 use crate::{Gc, GcBox, Tracer, trace::Trace};
-use std::{cell::UnsafeCell, ptr::NonNull};
+use std::{any::TypeId, cell::UnsafeCell, ptr::NonNull};
 
 use super::GcHeader;
 
@@ -95,6 +95,10 @@ pub(crate) trait ErasedEphemeronBox {
     /// Gets the header of the `EphemeronBox`.
     fn header(&self) -> &GcHeader;
 
+    /// Returns whether this allocation needs minor ephemeron processing.
+    /// Old unit-valued ephemerons with old keys have no nursery edge to trace.
+    fn needs_minor_trace(&self) -> bool;
+
     /// Traces through the `EphemeronBox`'s held value, but only if it's marked and its key is also
     /// marked. Returns `true` if the ephemeron successfuly traced through its value. This also
     /// considers ephemerons that are marked but don't have their value anymore as
@@ -114,6 +118,17 @@ pub(crate) trait ErasedEphemeronBox {
 impl<K: Trace + ?Sized, V: Trace> ErasedEphemeronBox for EphemeronBox<K, V> {
     fn header(&self) -> &GcHeader {
         &self.header
+    }
+
+    fn needs_minor_trace(&self) -> bool {
+        if self.header.is_young() || TypeId::of::<V>() != TypeId::of::<()>() {
+            return true;
+        }
+
+        // SAFETY: the collector clears this data before freeing its key. This
+        // read neither allocates nor mutates the ephemeron, so the existing
+        // key-validity invariant is unchanged.
+        unsafe { self.key() }.is_none_or(|key| key.header.is_young())
     }
 
     unsafe fn trace(&self, tracer: &mut Tracer) -> bool {

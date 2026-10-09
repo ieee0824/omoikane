@@ -376,7 +376,14 @@ where
 
     /// Returns `true` if the map contains a value for the specified key.
     pub(crate) fn contains_key(&self, k: &Gc<K>) -> bool {
-        self.get(k).is_some()
+        if self.table.is_empty() {
+            false
+        } else {
+            let hash = make_hash_from_gc(&self.hash_builder, k);
+            self.table
+                .find(hash, equivalent_key(k))
+                .is_some_and(EphemeronEdge::has_value)
+        }
     }
 
     // Inserts a key-value pair into the map.
@@ -415,7 +422,7 @@ where
 
     /// Clears all the expired keys in the map.
     pub(crate) fn clear_expired(&mut self) {
-        self.retain(|eph| eph.value().is_some());
+        self.retain(EphemeronEdge::has_value);
     }
 }
 

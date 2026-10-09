@@ -208,7 +208,13 @@ impl Tracer {
 
             while let Some(entry) = self.ephemeron_queue.pop_front() {
                 let eph = entry.pointer;
-                let header = unsafe { eph.as_ref() }.header();
+                let ephemeron = unsafe { eph.as_ref() };
+                if matches!(self.mode, TraceMode::Minor) && !ephemeron.needs_minor_trace() {
+                    // Old allocations stay in the major heap. An old unit
+                    // value with an old key cannot expose a nursery edge.
+                    continue;
+                }
+                let header = ephemeron.header();
 
                 match self.mode {
                     TraceMode::Major => header.mark(),
