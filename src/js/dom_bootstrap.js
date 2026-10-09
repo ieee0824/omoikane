@@ -138,6 +138,7 @@
   const nativeChildNodeIds = globalThis.__omoikane_child_node_ids;
   const nativeQuerySelectorAll = globalThis.__omoikane_query_selector_all;
   const nativeQuerySelector = globalThis.__omoikane_query_selector;
+  const nativeDocumentBody = globalThis.__omoikane_document_body;
   const nativeGetElementById = globalThis.__omoikane_get_element_by_id;
   const nativeNodeIndex = globalThis.__omoikane_node_index;
   const nativeNodeIsConnected = globalThis.__omoikane_node_is_connected;
@@ -462,11 +463,15 @@
   const documentHistoryURLs = browsingInput.documentHistoryURLs ||
     (browsingInput.documentHistoryURLs = new WeakMap());
   function forgetDiscardedNodeWrappers() {
-    const ids = nativeTakeDiscardedNodeIds() || [];
+    const ids = nativeTakeDiscardedNodeIds();
     // Ordinary insert/remove operations do not retire a browsing context.
     // Keep their weak-index maintenance amortized instead of rescanning every
     // wrapper after every mutation. Actual retirement still cleans up now.
-    sweepNodeCache(ids.length > 0);
+    if (ids === null) {
+      sweepNodeCache(false);
+      return;
+    }
+    sweepNodeCache(true);
     for (let index = 0; index < ids.length; index += 1) {
       const id = ids[index];
       browsingInput.visibilityHiddenDocumentIds.delete(id);
@@ -6416,7 +6421,9 @@
       // Parser-created on* attributes need the same initialization as initial
       // document markup, before an inserted script can load or dispatch events.
       wireInlineHandlers(root);
-      for (const id of __omoikane_collect_inserted_scripts(root.__id)) {
+      const scripts = __omoikane_collect_inserted_scripts(root.__id);
+      if (scripts === null) continue;
+      for (const id of scripts) {
         const node = wrapNode(id);
         const source = __omoikane_prepare_inserted_inline_script(node.__id);
         if (typeof source === "string") {
@@ -7549,7 +7556,11 @@
     }
 
     get body() {
-      return documentTagElement(this, "body");
+      const id = canonicalNodeId(this);
+      if (id === undefined) {
+        throw new IntrinsicTypeError("Document body getter called on an incompatible receiver");
+      }
+      return wrapNode(nativeDocumentBody(id));
     }
 
     // The element focused in this document. With nothing focused — on load,
@@ -16576,7 +16587,11 @@
     store[type] = { handler, target, source };
   }
   function wireInlineHandlers(node) {
-    if (node && internalNodeType(node) === 1) {
+    if (!node) return;
+    const nodeType = internalNodeType(node);
+    // CharacterData cannot contain elements, scripts, or shadow trees.
+    if (nodeType === 3 || nodeType === 4 || nodeType === 7 || nodeType === 8) return;
+    if (nodeType === 1) {
       const names = __omoikane_attribute_names(node.__id) || [];
       for (const name of names) {
         applyInlineHandlerAttribute(node, name, true);
@@ -16584,7 +16599,7 @@
       const shadow = nativeShadowRoot(internalNodeId(node));
       if (shadow != null) wireInlineHandlers(wrapNode(shadow));
     }
-    const kids = node ? internalChildNodes(node) : [];
+    const kids = internalChildNodes(node);
     for (const child of kids) {
       wireInlineHandlers(child);
     }

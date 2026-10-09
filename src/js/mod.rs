@@ -105,6 +105,8 @@ pub use pointer_lock::PointerLockTransition;
 #[cfg(test)]
 mod attribute_normalization_tests;
 #[cfg(test)]
+mod document_body_tests;
+#[cfg(test)]
 mod node_copy_tests;
 #[cfg(test)]
 mod node_lifetime_tests;
@@ -11120,6 +11122,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(node_has_slot_ancestor_native),
         ),
         (
+            js_string!("__omoikane_document_body"),
+            1,
+            NativeFunction::from_copy_closure(document_body_native),
+        ),
+        (
             js_string!("__omoikane_query_selector"),
             2,
             NativeFunction::from_copy_closure(query_selector_native),
@@ -15025,6 +15032,31 @@ fn node_has_slot_ancestor_native(
     })
 }
 
+// Read only the native document/root child lists. Returned native insertions
+// still enter the established query-result ownership and wrapper registry.
+fn document_body_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, document_id)?;
+    with_host_state(|state| {
+        let document = state
+            .borrow()
+            .get_node(document_id)
+            .ok_or_else(|| JsNativeError::typ().with_message("Document is unavailable"))?;
+        if document.node_type() != NodeType::Document {
+            return Err(JsNativeError::typ()
+                .with_message("Document body getter called on an incompatible receiver")
+                .into());
+        }
+        let body = document.document_body();
+        if let Some(body) = &body {
+            state
+                .borrow_mut()
+                .register_query_results(&document, std::slice::from_ref(body));
+        }
+        Ok(node_to_js_value(body))
+    })
+}
+
 fn query_selector_native(
     _: &JsValue,
     args: &[JsValue],
@@ -18770,8 +18802,8 @@ fn mark_inserted_scripts_in_tree(state: &mut HostState, root: &NodeHandle) {
     }
 }
 
-/// Returns only pending script node ids from an inserted subtree. The common
-/// case has no pending scripts and exits without walking or creating wrappers.
+/// Returns pending script node ids from an inserted subtree, or `null` when
+/// no scripts are pending. The common case skips subtree walks and JS arrays.
 fn collect_inserted_scripts_native(
     _: &JsValue,
     args: &[JsValue],
@@ -18781,10 +18813,11 @@ fn collect_inserted_scripts_native(
     ensure_same_origin_node(context, root_id)?;
     with_host_state(|state| {
         let state = state.borrow();
+        if state.runnable_inserted_scripts.is_empty() {
+            return Ok(JsValue::null());
+        }
         let mut ids = Vec::new();
-        if !state.runnable_inserted_scripts.is_empty()
-            && let Some(root) = state.get_node(root_id)
-        {
+        if let Some(root) = state.get_node(root_id) {
             let mut pending = vec![root];
             while let Some(node) = pending.pop() {
                 if state.runnable_inserted_scripts.contains(&node.identity()) {
@@ -20704,15 +20737,18 @@ fn iframe_force_navigation_native(
 
 /// Drains identities whose browsing-context behavior was retired. Their
 /// monotonic DOM identities remain valid while JavaScript retains the nodes.
+/// Returns null when no identities need cleanup, without creating a JS array.
 fn take_discarded_node_ids_native(
     _: &JsValue,
     _: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
     with_host_state(|state| {
-        let ids = std::mem::take(&mut state.borrow_mut().discarded_node_ids)
-            .into_iter()
-            .map(|id| JsValue::from(id as f64));
+        let ids = std::mem::take(&mut state.borrow_mut().discarded_node_ids);
+        if ids.is_empty() {
+            return Ok(JsValue::null());
+        }
+        let ids = ids.into_iter().map(|id| JsValue::from(id as f64));
         Ok(JsValue::from(
             boa_engine::object::builtins::JsArray::from_iter(ids, context),
         ))
@@ -20734,3 +20770,80 @@ mod frameset_tests;
 mod ua_display_tests;
 #[cfg(test)]
 mod visited_link_tests;
+
+#[cfg(test)]
+mod discarded_node_drain_tests {
+    use super::*;
+
+    fn assert_empty_drain(runtime: &mut JsRuntime) {
+        let _guard = activate_host_state(runtime.host_state.clone());
+        assert!(
+            take_discarded_node_ids_native(&JsValue::undefined(), &[], &mut runtime.context)
+                .unwrap()
+                .is_null()
+        );
+    }
+
+    #[test]
+    fn empty_drains_preserve_retired_document_aliases_and_security() {
+        let document = crate::html::TreeBuilder::parse(
+            "<iframe id=f srcdoc='<p id=old>kept</p>'></iframe>\
+             <iframe id=opaque sandbox srcdoc='<p>opaque</p>'></iframe>",
+        )
+        .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://drain.example/parent").unwrap();
+        assert_empty_drain(&mut runtime);
+        runtime
+            .eval(
+                r#"
+                var frame = document.getElementById('f');
+                var opaque = document.getElementById('opaque');
+                var oldWindow = frame.contentWindow;
+                var opaqueWindow = opaque.contentWindow;
+                var oldDocument = frame.contentDocument;
+                var heldNode = oldDocument.getElementById('old');
+                heldNode.marker = { value: 42 };
+                var ordinary = document.createElement('span');
+                document.body.appendChild(ordinary);
+                ordinary.remove();
+                "#,
+            )
+            .unwrap();
+        assert_empty_drain(&mut runtime);
+        // Each removal retires a real browsing context and runs the nonempty
+        // drain through the private bootstrap binding, after the empty path.
+        runtime.eval("frame.remove(); opaque.remove();").unwrap();
+        assert_empty_drain(&mut runtime);
+        runtime.run_until_idle().unwrap();
+        for _ in 0..2 {
+            runtime.context.clear_kept_objects();
+            boa_gc::force_collect();
+            runtime.host_state.borrow_mut().sweep_node_lifetimes();
+        }
+        assert_eq!(
+            runtime
+                .eval(
+                    r#"(() => {
+                        let denied = false;
+                        try { opaqueWindow.document; }
+                        catch (error) { denied = error.name === 'SecurityError'; }
+                        return denied && opaqueWindow.closed && oldWindow.closed &&
+                            oldWindow.document === oldDocument &&
+                            frame.contentWindow === null && frame.contentDocument === null &&
+                            heldNode.ownerDocument === oldDocument &&
+                            heldNode.parentNode === oldDocument.body &&
+                            oldDocument.getElementById('old') === heldNode &&
+                            heldNode.textContent === 'kept' && heldNode.marker.value === 42;
+                    })()"#,
+                )
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+        assert_empty_drain(&mut runtime);
+    }
+}
+
+#[cfg(test)]
+mod inserted_preparation_tests;

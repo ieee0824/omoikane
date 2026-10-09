@@ -21,6 +21,9 @@ static NEXT_NODE_ID: AtomicUsize = AtomicUsize::new(1);
 static NEXT_TOP_LAYER_ORDER: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
+mod document_body_tests;
+
+#[cfg(test)]
 mod slot_cache_tests;
 
 #[cfg(test)]
@@ -1133,6 +1136,49 @@ impl NodeHandle {
             position.checked_add(1)?
         };
         inner.children.get(adjacent).cloned()
+    }
+
+    /// Returns the first HTML `body` or `frameset` child of the document's HTML root.
+    ///
+    /// Namespace and local names are read from native state, without descendant
+    /// traversal, child snapshots, or persistent references to the result.
+    pub(crate) fn document_body(&self) -> Option<NodeHandle> {
+        fn html_namespace(element: &Element) -> bool {
+            match element.namespace_uri() {
+                Some(namespace) => namespace == "http://www.w3.org/1999/xhtml",
+                // Legacy parser/default HTML nodes predate namespace storage.
+                None => element.is_html(),
+            }
+        }
+
+        let root = {
+            let document = self.0.borrow();
+            if !matches!(&document.data, NodeData::Document(..)) {
+                return None;
+            }
+            document
+                .children
+                .iter()
+                .find(|child| matches!(&child.0.borrow().data, NodeData::Element(_)))
+                .cloned()?
+        };
+        let root_inner = root.0.borrow();
+        let NodeData::Element(element) = &root_inner.data else {
+            return None;
+        };
+        if !html_namespace(element) || element.local_name() != "html" {
+            return None;
+        }
+        root_inner
+            .children
+            .iter()
+            .find(|child| {
+                let child = child.0.borrow();
+                matches!(&child.data, NodeData::Element(element)
+                    if html_namespace(element)
+                        && matches!(element.local_name(), "body" | "frameset"))
+            })
+            .cloned()
     }
 
     /// Returns the element tag name, if this is an element node.
