@@ -97,7 +97,10 @@ fn iframe_intrinsics_stay_unavailable_across_origin_or_after_detach() {
         let denied = false;
         try { void child.Date; } catch (error) { denied = error.name === 'SecurityError'; }
         frame.remove();
-        return denied && child.closed && child.Date === undefined &&
+        // Discarding the browsing context does not remove its origin boundary.
+        let deniedAfterDetach = false;
+        try { void child.Date; } catch (error) { deniedAfterDetach = error.name === 'SecurityError'; }
+        return denied && deniedAfterDetach && child.closed &&
             new oldDate(123).getTime() === 123;
     })()"#,
     );

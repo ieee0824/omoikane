@@ -697,3 +697,74 @@ fn adoption_updates_all_realm_aliases_across_minor_collection() {
     collect(&mut runtime);
     assert!(runtime.host_state.borrow().node_lifetimes.document_count() <= 2);
 }
+
+#[test]
+fn lazy_retired_window_keeps_same_origin_document_and_opaque_boundary() {
+    let document = TreeBuilder::parse(
+        "<iframe id=normal srcdoc='<p id=old>kept-normal</p>'></iframe>\
+         <iframe id=scriptless sandbox='allow-same-origin' srcdoc='<p id=old>kept-sandbox</p>'></iframe>\
+         <iframe id=opaque sandbox srcdoc='<p id=old>opaque</p>'></iframe>",
+    )
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://retained.example/parent").unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                "var lazyFrames = ['normal', 'scriptless', 'opaque'].map(id => document.getElementById(id)); \
+                 var lazyWindows = lazyFrames.map(frame => frame.contentWindow); \
+                 lazyWindows.every(window => !window.closed)",
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    {
+        let state = runtime.host_state.borrow();
+        assert_eq!(state.iframe_documents.len(), 3);
+        assert!(
+            state
+                .iframe_documents
+                .values()
+                .all(|entry| entry.realm.is_none()),
+            "holding WindowProxy alone must keep scriptless child Realms lazy"
+        );
+    }
+    runtime
+        .eval(
+            r#"
+            lazyFrames.forEach(frame => frame.remove());
+            var lazyDocuments = [lazyWindows[0].document, lazyWindows[1].document];
+            var lazyNodes = lazyDocuments.map(doc => doc.getElementById('old'));
+            var lazyTexts = lazyNodes.map(node => node.firstChild);
+            lazyNodes.forEach(node => { node.marker = { value: 42 }; });
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    collect(&mut runtime);
+    collect(&mut runtime);
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+                if (!lazyWindows.every(window => window.closed)) return false;
+                if (!lazyFrames.every(frame => frame.contentWindow === null &&
+                    frame.contentDocument === null)) return false;
+                for (let index = 0; index < 2; index++) {
+                    const doc = lazyDocuments[index], node = lazyNodes[index];
+                    if (lazyWindows[index].document !== doc || node.ownerDocument !== doc ||
+                        doc.getElementById('old') !== node || node.parentNode !== doc.body ||
+                        lazyTexts[index].parentNode !== node || lazyTexts[index].ownerDocument !== doc ||
+                        lazyTexts[index].data !== ['kept-normal', 'kept-sandbox'][index] ||
+                        node.marker.value !== 42) return false;
+                }
+                try { lazyWindows[2].document; return false; }
+                catch (error) { return error.name === 'SecurityError'; }
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}

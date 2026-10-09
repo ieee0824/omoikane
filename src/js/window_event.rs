@@ -75,26 +75,7 @@ pub(super) fn register(
         bindings,
         js_string!("__omoikane_retained_window_global"),
         1,
-        NativeFunction::from_copy_closure(|_, args, context| {
-            let Some(window) = args.first().and_then(JsValue::as_object) else {
-                return Ok(JsValue::null());
-            };
-            let Some(realm) = window.associated_realm() else {
-                return Ok(JsValue::null());
-            };
-            let Some(document) = realm
-                .host_defined()
-                .get::<ModuleDocumentId>()
-                .map(|value| value.0)
-            else {
-                return Ok(JsValue::null());
-            };
-            if same_origin_document(context, document)? {
-                Ok(window.into())
-            } else {
-                Ok(JsValue::null())
-            }
-        }),
+        NativeFunction::from_copy_closure(retained_window_global_native),
     )?;
     register_private_callable(
         context,
@@ -124,6 +105,40 @@ pub(super) fn register(
         1,
         NativeFunction::from_copy_closure(iframe_nodes_in_subtree_native),
     )
+}
+
+/// Returns only a retained Realm's actual Window global. Listener placeholders
+/// belong to the creator Realm and must not stand in for a retired child Window.
+fn retained_window_global_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(window) = args.first().and_then(JsValue::as_object) else {
+        return Ok(JsValue::null());
+    };
+    let Some(realm) = window.associated_realm() else {
+        return Ok(JsValue::null());
+    };
+    let previous = context.enter_realm(realm.clone());
+    let global = context.global_object();
+    context.enter_realm(previous);
+    if !JsObject::equals(&window, &global) {
+        return Ok(JsValue::null());
+    }
+    let Some(document) = realm
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .map(|value| value.0)
+    else {
+        return Ok(JsValue::null());
+    };
+    // Keep the caller Realm restored before checking the retained Document.
+    if same_origin_document(context, document)? {
+        Ok(window.into())
+    } else {
+        Ok(JsValue::null())
+    }
 }
 
 /// Resolves a child or popup Document's WindowProxy in its creator's Realm.

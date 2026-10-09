@@ -9398,11 +9398,13 @@
       const frames = nativeIframeNodesInSubtree(current.__id);
       for (let index = 0; index < frames.length; index++) {
         const callback = safeWeakMapGet(iframeWindowProxyRetirers, wrapNode(frames[index]));
-        if (callback) callback(action);
         // Snapshot only loaded, accessible child Documents; cleanup must not
         // start a load or expose a cross-origin document to the parent Realm.
         const documentId = nativeExistingIframeDocument(frames[index], true);
         if (documentId !== null) pending.push(wrapNode(documentId));
+        // Wrapping an accessible Document can initialize its lazy Realm.
+        // Capture the resulting Window, rather than the earlier listener store.
+        if (callback) callback(action);
       }
     }
   }
