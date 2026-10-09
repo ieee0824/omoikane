@@ -111,6 +111,10 @@
   const nativeNodeNamespaceURI = globalThis.__omoikane_node_namespace_uri;
   const nativeNodePrefix = globalThis.__omoikane_node_prefix;
   const nativeParentNode = globalThis.__omoikane_parent_node;
+  const nativeFirstChild = globalThis.__omoikane_first_child;
+  const nativeLastChild = globalThis.__omoikane_last_child;
+  delete globalThis.__omoikane_first_child;
+  delete globalThis.__omoikane_last_child;
   const nativeMoveBefore = globalThis.__omoikane_move_before;
   const nativeShadowRoot = globalThis.__omoikane_shadow_root;
   const nativeParseUnsafeFragment = globalThis.__omoikane_parse_unsafe_fragment;
@@ -3599,13 +3603,11 @@
     }
 
     get firstChild() {
-      const ids = __omoikane_child_node_ids(this.__id);
-      return ids && ids.length > 0 ? wrapNode(ids[0]) : null;
+      return wrapNode(nativeFirstChild(this.__id));
     }
 
     get lastChild() {
-      const ids = __omoikane_child_node_ids(this.__id);
-      return ids && ids.length > 0 ? wrapNode(ids[ids.length - 1]) : null;
+      return wrapNode(nativeLastChild(this.__id));
     }
 
     get nextSibling() {
@@ -19066,6 +19068,44 @@
     xpathMutationHook = hook;
     delete globalThis.__omoikane_install_xpath_mutation_hook;
   };
+  // Font maintenance needs one notification per checkpoint, not the public
+  // observer's record snapshots. Keep its job and promise private so changing
+  // page-visible MutationObserver or Promise methods cannot intercept it.
+  // Bootstrap methods can outlive their creation Document through foreign
+  // node aliases. A hook belongs to its Document, not that shared environment.
+  const fontMutationHooks = browsingInput.fontMutationHooks ||
+    (browsingInput.fontMutationHooks = new WeakMap());
+  let fontMutationDocument = null;
+  let fontMutationPending = false;
+  const createFontMutationPromise = Promise.resolve.bind(Promise);
+  const enqueueFontMutation = Function.prototype.call.bind(Promise.prototype.then);
+  const setFontPromiseProperty = Object.defineProperty.bind(Object);
+  globalThis.__omoikane_install_font_mutation_hook = (doc, callback) => {
+    fontMutationDocument = createNodeWeakRef(doc);
+    safeWeakMapSet(fontMutationHooks, doc, callback);
+    delete globalThis.__omoikane_install_font_mutation_hook;
+  };
+
+  function notifyFontMutation(target, type, init) {
+    if (!fontMutationDocument || fontMutationPending) return;
+    if (type === "attributes" && init.attributeName !== "href" &&
+        init.attributeName !== "rel" && init.attributeName !== "media" &&
+        init.attributeName !== "disabled") return;
+    if (type !== "childList" && type !== "characterData" && type !== "attributes") return;
+    const doc = weakRefDeref(fontMutationDocument);
+    if (!doc || (target !== doc && !isInclusiveDescendant(target, doc))) return;
+    const callback = safeWeakMapGet(fontMutationHooks, doc);
+    if (!callback) return;
+    fontMutationPending = true;
+    // A completed notification must not leave a promise owned by the Realm's
+    // long-lived bootstrap environment. Allocate only when a batch is dirty.
+    const promise = createFontMutationPromise();
+    setFontPromiseProperty(promise, "constructor", {value: undefined});
+    enqueueFontMutation(promise, () => {
+      fontMutationPending = false;
+      callback(doc);
+    });
+  }
 
   class MutationRecord {
     constructor(type, target, init = {}) {
@@ -19101,6 +19141,7 @@
     refreshWindowNamesForMutation(target, type, init);
     if (xpathMutationHook) xpathMutationHook(target);
     if (type === "childList") customFormChildrenChanged(target, init);
+    if (!suppressObservers) notifyFontMutation(target, type, init);
     for (const observer of suppressObservers ? [] : mutationObservers) {
       let matched = false;
       let includeOldValue = false;

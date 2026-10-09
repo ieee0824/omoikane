@@ -1103,6 +1103,38 @@ impl NodeHandle {
         Ok(removed)
     }
 
+    /// Returns the first child without cloning the other child handles.
+    pub fn first_child(&self) -> Option<NodeHandle> {
+        self.0.borrow().children.first().cloned()
+    }
+
+    /// Returns the last child without cloning the other child handles.
+    pub fn last_child(&self) -> Option<NodeHandle> {
+        self.0.borrow().children.last().cloned()
+    }
+
+    /// Returns the next ordinary sibling without copying its parent's child list.
+    pub fn next_sibling(&self) -> Option<NodeHandle> {
+        self.adjacent_sibling(false)
+    }
+
+    /// Returns the previous ordinary sibling without copying its parent's child list.
+    pub fn previous_sibling(&self) -> Option<NodeHandle> {
+        self.adjacent_sibling(true)
+    }
+
+    fn adjacent_sibling(&self, previous: bool) -> Option<NodeHandle> {
+        let parent = self.parent_node()?;
+        let inner = parent.0.borrow();
+        let position = inner.children.iter().position(|child| child == self)?;
+        let adjacent = if previous {
+            position.checked_sub(1)?
+        } else {
+            position.checked_add(1)?
+        };
+        inner.children.get(adjacent).cloned()
+    }
+
     /// Returns the element tag name, if this is an element node.
     pub fn tag_name(&self) -> Option<String> {
         self.with_tag_name(|name| name.map(str::to_owned))
@@ -2053,6 +2085,26 @@ impl NodeHandle {
                 *utf16 = Some(units.to_vec());
             }
         }
+    }
+
+    /// Reads CharacterData without copying its scalar or original UTF-16 data.
+    ///
+    /// Original code units are present when the data contains unpaired surrogates.
+    /// Text, CDATA, Comment and ProcessingInstruction are supported; document
+    /// types are excluded. The node is immutably borrowed while `read` runs;
+    /// do not mutate it or invoke author code in the callback.
+    pub fn with_character_data<R>(
+        &self,
+        read: impl FnOnce(&str, Option<&[u16]>) -> R,
+    ) -> Option<R> {
+        let inner = self.0.borrow();
+        let (data, utf16) = match &inner.data {
+            NodeData::Text(text) => (&text.data, &text.utf16),
+            NodeData::Comment(comment) => (&comment.data, &comment.utf16),
+            NodeData::ProcessingInstruction(pi) => (&pi.data, &pi.utf16),
+            _ => return None,
+        };
+        Some(read(data, utf16.as_deref()))
     }
 
     /// Returns exact UTF-16 leaf data, including unpaired surrogates.

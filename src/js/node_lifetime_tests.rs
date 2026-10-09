@@ -16,6 +16,42 @@ fn collect(runtime: &mut JsRuntime) {
 }
 
 #[test]
+fn retained_detached_child_keeps_active_document_parent_and_expandos_alive() {
+    let document = TreeBuilder::parse("<body></body>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    runtime
+        .eval(
+            r#"
+            (() => {
+                const parent = document.createElement('a');
+                parent.marker = { value: 42 };
+                globalThis.retainedText = document.createTextNode('kept');
+                parent.appendChild(retainedText);
+                document.body.appendChild(parent);
+                document.body.removeChild(parent);
+            })();
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    collect(&mut runtime);
+    collect(&mut runtime);
+    assert_eq!(
+        runtime
+            .eval(
+                "retainedText.data === 'kept' && retainedText.parentNode.nodeName === 'A' && \
+                 retainedText.parentNode.marker.value === 42 && \
+                 retainedText.ownerDocument === document && \
+                 retainedText.parentNode.ownerDocument === document && \
+                 !retainedText.isConnected",
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
 fn iframe_history_snapshot_does_not_initialize_a_scriptless_realm() {
     let mut runtime = runtime();
     assert_eq!(

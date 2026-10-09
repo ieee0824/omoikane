@@ -541,9 +541,10 @@ impl CoverParenthesizedExpressionAndArrowParameterList {
                     "multiple expressions in parenthesized expression",
                 ));
             }
-            if let CoverExpression::Expression(expression) = &expressions[0] {
+            // The cover grammar is resolved; move its sole owned expression.
+            if let Some(CoverExpression::Expression(expression)) = expressions.into_iter().next() {
                 return Ok(ast::Expression::Parenthesized(Parenthesized::new(
-                    expression.clone(),
+                    expression,
                     Span::new(span_start.start(), span.end()),
                 )));
             }

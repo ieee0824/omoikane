@@ -28,6 +28,7 @@ use boa_engine::object::{
     },
 };
 use boa_engine::realm::Realm;
+use boa_engine::string::Utf16JsStringBuilder;
 use boa_engine::value::TryIntoJs;
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Script, Source, js_string};
 use boa_gc::{Finalize, RootProvider, Trace, Tracer};
@@ -103,6 +104,8 @@ mod pointer_lock;
 pub use pointer_lock::PointerLockTransition;
 #[cfg(test)]
 mod attribute_normalization_tests;
+#[cfg(test)]
+mod node_copy_tests;
 #[cfg(test)]
 mod node_lifetime_tests;
 #[cfg(test)]
@@ -648,11 +651,13 @@ impl BootstrapBindings {
         // Explicit old delete statements become no-ops: no capability was
         // installed on the page global in the first place.
         let prefix = "globalThis.__omoikane_";
-        let mut body = String::new();
+        // Limit suffix-based rewrites to the body, preserving the module header.
+        let body_start = source.len();
+        source.reserve(DOM_BOOTSTRAP.len());
         let mut cursor = 0;
         while let Some(offset) = DOM_BOOTSTRAP[cursor..].find(prefix) {
             let start = cursor + offset;
-            body.push_str(&DOM_BOOTSTRAP[cursor..start]);
+            source.push_str(&DOM_BOOTSTRAP[cursor..start]);
             let mut end = start + prefix.len();
             while DOM_BOOTSTRAP
                 .as_bytes()
@@ -663,19 +668,18 @@ impl BootstrapBindings {
             }
             let name = &DOM_BOOTSTRAP[start + "globalThis.".len()..end];
             if names.contains(name) {
-                if body.ends_with("delete ") {
-                    body.truncate(body.len() - "delete ".len());
-                    body.push_str("void 0");
+                if source[body_start..].ends_with("delete ") {
+                    source.truncate(source.len() - "delete ".len());
+                    source.push_str("void 0");
                 } else {
-                    body.push_str(name);
+                    source.push_str(name);
                 }
             } else {
-                body.push_str(&DOM_BOOTSTRAP[start..end]);
+                source.push_str(&DOM_BOOTSTRAP[start..end]);
             }
             cursor = end;
         }
-        body.push_str(&DOM_BOOTSTRAP[cursor..]);
-        source.push_str(&body);
+        source.push_str(&DOM_BOOTSTRAP[cursor..]);
         source
     }
 }
@@ -11516,6 +11520,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(child_node_ids_native),
         ),
         (
+            js_string!("__omoikane_first_child"),
+            1,
+            NativeFunction::from_copy_closure(first_child_native),
+        ),
+        (
+            js_string!("__omoikane_last_child"),
+            1,
+            NativeFunction::from_copy_closure(last_child_native),
+        ),
+        (
             js_string!("__omoikane_next_sibling"),
             1,
             NativeFunction::from_copy_closure(next_sibling_native),
@@ -12139,30 +12153,32 @@ fn caller_document_origin(context: &Context, document_id: usize) -> Option<Docum
 
 fn same_origin_document(context: &Context, target_document_id: usize) -> JsResult<bool> {
     let caller = caller_document_id(context);
-    let saved_caller_origin = caller.and_then(|id| caller_document_origin(context, id));
     with_host_state(|host| {
         let state = host.borrow();
-        Ok(caller.is_some_and(|caller| {
-            let source_origin = state.document_security_origins.get(&caller).or_else(|| {
-                (!state.document_is_active(caller))
-                    .then_some(())
-                    .and(saved_caller_origin.as_ref())
-            });
-            match (
-                source_origin,
+        let Some(caller) = caller else {
+            return Ok(false);
+        };
+        let Some(target) = state
+            .document_security_origins
+            .get(&target_document_id)
+            .or_else(|| {
                 state
-                    .document_security_origins
+                    .retired_document_security_origins
                     .get(&target_document_id)
-                    .or_else(|| {
-                        state
-                            .retired_document_security_origins
-                            .get(&target_document_id)
-                    }),
-            ) {
-                (Some(source), Some(target)) => source == target,
-                _ => false,
-            }
-        }))
+            })
+        else {
+            return Ok(false);
+        };
+        if let Some(source) = state.document_security_origins.get(&caller) {
+            return Ok(source == target);
+        }
+        // Active documents require a native origin record. Only a retired
+        // caller needs its saved Realm snapshot; cloning it on every ordinary
+        // DOM access allocates strings that the native record makes redundant.
+        if state.document_is_active(caller) {
+            return Ok(false);
+        }
+        Ok(caller_document_origin(context, caller).as_ref() == Some(target))
     })
 }
 
@@ -14750,9 +14766,7 @@ fn get_element_by_id_native(
         let mut pending = root.child_nodes();
         pending.reverse();
         while let Some(node) = pending.pop() {
-            if node.node_type() == NodeType::Element
-                && node.get_attribute("id").as_deref() == Some(expected.as_str())
-            {
+            if node.node_type() == NodeType::Element && node.attribute_eq("id", &expected) {
                 return Ok(node_to_js_value(Some(node)));
             }
             // Ordinary children exclude shadow trees, template contents and
@@ -18467,8 +18481,8 @@ fn get_text_content_native(
         .to_number(context)? as usize;
     ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
-        let state = state.borrow();
         let node = state
+            .borrow()
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         match node.node_type() {
@@ -18478,38 +18492,55 @@ fn get_text_content_native(
             crate::dom::NodeType::Text
             | crate::dom::NodeType::Comment
             | crate::dom::NodeType::ProcessingInstruction => {
-                let data = node.data_utf16().unwrap_or_default();
-                Ok(JsString::from(data.as_slice()).into())
+                Ok(character_data_js_string(&node).into())
             }
             // Element, Document, DocumentFragment: concatenate descendant text
-            _ => {
-                let text = collect_text_recursive_utf16(&node);
-                Ok(JsString::from(text.as_slice()).into())
-            }
+            _ => Ok(collect_text_recursive_js(&node).into()),
         }
     })
 }
 
-fn collect_text_recursive_utf16(node: &NodeHandle) -> Vec<u16> {
-    fn append(node: &NodeHandle, units: &mut Vec<u16>) {
+fn character_data_js_string(node: &NodeHandle) -> JsString {
+    node.with_character_data(|scalar, original| {
+        if let Some(units) = original {
+            return JsString::from(units);
+        }
+        if scalar.is_ascii() {
+            return JsString::from(scalar);
+        }
+        let mut builder = Utf16JsStringBuilder::new();
+        builder.extend(scalar.encode_utf16());
+        builder.build()
+    })
+    .unwrap_or_default()
+}
+
+fn append_character_data(node: &NodeHandle, builder: &mut Utf16JsStringBuilder) {
+    let _ = node.with_character_data(|scalar, original| {
+        if let Some(units) = original {
+            builder.extend_from_slice(units);
+        } else {
+            builder.extend(scalar.encode_utf16());
+        }
+    });
+}
+
+fn collect_text_recursive_js(node: &NodeHandle) -> JsString {
+    fn append(node: &NodeHandle, builder: &mut Utf16JsStringBuilder) {
         for child in node.child_nodes() {
             if child.node_type() == NodeType::Text {
-                units.extend(child.data_utf16().unwrap_or_default());
+                append_character_data(&child, builder);
             } else if matches!(
                 child.node_type(),
                 NodeType::Element | NodeType::DocumentFragment
             ) {
-                append(&child, units);
+                append(&child, builder);
             }
         }
     }
-    let mut units = Vec::new();
-    append(node, &mut units);
-    units
-}
-
-fn collect_text_recursive(node: &NodeHandle) -> String {
-    crate::dom::collect_descendant_text(node, crate::dom::TextTraversal::Containers)
+    let mut builder = Utf16JsStringBuilder::new();
+    append(node, &mut builder);
+    builder.build()
 }
 
 fn set_text_content_native(
@@ -18880,34 +18911,38 @@ fn child_node_ids_native(
     })
 }
 
-fn next_sibling_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let id = args
-        .first()
-        .cloned()
-        .unwrap_or_default()
-        .to_number(context)? as usize;
+fn first_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    child_edge_native(args, context, NodeHandle::first_child)
+}
+
+fn last_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    child_edge_native(args, context, NodeHandle::last_child)
+}
+
+fn child_edge_native(
+    args: &[JsValue],
+    context: &mut Context,
+    select: fn(&NodeHandle) -> Option<NodeHandle>,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
-        let state = state.borrow();
         let node = state
+            .borrow()
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        let parent = match node.parent_node() {
-            Some(p) => p,
-            None => return Ok(JsValue::null()),
-        };
-        let siblings = parent.child_nodes();
-        let mut found = false;
-        for sibling in &siblings {
-            if found {
-                return Ok(JsValue::from(sibling.identity() as f64));
-            }
-            if sibling.identity() == id {
-                found = true;
-            }
+        let child = select(&node);
+        if let Some(child) = &child {
+            state
+                .borrow_mut()
+                .register_query_results(&node, std::slice::from_ref(child));
         }
-        Ok(JsValue::null())
+        Ok(node_to_js_value(child))
     })
+}
+
+fn next_sibling_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    sibling_node_native(args, context, NodeHandle::next_sibling)
 }
 
 fn previous_sibling_native(
@@ -18915,32 +18950,28 @@ fn previous_sibling_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let id = args
-        .first()
-        .cloned()
-        .unwrap_or_default()
-        .to_number(context)? as usize;
+    sibling_node_native(args, context, NodeHandle::previous_sibling)
+}
+
+fn sibling_node_native(
+    args: &[JsValue],
+    context: &mut Context,
+    select: fn(&NodeHandle) -> Option<NodeHandle>,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, id)?;
     with_host_state(|state| {
-        let state = state.borrow();
         let node = state
+            .borrow()
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        let parent = match node.parent_node() {
-            Some(p) => p,
-            None => return Ok(JsValue::null()),
-        };
-        let siblings = parent.child_nodes();
-        let mut prev: Option<&NodeHandle> = None;
-        for sibling in &siblings {
-            if sibling.identity() == id {
-                return Ok(prev
-                    .map(|p| JsValue::from(p.identity() as f64))
-                    .unwrap_or(JsValue::null()));
-            }
-            prev = Some(sibling);
+        let sibling = select(&node);
+        if let Some(sibling) = &sibling {
+            state
+                .borrow_mut()
+                .register_query_results(&node, std::slice::from_ref(sibling));
         }
-        Ok(JsValue::null())
+        Ok(node_to_js_value(sibling))
     })
 }
 

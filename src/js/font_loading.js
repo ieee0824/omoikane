@@ -3,8 +3,10 @@
 (() => {
   const native = globalThis.__omoikane_font_loading;
   const task = globalThis.__omoikane_queue_font_loading_task;
+  const installMutationHook = globalThis.__omoikane_install_font_mutation_hook;
   delete globalThis.__omoikane_font_loading;
   delete globalThis.__omoikane_queue_font_loading_task;
+  delete globalThis.__omoikane_install_font_mutation_hook;
   const [faces, sets, documents] = globalThis.__omoikane_font_maps;
   delete globalThis.__omoikane_font_maps;
   const defaults = {
@@ -443,12 +445,14 @@
     const set = new FontFaceSet();
     setState(set).document = document;
     documents.set(document, set);
-    const observer = new MutationObserver(() => {
-      if (documents.has(document)) {
-        const set = documents.get(document); syncCSS(set); requestUsedFonts(set);
+    installMutationHook(document, currentDocument => {
+      // A queued maintenance notification may outlive its browsing context.
+      // Retired windows must not create internal rejection reports or restart
+      // font work. The private host predicate uses this callback's Realm.
+      if (!native('is-live')) return;
+      if (documents.has(currentDocument)) {
+        const set = documents.get(currentDocument); syncCSS(set); requestUsedFonts(set);
       }
     });
-    observer.observe(document, {subtree: true, childList: true, characterData: true,
-      attributes: true, attributeFilter: ['href', 'rel', 'media', 'disabled']});
   }
 })();

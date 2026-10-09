@@ -578,6 +578,18 @@ fn load_face_data(state: &mut HostState, document: &NodeHandle, id: u64) -> JsRe
 /// document identity for policy checks or for registration in another document.
 pub(super) fn native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let operation = string_argument(args.first(), "", context)?;
+    if operation == "is-live" {
+        // Font maintenance is optional after a context retires. Check the same
+        // immutable Realm owner used by the operations below, before building
+        // payloads or executing any resource/style work.
+        return with_host_state(|host| {
+            Ok(host
+                .borrow()
+                .csp_document_for_context(context)
+                .is_ok()
+                .into())
+        });
+    }
     let payload = string_argument(args.get(1), "{}", context)?;
     let payload: serde_json::Value = serde_json::from_str(&payload).map_err(error)?;
     if operation == "parse-source" || operation == "parse-font" {

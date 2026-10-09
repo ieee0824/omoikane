@@ -499,6 +499,74 @@ fn a_registered_font_used_by_the_document_loads_without_an_explicit_load_call() 
 }
 
 #[test]
+fn internal_font_notifications_preserve_author_mutation_records() {
+    let mut runtime = runtime();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval(
+            r#"
+            globalThis.takeRecordsCalls = 0;
+            globalThis.authorRecords = [];
+            const originalTakeRecords = MutationObserver.prototype.takeRecords;
+            MutationObserver.prototype.takeRecords = function() {
+                takeRecordsCalls++;
+                return originalTakeRecords.call(this);
+            };
+            const authorObserver = new MutationObserver(records => authorRecords.push(...records));
+            authorObserver.observe(document.body, {
+                subtree: true, childList: true, characterData: true,
+                characterDataOldValue: true, attributes: true, attributeOldValue: true
+            });
+            for (let i = 0; i < 16; i++) {
+                const parent = document.createElement('a');
+                const text = document.createTextNode('before');
+                parent.appendChild(text);
+                document.body.appendChild(parent);
+                parent.setAttribute('class', 'probe');
+                text.data = 'after';
+                document.body.removeChild(parent);
+            }
+            "#,
+        )
+        .unwrap();
+    assert_eq!(eval_json(&mut runtime, "authorRecords.length"), 0);
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "[takeRecordsCalls,authorRecords.length,\
+             authorRecords.filter(record=>record.type==='childList').length,\
+             authorRecords.filter(record=>record.type==='attributes'&&record.oldValue===null).length,\
+             authorRecords.filter(record=>record.type==='characterData'&&record.oldValue==='before').length]"
+        ),
+        json!([1, 64, 32, 16, 16])
+    );
+}
+
+#[test]
+fn text_mutation_requests_fonts_without_using_public_observer_methods() {
+    let mut runtime = runtime();
+    runtime
+        .eval(&format!(
+            "document.getElementById('sample').textContent='';\
+             globalThis.mutationFace=new FontFace('RuntimeFont',{});\
+             document.fonts.add(mutationFace);",
+            serde_json::to_string(&format!("url({})", font_url())).unwrap()
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_json(&mut runtime, "mutationFace.status"), "unloaded");
+    runtime
+        .eval(
+            "MutationObserver.prototype.takeRecords=function(){throw new Error('public observer method')};\
+             document.getElementById('sample').appendChild(document.createTextNode('A'));",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_json(&mut runtime, "mutationFace.status"), "loaded");
+}
+
+#[test]
 fn automatic_font_loading_uses_the_computed_stretch() {
     let document = TreeBuilder::parse(
         "<!doctype html><style>#sample{font-family:AutoStretch;font-stretch:75%;font-size:20px}</style><span id=sample>A</span>",
