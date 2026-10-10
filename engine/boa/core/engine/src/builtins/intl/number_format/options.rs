@@ -38,6 +38,22 @@ impl OptionType for SignedRoundingMode {
     }
 }
 
+/// ECMA option spelling for an already validated native rounding mode.
+pub(super) fn rounding_mode_name(mode: SignedRoundingMode) -> &'static str {
+    match mode {
+        SignedRoundingMode::Unsigned(UnsignedRoundingMode::Expand) => "expand",
+        SignedRoundingMode::Unsigned(UnsignedRoundingMode::Trunc) => "trunc",
+        SignedRoundingMode::Unsigned(UnsignedRoundingMode::HalfExpand) => "halfExpand",
+        SignedRoundingMode::Unsigned(UnsignedRoundingMode::HalfTrunc) => "halfTrunc",
+        SignedRoundingMode::Unsigned(UnsignedRoundingMode::HalfEven) => "halfEven",
+        SignedRoundingMode::Ceil => "ceil",
+        SignedRoundingMode::Floor => "floor",
+        SignedRoundingMode::HalfCeil => "halfCeil",
+        SignedRoundingMode::HalfFloor => "halfFloor",
+        _ => unreachable!("validated ECMA rounding mode"),
+    }
+}
+
 impl OptionType for NumberingSystem {
     fn from_value(value: JsValue, context: &mut Context) -> JsResult<Self> {
         let s = value.to_string(context)?.to_std_string_escaped();
@@ -231,6 +247,11 @@ pub(crate) struct Currency {
 }
 
 impl Currency {
+    /// Uppercase ISO code used as a typed data-provider attribute.
+    pub(crate) fn as_str(&self) -> &str {
+        self.inner.as_str()
+    }
+
     pub(crate) fn to_js_string(self) -> JsString {
         let bytes = self.inner.as_bytes();
         js_string!(&[
@@ -319,73 +340,23 @@ impl std::str::FromStr for Unit {
     ///
     /// [spec]: https://tc39.es/ecma402/#sec-iswellformedunitidentifier
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        const SANCTIONED_UNITS: [&str; 45] = [
-            "acre",
-            "bit",
-            "byte",
-            "celsius",
-            "centimeter",
-            "day",
-            "degree",
-            "fahrenheit",
-            "fluid-ounce",
-            "foot",
-            "gallon",
-            "gigabit",
-            "gigabyte",
-            "gram",
-            "hectare",
-            "hour",
-            "inch",
-            "kilobit",
-            "kilobyte",
-            "kilogram",
-            "kilometer",
-            "liter",
-            "megabit",
-            "megabyte",
-            "meter",
-            "microsecond",
-            "mile",
-            "mile-scandinavian",
-            "milliliter",
-            "millimeter",
-            "millisecond",
-            "minute",
-            "month",
-            "nanosecond",
-            "ounce",
-            "percent",
-            "petabyte",
-            "pound",
-            "second",
-            "stone",
-            "terabit",
-            "terabyte",
-            "week",
-            "yard",
-            "year",
-        ];
-
         let (num, den) = s
             .split_once("-per-")
             .filter(|(_, den)| !den.is_empty())
             .unwrap_or((s, ""));
 
-        let num = SANCTIONED_UNITS
-            .binary_search(&num)
-            .map(|i| SANCTIONED_UNITS[i])
-            .map_err(|_| ParseUnitError)?;
+        let num = boa_intl_data::sanctioned_simple_unit(num)
+            .map(|(identifier, _)| identifier)
+            .ok_or(ParseUnitError)?;
 
         let num = JsStr::latin1(num.as_bytes());
 
         let den = if den.is_empty() {
             JsStr::EMPTY
         } else {
-            let value = SANCTIONED_UNITS
-                .binary_search(&den)
-                .map(|i| SANCTIONED_UNITS[i])
-                .map_err(|_| ParseUnitError)?;
+            let value = boa_intl_data::sanctioned_simple_unit(den)
+                .map(|(identifier, _)| identifier)
+                .ok_or(ParseUnitError)?;
 
             JsStr::latin1(value.as_bytes())
         };
@@ -507,7 +478,7 @@ impl UnitFormatOptions {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct DigitFormatOptions {
     pub(crate) minimum_integer_digits: u8,
     pub(crate) rounding_increment: RoundingIncrement,
@@ -780,12 +751,14 @@ impl DigitFormatOptions {
             rounding_mode: SignedRoundingMode,
         ) -> i16 {
             let msb = number.nonzero_magnitude_start();
-            let min_msb = msb - i16::from(min_precision) + 1;
             let max_msb = msb - i16::from(max_precision) + 1;
             round(number, max_msb, rounding_mode, BaseMultiple::MultiplesOf1);
+            // ToRawPrecision uses the chosen rounded candidate's exponent;
+            // a carry changes both its padding and rounding magnitude.
+            let rounded_msb = number.nonzero_magnitude_start();
             number.trim_end();
-            number.pad_end(min_msb);
-            max_msb
+            number.pad_end(rounded_msb - i16::from(min_precision) + 1);
+            rounded_msb - i16::from(max_precision) + 1
         }
 
         // <https://tc39.es/ecma402/#sec-torawfixed>
@@ -989,7 +962,7 @@ impl RoundingIncrement {
 
     /// Gets the numeric value of this `RoundingIncrement`.
     pub(crate) fn to_u16(self) -> u16 {
-        u16::from(self.magnitude_offset + 1)
+        10u16.pow(u32::from(self.magnitude_offset))
             * match self.multiple {
                 BaseMultiple::MultiplesOf1 => 1,
                 BaseMultiple::MultiplesOf2 => 2,

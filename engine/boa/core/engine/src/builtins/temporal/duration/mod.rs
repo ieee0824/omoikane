@@ -1140,10 +1140,9 @@ impl Duration {
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal/Duration/toLocaleString
     pub(crate) fn to_locale_string(
         this: &JsValue,
-        _: &[JsValue],
-        _: &mut Context,
+        args: &[JsValue],
+        context: &mut Context,
     ) -> JsResult<JsValue> {
-        // TODO: Update for ECMA-402 compliance
         let object = this.as_object();
         let duration = object
             .as_ref()
@@ -1152,11 +1151,28 @@ impl Duration {
                 JsNativeError::typ().with_message("this value must be a Duration object.")
             })?;
 
-        let result = duration
-            .inner
-            .as_temporal_string(ToStringRoundingOptions::default())?;
-
-        Ok(JsString::from(result).into())
+        // Option getters can execute author code and collect. Copy internal
+        // state and release the receiver borrow before constructing Intl data.
+        #[cfg(feature = "intl")]
+        {
+            let inner = duration.inner.clone();
+            drop(duration);
+            let _object_root = object.map(JsObject::root);
+            crate::builtins::intl::DurationFormat::format_temporal(
+                &inner,
+                args.get_or_undefined(0),
+                args.get_or_undefined(1),
+                context,
+            )
+        }
+        #[cfg(not(feature = "intl"))]
+        {
+            let _ = (args, context);
+            let result = duration
+                .inner
+                .as_temporal_string(ToStringRoundingOptions::default())?;
+            Ok(JsString::from(result).into())
+        }
     }
 
     /// 7.3.25 `Temporal.Duration.prototype.valueOf ( )`

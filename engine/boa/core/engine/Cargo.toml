@@ -217,6 +217,22 @@ crate-type = ["cdylib", "lib"]
 name = "boa_engine"
 bench = false
 
+[[example]]
+name = "p1_intl_datetime_calendar_backend_probe"
+required-features = ["intl_bundled"]
+
+[[example]]
+name = "p1_intl_datetime_native_probe"
+required-features = ["intl_bundled"]
+
+[[example]]
+name = "p1_intl_datetime_pattern_probe"
+required-features = ["intl_bundled"]
+
+[[example]]
+name = "p1_intl_datetime_provider_probe"
+required-features = ["intl_bundled"]
+
 [[bench]]
 name = "full"
 harness = false

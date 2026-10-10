@@ -1608,6 +1608,27 @@ impl Date {
         func.call(this, &[], context)
     }
 
+    /// Converts explicit epoch milliseconds into ICU ISO fields without host state.
+    #[cfg(feature = "intl")]
+    pub(crate) fn intl_utc_datetime(
+        time: f64,
+    ) -> JsResult<icu_datetime::input::DateTime<icu_calendar::Iso>> {
+        let date = icu_calendar::Date::try_new_iso(
+            year_from_time(time),
+            month_from_time(time) + 1,
+            date_from_time(time),
+        )
+        .map_err(|error| JsNativeError::range().with_message(format!("date fields: {error:?}")))?;
+        let time = icu_datetime::input::Time::try_new(
+            hour_from_time(time),
+            min_from_time(time),
+            sec_from_time(time),
+            u32::from(ms_from_time(time)) * 1_000_000,
+        )
+        .map_err(|error| JsNativeError::range().with_message(format!("time fields: {error:?}")))?;
+        Ok(icu_datetime::input::DateTime { date, time })
+    }
+
     /// [`Date.prototype.toLocaleDateString()`][spec].
     ///
     /// The `toLocaleDateString()` method returns the date portion of the given Date instance according
@@ -1623,9 +1644,17 @@ impl Date {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
-        // Without the optional Intl feature, return the engine's stable date
-        // representation instead of rejecting. Browser bundles commonly call
-        // this method as a harmless feature probe during startup.
+        #[cfg(feature = "intl")]
+        {
+            Self::locale_format(
+                this,
+                args,
+                crate::builtins::intl::date_time_format::DateTimeReqs::Date,
+                crate::builtins::intl::date_time_format::DateTimeReqs::Date,
+                context,
+            )
+        }
+        #[cfg(not(feature = "intl"))]
         Self::to_date_string(this, args, context)
     }
 
@@ -1643,6 +1672,17 @@ impl Date {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        #[cfg(feature = "intl")]
+        {
+            Self::locale_format(
+                this,
+                args,
+                crate::builtins::intl::date_time_format::DateTimeReqs::AnyAll,
+                crate::builtins::intl::date_time_format::DateTimeReqs::AnyAll,
+                context,
+            )
+        }
+        #[cfg(not(feature = "intl"))]
         Self::to_string(this, args, context)
     }
 
@@ -1661,7 +1701,44 @@ impl Date {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        #[cfg(feature = "intl")]
+        {
+            Self::locale_format(
+                this,
+                args,
+                crate::builtins::intl::date_time_format::DateTimeReqs::Time,
+                crate::builtins::intl::date_time_format::DateTimeReqs::Time,
+                context,
+            )
+        }
+        #[cfg(not(feature = "intl"))]
         Self::to_time_string(this, args, context)
+    }
+
+    #[cfg(feature = "intl")]
+    fn locale_format(
+        this: &JsValue,
+        args: &[JsValue],
+        required: crate::builtins::intl::date_time_format::DateTimeReqs,
+        defaults: crate::builtins::intl::date_time_format::DateTimeReqs,
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        let time = this
+            .as_object()
+            .and_then(|object| object.downcast_ref::<Self>().map(|date| date.0))
+            .ok_or_else(|| JsNativeError::typ().with_message("receiver is not a Date"))?;
+        if time.is_nan() {
+            return Ok(js_string!("Invalid Date").into());
+        }
+        let mut formatter =
+            crate::builtins::intl::date_time_format::DateTimeFormat::new_with_requirements(
+                args.get_or_undefined(0),
+                args.get_or_undefined(1),
+                required,
+                defaults,
+                context,
+            )?;
+        formatter.format_epoch(time, context)
     }
 
     /// [`Date.prototype.toString()`][spec].

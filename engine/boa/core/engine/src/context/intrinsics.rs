@@ -197,6 +197,12 @@ pub struct StandardConstructors {
     plural_rules: StandardConstructor,
     #[cfg(feature = "intl")]
     number_format: StandardConstructor,
+    #[cfg(feature = "intl")]
+    duration_format: StandardConstructor,
+    #[cfg(feature = "intl")]
+    display_names: StandardConstructor,
+    #[cfg(feature = "intl")]
+    relative_time_format: StandardConstructor,
     #[cfg(feature = "temporal")]
     instant: StandardConstructor,
     #[cfg(feature = "temporal")]
@@ -296,6 +302,12 @@ impl Default for StandardConstructors {
             plural_rules: StandardConstructor::default(),
             #[cfg(feature = "intl")]
             number_format: StandardConstructor::default(),
+            #[cfg(feature = "intl")]
+            duration_format: StandardConstructor::default(),
+            #[cfg(feature = "intl")]
+            display_names: StandardConstructor::default(),
+            #[cfg(feature = "intl")]
+            relative_time_format: StandardConstructor::default(),
             #[cfg(feature = "temporal")]
             instant: StandardConstructor::default(),
             #[cfg(feature = "temporal")]
@@ -973,6 +985,34 @@ impl StandardConstructors {
     #[cfg(feature = "intl")]
     pub const fn number_format(&self) -> &StandardConstructor {
         &self.number_format
+    }
+
+    /// Returns the `Intl.DurationFormat` constructor.
+    ///
+    /// [ECMAScript reference](https://tc39.es/ecma402/#sec-intl.durationformat)
+    #[inline]
+    #[must_use]
+    #[cfg(feature = "intl")]
+    pub const fn duration_format(&self) -> &StandardConstructor {
+        &self.duration_format
+    }
+
+    /// Returns the native `Intl.DisplayNames` constructor.
+    /// [ECMAScript reference](https://tc39.es/ecma402/#sec-intl.displaynames)
+    #[inline]
+    #[must_use]
+    #[cfg(feature = "intl")]
+    pub const fn display_names(&self) -> &StandardConstructor {
+        &self.display_names
+    }
+
+    /// Returns the native `Intl.RelativeTimeFormat` constructor.
+    /// [ECMAScript reference](https://tc39.es/ecma402/#sec-intl.relativetimeformat)
+    #[inline]
+    #[must_use]
+    #[cfg(feature = "intl")]
+    pub const fn relative_time_format(&self) -> &StandardConstructor {
+        &self.relative_time_format
     }
 
     /// Returns the `Temporal.Instant` constructor.

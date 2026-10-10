@@ -10,9 +10,9 @@ pub use hooks::{DefaultHooks, HostHooks};
 #[cfg(feature = "intl")]
 pub use icu::IcuError;
 use intrinsics::Intrinsics;
-#[cfg(feature = "temporal")]
+#[cfg(any(feature = "temporal", feature = "intl"))]
 use temporal_rs::provider::TimeZoneProvider;
-#[cfg(feature = "temporal")]
+#[cfg(any(feature = "temporal", feature = "intl"))]
 use timezone_provider::tzif::CompiledTzdbProvider;
 
 use crate::job::Job;
@@ -123,7 +123,7 @@ pub struct Context {
 
     pub(crate) async_jobs_enabled: bool,
 
-    #[cfg(feature = "temporal")]
+    #[cfg(any(feature = "temporal", feature = "intl"))]
     tz_provider: CompiledTzdbProvider,
 
     /// Intl data provider.
@@ -1209,7 +1209,7 @@ impl Context {
     }
 
     /// Get the Time Zone Provider
-    #[cfg(feature = "temporal")]
+    #[cfg(any(feature = "temporal", feature = "intl"))]
     pub(crate) fn tz_provider(&self) -> &impl TimeZoneProvider {
         &self.tz_provider
     }
@@ -1423,7 +1423,7 @@ impl ContextBuilder {
             interner: self.interner.unwrap_or_default(),
             vm,
             strict: false,
-            #[cfg(feature = "temporal")]
+            #[cfg(any(feature = "temporal", feature = "intl"))]
             tz_provider: CompiledTzdbProvider::default(),
             #[cfg(feature = "intl")]
             intl_provider: if let Some(icu) = self.icu {
