@@ -52,6 +52,7 @@ thread_local! {
 #[derive(Default, Trace, Finalize)]
 struct ContextRoots {
     kept_alive: Vec<JsObject>,
+    finalization_registries: Vec<boa_gc::WeakGcEdge<crate::object::ErasedVTableObject>>,
     data: HostDefined,
     pending_async_resume: Option<builtins::generator::PendingAsyncResume>,
 }
@@ -693,14 +694,22 @@ impl Context {
     }
 
     /// Runs all the jobs with the provided job executor.
+    ///
+    /// Schedules cleanup jobs for reachable finalization registries with collected
+    /// targets before draining the executor; callbacks never run inside collection.
     #[inline]
     pub fn run_jobs(&mut self) -> JsResult<()> {
+        self.poll_finalization_registries();
         self.job_executor().run_jobs(self)
     }
 
     /// Asynchronously runs all jobs with the provided job executor.
+    ///
+    /// Schedules cleanup jobs for reachable finalization registries with collected
+    /// targets before draining the executor; callbacks never run inside collection.
     #[allow(clippy::future_not_send)]
     pub async fn run_jobs_async(&mut self) -> JsResult<()> {
+        self.poll_finalization_registries();
         let executor = self.job_executor();
         executor
             .run_jobs_async(&crate::job::AsyncContext::new(&mut *self))
@@ -718,6 +727,40 @@ impl Context {
     #[inline]
     pub fn clear_kept_objects(&mut self) {
         self.roots.kept_alive.clear();
+    }
+
+    pub(crate) fn track_finalization_registry(&mut self, registry: &JsObject) {
+        if self
+            .roots
+            .finalization_registries
+            .iter()
+            .filter_map(boa_gc::WeakGcEdge::upgrade_edge)
+            .any(|edge| JsObject::equals(&JsObject::from(edge), registry))
+        {
+            return;
+        }
+        let weak = boa_gc::WeakGcEdge::new_rooted(&registry.root_inner());
+        self.roots.finalization_registries.push(weak);
+    }
+
+    fn poll_finalization_registries(&mut self) {
+        self.roots
+            .finalization_registries
+            .retain(boa_gc::WeakGcEdge::is_upgradable);
+        let snapshot: Vec<_> = self
+            .roots
+            .finalization_registries
+            .iter()
+            .map(|edge| (edge.clone(), edge.root()))
+            .collect();
+        for (edge, _weak_root) in snapshot {
+            if let Some(root) = edge.upgrade_rooted() {
+                builtins::finalization_registry::FinalizationRegistry::schedule(
+                    JsObject::from(root.clone().into_edge()),
+                    self,
+                );
+            }
+        }
     }
 
     pub(crate) fn keep_alive(&mut self, object: JsObject) {
@@ -1108,6 +1151,15 @@ impl Context {
             .iter()
             .rev()
             .find_map(|frame| frame.active_runnable.clone())
+    }
+
+    /// Returns the owned receiver of the active native call, absent for construction.
+    ///
+    /// Native dispatch saves and restores this value across nested calls; the VM and
+    /// the short-lived native call roots keep object receivers alive during collection.
+    #[cfg_attr(not(feature = "intl"), allow(dead_code))]
+    pub(crate) fn native_call_receiver(&self) -> Option<JsValue> {
+        self.vm.native_active_receiver.clone()
     }
 
     /// Get `active function object`

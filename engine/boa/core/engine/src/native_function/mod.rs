@@ -434,6 +434,10 @@ pub(crate) fn native_function_call(
         &mut context.vm.native_active_function_is_constructor_call,
         false,
     );
+    let previous_receiver = context
+        .vm
+        .native_active_receiver
+        .replace(native_roots.this.clone());
 
     let continuation_depth = context.vm.native_call_continuations.len();
     let frame_depth = context.vm.frames.len();
@@ -445,6 +449,7 @@ pub(crate) fn native_function_call(
     .map_err(|err| err.inject_realm(context.realm()));
 
     context.vm.native_active_function = previous_active_function;
+    context.vm.native_active_receiver = previous_receiver;
     context.vm.native_active_function_is_constructor_call = previous_is_constructor_call;
     if context.vm.frames.len() > frame_depth {
         // A native continuation can leave a callback frame ready to execute.
@@ -568,6 +573,7 @@ fn native_function_construct(
         .vm
         .native_active_function
         .replace(this_function_object.clone());
+    let previous_receiver = context.vm.native_active_receiver.take();
 
     let result = function
         .call(
@@ -613,6 +619,7 @@ fn native_function_construct(
         });
 
     context.vm.native_active_function = previous_active_function;
+    context.vm.native_active_receiver = previous_receiver;
     context.vm.native_active_function_is_constructor_call = previous_is_constructor_call;
     context.swap_realm(&mut realm);
 
@@ -652,5 +659,94 @@ mod tests {
             .call(&JsValue::undefined(), &[], &mut context)
             .expect("native function realm edge should be promoted for the call");
         assert_eq!(result, JsValue::new(42));
+    }
+
+    #[test]
+    fn native_receiver_survives_nested_calls_collection_and_abrupt_completion() {
+        use crate::{JsArgs, JsNativeError, Source, js_string};
+        let mut context = Context::default();
+        context
+            .register_global_builtin_callable(
+                js_string!("innerReceiver"),
+                0,
+                NativeFunction::from_fn_ptr(|this, args, context| {
+                    boa_gc::force_collect();
+                    assert_eq!(context.native_call_receiver().as_ref(), Some(this));
+                    if args.get_or_undefined(0).to_boolean() {
+                        return Err(JsNativeError::error()
+                            .with_message("inner receiver failure")
+                            .into());
+                    }
+                    Ok(this.clone())
+                }),
+            )
+            .unwrap();
+        context
+            .register_global_builtin_callable(
+                js_string!("outerReceiver"),
+                1,
+                NativeFunction::from_fn_ptr(|this, args, context| {
+                    let callback = args
+                        .get_or_undefined(0)
+                        .as_callable()
+                        .expect("test callback");
+                    let result = callback.call(&JsValue::undefined(), &[], context);
+                    assert_eq!(context.native_call_receiver().as_ref(), Some(this));
+                    boa_gc::force_collect();
+                    result
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            context
+                .eval(Source::from_bytes(
+                    r#"(() => {
+            const outer = {id:'outer'}, inner = {id:'inner'};
+            if (outerReceiver.call(outer,() => innerReceiver.call(inner)) !== inner) return false;
+            try { outerReceiver.call(outer,() => innerReceiver.call(inner,true)); return false; }
+            catch(error) { if (error.message !== 'inner receiver failure') return false; }
+            return outerReceiver.call(outer,() => innerReceiver.call(inner)) === inner;
+        })()"#
+                ))
+                .unwrap(),
+            JsValue::new(true)
+        );
+        assert!(context.native_call_receiver().is_none());
+    }
+
+    #[test]
+    fn native_construction_has_no_receiver_and_restores_enclosing_call() {
+        use crate::{Source, js_string, object::FunctionObjectBuilder, property::Attribute};
+        let mut context = Context::default();
+        let constructor = FunctionObjectBuilder::new(
+            context.realm(),
+            NativeFunction::from_fn_ptr(|_, _, context| {
+                assert!(context.native_call_receiver().is_none());
+                boa_gc::force_collect();
+                Ok(JsValue::undefined())
+            }),
+        )
+        .constructor(true)
+        .build();
+        context
+            .register_global_property(
+                js_string!("ReceiverConstructor"),
+                constructor,
+                Attribute::all(),
+            )
+            .unwrap();
+        context
+            .register_global_builtin_callable(
+                js_string!("enclosingReceiver"),
+                0,
+                NativeFunction::from_fn_ptr(|this, _, context| {
+                    context.eval(Source::from_bytes("new ReceiverConstructor()"))?;
+                    assert_eq!(context.native_call_receiver().as_ref(), Some(this));
+                    Ok(this.clone())
+                }),
+            )
+            .unwrap();
+        assert_eq!(context.eval(Source::from_bytes("(() => { const value = {}; return enclosingReceiver.call(value) === value; })()" )).unwrap(), JsValue::new(true));
+        assert!(context.native_call_receiver().is_none());
     }
 }

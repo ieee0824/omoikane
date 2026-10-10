@@ -151,6 +151,12 @@ impl IntrinsicObject for Symbol {
                 attribute,
             )
             .static_property(js_string!("unscopables"), symbol_unscopables, attribute)
+            .static_property(js_string!("dispose"), JsSymbol::dispose(), attribute)
+            .static_property(
+                js_string!("asyncDispose"),
+                JsSymbol::async_dispose(),
+                attribute,
+            )
             .method(Self::to_string, js_string!("toString"), 0)
             .method(Self::value_of, js_string!("valueOf"), 0)
             .accessor(
@@ -184,7 +190,7 @@ impl BuiltInObject for Symbol {
 impl BuiltInConstructor for Symbol {
     const CONSTRUCTOR_ARGUMENTS: usize = 0;
     const PROTOTYPE_STORAGE_SLOTS: usize = 6;
-    const CONSTRUCTOR_STORAGE_SLOTS: usize = 15;
+    const CONSTRUCTOR_STORAGE_SLOTS: usize = 17;
 
     const STANDARD_CONSTRUCTOR: fn(&StandardConstructors) -> &StandardConstructor =
         StandardConstructors::symbol;

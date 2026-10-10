@@ -13,7 +13,12 @@ use crate::{
 use boa_gc::{Finalize, Trace};
 
 mod async_from_sync_iterator;
+mod constructor;
+mod consumers;
+mod helper;
+mod wrapper;
 pub(crate) use async_from_sync_iterator::AsyncFromSyncIterator;
+pub(crate) use constructor::IteratorConstructor;
 
 /// `IfAbruptCloseIterator ( value, iteratorRecord )`
 ///
@@ -176,9 +181,7 @@ pub(crate) struct Iterator;
 
 impl IntrinsicObject for Iterator {
     fn init(realm: &Realm) {
-        BuiltInBuilder::with_intrinsic::<Self>(realm)
-            .static_method(|v, _, _| Ok(v.clone()), JsSymbol::iterator(), 0)
-            .build();
+        IteratorConstructor::init(realm);
     }
 
     fn get(intrinsics: &Intrinsics) -> JsObject {

@@ -6,6 +6,7 @@ use crate::value::JsVariant;
 use crate::{Context, JsNativeError, JsResult, JsString, JsValue, object::JsObject};
 
 /// A type used as an option parameter for [`get_option`].
+#[cfg_attr(not(any(feature = "intl", feature = "temporal")), allow(dead_code))]
 pub(crate) trait OptionType: Sized {
     /// Parses a [`JsValue`] into an instance of `Self`.
     ///
@@ -19,6 +20,7 @@ pub(crate) trait OptionType: Sized {
 /// A type that implements [`OptionType`] by parsing a string.
 ///
 /// This automatically implements `OptionType` for a type if the type implements `FromStr`.
+#[cfg_attr(not(any(feature = "intl", feature = "temporal")), allow(dead_code))]
 pub(crate) trait ParsableOptionType: FromStr {}
 
 impl<T: ParsableOptionType> OptionType for T
@@ -49,6 +51,7 @@ where
 /// it wants to parse from a [`str`] or convert directly from a boolean or number.
 ///
 /// [spec]: https://tc39.es/ecma402/#sec-getoption
+#[cfg_attr(not(any(feature = "intl", feature = "temporal")), allow(dead_code))]
 pub(crate) fn get_option<T: OptionType>(
     options: &JsObject,
     property: JsString,
