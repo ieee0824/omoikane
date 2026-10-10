@@ -91,6 +91,21 @@ pub(crate) fn character_data_utf16_copy_work() -> usize {
     CHARACTER_DATA_UTF16_COPY_WORK.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+thread_local! {
+    static ATTRIBUTE_UTF16_COPY_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_attribute_utf16_copy_work() {
+    ATTRIBUTE_UTF16_COPY_WORK.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn attribute_utf16_copy_work() -> usize {
+    ATTRIBUTE_UTF16_COPY_WORK.with(std::cell::Cell::get)
+}
+
 /// Returns whether an HTML form control is actually disabled.
 ///
 /// Besides a control's own `disabled` attribute, a disabled `fieldset`
@@ -389,12 +404,12 @@ impl PartialEq for ParserFormOwner {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AttributeRecord {
-    utf16: Option<Vec<u16>>,
-    qualified_name: String,
-    namespace_uri: Option<String>,
-    local_name: String,
-    value: String,
+pub(crate) struct AttributeRecord {
+    pub(crate) utf16: Option<Vec<u16>>,
+    pub(crate) qualified_name: String,
+    pub(crate) namespace_uri: Option<String>,
+    pub(crate) local_name: String,
+    pub(crate) value: String,
 }
 
 fn cloned_attribute_record(
@@ -1290,6 +1305,21 @@ impl NodeHandle {
         }
     }
 
+    /// Reads ordered attribute records without copying names or payloads.
+    ///
+    /// The immutable DOM borrow lasts only for `read`. The callback must not
+    /// mutate the node or invoke author code; returned values must be owned.
+    pub(crate) fn with_attribute_records<R>(
+        &self,
+        read: impl FnOnce(&[AttributeRecord]) -> R,
+    ) -> Option<R> {
+        let inner = self.0.borrow();
+        let NodeData::Element(element) = &inner.data else {
+            return None;
+        };
+        Some(read(&element.attribute_records))
+    }
+
     /// Returns attribute records with exact UTF-16 values in insertion order.
     pub fn attribute_records_utf16(
         &self,
@@ -1298,6 +1328,22 @@ impl NodeHandle {
         let NodeData::Element(element) = &inner.data else {
             return None;
         };
+        #[cfg(test)]
+        ATTRIBUTE_UTF16_COPY_WORK.with(|count| {
+            count.set(
+                count.get()
+                    + element
+                        .attribute_records
+                        .iter()
+                        .map(|record| {
+                            record
+                                .utf16
+                                .as_ref()
+                                .map_or_else(|| record.value.encode_utf16().count(), Vec::len)
+                        })
+                        .sum::<usize>(),
+            );
+        });
         Some(
             element
                 .attribute_records
