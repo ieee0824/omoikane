@@ -302,3 +302,27 @@ fn popup_navigation_runs_external_classic_script() {
             .to_boolean()
     );
 }
+
+#[test]
+fn cross_origin_popup_uses_intrinsic_fallback_descriptors() {
+    let document = TreeBuilder::parse("<html><body></body></html>").document();
+    let mut runtime = JsRuntime::with_document_and_url(document, "https://example.test/").unwrap();
+    runtime
+        .eval("globalThis.popup = open('data:text/html,<p>opaque</p>', 'opaque');")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(runtime.eval(r#"(() => {
+        for (const key of ['then', Symbol.hasInstance, Symbol.isConcatSpreadable, Symbol.toStringTag]) {
+            if (popup[key] !== undefined) return false;
+            const descriptor = Object.getOwnPropertyDescriptor(popup, key);
+            if (!descriptor || descriptor.value !== undefined || descriptor.writable ||
+                descriptor.enumerable || !descriptor.configurable) return false;
+        }
+        for (const key of ['Date', 'document', Symbol('hasInstance')]) {
+            let denied = false;
+            try { void popup[key]; } catch (error) { denied = error.name === 'SecurityError'; }
+            if (!denied) return false;
+        }
+        return true;
+    })()"#).unwrap().to_boolean());
+}

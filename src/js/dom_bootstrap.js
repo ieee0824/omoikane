@@ -1,4 +1,15 @@
 (() => {
+  // Capture intrinsic identities before author code can replace global Symbol.
+  const windowProxyToStringTag = Symbol.toStringTag;
+  const windowProxyHasInstance = Symbol.hasInstance;
+  const windowProxyIsConcatSpreadable = Symbol.isConcatSpreadable;
+  function isCrossOriginWindowFallbackKey(property) {
+    return property === "then" || property === windowProxyToStringTag ||
+      property === windowProxyHasInstance || property === windowProxyIsConcatSpreadable;
+  }
+  function crossOriginWindowFallbackDescriptor() {
+    return { value: undefined, writable: false, enumerable: false, configurable: true };
+  }
   let platformEventInterfaces;
   let platformHandlerTypes;
   function windowHandlerReceiver(window, property, receiver, proxy) {
@@ -10087,7 +10098,6 @@
         const handler = {
           get(_target, property, receiver) {
             refresh();
-            if (property === Symbol.toStringTag) return "Window";
             if (property === "closed") return access === "closed";
             if (property === "window" || property === "self" || property === "frames") return proxy;
             // Check in the trap itself: a helper in the facade's creator Realm
@@ -10097,6 +10107,8 @@
             // Realm, so validate the caller without creating a scriptless one.
             const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) :
               nativeWindowProxyGlobal(proxy, property !== "location");
+            if (window === null && isCrossOriginWindowFallbackKey(property)) return undefined;
+            if (property === windowProxyToStringTag) return "Window";
             if (property === "top") return window !== null ? window.top : topWindow;
             if (property === "parent") return window !== null && access === "cross" ? window.parent : parentWindow();
             if (property === "opener") return null;
@@ -10144,7 +10156,10 @@
             refresh();
             if (safeCrossOriginProperties.has(property)) return true;
             const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) : nativeWindowProxyGlobal(proxy);
-            if (window === null) throw securityError();
+            if (window === null) {
+              if (isCrossOriginWindowFallbackKey(property)) return true;
+              throw securityError();
+            }
             return property in window || Object.prototype.hasOwnProperty.call(methods, property);
           },
           defineProperty(_target, property, descriptor) {
@@ -10175,7 +10190,10 @@
               return { value: postMessage, writable: false, enumerable: true, configurable: true };
             }
             const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) : nativeWindowProxyGlobal(proxy);
-            if (window === null) throw securityError();
+            if (window === null) {
+              if (isCrossOriginWindowFallbackKey(property)) return crossOriginWindowFallbackDescriptor();
+              throw securityError();
+            }
             const descriptor = Reflect.getOwnPropertyDescriptor(window, property);
             // This JS Proxy has an empty, extensible target. Its forwarded
             // descriptors must remain configurable across Window generations.
@@ -24212,7 +24230,10 @@
       },
       getOwnPropertyDescriptor(_target, property) {
         const window = nativeWindowProxyGlobal(getProxy());
-        if (window === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        if (window === null) {
+          if (isCrossOriginWindowFallbackKey(property)) return crossOriginWindowFallbackDescriptor();
+          throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        }
         const descriptor = safeGetOwnPropertyDescriptor(window, property);
         return descriptor ? { ...descriptor, configurable: true } : undefined;
       },
@@ -24253,10 +24274,11 @@
       ...auxiliaryWindowReflection(() => proxy),
       get(_target, property, receiver) {
         const state = access();
-        if (property === Symbol.toStringTag) return "Window";
         if (property === "closed") return state === "closed";
         if (property === "close") return () => __omoikane_close_auxiliary_window(id);
         const target = state === "closed" ? null : nativeWindowProxyGlobal(proxy);
+        if (target === null && isCrossOriginWindowFallbackKey(property)) return undefined;
+        if (property === windowProxyToStringTag) return "Window";
         if (property === "location") return target !== null && state === "cross" ? target.location : location;
         if (property === "window" || property === "self" || property === "frames" ||
             property === "parent" || property === "top") return proxy;
