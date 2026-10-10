@@ -253,13 +253,7 @@ impl WriteParser {
                 .and_then(NodeHandle::parent_node)
                 .or_else(|| document.query_selector("body"))
                 .unwrap_or_else(|| html.clone());
-            let reference = anchor.as_ref().and_then(|anchor| {
-                let siblings = parent.child_nodes();
-                siblings
-                    .iter()
-                    .position(|node| node == anchor)
-                    .and_then(|index| siblings.get(index + 1).cloned())
-            });
+            let reference = anchor.as_ref().and_then(NodeHandle::next_sibling);
             let mut ancestors = Vec::new();
             let mut current = Some(parent.clone());
             while let Some(node) = current {
@@ -1691,42 +1685,44 @@ impl Builder {
         }
     }
 
-    fn character_units(&self, text: &str) -> Vec<u16> {
-        if let Some(unit) = self.character_surrogate {
-            assert_eq!(text, "\u{fffd}");
-            vec![unit]
-        } else {
-            text.encode_utf16().collect()
-        }
+    fn character_node(&self, text: &str) -> NodeHandle {
+        let Some(unit) = self.character_surrogate else {
+            return NodeHandle::text(text);
+        };
+        assert_eq!(text, "\u{fffd}");
+        let node = NodeHandle::text("");
+        node.set_data_utf16(&[unit]);
+        node
     }
 
-    fn character_node(&self, text: &str) -> NodeHandle {
-        let node = NodeHandle::text("");
-        node.set_data_utf16(&self.character_units(text));
-        node
+    fn append_character_data(&self, node: &NodeHandle, text: &str) {
+        if let Some(unit) = self.character_surrogate {
+            assert_eq!(text, "\u{fffd}");
+            node.append_text_utf16(&[unit]);
+        } else {
+            node.append_text_data(text);
+        }
     }
 
     fn insert_text(&mut self, text: &str) {
         let parent = self.current_node_or_document();
         // Writes can split a character run at arbitrary input boundaries.
         // Keep the live Text node when more characters arrive at the same point.
+        let reference = self
+            .write_boundary
+            .as_ref()
+            .filter(|(boundary, _)| boundary == &parent)
+            .and_then(|(_, reference)| reference.as_ref())
+            .filter(|reference| reference.parent_node().as_ref() == Some(&parent));
+        let previous = match reference {
+            Some(reference) => reference.previous_sibling(),
+            None => parent.last_child(),
+        };
+        if let Some(previous) = previous
+            && previous.node_type() == crate::dom::NodeType::Text
         {
-            let children = parent.child_nodes();
-            let index = self
-                .write_boundary
-                .as_ref()
-                .filter(|(boundary, _)| boundary == &parent)
-                .and_then(|(_, reference)| reference.as_ref())
-                .and_then(|reference| children.iter().position(|node| node == reference))
-                .unwrap_or(children.len());
-            if let Some(previous) = index.checked_sub(1).and_then(|index| children.get(index))
-                && previous.node_type() == crate::dom::NodeType::Text
-            {
-                let mut units = previous.data_utf16().unwrap_or_default();
-                units.extend(self.character_units(text));
-                previous.set_data_utf16(&units);
-                return;
-            }
+            self.append_character_data(&previous, text);
+            return;
         }
         self.append_node(&parent, self.character_node(text));
     }
@@ -1735,24 +1731,17 @@ impl Builder {
         if let Some(table) = self.current_table()
             && let Some(parent) = table.parent_node()
         {
-            let children = parent.child_nodes();
-            if let Some(previous) = children
-                .iter()
-                .position(|child| child == &table)
-                .and_then(|index| index.checked_sub(1))
-                .and_then(|index| children.get(index))
+            if let Some(previous) = table.previous_sibling()
                 && previous.node_type() == crate::dom::NodeType::Text
             {
-                let mut units = previous.data_utf16().unwrap_or_default();
-                units.extend(self.character_units(text));
-                previous.set_data_utf16(&units);
+                self.append_character_data(&previous, text);
                 return;
             }
             let text_node = self.character_node(text);
             if let Some(created) = &self.created_nodes {
                 created.borrow_mut().push(text_node.clone());
             }
-            let _ = parent.insert_before(text_node.clone(), &table);
+            let _ = parent.insert_before(text_node, &table);
             return;
         }
 
@@ -2139,6 +2128,48 @@ mod tests {
     use crate::dom::Node;
 
     use super::*;
+
+    #[test]
+    fn ordinary_text_insertion_does_not_snapshot_existing_siblings() {
+        const ITEMS: usize = 512;
+        let mut html = String::from("<body>");
+        for _ in 0..ITEMS {
+            html.push_str("x<br>");
+        }
+
+        crate::dom::reset_child_snapshot_handle_clones();
+        let result = TreeBuilder::parse(&html);
+        let cloned_handles = crate::dom::child_snapshot_handle_clones();
+        assert!(
+            cloned_handles < ITEMS * 16,
+            "ordinary text insertion cloned {cloned_handles} child handles"
+        );
+
+        let body = result.document().query_selector("body").unwrap();
+        assert_eq!(body.child_nodes().len(), ITEMS * 2);
+    }
+
+    #[test]
+    fn unpaired_surrogate_text_append_has_linear_copy_work() {
+        fn parse_copy_work(items: usize) -> usize {
+            let mut input = "<body>".encode_utf16().collect::<Vec<_>>();
+            input.extend(std::iter::repeat_n(0xd800, items));
+
+            crate::dom::reset_character_data_utf16_copy_work();
+            let result = TreeBuilder::parse_inert_utf16(&input);
+            let body = result.document().query_selector("body").unwrap();
+            let text = body.first_child().unwrap();
+            assert_eq!(text.data_utf16(), Some(vec![0xd800; items]));
+            crate::dom::character_data_utf16_copy_work()
+        }
+
+        let small = parse_copy_work(256);
+        let large = parse_copy_work(512);
+        assert!(
+            large < small * 3,
+            "doubling unpaired UTF-16 grew copy work from {small} to {large}"
+        );
+    }
 
     #[test]
     fn document_parser_builds_open_and_closed_declarative_shadow_roots() {
@@ -2685,6 +2716,24 @@ mod tests {
 
         assert_eq!(children[0].node_name(), "#text");
         assert_eq!(children[0].data(), Some("hello".to_string()));
+        assert_eq!(children[1].tag_name().as_deref(), Some("table"));
+    }
+
+    #[test]
+    fn foster_parented_text_appends_without_losing_exact_utf16() {
+        let mut input: Vec<u16> = "<body><table>".encode_utf16().collect();
+        input.push(0xd800);
+        input.extend("x<tr><td>cell</td></tr></table>".encode_utf16());
+        let result = TreeBuilder::parse_inert_utf16(&input);
+        let body = result.document().query_selector("body").unwrap();
+        let children = body.child_nodes();
+
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].node_type(), crate::dom::NodeType::Text);
+        assert_eq!(
+            children[0].data_utf16(),
+            Some(vec![0xd800, u16::from(b'x')])
+        );
         assert_eq!(children[1].tag_name().as_deref(), Some("table"));
     }
 

@@ -31,6 +31,12 @@ thread_local! {
     static SLOT_ASSIGNMENT_WORK: std::cell::Cell<(usize, usize, usize)> = const {
         std::cell::Cell::new((0, 0, 0))
     };
+    static CHILD_SNAPSHOT_HANDLE_CLONES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static CHARACTER_DATA_UTF16_COPY_WORK: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
 }
 
 thread_local! {
@@ -60,6 +66,26 @@ fn invalidate_slot_assignments() {
 /// Whether any element on this thread holds a non-zero scroll offset.
 pub(crate) fn any_element_scrolled() -> bool {
     SCROLLED_ELEMENTS.with(|count| count.get() > 0)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_child_snapshot_handle_clones() {
+    CHILD_SNAPSHOT_HANDLE_CLONES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn child_snapshot_handle_clones() -> usize {
+    CHILD_SNAPSHOT_HANDLE_CLONES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_character_data_utf16_copy_work() {
+    CHARACTER_DATA_UTF16_COPY_WORK.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn character_data_utf16_copy_work() -> usize {
+    CHARACTER_DATA_UTF16_COPY_WORK.with(std::cell::Cell::get)
 }
 
 /// Returns whether an HTML form control is actually disabled.
@@ -524,6 +550,7 @@ pub(crate) struct TextControlState {
 pub struct Text {
     data: String,
     utf16: Option<Vec<u16>>,
+    unpaired_surrogates: u32,
     cdata_section: bool,
 }
 
@@ -533,6 +560,7 @@ impl Text {
         Self {
             data: data.into(),
             utf16: None,
+            unpaired_surrogates: 0,
             cdata_section: false,
         }
     }
@@ -542,6 +570,7 @@ impl Text {
         Self {
             data: data.into(),
             utf16: None,
+            unpaired_surrogates: 0,
             cdata_section: true,
         }
     }
@@ -550,6 +579,23 @@ impl Text {
     pub fn data(&self) -> &str {
         &self.data
     }
+}
+
+fn decode_utf16_lossy_with_unpaired_count(units: &[u16]) -> (String, u32) {
+    let mut data = String::new();
+    let mut unpaired = 0_u32;
+    for point in char::decode_utf16(units.iter().copied()) {
+        match point {
+            Ok(value) => data.push(value),
+            Err(_) => {
+                data.push(char::REPLACEMENT_CHARACTER);
+                unpaired = unpaired
+                    .checked_add(1)
+                    .expect("UTF-16 unpaired surrogate count exhausted");
+            }
+        }
+    }
+    (data, unpaired)
 }
 
 /// A DOM comment node.
@@ -2087,6 +2133,7 @@ impl NodeHandle {
             NodeData::Text(text) => {
                 text.data = data.to_string();
                 text.utf16 = None;
+                text.unpaired_surrogates = 0;
             }
             NodeData::Comment(comment) => {
                 comment.data = data.to_string();
@@ -2115,27 +2162,147 @@ impl NodeHandle {
     /// The scalar view replaces unpaired surrogates for rendering only.
     pub fn set_data_utf16(&self, units: &[u16]) {
         let mut inner = self.0.borrow_mut();
+        if !matches!(
+            inner.data,
+            NodeData::Text(_) | NodeData::Comment(_) | NodeData::ProcessingInstruction(_)
+        ) {
+            return;
+        }
+        #[cfg(test)]
+        CHARACTER_DATA_UTF16_COPY_WORK.with(|count| {
+            count.set(count.get().saturating_add(units.len()));
+        });
+        let (value, unpaired_surrogates) = decode_utf16_lossy_with_unpaired_count(units);
+        if let NodeData::Text(text) = &mut inner.data {
+            text.data = value;
+            text.unpaired_surrogates = unpaired_surrogates;
+            text.utf16 = (unpaired_surrogates != 0).then(|| units.to_vec());
+            return;
+        }
         let (data, utf16) = match &mut inner.data {
-            NodeData::Text(text) => (&mut text.data, &mut text.utf16),
             NodeData::Comment(comment) => (&mut comment.data, &mut comment.utf16),
             NodeData::ProcessingInstruction(pi) => (&mut pi.data, &mut pi.utf16),
             _ => return,
         };
-        match String::from_utf16(units) {
-            Ok(value) => {
-                *data = value;
-                *utf16 = None;
-            }
-            Err(_) => {
-                *data = String::from_utf16_lossy(units);
-                *utf16 = Some(units.to_vec());
-            }
+        *data = value;
+        *utf16 = (unpaired_surrogates != 0).then(|| units.to_vec());
+    }
+
+    /// Appends scalar text without copying the existing text payload.
+    ///
+    /// Exact UTF-16 storage is extended as well when the node already retains
+    /// original code units. No-op for node kinds other than Text.
+    pub(crate) fn append_text_data(&self, suffix: &str) {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Text(text) = &mut inner.data else {
+            return;
+        };
+        text.data.push_str(suffix);
+        if let Some(units) = &mut text.utf16 {
+            units.extend(suffix.encode_utf16());
         }
+    }
+
+    /// Appends exact UTF-16 while keeping both the scalar and code-unit views.
+    /// Existing scalar data is promoted only for the first unpaired surrogate.
+    pub(crate) fn append_text_utf16(&self, suffix: &[u16]) {
+        if suffix.is_empty() {
+            return;
+        }
+        let single_surrogate =
+            (suffix.len() == 1 && (0xd800..=0xdfff).contains(&suffix[0])).then_some(suffix[0]);
+        let decoded_suffix = single_surrogate
+            .is_none()
+            .then(|| decode_utf16_lossy_with_unpaired_count(suffix));
+        let suffix_unpaired = decoded_suffix.as_ref().map_or(1, |(_, count)| *count);
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Text(text) = &mut inner.data else {
+            return;
+        };
+        if suffix_unpaired == 0 {
+            let suffix_data = &decoded_suffix.as_ref().expect("decoded scalar suffix").0;
+            text.data.push_str(&suffix_data);
+            if let Some(units) = &mut text.utf16 {
+                #[cfg(test)]
+                CHARACTER_DATA_UTF16_COPY_WORK.with(|count| {
+                    count.set(count.get().saturating_add(suffix.len()));
+                });
+                units.extend_from_slice(suffix);
+            }
+            return;
+        }
+
+        let previous_high = text
+            .utf16
+            .as_ref()
+            .and_then(|units| units.last().copied())
+            .filter(|unit| (0xd800..=0xdbff).contains(unit));
+        let joins_boundary_pair = previous_high
+            .zip(suffix.first().copied())
+            .filter(|(_, low)| (0xdc00..=0xdfff).contains(low));
+        #[cfg(test)]
+        let promoted = text.utf16.is_none();
+        let mut exact = text
+            .utf16
+            .take()
+            .unwrap_or_else(|| text.data.encode_utf16().collect());
+        #[cfg(test)]
+        let promoted_units = promoted.then_some(exact.len()).unwrap_or(0);
+        exact.extend_from_slice(suffix);
+        #[cfg(test)]
+        CHARACTER_DATA_UTF16_COPY_WORK.with(|count| {
+            count.set(
+                count
+                    .get()
+                    .saturating_add(promoted_units)
+                    .saturating_add(suffix.len()),
+            );
+        });
+
+        if let Some((high, low)) = joins_boundary_pair {
+            debug_assert!(text.unpaired_surrogates != 0);
+            debug_assert!(suffix_unpaired != 0);
+            let previous = text.data.pop();
+            debug_assert_eq!(previous, Some(char::REPLACEMENT_CHARACTER));
+            let joined = char::decode_utf16([high, low])
+                .next()
+                .and_then(Result::ok)
+                .expect("validated surrogate pair");
+            text.data.push(joined);
+            if let Some((suffix_data, _)) = &decoded_suffix {
+                text.data.push_str(
+                    suffix_data
+                        .strip_prefix(char::REPLACEMENT_CHARACTER)
+                        .expect("lone low surrogate projects to replacement"),
+                );
+            }
+            text.unpaired_surrogates = text
+                .unpaired_surrogates
+                .checked_sub(1)
+                .and_then(|count| count.checked_add(suffix_unpaired - 1))
+                .expect("UTF-16 unpaired surrogate count exhausted");
+        } else {
+            if single_surrogate.is_some() {
+                text.data.push(char::REPLACEMENT_CHARACTER);
+            } else {
+                text.data
+                    .push_str(&decoded_suffix.as_ref().expect("decoded suffix").0);
+            }
+            text.unpaired_surrogates = text
+                .unpaired_surrogates
+                .checked_add(suffix_unpaired)
+                .expect("UTF-16 unpaired surrogate count exhausted");
+        }
+        // Keep the exact buffer after a later append completes a split pair.
+        // Dropping it here would make every following lone surrogate re-encode
+        // the entire scalar prefix and restore quadratic behavior.
+        text.utf16 = Some(exact);
     }
 
     /// Reads CharacterData without copying its scalar or original UTF-16 data.
     ///
-    /// Original code units are present when the data contains unpaired surrogates.
+    /// Original code units are present after exact UTF-16 input introduces an
+    /// unpaired surrogate. They may remain after a later append completes it.
     /// Text, CDATA, Comment and ProcessingInstruction are supported; document
     /// types are excluded. The node is immutably borrowed while `read` runs;
     /// do not mutate it or invoke author code in the callback.
@@ -2165,11 +2332,14 @@ impl NodeHandle {
             }
             _ => return None,
         };
-        Some(
-            utf16
-                .clone()
-                .unwrap_or_else(|| data.encode_utf16().collect()),
-        )
+        let units = utf16
+            .clone()
+            .unwrap_or_else(|| data.encode_utf16().collect::<Vec<_>>());
+        #[cfg(test)]
+        CHARACTER_DATA_UTF16_COPY_WORK.with(|count| {
+            count.set(count.get().saturating_add(units.len()));
+        });
+        Some(units)
     }
 
     /// Returns whether this text-like node is a CDATA section.
@@ -2254,7 +2424,12 @@ impl Node for NodeHandle {
     }
 
     fn child_nodes(&self) -> Vec<NodeHandle> {
-        self.0.borrow().children.clone()
+        let inner = self.0.borrow();
+        #[cfg(test)]
+        CHILD_SNAPSHOT_HANDLE_CLONES.with(|count| {
+            count.set(count.get().saturating_add(inner.children.len()));
+        });
+        inner.children.clone()
     }
 }
 
@@ -2488,6 +2663,61 @@ fn parse_attribute_selector(selector: &str) -> Option<AttributeSelector> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appending_scalar_text_preserves_exact_utf16_data() {
+        let text = NodeHandle::text("");
+        text.set_data_utf16(&[0xd800]);
+        text.append_text_data("x😀");
+
+        assert_eq!(text.data(), Some("\u{fffd}x😀".to_owned()));
+        assert_eq!(
+            text.data_utf16(),
+            Some(vec![0xd800, u16::from(b'x'), 0xd83d, 0xde00])
+        );
+    }
+
+    #[test]
+    fn appending_utf16_completes_a_split_surrogate_pair() {
+        let text = NodeHandle::text("");
+        text.set_data_utf16(&[0xd83d]);
+        text.append_text_utf16(&[0xde00]);
+
+        assert_eq!(text.data().as_deref(), Some("😀"));
+        assert_eq!(text.data_utf16(), Some(vec![0xd83d, 0xde00]));
+        assert_eq!(
+            text.with_character_data(|_, exact| exact == Some(&[0xd83d, 0xde00])),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn repeated_split_surrogate_pairs_have_linear_copy_work() {
+        fn append_copy_work(items: usize) -> usize {
+            let text = NodeHandle::text("");
+            reset_character_data_utf16_copy_work();
+            for _ in 0..items {
+                text.append_text_utf16(&[0xd83d]);
+                text.append_text_utf16(&[0xde00]);
+            }
+            assert_eq!(text.data().unwrap().chars().count(), items);
+            assert_eq!(text.data_utf16().unwrap().len(), items * 2);
+            character_data_utf16_copy_work()
+        }
+
+        let small = append_copy_work(256);
+        let large = append_copy_work(512);
+        assert!(
+            large < small * 3,
+            "doubling split pairs grew copy work from {small} to {large}"
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn text_payload_stays_within_existing_padding() {
+        assert_eq!(std::mem::size_of::<Text>(), 56);
+    }
 
     #[test]
     fn descendant_text_preserves_each_traversal_contract() {
