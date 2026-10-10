@@ -30,6 +30,24 @@ fn empty() {
 }
 
 #[test]
+fn utf8_conversion_preserves_bmp_astral_and_large_exact_allocations() {
+    for input in [
+        "é".to_owned(),
+        "日本語".to_owned(),
+        "a\0é😀\u{10ffff}".to_owned(),
+        "é日本語😀".repeat(16_384),
+    ] {
+        let borrowed = JsString::from(input.as_str());
+        assert_eq!(borrowed.len(), input.encode_utf16().count());
+        assert_eq!(borrowed.capacity(), Some(borrowed.len()));
+        assert_eq!(borrowed.to_std_string().unwrap(), input);
+        let owned = JsString::from(input);
+        assert_eq!(owned, borrowed);
+        assert_eq!(owned.capacity(), Some(owned.len()));
+    }
+}
+
+#[test]
 fn refcount() {
     let x = JsString::from("Hello world");
     assert_eq!(x.refcount(), Some(1));

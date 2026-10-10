@@ -1172,8 +1172,12 @@ impl From<&str> for JsString {
             return StaticJsStrings::get_string(&js_str)
                 .unwrap_or_else(|| JsString::from_slice_skip_interning(js_str));
         }
-        let s = s.encode_utf16().collect::<Vec<_>>();
-        JsString::from_slice_skip_interning(JsStr::utf16(&s[..]))
+        // Count first so the builder fills its final allocation without growth
+        // or a temporary UTF-16 Vec followed by another full payload copy.
+        let units = s.chars().map(char::len_utf16).sum();
+        let mut builder = Utf16JsStringBuilder::with_capacity(units);
+        builder.extend(s.encode_utf16());
+        builder.build()
     }
 }
 
