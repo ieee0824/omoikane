@@ -12,6 +12,9 @@
 //! [spec]: https://tc39.es/ecma262/#sec-typedarray-objects
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypedArray
 
+#[cfg(test)]
+mod tests;
+
 use crate::{
     Context, JsArgs, JsResult, JsString,
     builtins::{BuiltInBuilder, BuiltInConstructor, BuiltInObject, IntrinsicObject},
