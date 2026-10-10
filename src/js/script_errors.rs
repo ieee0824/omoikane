@@ -1,5 +1,7 @@
 //! Private, Realm-scoped delivery of Boa promise rejection tracker changes.
 use super::*;
+#[cfg(test)]
+use boa_gc::Rooted;
 
 /// Owned UTF-16 error fields that can cross a Worker runtime boundary without
 /// retaining the thrown object or its Realm.
@@ -184,24 +186,116 @@ pub(super) fn fetch_classic_source(
     Some((filename, source, response.redirect_count(), muted))
 }
 
+struct PromiseReport {
+    promise: JsObject,
+    operation: OperationType,
+    document: usize,
+    delivered: bool,
+    sequence: u64,
+}
+
+struct PromiseCheckpoint {
+    pending: Vec<PromiseReport>,
+    handled_rejections: HashMap<JsObject, u64>,
+    reporters: HashMap<usize, (JsObject, Realm)>,
+}
+
+impl Finalize for PromiseCheckpoint {}
+
+unsafe impl Trace for PromiseCheckpoint {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        for report in &self.pending {
+            unsafe { report.promise.trace(tracer) };
+        }
+        for promise in self.handled_rejections.keys() {
+            unsafe { promise.trace(tracer) };
+        }
+        for (callback, _) in self.reporters.values() {
+            unsafe { callback.trace(tracer) };
+        }
+    }
+
+    fn run_finalizer(&self) {}
+}
+
 #[derive(Default)]
 pub(super) struct PromiseReports {
-    pending: Vec<(JsObject, OperationType, usize, bool)>,
+    pending: Vec<PromiseReport>,
+    handled_rejections: HashMap<JsObject, u64>,
+    next_sequence: u64,
     reporters: HashMap<usize, (JsObject, Realm)>,
     error_reporters: HashMap<usize, (JsObject, Realm)>,
 }
 
 impl PromiseReports {
+    fn mark_handled(&mut self, promise: &JsObject) {
+        let cutoff = self.next_sequence;
+        self.handled_rejections
+            .entry(promise.clone())
+            .and_modify(|existing| *existing = (*existing).max(cutoff))
+            .or_insert(cutoff);
+    }
+
+    fn push(
+        &mut self,
+        promise: JsObject,
+        operation: OperationType,
+        document: usize,
+        delivered: bool,
+    ) {
+        let sequence = self.next_sequence;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .expect("promise report sequence exhausted before checkpoint");
+        self.pending.push(PromiseReport {
+            promise,
+            operation,
+            document,
+            delivered,
+            sequence,
+        });
+    }
+
+    fn take_checkpoint(&mut self) -> (Vec<PromiseReport>, HashMap<JsObject, u64>) {
+        let pending = std::mem::take(&mut self.pending);
+        let handled_rejections = std::mem::take(&mut self.handled_rejections);
+        self.next_sequence = 0;
+        (pending, handled_rejections)
+    }
+
     /// Releases notification callbacks when their document stops being active.
     /// Retained DOM wrappers must not keep browser notification roots alive.
     pub(super) fn retire_document(&mut self, document: usize) {
         self.reporters.remove(&document);
         self.error_reporters.remove(&document);
-        self.pending.retain(|(_, _, owner, _)| *owner != document);
+        self.pending.retain(|report| report.document != document);
+
+        // A handler may belong to the retired document while suppressing a
+        // rejection owned by another document. Preserve only cutoffs that
+        // still suppress at least one retained rejection.
+        let old_cutoffs = std::mem::take(&mut self.handled_rejections);
+        for report in &self.pending {
+            if report.operation != OperationType::Reject {
+                continue;
+            }
+            let Some(&cutoff) = old_cutoffs.get(&report.promise) else {
+                continue;
+            };
+            if report.sequence < cutoff {
+                self.handled_rejections
+                    .entry(report.promise.clone())
+                    .and_modify(|existing| *existing = (*existing).max(cutoff))
+                    .or_insert(cutoff);
+            }
+        }
     }
 
     pub(super) unsafe fn trace(&self, tracer: &mut Tracer) {
-        for (promise, _, _, _) in &self.pending {
+        for report in &self.pending {
+            unsafe { report.promise.trace(tracer) };
+        }
+        for promise in self.handled_rejections.keys() {
             unsafe { promise.trace(tracer) };
         }
         for (callback, _) in self.reporters.values().chain(self.error_reporters.values()) {
@@ -210,29 +304,36 @@ impl PromiseReports {
     }
 }
 
+fn rejection_was_handled(
+    report: &PromiseReport,
+    handled_rejections: &HashMap<JsObject, u64>,
+) -> bool {
+    report.operation == OperationType::Reject
+        && handled_rejections
+            .get(&report.promise)
+            .is_some_and(|cutoff| report.sequence < *cutoff)
+}
+
 pub(super) fn track(promise: &JsObject, operation: OperationType, context: &mut Context) {
     // HTML HostPromiseRejectionTracker suppresses both operations according to
     // the running classic script, including handlers on another script's promise.
     if active_script_errors_are_muted(context) {
         return;
     }
-    let reporter = with_host_state(|host| {
-        let mut state = host.borrow_mut();
-        let document = context_document_id(context, &state);
-        if operation == OperationType::Handle {
+    let reporter = if operation == OperationType::Handle {
+        with_host_state(|host| {
+            let mut state = host.borrow_mut();
+            let document = context_document_id(context, &state);
             // A rejection not yet delivered at a checkpoint is no longer a
             // candidate, including when a parent Realm installs the handler.
-            state
-                .promise_reports
-                .pending
-                .retain(|(candidate, op, _, _)| {
-                    *op != OperationType::Reject || !JsObject::equals(candidate, promise)
-                });
-        }
-        Ok(state.promise_reports.reporters.get(&document).cloned())
-    })
-    .ok()
-    .flatten();
+            state.promise_reports.mark_handled(promise);
+            Ok(state.promise_reports.reporters.get(&document).cloned())
+        })
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
     // Handle notifications enqueue their task when the handler is attached,
     // before subsequent author tasks, rather than at the next checkpoint.
     let delivered = if operation == OperationType::Handle {
@@ -259,8 +360,7 @@ pub(super) fn track(promise: &JsObject, operation: OperationType, context: &mut 
         // during notification remains observable to that notification.
         state
             .promise_reports
-            .pending
-            .push((promise.clone(), operation, document, delivered));
+            .push(promise.clone(), operation, document, delivered);
         Ok(())
     });
 }
@@ -385,21 +485,28 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
 }
 
 pub(super) fn flush(context: &mut Context) -> JsResult<()> {
-    let (pending, reporters) = with_host_state(|host| {
+    let checkpoint = Box::new(with_host_state(|host| {
         let mut state = host.borrow_mut();
-        Ok((
-            std::mem::take(&mut state.promise_reports.pending),
-            state.promise_reports.reporters.clone(),
-        ))
-    })?;
-    for (promise, operation, document, delivered) in pending {
-        if delivered {
+        let (pending, handled_rejections) = state.promise_reports.take_checkpoint();
+        Ok(PromiseCheckpoint {
+            pending,
+            handled_rejections,
+            reporters: state.promise_reports.reporters.clone(),
+        })
+    })?);
+    // SAFETY: The box keeps the checkpoint at a stable address, and the guard
+    // is declared after it so registration ends before the box is dropped.
+    // The checkpoint is only read while reporter callbacks may allocate.
+    let _checkpoint_roots =
+        unsafe { RootProvider::register(std::ptr::NonNull::from(&*checkpoint)) };
+    for report in &checkpoint.pending {
+        if report.delivered || rejection_was_handled(report, &checkpoint.handled_rejections) {
             continue;
         }
-        let Some((callback, realm)) = reporters.get(&document) else {
+        let Some((callback, realm)) = checkpoint.reporters.get(&report.document) else {
             continue;
         };
-        let reason = match JsPromise::from_object(promise.clone())?.state() {
+        let reason = match JsPromise::from_object(report.promise.clone())?.state() {
             PromiseState::Rejected(reason) => reason,
             _ => continue,
         };
@@ -408,17 +515,17 @@ pub(super) fn flush(context: &mut Context) -> JsResult<()> {
             callback,
             realm,
             &[
-                JsValue::from(if operation == OperationType::Reject {
+                JsValue::from(if report.operation == OperationType::Reject {
                     0
                 } else {
                     1
                 }),
-                promise.into(),
+                report.promise.clone().into(),
                 reason,
             ],
         )?;
     }
-    for (callback, realm) in reporters.values() {
+    for (callback, realm) in checkpoint.reporters.values() {
         invoke(context, callback, realm, &[JsValue::from(2)])?;
     }
     Ok(())
@@ -683,6 +790,97 @@ fn decode_exception_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handled_cutoff_suppresses_only_earlier_rejections() {
+        let promise = Rooted::new(JsObject::with_null_proto());
+        let other = Rooted::new(JsObject::with_null_proto());
+        let mut reports = PromiseReports::default();
+        reports.push((*promise).clone(), OperationType::Reject, 1, false);
+        reports.push((*other).clone(), OperationType::Reject, 1, false);
+        reports.mark_handled(&promise);
+        reports.push((*promise).clone(), OperationType::Handle, 1, true);
+        reports.push((*promise).clone(), OperationType::Reject, 1, false);
+
+        let (pending, cutoffs) = reports.take_checkpoint();
+        let rejected = pending
+            .iter()
+            .filter(|report| {
+                report.operation == OperationType::Reject
+                    && JsObject::equals(&report.promise, &promise)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rejected.len(), 2);
+        assert!(rejection_was_handled(rejected[0], &cutoffs));
+        assert!(!rejection_was_handled(rejected[1], &cutoffs));
+    }
+
+    #[test]
+    fn retiring_handler_document_keeps_cross_document_cutoff() {
+        let promise = Rooted::new(JsObject::with_null_proto());
+        let mut reports = PromiseReports::default();
+        reports.push((*promise).clone(), OperationType::Reject, 2, false);
+        reports.mark_handled(&promise);
+        reports.push((*promise).clone(), OperationType::Handle, 1, true);
+
+        reports.retire_document(1);
+        assert_eq!(reports.pending.len(), 1);
+        assert_eq!(reports.handled_rejections.get(&*promise), Some(&1));
+
+        reports.retire_document(2);
+        assert!(reports.pending.is_empty());
+        assert!(reports.handled_rejections.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_roots_later_promises_across_reporter_collection() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .with_active_host(|context| {
+                context.register_global_builtin_callable(
+                    js_string!("forcePromiseReportCollection"),
+                    0,
+                    NativeFunction::from_fn_ptr(|_, _, _| {
+                        boa_gc::force_collect();
+                        Ok(JsValue::undefined())
+                    }),
+                )?;
+                let callback_value = context.eval(Source::from_bytes(
+                    "globalThis.promiseReportReasons = [];\
+                         (operation, promise, reason) => {\
+                           if (operation === 0) {\
+                             promiseReportReasons.push(reason);\
+                             forcePromiseReportCollection();\
+                           }\
+                         }",
+                ))?;
+                let callback = Rooted::new(callback_value.as_callable().ok_or_else(|| {
+                    JsNativeError::typ().with_message("reporter must be callable")
+                })?);
+                with_host_state(|host| {
+                    let mut state = host.borrow_mut();
+                    let document = context_document_id(context, &state);
+                    state
+                        .promise_reports
+                        .reporters
+                        .insert(document, ((*callback).clone(), context.realm().clone()));
+                    Ok(())
+                })?;
+                context.eval(Source::from_bytes(
+                    "Promise.reject('first'); Promise.reject('second');",
+                ))?;
+                flush(context)?;
+                let reasons = context.eval(Source::from_bytes("promiseReportReasons.join(',')"))?;
+                assert_eq!(
+                    reasons
+                        .as_string()
+                        .map(|value| value.to_std_string_escaped()),
+                    Some("first,second".to_owned())
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
 
     #[test]
     fn muted_script_tracker_suppresses_reject_and_handle_in_retained_callbacks() {
