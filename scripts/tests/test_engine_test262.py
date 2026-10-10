@@ -89,6 +89,24 @@ class ComparisonTests(unittest.TestCase):
         result = gate.read(self.artifacts / "comparison.json")
         self.assertEqual(result["targets"][gate.TARGETS[0]]["changes"][0]["case"], "test/known-failure")
 
+    def test_original_engine_panic_must_be_a_current_pass(self):
+        folder = self.folder.parent / "reference"
+        cases = gate.read(folder / "cases.json")
+        cases["test/known-failure"]["status"] = "P"
+        gate.write(folder / "cases.json", cases)
+        execution = gate.read(folder / "execution.json")
+        execution["stats"] = dict(gate.Counter(x["status"] for x in cases.values()))
+        gate.write(folder / "execution.json", execution)
+        for status in ("F", "I", "P", None):
+            with self.subTest(status=status):
+                self.change_case("test/known-failure", status)
+                self.assertFalse(self.compare())
+        self.change_case("test/known-failure", "O")
+        self.assertTrue(self.compare())
+        report = gate.read(self.artifacts / "comparison.json")["targets"][gate.TARGETS[0]]
+        self.assertEqual(report["baseline_panics"], ["test/known-failure"])
+        self.assertEqual(report["unresolved_baseline_panics"], [])
+
     def test_removed_case_fails_even_when_counts_match_new_inventory(self):
         self.change_case("test/passing", None)
         self.assertFalse(self.compare())
@@ -189,6 +207,20 @@ class RetainedSourceTests(unittest.TestCase):
                 self.assertEqual((root / "restored" / name).read_bytes(), (root / name).read_bytes())
                 self.assertEqual((root / "restored" / name).stat().st_mode & 0o777,
                                  (root / name).stat().st_mode & 0o777)
+
+
+class OutcomeTests(unittest.TestCase):
+    def test_original_panic_inventory_is_preserved(self):
+        cases = {"test/panic": {"status": "P"}}
+        stats = {"t": 1, "o": 0, "i": 0, "p": 1}
+        self.assertEqual(gate.validate_outcomes(cases, stats, "reference"), {"P": 1})
+        with self.assertRaisesRegex(AssertionError, "maintained engine must not panic"):
+            gate.validate_outcomes(cases, stats, "current")
+
+    def test_incorrect_panic_inventory_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, "incorrect panic inventory"):
+            gate.validate_outcomes({"test/panic": {"status": "P"}},
+                                   {"t": 1, "o": 0, "i": 0, "p": 0}, "reference")
 
 
 class CheckoutTests(unittest.TestCase):

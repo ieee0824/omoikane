@@ -76,6 +76,18 @@ def restore_reference(destination, origin):
             path.chmod(member.mode & 0o777)
 
 
+def validate_outcomes(cases, stats, variant):
+    """Retain original-engine panics; require the maintained engine to be panic-free."""
+    assert variant in ("reference", "current")
+    assert len(cases) == stats["t"] > 0, stats
+    counts = Counter(case["status"] for case in cases.values())
+    assert counts["O"] == stats["o"] and counts["I"] == stats["i"]
+    assert counts["P"] == stats["p"], "incorrect panic inventory"
+    if variant == "current":
+        assert counts["P"] == 0, "maintained engine must not panic"
+    return dict(counts)
+
+
 def run(root, target, variant, test262):
     folder = (root / target / variant).resolve()
     folder.mkdir(parents=True, exist_ok=False)
@@ -133,11 +145,11 @@ def run(root, target, variant, test262):
         assert raw["c"] == revision and raw["u"] == actual, "incorrect source/suite identity"
         cases = case_index(raw["r"])
         stats = raw["r"]["a"]
-        assert len(cases) == stats["t"] > 0 and stats["p"] == 0, stats
-        counts = Counter(case["status"] for case in cases.values())
-        assert counts["O"] == stats["o"] and counts["I"] == stats["i"] and counts["P"] == 0
+        # Preserve failing current runs and immutable-reference panics verbatim.
         write(folder / "cases.json", cases)
-        report.update(status="completed", stats=dict(counts), case_count=len(cases))
+        report.update(panic_count=stats["p"], case_count=len(cases))
+        counts = validate_outcomes(cases, stats, variant)
+        report.update(status="completed", stats=counts)
     except Exception as error:
         report.update(status="failed", error=f"{type(error).__name__}: {error}")
     write(folder / "execution.json", report)
@@ -204,6 +216,9 @@ def compare(root):
             added_failures = [name for name in sorted(b.keys() - a.keys())
                               if b[name]["status"] in ("F", "P")]
             panics = [name for name, case in b.items() if case["status"] == "P"]
+            baseline_panics = [name for name, case in a.items() if case["status"] == "P"]
+            unresolved_baseline_panics = [name for name in baseline_panics
+                                         if b.get(name, {}).get("status") != "O"]
             changes = [{"case": name, "before": a.get(name), "after": b.get(name)}
                        for name in sorted(a.keys() | b.keys()) if a.get(name) != b.get(name)]
             required_failures = [name for name in FLOAT16_CASES
@@ -211,11 +226,14 @@ def compare(root):
             required_cases = {name: {"before": a.get(name), "after": b.get(name)}
                               for name in FLOAT16_CASES}
             current_cases[target] = b
-            passed = not (removed or regressed or added_failures or panics or required_failures)
+            passed = not (removed or regressed or added_failures or panics
+                          or unresolved_baseline_panics or required_failures)
             report["targets"][target] = {"passed": passed, "before": before["stats"],
                                          "after": after["stats"], "removed": removed,
                                          "regressions": regressed, "added_failures": added_failures,
                                          "panics": panics, "changes": changes,
+                                         "baseline_panics": baseline_panics,
+                                         "unresolved_baseline_panics": unresolved_baseline_panics,
                                          "reference_lock_sha256": before["lock_sha256"],
                                          "current_lock_sha256": after["lock_sha256"],
                                          "required_cases": required_cases,
