@@ -138,3 +138,99 @@ fn iframe_bootstrap_preserves_parent_closures_and_microtask_order() {
     runtime.run_jobs().unwrap();
     check(&mut runtime, "microtaskRan");
 }
+
+#[test]
+fn cross_origin_fallback_keys_are_undefined_before_and_after_detach() {
+    for sandbox in [false, true] {
+        let mut runtime = runtime();
+        runtime.eval(if sandbox {
+            "globalThis.frame = document.createElement('iframe'); frame.setAttribute('sandbox', ''); frame.srcdoc = '<p>opaque</p>'; document.body.appendChild(frame);"
+        } else {
+            "globalThis.frame = document.createElement('iframe'); frame.src = 'data:text/html,<p>opaque</p>'; document.body.appendChild(frame);"
+        }).unwrap();
+        runtime.run_until_idle().unwrap();
+        check(
+            &mut runtime,
+            r#"(() => {
+            const child = frame.contentWindow;
+            const keys = ['then', Symbol.hasInstance, Symbol.isConcatSpreadable, Symbol.toStringTag];
+            for (const phase of ['active', 'closed']) {
+                if (phase === 'closed') frame.remove();
+                for (const key of keys) {
+                    if (child[key] !== undefined || !(key in child)) return false;
+                    const descriptor = Object.getOwnPropertyDescriptor(child, key);
+                    if (!descriptor || descriptor.value !== undefined || descriptor.writable ||
+                        descriptor.enumerable || !descriptor.configurable) return false;
+                }
+                for (const key of ['Date', 'document', Symbol('hasInstance')]) {
+                    let denied = false;
+                    try { void child[key]; } catch (error) { denied = error.name === 'SecurityError'; }
+                    if (!denied) return false;
+                    denied = false;
+                    try { Object.getOwnPropertyDescriptor(child, key); }
+                    catch (error) { denied = error.name === 'SecurityError'; }
+                    if (!denied) return false;
+                }
+            }
+            return child.closed;
+        })()"#,
+        );
+    }
+}
+
+#[test]
+fn cross_origin_fallback_uses_captured_intrinsic_symbols() {
+    let mut runtime = runtime();
+    runtime.eval("globalThis.frame = document.createElement('iframe'); frame.src = 'data:text/html,<p>opaque</p>'; document.body.appendChild(frame);").unwrap();
+    runtime.run_until_idle().unwrap();
+    check(
+        &mut runtime,
+        r#"(() => {
+        const child = frame.contentWindow;
+        const originalSymbol = Symbol;
+        const keys = ['then', Symbol.hasInstance, Symbol.isConcatSpreadable, Symbol.toStringTag];
+        let symbolReads = 0;
+        globalThis.Symbol = new Proxy(originalSymbol, {
+            get() { symbolReads++; throw new Error('author Symbol getter'); }
+        });
+        try {
+            for (const phase of ['active', 'closed']) {
+                if (phase === 'closed') frame.remove();
+                for (const key of keys) {
+                    if (child[key] !== undefined) return false;
+                    const descriptor = Object.getOwnPropertyDescriptor(child, key);
+                    if (!descriptor || descriptor.value !== undefined) return false;
+                }
+            }
+            return symbolReads === 0 && child.closed;
+        } finally {
+            globalThis.Symbol = originalSymbol;
+        }
+    })()"#,
+    );
+}
+
+#[test]
+fn same_origin_fallback_named_properties_reach_author_getters() {
+    check(
+        &mut runtime(),
+        r#"(() => {
+        const frame = document.createElement('iframe');
+        document.body.appendChild(frame);
+        const child = frame.contentWindow;
+        const DateConstructor = child.Date;
+        const DocumentConstructor = child.Document;
+        child.eval(`globalThis.reads = 0;
+            for (const key of ['then', Symbol.hasInstance, Symbol.isConcatSpreadable]) {
+                Object.defineProperty(globalThis, key, {
+                    configurable: true, get() { globalThis.reads++; return 17; }
+                });
+            }`);
+        for (const key of ['then', Symbol.hasInstance, Symbol.isConcatSpreadable]) {
+            if (child[key] !== 17) return false;
+        }
+        return child.reads === 3 && child.document instanceof DocumentConstructor &&
+            child.Date === DateConstructor && new DateConstructor(123).getTime() === 123;
+    })()"#,
+    );
+}
