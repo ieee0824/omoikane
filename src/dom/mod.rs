@@ -9,6 +9,9 @@ use std::fmt;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+mod string;
+pub(crate) use string::DomString;
+
 /// Monotonic source of per-node identities. A fresh value is minted for every
 /// node and never reused, so [`NodeHandle::identity`] cannot alias a released
 /// node's identity. (A pointer-based identity would be recycled when the
@@ -1504,27 +1507,22 @@ impl NodeHandle {
             Ok(value) => (value, None),
             Err(_) => (String::from_utf16_lossy(units), Some(units.to_vec())),
         };
-        self.set_attribute(name, value);
-        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
-            let name = if element.html {
-                name.to_ascii_lowercase()
-            } else {
-                name.to_owned()
-            };
-            if let Some(record) = element
-                .attribute_records
-                .iter_mut()
-                .find(|record| record.qualified_name == name)
-            {
-                record.utf16 = original;
-            }
-        }
+        self.set_attribute_internal(name.to_owned(), value, original);
+    }
+
+    /// Moves a scalar attribute value, or retains an owned exact DOMString.
+    pub(crate) fn set_attribute_owned(&self, name: String, data: DomString) {
+        let (value, exact) = data.into_parts();
+        self.set_attribute_internal(name, value, exact);
     }
 
     /// Sets an attribute on an element node. No-op for other node kinds.
     pub fn set_attribute(&self, name: impl Into<String>, value: impl Into<String>) {
+        self.set_attribute_internal(name.into(), value.into(), None);
+    }
+
+    fn set_attribute_internal(&self, name: String, value: String, utf16: Option<Vec<u16>>) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
-            let name = name.into();
             let name = if element.html {
                 name.to_ascii_lowercase()
             } else {
@@ -1542,17 +1540,16 @@ impl NodeHandle {
             if name == "selected" && !element.dirty_selectedness {
                 element.selected = true;
             }
-            let value = value.into();
             if let Some(attribute) = element
                 .attribute_records
                 .iter_mut()
                 .find(|attribute| attribute.qualified_name == name)
             {
                 attribute.value = value;
-                attribute.utf16 = None;
+                attribute.utf16 = utf16;
             } else {
                 element.attribute_records.push(AttributeRecord {
-                    utf16: None,
+                    utf16,
                     qualified_name: name.clone(),
                     namespace_uri: None,
                     local_name: name,
@@ -1582,6 +1579,7 @@ impl NodeHandle {
             namespace_uri,
             local_name.into(),
             value.into(),
+            None,
             false,
         );
     }
@@ -1599,7 +1597,28 @@ impl NodeHandle {
             namespace_uri,
             local_name.into(),
             value.into(),
+            None,
             true,
+        );
+    }
+
+    /// Moves a namespaced value without normalizing scalar strings via UTF-16.
+    pub(crate) fn set_xml_attribute_ns_owned(
+        &self,
+        qualified_name: String,
+        namespace_uri: Option<String>,
+        local_name: String,
+        data: DomString,
+        replace_qualified_name: bool,
+    ) {
+        let (value, exact) = data.into_parts();
+        self.set_xml_attribute_ns_internal(
+            qualified_name,
+            namespace_uri,
+            local_name,
+            value,
+            exact,
+            replace_qualified_name,
         );
     }
 
@@ -1609,6 +1628,7 @@ impl NodeHandle {
         namespace_uri: Option<String>,
         local_name: String,
         value: String,
+        utf16: Option<Vec<u16>>,
         replace_qualified_name: bool,
     ) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
@@ -1635,10 +1655,10 @@ impl NodeHandle {
                     attribute.qualified_name = qualified_name;
                 }
                 attribute.value = value;
-                attribute.utf16 = None;
+                attribute.utf16 = utf16;
             } else {
                 element.attribute_records.push(AttributeRecord {
-                    utf16: None,
+                    utf16,
                     qualified_name,
                     namespace_uri,
                     local_name,
@@ -2142,6 +2162,33 @@ impl NodeHandle {
             NodeData::ProcessingInstruction(pi) => {
                 pi.data = data.to_string();
                 pi.utf16 = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Moves owned CharacterData into its node; only exact input is decoded.
+    pub(crate) fn set_data_owned(&self, data: DomString) {
+        let (value, exact, unpaired) = match data {
+            DomString::Scalar(value) => (value, None, 0),
+            DomString::Utf16(units) => {
+                let (value, unpaired) = decode_utf16_lossy_with_unpaired_count(&units);
+                (value, (unpaired != 0).then_some(units), unpaired)
+            }
+        };
+        match &mut self.0.borrow_mut().data {
+            NodeData::Text(text) => {
+                text.data = value;
+                text.utf16 = exact;
+                text.unpaired_surrogates = unpaired;
+            }
+            NodeData::Comment(comment) => {
+                comment.data = value;
+                comment.utf16 = exact;
+            }
+            NodeData::ProcessingInstruction(pi) => {
+                pi.data = value;
+                pi.utf16 = exact;
             }
             _ => {}
         }

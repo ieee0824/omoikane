@@ -13,7 +13,7 @@ pub(super) fn fragment_native(
         .cloned()
         .unwrap_or_default()
         .to_string(context)?;
-    let source: Vec<u16> = source.iter().collect();
+    let source = dom_string::from_js(&source);
     let run_scripts = args.get(2).is_some_and(JsValue::to_boolean);
     let sanitizer = html_sanitizer::from_argument(args.get(3), context)?;
     let safe = args.get(4).is_some_and(JsValue::to_boolean);
@@ -30,10 +30,17 @@ pub(super) fn fragment_native(
         {
             return Ok(JsValue::null());
         }
-        let parsed = crate::html::TreeBuilder::parse_fragment_utf16_with_shadow_roots(
-            &source,
-            &parsing_context,
-        );
+        let parsed = match &source {
+            DomString::Scalar(value) => {
+                crate::html::TreeBuilder::parse_fragment_with_shadow_roots(value, &parsing_context)
+            }
+            DomString::Utf16(units) => {
+                crate::html::TreeBuilder::parse_fragment_utf16_with_shadow_roots(
+                    units,
+                    &parsing_context,
+                )
+            }
+        };
         if let Some(config) = &sanitizer {
             html_sanitizer::sanitize(&parsed.fragment(), config, safe);
             if let Some(root) = parsed.context_shadow_root() {
@@ -81,10 +88,13 @@ pub(super) fn document_native(
         .cloned()
         .unwrap_or_default()
         .to_string(context)?;
-    let source: Vec<u16> = source.iter().collect();
+    let source = dom_string::from_js(&source);
     let sanitizer = html_sanitizer::from_argument(args.get(1), context)?;
     let safe = args.get(2).is_some_and(JsValue::to_boolean);
-    let parsed = crate::html::TreeBuilder::parse_inert_utf16(&source);
+    let parsed = match &source {
+        DomString::Scalar(value) => crate::html::TreeBuilder::parse_inert(value),
+        DomString::Utf16(units) => crate::html::TreeBuilder::parse_inert_utf16(units),
+    };
     if let Some(config) = &sanitizer {
         html_sanitizer::sanitize(&parsed.document(), config, safe);
     }
