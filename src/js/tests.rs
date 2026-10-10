@@ -25192,22 +25192,19 @@ fn iframe_location_navigation_resolves_relative_to_caller_document() {
                   const frame = document.getElementById('f');
                   const child = frame.contentWindow;
                   child.location.href = 'href.html';
-                  const hrefURL = child.document.URL;
+                  const hrefURL = child.location.href;
 
                   frame.src = '/frame/assign-base.html';
-                  child.document;
                   child.location.assign('assign.html');
-                  const assignURL = child.document.URL;
+                  const assignURL = child.location.href;
 
                   frame.src = '/frame/replace-base.html';
-                  child.document;
                   child.location.replace('replace.html');
-                  const replaceURL = child.document.URL;
+                  const replaceURL = child.location.href;
 
                   frame.src = '/frame/history-base.html';
-                  child.document;
                   child.history.pushState(null, '', 'state.html');
-                  return [hrefURL, assignURL, replaceURL, child.document.URL].join('|');
+                  return [hrefURL, assignURL, replaceURL, child.location.href].join('|');
                 })()"#
         ),
         Some(format!(
@@ -25304,6 +25301,9 @@ fn cross_origin_iframe_document_events_reach_its_own_window_listeners() {
           }, {once:true});
           window.dispatchEvent(new Event('direct-event'));
           document.documentElement.setAttribute('data-direct-window-event', String(directIdentity));
+          const ownView = document.defaultView;
+          document.documentElement.setAttribute('data-own-location',
+            String(ownView.location.href === document.URL && ownView.location === window.location));
         </script></body></html>"#,
     );
     let document = TreeBuilder::parse(&format!(
@@ -25348,6 +25348,15 @@ fn cross_origin_iframe_document_events_reach_its_own_window_listeners() {
             .get_attribute("data-direct-window-event")
             .as_deref(),
         Some("true")
+    );
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-own-location")
+            .as_deref(),
+        Some("true"),
+        "a cross-origin child can still read its own WindowProxy Location"
     );
 }
 

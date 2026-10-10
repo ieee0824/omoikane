@@ -67,7 +67,7 @@ pub(super) fn register(
         context,
         bindings,
         js_string!("__omoikane_window_proxy_global"),
-        1,
+        2,
         NativeFunction::from_copy_closure(window_proxy_global_native),
     )?;
     register_private_callable(
@@ -441,6 +441,7 @@ fn window_proxy_global_native(
     if !same_origin_document(context, document)? {
         return Ok(JsValue::null());
     }
+    let create_if_missing = args.get(1).is_none_or(JsValue::to_boolean);
     with_host_state(|host| {
         let (realm, frame, auxiliary) = {
             let state = host.borrow();
@@ -460,9 +461,33 @@ fn window_proxy_global_native(
         let realm = if let Some(realm) = realm {
             realm
         } else if let Some(frame) = frame {
-            ensure_iframe_realm(context, host, frame, document)?
+            if create_if_missing {
+                ensure_iframe_realm(context, host, frame, document)?
+            } else {
+                let Some(realm) = host
+                    .borrow()
+                    .iframe_documents
+                    .get(&frame)
+                    .and_then(|entry| entry.realm.clone())
+                else {
+                    return Ok(JsValue::null());
+                };
+                realm
+            }
         } else if let Some(auxiliary) = auxiliary {
-            ensure_auxiliary_realm(context, host, auxiliary)?
+            if create_if_missing {
+                ensure_auxiliary_realm(context, host, auxiliary)?
+            } else {
+                let Some(realm) = host
+                    .borrow()
+                    .auxiliary_contexts
+                    .get(&auxiliary)
+                    .and_then(|entry| entry.realm.clone())
+                else {
+                    return Ok(JsValue::null());
+                };
+                realm
+            }
         } else {
             return Ok(JsValue::null());
         };

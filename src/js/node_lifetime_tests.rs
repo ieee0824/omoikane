@@ -74,6 +74,44 @@ fn iframe_history_snapshot_does_not_initialize_a_scriptless_realm() {
 
     assert_eq!(
         runtime
+            .eval("child.location.href")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "about:srcdoc"
+    );
+    assert!(
+        runtime
+            .host_state
+            .borrow()
+            .iframe_documents
+            .values()
+            .all(|entry| entry.realm.is_none()),
+        "reading Location must not bootstrap a child Realm"
+    );
+
+    assert_eq!(
+        runtime
+            .eval(
+                "child.location.href = 'data:text/html,<p>navigated</p>'; child === frame.contentWindow && !child.closed"
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert!(
+        runtime
+            .host_state
+            .borrow()
+            .iframe_documents
+            .values()
+            .all(|entry| entry.realm.is_none()),
+        "scriptless cross-document navigation must not bootstrap a departing child Realm"
+    );
+
+    assert_eq!(
+        runtime
             .eval("frame.srcdoc = '<p>replacement</p>'; child === frame.contentWindow && !child.closed")
             .unwrap()
             .as_boolean(),

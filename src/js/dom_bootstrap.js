@@ -9469,7 +9469,8 @@
       // The child may have started a Realm after its WindowProxy received
       // listeners. Attach those listeners to the existing Window before its
       // pagehide event is dispatched in that Realm.
-      void iframe.__contentWindowFacade.__listeners;
+      const syncWindowListeners = safeWeakMapGet(iframeWindowProxyRetirers, iframe);
+      if (syncWindowListeners) syncWindowListeners("sync-listeners");
     }
     if (nativeDispatchIframeDeparture(iframe.__id)) return;
     const departingDocument = sameOriginDocumentId !== null ? wrapNode(documentId) : null;
@@ -9796,9 +9797,9 @@
           // top-level realm, so its Document URL is the relevant base. History
           // state URLs deliberately continue to use the target Document below.
           const destination = new URL(String(value), callerBaseURL()).href;
-          const currentDocument = childNavigationDocument ||
-            (access === "same" ? iframe.contentDocument : null);
-          const currentURL = currentDocument ? currentDocument.URL : nativeIframeDocumentURL(iframe.__id);
+          const currentDocument = childNavigationDocument;
+          const currentURL = currentDocument ? currentDocument.URL :
+            (historyIndex < 0 ? nativeIframeDocumentURL(iframe.__id) : historyEntries[historyIndex].href);
           if (currentURL && currentURL.split("#", 1)[0] === destination.split("#", 1)[0]) {
             if (currentURL === destination) return;
             captureActiveHistory();
@@ -9812,9 +9813,11 @@
               historyEntries.push(entry);
               historyIndex = historyEntries.length - 1;
             }
-            if (currentDocument) {
+            const historyDocument = currentDocument ||
+              (access === "same" ? iframe.contentDocument : null);
+            if (historyDocument) {
               safeWeakMapSet(documentHistoryURLs,
-                safeWeakMapGet(nodeEventStates, currentDocument), destination);
+                safeWeakMapGet(nodeEventStates, historyDocument), destination);
             }
             dispatchWindowEvent("hashchange", { oldURL: currentURL, newURL: destination });
             return;
@@ -10004,8 +10007,7 @@
           get href() {
             refresh();
             if (access !== "same") throw securityError();
-            const document = iframe.contentDocument;
-            return document ? document.URL : "about:blank";
+            return historyIndex < 0 ? "about:blank" : historyEntries[historyIndex].href;
           },
           set href(value) { navigate(value, "push"); },
           get assign() {
@@ -10050,7 +10052,11 @@
             if (property === "window" || property === "self" || property === "frames") return proxy;
             // Check in the trap itself: a helper in the facade's creator Realm
             // would replace the author caller whose origin must be checked.
-            const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) : nativeWindowProxyGlobal(proxy);
+            // Location uses the facade unless a cross-origin owner is being
+            // inspected from inside the child itself. That case already has a
+            // Realm, so validate the caller without creating a scriptless one.
+            const window = access === "closed" ? nativeRetainedWindowGlobal(retainedWindow) :
+              nativeWindowProxyGlobal(proxy, property !== "location");
             if (property === "top") return window !== null ? window.top : topWindow;
             if (property === "parent") return window !== null && access === "cross" ? window.parent : parentWindow();
             if (property === "opener") return null;
@@ -10193,6 +10199,10 @@
         captures.add(captureReference);
         safeWeakMapSet(iframeWindowProxyRetirers, this, (action = "retire") => {
           if (action === "cancel") { retainedWindow = null; return; }
+          if (action === "sync-listeners") {
+            getActiveWindow(false);
+            return;
+          }
           if (action === "prepare") {
             retainedWindow = getActiveWindow(false);
             return;
