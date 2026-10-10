@@ -602,6 +602,9 @@ struct BootstrapBindings {
     names: Vec<String>,
 }
 
+static BOOTSTRAP_MODULE_SOURCES: OnceLock<Mutex<HashMap<Vec<String>, Arc<String>>>> =
+    OnceLock::new();
+
 impl BootstrapBindings {
     fn new() -> Self {
         Self {
@@ -640,7 +643,7 @@ impl BootstrapBindings {
         self.value(name, callable, context)
     }
 
-    fn module_source(&self) -> String {
+    fn build_module_source(&self) -> String {
         let names: HashSet<&str> = self.names.iter().map(String::as_str).collect();
         let mut source = format!(
             "const {{ {} }} = import.meta.__omoikane_private_bindings;\n\
@@ -682,6 +685,19 @@ impl BootstrapBindings {
             cursor = end;
         }
         source.push_str(&DOM_BOOTSTRAP[cursor..]);
+        source
+    }
+
+    fn module_source(&self) -> Arc<String> {
+        let sources = BOOTSTRAP_MODULE_SOURCES.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut sources = sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(source) = sources.get(&self.names) {
+            return Arc::clone(source);
+        }
+        let source = Arc::new(self.build_module_source());
+        sources.insert(self.names.clone(), Arc::clone(&source));
         source
     }
 }
@@ -1907,9 +1923,6 @@ fn is_nested_frame_tag(tag: &str) -> bool {
 struct IframeDocument {
     /// Root document node of the sub-browsing context.
     document: NodeHandle,
-    /// The `src` attribute value this document was loaded from (`""` for an
-    /// `about:blank` sub-document with no `src`).
-    loaded_src: String,
     /// Effective URL used to initialize the child browsing-context global.
     document_url: String,
     /// Child browsing-context Realm. Same-origin WindowProxy access or script
@@ -2519,37 +2532,32 @@ impl HostState {
         {
             return;
         }
-        let attributes = node.attributes().unwrap_or_default();
-        let is_iframe = node.tag_name().is_some_and(|tag| is_nested_frame_tag(&tag));
-        let (effective_attribute, new_resource) = if is_iframe {
-            match attributes
-                .get("srcdoc")
-                .filter(|_| node.has_tag_name("iframe"))
-            {
-                Some(srcdoc) => ("srcdoc", srcdoc.clone()),
-                None => (
-                    "src",
-                    attributes
-                        .get("src")
-                        .map(|src| src.trim().to_string())
-                        .unwrap_or_default(),
-                ),
-            }
-        } else {
+        let (is_iframe, accepts_srcdoc) = node.with_tag_name(|tag| {
             (
-                resource_attr,
-                attributes
-                    .get(resource_attr)
-                    .map(|resource| resource.trim().to_string())
-                    .unwrap_or_default(),
+                tag.is_some_and(is_nested_frame_tag),
+                tag.is_some_and(|tag| tag.eq_ignore_ascii_case("iframe")),
             )
+        });
+        let effective_attribute = if accepts_srcdoc && node.has_attribute("srcdoc") {
+            "srcdoc"
+        } else if is_iframe {
+            "src"
+        } else {
+            resource_attr
         };
         if self
             .iframe_documents
             .get(&node.identity())
             .is_some_and(|entry| {
                 entry.loaded_attribute == effective_attribute
-                    && entry.loaded_resource == new_resource
+                    && node.with_attribute(effective_attribute, |resource| {
+                        let resource = resource.unwrap_or_default();
+                        if effective_attribute == "srcdoc" {
+                            entry.loaded_resource == resource
+                        } else {
+                            entry.loaded_resource == resource.trim()
+                        }
+                    })
             })
         {
             return;
@@ -2590,29 +2598,29 @@ impl HostState {
         if !self.node_is_in_active_document(iframe) {
             return Err(JsHostError::InactiveIframeOwner);
         }
-        let attributes = iframe.attributes().unwrap_or_default();
-        let is_iframe = iframe
-            .tag_name()
-            .is_some_and(|tag| is_nested_frame_tag(&tag));
+        let (is_iframe, accepts_srcdoc) = iframe.with_tag_name(|tag| {
+            (
+                tag.is_some_and(is_nested_frame_tag),
+                tag.is_some_and(|tag| tag.eq_ignore_ascii_case("iframe")),
+            )
+        });
         let (resource_attribute, resource) = if is_iframe {
-            match attributes
-                .get("srcdoc")
-                .filter(|_| iframe.has_tag_name("iframe"))
-            {
-                Some(srcdoc) => ("srcdoc", srcdoc.clone()),
-                None => (
+            if accepts_srcdoc && iframe.has_attribute("srcdoc") {
+                ("srcdoc", iframe.get_attribute("srcdoc").unwrap_or_default())
+            } else {
+                (
                     "src",
-                    attributes
-                        .get("src")
+                    iframe
+                        .get_attribute("src")
                         .map(|src| src.trim().to_string())
                         .unwrap_or_default(),
-                ),
+                )
             }
         } else {
             (
                 "data",
-                attributes
-                    .get("data")
+                iframe
+                    .get_attribute("data")
                     .map(|data| data.trim().to_string())
                     .unwrap_or_default(),
             )
@@ -2790,7 +2798,6 @@ impl HostState {
             iframe_id,
             IframeDocument {
                 document: document.clone(),
-                loaded_src: resource.clone(),
                 document_url,
                 realm: None,
                 loaded_attribute: resource_attribute,
@@ -3074,10 +3081,12 @@ impl HostState {
             effective_url.push('#');
             effective_url.push_str(fragment);
         }
+        let mime_type = response.header("Content-Type").unwrap_or("").to_owned();
+        let csp_headers = child_document::response_csp_headers(&response);
         Some(FetchedChildResource {
-            mime_type: response.header("Content-Type").unwrap_or("").to_owned(),
-            csp_headers: child_document::response_csp_headers(&response),
-            body: response.body().to_vec(),
+            mime_type,
+            csp_headers,
+            body: response.into_body(),
             effective_url,
         })
     }
