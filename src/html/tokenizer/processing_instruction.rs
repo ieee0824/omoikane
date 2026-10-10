@@ -1,5 +1,6 @@
 //! HTML Standard processing-instruction tokenizer states 13.2.5.72–76.
 use super::{Cursor, HtmlParseError, TextBuffer, Token, comment_token, is_html_whitespace};
+use crate::dom::DomString;
 
 /// Consumes after `<?`; the incremental tokenizer waits for a complete token.
 pub(super) fn consume(cursor: &mut Cursor, errors: &mut Vec<HtmlParseError>) -> Option<Token> {
@@ -41,14 +42,18 @@ pub(super) fn consume(cursor: &mut Cursor, errors: &mut Vec<HtmlParseError>) -> 
             if ch == '?' {
                 cursor.consume();
             }
-            let units = data.take().unwrap_or_default();
-            return Some(match String::from_utf16(&units) {
-                Ok(data) => Token::ProcessingInstruction { target, data },
-                Err(_) => Token::ProcessingInstructionUtf16 {
-                    target,
-                    data: units,
+            return Some(
+                match data
+                    .take()
+                    .unwrap_or_else(|| DomString::Scalar(String::new()))
+                {
+                    DomString::Scalar(data) => Token::ProcessingInstruction { target, data },
+                    DomString::Utf16(units) => Token::ProcessingInstructionUtf16 {
+                        target,
+                        data: units,
+                    },
                 },
-            });
+            );
         }
         data.push_code_point(cursor.consumed_code_point().unwrap());
     }

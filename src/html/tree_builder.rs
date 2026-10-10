@@ -288,12 +288,15 @@ impl WriteParser {
         self.tokenizer.finish_input_chunk();
     }
 
-    pub(crate) fn take_pending_input_utf16(&mut self) -> Vec<u16> {
-        self.tokenizer.take_pending_input_utf16()
+    pub(crate) fn push_input_owned(&mut self, input: &crate::dom::DomString) {
+        match input {
+            crate::dom::DomString::Scalar(value) => self.push_input(value),
+            crate::dom::DomString::Utf16(units) => self.push_input_utf16(units),
+        }
     }
 
-    pub(crate) fn take_pending_input(&mut self) -> String {
-        self.tokenizer.take_pending_input()
+    pub(crate) fn take_pending_input_owned(&mut self) -> crate::dom::DomString {
+        self.tokenizer.take_pending_input_owned()
     }
 
     pub(crate) fn take_created_nodes(&mut self) -> Vec<NodeHandle> {
@@ -459,13 +462,17 @@ impl Builder {
             return;
         }
 
-        if let Token::ProcessingInstruction { target, data } = &token {
-            self.insert_processing_instruction(target, data);
-            return;
-        }
-        if self.process_foreign_token(&token, errors) {
-            return;
-        }
+        let token = match token {
+            Token::ProcessingInstruction { target, data } => {
+                self.insert_processing_instruction(target, data);
+                return;
+            }
+            token => token,
+        };
+        let token = match self.process_foreign_token(token, errors) {
+            Ok(()) => return,
+            Err(token) => token,
+        };
         match self.mode {
             InsertionMode::Initial => self.handle_initial(token, errors),
             InsertionMode::BeforeHtml => self.handle_before_html(token, errors),
@@ -494,7 +501,7 @@ impl Builder {
         self.leaf_data_utf16 = previous;
     }
 
-    fn insert_processing_instruction(&self, target: &str, data: &str) {
+    fn insert_processing_instruction(&self, target: String, data: String) {
         let parent = match self.mode {
             InsertionMode::Initial | InsertionMode::BeforeHtml | InsertionMode::AfterAfterBody => {
                 self.document.clone()
@@ -512,7 +519,7 @@ impl Builder {
     fn handle_initial(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
             Token::ProcessingInstruction { target, data } => {
-                self.insert_processing_instruction(&target, &data)
+                self.insert_processing_instruction(target, data)
             }
             Token::Comment(data) => self.append_node(&self.document, NodeHandle::comment(data)),
             Token::Doctype(doctype) => {
@@ -545,14 +552,14 @@ impl Builder {
     fn handle_before_html(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
             Token::ProcessingInstruction { target, data } => {
-                self.insert_processing_instruction(&target, &data)
+                self.insert_processing_instruction(target, data)
             }
             Token::Comment(data) => self.append_node(&self.document, NodeHandle::comment(data)),
             Token::Character(data) if data.trim().is_empty() => {}
             Token::StartTag {
                 name, attributes, ..
             } if name == "html" => {
-                let html = self.insert_html_element_with_attributes("html", &attributes);
+                let html = self.insert_html_element_with_attributes("html", attributes);
                 self.open_elements.push(html);
                 self.mode = InsertionMode::BeforeHead;
             }
@@ -573,7 +580,7 @@ impl Builder {
         match token {
             Token::Character(data) if data.trim().is_empty() => {}
             Token::ProcessingInstruction { target, data } => {
-                self.insert_processing_instruction(&target, &data)
+                self.insert_processing_instruction(target, data)
             }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
@@ -581,7 +588,7 @@ impl Builder {
             Token::StartTag {
                 name, attributes, ..
             } if name == "head" => {
-                let head = self.insert_element_with_attributes("head", &attributes);
+                let head = self.insert_element_with_attributes("head", attributes);
                 self.open_elements.push(head);
                 self.mode = InsertionMode::InHead;
             }
@@ -600,10 +607,10 @@ impl Builder {
     fn handle_in_head(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
             Token::Character(data) => {
-                self.handle_head_text(&data, errors);
+                self.handle_head_text(data, errors);
             }
             Token::ProcessingInstruction { target, data } => {
-                self.insert_processing_instruction(&target, &data)
+                self.insert_processing_instruction(target, data)
             }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
@@ -619,9 +626,9 @@ impl Builder {
             ) =>
             {
                 let element = if name == "template" {
-                    self.insert_template_with_attributes(&attributes)
+                    self.insert_template_with_attributes(attributes)
                 } else {
-                    self.insert_element_with_attributes(&name, &attributes)
+                    self.insert_element_with_attributes(&name, attributes)
                 };
                 if name == "template" {
                     self.open_elements.push(element.clone());
@@ -660,7 +667,7 @@ impl Builder {
         }
     }
 
-    fn handle_head_text(&mut self, data: &str, errors: &mut Vec<HtmlParseError>) {
+    fn handle_head_text(&mut self, mut data: String, errors: &mut Vec<HtmlParseError>) {
         // Text-only head elements use the tokenizer's raw-text/RCDATA state.
         if matches!(
             self.current_node().tag_name().as_deref(),
@@ -677,14 +684,19 @@ impl Builder {
                 (!matches!(ch, '\t' | '\n' | '\u{000c}' | '\r' | ' ')).then_some(offset)
             })
             .unwrap_or(data.len());
-        if whitespace_end > 0 {
-            self.insert_text(&data[..whitespace_end]);
+        let remainder = if whitespace_end == 0 {
+            std::mem::take(&mut data)
+        } else {
+            data.split_off(whitespace_end)
+        };
+        if !data.is_empty() {
+            self.insert_text(data);
         }
-        if whitespace_end < data.len() {
+        if !remainder.is_empty() {
             self.pop_matching("head");
             self.mode = InsertionMode::InBody;
             self.ensure_body_element();
-            self.process_token(Token::Character(data[whitespace_end..].to_owned()), errors);
+            self.process_token(Token::Character(remainder), errors);
         }
     }
 
@@ -697,11 +709,11 @@ impl Builder {
             }
             Token::Character(data) => {
                 if !data.is_empty() {
-                    self.insert_text(&data);
+                    self.insert_text(data);
                 }
             }
             Token::ProcessingInstruction { target, data } => {
-                self.insert_processing_instruction(&target, &data)
+                self.insert_processing_instruction(target, data)
             }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
@@ -719,16 +731,16 @@ impl Builder {
                 match name.as_str() {
                     "html" => {
                         if let Some(html) = self.find_open_element("html") {
-                            self.merge_missing_attributes(&html, &attributes);
+                            self.merge_missing_attributes(&html, attributes);
                         }
                     }
                     "head" => {}
                     "body" => {
                         if !self.fragment {
                             if let Some(body) = self.find_open_element("body") {
-                                self.merge_missing_attributes(&body, &attributes);
+                                self.merge_missing_attributes(&body, attributes);
                             } else {
-                                let body = self.insert_element_with_attributes("body", &attributes);
+                                let body = self.insert_element_with_attributes("body", attributes);
                                 self.open_elements.push(body);
                             }
                         }
@@ -738,7 +750,7 @@ impl Builder {
                         if self.form_element.is_some() && !in_template {
                             return;
                         }
-                        let form = self.insert_element_with_attributes("form", &attributes);
+                        let form = self.insert_element_with_attributes("form", attributes);
                         if !in_template {
                             self.form_element = Some(form.clone());
                         }
@@ -753,7 +765,7 @@ impl Builder {
                         let element = self.insert_foreign_element(
                             &self.insertion_parent(),
                             &name,
-                            &attributes,
+                            attributes,
                             namespace,
                         );
                         if !self_closing {
@@ -761,7 +773,7 @@ impl Builder {
                         }
                     }
                     "table" => {
-                        let table = self.insert_element_with_attributes("table", &attributes);
+                        let table = self.insert_element_with_attributes("table", attributes);
                         if !self_closing {
                             self.open_elements.push(table);
                             self.mode = InsertionMode::InTable;
@@ -777,19 +789,19 @@ impl Builder {
                         self.process_token(
                             Token::StartTag {
                                 name: name.clone(),
-                                attributes: attributes.clone(),
+                                attributes,
                                 self_closing,
                             },
                             errors,
                         );
                     }
                     "template" => {
-                        let template = self.insert_template_with_attributes(&attributes);
+                        let template = self.insert_template_with_attributes(attributes);
                         self.open_elements.push(template);
                         self.template_insertion_modes.push(self.mode);
                     }
                     _ => {
-                        let element = self.insert_element_with_attributes(&name, &attributes);
+                        let element = self.insert_element_with_attributes(&name, attributes);
                         if !self_closing && !is_void_element(&name) {
                             if is_formatting_element(&name) {
                                 self.active_formatting_elements.push(element.clone());
@@ -875,10 +887,10 @@ impl Builder {
 
     fn handle_in_table(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
-            Token::Character(data) if data.trim().is_empty() => self.insert_text(&data),
-            Token::Character(data) => self.foster_parent_text(&data),
+            Token::Character(data) if data.trim().is_empty() => self.insert_text(data),
+            Token::Character(data) => self.foster_parent_text(data),
             Token::ProcessingInstruction { target, data } => {
-                self.insert_processing_instruction(&target, &data)
+                self.insert_processing_instruction(target, data)
             }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
@@ -892,7 +904,7 @@ impl Builder {
                     if self.form_element.is_none() && self.template_insertion_modes.is_empty() {
                         // The in-table rule inserts the form and immediately
                         // pops it, retaining only the parser's form pointer.
-                        let form = self.insert_element_with_attributes("form", &attributes);
+                        let form = self.insert_element_with_attributes("form", attributes);
                         self.form_element = Some(form);
                     }
                 }
@@ -901,7 +913,7 @@ impl Builder {
                     let table = self
                         .current_table()
                         .unwrap_or_else(|| self.ensure_table_element());
-                    let group = self.insert_into(&table, "colgroup", &attributes);
+                    let group = self.insert_into(&table, "colgroup", attributes);
                     self.open_elements.push(group);
                     self.mode = InsertionMode::InColumnGroup;
                 }
@@ -910,7 +922,7 @@ impl Builder {
                     let table = self
                         .current_table()
                         .unwrap_or_else(|| self.ensure_table_element());
-                    let group = self.insert_into(&table, "colgroup", &[]);
+                    let group = self.insert_into(&table, "colgroup", Vec::new());
                     self.open_elements.push(group);
                     self.mode = InsertionMode::InColumnGroup;
                     self.process_token(
@@ -929,7 +941,7 @@ impl Builder {
                     let table = self
                         .current_table()
                         .unwrap_or_else(|| self.ensure_table_element());
-                    let section = self.insert_into(&table, &name, &attributes);
+                    let section = self.insert_into(&table, &name, attributes);
                     self.open_elements.push(section);
                     self.mode = InsertionMode::InTableBody;
                 }
@@ -941,33 +953,33 @@ impl Builder {
                     let table = self
                         .current_table()
                         .unwrap_or_else(|| self.ensure_table_element());
-                    let tbody = self.insert_into(&table, "tbody", &[]);
+                    let tbody = self.insert_into(&table, "tbody", Vec::new());
                     self.open_elements.push(tbody);
                     self.mode = InsertionMode::InTableBody;
                     self.process_token(
                         Token::StartTag {
                             name: name.clone(),
-                            attributes: attributes.clone(),
+                            attributes,
                             self_closing,
                         },
                         errors,
                     );
                 }
                 "table" => {
-                    let table = self.insert_element_with_attributes("table", &attributes);
+                    let table = self.insert_element_with_attributes("table", attributes);
                     if !self_closing {
                         self.open_elements.push(table);
                     }
                 }
                 "template" => {
-                    let template = self.insert_template_with_attributes(&attributes);
+                    let template = self.insert_template_with_attributes(attributes);
                     if !self_closing {
                         self.open_elements.push(template);
                         self.template_insertion_modes.push(self.mode);
                         self.mode = InsertionMode::InBody;
                     }
                 }
-                _ => self.foster_parent_element(&name, &attributes, self_closing),
+                _ => self.foster_parent_element(&name, attributes, self_closing),
             },
             Token::EndTag { name } if name == "table" => {
                 self.pop_matching("table");
@@ -994,9 +1006,9 @@ impl Builder {
 
     fn handle_in_column_group(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
-            Token::Character(data) if data.trim().is_empty() => self.insert_text(&data),
+            Token::Character(data) if data.trim().is_empty() => self.insert_text(data),
             Token::ProcessingInstruction { target, data } => {
-                self.insert_processing_instruction(&target, &data)
+                self.insert_processing_instruction(target, data)
             }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
@@ -1004,7 +1016,7 @@ impl Builder {
             Token::StartTag {
                 name, attributes, ..
             } if name == "col" => {
-                self.insert_element_with_attributes("col", &attributes);
+                self.insert_element_with_attributes("col", attributes);
             }
             Token::EndTag { name } if name == "col" => {}
             Token::EndTag { name } if name == "colgroup" => {
@@ -1043,7 +1055,7 @@ impl Builder {
                 "tr" => {
                     self.clear_stack_to_table_body_context();
                     let section = self.current_node();
-                    let tr = self.insert_into(&section, "tr", &attributes);
+                    let tr = self.insert_into(&section, "tr", attributes);
                     self.open_elements.push(tr);
                     self.mode = InsertionMode::InRow;
                 }
@@ -1052,13 +1064,13 @@ impl Builder {
                     // then reprocess so the cell is placed inside it.
                     self.clear_stack_to_table_body_context();
                     let section = self.current_node();
-                    let tr = self.insert_into(&section, "tr", &[]);
+                    let tr = self.insert_into(&section, "tr", Vec::new());
                     self.open_elements.push(tr);
                     self.mode = InsertionMode::InRow;
                     self.process_token(
                         Token::StartTag {
                             name: name.clone(),
-                            attributes: attributes.clone(),
+                            attributes,
                             self_closing,
                         },
                         errors,
@@ -1072,7 +1084,7 @@ impl Builder {
                     self.process_token(
                         Token::StartTag {
                             name: name.clone(),
-                            attributes: attributes.clone(),
+                            attributes,
                             self_closing,
                         },
                         errors,
@@ -1126,7 +1138,7 @@ impl Builder {
                 self_closing: _,
             } if name == "td" || name == "th" => {
                 let row = self.current_node();
-                let cell = self.insert_into(&row, &name, &attributes);
+                let cell = self.insert_into(&row, &name, attributes);
                 self.open_elements.push(cell);
                 self.mode = InsertionMode::InCell;
             }
@@ -1190,11 +1202,11 @@ impl Builder {
         match token {
             Token::Character(data) => {
                 if !data.is_empty() {
-                    self.insert_text(&data);
+                    self.insert_text(data);
                 }
             }
             Token::ProcessingInstruction { target, data } => {
-                self.insert_processing_instruction(&target, &data)
+                self.insert_processing_instruction(target, data)
             }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
@@ -1207,7 +1219,7 @@ impl Builder {
                 if self.current_node().tag_name().as_deref() == Some("option") {
                     self.open_elements.pop();
                 }
-                let option = self.insert_element_with_attributes("option", &attributes);
+                let option = self.insert_element_with_attributes("option", attributes);
                 if !self_closing {
                     self.open_elements.push(option);
                 }
@@ -1223,7 +1235,7 @@ impl Builder {
                 if self.current_node().tag_name().as_deref() == Some("optgroup") {
                     self.open_elements.pop();
                 }
-                let group = self.insert_element_with_attributes("optgroup", &attributes);
+                let group = self.insert_element_with_attributes("optgroup", attributes);
                 if !self_closing {
                     self.open_elements.push(group);
                 }
@@ -1292,18 +1304,22 @@ impl Builder {
         true
     }
 
-    fn process_foreign_token(&mut self, token: &Token, errors: &mut Vec<HtmlParseError>) -> bool {
+    fn process_foreign_token(
+        &mut self,
+        token: Token,
+        errors: &mut Vec<HtmlParseError>,
+    ) -> Result<(), Token> {
         let current = self.current_node();
         let Some(namespace) = current.namespace_uri() else {
-            return false;
+            return Err(token);
         };
         if namespace == HTML_NAMESPACE {
-            return false;
+            return Err(token);
         }
 
-        if let Token::StartTag { name, .. } = token {
+        if let Token::StartTag { name, .. } = &token {
             if foreign_allows_html_start(&current, name) {
-                return false;
+                return Err(token);
             }
             if is_foreign_breakout_tag(name) {
                 let minimum_depth = if self.fragment { 2 } else { 1 };
@@ -1316,8 +1332,8 @@ impl Builder {
                     self.open_elements.pop();
                 }
                 self.mode = InsertionMode::InBody;
-                self.handle_in_body(token.clone(), errors);
-                return true;
+                self.handle_in_body(token, errors);
+                return Ok(());
             }
         }
 
@@ -1333,7 +1349,7 @@ impl Builder {
                 }
             }
             Token::ProcessingInstruction { target, data } => {
-                self.insert_processing_instruction(&target, &data)
+                self.insert_processing_instruction(target, data)
             }
             Token::Comment(data) => {
                 self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
@@ -1346,7 +1362,7 @@ impl Builder {
             } => {
                 let element = self.insert_foreign_element(
                     &self.insertion_parent(),
-                    name,
+                    &name,
                     attributes,
                     &namespace,
                 );
@@ -1358,21 +1374,21 @@ impl Builder {
                 if let Some(index) = self.open_elements.iter().rposition(|element| {
                     element
                         .tag_name()
-                        .is_some_and(|tag| tag.eq_ignore_ascii_case(name))
+                        .is_some_and(|tag| tag.eq_ignore_ascii_case(&name))
                 }) {
                     self.open_elements.truncate(index);
                 }
             }
             Token::Eof => self.mode = InsertionMode::AfterAfterBody,
         }
-        true
+        Ok(())
     }
 
     fn insert_foreign_element(
         &self,
         parent: &NodeHandle,
         name: &str,
-        attributes: &[super::Attribute],
+        attributes: Vec<super::Attribute>,
         namespace: &str,
     ) -> NodeHandle {
         let adjusted_name = if namespace == SVG_NAMESPACE {
@@ -1382,23 +1398,20 @@ impl Builder {
         };
         let element = NodeHandle::xml_element(adjusted_name, Some(namespace.to_string()));
         for attribute in attributes {
-            let name = super::foreign_attributes::adjusted_name(attribute.name(), namespace);
+            let (source_name, value) = attribute.into_owned();
+            let name = super::foreign_attributes::adjusted_name(&source_name, namespace);
             let attribute_namespace = super::foreign_attributes::namespace(name);
             let local_name = if attribute_namespace.is_some() {
                 name.rsplit_once(':').map_or(name, |(_, local)| local)
             } else {
                 name
             };
-            element.set_xml_attribute_ns(
-                name,
+            element.set_xml_attribute_ns_owned(
+                name.to_owned(),
                 attribute_namespace.map(str::to_owned),
-                local_name,
-                attribute.value(),
-            );
-            element.set_attribute_value_ns_utf16(
-                attribute_namespace,
-                local_name,
-                &attribute.value_utf16(),
+                local_name.to_owned(),
+                value,
+                false,
             );
         }
         self.append_node(parent, element.clone());
@@ -1409,7 +1422,7 @@ impl Builder {
         match token {
             Token::Character(data) if data.trim().is_empty() => {}
             Token::ProcessingInstruction { target, data } => {
-                self.insert_processing_instruction(&target, &data)
+                self.insert_processing_instruction(target, data)
             }
             Token::Comment(data) => self.append_node(&self.document, NodeHandle::comment(data)),
             Token::EndTag { name } if name == "html" => {
@@ -1427,7 +1440,7 @@ impl Builder {
     fn handle_after_after_body(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
         match token {
             Token::ProcessingInstruction { target, data } => {
-                self.insert_processing_instruction(&target, &data)
+                self.insert_processing_instruction(target, data)
             }
             Token::Comment(data) => self.append_node(&self.document, NodeHandle::comment(data)),
             Token::Character(data) if data.trim().is_empty() => {}
@@ -1455,7 +1468,7 @@ impl Builder {
         }
 
         let html = self.ensure_html_element();
-        let head = self.insert_into(&html, "head", &[]);
+        let head = self.insert_into(&html, "head", Vec::new());
         self.open_elements.push(head.clone());
         head
     }
@@ -1467,7 +1480,7 @@ impl Builder {
 
         self.pop_matching("head");
         let html = self.ensure_html_element();
-        let body = self.insert_into(&html, "body", &[]);
+        let body = self.insert_into(&html, "body", Vec::new());
         self.open_elements.push(body.clone());
         body
     }
@@ -1478,7 +1491,7 @@ impl Builder {
         }
 
         let body = self.ensure_body_element();
-        let table = self.insert_into(&body, "table", &[]);
+        let table = self.insert_into(&body, "table", Vec::new());
         self.open_elements.push(table.clone());
         table
     }
@@ -1523,17 +1536,18 @@ impl Builder {
     }
 
     fn insert_html_element(&mut self, name: &str) -> NodeHandle {
-        self.insert_html_element_with_attributes(name, &[])
+        self.insert_html_element_with_attributes(name, Vec::new())
     }
 
     fn insert_html_element_with_attributes(
         &mut self,
         name: &str,
-        attributes: &[super::Attribute],
+        attributes: Vec<super::Attribute>,
     ) -> NodeHandle {
         let node = NodeHandle::html_element_ns(name, HTML_NAMESPACE);
         for attribute in attributes {
-            node.set_attribute_utf16(attribute.name(), &attribute.value_utf16());
+            let (name, value) = attribute.into_owned();
+            node.set_attribute_owned(name, value);
         }
         self.append_node(&self.document, node.clone());
         node
@@ -1542,7 +1556,7 @@ impl Builder {
     fn insert_element_with_attributes(
         &mut self,
         name: &str,
-        attributes: &[super::Attribute],
+        attributes: Vec<super::Attribute>,
     ) -> NodeHandle {
         let parent = if name == "body" {
             self.ensure_html_element()
@@ -1552,13 +1566,8 @@ impl Builder {
         self.insert_into(&parent, name, attributes)
     }
 
-    fn insert_template_with_attributes(&mut self, attributes: &[super::Attribute]) -> NodeHandle {
+    fn insert_template_with_attributes(&mut self, attributes: Vec<super::Attribute>) -> NodeHandle {
         let host = self.current_node();
-        let template = self.insert_element_with_attributes("template", attributes);
-        if !self.allow_declarative_shadow_roots {
-            return template;
-        }
-
         let mode = attributes
             .iter()
             .find(|attribute| attribute.name().eq_ignore_ascii_case("shadowrootmode"))
@@ -1571,6 +1580,27 @@ impl Builder {
                     None
                 }
             });
+        let has = |name: &str| {
+            attributes
+                .iter()
+                .any(|attribute| attribute.name().eq_ignore_ascii_case(name))
+        };
+        let settings = crate::dom::ShadowRootSettings {
+            serializable: has("shadowrootserializable"),
+            delegates_focus: has("shadowrootdelegatesfocus"),
+            clonable: has("shadowrootclonable"),
+            declarative: true,
+            manual_slot_assignment: attributes.iter().any(|attribute| {
+                attribute
+                    .name()
+                    .eq_ignore_ascii_case("shadowrootslotassignment")
+                    && attribute.value().eq_ignore_ascii_case("manual")
+            }),
+        };
+        let template = self.insert_element_with_attributes("template", attributes);
+        if !self.allow_declarative_shadow_roots {
+            return template;
+        }
         let Some(mode) = mode else {
             return template;
         };
@@ -1582,23 +1612,7 @@ impl Builder {
         let Some(root) = host.attach_shadow(mode) else {
             return template;
         };
-        let has = |name: &str| {
-            attributes
-                .iter()
-                .any(|attribute| attribute.name().eq_ignore_ascii_case(name))
-        };
-        root.set_shadow_root_settings(crate::dom::ShadowRootSettings {
-            serializable: has("shadowrootserializable"),
-            delegates_focus: has("shadowrootdelegatesfocus"),
-            clonable: has("shadowrootclonable"),
-            declarative: true,
-            manual_slot_assignment: attributes.iter().any(|attribute| {
-                attribute
-                    .name()
-                    .eq_ignore_ascii_case("shadowrootslotassignment")
-                    && attribute.value().eq_ignore_ascii_case("manual")
-            }),
-        });
+        root.set_shadow_root_settings(settings);
         if !template.set_template_content(root.clone()) {
             return template;
         }
@@ -1615,14 +1629,15 @@ impl Builder {
         &self,
         parent: &NodeHandle,
         name: &str,
-        attributes: &[super::Attribute],
+        attributes: Vec<super::Attribute>,
     ) -> NodeHandle {
         let element = NodeHandle::html_element_ns(name, HTML_NAMESPACE);
         if name == "script" {
             element.set_script_source_position(self.script_source_position);
         }
         for attribute in attributes {
-            element.set_attribute_utf16(attribute.name(), &attribute.value_utf16());
+            let (name, value) = attribute.into_owned();
+            element.set_attribute_owned(name, value);
         }
         self.append_node(parent, element.clone());
         self.associate_parser_form(&element);
@@ -1653,11 +1668,12 @@ impl Builder {
         element.set_parser_form_owner(form);
     }
 
-    fn merge_missing_attributes(&self, element: &NodeHandle, attributes: &[super::Attribute]) {
+    fn merge_missing_attributes(&self, element: &NodeHandle, attributes: Vec<super::Attribute>) {
         let existing = element.attributes().unwrap_or_default();
         for attribute in attributes {
             if !existing.contains_key(attribute.name()) {
-                element.set_attribute_utf16(attribute.name(), &attribute.value_utf16());
+                let (name, value) = attribute.into_owned();
+                element.set_attribute_owned(name, value);
             }
         }
     }
@@ -1685,7 +1701,7 @@ impl Builder {
         }
     }
 
-    fn character_node(&self, text: &str) -> NodeHandle {
+    fn character_node(&self, text: String) -> NodeHandle {
         let Some(unit) = self.character_surrogate else {
             return NodeHandle::text(text);
         };
@@ -1704,7 +1720,7 @@ impl Builder {
         }
     }
 
-    fn insert_text(&mut self, text: &str) {
+    fn insert_text(&mut self, text: String) {
         let parent = self.current_node_or_document();
         // Writes can split a character run at arbitrary input boundaries.
         // Keep the live Text node when more characters arrive at the same point.
@@ -1721,20 +1737,20 @@ impl Builder {
         if let Some(previous) = previous
             && previous.node_type() == crate::dom::NodeType::Text
         {
-            self.append_character_data(&previous, text);
+            self.append_character_data(&previous, &text);
             return;
         }
         self.append_node(&parent, self.character_node(text));
     }
 
-    fn foster_parent_text(&mut self, text: &str) {
+    fn foster_parent_text(&mut self, text: String) {
         if let Some(table) = self.current_table()
             && let Some(parent) = table.parent_node()
         {
             if let Some(previous) = table.previous_sibling()
                 && previous.node_type() == crate::dom::NodeType::Text
             {
-                self.append_character_data(&previous, text);
+                self.append_character_data(&previous, &text);
                 return;
             }
             let text_node = self.character_node(text);
@@ -1751,7 +1767,7 @@ impl Builder {
     fn foster_parent_element(
         &mut self,
         name: &str,
-        attributes: &[super::Attribute],
+        attributes: Vec<super::Attribute>,
         self_closing: bool,
     ) {
         if let Some(table) = self.current_table()

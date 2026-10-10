@@ -3,6 +3,7 @@
 //! The implementation is intentionally small, but it follows the overall
 //! HTML5 tokenizer shape so later tree-construction work can extend it.
 
+use crate::dom::DomString;
 use std::fmt;
 
 mod input;
@@ -31,19 +32,16 @@ impl Attribute {
         }
     }
 
-    fn from_utf16(name: String, units: Vec<u16>) -> Self {
-        match String::from_utf16(&units) {
-            Ok(value) => Self {
-                name,
-                value,
-                utf16: None,
-            },
-            Err(_) => Self {
-                name,
-                value: String::from_utf16_lossy(&units),
-                utf16: Some(units),
-            },
-        }
+    fn from_owned(name: String, data: DomString) -> Self {
+        let (value, utf16) = data.into_parts();
+        Self { name, value, utf16 }
+    }
+
+    pub(crate) fn into_owned(self) -> (String, DomString) {
+        let data = self
+            .utf16
+            .map_or_else(|| DomString::Scalar(self.value), DomString::Utf16);
+        (self.name, data)
     }
 
     /// Returns the exact attribute value code units, including unpaired surrogates.
@@ -393,7 +391,7 @@ impl IncrementalTokenizer {
     }
 
     pub(crate) fn push_input(&mut self, input: &str) {
-        self.push_input_utf16(&input.encode_utf16().collect::<Vec<u16>>());
+        self.input_decoder.push_str(input, &mut self.pending);
     }
 
     pub(crate) fn push_input_utf16(&mut self, units: &[u16]) {
@@ -405,6 +403,7 @@ impl IncrementalTokenizer {
     }
 
     /// Takes unconsumed source units, including a pending high surrogate.
+    #[cfg(test)]
     pub(crate) fn take_pending_input_utf16(&mut self) -> Vec<u16> {
         self.input_decoder.finish(&mut self.pending);
         let mut units = Vec::new();
@@ -414,10 +413,16 @@ impl IncrementalTokenizer {
         units
     }
 
-    /// Temporarily hide the outer scalar write's tail during reentrant parsing.
-    pub(crate) fn take_pending_input(&mut self) -> String {
-        String::from_utf16(&self.take_pending_input_utf16())
-            .expect("scalar write input must contain valid UTF-16")
+    /// Moves a suspended write tail through scalar storage unless it contains
+    /// an unpaired surrogate that needs exact code units.
+    pub(crate) fn take_pending_input_owned(&mut self) -> DomString {
+        self.input_decoder.finish(&mut self.pending);
+        let mut text = TextBuffer::default();
+        for point in std::mem::take(&mut self.pending) {
+            text.push_code_point(point);
+        }
+        text.take()
+            .unwrap_or_else(|| DomString::Scalar(String::new()))
     }
 
     pub(crate) fn drain(
@@ -453,7 +458,7 @@ impl IncrementalTokenizer {
             // A few tokenizer states consume lookahead as one operation. Wait
             // until that operation is complete instead of mistaking a write
             // boundary for EOF (notably &am + p; and <!DOC + TYPE).
-            if !eof && needs_more_input(state, ch, &cursor.chars[cursor.index..]) {
+            if !eof && needs_more_input(state, ch, &cursor.source[cursor.index..]) {
                 break;
             }
             cursor.consume();
@@ -1340,7 +1345,7 @@ fn eof_state_needs_unexpected_eof_error(state: State) -> bool {
 }
 
 /// Lookahead which cannot be committed at a non-final input boundary.
-fn needs_more_input(state: State, ch: char, remaining: &[char]) -> bool {
+fn needs_more_input(state: State, ch: char, remaining: &[InputCodePoint]) -> bool {
     if ch == '&'
         && matches!(
             state,
@@ -1351,16 +1356,20 @@ fn needs_more_input(state: State, ch: char, remaining: &[char]) -> bool {
                 | State::AttributeValueUnquoted
         )
     {
-        return remaining[1..]
-            .iter()
-            .all(|c| c.is_ascii_alphanumeric() || *c == '#');
+        return remaining[1..].iter().all(|point| {
+            let value = point.scalar_view();
+            value.is_ascii_alphanumeric() || value == '#'
+        });
     }
     match state {
-        State::TagOpen if ch == '?' => !remaining.contains(&'>'),
+        State::TagOpen if ch == '?' => !remaining.contains(&InputCodePoint::Scalar('>')),
         State::MarkupDeclarationOpen if ch == '-' => remaining.len() < 2,
         State::MarkupDeclarationOpen if ch.eq_ignore_ascii_case(&'d') => remaining.len() < 7,
         State::AfterDoctypeName if !is_html_whitespace(ch) && ch != '>' => {
-            remaining.len() < 6 && remaining.iter().all(char::is_ascii_alphabetic)
+            remaining.len() < 6
+                && remaining
+                    .iter()
+                    .all(|point| point.scalar_view().is_ascii_alphabetic())
         }
         _ => false,
     }
@@ -1425,27 +1434,14 @@ mod incremental_tests {
 
 #[derive(Debug, Clone)]
 struct Cursor {
-    chars: Vec<char>,
     source: Vec<InputCodePoint>,
     index: usize,
     can_reconsume: bool,
 }
 
 impl Cursor {
-    fn new(chars: Vec<char>) -> Self {
-        Self::from_code_points(chars.into_iter().map(InputCodePoint::Scalar).collect())
-    }
-
     fn from_code_points(source: Vec<InputCodePoint>) -> Self {
-        let chars = source
-            .iter()
-            .map(|point| match point {
-                InputCodePoint::Scalar(value) => *value,
-                InputCodePoint::Surrogate(_) => '\u{fffd}',
-            })
-            .collect();
         Self {
-            chars,
             source,
             index: 0,
             can_reconsume: false,
@@ -1459,14 +1455,17 @@ impl Cursor {
     }
 
     fn consume(&mut self) -> Option<char> {
-        let ch = self.chars.get(self.index).copied()?;
+        let ch = self.source.get(self.index).copied()?.scalar_view();
         self.index += 1;
         self.can_reconsume = true;
         Some(ch)
     }
 
     fn peek(&self) -> Option<char> {
-        self.chars.get(self.index).copied()
+        self.source
+            .get(self.index)
+            .copied()
+            .map(InputCodePoint::scalar_view)
     }
 
     fn reconsume(&mut self) {
@@ -1486,16 +1485,25 @@ fn is_html_whitespace(ch: char) -> bool {
 }
 
 fn comment_token(mut data: TextBuffer) -> Token {
-    let units = data.take().unwrap_or_default();
-    match String::from_utf16(&units) {
-        Ok(data) => Token::Comment(data),
-        Err(_) => Token::CommentUtf16(units),
+    match data
+        .take()
+        .unwrap_or_else(|| DomString::Scalar(String::new()))
+    {
+        DomString::Scalar(data) => Token::Comment(data),
+        DomString::Utf16(units) => Token::CommentUtf16(units),
     }
 }
 
 fn flush_text(buffer: &mut TextBuffer, tokens: &mut Vec<Token>) {
-    let Some(units) = buffer.take() else {
+    let Some(data) = buffer.take() else {
         return;
+    };
+    let units = match data {
+        DomString::Scalar(data) => {
+            tokens.push(Token::Character(data));
+            return;
+        }
+        DomString::Utf16(units) => units,
     };
     let mut scalar = String::new();
     for point in char::decode_utf16(units) {
@@ -1516,9 +1524,11 @@ fn flush_text(buffer: &mut TextBuffer, tokens: &mut Vec<Token>) {
 
 fn push_attribute(attributes: &mut Vec<Attribute>, name: &mut String, value: &mut TextBuffer) {
     if !name.is_empty() {
-        attributes.push(Attribute::from_utf16(
+        attributes.push(Attribute::from_owned(
             std::mem::take(name),
-            value.take().unwrap_or_default(),
+            value
+                .take()
+                .unwrap_or_else(|| DomString::Scalar(String::new())),
         ));
     }
 }
@@ -1527,7 +1537,7 @@ fn emit_tag(
     tokens: &mut Vec<Token>,
     current_tag_name: &str,
     current_end_tag_name: &str,
-    current_attributes: &[Attribute],
+    current_attributes: &mut Vec<Attribute>,
     current_self_closing: bool,
 ) {
     if !current_end_tag_name.is_empty() {
@@ -1540,7 +1550,7 @@ fn emit_tag(
     if !current_tag_name.is_empty() {
         tokens.push(Token::StartTag {
             name: current_tag_name.to_string(),
-            attributes: current_attributes.to_vec(),
+            attributes: std::mem::take(current_attributes),
             self_closing: current_self_closing,
         });
     }
@@ -2523,5 +2533,41 @@ mod utf16_character_token_tests {
                 assert_eq!(units, source, "{context} split{boundary}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod scalar_staging_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_html_payloads_never_promote_to_utf16_staging() {
+        for items in [1024, 2048] {
+            let value = "aé😀".repeat(items);
+            let input =
+                format!("<body><p x=\"{value}\">{value}<!--{value}--><?probe {value}?></p></body>");
+            input::reset_utf16_staging_units();
+            let parsed = crate::html::TreeBuilder::parse(&input);
+            assert!(parsed.errors().is_empty());
+            assert_eq!(input::utf16_staging_units(), 0);
+            eprintln!(
+                "HTML staging input_bytes={}, materialized_utf16_units=0",
+                input.len()
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_attribute_moves_its_allocation_into_dom_storage() {
+        let tokens = Tokenizer::new("<p x='aé😀 value'>").tokenize();
+        let Token::StartTag { attributes, .. } = tokens.into_iter().next().unwrap() else {
+            panic!("start tag expected")
+        };
+        let attribute = attributes.into_iter().next().unwrap();
+        let pointer = attribute.value.as_ptr();
+        let (name, value) = attribute.into_owned();
+        let node = crate::dom::NodeHandle::element("p");
+        node.set_attribute_owned(name, value);
+        node.with_attribute("x", |value| assert_eq!(value.unwrap().as_ptr(), pointer));
     }
 }

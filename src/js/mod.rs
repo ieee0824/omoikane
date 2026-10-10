@@ -40,7 +40,7 @@ use crate::css::{
 };
 use crate::css::{SelectorMatchCache, matches_selector_boundary_cached, matches_selector_cached};
 use crate::dom::{
-    Node, NodeHandle, NodeType, ShadowRootMode, WeakNodeHandle, is_actually_disabled,
+    DomString, Node, NodeHandle, NodeType, ShadowRootMode, WeakNodeHandle, is_actually_disabled,
 };
 use crate::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
@@ -70,6 +70,9 @@ mod computed_style_layout_tests;
 #[cfg(test)]
 mod computed_text_shadow_tests;
 mod document_write;
+mod dom_string;
+#[cfg(test)]
+mod dom_string_tests;
 mod errors;
 use errors::JsHostError;
 pub use errors::{FindInPageError, JsEvaluationError, NotificationPermissionError};
@@ -16415,7 +16418,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
                 None
             }
         });
-        node.set_attribute_utf16(&name, &value.iter().collect::<Vec<u16>>());
+        node.set_attribute_owned(name, dom_string::from_js(&value));
         if is_name_attribute {
             state.borrow_mut().refresh_iframe_context_name(&node);
         }
@@ -16469,8 +16472,7 @@ fn set_attribute_ns_native(
         .cloned()
         .unwrap_or_default()
         .to_string(context)?;
-    let value_units: Vec<u16> = value.iter().collect();
-    let value = String::from_utf16_lossy(&value_units);
+    let value = dom_string::from_js(&value);
     let replace_qualified_name = args.get(5).and_then(JsValue::as_boolean).unwrap_or(false);
     let is_name_attribute = namespace.is_none() && qualified_name == "name";
     let is_style_attribute = namespace.is_none() && qualified_name == "style";
@@ -16494,17 +16496,13 @@ fn set_attribute_ns_native(
                 }
             })
         });
-        if replace_qualified_name {
-            node.replace_xml_attribute_ns(
-                qualified_name,
-                namespace.clone(),
-                local_name.clone(),
-                value,
-            );
-        } else {
-            node.set_xml_attribute_ns(qualified_name, namespace.clone(), local_name.clone(), value);
-        }
-        node.set_attribute_value_ns_utf16(namespace.as_deref(), &local_name, &value_units);
+        node.set_xml_attribute_ns_owned(
+            qualified_name,
+            namespace.clone(),
+            local_name,
+            value,
+            replace_qualified_name,
+        );
         if is_name_attribute {
             state.borrow_mut().refresh_iframe_context_name(&node);
         }
@@ -18613,7 +18611,7 @@ fn set_text_content_native(
         .cloned()
         .unwrap_or_default()
         .to_string(context)?;
-    let units: Vec<u16> = text.iter().collect();
+    let data = dom_string::from_js(&text);
     let creator = caller_document_id(context);
     with_host_state(|state| {
         let node = state
@@ -18633,7 +18631,7 @@ fn set_text_content_native(
                 .is_some_and(|tag| tag.eq_ignore_ascii_case("style"));
         // For text/comment leaf nodes, update data directly
         if is_character_data {
-            node.set_data_utf16(&units);
+            node.set_data_owned(data);
         } else {
             // Remove all children
             let removed_children = node.child_nodes();
@@ -18650,7 +18648,7 @@ fn set_text_content_native(
             // Add single text node
             if !text.is_empty() {
                 let text_node = NodeHandle::text("");
-                text_node.set_data_utf16(&units);
+                text_node.set_data_owned(data);
                 node.append_child(text_node.clone());
                 state
                     .borrow_mut()
@@ -19762,7 +19760,7 @@ fn create_text_node_native(
         .unwrap_or_default()
         .to_string(context)?;
     let node = NodeHandle::text("");
-    node.set_data_utf16(&text.iter().collect::<Vec<u16>>());
+    node.set_data_owned(dom_string::from_js(&text));
     let id = node.identity() as f64;
     let creator = caller_document_id(context);
     with_host_state(|state| {
@@ -19784,7 +19782,7 @@ fn create_cdata_section_native(
         .unwrap_or_default()
         .to_string(context)?;
     let node = NodeHandle::cdata_section("");
-    node.set_data_utf16(&text.iter().collect::<Vec<u16>>());
+    node.set_data_owned(dom_string::from_js(&text));
     let id = node.identity() as f64;
     let creator = caller_document_id(context);
     with_host_state(|state| {
@@ -20093,7 +20091,7 @@ fn create_processing_instruction_native(
         .unwrap_or_default()
         .to_string(context)?;
     let node = NodeHandle::processing_instruction(target, "");
-    node.set_data_utf16(&data.iter().collect::<Vec<u16>>());
+    node.set_data_owned(dom_string::from_js(&data));
     let id = node.identity() as f64;
     let creator = caller_document_id(context);
     with_host_state(|state| {
@@ -20115,7 +20113,7 @@ fn create_comment_native(
         .unwrap_or_default()
         .to_string(context)?;
     let node = NodeHandle::comment("");
-    node.set_data_utf16(&data.iter().collect::<Vec<u16>>());
+    node.set_data_owned(dom_string::from_js(&data));
     let id = node.identity() as f64;
     let creator = caller_document_id(context);
     with_host_state(|state| {
@@ -20529,8 +20527,8 @@ fn document_write_native(
         .cloned()
         .unwrap_or_default()
         .to_string(context)?;
-    let text: Vec<u16> = text.iter().collect();
-    with_host_state(|state| document_write::write(state, target_id, &text, false, context))
+    let text = dom_string::from_js(&text);
+    with_host_state(|state| document_write::write(state, target_id, text, false, context))
 }
 
 fn document_close_native(
@@ -20540,7 +20538,15 @@ fn document_close_native(
 ) -> JsResult<JsValue> {
     let target_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_document(context, target_id)?;
-    with_host_state(|state| document_write::write(state, target_id, &[], true, context))
+    with_host_state(|state| {
+        document_write::write(
+            state,
+            target_id,
+            DomString::Scalar(String::new()),
+            true,
+            context,
+        )
+    })
 }
 
 /// `__omoikane_iframe_content_document(iframeId)` — returns the node id of the
