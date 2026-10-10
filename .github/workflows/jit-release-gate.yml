@@ -34,6 +34,7 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts/tests -p test_select_gate_artifacts.py
           python3 -m unittest discover -s scripts/tests -p test_jit_gate5.py
+          python3 -m unittest discover -s scripts/tests -p test_diagnose_gate5_wpt.py
       - name: Resolve one dependency set for all six jobs
         run: python3 scripts/jit-gate5.py prepare .artifacts/jit-gate5/inputs
       - uses: actions/upload-artifact@v4
@@ -112,8 +113,15 @@ jobs:
         env:
           GATE_KIND: ${{ matrix.kind }}
           GATE_TARGET: ${{ matrix.target }}
+          OMOIKANE_GATE_DIAGNOSTICS: '1'
           CARGO_LOG: ${{ matrix.target == 'aarch64-apple-darwin' && matrix.kind == 'suite' && 'cargo::core::compiler::fingerprint=info' || '' }}
         run: python3 scripts/jit-gate5.py "$GATE_KIND" "$GATE_TARGET" .artifacts/jit-gate5
+      - name: Capture a native WPT crash without replacing the failed suite
+        if: failure() && matrix.kind == 'suite' && matrix.target == 'aarch64-apple-darwin'
+        continue-on-error: true
+        run: >-
+          python3 scripts/diagnose-gate5-wpt.py
+          .artifacts/jit-gate5/aarch64-apple-darwin/suite
       - name: Save Boa suite artifacts
         if: matrix.kind == 'suite' && steps.boa-cache.outputs.cache-hit != 'true' && success()
         continue-on-error: true

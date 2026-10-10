@@ -140,6 +140,10 @@ def run_target(kind, target, root):
                         "WPT_REPORT": str(folder / "wpt.json"), "WPT_JUNIT": str(folder / "wpt.xml"),
                         "OMOIKANE_JIT_GATE_REPORT_DIR": str(folder),
                         "OMOIKANE_WEB_API_REPORT": str(folder / "web-api.json")})
+            if env.get("OMOIKANE_GATE_DIAGNOSTICS") == "1":
+                write(folder / "suite-environment.json", {key: env.get(key) for key in
+                    ("WPT_ROOT", "WPT_REQUIRED", "WPT_MANIFEST", "WPT_REPORT", "WPT_JUNIT",
+                     "OMOIKANE_JIT_GATE_REPORT_DIR", "OMOIKANE_WEB_API_REPORT", "RUST_TEST_THREADS", "CI")})
             run("fetch-wpt", ["bash", "scripts/fetch-wpt.sh"])
             run("full-suite", SUITE_COMMAND)
             report["test_results"] = re.findall(
