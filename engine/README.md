@@ -327,3 +327,37 @@ count. Complete-suite comparison and publication CI remain pending here.
 
 Follow-up evidence is retained in `pr1333-ci-fixes-20261010` and
 `p1-1295-publish-product-final-20261010` beneath the evidence root above.
+
+### Resizable TypedArray follow-up
+
+The complete pinned suite exposed five existing TypedArray panic cases in both
+the retained engine and the maintained engine. `filter` and `with` now propagate
+BigInt conversion errors when source resizing or detachment leaves an element
+undefined. `slice` avoids accessing the source byte offset when the copy count
+becomes zero after fresh bounds validation; the species-created result keeps
+its originally requested length. Three regression tests failed before these
+corrections and passed afterward. The five unchanged Test262 fixtures passed
+in both normal and strict mode, for ten successful cases.
+
+The immutable reference engine's panics are recorded as panics, rather than
+rewriting its engine or converting those results to failures or ignores. A
+successful comparison requires every reference panic to become a maintained
+engine PASS. The maintained engine must remain panic-free, and removed cases,
+regressions, newly failing cases and platform disagreements remain failures.
+Nineteen harness tests check these conditions. After this correction, the
+required-WPT full root run passed 113 groups and 3,933 tests, with zero failures
+or ignored tests. Both the package build and dev library JSON build succeeded.
+The rebuilt probe again matched all 18 availability checks, ten semantic
+checks and 33 principal-locale outputs against the retained Firefox observation.
+The extended comparison passed its 60 semantic and 12 descending-range checks;
+all seven previously recorded exact string differences remain unchanged.
+
+The latest standalone dev probe is **93,908,032 bytes**, a 36,328,952-byte
+increase over the same-profile 57,579,080-byte baseline. Three fresh-process
+ABBA blocks retained six samples per variant: initialization medians were
+574,311 -> 592,234 microseconds, with ranges 545,317-744,547 -> 435,326-643,777.
+Test262 and a feature-contract build were active during the measurement. These
+overlapping ranges do not establish a startup improvement or regression.
+The earlier measurements remain historical observations. Latest evidence is
+in `p1-1295-publish-product-typedarray-20261010` beneath the evidence root above.
+Complete-suite comparison and publication CI for this correction remain pending.
