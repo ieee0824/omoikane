@@ -291,3 +291,39 @@ Evidence is preserved under `/workspace/.artifacts/p1-owned-cache/` in
 `p1-1295-publish-product-20261010`, `p1-1331-text-sink-20261010` and
 `p1-jsstring-direct-20261010`. Source freezes, real Cargo artifacts, binaries,
 reference payloads, exact mismatches and raw samples are retained.
+
+### CI follow-up validation
+
+Inline cache installation now releases the receiver borrow before allocating
+weak shape handles, while retaining an owned shape root. A real abandoned Map
+iterator reproduces the former finalizer borrow panic before the correction;
+the corrected cache contract passes. The JIT full library run passed 3,098 tests.
+The Unicode script-extension interval correction was then verified with 520
+regress tests and doctests, with one existing doctest ignored, and the original
+Grantha Test262 fixture passed in both normal and strict mode.
+
+After both runtime corrections, the required-WPT root command again passed
+113 groups and 3,933 tests, with zero failures or ignored tests. The final dev
+library build and committed Rust formatting checks also passed. The rebuilt
+standalone probe matched the retained Firefox observation in all 18 availability
+checks, ten semantic checks and 33 outputs across the three principal locales.
+
+This final standalone dev probe measured **93,908,264 bytes**, compared with
+57,579,080 bytes for the same-profile baseline, a 36,329,184-byte increase. Three
+fresh-process ABBA blocks retained six initialization samples per variant:
+medians were 397,386 -> 374,713.5 microseconds, with ranges
+363,593-448,805 -> 273,078-461,807 microseconds. Other Test262 runs were active
+during this measurement. The overlapping ranges do not establish a startup
+improvement, and this is neither provider-only causality nor release/GUI size.
+The earlier probe measurements above remain historical observations.
+
+The CI Test262 pin now uses `2e0a56762801e275a9fdf96dc49d90ba0cddcf63`, matching
+the current Temporal YearMonth contract. Both engines share only the tester's
+feature-edition metadata adapter; the retained engine, dependency lock and ignore
+configuration keep their original bytes. The runner rejects missing or edited
+tracked fixtures and records the complete test/harness inventory. The local
+checkout contains 53,974 such files; this is an input count, not a passed-case
+count. Complete-suite comparison and publication CI remain pending here.
+
+Follow-up evidence is retained in `pr1333-ci-fixes-20261010` and
+`p1-1295-publish-product-final-20261010` beneath the evidence root above.
