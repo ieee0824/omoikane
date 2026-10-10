@@ -39,11 +39,13 @@ def capture(debugger):
     report.update(launch_error=str(error), pid=process.GetProcessID(),
                   seconds=time.monotonic() - started,
                   state=lldb.SBDebugger.StateAsCString(process.GetState()))
+    # The outer script command can retain a pre-launch execution context.
+    execution = lldb.SBExecutionContext(process)
     with (output / "native-stack.log").open("w") as log:
         for command in ["process status", "thread list", "thread backtrace all",
                         "register read", "image list -o -f"]:
             result = lldb.SBCommandReturnObject()
-            debugger.GetCommandInterpreter().HandleCommand(command, result)
+            debugger.GetCommandInterpreter().HandleCommand(command, execution, result)
             log.write(f"(lldb) {command}\n{result.GetOutput() or ''}{result.GetError() or ''}\n")
     report["threads"] = [
         {"id": thread.GetThreadID(), "name": thread.GetName(),

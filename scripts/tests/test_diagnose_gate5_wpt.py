@@ -142,6 +142,8 @@ class DiagnosticTests(unittest.TestCase):
         command_result = MagicMock()
         command_result.GetOutput.return_value, command_result.GetError.return_value = "mock stack\n", ""
         lldb.SBCommandReturnObject = MagicMock(return_value=command_result)
+        execution = object()
+        lldb.SBExecutionContext = MagicMock(return_value=execution)
         launch.GetLaunchFlags.side_effect = [3, 1]
         debugger.GetSelectedTarget.return_value = target
         target.GetExecutable.return_value = types.SimpleNamespace(fullpath=str(self.binary))
@@ -169,9 +171,80 @@ class DiagnosticTests(unittest.TestCase):
         launch.AddDuplicateFileAction.assert_called_once_with(1, 2)
         commands = [call.args[0] for call in debugger.GetCommandInterpreter.return_value.HandleCommand.call_args_list]
         self.assertEqual(commands, ["process status", "thread list", "thread backtrace all", "register read", "image list -o -f"])
+        lldb.SBExecutionContext.assert_called_once_with(process)
+        for call in debugger.GetCommandInterpreter.return_value.HandleCommand.call_args_list:
+            self.assertIs(call.args[1], execution)
+            self.assertIs(call.args[2], command_result)
         process.Kill.assert_called_once()
         process.Continue.assert_not_called()
         self.assertTrue(json.loads((output / "process.json").read_text())["binary_unchanged"])
+
+
+    def test_lldb_commands_use_launched_process_inside_prelaunch_script_context(self):
+        import hashlib
+        lldb = types.SimpleNamespace(eLaunchFlagDisableASLR=2, eStateExited=10,
+                                    eStateStopped=5, eStateCrashed=8)
+        launch, process, target, debugger = (MagicMock() for _ in range(4))
+        lldb.SBLaunchInfo = MagicMock(return_value=launch)
+        lldb.SBError = MagicMock(return_value="success")
+        lldb.SBDebugger = types.SimpleNamespace(StateAsCString=lambda state: "stopped")
+        lldb.SBExecutionContext = lambda active: types.SimpleNamespace(process=active)
+
+        class CommandResult:
+            def __init__(self):
+                self.output, self.error = "", ""
+
+            def GetOutput(self):
+                return self.output
+
+            def GetError(self):
+                return self.error
+
+        lldb.SBCommandReturnObject = CommandResult
+        launch.GetLaunchFlags.return_value = 1
+        # LLDB --file already selected the right target. The outer script
+        # command still has its pre-launch override context with no process.
+        debugger.GetSelectedTarget.return_value = target
+        target.GetExecutable.return_value = types.SimpleNamespace(fullpath=str(self.binary))
+        target.GetTriple.return_value = "arm64-apple-macosx"
+        target.Launch.return_value = process
+        process.GetState.return_value, process.GetProcessID.return_value = 5, 64633
+        process.__iter__.return_value = iter([])
+        expected = {"process status": "Process 64633 stopped",
+                    "thread list": "* thread #2: EXC_BAD_ACCESS",
+                    "thread backtrace all": "thread #2: frame #0 JsObject::invoke",
+                    "register read": "pc = 0x103315918",
+                    "image list -o -f": "wpt_smoke image"}
+
+        def interpret(command, *arguments):
+            if len(arguments) == 1:
+                result, active = arguments[0], None
+            else:
+                context, result = arguments
+                active = context.process
+            if active is process or command == "image list -o -f":
+                result.output = expected[command] + "\n"
+            else:
+                result.error = "error: Command requires a current process.\n"
+
+        debugger.GetCommandInterpreter.return_value.HandleCommand.side_effect = interpret
+        output = self.root / "lldb-prelaunch-context"
+        environment = dict(self.normal_environment, OMOIKANE_LLDB_OUTPUT=str(output),
+                           OMOIKANE_LLDB_BINARY_SHA256=hashlib.sha256(self.binary.read_bytes()).hexdigest())
+
+        def kill():
+            saved = (output / "native-stack.log").read_text()
+            self.assertNotIn("Command requires a current process", saved)
+            for text in expected.values():
+                self.assertIn(text, saved)
+            return "success"
+
+        process.Kill.side_effect = kill
+        with patch.dict(sys.modules, {"lldb": lldb}), patch.dict(os.environ, environment):
+            capture.capture(debugger)
+        process.Continue.assert_not_called()
+        process.Kill.assert_called_once()
+        self.assertTrue(json.loads((output / "process.json").read_text())["completed"])
 
 
 if __name__ == "__main__":
