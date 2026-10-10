@@ -864,9 +864,9 @@ impl BuiltinTypedArray {
         // 10. Let n be 0.
         // 11. For each element e of kept, do
         for (n, e) in kept.iter().enumerate() {
-            // a. Perform ! Set(A, ! ToString(𝔽(n)), e, true).
-            a.set(n, e.clone(), true, context)
-                .expect("Set cannot fail here");
+            // The callback can shrink or detach the source. Retained undefined
+            // values must propagate their BigInt conversion error after all callbacks.
+            a.set(n, e.clone(), true, context)?;
             // b. Set n to n + 1.
         }
 
@@ -2112,6 +2112,14 @@ impl BuiltinTypedArray {
         // d. Set countBytes to max(endIndex - startIndex, 0).
         let count = end_index.saturating_sub(start_index) as usize;
 
+        // Coercion or species construction can leave a valid length-tracking
+        // source empty. No source byte offset is accessed when nothing is copied.
+        if count == 0 {
+            drop(src_buf_borrow);
+            drop((src_borrow, target_borrow));
+            return Ok(target.upcast().into());
+        }
+
         // f. Let targetType be TypedArrayElementType(A).
         let target_type = target_borrow.data().kind();
 
@@ -2660,10 +2668,9 @@ impl BuiltinTypedArray {
                 // c. Else, let fromValue be ! Get(O, Pk).
                 ta.get(k, context).expect("cannot fail per the spec")
             };
-            // d. Perform ! Set(A, Pk, fromValue, true).
-            new_array
-                .set(k, value, true, context)
-                .expect("cannot fail per the spec");
+            // Coercion can shrink the source, making later elements undefined.
+            // BigInt element conversion must throw a JavaScript error, not panic.
+            new_array.set(k, value, true, context)?;
 
             // e. Set k to k + 1.
         }

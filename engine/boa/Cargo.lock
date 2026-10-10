@@ -361,6 +361,7 @@ dependencies = [
  "boa_gc",
  "boa_icu_provider",
  "boa_interner",
+ "boa_intl_data",
  "boa_macros",
  "boa_parser",
  "boa_string",
@@ -390,6 +391,7 @@ dependencies = [
  "icu_locale",
  "icu_normalizer",
  "icu_plurals",
+ "icu_properties",
  "icu_provider",
  "icu_segmenter",
  "indexmap",
@@ -465,6 +467,8 @@ dependencies = [
 name = "boa_icu_provider"
 version = "0.21.1"
 dependencies = [
+ "boa_intl_data",
+ "icu_calendar",
  "icu_casemap",
  "icu_collator",
  "icu_datetime",
@@ -479,6 +483,8 @@ dependencies = [
  "icu_segmenter",
  "once_cell",
  "paste",
+ "serde",
+ "yoke",
 ]
 
 [[package]]
@@ -503,6 +509,20 @@ version = "0.21.1"
 dependencies = [
  "boa_engine",
  "boa_macros",
+]
+
+[[package]]
+name = "boa_intl_data"
+version = "0.21.1"
+dependencies = [
+ "databake",
+ "icu_provider",
+ "icu_provider_blob",
+ "serde",
+ "serde_json",
+ "yoke",
+ "zerofrom",
+ "zerovec",
 ]
 
 [[package]]

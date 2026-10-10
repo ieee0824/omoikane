@@ -546,7 +546,12 @@ impl PlainTime {
         let options = get_options_object(args.get_or_undefined(1))?;
         let overflow = get_option::<Overflow>(&options, js_string!("overflow"), context)?;
 
-        create_temporal_time(time.inner.with(partial, overflow)?, None, context).map(Into::into)
+        create_temporal_time(
+            time.inner.with(partial.regulate(overflow)?, overflow)?,
+            None,
+            context,
+        )
+        .map(Into::into)
     }
 
     /// 4.3.12 `Temporal.PlainTime.prototype.until ( other [ , options ] )`
@@ -912,13 +917,13 @@ pub(crate) fn to_temporal_time(
             let options = get_options_object(options)?;
             let overflow = get_option::<Overflow>(&options, js_string!("overflow"), context)?;
 
-            PlainTimeInner::from_partial(partial, overflow).map_err(Into::into)
+            PlainTimeInner::from_partial(partial.regulate(overflow)?, overflow).map_err(Into::into)
         }
         // 3. Else,
         JsVariant::String(str) => {
             // b. Let result be ? ParseTemporalTimeString(item).
             // c. Assert: IsValidTime(result.[[Hour]], result.[[Minute]], result.[[Second]], result.[[Millisecond]], result.[[Microsecond]], result.[[Nanosecond]]) is true.
-            let result = str.to_std_string_escaped().parse::<PlainTimeInner>()?;
+            let result = super::parsing::iso_source(&str)?.parse::<PlainTimeInner>()?;
 
             let options = get_options_object(options)?;
             let _overflow = get_option::<Overflow>(&options, js_string!("overflow"), context)?;
@@ -934,64 +939,60 @@ pub(crate) fn to_temporal_time(
     // 4. Return ! CreateTemporalTime(result.[[Hour]], result.[[Minute]], result.[[Second]], result.[[Millisecond]], result.[[Microsecond]], result.[[Nanosecond]]).
 }
 
+/// Owns signed, truncated fields until the overflow option has been observed.
+pub(crate) struct PartialTimeRecord {
+    fields: [Option<f64>; 6],
+}
+
+impl PartialTimeRecord {
+    fn regulate(self, overflow: Option<Overflow>) -> JsResult<PartialTime> {
+        let limits = [23.0, 59.0, 59.0, 999.0, 999.0, 999.0];
+        if overflow == Some(Overflow::Reject)
+            && self
+                .fields
+                .iter()
+                .zip(limits)
+                .any(|(value, limit)| value.is_some_and(|value| value < 0.0 || value > limit))
+        {
+            return Err(JsNativeError::range()
+                .with_message("Temporal time field out of range")
+                .into());
+        }
+        let [hour, minute, second, millisecond, microsecond, nanosecond] = self.fields;
+        // Rust's saturating casts retain the constrain behavior for negative or
+        // large inputs. The native regulator applies each field's final limit.
+        Ok(PartialTime {
+            hour: hour.map(|value| value as u8),
+            minute: minute.map(|value| value as u8),
+            second: second.map(|value| value as u8),
+            millisecond: millisecond.map(|value| value as u16),
+            microsecond: microsecond.map(|value| value as u16),
+            nanosecond: nanosecond.map(|value| value as u16),
+        })
+    }
+}
+
 pub(crate) fn to_partial_time_record(
     partial_object: &JsObject,
     context: &mut Context,
-) -> JsResult<PartialTime> {
-    let hour = partial_object
-        .get(js_string!("hour"), context)?
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            Ok::<u8, JsError>(finite.as_integer_with_truncation::<u8>())
-        })
-        .transpose()?;
-
-    let microsecond = partial_object
-        .get(js_string!("microsecond"), context)?
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            Ok::<u16, JsError>(finite.as_integer_with_truncation::<u16>())
-        })
-        .transpose()?;
-
-    let millisecond = partial_object
-        .get(js_string!("millisecond"), context)?
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            Ok::<u16, JsError>(finite.as_integer_with_truncation::<u16>())
-        })
-        .transpose()?;
-
-    let minute = partial_object
-        .get(js_string!("minute"), context)?
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            Ok::<u8, JsError>(finite.as_integer_with_truncation::<u8>())
-        })
-        .transpose()?;
-
-    let nanosecond = partial_object
-        .get(js_string!("nanosecond"), context)?
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            Ok::<u16, JsError>(finite.as_integer_with_truncation::<u16>())
-        })
-        .transpose()?;
-
-    let second = partial_object
-        .get(js_string!("second"), context)?
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            Ok::<u8, JsError>(finite.as_integer_with_truncation::<u8>())
-        })
-        .transpose()?;
-
-    Ok(PartialTime {
-        hour,
-        minute,
-        second,
-        millisecond,
-        microsecond,
-        nanosecond,
-    })
+) -> JsResult<PartialTimeRecord> {
+    let mut fields = [None; 6];
+    // ToTemporalTimeRecord observes properties in alphabetical order.
+    for (name, index) in [
+        ("hour", 0),
+        ("microsecond", 4),
+        ("millisecond", 3),
+        ("minute", 1),
+        ("nanosecond", 5),
+        ("second", 2),
+    ] {
+        fields[index] = partial_object
+            .get(JsString::from(name), context)?
+            .map(|value| {
+                let finite = value.to_finitef64(context)?;
+                Ok::<f64, JsError>(finite.as_inner().trunc())
+            })
+            .transpose()?;
+    }
+    Ok(PartialTimeRecord { fields })
 }

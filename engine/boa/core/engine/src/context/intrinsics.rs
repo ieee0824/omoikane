@@ -40,12 +40,15 @@ impl Intrinsics {
     ///
     /// [`Realm::initialize`]: crate::realm::Realm::initialize
     pub(crate) fn uninit(root_shape: &RootShape) -> Option<Self> {
-        let constructors = StandardConstructors::default();
+        let mut constructors = StandardConstructors::default();
+        let objects = IntrinsicObjects::uninit()?;
+        constructors.iterator =
+            StandardConstructor::with_prototype(objects.iterator_prototypes().iterator());
         let templates = ObjectTemplates::new(root_shape, &constructors);
 
         Some(Self {
             constructors,
-            objects: IntrinsicObjects::uninit()?,
+            objects,
             templates,
         })
     }
@@ -174,7 +177,12 @@ pub struct StandardConstructors {
     data_view: StandardConstructor,
     date_time_format: StandardConstructor,
     promise: StandardConstructor,
+    async_disposable_stack: StandardConstructor,
+    disposable_stack: StandardConstructor,
+    suppressed_error: StandardConstructor,
+    iterator: StandardConstructor,
     weak_ref: StandardConstructor,
+    finalization_registry: StandardConstructor,
     weak_map: StandardConstructor,
     weak_set: StandardConstructor,
     #[cfg(feature = "intl")]
@@ -189,6 +197,12 @@ pub struct StandardConstructors {
     plural_rules: StandardConstructor,
     #[cfg(feature = "intl")]
     number_format: StandardConstructor,
+    #[cfg(feature = "intl")]
+    duration_format: StandardConstructor,
+    #[cfg(feature = "intl")]
+    display_names: StandardConstructor,
+    #[cfg(feature = "intl")]
+    relative_time_format: StandardConstructor,
     #[cfg(feature = "temporal")]
     instant: StandardConstructor,
     #[cfg(feature = "temporal")]
@@ -268,7 +282,12 @@ impl Default for StandardConstructors {
             data_view: StandardConstructor::default(),
             date_time_format: StandardConstructor::default(),
             promise: StandardConstructor::default(),
+            async_disposable_stack: StandardConstructor::default(),
+            disposable_stack: StandardConstructor::default(),
+            suppressed_error: StandardConstructor::default(),
+            iterator: StandardConstructor::default(),
             weak_ref: StandardConstructor::default(),
+            finalization_registry: StandardConstructor::default(),
             weak_map: StandardConstructor::default(),
             weak_set: StandardConstructor::default(),
             #[cfg(feature = "intl")]
@@ -283,6 +302,12 @@ impl Default for StandardConstructors {
             plural_rules: StandardConstructor::default(),
             #[cfg(feature = "intl")]
             number_format: StandardConstructor::default(),
+            #[cfg(feature = "intl")]
+            duration_format: StandardConstructor::default(),
+            #[cfg(feature = "intl")]
+            display_names: StandardConstructor::default(),
+            #[cfg(feature = "intl")]
+            relative_time_format: StandardConstructor::default(),
             #[cfg(feature = "temporal")]
             instant: StandardConstructor::default(),
             #[cfg(feature = "temporal")]
@@ -813,6 +838,41 @@ impl StandardConstructors {
         &self.promise
     }
 
+    /// Returns the intrinsic `AsyncDisposableStack` constructor.
+    #[inline]
+    #[must_use]
+    pub const fn async_disposable_stack(&self) -> &StandardConstructor {
+        &self.async_disposable_stack
+    }
+
+    /// Returns the intrinsic `DisposableStack` constructor.
+    #[inline]
+    #[must_use]
+    pub const fn disposable_stack(&self) -> &StandardConstructor {
+        &self.disposable_stack
+    }
+
+    /// Returns the intrinsic `SuppressedError` constructor.
+    #[inline]
+    #[must_use]
+    pub const fn suppressed_error(&self) -> &StandardConstructor {
+        &self.suppressed_error
+    }
+
+    /// Returns the intrinsic abstract `Iterator` constructor.
+    #[inline]
+    #[must_use]
+    pub const fn iterator(&self) -> &StandardConstructor {
+        &self.iterator
+    }
+
+    /// Returns the intrinsic `FinalizationRegistry` constructor.
+    #[inline]
+    #[must_use]
+    pub const fn finalization_registry(&self) -> &StandardConstructor {
+        &self.finalization_registry
+    }
+
     /// Returns the `WeakRef` constructor.
     ///
     /// More information:
@@ -925,6 +985,34 @@ impl StandardConstructors {
     #[cfg(feature = "intl")]
     pub const fn number_format(&self) -> &StandardConstructor {
         &self.number_format
+    }
+
+    /// Returns the `Intl.DurationFormat` constructor.
+    ///
+    /// [ECMAScript reference](https://tc39.es/ecma402/#sec-intl.durationformat)
+    #[inline]
+    #[must_use]
+    #[cfg(feature = "intl")]
+    pub const fn duration_format(&self) -> &StandardConstructor {
+        &self.duration_format
+    }
+
+    /// Returns the native `Intl.DisplayNames` constructor.
+    /// [ECMAScript reference](https://tc39.es/ecma402/#sec-intl.displaynames)
+    #[inline]
+    #[must_use]
+    #[cfg(feature = "intl")]
+    pub const fn display_names(&self) -> &StandardConstructor {
+        &self.display_names
+    }
+
+    /// Returns the native `Intl.RelativeTimeFormat` constructor.
+    /// [ECMAScript reference](https://tc39.es/ecma402/#sec-intl.relativetimeformat)
+    #[inline]
+    #[must_use]
+    #[cfg(feature = "intl")]
+    pub const fn relative_time_format(&self) -> &StandardConstructor {
+        &self.relative_time_format
     }
 
     /// Returns the `Temporal.Instant` constructor.
@@ -1080,6 +1168,8 @@ pub struct IntrinsicObjects {
     array_prototype_to_string: JsFunctionEdge,
 
     /// Cached iterator prototypes.
+    iterator_wrapper: JsObject,
+    iterator_helper: JsObject,
     iterator_prototypes: IteratorPrototypes,
 
     /// [`%GeneratorFunction.prototype.prototype%`](https://tc39.es/ecma262/#sec-properties-of-generator-prototype)
@@ -1151,6 +1241,8 @@ impl IntrinsicObjects {
             throw_type_error: JsFunction::empty_intrinsic_function(false).into_edge(),
             array_prototype_values: JsFunction::empty_intrinsic_function(false).into_edge(),
             array_prototype_to_string: JsFunction::empty_intrinsic_function(false).into_edge(),
+            iterator_wrapper: JsObject::with_null_proto(),
+            iterator_helper: JsObject::with_null_proto(),
             iterator_prototypes: IteratorPrototypes::default(),
             generator: JsObject::with_null_proto(),
             async_generator: JsObject::with_null_proto(),
@@ -1201,6 +1293,16 @@ impl IntrinsicObjects {
     #[must_use]
     pub fn array_prototype_to_string(&self) -> JsFunction {
         self.array_prototype_to_string.root()
+    }
+
+    /// Returns the prototype shared by native lazy iterator helpers.
+    pub(crate) fn iterator_helper(&self) -> JsObject {
+        self.iterator_helper.clone()
+    }
+
+    /// Returns the prototype shared by Iterator.from wrappers.
+    pub(crate) fn iterator_wrapper(&self) -> JsObject {
+        self.iterator_wrapper.clone()
     }
 
     /// Gets the cached iterator prototypes.

@@ -26,6 +26,9 @@ use temporal_rs::{
     partial::PartialDuration,
 };
 
+mod calendar_window;
+mod precision;
+mod serialize;
 #[cfg(test)]
 mod tests;
 
@@ -891,7 +894,10 @@ impl Duration {
             .and_then(JsObject::downcast_ref::<Self>)
             .ok_or_else(|| {
                 JsNativeError::typ().with_message("this value must be a Duration object.")
-            })?;
+            })?
+            .inner
+            .clone();
+        let _receiver_root = object.map(JsObject::root);
 
         let round_to = match args.first().map(JsValue::variant) {
             // 3. If roundTo is undefined, then
@@ -963,9 +969,13 @@ impl Duration {
         // 21. If smallestUnitPresent is false and largestUnitPresent is false, then
 
         let rounded_duration =
-            duration
-                .inner
-                .round_with_provider(options, relative_to, context.tz_provider())?;
+            duration.round_with_provider(options, relative_to.clone(), context.tz_provider())?;
+        let rounded_duration = calendar_window::exact_round(
+            &duration,
+            options,
+            relative_to.as_ref(),
+            rounded_duration,
+        )?;
         create_temporal_duration(rounded_duration, None, context).map(Into::into)
     }
 
@@ -993,7 +1003,10 @@ impl Duration {
             .and_then(JsObject::downcast_ref::<Self>)
             .ok_or_else(|| {
                 JsNativeError::typ().with_message("this value must be a Duration object.")
-            })?;
+            })?
+            .inner
+            .clone();
+        let _receiver_root = object.map(JsObject::root);
 
         let total_of = args.get_or_undefined(0);
 
@@ -1040,11 +1053,11 @@ impl Duration {
         )?
         .ok_or_else(|| JsNativeError::range().with_message("unit cannot be undefined."))?;
 
-        Ok(duration
-            .inner
-            .total_with_provider(unit, relative_to, context.tz_provider())?
-            .as_inner()
-            .into())
+        let native = duration
+            .total_with_provider(unit, relative_to.clone(), context.tz_provider())?
+            .as_inner();
+        let exact = calendar_window::exact_total(&duration, unit, relative_to.as_ref())?;
+        Ok(exact.unwrap_or(native).into())
     }
 
     /// 7.3.22 `Temporal.Duration.prototype.toString ( [ options ] )`
@@ -1069,7 +1082,10 @@ impl Duration {
             .and_then(JsObject::downcast_ref::<Self>)
             .ok_or_else(|| {
                 JsNativeError::typ().with_message("this value must be a Duration object.")
-            })?;
+            })?
+            .inner
+            .clone();
+        let _receiver_root = object.map(JsObject::root);
 
         let options = get_options_object(args.get_or_undefined(0))?;
         let precision = get_digits_option(&options, context)?;
@@ -1077,11 +1093,14 @@ impl Duration {
             get_option::<RoundingMode>(&options, js_string!("roundingMode"), context)?;
         let smallest_unit = get_option::<Unit>(&options, js_string!("smallestUnit"), context)?;
 
-        let result = duration.inner.as_temporal_string(ToStringRoundingOptions {
-            precision,
-            smallest_unit,
-            rounding_mode,
-        })?;
+        let result = serialize::temporal_string(
+            &duration,
+            ToStringRoundingOptions {
+                precision,
+                smallest_unit,
+                rounding_mode,
+            },
+        )?;
 
         Ok(JsString::from(result).into())
     }
@@ -1104,9 +1123,8 @@ impl Duration {
                 JsNativeError::typ().with_message("this value must be a Duration object.")
             })?;
 
-        let result = duration
-            .inner
-            .as_temporal_string(ToStringRoundingOptions::default())?;
+        let result =
+            serialize::temporal_string(&duration.inner, ToStringRoundingOptions::default())?;
 
         Ok(JsString::from(result).into())
     }
@@ -1122,10 +1140,9 @@ impl Duration {
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal/Duration/toLocaleString
     pub(crate) fn to_locale_string(
         this: &JsValue,
-        _: &[JsValue],
-        _: &mut Context,
+        args: &[JsValue],
+        context: &mut Context,
     ) -> JsResult<JsValue> {
-        // TODO: Update for ECMA-402 compliance
         let object = this.as_object();
         let duration = object
             .as_ref()
@@ -1134,11 +1151,28 @@ impl Duration {
                 JsNativeError::typ().with_message("this value must be a Duration object.")
             })?;
 
-        let result = duration
-            .inner
-            .as_temporal_string(ToStringRoundingOptions::default())?;
-
-        Ok(JsString::from(result).into())
+        // Option getters can execute author code and collect. Copy internal
+        // state and release the receiver borrow before constructing Intl data.
+        #[cfg(feature = "intl")]
+        {
+            let inner = duration.inner.clone();
+            drop(duration);
+            let _object_root = object.map(JsObject::root);
+            crate::builtins::intl::DurationFormat::format_temporal(
+                &inner,
+                args.get_or_undefined(0),
+                args.get_or_undefined(1),
+                context,
+            )
+        }
+        #[cfg(not(feature = "intl"))]
+        {
+            let _ = (args, context);
+            let result = duration
+                .inner
+                .as_temporal_string(ToStringRoundingOptions::default())?;
+            Ok(JsString::from(result).into())
+        }
     }
 
     /// 7.3.25 `Temporal.Duration.prototype.valueOf ( )`
@@ -1232,6 +1266,7 @@ pub(crate) fn create_temporal_duration(
     context: &mut Context,
 ) -> JsResult<JsObject> {
     // 1. If ! IsValidDuration(years, months, weeks, days, hours, minutes, seconds, milliseconds, microseconds, nanoseconds) is false, throw a RangeError exception.
+    let inner = precision::number_slots(inner)?;
 
     // 2. If newTarget is not present, set newTarget to %Temporal.Duration%.
     let new_target = if let Some(target) = new_target {

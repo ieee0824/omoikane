@@ -551,7 +551,9 @@ impl PlainYearMonth {
             .and_then(JsObject::downcast_ref::<Self>)
             .ok_or_else(|| {
                 JsNativeError::typ().with_message("this value must be a PlainYearMonth object.")
-            })?;
+            })?
+            .inner
+            .clone();
 
         // 3. If ? IsPartialTemporalObject(temporalYearMonthLike) is false, throw a TypeError exception.
         let Some(obj) = is_partial_temporal_object(args.get_or_undefined(0), context)? else {
@@ -561,17 +563,21 @@ impl PlainYearMonth {
         };
         // 4. Let calendar be yearMonth.[[Calendar]].
         // 5. Let fields be ISODateToFields(calendar, yearMonth.[[ISODate]], year-month).
-        // TODO: We may need to throw early on an empty partial for Order of operations, but ideally this is enforced by `temporal_rs`
         // 6. Let partialYearMonth be ? PrepareCalendarFields(calendar, temporalYearMonthLike, « year, month, month-code », « », partial).
         // 7. Set fields to CalendarMergeFields(calendar, fields, partialYearMonth).
-        let fields = to_year_month_calendar_fields(&obj, year_month.inner.calendar(), context)?;
+        let fields = to_year_month_calendar_fields(&obj, year_month.calendar(), context)?;
+        if fields.is_empty() {
+            return Err(JsNativeError::typ()
+                .with_message("temporalYearMonthLike must contain a calendar field")
+                .into());
+        }
         // 8. Let resolvedOptions be ? GetOptionsObject(options).
         let resolved_options = get_options_object(args.get_or_undefined(1))?;
         // 9. Let overflow be ? GetTemporalOverflowOption(resolvedOptions).
         let overflow = get_option::<Overflow>(&resolved_options, js_string!("overflow"), context)?
             .unwrap_or_default();
         // 10. Let isoDate be ? CalendarYearMonthFromFields(calendar, fields, overflow).
-        let result = year_month.inner.with(fields, Some(overflow))?;
+        let result = year_month.with(fields, Some(overflow))?;
         // 11. Return ! CreateTemporalYearMonth(isoDate, calendar).
         create_temporal_year_month(result, None, context)
     }
@@ -589,9 +595,7 @@ impl PlainYearMonth {
     /// [temporal_rs-docs]: https://docs.rs/temporal_rs/latest/temporal_rs/struct.PlainYearMonth.html#method.add
     fn add(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         let duration_like = args.get_or_undefined(0);
-        let options = get_options_object(args.get_or_undefined(1))?;
-
-        add_or_subtract_duration(true, this, duration_like, &options, context)
+        add_or_subtract_duration(true, this, duration_like, args.get_or_undefined(1), context)
     }
 
     /// 9.3.15 `Temporal.PlainYearMonth.prototype.subtract ( temporalDurationLike [ , options ] )`
@@ -607,9 +611,13 @@ impl PlainYearMonth {
     /// [temporal_rs-docs]: https://docs.rs/temporal_rs/latest/temporal_rs/struct.PlainYearMonth.html#method.subtract
     fn subtract(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         let duration_like = args.get_or_undefined(0);
-        let options = get_options_object(args.get_or_undefined(1))?;
-
-        add_or_subtract_duration(false, this, duration_like, &options, context)
+        add_or_subtract_duration(
+            false,
+            this,
+            duration_like,
+            args.get_or_undefined(1),
+            context,
+        )
     }
 
     /// 9.3.16 `Temporal.PlainYearMonth.prototype.until ( other [ , options ] )`
@@ -898,7 +906,7 @@ fn to_temporal_year_month(
     };
 
     // 4. Let result be ? ParseISODateTime(item, « TemporalYearMonthString »).
-    let result = InnerYearMonth::from_str(&ym_string.to_std_string_escaped())?;
+    let result = InnerYearMonth::from_str(&super::parsing::iso_source(&ym_string)?)?;
     // 5. Let calendar be result.[[Calendar]].
     // 6. If calendar is empty, set calendar to "iso8601".
     // 7. Set calendar to ? CanonicalizeCalendar(calendar).
@@ -962,38 +970,63 @@ fn add_or_subtract_duration(
     is_addition: bool,
     this: &JsValue,
     duration_like: &JsValue,
-    options: &JsObject,
+    options: &JsValue,
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let duration: Duration = if duration_like.is_object() {
-        to_temporal_duration(duration_like, context)?
-    } else if let Some(duration_string) = duration_like.as_string() {
-        Duration::from_str(duration_string.to_std_string_escaped().as_str())?
-    } else {
-        return Err(JsNativeError::typ()
-            .with_message("cannot handler string durations yet.")
-            .into());
-    };
-
-    let overflow =
-        get_option(options, js_string!("overflow"), context)?.unwrap_or(Overflow::Constrain);
-
     let object = this.as_object();
     let year_month = object
         .as_ref()
         .and_then(JsObject::downcast_ref::<PlainYearMonth>)
         .ok_or_else(|| {
             JsNativeError::typ().with_message("this value must be a PlainYearMonth object.")
-        })?;
-
-    let inner = &year_month.inner;
-    let year_month_result = if is_addition {
-        inner.add(&duration, overflow)?
+        })?
+        .inner
+        .clone();
+    let duration = to_temporal_duration(duration_like, context)?;
+    let duration = if is_addition {
+        duration
     } else {
-        inner.subtract(&duration, overflow)?
+        duration.negated()
     };
+    let options = get_options_object(options)?;
+    let overflow =
+        get_option(&options, js_string!("overflow"), context)?.unwrap_or(Overflow::Constrain);
+    if duration.weeks() != 0
+        || duration.days() != 0
+        || duration.hours() != 0
+        || duration.minutes() != 0
+        || duration.seconds() != 0
+        || duration.milliseconds() != 0
+        || duration.microseconds() != 0
+        || duration.nanoseconds() != 0
+    {
+        return Err(JsNativeError::range()
+            .with_message("PlainYearMonth arithmetic only accepts years and months")
+            .into());
+    }
+    let year_month_result = add_year_month(&year_month, &duration, overflow)?;
 
     create_temporal_year_month(year_month_result, None, context)
+}
+
+/// AddDurationToYearMonth validates the calendar's first day in both directions.
+/// Year-month limits include partial months, but the intermediate and added
+/// dates must independently satisfy the stricter PlainDate limits.
+fn add_year_month(
+    year_month: &InnerYearMonth,
+    duration: &Duration,
+    overflow: Overflow,
+) -> JsResult<InnerYearMonth> {
+    let fields = CalendarFields::new()
+        .with_year(year_month.year())
+        .with_month_code(year_month.month_code())
+        .with_day(1);
+    year_month
+        .calendar()
+        .date_from_fields(fields, Overflow::Constrain)?
+        .add(duration, Some(overflow))?
+        .to_plain_year_month()
+        .map_err(Into::into)
 }
 
 fn to_partial_year_month(

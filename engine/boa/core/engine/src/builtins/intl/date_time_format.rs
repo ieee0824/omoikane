@@ -8,7 +8,7 @@
 //! [spec]: https://tc39.es/ecma402/#datetimeformat-objects
 
 use crate::{
-    Context, JsData, JsResult, JsString, JsValue,
+    Context, JsArgs, JsData, JsResult, JsString, JsValue,
     builtins::{
         BuiltInBuilder, BuiltInConstructor, BuiltInObject, IntrinsicObject, OrdinaryObject,
         options::OptionType,
@@ -21,38 +21,83 @@ use crate::{
     string::StaticJsStrings,
 };
 
-use boa_gc::{Finalize, Trace};
+use boa_gc::{Finalize, Trace, custom_trace};
 use icu_calendar::preferences::CalendarAlgorithm;
 use icu_datetime::preferences::HourCycle;
 use icu_locale::extensions::unicode::Value;
 
+mod backend;
+mod calendar_patterns;
+mod calendar_period;
+mod candidates;
+mod format;
+mod hour_cycle;
+mod initialization;
+mod match_fields;
+mod matcher;
+mod negotiation;
+mod options;
+mod parts;
+mod pattern;
+mod range;
+mod range_data;
+mod range_fields;
+mod range_parts;
+mod range_pattern;
+mod range_selection;
+mod resolution;
+mod timezone;
+
+#[cfg(test)]
+mod tests;
+
 /// JavaScript `Intl.DateTimeFormat` object.
-#[derive(Debug, Clone, Trace, Finalize, JsData)]
+#[derive(Debug, Clone, Finalize, JsData)]
 pub(crate) struct DateTimeFormat {
-    initialized: bool,
-    locale: JsString,
-    calendar: JsString,
-    numbering_system: JsString,
-    time_zone: JsString,
-    weekday: JsString,
-    era: JsString,
-    year: JsString,
-    month: JsString,
-    day: JsString,
-    day_period: JsString,
-    hour: JsString,
-    minute: JsString,
-    second: JsString,
-    fractional_second_digits: JsString,
-    time_zone_name: JsString,
-    hour_cycle: JsString,
-    pattern: JsString,
-    bound_format: JsString,
+    locale: icu_locale::Locale,
+    time_zone: timezone::ResolvedTimeZone,
+    components: options::Components,
+    backend: backend::DateTimeBackend,
+    bound_format: Option<crate::object::JsFunctionEdge>,
+}
+
+// SAFETY: bound_format is the only GC-managed field. ICU data and JsString
+// component values own their data independently of the JavaScript GC.
+unsafe impl Trace for DateTimeFormat {
+    custom_trace!(this, mark, mark(&this.bound_format));
 }
 
 impl IntrinsicObject for DateTimeFormat {
     fn init(realm: &Realm) {
-        BuiltInBuilder::from_standard_constructor::<Self>(realm).build();
+        let format = BuiltInBuilder::callable(realm, Self::get_format)
+            .name(js_string!("get format"))
+            .build();
+        BuiltInBuilder::from_standard_constructor::<Self>(realm)
+            .property(
+                crate::JsSymbol::to_string_tag(),
+                js_string!("Intl.DateTimeFormat"),
+                crate::property::Attribute::CONFIGURABLE,
+            )
+            .accessor(
+                js_string!("format"),
+                Some(format),
+                None,
+                crate::property::Attribute::CONFIGURABLE,
+            )
+            .method(Self::resolved_options, js_string!("resolvedOptions"), 0)
+            .method(Self::format_to_parts, js_string!("formatToParts"), 1)
+            .method(Self::format_range, js_string!("formatRange"), 2)
+            .method(
+                Self::format_range_to_parts,
+                js_string!("formatRangeToParts"),
+                2,
+            )
+            .static_method(
+                Self::supported_locales_of,
+                js_string!("supportedLocalesOf"),
+                1,
+            )
+            .build();
     }
 
     fn get(intrinsics: &Intrinsics) -> JsObject {
@@ -66,8 +111,8 @@ impl BuiltInObject for DateTimeFormat {
 
 impl BuiltInConstructor for DateTimeFormat {
     const CONSTRUCTOR_ARGUMENTS: usize = 0;
-    const PROTOTYPE_STORAGE_SLOTS: usize = 0;
-    const CONSTRUCTOR_STORAGE_SLOTS: usize = 0;
+    const PROTOTYPE_STORAGE_SLOTS: usize = 7;
+    const CONSTRUCTOR_STORAGE_SLOTS: usize = 1;
 
     const STANDARD_CONSTRUCTOR: fn(&StandardConstructors) -> &StandardConstructor =
         StandardConstructors::date_time_format;
@@ -81,7 +126,7 @@ impl BuiltInConstructor for DateTimeFormat {
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat
     fn constructor(
         new_target: &JsValue,
-        _args: &[JsValue],
+        args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
         // 1. If NewTarget is undefined, let newTarget be the active function object, else let newTarget be NewTarget.
@@ -104,40 +149,10 @@ impl BuiltInConstructor for DateTimeFormat {
             StandardConstructors::date_time_format,
             context,
         )?;
-        // 2. Let dateTimeFormat be ? OrdinaryCreateFromConstructor(newTarget, "%DateTimeFormat.prototype%",
-        // « [[InitializedDateTimeFormat]], [[Locale]], [[Calendar]], [[NumberingSystem]], [[TimeZone]], [[Weekday]],
-        // [[Era]], [[Year]], [[Month]], [[Day]], [[DayPeriod]], [[Hour]], [[Minute]], [[Second]],
-        // [[FractionalSecondDigits]], [[TimeZoneName]], [[HourCycle]], [[Pattern]], [[BoundFormat]] »).
-        let date_time_format = JsObject::from_proto_and_data_with_shared_shape(
-            context.root_shape(),
-            prototype,
-            Self {
-                initialized: true,
-                locale: js_string!("en-US"),
-                calendar: js_string!("gregory"),
-                numbering_system: js_string!("arab"),
-                time_zone: js_string!("UTC"),
-                weekday: js_string!("narrow"),
-                era: js_string!("narrow"),
-                year: js_string!("numeric"),
-                month: js_string!("narrow"),
-                day: js_string!("numeric"),
-                day_period: js_string!("narrow"),
-                hour: js_string!("numeric"),
-                minute: js_string!("numeric"),
-                second: js_string!("numeric"),
-                fractional_second_digits: js_string!(),
-                time_zone_name: js_string!(),
-                hour_cycle: js_string!("h24"),
-                pattern: js_string!("{hour}:{minute}"),
-                bound_format: js_string!("undefined"),
-            },
-        );
-
-        // TODO 3. Perform ? InitializeDateTimeFormat(dateTimeFormat, locales, options).
-        // TODO 4. If the implementation supports the normative optional constructor mode of 4.3 Note 1, then
-        // TODO a. Let this be the this value.
-        // TODO b. Return ? ChainDateTimeFormat(dateTimeFormat, NewTarget, this).
+        let _prototype_root = prototype.clone().root();
+        let data = Self::new(args.get_or_undefined(0), args.get_or_undefined(1), context)?;
+        let date_time_format =
+            JsObject::from_proto_and_data_with_shared_shape(context.root_shape(), prototype, data);
 
         // 5. Return dateTimeFormat.
         Ok(date_time_format.into())

@@ -76,6 +76,8 @@ enum WellKnown {
     ToPrimitive,
     ToStringTag,
     Unscopables,
+    Dispose,
+    AsyncDispose,
 }
 
 impl WellKnown {
@@ -94,6 +96,8 @@ impl WellKnown {
             Self::ToPrimitive => StaticJsStrings::SYMBOL_TO_PRIMITIVE,
             Self::ToStringTag => StaticJsStrings::SYMBOL_TO_STRING_TAG,
             Self::Unscopables => StaticJsStrings::SYMBOL_UNSCOPABLES,
+            Self::Dispose => StaticJsStrings::SYMBOL_DISPOSE,
+            Self::AsyncDispose => StaticJsStrings::SYMBOL_ASYNC_DISPOSE,
         }
     }
 
@@ -112,6 +116,8 @@ impl WellKnown {
             Self::ToPrimitive => StaticJsStrings::FN_SYMBOL_TO_PRIMITIVE,
             Self::ToStringTag => StaticJsStrings::FN_SYMBOL_TO_STRING_TAG,
             Self::Unscopables => StaticJsStrings::FN_SYMBOL_UNSCOPABLES,
+            Self::Dispose => StaticJsStrings::FN_SYMBOL_DISPOSE,
+            Self::AsyncDispose => StaticJsStrings::FN_SYMBOL_ASYNC_DISPOSE,
         }
     }
 
@@ -147,6 +153,25 @@ unsafe impl Send for JsSymbol {}
 // SAFETY: `JsSymbol` uses `Arc` to do the reference counting, making this type thread-safe.
 unsafe impl Sync for JsSymbol {}
 
+/// A symbol identity that does not keep dynamically allocated symbols alive.
+#[derive(Debug, Clone, Trace, Finalize)]
+#[boa_gc(unsafe_empty_trace)]
+pub(crate) struct WeakJsSymbol {
+    hash: u64,
+    weak: Option<std::sync::Weak<RawJsSymbol>>,
+}
+
+impl WeakJsSymbol {
+    pub(crate) fn is_alive(&self) -> bool {
+        self.weak
+            .as_ref()
+            .is_none_or(|weak| weak.strong_count() != 0)
+    }
+    pub(crate) fn matches(&self, symbol: &JsSymbol) -> bool {
+        self.hash == symbol.hash()
+    }
+}
+
 macro_rules! well_known_symbols {
     ( $( $(#[$attr:meta])* ($name:ident, $variant:path) ),+$(,)? ) => {
         $(
@@ -177,6 +202,23 @@ impl JsSymbol {
             // SAFETY: Pointers returned by `Arc::into_raw` must be non-null.
             repr: unsafe { Tagged::from_ptr(Arc::into_raw(arc).cast_mut()) },
         })
+    }
+
+    /// Downgrades a symbol without adding a strong reference to its allocation.
+    pub(crate) fn downgrade(&self) -> WeakJsSymbol {
+        let weak = match self.repr.unwrap() {
+            UnwrappedTagged::Ptr(ptr) => {
+                // SAFETY: the pointer belongs to a live Arc owned by self. The
+                // ManuallyDrop view must not decrement self's strong reference.
+                let arc = ManuallyDrop::new(unsafe { Arc::from_raw(ptr.as_ptr().cast_const()) });
+                Some(Arc::downgrade(&arc))
+            }
+            UnwrappedTagged::Tag(_) => None,
+        };
+        WeakJsSymbol {
+            hash: self.hash(),
+            weak,
+        }
     }
 
     /// Returns the `Symbol` description.
@@ -306,6 +348,10 @@ impl JsSymbol {
         (to_string_tag, WellKnown::ToStringTag),
         /// Gets the static `JsSymbol` for `"Symbol.unscopables"`.
         (unscopables, WellKnown::Unscopables),
+        /// Gets the static `JsSymbol` for `"Symbol.dispose"`.
+        (dispose, WellKnown::Dispose),
+        /// Gets the static `JsSymbol` for `"Symbol.asyncDispose"`.
+        (async_dispose, WellKnown::AsyncDispose),
     }
 }
 

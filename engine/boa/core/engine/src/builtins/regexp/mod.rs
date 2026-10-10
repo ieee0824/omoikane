@@ -32,6 +32,7 @@ use std::str::FromStr;
 
 use super::{BuiltInBuilder, BuiltInConstructor, IntrinsicObject};
 
+mod escape;
 mod regexp_string_iterator;
 pub(crate) use regexp_string_iterator::RegExpStringIterator;
 #[cfg(test)]
@@ -88,6 +89,7 @@ impl IntrinsicObject for RegExp {
             .name(js_string!("get source"))
             .build();
         let regexp = BuiltInBuilder::from_standard_constructor::<Self>(realm)
+            .static_method(escape::escape, js_string!("escape"), 1)
             .static_accessor(
                 JsSymbol::species(),
                 Some(get_species),
@@ -177,7 +179,7 @@ impl BuiltInObject for RegExp {
 impl BuiltInConstructor for RegExp {
     const CONSTRUCTOR_ARGUMENTS: usize = 2;
     const PROTOTYPE_STORAGE_SLOTS: usize = 30;
-    const CONSTRUCTOR_STORAGE_SLOTS: usize = 2;
+    const CONSTRUCTOR_STORAGE_SLOTS: usize = 3;
 
     const STANDARD_CONSTRUCTOR: fn(&StandardConstructors) -> &StandardConstructor =
         StandardConstructors::regexp;

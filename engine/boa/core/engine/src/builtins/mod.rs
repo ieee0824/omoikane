@@ -34,11 +34,18 @@ pub mod weak;
 pub mod weak_map;
 pub mod weak_set;
 
+mod async_disposable_stack;
 mod builder;
+mod disposable_stack;
+pub(crate) mod finalization_registry;
+mod suppressed_error;
 
+use async_disposable_stack::AsyncDisposableStack;
 use builder::BuiltInBuilder;
+use disposable_stack::DisposableStack;
 use error::Error;
 use num_traits::Zero;
+use suppressed_error::SuppressedError;
 
 #[cfg(feature = "annex-b")]
 pub mod escape;
@@ -46,8 +53,6 @@ pub mod escape;
 #[cfg(feature = "intl")]
 pub mod intl;
 
-// TODO: remove `cfg` when `Temporal` gets to stage 4.
-#[cfg(any(feature = "intl", feature = "temporal"))]
 pub(crate) mod options;
 
 #[cfg(feature = "temporal")]
@@ -284,6 +289,9 @@ impl Realm {
         Float64Array::init(self);
         Symbol::init(self);
         Error::init(self);
+        SuppressedError::init(self);
+        DisposableStack::init(self);
+        AsyncDisposableStack::init(self);
         RangeError::init(self);
         ReferenceError::init(self);
         TypeError::init(self);
@@ -304,6 +312,7 @@ impl Realm {
         DecodeUri::init(self);
         DecodeUriComponent::init(self);
         WeakRef::init(self);
+        finalization_registry::FinalizationRegistry::init(self);
         WeakMap::init(self);
         WeakSet::init(self);
         Atomics::init(self);
@@ -326,6 +335,9 @@ impl Realm {
             intl::segmenter::SegmentIterator::init(self);
             intl::PluralRules::init(self);
             intl::NumberFormat::init(self);
+            intl::DurationFormat::init(self);
+            intl::DisplayNames::init(self);
+            intl::RelativeTimeFormat::init(self);
         }
 
         #[cfg(feature = "temporal")]
@@ -390,6 +402,7 @@ pub(crate) fn set_default_global_bindings(context: &mut Context) -> JsResult<()>
     global_binding::<Math>(context)?;
     global_binding::<Json>(context)?;
     global_binding::<Array>(context)?;
+    global_binding::<iterable::IteratorConstructor>(context)?;
     global_binding::<Proxy>(context)?;
     global_binding::<ArrayBuffer>(context)?;
     global_binding::<SharedArrayBuffer>(context)?;
@@ -423,6 +436,9 @@ pub(crate) fn set_default_global_bindings(context: &mut Context) -> JsResult<()>
     global_binding::<Float64Array>(context)?;
     global_binding::<Symbol>(context)?;
     global_binding::<Error>(context)?;
+    global_binding::<SuppressedError>(context)?;
+    global_binding::<DisposableStack>(context)?;
+    global_binding::<AsyncDisposableStack>(context)?;
     global_binding::<RangeError>(context)?;
     global_binding::<ReferenceError>(context)?;
     global_binding::<TypeError>(context)?;
@@ -437,6 +453,7 @@ pub(crate) fn set_default_global_bindings(context: &mut Context) -> JsResult<()>
     global_binding::<DecodeUri>(context)?;
     global_binding::<DecodeUriComponent>(context)?;
     global_binding::<WeakRef>(context)?;
+    global_binding::<finalization_registry::FinalizationRegistry>(context)?;
     global_binding::<WeakMap>(context)?;
     global_binding::<WeakSet>(context)?;
     global_binding::<Atomics>(context)?;

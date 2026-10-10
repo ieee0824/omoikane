@@ -107,9 +107,9 @@ impl SetPropertyByName {
         let slot = *context.slot();
         if succeeded && slot.is_cachable() {
             let ic = &context.vm.frame().code_block.ic[usize::from(index)];
-            let object_borrowed = object.borrow();
-            let shape = object_borrowed.shape_edge();
-            ic.set(shape, slot);
+            // Weak cache handles can allocate and run object finalizers.
+            let shape = object.borrow().shape();
+            ic.set(&shape.clone().into_edge(), slot);
         }
 
         Ok(())

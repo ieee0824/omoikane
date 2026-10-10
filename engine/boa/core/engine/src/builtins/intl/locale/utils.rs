@@ -288,15 +288,20 @@ where
             return Some(locale);
         }
 
-        if let Some(id) = response
+        // `DataResponseMetadata::locale` identifies the payload selected by
+        // the provider. An unknown payload is the provider's root fallback,
+        // not a supported best-fit locale. A known payload can be a
+        // less-specific parent such as `en` for an `en-US` request, but that
+        // data fallback must not rewrite the public locale selected by the
+        // best-fit matcher.
+        if response
             .locale
-            .map(|dl| dl.into_locale().id)
-            .or(Some(id))
-            .filter(|loc| loc != &LanguageIdentifier::UNKNOWN)
+            .is_some_and(|locale| locale.into_locale().id == LanguageIdentifier::UNKNOWN)
         {
-            locale.id = id;
-            return Some(locale);
+            continue;
         }
+        locale.id = id;
+        return Some(locale);
     }
     None
 }
@@ -515,8 +520,13 @@ mod tests {
         );
 
         assert_eq!(
+            lookup_matching_locale_by_best_fit::<TestService>([locale!("en-US")], icu),
+            Some(locale!("en-US"))
+        );
+
+        assert_eq!(
             lookup_matching_locale_by_best_fit::<TestService>([locale!("es-ES")], icu),
-            Some(locale!("es"))
+            Some(locale!("es-ES"))
         );
 
         assert_eq!(
@@ -545,7 +555,7 @@ mod tests {
         let requested = vec![kr, gr, es.clone(), uz];
 
         let res = lookup_matching_locale_by_best_fit::<TestService>(requested, icu).unwrap();
-        assert_eq!(res.id, langid!("es"));
+        assert_eq!(res.id, langid!("es-ES-valencia"));
         assert_eq!(res.extensions, es.extensions);
     }
 }

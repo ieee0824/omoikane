@@ -656,3 +656,48 @@ fn named_property_getter_result_survives_cache_fill() -> JsResult<()> {
 fn global_getter_result_survives_cache_fill() -> JsResult<()> {
     assert_getter_result_survives_cache_fill("fresh")
 }
+
+#[test]
+fn map_iterator_finalization_can_borrow_cache_fill_receiver() -> JsResult<()> {
+    use std::{cell::Cell, rc::Rc};
+
+    let context = &mut Context::default();
+    let map = context
+        .eval(Source::from_bytes("globalThis.map = new Map([[1, 2]])"))?
+        .as_object()
+        .unwrap();
+    let _map_root = map.clone().root();
+    let garbage_finalized = Rc::new(Cell::new(0));
+    let getter = crate::object::FunctionObjectBuilder::new(
+        context.realm(),
+        crate::NativeFunction::from_copy_closure_with_captures(
+            |_, _, captures, context| {
+                let _no_gc = boa_gc::NoGcScope::new();
+                // Abandon a real iterator over the object whose property cache
+                // is about to be filled. Its finalizer must update the map.
+                context.eval(Source::from_bytes("map.entries()"))?;
+                for _ in 0..512 {
+                    let _garbage = boa_gc::GcEdge::new(CacheFillGarbage {
+                        _padding: [0; 8192],
+                        finalized: Rc::clone(&captures.garbage_finalized),
+                    });
+                }
+                Ok(1.into())
+            },
+            CacheGetterCaptures {
+                result_finalized: Rc::new(Cell::new(false)),
+                garbage_finalized: Rc::clone(&garbage_finalized),
+            },
+        ),
+    )
+    .build();
+    map.define_property_or_throw(
+        js_string!("fresh"),
+        PropertyDescriptor::builder().get(getter).configurable(true),
+        context,
+    )?;
+    assert_eq!(context.eval(Source::from_bytes("map.fresh"))?, 1.into());
+    assert!(garbage_finalized.get() > 0, "cache fill must collect");
+    assert_eq!(context.eval(Source::from_bytes("map.size"))?, 1.into());
+    Ok(())
+}

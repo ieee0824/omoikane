@@ -151,6 +151,9 @@ pub struct Vm {
     /// because we don't push a frame for them.
     pub(crate) native_active_function: Option<JsObject>,
 
+    /// Owned receiver of the active native `[[Call]]`; `[[Construct]]` has none.
+    pub(crate) native_active_receiver: Option<JsValue>,
+
     /// Whether the active native function was entered through `[[Construct]]`.
     pub(crate) native_active_function_is_constructor_call: bool,
 
@@ -189,6 +192,7 @@ unsafe impl Trace for Vm {
             self.return_value.trace(tracer);
             self.pending_exception.trace(tracer);
             self.native_active_function.trace(tracer);
+            self.native_active_receiver.trace(tracer);
             self.pending_native_call.trace(tracer);
         }
 
@@ -600,6 +604,7 @@ impl Vm {
             #[cfg(feature = "baseline-jit")]
             arithmetic_jit_budget: None,
             native_active_function: None,
+            native_active_receiver: None,
             native_active_function_is_constructor_call: false,
             pending_native_call: None,
             native_call_continuations: Vec::new(),

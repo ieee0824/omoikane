@@ -851,6 +851,7 @@ fn date_proto_to_string() {
 }
 
 #[test]
+#[cfg(not(feature = "intl"))]
 fn date_proto_to_locale_date_string() {
     run_test_actions([TestAction::assert_eq(
         "new Date(2020, 6, 8, 9, 16, 15, 779).toLocaleDateString()",
@@ -859,6 +860,7 @@ fn date_proto_to_locale_date_string() {
 }
 
 #[test]
+#[cfg(not(feature = "intl"))]
 fn date_proto_to_locale_string() {
     let to_string_format = format_description!(
         "[weekday repr:short] [month repr:short] [day] [year] [hour]:[minute]:[second] GMT[offset_hour sign:mandatory][offset_minute][end]"
@@ -874,6 +876,7 @@ fn date_proto_to_locale_string() {
 }
 
 #[test]
+#[cfg(not(feature = "intl"))]
 fn date_proto_to_locale_time_string() {
     let to_time_string_format = format_description!(
         "[hour]:[minute]:[second] GMT[offset_hour sign:mandatory][offset_minute][end]"
@@ -886,6 +889,79 @@ fn date_proto_to_locale_time_string() {
         "new Date(2020, 6, 8, 9, 16, 15, 779).toLocaleTimeString()",
         js_string!(t),
     )]);
+}
+
+#[test]
+#[cfg(feature = "intl")]
+fn date_proto_to_locale_date_string_intl() {
+    run_test_actions([
+        TestAction::assert(indoc! {r#"
+            (() => {
+                const date = new Date(2020, 6, 8, 9, 16, 15, 779);
+                const formatter = new Intl.DateTimeFormat(undefined, {
+                    year: 'numeric', month: 'numeric', day: 'numeric'
+                });
+                return date.toLocaleDateString() === formatter.format(date);
+            })()
+        "#}),
+        TestAction::assert_eq(
+            "new Date(Date.UTC(2020, 6, 8, 9, 16, 15, 779)).toLocaleDateString('en-US', {timeZone: 'UTC'})",
+            js_str!("7/8/2020"),
+        ),
+        TestAction::assert_eq(
+            "new Date(Date.UTC(2020, 6, 8, 9, 16, 15, 779)).toLocaleDateString('de-DE', {timeZone: 'UTC'})",
+            js_str!("8.7.2020"),
+        ),
+    ]);
+}
+
+#[test]
+#[cfg(feature = "intl")]
+fn date_proto_to_locale_string_intl() {
+    run_test_actions([
+        TestAction::assert(indoc! {r#"
+            (() => {
+                const date = new Date(2020, 6, 8, 9, 16, 15, 779);
+                const formatter = new Intl.DateTimeFormat(undefined, {
+                    year: 'numeric', month: 'numeric', day: 'numeric',
+                    hour: 'numeric', minute: 'numeric', second: 'numeric'
+                });
+                return date.toLocaleString() === formatter.format(date);
+            })()
+        "#}),
+        TestAction::assert_eq(
+            "new Date(Date.UTC(2020, 6, 8, 9, 16, 15, 779)).toLocaleString('en-US', {timeZone: 'UTC'})",
+            js_str!("7/8/2020, 9:16:15 AM"),
+        ),
+        TestAction::assert_eq(
+            "new Date(Date.UTC(2020, 6, 8, 9, 16, 15, 779)).toLocaleString('de-DE', {timeZone: 'UTC'})",
+            js_str!("8.7.2020, 09:16:15"),
+        ),
+    ]);
+}
+
+#[test]
+#[cfg(feature = "intl")]
+fn date_proto_to_locale_time_string_intl() {
+    run_test_actions([
+        TestAction::assert(indoc! {r#"
+            (() => {
+                const date = new Date(2020, 6, 8, 9, 16, 15, 779);
+                const formatter = new Intl.DateTimeFormat(undefined, {
+                    hour: 'numeric', minute: 'numeric', second: 'numeric'
+                });
+                return date.toLocaleTimeString() === formatter.format(date);
+            })()
+        "#}),
+        TestAction::assert_eq(
+            "new Date(Date.UTC(2020, 6, 8, 9, 16, 15, 779)).toLocaleTimeString('en-US', {timeZone: 'UTC'})",
+            js_str!("9:16:15 AM"),
+        ),
+        TestAction::assert_eq(
+            "new Date(Date.UTC(2020, 6, 8, 9, 16, 15, 779)).toLocaleTimeString('de-DE', {timeZone: 'UTC'})",
+            js_str!("09:16:15"),
+        ),
+    ]);
 }
 
 #[test]

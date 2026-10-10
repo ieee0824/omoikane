@@ -1,0 +1,16 @@
+{
+  "source": "ICU4X baked calendar data selected by engine/boa/Cargo.lock",
+  "icu_calendar_version": "2.0.5",
+  "icu_calendar_data_version": "2.0.0",
+  "icu_provider_blob_version": "2.0.0",
+  "generator": "core/icu_provider/examples/export_calendar_data.rs",
+  "markers": [
+    "CalendarChineseV1",
+    "CalendarDangiV1",
+    "CalendarHijriSimulatedMeccaV1",
+    "CalendarJapaneseModernV1",
+    "CalendarJapaneseExtendedV1"
+  ],
+  "bytes": 7414,
+  "sha256": "90e55a4bfe02492213ef06fe884e49e5c9d0be9e2211240fa53a193b3236cfe4"
+}

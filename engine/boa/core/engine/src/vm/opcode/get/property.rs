@@ -140,9 +140,10 @@ impl GetPropertyByName {
         let slot = *context.slot();
         if slot.is_cachable() {
             let ic = &context.vm.frame().code_block.ic[usize::from(index)];
-            let object_borrowed = object.borrow();
-            let shape = object_borrowed.shape_edge();
-            ic.set(shape, slot);
+            // Cache installation allocates and can finalize an iterator over
+            // this object. Release its borrow while keeping the shape rooted.
+            let shape = object.borrow().shape();
+            ic.set(&shape.clone().into_edge(), slot);
         }
 
         context.vm.set_register(dst.into(), result);

@@ -12,6 +12,9 @@
 //! [spec]: https://tc39.es/ecma262/#sec-typedarray-objects
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypedArray
 
+#[cfg(test)]
+mod tests;
+
 use crate::{
     Context, JsArgs, JsResult, JsString,
     builtins::{BuiltInBuilder, BuiltInConstructor, BuiltInObject, IntrinsicObject},
@@ -27,9 +30,11 @@ use crate::{
 };
 use boa_gc::{Finalize, Trace};
 
+mod base64_decode;
 mod builtin;
 mod element;
 mod object;
+mod uint8_encoding;
 
 pub(crate) use builtin::{BuiltinTypedArray, is_valid_integer_index};
 #[cfg(feature = "float16")]
@@ -52,7 +57,7 @@ impl<T: TypedArrayMarker> IntrinsicObject for T {
             .name(js_string!("get [Symbol.species]"))
             .build();
 
-        BuiltInBuilder::from_standard_constructor::<Self>(realm)
+        let builder = BuiltInBuilder::from_standard_constructor::<Self>(realm)
             .prototype(
                 realm
                     .intrinsics()
@@ -78,8 +83,23 @@ impl<T: TypedArrayMarker> IntrinsicObject for T {
                 js_string!("BYTES_PER_ELEMENT"),
                 size_of::<T::Element>(),
                 Attribute::READONLY | Attribute::NON_ENUMERABLE | Attribute::PERMANENT,
-            )
-            .build();
+            );
+        let builder = if T::ERASED == TypedArrayKind::Uint8 {
+            builder
+                .method(uint8_encoding::to_hex, js_string!("toHex"), 0)
+                .method(uint8_encoding::to_base64, js_string!("toBase64"), 0)
+                .method(
+                    uint8_encoding::set_from_base64,
+                    js_string!("setFromBase64"),
+                    1,
+                )
+                .static_method(uint8_encoding::from_base64, js_string!("fromBase64"), 1)
+                .method(uint8_encoding::set_from_hex, js_string!("setFromHex"), 1)
+                .static_method(uint8_encoding::from_hex, js_string!("fromHex"), 1)
+        } else {
+            builder
+        };
+        builder.build();
     }
 }
 
@@ -92,8 +112,14 @@ impl<T: TypedArrayMarker> BuiltInObject for T {
 
 impl<T: TypedArrayMarker> BuiltInConstructor for T {
     const CONSTRUCTOR_ARGUMENTS: usize = 3;
-    const PROTOTYPE_STORAGE_SLOTS: usize = 1;
-    const CONSTRUCTOR_STORAGE_SLOTS: usize = 3;
+    const PROTOTYPE_STORAGE_SLOTS: usize = match T::ERASED {
+        TypedArrayKind::Uint8 => 5,
+        _ => 1,
+    };
+    const CONSTRUCTOR_STORAGE_SLOTS: usize = match T::ERASED {
+        TypedArrayKind::Uint8 => 5,
+        _ => 3,
+    };
 
     const STANDARD_CONSTRUCTOR: fn(&StandardConstructors) -> &StandardConstructor =
         <Self as TypedArrayMarker>::ERASED.standard_constructor();

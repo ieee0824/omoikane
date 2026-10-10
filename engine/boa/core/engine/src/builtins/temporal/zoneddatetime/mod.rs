@@ -28,6 +28,7 @@ use temporal_rs::{
         Disambiguation, DisplayCalendar, DisplayOffset, DisplayTimeZone, OffsetDisambiguation,
         Overflow, RoundingIncrement, RoundingMode, RoundingOptions, ToStringRoundingOptions, Unit,
     },
+    parsed_intermediates::ParsedZonedDateTime,
     partial::{PartialTime, PartialZonedDateTime},
     provider::TransitionDirection,
 };
@@ -1183,7 +1184,10 @@ impl ZonedDateTime {
             .and_then(JsObject::downcast_ref::<Self>)
             .ok_or_else(|| {
                 JsNativeError::typ().with_message("the this object must be a ZonedDateTime object.")
-            })?;
+            })?
+            .inner
+            .as_ref()
+            .clone();
         // 3. If ? IsPartialTemporalObject(temporalZonedDateTimeLike) is false, throw a TypeError exception.
         let Some(obj) = is_partial_temporal_object(args.get_or_undefined(0), context)? else {
             return Err(JsNativeError::typ()
@@ -1205,12 +1209,13 @@ impl ZonedDateTime {
         // 16. Set fields.[[OffsetString]] to FormatUTCOffsetNanoseconds(offsetNanoseconds).
         // 17. Let partialZonedDateTime be ? PrepareCalendarFields(calendar, temporalZonedDateTimeLike, « year, month, month-code, day », « hour, minute, second, millisecond, microsecond, nanosecond, offset », partial).
         // 18. Set fields to CalendarMergeFields(calendar, fields, partialZonedDateTime).
-        let (fields, _) = to_zoned_date_time_fields(
-            &obj,
-            zdt.inner.calendar(),
-            ZdtFieldsType::NoTimeZone,
-            context,
-        )?;
+        let (fields, _) =
+            to_zoned_date_time_fields(&obj, zdt.calendar(), ZdtFieldsType::NoTimeZone, context)?;
+        if fields.is_empty() {
+            return Err(JsNativeError::typ()
+                .with_message("temporalZonedDateTimeLike must contain a date, time or offset field")
+                .into());
+        }
 
         // 19. Let resolvedOptions be ? GetOptionsObject(options).
         let resolved_options = get_options_object(args.get_or_undefined(1))?;
@@ -1223,7 +1228,7 @@ impl ZonedDateTime {
         // 22. Let overflow be ? GetTemporalOverflowOption(resolvedOptions).
         let overflow = get_option::<Overflow>(&resolved_options, js_string!("overflow"), context)?;
 
-        let result = zdt.inner.with_with_provider(
+        let result = zdt.with_with_provider(
             fields,
             disambiguation,
             offset,
@@ -1957,6 +1962,10 @@ pub(crate) fn to_temporal_zoneddatetime(
             // j. Let overflow be ? GetTemporalOverflowOption(resolvedOptions).
             let overflow = get_option::<Overflow>(&options, js_string!("overflow"), context)?;
             // k. Let result be ? InterpretTemporalDateTimeFields(calendar, fields, overflow).
+            super::calendar::validate_required_date_fields(
+                &partial.fields.calendar_fields,
+                &partial.calendar,
+            )?;
             // l. Let isoDate be result.[[ISODate]].
             // m. Let time be result.[[Time]].
             Ok(ZonedDateTimeInner::from_partial_with_provider(
@@ -1969,6 +1978,11 @@ pub(crate) fn to_temporal_zoneddatetime(
         }
         JsVariant::String(zdt_source) => {
             // b. Let result be ? ParseISODateTime(item, « TemporalDateTimeString[+Zoned] »).
+            let source = super::parsing::iso_source(&zdt_source)?;
+            let parsed = ParsedZonedDateTime::from_utf8_with_provider(
+                source.as_bytes(),
+                context.tz_provider(),
+            )?;
             // c. Let annotation be result.[[TimeZone]].[[TimeZoneAnnotation]].
             // d. Assert: annotation is not empty.
             // e. Let timeZone be ? ToTemporalTimeZoneIdentifier(annotation).
@@ -1999,8 +2013,8 @@ pub(crate) fn to_temporal_zoneddatetime(
             // 7. If offsetBehaviour is option, then
             //        a. Set offsetNanoseconds to ! ParseDateTimeUTCOffset(offsetString).
             // 8. Let epochNanoseconds be ? InterpretISODateTimeOffset(isoDate, time, offsetBehaviour, offsetNanoseconds, timeZone, disambiguation, offsetOption, matchBehaviour).
-            Ok(ZonedDateTimeInner::from_utf8_with_provider(
-                zdt_source.to_std_string_escaped().as_bytes(),
+            Ok(ZonedDateTimeInner::from_parsed_with_provider(
+                parsed,
                 disambiguation,
                 offset_option,
                 context.tz_provider(),

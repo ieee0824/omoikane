@@ -31,24 +31,35 @@ use static_assertions::const_assert;
 
 pub(crate) mod collator;
 pub(crate) mod date_time_format;
+pub(crate) mod display_names;
+pub(crate) mod duration_format;
 pub(crate) mod list_format;
 pub(crate) mod locale;
+mod native_names;
 pub(crate) mod number_format;
 pub(crate) mod plural_rules;
+pub(crate) mod relative_time_format;
 pub(crate) mod segmenter;
 
 pub(crate) use self::{
-    collator::Collator, date_time_format::DateTimeFormat, list_format::ListFormat, locale::Locale,
-    number_format::NumberFormat, plural_rules::PluralRules, segmenter::Segmenter,
+    collator::Collator, date_time_format::DateTimeFormat, display_names::DisplayNames,
+    duration_format::DurationFormat, list_format::ListFormat, locale::Locale,
+    number_format::NumberFormat, plural_rules::PluralRules,
+    relative_time_format::RelativeTimeFormat, segmenter::Segmenter,
 };
 
+#[cfg(all(test, feature = "intl_bundled"))]
+mod name_tests;
 mod options;
 
 // No singletons are allowed as lang markers.
 // Hopefully, we'll be able to migrate this to the definition of `Service` in the future
 // (https://github.com/rust-lang/rust/issues/76560)
 const_assert! {!<Collator as Service>::LangMarker::INFO.is_singleton}
+const_assert! {!<DurationFormat as Service>::LangMarker::INFO.is_singleton}
 const_assert! {!<ListFormat as Service>::LangMarker::INFO.is_singleton}
+const_assert! {!<DisplayNames as Service>::LangMarker::INFO.is_singleton}
+const_assert! {!<RelativeTimeFormat as Service>::LangMarker::INFO.is_singleton}
 const_assert! {!<NumberFormat as Service>::LangMarker::INFO.is_singleton}
 const_assert! {!<PluralRules as Service>::LangMarker::INFO.is_singleton}
 const_assert! {!<Segmenter as Service>::LangMarker::INFO.is_singleton}
@@ -131,6 +142,33 @@ impl IntrinsicObject for Intl {
                     .number_format()
                     .constructor(),
                 NumberFormat::ATTRIBUTE,
+            )
+            .static_property(
+                DurationFormat::NAME,
+                realm
+                    .intrinsics()
+                    .constructors()
+                    .duration_format()
+                    .constructor(),
+                DurationFormat::ATTRIBUTE,
+            )
+            .static_property(
+                DisplayNames::NAME,
+                realm
+                    .intrinsics()
+                    .constructors()
+                    .display_names()
+                    .constructor(),
+                DisplayNames::ATTRIBUTE,
+            )
+            .static_property(
+                RelativeTimeFormat::NAME,
+                realm
+                    .intrinsics()
+                    .constructors()
+                    .relative_time_format()
+                    .constructor(),
+                RelativeTimeFormat::ATTRIBUTE,
             )
             .static_method(
                 Self::get_canonical_locales,

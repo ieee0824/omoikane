@@ -291,8 +291,8 @@ impl Number {
     ///
     /// The `toLocaleString()` method returns a string with a language-sensitive representation of this number.
     ///
-    /// Note that while this technically conforms to the Ecma standard, it does no actual
-    /// internationalization logic.
+    /// With `intl`, locale and formatting options use the intrinsic NumberFormat
+    /// implementation. Without `intl`, this uses the default numeric representation.
     ///
     /// More information:
     ///  - [ECMAScript reference][spec]
@@ -303,11 +303,24 @@ impl Number {
     #[allow(clippy::wrong_self_convention)]
     pub(crate) fn to_locale_string(
         this: &JsValue,
-        _: &[JsValue],
-        _: &mut Context,
+        args: &[JsValue],
+        context: &mut Context,
     ) -> JsResult<JsValue> {
         let this_num = Self::this_number_value(this)?;
-        Ok(JsValue::new(js_string!(this_num)))
+        #[cfg(feature = "intl")]
+        {
+            let formatter = super::intl::number_format::NumberFormat::new(
+                args.get_or_undefined(0),
+                args.get_or_undefined(1),
+                context,
+            )?;
+            formatter.format_value(&JsValue::new(this_num), context)
+        }
+        #[cfg(not(feature = "intl"))]
+        {
+            let _ = (args, context);
+            Ok(JsValue::new(js_string!(this_num)))
+        }
     }
 
     /// `flt_str_to_exp` - used in `to_precision`

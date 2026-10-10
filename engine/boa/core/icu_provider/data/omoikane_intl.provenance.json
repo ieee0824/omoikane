@@ -1,0 +1,134 @@
+{
+  "coverage": "all 739 CLDR JSON locales and all 77 numeric numbering systems",
+  "encoding": "ICU4X 2.0 BlobExporter postcard with zero-copy typed schemas",
+  "generatorFiles": {
+    "calendar_intervals.py": "532e58473933dce016e54e9dd3dfa66e5c7249840ac20576b2fcc899e8475775",
+    "calendar_patterns.py": "32449d6466ce7b99aae574764baece8fab558a79c9faf6da31acb03db789af13",
+    "compact_patterns.py": "c79058cd127f0aa14e47eaa7b105577dbf31afc4aa088c9f630e0fbfd0aa885f",
+    "generate.py": "712aa22380f70ea5113a134f6c5fbec795d8424c10a418a8b634e0107ec61ccb",
+    "number_range_patterns.py": "6dd010d6b72a3302cd9721fbaf4dcaca35f4e461780d6cd0971b9f1b88579a23",
+    "patterns.py": "dcae2a94da3db2fa27fd62a1aef35b50033675dc91e5af29c2eeaa69d1bd2404",
+    "relative_display_names.py": "d19a0a6149697966f3e919912aced96cee3da1974146a3c2131b0d185512aab1",
+    "root_symbols.py": "8da9db15bd84548482920edc95f3d70d891434199709aad4b4c44467df3993ba"
+  },
+  "inputOutputFiles": {
+    "all_unit_patterns.json": {
+      "bytes": 51711236,
+      "exploratoryZlib9Bytes": 3686684,
+      "sha256": "6ce06989bcb53aa7e0bd6a62637a9d3213e0f3d0adbd637e1317e9b6ee73da3b"
+    },
+    "calendar_date_patterns.json": {
+      "bytes": 10912339,
+      "exploratoryZlib9Bytes": 139613,
+      "sha256": "01f753f315095e6e9305dd939d6c3cbb3c1efc4e072fae2a0112281107dcbe05"
+    },
+    "calendar_interval_patterns.json": {
+      "bytes": 29709644,
+      "exploratoryZlib9Bytes": 543124,
+      "sha256": "0fef803538c40c4068980c3131d7ab5380da2b804d9a130b392fb2a92d632fdb"
+    },
+    "compact_patterns.json": {
+      "bytes": 2068450,
+      "exploratoryZlib9Bytes": 55157,
+      "sha256": "29ea2f5f4b7107298b30d0852df2888c453338de76f2e223419996d3acf80d9e"
+    },
+    "currency_digits.json": {
+      "bytes": 4399,
+      "exploratoryZlib9Bytes": 425,
+      "sha256": "c87c5b05219bfedcae0a76cab044a0f80802f2812199a66daae7886bf2e19290"
+    },
+    "currency_names.json": {
+      "bytes": 26318674,
+      "exploratoryZlib9Bytes": 3707146,
+      "sha256": "610a4aae3eb4246ac6b94f834e3384a64f5f198ca6c391e8786d44480a5d3431"
+    },
+    "currency_patterns.json": {
+      "bytes": 1749086,
+      "exploratoryZlib9Bytes": 17187,
+      "sha256": "75b06fb6114ac7b336771f0996a7f5b4784c4ecf1cd64ff2e9271115c6074c40"
+    },
+    "display_names.json": {
+      "bytes": 23686288,
+      "exploratoryZlib9Bytes": 5330202,
+      "sha256": "3f51965cb95174f71fd5c0f1c041487743a8bee52983e01fc463761432dd0b4b"
+    },
+    "duration_unit_patterns.json": {
+      "bytes": 2988675,
+      "exploratoryZlib9Bytes": 84546,
+      "sha256": "bfc267153a3f2b441c6ff45d09d9401ec3aebe3e2b0a4a9f15b36d2baaa8b3c9"
+    },
+    "locale_metadata.json": {
+      "bytes": 98963,
+      "exploratoryZlib9Bytes": 9416,
+      "sha256": "b042c4bb884962d4d2ba173e97a24a1aaf986925286e353a3ffdabd7928602b9"
+    },
+    "number_patterns.json": {
+      "bytes": 68447,
+      "exploratoryZlib9Bytes": 3151,
+      "sha256": "3ad9a88369017b27178552dfbf8765c3736f3320a1fa729d31fd8fefb9b967a6"
+    },
+    "number_range_patterns.json": {
+      "bytes": 187643,
+      "exploratoryZlib9Bytes": 6052,
+      "sha256": "13d43e6746fd8557205de63ad67774da28e2c34137002a47bf715aba81be546a"
+    },
+    "number_symbols.json": {
+      "bytes": 269428,
+      "exploratoryZlib9Bytes": 5935,
+      "sha256": "9e6525e1bd95d6afe324ac9c91669a121f26f80102251f6bba4aa171a0e8dc83"
+    },
+    "relative_time_patterns.json": {
+      "bytes": 4297023,
+      "exploratoryZlib9Bytes": 172339,
+      "sha256": "9e9ef5e400efd2cc3765643dbe4ca1d639fd01aa4d85b78a5b2a2b06dfca3dc0"
+    },
+    "root_number_symbols.json": {
+      "bytes": 96010,
+      "exploratoryZlib9Bytes": 3698,
+      "sha256": "996ebd0dbf57264477c9df734fd546046246aedbb1e1196a4bc500fcbb8549a0"
+    }
+  },
+  "markerCounts": {
+    "OmoikaneCalendarDatePatternsV1": 12563,
+    "OmoikaneCalendarIntervalPatternsV1": 12563,
+    "OmoikaneCompactPatternsV1": 2606,
+    "OmoikaneCompoundUnitPatternsV1": 2217,
+    "OmoikaneCurrencyDigitsV1": 1,
+    "OmoikaneCurrencyPatternsV1": 1620,
+    "OmoikaneCurrencyTextV1": 155792,
+    "OmoikaneDisplayNamesV1": 739,
+    "OmoikaneDurationDigitalV1": 57642,
+    "OmoikaneGlobalCurrencyPatternsV1": 77,
+    "OmoikaneGlobalNumberPatternsV1": 77,
+    "OmoikaneGlobalNumberSymbolsV1": 77,
+    "OmoikaneNumberPatternsV1": 1620,
+    "OmoikaneNumberRangePatternsV1": 57642,
+    "OmoikaneNumberSymbolsV1": 1620,
+    "OmoikaneRelativeTimePatternsV1": 739,
+    "OmoikaneUnitPatternsV1": 101982
+  },
+  "numberRangeSupplementalInput": {
+    "bytes": 24710,
+    "sha256": "a2c4e48d32d84a9664c9da11d8855937284721fd7ca5fbd78a8237fcde6cbe29"
+  },
+  "postcardBytes": 19117677,
+  "postcardSha256": "1bb37c3ffa1d9a8a72c7c7031fd0ece81ec1b6a777edcfa39d035414d6db16e0",
+  "rootSource": {
+    "bytes": 268212,
+    "commit": "2ef784e3a4168bc2a43cd1b5b9839b6636f5899c",
+    "repository": "https://github.com/unicode-org/cldr",
+    "sha256": "1ac705812e9e186b8d904813a4989d160729cc4d217849ad3736257da10f69b0",
+    "tag": "release-47",
+    "tagObject": "adbaf76bf62572cbfe2044564c40ed44beb00f8a",
+    "url": "https://raw.githubusercontent.com/unicode-org/cldr/2ef784e3a4168bc2a43cd1b5b9839b6636f5899c/common/main/root.xml"
+  },
+  "schemaVersion": 1,
+  "source": {
+    "bytes": 74838157,
+    "commit": "16f6b8578ba5fe98959034706f337674f816fc3f",
+    "repository": "https://github.com/unicode-org/cldr-json",
+    "sha256": "bbb9a9aac2dfc534bd18288678a5984023d11d22f712f3c33425f3214bd1def6",
+    "tag": "47.0.0",
+    "url": "https://github.com/unicode-org/cldr-json/releases/download/47.0.0/cldr-47.0.0-json-full.zip"
+  }
+}

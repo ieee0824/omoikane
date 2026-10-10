@@ -283,7 +283,9 @@ impl PlainMonthDay {
             .and_then(JsObject::downcast_ref::<Self>)
             .ok_or_else(|| {
                 JsNativeError::typ().with_message("this value must be a PlainMonthDay object.")
-            })?;
+            })?
+            .inner
+            .clone();
 
         // 3. If ? IsPartialTemporalObject(temporalMonthDayLike) is false, throw a TypeError exception.
         let Some(object) = is_partial_temporal_object(args.get_or_undefined(0), context)? else {
@@ -294,7 +296,8 @@ impl PlainMonthDay {
         // 4. Let calendar be monthDay.[[Calendar]].
         // 5. Let fields be ISODateToFields(calendar, monthDay.[[ISODate]], month-day).
         // 6. Let partialMonthDay be ? PrepareCalendarFields(calendar, temporalMonthDayLike, « year, month, month-code, day », « », partial).
-        let fields = to_calendar_fields(&object, month_day.inner.calendar(), context)?;
+        let mut fields = to_calendar_fields(&object, month_day.calendar(), context)?;
+        normalize_iso_month_day_year(&mut fields, month_day.calendar());
         // 7. Set fields to CalendarMergeFields(calendar, fields, partialMonthDay).
         // 8. Let resolvedOptions be ? GetOptionsObject(options).
         let resolved_options = get_options_object(args.get_or_undefined(1))?;
@@ -302,7 +305,7 @@ impl PlainMonthDay {
         let overflow = get_option::<Overflow>(&resolved_options, js_string!("overflow"), context)?;
         // 10. Let isoDate be ? CalendarMonthDayFromFields(calendar, fields, overflow).
         // 11. Return ! CreateTemporalMonthDay(isoDate, calendar).
-        create_temporal_month_day(month_day.inner.with(fields, overflow)?, None, context)
+        create_temporal_month_day(month_day.with(fields, overflow)?, None, context)
     }
 
     /// 10.3.7 `Temporal.PlainMonthDay.prototype.equals ( other )`
@@ -583,12 +586,13 @@ fn to_temporal_month_day(
             })
             .transpose()?;
 
-        let partial_date = PartialDate::new()
+        let mut partial_date = PartialDate::new()
             .with_month(month)
             .with_day(day)
             .with_year(year)
             .with_month_code(month_code)
             .with_calendar(calendar);
+        normalize_iso_month_day_year(&mut partial_date.calendar_fields, &partial_date.calendar);
 
         // d. Let resolvedOptions be ? GetOptionsObject(options).
         let options = get_options_object(options)?;
@@ -610,7 +614,7 @@ fn to_temporal_month_day(
     // 6. If calendar is empty, set calendar to "iso8601".
     // 7. Set calendar to ? CanonicalizeCalendar(calendar).
     let parse_record =
-        ParsedDate::month_day_from_utf8(md_string.to_std_string_escaped().as_bytes())?;
+        ParsedDate::month_day_from_utf8(super::parsing::iso_source(&md_string)?.as_bytes())?;
     // 8. Let resolvedOptions be ? GetOptionsObject(options).
     let options = get_options_object(options)?;
     // 9. Perform ? GetTemporalOverflowOption(resolvedOptions).
@@ -626,4 +630,12 @@ fn to_temporal_month_day(
     // 15. Set isoDate to ? CalendarMonthDayFromFields(calendar, result, constrain).
     // 16. Return ! CreateTemporalMonthDay(isoDate, calendar).
     Ok(InnerMonthDay::from_parsed(parse_record)?)
+}
+
+/// An ISO month-day year only determines overflow, never representable-date
+/// limits. The Gregorian leap-year cycle repeats every 400 years.
+fn normalize_iso_month_day_year(fields: &mut CalendarFields, calendar: &Calendar) {
+    if calendar.is_iso() {
+        fields.year = fields.year.map(|year| year.rem_euclid(400) + 2000);
+    }
 }

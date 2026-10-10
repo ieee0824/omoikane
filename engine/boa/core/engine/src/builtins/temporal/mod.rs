@@ -13,6 +13,7 @@ mod error;
 mod instant;
 mod now;
 mod options;
+mod parsing;
 mod plain_date;
 mod plain_date_time;
 mod plain_month_day;
@@ -20,6 +21,8 @@ mod plain_time;
 mod plain_year_month;
 mod zoneddatetime;
 
+#[cfg(test)]
+mod regression_tests;
 #[cfg(test)]
 mod tests;
 

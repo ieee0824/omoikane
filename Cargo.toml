@@ -63,7 +63,7 @@ crc32fast = "1.5"
 # bounded JIT completion copies/property-binding scans (ieee0824/boa#88),
 # and ASAN-independent native parser stack measurement (ieee0824/boa#89).
 # The imported source contains all listed fork changes.
-boa_engine = { path = "engine/boa/core/engine", features = ["annex-b"] }
+boa_engine = { path = "engine/boa/core/engine", features = ["annex-b", "intl_bundled", "experimental"] }
 boa_gc = { path = "engine/boa/core/gc" }
 flate2 = "1.1"
 gif = "0.13"

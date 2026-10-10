@@ -12,6 +12,16 @@ use crate::read::{MetaData, TestFlag};
 /// Minimum edition required by a specific feature in the `test262` repository.
 static FEATURE_EDITION: phf::Map<&'static str, SpecEdition> = phf::phf_map! {
     // Proposed language features
+    // Metadata in the pinned complete Test262 checkout. These names classify
+    // tests; they do not add ignore rules for unsupported proposals.
+    "error-stack-accessor" => SpecEdition::ESNext,
+    "await-dictionary" => SpecEdition::ESNext,
+    "import-text" => SpecEdition::ESNext,
+    "import-bytes" => SpecEdition::ESNext,
+    "nonextensible-applies-to-private" => SpecEdition::ESNext,
+    "stable-array-sort" => SpecEdition::ES10,
+    "stable-typedarray-sort" => SpecEdition::ES10,
+
 
     // Intl.Locale Info
     // https://github.com/tc39/proposal-intl-locale-info
@@ -44,6 +54,13 @@ static FEATURE_EDITION: phf::Map<&'static str, SpecEdition> = phf::phf_map! {
     // Temporal
     // https://github.com/tc39/proposal-temporal
     "Temporal" => SpecEdition::ESNext,
+    // Metadata present in the fixed Test262 revision used for integration checks.
+    // Recognizing a feature does not suppress tests for unsupported proposals.
+    "Intl.Era-monthcode" => SpecEdition::ESNext,
+    "Iterator.prototype.join" => SpecEdition::ESNext,
+    "iterator-chunking" => SpecEdition::ESNext,
+    "iterator-includes" => SpecEdition::ESNext,
+    "joint-iteration" => SpecEdition::ESNext,
 
     // ShadowRealm, née Callable Boundary Realms
     // https://github.com/tc39/proposal-realms
@@ -82,6 +99,7 @@ static FEATURE_EDITION: phf::Map<&'static str, SpecEdition> = phf::phf_map! {
     // Uint8Array Base64
     // https://github.com/tc39/proposal-arraybuffer-base64
     "uint8array-base64" => SpecEdition::ESNext,
+    "immutable-arraybuffer" => SpecEdition::ESNext,
 
     // Atomics.pause
     // https://github.com/tc39/proposal-atomics-microwait
