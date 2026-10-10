@@ -1737,6 +1737,10 @@ struct HostState {
     /// Resource elements that already have a queued load task. This prevents a
     /// move within one connected document from producing duplicate events.
     pending_resource_loads: HashSet<usize>,
+    /// Iframes whose next resource load must replace the active Document even
+    /// when the effective `src`/`srcdoc` did not change (reload/history travel).
+    /// Keeping this separate lets the old Document remain active until commit.
+    pending_forced_iframe_navigations: HashSet<usize>,
     /// Source captured before an iframe navigation's asynchronous load.
     pending_iframe_visits: HashMap<usize, VisitSource>,
     /// Preserves a child Window's initiator while its callback changes `src`.
@@ -2244,6 +2248,7 @@ impl HostState {
             browsing_context_names: HashMap::new(),
             discarded_node_ids: Vec::new(),
             pending_resource_loads: HashSet::new(),
+            pending_forced_iframe_navigations: HashSet::new(),
             pending_iframe_visits: HashMap::new(),
             active_child_navigation_frame: None,
             navigation_requests: VecDeque::new(),
@@ -2626,8 +2631,10 @@ impl HostState {
             )
         };
         let iframe_id = iframe.identity();
+        let force_navigation = self.pending_forced_iframe_navigations.remove(&iframe_id);
 
         if submission.is_none()
+            && !force_navigation
             && let Some(entry) = self.iframe_documents.get(&iframe_id)
             && entry.loaded_attribute == resource_attribute
             && entry.loaded_resource == resource
@@ -3233,6 +3240,8 @@ impl HostState {
         }
         self.pending_resource_loads
             .retain(|id| !tree_ids.contains(id));
+        self.pending_forced_iframe_navigations
+            .retain(|id| !tree_ids.contains(id));
         self.event_loop.cancel_resource_loads_for_nodes(&tree_ids);
         self.discarded_node_ids.extend(tree_ids.iter().copied());
         self.unregister_tree(document);
@@ -3343,6 +3352,7 @@ impl HostState {
 
     fn destroy_iframe_context(&mut self, iframe_id: usize) {
         self.retire_iframe_document(iframe_id);
+        self.pending_forced_iframe_navigations.remove(&iframe_id);
         self.pending_iframe_visits.remove(&iframe_id);
         self.iframe_context_ids.remove(&iframe_id);
         self.browsing_context_names.remove(&iframe_id);
@@ -3364,6 +3374,8 @@ impl HostState {
             self.destroy_iframe_context(iframe_id);
         }
         self.pending_resource_loads
+            .retain(|node_id| !subtree_ids.contains(node_id));
+        self.pending_forced_iframe_navigations
             .retain(|node_id| !subtree_ids.contains(node_id));
         self.pending_iframe_visits
             .retain(|node_id, _| !subtree_ids.contains(node_id));
@@ -10069,6 +10081,7 @@ impl Drop for JsRuntime {
         state.node_lifetimes = node_lifetime::NodeLifetimes::default();
         state.event_loop = EventLoop::default();
         state.pending_resource_loads.clear();
+        state.pending_forced_iframe_navigations.clear();
         state.worker_owner_realm = None;
         state.main_realm = None;
         state.write_parsers.clear();
@@ -20575,13 +20588,42 @@ fn iframe_content_document_native(
 /// so event-listener access does not bootstrap a scriptless child Document.
 /// Origin and sandbox checks also apply at this native boundary.
 fn iframe_global_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let document = iframe_content_document_native(&JsValue::undefined(), args, context)?;
-    if document.is_null() {
-        return Ok(JsValue::null());
-    }
     let iframe_id = parse_node_id(args.first(), context)?;
-    let document_id = document.to_number(context)? as usize;
     let create_if_missing = args.get(1).is_none_or(JsValue::to_boolean);
+    let document_id = if create_if_missing {
+        let document = iframe_content_document_native(&JsValue::undefined(), args, context)?;
+        if document.is_null() {
+            return Ok(JsValue::null());
+        }
+        document.to_number(context)? as usize
+    } else {
+        ensure_same_origin_node(context, iframe_id)?;
+        let document_id = with_host_state(|state| -> JsResult<Option<usize>> {
+            let state = state.borrow();
+            let Some(iframe) = state
+                .get_node(iframe_id)
+                .filter(|iframe| state.node_is_in_active_document(iframe))
+            else {
+                return Ok(None);
+            };
+            let Some(document) = state
+                .iframe_documents
+                .get(&iframe_id)
+                .map(|entry| entry.document.clone())
+            else {
+                return Ok(None);
+            };
+            let exposed = state
+                .sandbox_policy_for_document(&document)
+                .exposes_document_to_parent()
+                && state.iframe_document_is_same_origin(&iframe, &document);
+            Ok(exposed.then(|| document.identity()))
+        })?;
+        let Some(document_id) = document_id else {
+            return Ok(JsValue::null());
+        };
+        document_id
+    };
     with_host_state(|state| {
         let realm = if create_if_missing {
             ensure_iframe_realm(context, state, iframe_id, document_id)?
@@ -20659,9 +20701,10 @@ fn existing_iframe_document_native(
     Ok(JsValue::null())
 }
 
-/// Returns `same:<context>:<generation>`, `cross:<context>:<generation>`, or
-/// `closed` for a nested WindowProxy. `expectedContext` pins an already-created
-/// proxy to its browsing context so detach/reconnect cannot revive it.
+/// Returns `same:<context>:<generation>:<pending-resource>`,
+/// `cross:<context>:<generation>:<pending-resource>`, or `closed` for a nested
+/// WindowProxy. `expectedContext` pins an already-created proxy to its browsing
+/// context so detach/reconnect cannot revive it.
 fn iframe_context_state_native(
     _: &JsValue,
     args: &[JsValue],
@@ -20687,12 +20730,27 @@ fn iframe_context_state_native(
         if !state.borrow().node_is_in_active_document(&iframe) {
             return Ok(js_string!("closed").into());
         }
-        let document = state
-            .borrow_mut()
-            .iframe_content_document(&iframe)
-            .map_err(|error| {
-                JsError::from(JsNativeError::error().with_message(error.to_string()))
-            })?;
+        // Keep the currently active Document visible while a queued resource
+        // navigation is pending. Loading the new `src` here makes every
+        // WindowProxy refresh perform synchronous network and parser work,
+        // even when a later navigation supersedes it in the same script.
+        let existing_document = {
+            let state = state.borrow();
+            state
+                .iframe_documents
+                .get(&iframe_id)
+                .map(|entry| entry.document.clone())
+        };
+        let document = if let Some(document) = existing_document {
+            document
+        } else {
+            state
+                .borrow_mut()
+                .iframe_content_document(&iframe)
+                .map_err(|error| {
+                    JsError::from(JsNativeError::error().with_message(error.to_string()))
+                })?
+        };
         let state = state.borrow();
         let Some(context_id) = state.iframe_context_ids.get(&iframe_id).copied() else {
             return Ok(js_string!("closed").into());
@@ -20714,12 +20772,17 @@ fn iframe_context_state_native(
         } else {
             "cross"
         };
-        Ok(js_string!(format!("{access}:{context_id}:{generation}")).into())
+        let pending_resource = state.pending_resource_loads.contains(&iframe_id);
+        Ok(js_string!(format!(
+            "{access}:{context_id}:{generation}:{pending_resource}"
+        ))
+        .into())
     })
 }
 
-/// Forces the next load of a connected iframe to create a fresh Document and
-/// Window generation even when its effective `src`/`srcdoc` is unchanged.
+/// Queues the next load of a connected iframe even when its effective
+/// `src`/`srcdoc` is unchanged. The active Document stays available until the
+/// resource task (or an explicit `contentDocument` read) commits its replacement.
 /// The browsing-context id is preserved, so existing WindowProxy objects are
 /// retargeted rather than retired. Used by Location reload and history travel.
 fn iframe_force_navigation_native(
@@ -20738,7 +20801,7 @@ fn iframe_force_navigation_native(
             return Ok(JsValue::from(false));
         }
         let mut state = state.borrow_mut();
-        state.retire_iframe_document(iframe_id);
+        state.pending_forced_iframe_navigations.insert(iframe_id);
         state.schedule_connected_resource_loads(&iframe, true);
         Ok(JsValue::from(true))
     })

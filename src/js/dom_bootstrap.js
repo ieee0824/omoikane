@@ -9448,7 +9448,7 @@
       const documentId = nativeExistingIframeDocument(id);
       if (documentId !== null && documentId !== undefined &&
           !browsingInput.visibilityHiddenDocumentIds.has(documentId)) {
-        const accessibleId = nativeIframeContentDocument(id);
+        const accessibleId = nativeExistingIframeDocument(id, true);
         const childDocument = accessibleId === documentId ? wrapNode(documentId) : null;
         if (!childDocument) nativeDispatchIframeDeparture(id);
         browsingInput.visibilityHiddenDocumentIds.add(documentId);
@@ -9464,7 +9464,7 @@
     const documentId = nativeExistingIframeDocument(iframe.__id);
     if (documentId === null || documentId === undefined ||
         browsingInput.departingIframeDocumentIds.has(documentId)) return;
-    const sameOriginDocumentId = nativeIframeContentDocument(iframe.__id);
+    const sameOriginDocumentId = nativeExistingIframeDocument(iframe.__id, true);
     if (sameOriginDocumentId !== null && iframe.__contentWindowFacade) {
       // The child may have started a Realm after its WindowProxy received
       // listeners. Attach those listeners to the existing Window before its
@@ -9473,7 +9473,10 @@
       if (syncWindowListeners) syncWindowListeners("sync-listeners");
     }
     if (nativeDispatchIframeDeparture(iframe.__id)) return;
-    const departingDocument = sameOriginDocumentId !== null ? wrapNode(documentId) : null;
+    // A scriptless child has no event listeners or Realm to notify. Reuse an
+    // existing wrapper when there is one; wrapping solely for departure would
+    // eagerly bootstrap the Realm that this navigation is about to replace.
+    const departingDocument = sameOriginDocumentId !== null ? cachedNode(documentId) : null;
     browsingInput.departingIframeDocumentIds.add(documentId);
     if (departingDocument) {
       departingDocument.dispatchEvent(new platformEventInterfaces.PageTransitionEvent("pagehide", {
@@ -9515,11 +9518,14 @@
     get height() { return this.getAttribute("height") ?? ""; }
     set height(value) { this.setAttribute("height", String(value)); }
 
-    __prepareResourceNavigation() {
+    __prepareResourceNavigation(action = "capture") {
       if (!this.isConnected) return;
-      const outgoingDocument = nativeExistingIframeDocument(this.__id, true);
-      if (outgoingDocument !== null) {
-        prepareIframeWindowProxyDiscard(wrapNode(outgoingDocument));
+      if (action === "capture") {
+        const outgoingDocument = nativeExistingIframeDocument(this.__id, true);
+        if (outgoingDocument !== null) {
+          const outgoingWrapper = cachedNode(outgoingDocument);
+          if (outgoingWrapper) prepareIframeWindowProxyDiscard(outgoingWrapper);
+        }
       }
       const events = safeWeakMapGet(nodeEventStates, this);
       let captures = events.iframeHistoryCapturers;
@@ -9528,14 +9534,14 @@
           if (!weakRefDeref(reference)) captures.delete(reference);
         }
       }
-      if (!captures || captures.size === 0) {
+      if ((!captures || captures.size === 0) && action === "capture") {
         // Record the current entry before a direct src/srcdoc mutation. A
         // wrapper in another Realm can already own the live history facade.
         void this.contentWindow;
         captures = events.iframeHistoryCapturers;
       }
       if (captures) {
-        for (const reference of captures) weakRefDeref(reference)?.();
+        for (const reference of captures) weakRefDeref(reference)?.(action);
       }
     }
 
@@ -9609,6 +9615,7 @@
         const historyEntries = [];
         let historyIndex = -1;
         let pendingHistoryAction = null;
+        let pendingLocationURL = null;
         let historyScrollRestoration = "auto";
         let childNavigationDocument = null;
         let proxy;
@@ -9661,6 +9668,7 @@
           const entry = captureHistoryEntry(generation, nextAccess);
           const action = pendingHistoryAction;
           pendingHistoryAction = null;
+          pendingLocationURL = null;
           if (historyIndex < 0) {
             historyEntries.push(entry);
             historyIndex = 0;
@@ -9714,7 +9722,7 @@
             access = "closed";
             return;
           }
-          const [nextAccess, context, generation] = raw.split(":");
+          const [nextAccess, context, generation, pendingResource] = raw.split(":");
           if (expectedContext === null) expectedContext = context;
           if (context !== expectedContext) {
             access = "closed";
@@ -9726,6 +9734,12 @@
             activeWindow = { __listeners: new Map() };
             activeRealmReady = false;
             activeHistory = makeHistoryFacade(generation);
+          } else if (pendingHistoryAction !== null && pendingResource === "false") {
+            // A queued resource task can become a no-op when a later mutation
+            // returns to the active resource. No generation change will clear
+            // the optimistic Location/history state in that case.
+            pendingHistoryAction = null;
+            pendingLocationURL = null;
           }
           access = nextAccess;
         };
@@ -9773,8 +9787,11 @@
           }
         };
         const captureActiveHistory = () => {
-          if (pendingHistoryAction !== null) return;
           refresh();
+          // A queued load may have committed since the facade's last read.
+          // Refresh first so a following direct src mutation records that
+          // generation, while an uncommitted navigation remains supersedable.
+          if (pendingHistoryAction !== null) return;
           if (access === "closed" || historyIndex < 0) return;
           const entry = historyEntries[historyIndex];
           if (entry.generation === activeGeneration) entry.persisted = nativeCaptureIframeFormState(iframe.__id);
@@ -9789,6 +9806,21 @@
           nativeIframeForceNavigation(iframe.__id);
           forgetDiscardedNodeWrappers();
         };
+        const notePendingResourceNavigation = () => {
+          const attribute = hasFrameSrcdoc(iframe) ? "srcdoc" : "src";
+          const value = iframe.getAttribute(attribute) || "";
+          if (attribute === "srcdoc") {
+            pendingLocationURL = "about:srcdoc";
+          } else if (!value.trim()) {
+            pendingLocationURL = "about:blank";
+          } else {
+            try { pendingLocationURL = new URL(value, creatorBaseURL()).href; }
+            catch (_) { pendingLocationURL = value; }
+          }
+          // A direct src/srcdoc mutation starts a normal navigation. Location,
+          // reload, and traversal replace this after their attribute writes.
+          pendingHistoryAction = "push";
+        };
         const navigate = (value, disposition) => {
           refresh();
           if (access === "closed") return;
@@ -9799,9 +9831,11 @@
           const destination = new URL(String(value), callerBaseURL()).href;
           const currentDocument = childNavigationDocument;
           const currentURL = currentDocument ? currentDocument.URL :
-            (historyIndex < 0 ? nativeIframeDocumentURL(iframe.__id) : historyEntries[historyIndex].href);
-          if (currentURL && currentURL.split("#", 1)[0] === destination.split("#", 1)[0]) {
-            if (currentURL === destination) return;
+            (pendingLocationURL ??
+              (historyIndex < 0 ? nativeIframeDocumentURL(iframe.__id) : historyEntries[historyIndex].href));
+          if (currentURL === destination) return;
+          if (pendingLocationURL === null && currentURL &&
+              currentURL.split("#", 1)[0] === destination.split("#", 1)[0]) {
             captureActiveHistory();
             nativeCommitIframeFragment(iframe.__id, destination);
             const entry = { ...historyEntries[historyIndex], href: destination,
@@ -9824,9 +9858,10 @@
           }
           captureActiveHistory();
           dispatchIframeNavigationDeparture(iframe);
-          pendingHistoryAction = disposition;
           iframe.removeAttribute("srcdoc");
           iframe.src = destination;
+          pendingLocationURL = destination;
+          pendingHistoryAction = disposition;
           forceNavigation();
         };
         const reloadBrowsingContext = expectedGeneration => {
@@ -9840,8 +9875,8 @@
           captureActiveHistory();
           dispatchIframeNavigationDeparture(iframe);
           const entry = historyEntries[historyIndex];
-          pendingHistoryAction = "reload";
           if (entry.submission !== null) {
+            pendingHistoryAction = "reload";
             nativeIframeReplaySubmission(iframe.__id, entry.submission, entry.href);
             forgetDiscardedNodeWrappers();
             restoreHistoryState(entry);
@@ -9854,6 +9889,8 @@
             iframe.removeAttribute("srcdoc");
             iframe.src = entry.href;
           }
+          pendingLocationURL = entry.href;
+          pendingHistoryAction = "reload";
           forceNavigation();
           restoreHistoryState(entry);
         };
@@ -9895,8 +9932,8 @@
           }
           historyIndex = target;
           dispatchIframeNavigationDeparture(iframe);
-          pendingHistoryAction = "traverse";
           if (entry.submission !== null) {
+            pendingHistoryAction = "traverse";
             nativeIframeReplaySubmission(iframe.__id, entry.submission, entry.href);
             forgetDiscardedNodeWrappers();
             restoreHistoryState(entry);
@@ -9908,6 +9945,8 @@
             iframe.removeAttribute("srcdoc");
             iframe.src = entry.value;
           }
+          pendingLocationURL = entry.href;
+          pendingHistoryAction = "traverse";
           forceNavigation();
           restoreHistoryState(entry);
         };
@@ -10007,7 +10046,8 @@
           get href() {
             refresh();
             if (access !== "same") throw securityError();
-            return historyIndex < 0 ? "about:blank" : historyEntries[historyIndex].href;
+            return pendingLocationURL ??
+              (historyIndex < 0 ? "about:blank" : historyEntries[historyIndex].href);
           },
           set href(value) { navigate(value, "push"); },
           get assign() {
@@ -10161,6 +10201,10 @@
         safeWeakSetAdd(registeredWindowProxies, proxy);
         this.__contentWindowFacade = proxy;
         this.__contentWindowRefresh = refresh;
+        const captureNavigationState = action => {
+          if (action === "resource-changed") notePendingResourceNavigation();
+          else captureActiveHistory();
+        };
         safeWeakMapSet(iframeChildNavigators, this, (documentId, kind, value, extra, committedURL, eventState) => {
           const previous = childNavigationDocument;
           const navigationDocument = {};
@@ -10192,10 +10236,10 @@
             childNavigationDocument = previous;
           }
         });
-        safeWeakMapSet(iframeHistoryCapturers, this, captureActiveHistory);
+        safeWeakMapSet(iframeHistoryCapturers, this, captureNavigationState);
         const events = safeWeakMapGet(nodeEventStates, this);
         const captures = events.iframeHistoryCapturers || (events.iframeHistoryCapturers = new Set());
-        const captureReference = new IntrinsicWeakRef(captureActiveHistory);
+        const captureReference = new IntrinsicWeakRef(captureNavigationState);
         captures.add(captureReference);
         safeWeakMapSet(iframeWindowProxyRetirers, this, (action = "retire") => {
           if (action === "cancel") { retainedWindow = null; return; }
@@ -10215,6 +10259,7 @@
           historyEntries.splice(0);
           historyIndex = -1;
           pendingHistoryAction = null;
+          pendingLocationURL = null;
         });
         windowObjects.add(proxy);
         registerBrowsingWindow(proxy);
@@ -10242,10 +10287,11 @@
     setAttribute(name, value) {
       const attribute = String(name).toLowerCase();
       const normalized = String(value);
+      let changesResource = false;
       if (attribute === "src" || (attribute === "srcdoc" && internalNodeLocalName(this) === "iframe")) {
         this.__prepareResourceNavigation();
         const previous = this.getAttribute(attribute);
-        const changesResource = attribute === "srcdoc"
+        changesResource = attribute === "srcdoc"
           ? previous !== normalized
           : !hasFrameSrcdoc(this) &&
             (previous ?? "").trim() !== normalized.trim();
@@ -10254,18 +10300,26 @@
         }
       }
       super.setAttribute(name, normalized);
+      if (changesResource && this.isConnected) {
+        this.__prepareResourceNavigation("resource-changed");
+      }
     }
 
     removeAttribute(name) {
       const attribute = String(name).toLowerCase();
+      let changesResource = false;
       if ((attribute === "src" || (attribute === "srcdoc" && internalNodeLocalName(this) === "iframe")) && this.hasAttribute(name)) {
         this.__prepareResourceNavigation();
-        if (this.isConnected &&
-            (attribute === "srcdoc" || !hasFrameSrcdoc(this))) {
+        changesResource = this.isConnected &&
+          (attribute === "srcdoc" || !hasFrameSrcdoc(this));
+        if (changesResource) {
           dispatchIframeNavigationDeparture(this);
         }
       }
       super.removeAttribute(name);
+      if (changesResource) {
+        this.__prepareResourceNavigation("resource-changed");
+      }
     }
   }
 

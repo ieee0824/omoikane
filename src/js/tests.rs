@@ -24440,6 +24440,7 @@ fn data_document_nested_relative_resource_does_not_use_top_level_base() {
                    globalThis.opaqueClosed = opaqueWindow.closed;"#,
         )
         .unwrap();
+    runtime.run_until_idle().unwrap();
 
     let outer_id = runtime.eval("outer.__id").unwrap().as_number().unwrap() as usize;
     let (outer_document_id, leaf) = {
@@ -25211,6 +25212,246 @@ fn iframe_location_navigation_resolves_relative_to_caller_document() {
             "http://127.0.0.1:{port}/caller/href.html|http://127.0.0.1:{port}/caller/assign.html|http://127.0.0.1:{port}/caller/replace.html|http://127.0.0.1:{port}/frame/state.html"
         )),
         "Location uses the caller base while History state URLs use the target Document"
+    );
+}
+
+#[test]
+fn superseded_iframe_location_navigations_fetch_only_the_committed_resource() {
+    use crate::html::TreeBuilder;
+
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded_requests = requests.clone();
+    let (port, _server) = spawn_reusable_http_server(move |path, _| {
+        recorded_requests.lock().unwrap().push(path.to_owned());
+        let body = format!("<html><body>{path}</body></html>");
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    });
+    let document = TreeBuilder::parse(
+        r#"<html><body><iframe id="f" src="/frame/child.html"></iframe></body></html>"#,
+    )
+    .document();
+    let iframe = document.query_selector("iframe").unwrap();
+    let iframe_id = iframe.identity();
+    let mut runtime = JsRuntime::with_document_and_url(
+        document,
+        &format!("http://127.0.0.1:{port}/caller/parent.html"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            r#"(() => {
+                  const frame = document.getElementById('f');
+                  const child = frame.contentWindow;
+                  // Exercise the existing-Realm path: preparing a later
+                  // navigation must not synchronously commit the pending one.
+                  void child.document;
+                  globalThis.savedChild = child;
+
+                  child.location.href = 'href.html';
+                  const hrefURL = child.location.href;
+                  frame.src = '/frame/assign-base.html';
+                  const directAssignURL = child.location.href;
+                  child.location.assign('assign.html');
+                  const assignURL = child.location.href;
+                  frame.src = '/frame/replace-base.html';
+                  child.location.replace('replace.html');
+                  const replaceURL = child.location.href;
+                  frame.src = '/frame/final.html';
+                  const finalURL = child.location.href;
+                  return [hrefURL, directAssignURL, assignURL, replaceURL, finalURL].join('|');
+                })()"#,
+        ),
+        Some(format!(
+            "http://127.0.0.1:{port}/caller/href.html|http://127.0.0.1:{port}/frame/assign-base.html|http://127.0.0.1:{port}/caller/assign.html|http://127.0.0.1:{port}/caller/replace.html|http://127.0.0.1:{port}/frame/final.html"
+        )),
+        "Location must expose the latest pending URL without committing superseded resources",
+    );
+
+    let initial_document = {
+        let state = runtime.host_state.borrow();
+        let entry = &state.iframe_documents[&iframe_id];
+        assert_eq!(
+            entry.document_url,
+            format!("http://127.0.0.1:{port}/frame/child.html")
+        );
+        entry.document.identity()
+    };
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        ["/frame/child.html"],
+        "superseded pending navigations must not synchronously fetch"
+    );
+
+    runtime.run_until_idle().unwrap();
+
+    let committed_document = {
+        let state = runtime.host_state.borrow();
+        let entry = &state.iframe_documents[&iframe_id];
+        assert_eq!(
+            entry.document_url,
+            format!("http://127.0.0.1:{port}/frame/final.html")
+        );
+        entry.document.identity()
+    };
+    assert_ne!(initial_document, committed_document);
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        ["/frame/child.html", "/frame/final.html"],
+        "the resource task must commit only the final pending navigation"
+    );
+    assert_eq!(
+        eval_string_value(&mut runtime, "savedChild.location.href"),
+        Some(format!("http://127.0.0.1:{port}/frame/final.html"))
+    );
+
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            r#"(() => {
+                  const frame = document.getElementById('f');
+                  frame.src = '/frame/discarded.html';
+                  frame.src = '/frame/final.html';
+                  return savedChild.location.href;
+                })()"#,
+        ),
+        Some(format!("http://127.0.0.1:{port}/frame/final.html")),
+    );
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        runtime.host_state.borrow().iframe_documents[&iframe_id]
+            .document
+            .identity(),
+        committed_document,
+        "returning to the loaded resource must leave its Document active"
+    );
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        ["/frame/child.html", "/frame/final.html"],
+        "a queued load that returns to the active resource must not fetch"
+    );
+
+    let settled_url = format!("http://127.0.0.1:{port}/frame/final.html#settled");
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            "savedChild.location.href = savedChild.location.href + '#settled'; \
+             savedChild.location.href",
+        ),
+        Some(settled_url.clone()),
+    );
+    runtime.run_until_idle().unwrap();
+    let state = runtime.host_state.borrow();
+    let settled_entry = &state.iframe_documents[&iframe_id];
+    assert_eq!(
+        settled_entry.document.identity(),
+        committed_document,
+        "a fragment navigation after the no-op task must stay in the active Document"
+    );
+    assert_eq!(settled_entry.document_url, settled_url);
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        ["/frame/child.html", "/frame/final.html"],
+        "settling the pending state must avoid a follow-up resource fetch"
+    );
+}
+
+#[test]
+fn discarding_parent_iframe_does_not_fetch_a_pending_child_navigation() {
+    use crate::html::TreeBuilder;
+
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let inner_requests = requests.clone();
+    let (inner_port, _inner_server) = spawn_reusable_http_server(move |path, _| {
+        inner_requests.lock().unwrap().push(format!("inner{path}"));
+        let body = format!("<html><body>{path}</body></html>");
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    });
+    let outer_requests = requests.clone();
+    let (outer_port, _outer_server) = spawn_reusable_http_server(move |path, _| {
+        outer_requests.lock().unwrap().push(format!("outer{path}"));
+        let body = if path == "/outer/initial.html" {
+            format!(
+                "<html><body><iframe id=inner src=http://127.0.0.1:{inner_port}/inner/initial.html></iframe></body></html>"
+            )
+        } else {
+            format!("<html><body>{path}</body></html>")
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    });
+    let document = TreeBuilder::parse(
+        r#"<html><body><iframe id="outer" src="/outer/initial.html"></iframe></body></html>"#,
+    )
+    .document();
+    let outer_id = document.query_selector("#outer").unwrap().identity();
+    let mut runtime = JsRuntime::with_document_and_url(
+        document,
+        &format!("http://127.0.0.1:{outer_port}/parent.html"),
+    )
+    .unwrap();
+
+    runtime
+        .eval(
+            "globalThis.outer = document.getElementById('outer'); \
+             globalThis.outerDocument = outer.contentDocument;",
+        )
+        .unwrap();
+    let inner = {
+        let state = runtime.host_state.borrow();
+        state.iframe_documents[&outer_id]
+            .document
+            .query_selector("#inner")
+            .unwrap()
+    };
+    let inner_id = inner.identity();
+    let inner_document_id = runtime
+        .host_state
+        .borrow_mut()
+        .iframe_content_document(&inner)
+        .unwrap()
+        .identity();
+    let inner_realm = runtime
+        .ensure_iframe_realm(inner_id, inner_document_id)
+        .unwrap();
+    let parent_realm = runtime.context.enter_realm(inner_realm);
+    let navigation = runtime.eval("location.href = '/inner/pending.html'");
+    runtime.context.enter_realm(parent_realm);
+    navigation.unwrap();
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        ["outer/outer/initial.html", "inner/inner/initial.html"],
+        "starting a child navigation must leave its network load queued"
+    );
+
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            r#"(() => {
+                  outer.src = '/outer/final.html';
+                  void outer.contentDocument;
+                  return outer.contentDocument.URL;
+                })()"#,
+        ),
+        Some(format!("http://127.0.0.1:{outer_port}/outer/final.html")),
+    );
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        [
+            "outer/outer/initial.html",
+            "inner/inner/initial.html",
+            "outer/outer/final.html",
+        ],
+        "discard preparation must not fetch a child navigation that teardown cancels"
     );
 }
 

@@ -361,6 +361,14 @@ fn resolve_receiver_document_id(
     receiver: Option<&JsValue>,
     context: &mut Context,
 ) -> JsResult<usize> {
+    resolve_receiver_document_id_with_pending(receiver, context, true)
+}
+
+fn resolve_receiver_document_id_with_pending(
+    receiver: Option<&JsValue>,
+    context: &mut Context,
+    commit_pending_navigation: bool,
+) -> JsResult<usize> {
     let receiver = match receiver {
         None => context.global_object(),
         Some(value) if value.is_null_or_undefined() => context.global_object(),
@@ -387,9 +395,19 @@ fn resolve_receiver_document_id(
                 .get_node(frame)
                 .filter(|node| state.node_is_in_active_document(node))
                 .ok_or_else(|| JsNativeError::typ().with_message("WindowProxy is closed"))?;
-            let document = state
-                .iframe_content_document(&node)
-                .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
+            let document = if commit_pending_navigation {
+                state
+                    .iframe_content_document(&node)
+                    .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?
+            } else {
+                state
+                    .iframe_documents
+                    .get(&frame)
+                    .map(|entry| entry.document.clone())
+                    .ok_or_else(|| {
+                        JsNativeError::typ().with_message("WindowProxy is not initialized")
+                    })?
+            };
             Ok(document.identity())
         })?
     } else if let Some(auxiliary) = target.as_string() {
@@ -437,11 +455,12 @@ fn window_proxy_global_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let document = resolve_receiver_document_id(args.first(), context)?;
+    let create_if_missing = args.get(1).is_none_or(JsValue::to_boolean);
+    let document =
+        resolve_receiver_document_id_with_pending(args.first(), context, create_if_missing)?;
     if !same_origin_document(context, document)? {
         return Ok(JsValue::null());
     }
-    let create_if_missing = args.get(1).is_none_or(JsValue::to_boolean);
     with_host_state(|host| {
         let (realm, frame, auxiliary) = {
             let state = host.borrow();

@@ -86,14 +86,22 @@ fn iframe_navigation_retargets_constructors_and_preserves_retained_values() {
 
 #[test]
 fn iframe_intrinsics_stay_unavailable_across_origin_or_after_detach() {
-    check(
-        &mut runtime(),
-        r#"(() => {
-        const frame = document.createElement('iframe');
+    let mut runtime = runtime();
+    runtime
+        .eval(
+            r#"
+        globalThis.frame = document.createElement('iframe');
         document.body.appendChild(frame);
-        const child = frame.contentWindow;
-        const oldDate = child.Date;
+        globalThis.child = frame.contentWindow;
+        globalThis.oldDate = child.Date;
         frame.src = 'data:text/html,<html><body>opaque</body></html>';
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    check(
+        &mut runtime,
+        r#"(() => {
         let denied = false;
         try { void child.Date; } catch (error) { denied = error.name === 'SecurityError'; }
         frame.remove();
