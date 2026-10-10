@@ -62,6 +62,14 @@ input for lookbehind, anchors, captures and backreferences. Ordinary global
 search continues to use the existing iterator. This avoids scanning the rest
 of an input after every failed sticky token match in WebIDL parsers.
 
+The bundled script-extension tables also merge overlapping intervals in Arabic,
+Bengali, Cyrillic, Devanagari, Grantha, Gujarati, Gurmukhi and Tamil. This preserves
+each table's character membership while satisfying the sorted, disjoint interval
+invariant required by the parser and its binary searches. Regression tests cover
+the merged ranges through both property names and script aliases, including
+complement matches. The original archive hashes remain unchanged in the origin
+record; these corrections are local modifications.
+
 In the Boa workspace, validate regress and the embedding with a separate target:
 
 ```sh
