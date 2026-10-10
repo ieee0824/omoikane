@@ -19898,20 +19898,20 @@ const ARABIC_EXTENSIONS: [Interval; 52] = [
     Interval::new(1542, 1756),
     Interval::new(1758, 1791),
     Interval::new(1872, 1919),
-    Interval::new(2160, 2190),
-    Interval::new(2192, 2193),
-    Interval::new(2200, 2273),
+    Interval::new(2160, 2193),
+    Interval::new(2199, 2273),
     Interval::new(2275, 2303),
-    Interval::new(64336, 64450),
-    Interval::new(64467, 64911),
-    Interval::new(64914, 64967),
-    Interval::new(64975, 64975),
+    Interval::new(8271, 8271),
+    Interval::new(11841, 11841),
+    Interval::new(64336, 64975),
     Interval::new(65008, 65023),
     Interval::new(65136, 65140),
     Interval::new(65142, 65276),
     Interval::new(66272, 66299),
     Interval::new(69216, 69246),
-    Interval::new(69373, 69375),
+    Interval::new(69314, 69319),
+    Interval::new(69328, 69336),
+    Interval::new(69370, 69375),
     Interval::new(126464, 126467),
     Interval::new(126469, 126495),
     Interval::new(126497, 126498),
@@ -19984,7 +19984,8 @@ const BENGALI: [Interval; 14] = [
     Interval::new(2534, 2558),
 ];
 
-const BENGALI_EXTENSIONS: [Interval; 26] = [
+const BENGALI_EXTENSIONS: [Interval; 27] = [
+    Interval::new(700, 700),
     Interval::new(2385, 2386),
     Interval::new(2404, 2405),
     Interval::new(2432, 2435),
@@ -20145,9 +20146,16 @@ const CYRILLIC: [Interval; 10] = [
     Interval::new(123023, 123023),
 ];
 
-const CYRILLIC_EXTENSIONS: [Interval; 11] = [
+const CYRILLIC_EXTENSIONS: [Interval; 18] = [
+    Interval::new(700, 700),
+    Interval::new(768, 770),
+    Interval::new(772, 772),
+    Interval::new(774, 774),
+    Interval::new(776, 776),
+    Interval::new(779, 779),
+    Interval::new(785, 785),
     Interval::new(1024, 1327),
-    Interval::new(7296, 7304),
+    Interval::new(7296, 7306),
     Interval::new(7467, 7467),
     Interval::new(7544, 7544),
     Interval::new(7672, 7672),
@@ -20167,7 +20175,8 @@ const DEVANAGARI: [Interval; 5] = [
     Interval::new(72448, 72457),
 ];
 
-const DEVANAGARI_EXTENSIONS: [Interval; 8] = [
+const DEVANAGARI_EXTENSIONS: [Interval; 9] = [
+    Interval::new(700, 700),
     Interval::new(2304, 2386),
     Interval::new(2389, 2431),
     Interval::new(7376, 7414),

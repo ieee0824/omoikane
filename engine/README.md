@@ -70,6 +70,16 @@ the merged ranges through both property names and script aliases, including
 complement matches. The original archive hashes remain unchanged in the origin
 record; these corrections are local modifications.
 
+Arabic, Bengali, Cyrillic and Devanagari Script_Extensions additionally use the
+Unicode 17.0.0 membership sets. This resolves the remaining generated Test262
+failures after the interval correction; other Unicode properties retain their
+existing data version. Regenerate these four tables with
+`python3 scripts/update-regress-script-extensions.py <ucd-directory>` using
+`Scripts.txt` and `ScriptExtensions.txt` from
+<https://www.unicode.org/Public/17.0.0/ucd/>. The script verifies pinned SHA-256
+hashes, applies explicit extension values over the default Script property,
+and emits sorted, disjoint intervals. `--check` verifies reproducibility.
+
 In the Boa workspace, validate regress and the embedding with a separate target:
 
 ```sh

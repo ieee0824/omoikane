@@ -450,6 +450,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unicode_17_script_extension_additions_match_aliases_and_complements() {
+        for (name, alias, points) in [
+            (
+                "Arabic",
+                "Arab",
+                &[0x88f, 0x897, 0x204f, 0x2e41, 0x10ec2, 0x10efc][..],
+            ),
+            ("Bengali", "Beng", &[0x2bc][..]),
+            (
+                "Cyrillic",
+                "Cyrl",
+                &[0x2bc, 0x300, 0x30b, 0x311, 0x1c89, 0x1c8a][..],
+            ),
+            ("Devanagari", "Deva", &[0x2bc][..]),
+        ] {
+            for property in ["Script_Extensions", "scx"] {
+                for value in [name, alias] {
+                    let positive =
+                        crate::Regex::with_flags(&format!(r"^\p{{{property}={value}}}$"), "u")
+                            .unwrap();
+                    let negative =
+                        crate::Regex::with_flags(&format!(r"^\P{{{property}={value}}}$"), "u")
+                            .unwrap();
+                    for &cp in points {
+                        let text = char::from_u32(cp).unwrap().to_string();
+                        assert!(positive.find(&text).is_some(), "{property}={value}: {cp:X}");
+                        assert!(negative.find(&text).is_none(), "{property}={value}: {cp:X}");
+                    }
+                    assert!(positive.find("A").is_none());
+                    assert!(negative.find("A").is_some());
+                }
+            }
+        }
+    }
+
     // Map from folded char to the chars that folded to it.
     // If an entry is missing, it means either nothing folds to the char,
     // or it folds exclusively to itself; this can be determined by comparing
