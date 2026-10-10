@@ -39,6 +39,7 @@ boa_ast = { version = "~0.21.1", path = "core/ast" }
 boa_engine = { version = "~0.21.1", path = "core/engine" }
 boa_gc = { version = "~0.21.0", path = "core/gc" }
 boa_icu_provider = { version = "~0.21.1", path = "core/icu_provider" }
+boa_intl_data = { version = "~0.21.1", path = "core/intl_data" }
 boa_interner = { version = "~0.21.1", path = "core/interner" }
 boa_macros = { version = "~0.21.1", path = "core/macros" }
 boa_parser = { version = "~0.21.1", path = "core/parser" }
@@ -162,6 +163,9 @@ writeable = "~0.6.1"
 tinystr = "~0.8.1"
 yoke = "0.8.0"
 zerofrom = "~0.1.6"
+# Existing Cargo.lock versions; direct dependencies share the ICU4X instances.
+zerovec = { version = "~0.11.4", default-features = false }
+databake = { version = "~0.2.0", default-features = false }
 fixed_decimal = "0.7.0"
 
 [workspace.metadata.workspaces]

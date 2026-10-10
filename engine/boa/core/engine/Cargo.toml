@@ -36,12 +36,18 @@ intl_bundled = ["intl", "dep:boa_icu_provider"]
 # Prefer this over `intl_bundled` if you want to reduce the size of the final binary
 # by providing a smaller ICU4X data provider.
 intl = [
+    "dep:boa_intl_data",
+    "dep:temporal_rs",
+    "dep:timezone_provider",
+    "timezone_provider/tzif",
+    "dep:iana-time-zone",
     "boa_gc/icu",
     "icu_normalizer/serde",
     "dep:icu_locale",
     "dep:icu_datetime",
     "dep:icu_plurals",
     "dep:icu_provider",
+    "dep:icu_properties",
     "dep:icu_calendar",
     "dep:icu_collator",
     "dep:icu_casemap",
@@ -142,8 +148,10 @@ libc = { workspace = true, optional = true }
 
 # intl deps
 boa_icu_provider = { workspace = true, features = ["std"], optional = true }
+boa_intl_data = { workspace = true, optional = true }
 sys-locale = { workspace = true, optional = true }
 icu_provider = { workspace = true, optional = true }
+icu_properties = { workspace = true, optional = true }
 icu_locale = { workspace = true, default-features = false, features = [
     "serde",
 ], optional = true }

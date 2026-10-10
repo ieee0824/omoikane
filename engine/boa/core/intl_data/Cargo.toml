@@ -1,0 +1,33 @@
+[package]
+name = "boa_intl_data"
+description = "Shared zero-copy CLDR data markers for Boa Intl services."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+icu_provider = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+yoke = { workspace = true, features = ["derive"] }
+zerofrom = { workspace = true, features = ["derive"] }
+zerovec = { workspace = true, features = ["serde", "yoke"] }
+databake = { workspace = true, features = ["derive"], optional = true }
+
+[features]
+default = []
+datagen = ["dep:databake", "icu_provider/export", "zerovec/databake"]
+
+[dev-dependencies]
+icu_provider_blob = { workspace = true, features = ["export"] }
+serde_json.workspace = true
+
+[[example]]
+name = "export_cldr_data"
+path = "examples/export_cldr_data/main.rs"
+required-features = ["datagen"]
+
+[lints]
+workspace = true
