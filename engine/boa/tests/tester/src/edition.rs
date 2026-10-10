@@ -44,6 +44,13 @@ static FEATURE_EDITION: phf::Map<&'static str, SpecEdition> = phf::phf_map! {
     // Temporal
     // https://github.com/tc39/proposal-temporal
     "Temporal" => SpecEdition::ESNext,
+    // Metadata present in the fixed Test262 revision used for integration checks.
+    // Recognizing a feature does not suppress tests for unsupported proposals.
+    "Intl.Era-monthcode" => SpecEdition::ESNext,
+    "Iterator.prototype.join" => SpecEdition::ESNext,
+    "iterator-chunking" => SpecEdition::ESNext,
+    "iterator-includes" => SpecEdition::ESNext,
+    "joint-iteration" => SpecEdition::ESNext,
 
     // ShadowRealm, née Callable Boundary Realms
     // https://github.com/tc39/proposal-realms
@@ -82,6 +89,7 @@ static FEATURE_EDITION: phf::Map<&'static str, SpecEdition> = phf::phf_map! {
     // Uint8Array Base64
     // https://github.com/tc39/proposal-arraybuffer-base64
     "uint8array-base64" => SpecEdition::ESNext,
+    "immutable-arraybuffer" => SpecEdition::ESNext,
 
     // Atomics.pause
     // https://github.com/tc39/proposal-atomics-microwait

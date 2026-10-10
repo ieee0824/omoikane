@@ -18651,91 +18651,6 @@
     enumerable: true,
     get() { return nativeIsSecureContext(); },
   });
-  if (globalThis.Intl === undefined) {
-    class IntlFormatter {
-      constructor(locales, options) {
-        this.locales = locales;
-        this.options = options || {};
-      }
-      resolvedOptions() {
-        return { locale: "en-US", ...this.options };
-      }
-      static supportedLocalesOf(locales) {
-        if (locales === undefined) return [];
-        return Array.isArray(locales) ? locales.map(String) : [String(locales)];
-      }
-    }
-    class NumberFormat extends IntlFormatter {
-      format(value) { return String(Number(value)); }
-      formatToParts(value) { return [{ type: "integer", value: this.format(value) }]; }
-      formatRange(start, end) { return this.format(start) + "–" + this.format(end); }
-      formatRangeToParts(start, end) {
-        return [{ type: "integer", value: this.formatRange(start, end), source: "shared" }];
-      }
-    }
-    class DateTimeFormat extends IntlFormatter {
-      format(value) {
-        const date = value === undefined ? new Date() : new Date(value);
-        return Number.isNaN(date.getTime()) ? "Invalid Date" : date.toISOString();
-      }
-      formatToParts(value) { return [{ type: "literal", value: this.format(value) }]; }
-      formatRange(start, end) { return this.format(start) + " – " + this.format(end); }
-      formatRangeToParts(start, end) {
-        return [{ type: "literal", value: this.formatRange(start, end), source: "shared" }];
-      }
-    }
-    class PluralRules extends IntlFormatter {
-      select(value) { return Number(value) === 1 ? "one" : "other"; }
-      selectRange() { return "other"; }
-    }
-    class RelativeTimeFormat extends IntlFormatter {
-      format(value, unit) { return String(value) + " " + String(unit); }
-      formatToParts(value, unit) {
-        return [{ type: "integer", value: String(value), unit: String(unit) }];
-      }
-    }
-    class ListFormat extends IntlFormatter {
-      format(values) { return Array.from(values, String).join(", "); }
-      formatToParts(values) {
-        return [{ type: "element", value: this.format(values) }];
-      }
-    }
-    class Collator extends IntlFormatter {
-      compare(left, right) {
-        const a = String(left), b = String(right);
-        return a < b ? -1 : a > b ? 1 : 0;
-      }
-    }
-    class DisplayNames extends IntlFormatter {
-      of(code) { return String(code); }
-    }
-    class Locale {
-      constructor(tag) { this.baseName = String(tag); }
-      toString() { return this.baseName; }
-      maximize() { return this; }
-      minimize() { return this; }
-    }
-    const callableFormatter = Constructor => {
-      function Formatter(...args) { return new Constructor(...args); }
-      Formatter.prototype = Constructor.prototype;
-      Formatter.supportedLocalesOf = IntlFormatter.supportedLocalesOf;
-      return Formatter;
-    };
-    globalThis.Intl = {
-      NumberFormat: callableFormatter(NumberFormat),
-      DateTimeFormat: callableFormatter(DateTimeFormat),
-      PluralRules: callableFormatter(PluralRules),
-      RelativeTimeFormat: callableFormatter(RelativeTimeFormat),
-      ListFormat: callableFormatter(ListFormat),
-      Collator: callableFormatter(Collator),
-      DisplayNames: callableFormatter(DisplayNames),
-      Locale,
-      getCanonicalLocales(locales) {
-        if (locales === undefined) return [];
-        return Array.isArray(locales) ? locales.map(String) : [String(locales)];
-      },
-    };
-  }
   if (globalThis.TextEncoder === undefined) {
     globalThis.TextEncoder = class TextEncoder {
       get encoding() { return "utf-8"; }
@@ -19301,15 +19216,6 @@
         if (records.length) this._callback.call(this, records, this);
       });
     }
-  };
-
-  // Boa does not currently implement locale-aware Date formatting. Pages commonly
-  // use this API for diagnostic timestamps, so provide a deterministic fallback.
-  Date.prototype.toLocaleTimeString = function() {
-    const hours = String(this.getHours()).padStart(2, "0");
-    const minutes = String(this.getMinutes()).padStart(2, "0");
-    const seconds = String(this.getSeconds()).padStart(2, "0");
-    return hours + ":" + minutes + ":" + seconds;
   };
 
   // Performance Timeline, User Timing, Resource/Navigation Timing, and

@@ -4252,10 +4252,21 @@ fn intl_formatters_expose_common_bootstrap_surface() {
     assert!(
         runtime
             .eval(
-                r#"Intl.NumberFormat("en").format(12) === "12" &&
-                   Intl.PluralRules("en").select(1) === "one" &&
-                   Intl.ListFormat("en").format(["a", "b"]) === "a, b" &&
-                   Intl.getCanonicalLocales("en-US")[0] === "en-US""#,
+                r#"(() => {
+                   const requiresNew = constructor => {
+                       try {
+                           constructor("en");
+                           return false;
+                       } catch (error) {
+                           return error instanceof TypeError;
+                       }
+                   };
+                   return Intl.NumberFormat("en").format(12) === "12" &&
+                       new Intl.PluralRules("en").select(1) === "one" &&
+                       new Intl.ListFormat("en").format(["a", "b"]) === "a and b" &&
+                       Intl.getCanonicalLocales("en-US")[0] === "en-US" &&
+                       requiresNew(Intl.PluralRules) && requiresNew(Intl.ListFormat);
+                })()"#,
             )
             .unwrap()
             .as_boolean()
@@ -6835,7 +6846,7 @@ fn exposes_document_location_and_date_locale_time_string() {
         .as_boolean()
         .unwrap());
     let value = runtime
-        .eval("new Date(2020, 0, 1, 2, 3, 4).toLocaleTimeString()")
+        .eval(r#"new Date(Date.UTC(2020, 0, 1, 2, 3, 4)).toLocaleTimeString("de-DE", {timeZone:"UTC"})"#)
         .unwrap()
         .as_string()
         .unwrap()
