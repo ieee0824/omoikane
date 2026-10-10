@@ -828,8 +828,7 @@ fn to_temporal_instant(item: &JsValue, context: &mut Context) -> JsResult<InnerI
     // 7. If IsValidEpochNanoseconds(epochNanoseconds) is false, throw a RangeError exception.
     // 8. Return ! CreateTemporalInstant(epochNanoseconds).
     // 2. If item is not a String, throw a TypeError exception.
-    string_to_parse
-        .to_std_string_escaped()
+    super::parsing::iso_source(&string_to_parse)?
         .parse::<InnerInstant>()
         .map_err(Into::into)
 }

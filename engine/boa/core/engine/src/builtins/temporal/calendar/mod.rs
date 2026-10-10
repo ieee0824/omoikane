@@ -4,7 +4,25 @@ use std::str::FromStr;
 
 use super::extract_from_temporal_type;
 use crate::{Context, JsNativeError, JsObject, JsResult, JsValue, js_string};
-use temporal_rs::Calendar;
+use temporal_rs::{Calendar, fields::CalendarFields};
+
+/// CalendarResolveFields checks missing ISO fields before month-code ranges.
+/// This runs after option coercion and does not read the source object again.
+pub(super) fn validate_required_date_fields(
+    fields: &CalendarFields,
+    calendar: &Calendar,
+) -> JsResult<()> {
+    if calendar.is_iso()
+        && (fields.year.is_none()
+            || fields.day.is_none()
+            || (fields.month.is_none() && fields.month_code.is_none()))
+    {
+        return Err(JsNativeError::typ()
+            .with_message("A date requires year, day, and month or monthCode")
+            .into());
+    }
+    Ok(())
+}
 
 // -- `Calendar` Abstract Operations --
 

@@ -1372,8 +1372,7 @@ pub(crate) fn to_temporal_date(
     };
 
     // 4. Let result be ? ParseISODateTime(item, « TemporalDateTimeString[~Zoned] »).
-    let result = date_like_string
-        .to_std_string_escaped()
+    let result = super::parsing::iso_source(&date_like_string)?
         .parse::<InnerDate>()
         .map_err(|err| JsNativeError::range().with_message(err.to_string()))?;
 

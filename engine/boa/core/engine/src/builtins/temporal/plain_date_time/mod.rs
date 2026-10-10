@@ -1697,6 +1697,10 @@ pub(crate) fn to_temporal_datetime(
         let resolved_options = get_options_object(&options.unwrap_or_default())?;
         // g. Let result be ? InterpretTemporalDateTimeFields(calendarRec, fields, resolvedOptions).
         let overflow = get_option::<Overflow>(&resolved_options, js_string!("overflow"), context)?;
+        super::calendar::validate_required_date_fields(
+            &partial_dt.fields.calendar_fields,
+            &partial_dt.calendar,
+        )?;
         return InnerDateTime::from_partial(partial_dt, overflow).map_err(Into::into);
     }
     // 4. Else,
@@ -1714,7 +1718,7 @@ pub(crate) fn to_temporal_datetime(
     // f. If calendar is empty, set calendar to "iso8601".
     // g. If IsBuiltinCalendar(calendar) is false, throw a RangeError exception.
     // h. Set calendar to CanonicalizeUValue("ca", calendar).
-    let date = string.to_std_string_escaped().parse::<InnerDateTime>()?;
+    let date = super::parsing::iso_source(&string)?.parse::<InnerDateTime>()?;
     // i. Perform ? GetTemporalOverflowOption(resolvedOptions).
     let resolved_options = get_options_object(&options.unwrap_or_default())?;
     let _ = get_option::<Overflow>(&resolved_options, js_string!("overflow"), context)?;
