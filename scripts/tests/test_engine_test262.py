@@ -29,6 +29,9 @@ class ComparisonTests(unittest.TestCase):
         source.mkdir()
         (source / "Cargo.lock").write_text("original dependencies\n")
         (source / "test262_config.toml").write_text('commit = "' + "c" * 40 + '"\n')
+        metadata = source / "tests/tester/src/edition.rs"
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text("common metadata adapter\n")
         for target in gate.TARGETS:
             for variant in ("reference", "current"):
                 folder = self.artifacts / target / variant
@@ -36,6 +39,9 @@ class ComparisonTests(unittest.TestCase):
                     "target": target, "variant": variant, "revision": "a" * 40,
                     "status": "completed", "origin_tree": "b" * 40,
                     "test262_revision": "c" * 40, "toolchain_sha256": "d" * 64,
+                    "source_config_sha256": hashlib.sha256((source / "test262_config.toml").read_bytes()).hexdigest(),
+                    "tester_metadata_sha256": hashlib.sha256(metadata.read_bytes()).hexdigest(),
+                    "suite_file_count": 2, "suite_inventory_sha256": "f" * 64,
                     "lock_sha256": hashlib.sha256((source / "Cargo.lock").read_bytes()).hexdigest(),
                     "case_count": 2, "stats": {"O": 1, "F": 1}})
                 gate.write(folder / "cases.json", {
@@ -43,7 +49,9 @@ class ComparisonTests(unittest.TestCase):
                     "test/known-failure": {"status": "F", "ecma_version": 6}})
         origin = gate.read(self.root / "engine/boa-origin.json")
         origin["files"] = {"Cargo.lock": {
-            "sha256": hashlib.sha256((source / "Cargo.lock").read_bytes()).hexdigest()}}
+            "sha256": hashlib.sha256((source / "Cargo.lock").read_bytes()).hexdigest()},
+            "test262_config.toml": {
+            "sha256": hashlib.sha256((source / "test262_config.toml").read_bytes()).hexdigest()}}
         gate.write(self.root / "engine/boa-origin.json", origin)
         for target in gate.TARGETS:
             for variant in ("reference", "current"):
@@ -102,6 +110,9 @@ class ComparisonTests(unittest.TestCase):
     def test_stale_source_wrong_inputs_and_incomplete_execution_fail(self):
         original = gate.read(self.folder / "execution.json")
         for field, value in (("revision", "e" * 40), ("test262_revision", "e" * 40),
+                             ("source_config_sha256", "e" * 64),
+                             ("tester_metadata_sha256", "e" * 64),
+                             ("suite_file_count", 0), ("suite_inventory_sha256", "e" * 64),
                              ("origin_tree", "e" * 40), ("lock_sha256", "e" * 64),
                              ("toolchain_sha256", "e" * 64), ("status", "running"),
                              ("case_count", 0), ("stats", {"O": 2})):
@@ -178,6 +189,34 @@ class RetainedSourceTests(unittest.TestCase):
                 self.assertEqual((root / "restored" / name).read_bytes(), (root / name).read_bytes())
                 self.assertEqual((root / "restored" / name).stat().st_mode & 0o777,
                                  (root / name).stat().st_mode & 0o777)
+
+
+class CheckoutTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
+        for name in ("test/case.js", "harness/assert.js"):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("original fixture\n")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "commit", "--quiet", "-m", "fixtures"], cwd=self.root, check=True)
+
+    def test_complete_checkout_records_inventory(self):
+        self.assertEqual(gate.validate_checkout(self.root)["suite_file_count"], 2)
+
+    def test_missing_tracked_fixture_rejected(self):
+        (self.root / "test/case.js").unlink()
+        with self.assertRaisesRegex(AssertionError, "incomplete Test262 checkout"):
+            gate.validate_checkout(self.root)
+
+    def test_edited_fixture_rejected(self):
+        (self.root / "test/case.js").write_text("changed expectation\n")
+        with self.assertRaisesRegex(AssertionError, "modified Test262 fixtures"):
+            gate.validate_checkout(self.root)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,16 @@ use crate::read::{MetaData, TestFlag};
 /// Minimum edition required by a specific feature in the `test262` repository.
 static FEATURE_EDITION: phf::Map<&'static str, SpecEdition> = phf::phf_map! {
     // Proposed language features
+    // Metadata in the pinned complete Test262 checkout. These names classify
+    // tests; they do not add ignore rules for unsupported proposals.
+    "error-stack-accessor" => SpecEdition::ESNext,
+    "await-dictionary" => SpecEdition::ESNext,
+    "import-text" => SpecEdition::ESNext,
+    "import-bytes" => SpecEdition::ESNext,
+    "nonextensible-applies-to-private" => SpecEdition::ESNext,
+    "stable-array-sort" => SpecEdition::ES10,
+    "stable-typedarray-sort" => SpecEdition::ES10,
+
 
     // Intl.Locale Info
     // https://github.com/tc39/proposal-intl-locale-info

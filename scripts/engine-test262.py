@@ -92,11 +92,29 @@ def run(root, target, variant, test262):
         if variant == "reference":
             source = folder / "reference-source"
             restore_reference(source, origin)
-        config = tomllib.loads((source / "test262_config.toml").read_text())
+            # Only the test metadata adapter is shared. The engine, dependency
+            # lock and ignore configuration retain the verified original bytes.
+            metadata = Path("tests/tester/src/edition.rs")
+            original = (source / metadata).read_bytes()
+            (folder / "original-tester-edition.rs").write_bytes(original)
+            (source / metadata).write_bytes((ROOT / "engine/boa" / metadata).read_bytes())
+            report["tester_metadata_overlay"] = str(metadata)
+        config_path = source / "test262_config.toml"
+        config = tomllib.loads(config_path.read_text())
+        # Compare both engines against the same current specification snapshot.
+        # Keep the retained reference's engine, lock and ignore configuration
+        # untouched; --test262-path selects the common checkout explicitly.
+        suite_revision = tomllib.loads(
+            (ROOT / "engine/boa/test262_config.toml").read_text())["commit"]
         actual = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=test262, text=True).strip()
-        assert actual == config["commit"], (actual, config["commit"])
+        assert actual == suite_revision, (actual, suite_revision)
+        report.update(validate_checkout(test262))
         subprocess.run(["git", "update-ref", "refs/heads/main", actual], cwd=test262, check=True)
         report.update(test262_revision=actual, origin_tree=origin["tree"],
+                      tester_metadata_sha256=hashlib.sha256(
+                          (source / "tests/tester/src/edition.rs").read_bytes()).hexdigest(),
+                      source_config_revision=config["commit"],
+                      source_config_sha256=hashlib.sha256(config_path.read_bytes()).hexdigest(),
                       lock_sha256=hashlib.sha256((source / "Cargo.lock").read_bytes()).hexdigest())
         (folder / "Cargo.lock").write_bytes((source / "Cargo.lock").read_bytes())
         env = dict(os.environ, RUST_MIN_STACK="8388608", RAYON_NUM_THREADS="2", GITHUB_SHA=revision)
@@ -127,6 +145,20 @@ def run(root, target, variant, test262):
     return report["status"] == "completed"
 
 
+def validate_checkout(checkout):
+    """Reject missing or edited fixture inputs before running the complete suite."""
+    inventory = subprocess.check_output(
+        ["git", "ls-tree", "-r", "-z", "--name-only", "HEAD", "test", "harness"], cwd=checkout)
+    paths = [name.decode() for name in inventory.split(b"\0") if name]
+    assert paths, "empty Test262 fixture inventory"
+    missing = [name for name in paths if not (checkout / name).is_file()]
+    assert not missing, f"incomplete Test262 checkout: {len(missing)} missing files; {missing[:10]}"
+    result = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "test", "harness"], cwd=checkout)
+    assert result.returncode == 0, "modified Test262 fixtures"
+    return {"suite_file_count": len(paths),
+            "suite_inventory_sha256": hashlib.sha256(inventory).hexdigest()}
+
+
 def compare(root):
     report = {"passed": True, "targets": {}}
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -145,6 +177,14 @@ def compare(root):
             assert before["revision"] == revision, "stale source revision"
             assert before["origin_tree"] == origin["tree"], "incorrect original source"
             assert before["test262_revision"] == suite_revision, "incorrect suite revision"
+            metadata_sha256 = hashlib.sha256(
+                (source / "tests/tester/src/edition.rs").read_bytes()).hexdigest()
+            assert before["tester_metadata_sha256"] == after["tester_metadata_sha256"] == metadata_sha256, "incorrect tester metadata adapter"
+            assert before["suite_file_count"] == after["suite_file_count"] > 0, "missing suite inventory"
+            assert before["suite_inventory_sha256"] == after["suite_inventory_sha256"], "different fixture inventory"
+            assert before["source_config_sha256"] == origin["files"]["test262_config.toml"]["sha256"], "incorrect reference tester config"
+            assert after["source_config_sha256"] == hashlib.sha256(
+                (source / "test262_config.toml").read_bytes()).hexdigest(), "incorrect current tester config"
             # The retained source keeps its original lock. Dependency fixes in the
             # current engine must not overwrite or silently re-resolve that baseline.
             assert before["lock_sha256"] == origin["files"]["Cargo.lock"]["sha256"], "incorrect reference dependency lock"
