@@ -288,7 +288,7 @@ fn render_frameset_canvas(
             };
             let response = client.get(&resolved.to_string())?;
             let html = decode_html_response(&response);
-            let frame_document = TreeBuilder::parse(&html).document();
+            let frame_document = TreeBuilder::parse_decoded(&html).document();
             render_document_or_frameset_canvas(
                 &frame_document,
                 Some(&resolved),
@@ -393,7 +393,7 @@ fn resolve_frameset_render_document(
     };
     let response = Client::new().get(&resolved.to_string())?;
     let html = decode_html_response(&response);
-    let frame_document = TreeBuilder::parse(&html).document();
+    let frame_document = TreeBuilder::parse_decoded(&html).document();
     Ok((frame_document, Some(resolved)))
 }
 

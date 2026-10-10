@@ -23,6 +23,41 @@ use std::{
 };
 use thiserror::Error;
 
+/// Immutable host provenance copied from a script when it throws.
+///
+/// Insert this value in the script's [`crate::HostDefined`] to retain diagnostic
+/// metadata without retaining its Realm or GC graph. Payloads must be `Send + Sync`,
+/// excluding Boa's thread-local GC handles.
+#[derive(Clone, Default, Trace, Finalize, crate::JsData)]
+pub struct ScriptErrorMetadata {
+    #[unsafe_ignore_trace]
+    value: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+impl std::fmt::Debug for ScriptErrorMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptErrorMetadata")
+            .field("has_value", &self.value.is_some())
+            .finish()
+    }
+}
+
+impl ScriptErrorMetadata {
+    /// Stores owned, immutable host diagnostic data.
+    #[must_use]
+    pub fn new<T: std::any::Any + Send + Sync>(value: T) -> Self {
+        Self {
+            value: Some(std::sync::Arc::new(value)),
+        }
+    }
+
+    /// Borrows the host data if its type is `T`.
+    #[must_use]
+    pub fn get<T: std::any::Any>(&self) -> Option<&T> {
+        self.value.as_ref()?.downcast_ref()
+    }
+}
+
 /// Create an error object from a value or string literal. Optionally the
 /// first argument of the macro can be a type of error (such as `TypeError`,
 /// `RangeError` or `InternalError`).
@@ -210,6 +245,7 @@ pub struct JsError {
     inner: Repr,
 
     pub(crate) backtrace: Option<Backtrace>,
+    pub(crate) source_script_metadata: Option<ScriptErrorMetadata>,
 }
 
 impl Eq for JsError {}
@@ -297,6 +333,34 @@ impl error::Error for JsError {
 }
 
 impl JsError {
+    /// Returns the nearest mapped JavaScript frame's filename, line and column.
+    ///
+    /// Positions are one-based and relative to the parsed source. A filename
+    /// is present only when the embedding supplied a source path. No author
+    /// properties are read; errors without a mapped frame return `None`.
+    #[must_use]
+    pub fn source_location(&self) -> Option<(Option<String>, u32, u32)> {
+        self.backtrace.as_ref()?.iter().rev().find_map(|entry| {
+            let ShadowEntry::Bytecode { pc, source_info } = entry else {
+                return None;
+            };
+            let position = source_info.map().find(*pc)?;
+            let filename = match source_info.map().path() {
+                crate::vm::SourcePath::Path(path) => Some(path.to_string_lossy().into_owned()),
+                _ => None,
+            };
+            Some((filename, position.line_number(), position.column_number()))
+        })
+    }
+
+    /// Returns the immutable host provenance of the throwing classic script.
+    ///
+    /// This snapshot remains available after the Script and Realm are collected.
+    #[must_use]
+    pub fn source_script_metadata(&self) -> Option<&ScriptErrorMetadata> {
+        self.source_script_metadata.as_ref()
+    }
+
     /// Creates a new `JsError` from a native error `err`.
     ///
     /// # Examples
@@ -312,6 +376,7 @@ impl JsError {
         Self {
             inner: Repr::Native(Box::new(err)),
             backtrace: None,
+            source_script_metadata: None,
         }
     }
 
@@ -353,6 +418,7 @@ impl JsError {
         Self {
             inner: Repr::Opaque(value),
             backtrace: None,
+            source_script_metadata: None,
         }
     }
 
@@ -673,6 +739,7 @@ impl From<JsNativeError> for JsError {
         Self {
             inner: Repr::Native(Box::new(error)),
             backtrace: None,
+            source_script_metadata: None,
         }
     }
 }

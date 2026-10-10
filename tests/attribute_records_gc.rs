@@ -53,7 +53,7 @@ fn indexed_attributes_and_namespace_values_remain_live_after_mutations() {
                 const removed = [element.attributes.length, element.attributes.item(0) === second,
                                  element.attributes.item(1) === null, first.value].join('|');
                 element.setAttributeNS('urn:test', 'p:kind', 'namespaced');
-                element.setAttribute('xlink:href', 'legacy');
+                element.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', 'legacy');
                 const ns = [element.getAttributeNS('urn:test', 'kind'),
                             element.getAttributeNS('http://www.w3.org/1999/xlink', 'href'),
                             element.getAttributeNS(null, 'href') === null].join('|');
@@ -69,4 +69,26 @@ fn indexed_attributes_and_namespace_values_remain_live_after_mutations() {
         actual,
         "2|true|updated|second;1|true|true|updated;namespaced|legacy|true"
     );
+}
+
+#[test]
+fn qualified_attribute_names_do_not_imply_a_namespace() {
+    let actual = JsRuntime::new()
+        .unwrap()
+        .eval(
+            r#"(() => {
+        const element = document.createElement('div');
+        element.setAttribute('xlink:href', 'plain');
+        const attribute = element.attributes.item(0);
+        return [attribute.namespaceURI === null, attribute.prefix === null,
+            attribute.localName === 'xlink:href',
+            element.getAttributeNS(null, 'xlink:href') === 'plain',
+            element.getAttributeNS('http://www.w3.org/1999/xlink', 'href') === null].join('|');
+    })()"#,
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(actual, "true|true|true|true|true");
 }

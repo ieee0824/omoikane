@@ -44,6 +44,147 @@ fn sample_document() -> NodeHandle {
 }
 
 #[test]
+fn native_host_call_identifies_the_immediate_javascript_caller_realm() {
+    let mut context = Context::default();
+    context
+        .realm()
+        .host_defined_mut()
+        .insert(ModuleDocumentId(10));
+    context
+        .register_global_builtin_callable(
+            js_string!("probeCaller"),
+            0,
+            NativeFunction::from_copy_closure(|_, _, context| {
+                let id = context.caller_realm().and_then(|realm| {
+                    realm
+                        .host_defined()
+                        .get::<ModuleDocumentId>()
+                        .map(|id| id.0)
+                });
+                Ok(id.map_or_else(JsValue::undefined, |id| JsValue::from(id as f64)))
+            }),
+        )
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "globalThis.direct = () => probeCaller(); globalThis.nested = () => direct();",
+        ))
+        .unwrap();
+    let parent = context.global_object();
+    let probe = parent.get(js_string!("probeCaller"), &mut context).unwrap();
+    let direct = parent.get(js_string!("direct"), &mut context).unwrap();
+    let nested = parent.get(js_string!("nested"), &mut context).unwrap();
+    let child = context.create_realm().unwrap();
+    child.host_defined_mut().insert(ModuleDocumentId(20));
+    context.enter_realm(child);
+    for (name, value) in [
+        ("parentProbe", probe),
+        ("parentDirect", direct),
+        ("parentNested", nested),
+    ] {
+        context
+            .register_global_property(
+                js_string!(name),
+                value,
+                boa_engine::property::Attribute::all(),
+            )
+            .unwrap();
+    }
+    let value = context
+        .eval(Source::from_bytes(
+            "JSON.stringify([parentProbe(), parentDirect(), parentNested()])",
+        ))
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        "[20,20,10]"
+    );
+}
+
+#[test]
+fn host_global_this_is_used_by_scripts_eval_and_sloppy_functions() {
+    let mut context = Context::default();
+    let original = context.global_object();
+    let host_this = JsObject::with_null_proto();
+    context
+        .register_global_property(
+            js_string!("expectedThis"),
+            host_this.clone(),
+            boa_engine::property::Attribute::all(),
+        )
+        .unwrap();
+    context.set_global_this(host_this).unwrap();
+    let source = r#"
+        JSON.stringify([
+            this === expectedThis,
+            globalThis === expectedThis,
+            (0, eval)('this') === expectedThis,
+            Function('return this')() === expectedThis,
+            (function() { return this; })() === expectedThis,
+            (function() { 'use strict'; return this; })() === undefined,
+            Object.getOwnPropertyDescriptor(this === expectedThis ? expectedThis : this,
+                'expectedThis') === undefined
+        ])
+    "#;
+    let value = context.eval(Source::from_bytes(source)).unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        "[true,true,true,true,true,true,true]"
+    );
+    boa_gc::force_collect();
+    assert_eq!(
+        context
+            .eval(Source::from_bytes("this === expectedThis"))
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert_eq!(context.global_object(), original);
+}
+
+#[test]
+fn host_global_this_initialization_preserves_creation_realm_and_is_atomic() {
+    let mut context = Context::default();
+    let creator = context.realm().clone();
+    let host_this = JsObject::with_null_proto();
+    host_this.set_associated_realm(&creator);
+    let child = context.create_realm().unwrap();
+    context.enter_realm(child);
+    context.set_global_this(host_this.clone()).unwrap();
+    assert_eq!(host_this.associated_realm(), Some(creator));
+    let global = context.global_object();
+    global
+        .define_property_or_throw(
+            js_string!("globalThis"),
+            boa_engine::property::PropertyDescriptor::builder()
+                .value(host_this.clone())
+                .writable(false)
+                .configurable(false),
+            &mut context,
+        )
+        .unwrap();
+    assert!(
+        context
+            .set_global_this(JsObject::with_null_proto())
+            .is_err()
+    );
+    assert_eq!(
+        context
+            .eval(Source::from_bytes("this === globalThis"))
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        global
+            .get(js_string!("globalThis"), &mut context)
+            .unwrap()
+            .as_object(),
+        Some(host_this)
+    );
+}
+
+#[test]
 fn creates_runtime_and_evaluates_scripts() {
     let mut runtime = JsRuntime::new().unwrap();
     let value = runtime.eval("1 + 2 + 3").unwrap();
@@ -317,28 +458,29 @@ fn shared_worker_is_shared_across_same_origin_runtimes() {
 #[test]
 fn shared_worker_startup_failure_is_observable_without_stopping_page() {
     let mut runtime = JsRuntime::new().unwrap();
-    runtime
-        .eval(
-            r#"globalThis.sharedWorkerErrors = [];
-                   const source = encodeURIComponent('throw new Error("shared boom");');
-                   const worker = new SharedWorker('data:text/javascript,' + source);
-                   worker.onerror = event => sharedWorkerErrors.push(event.message);"#,
-        )
-        .unwrap();
+    runtime.eval(r#"globalThis.sharedWorkerErrors = []; globalThis.sharedWorkerReports = [];
+        const source = encodeURIComponent(`const errors = [];
+            onerror = (message, filename, line, column, error) => {
+                errors.push([message, filename === location.href, line > 0, column > 0, error.message]);
+                return false;
+            };
+            onconnect = event => event.ports[0].postMessage(errors);
+            throw new Error('shared boom');`);
+        const worker = new SharedWorker('data:text/javascript,' + source);
+        worker.onerror = event => sharedWorkerErrors.push(event.message);
+        worker.port.onmessage = event => sharedWorkerReports.push(event.data);
+    "#).unwrap();
     runtime.run_until_idle().unwrap();
     assert_eq!(
         runtime
             .eval("sharedWorkerErrors.length")
             .unwrap()
             .as_number(),
-        Some(1.0)
+        Some(0.0)
     );
-    assert!(
-        runtime
-            .eval("sharedWorkerErrors[0].includes('shared boom')")
-            .unwrap()
-            .as_boolean()
-            .unwrap_or(false)
+    assert_eq!(
+        eval_str(&mut runtime, "JSON.stringify(sharedWorkerReports)"),
+        r#"[[["shared boom",true,true,true,"shared boom"]]]"#
     );
     assert_eq!(runtime.eval("3 * 7").unwrap().as_number(), Some(21.0));
 }
@@ -1144,6 +1286,9 @@ fn dedicated_worker_startup_failure_is_observable_without_stopping_page() {
         runtime.eval("workerErrors.length").unwrap().as_number(),
         Some(1.0)
     );
+    assert_eq!(eval_str(&mut runtime, "workerErrors[0]"), "boom");
+    assert_eq!(runtime.host_state.borrow().workers.len(), 1);
+    runtime.eval("worker.terminate()").unwrap();
     assert_eq!(runtime.host_state.borrow().workers.len(), 0);
     assert_eq!(runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
 }
@@ -3410,7 +3555,7 @@ fn range_set_start_and_end_reroot_across_documents() {
                 document.body.appendChild(frame);
                 const foreign = frame.contentDocument;
                 const root = foreign.createElement('root');
-                foreign.appendChild(root);
+                foreign.body.appendChild(root);
                 const text = foreign.createTextNode('foreign');
                 root.appendChild(text);
                 const range = document.createRange();
@@ -7605,7 +7750,7 @@ fn style_color_properties_ignore_invalid_assignments() {
                 target.style.outlineColor = "red, green";
                 const sheetNode = document.createElement("style");
                 sheetNode.textContent = "div { color: green; }";
-                document.appendChild(sheetNode);
+                document.documentElement.appendChild(sheetNode);
                 const rule = sheetNode.sheet.cssRules[0];
                 rule.style.color = "not-a-color";
                 globalThis.ruleColor = rule.style.color;
@@ -13637,7 +13782,8 @@ fn failed_custom_elements_are_not_retried_and_iframe_registry_is_isolated() {
                   const childRegistry = frame.contentWindow.customElements;
                   const childDocument = frame.contentDocument;
                   const beforeDefinition = childDocument.createElement("x-isolated");
-                  class ChildElement extends HTMLElement {}
+                  // HTMLConstructor resolves the registry of its own Realm.
+                  class ChildElement extends frame.contentWindow.HTMLElement {}
                   childRegistry.define("x-isolated", ChildElement);
                   const remainedUndefined = !(beforeDefinition instanceof ChildElement);
                   childRegistry.upgrade(beforeDefinition);
@@ -14846,6 +14992,11 @@ fn iframe_visits_use_the_navigating_frame_origin_and_top_level_site() {
     runtime.run_until_idle().unwrap();
 
     assert_eq!(
+        runtime.take_task_errors(),
+        Vec::<String>::new(),
+        "iframe tasks must succeed"
+    );
+    assert_eq!(
         server.join(),
         vec!["/first".to_string(), "/second".to_string()]
     );
@@ -14853,6 +15004,32 @@ fn iframe_visits_use_the_navigating_frame_origin_and_top_level_site() {
     assert!(!storage.has_visited_url(&first, &child_source));
     assert!(storage.has_visited_url(&second, &child_source));
     assert!(!storage.has_visited_url(&second, &owner_source));
+}
+
+#[test]
+fn popup_document_default_view_and_window_event_targets_are_its_window_proxy() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"(() => {
+        const popup = window.open('', 'window-identity');
+        const doc = popup.document;
+        let calls = 0;
+        let identity = false;
+        popup.addEventListener('popup-event', function(event) {
+            calls++;
+            identity = this === popup && event.currentTarget === popup;
+        }, {once:true});
+        doc.dispatchEvent(new Event('popup-event', {bubbles:true}));
+        doc.dispatchEvent(new Event('popup-event', {bubbles:true}));
+        return [doc.defaultView === popup, calls, identity].join('|');
+    })()"#,
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(value, "true|1|true");
 }
 
 #[test]
@@ -14954,6 +15131,11 @@ fn named_iframe_link_visit_uses_the_child_initiator_partition() {
         .unwrap();
     runtime.run_until_idle().unwrap();
 
+    assert_eq!(
+        runtime.take_task_errors(),
+        Vec::<String>::new(),
+        "iframe tasks must succeed"
+    );
     assert_eq!(
         server.join(),
         vec!["/first".to_string(), "/second".to_string()]
@@ -21732,7 +21914,7 @@ fn range_contextual_fragment_uses_html_and_foreign_contexts() {
           ].join('|');
         })()"#,
         ),
-        "tbody|tr|2|option|span|http://www.w3.org/2000/svg|foreignObject||http://www.w3.org/1998/Math/MathML||true"
+        "tbody|tr|2|option|span|http://www.w3.org/2000/svg|foreignObject|http://www.w3.org/1999/xhtml|http://www.w3.org/1998/Math/MathML|http://www.w3.org/1999/xhtml|true"
     );
 }
 
@@ -22363,14 +22545,16 @@ fn embedded_svg_documents_are_exposed_by_iframe_and_object() {
                        document.body.appendChild(frame); document.body.appendChild(object);
                        [frame.getSVGDocument() === frame.contentDocument,
                         object.getSVGDocument() === object.contentDocument,
-                        frame.getSVGDocument().documentElement instanceof SVGSVGElement,
-                        object.getSVGDocument().getElementsByTagName('text')[0] instanceof SVGTextElement].join('|')"#,
+                        frame.getSVGDocument().documentElement instanceof frame.contentWindow.SVGSVGElement,
+                        object.getSVGDocument().getElementsByTagName('text')[0] instanceof object.contentDocument.defaultView.SVGTextElement,
+                        !(frame.getSVGDocument().documentElement instanceof SVGSVGElement),
+                        !(object.getSVGDocument().getElementsByTagName('text')[0] instanceof SVGTextElement)].join('|')"#,
             )
             .unwrap()
             .as_string()
             .map(|s| s.to_std_string_escaped())
             .as_deref(),
-        Some("true|true|true|true")
+        Some("true|true|true|true|true|true")
     );
 
     assert_eq!(
@@ -22614,7 +22798,7 @@ fn same_document_direct_reinsertion_replaces_iframe_context() {
     assert_eq!(
         eval_string_value(
             &mut runtime,
-            "[firstWindow.closed, firstWindow.document === null, firstDocument.defaultView === null, frame.contentWindow !== firstWindow].join('|')"
+            "[firstWindow.closed, firstWindow.document === firstDocument, firstDocument.defaultView === null, frame.contentWindow !== firstWindow].join('|')"
         )
         .as_deref(),
         Some("true|true|true|true"),
@@ -24256,6 +24440,7 @@ fn data_document_nested_relative_resource_does_not_use_top_level_base() {
                    globalThis.opaqueClosed = opaqueWindow.closed;"#,
         )
         .unwrap();
+    runtime.run_until_idle().unwrap();
 
     let outer_id = runtime.eval("outer.__id").unwrap().as_number().unwrap() as usize;
     let (outer_document_id, leaf) = {
@@ -24724,7 +24909,7 @@ fn outer_iframe_navigation_retires_saved_descendant_window_proxy() {
                   const replacement = outer.contentDocument;
                   return [
                     nestedProxy.closed,
-                    nestedProxy.document === null,
+                    nestedProxy.document === nestedDocument,
                     nestedDocument.defaultView === null,
                     oldOuterDocument.defaultView === null,
                     replacement.getElementById('replacement').textContent,
@@ -25008,28 +25193,265 @@ fn iframe_location_navigation_resolves_relative_to_caller_document() {
                   const frame = document.getElementById('f');
                   const child = frame.contentWindow;
                   child.location.href = 'href.html';
-                  const hrefURL = child.document.URL;
+                  const hrefURL = child.location.href;
 
                   frame.src = '/frame/assign-base.html';
-                  child.document;
                   child.location.assign('assign.html');
-                  const assignURL = child.document.URL;
+                  const assignURL = child.location.href;
 
                   frame.src = '/frame/replace-base.html';
-                  child.document;
                   child.location.replace('replace.html');
-                  const replaceURL = child.document.URL;
+                  const replaceURL = child.location.href;
 
                   frame.src = '/frame/history-base.html';
-                  child.document;
                   child.history.pushState(null, '', 'state.html');
-                  return [hrefURL, assignURL, replaceURL, child.document.URL].join('|');
+                  return [hrefURL, assignURL, replaceURL, child.location.href].join('|');
                 })()"#
         ),
         Some(format!(
             "http://127.0.0.1:{port}/caller/href.html|http://127.0.0.1:{port}/caller/assign.html|http://127.0.0.1:{port}/caller/replace.html|http://127.0.0.1:{port}/frame/state.html"
         )),
         "Location uses the caller base while History state URLs use the target Document"
+    );
+}
+
+#[test]
+fn superseded_iframe_location_navigations_fetch_only_the_committed_resource() {
+    use crate::html::TreeBuilder;
+
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded_requests = requests.clone();
+    let (port, _server) = spawn_reusable_http_server(move |path, _| {
+        recorded_requests.lock().unwrap().push(path.to_owned());
+        let body = format!("<html><body>{path}</body></html>");
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    });
+    let document = TreeBuilder::parse(
+        r#"<html><body><iframe id="f" src="/frame/child.html"></iframe></body></html>"#,
+    )
+    .document();
+    let iframe = document.query_selector("iframe").unwrap();
+    let iframe_id = iframe.identity();
+    let mut runtime = JsRuntime::with_document_and_url(
+        document,
+        &format!("http://127.0.0.1:{port}/caller/parent.html"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            r#"(() => {
+                  const frame = document.getElementById('f');
+                  const child = frame.contentWindow;
+                  // Exercise the existing-Realm path: preparing a later
+                  // navigation must not synchronously commit the pending one.
+                  void child.document;
+                  globalThis.savedChild = child;
+
+                  child.location.href = 'href.html';
+                  const hrefURL = child.location.href;
+                  frame.src = '/frame/assign-base.html';
+                  const directAssignURL = child.location.href;
+                  child.location.assign('assign.html');
+                  const assignURL = child.location.href;
+                  frame.src = '/frame/replace-base.html';
+                  child.location.replace('replace.html');
+                  const replaceURL = child.location.href;
+                  frame.src = '/frame/final.html';
+                  const finalURL = child.location.href;
+                  return [hrefURL, directAssignURL, assignURL, replaceURL, finalURL].join('|');
+                })()"#,
+        ),
+        Some(format!(
+            "http://127.0.0.1:{port}/caller/href.html|http://127.0.0.1:{port}/frame/assign-base.html|http://127.0.0.1:{port}/caller/assign.html|http://127.0.0.1:{port}/caller/replace.html|http://127.0.0.1:{port}/frame/final.html"
+        )),
+        "Location must expose the latest pending URL without committing superseded resources",
+    );
+
+    let initial_document = {
+        let state = runtime.host_state.borrow();
+        let entry = &state.iframe_documents[&iframe_id];
+        assert_eq!(
+            entry.document_url,
+            format!("http://127.0.0.1:{port}/frame/child.html")
+        );
+        entry.document.identity()
+    };
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        ["/frame/child.html"],
+        "superseded pending navigations must not synchronously fetch"
+    );
+
+    runtime.run_until_idle().unwrap();
+
+    let committed_document = {
+        let state = runtime.host_state.borrow();
+        let entry = &state.iframe_documents[&iframe_id];
+        assert_eq!(
+            entry.document_url,
+            format!("http://127.0.0.1:{port}/frame/final.html")
+        );
+        entry.document.identity()
+    };
+    assert_ne!(initial_document, committed_document);
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        ["/frame/child.html", "/frame/final.html"],
+        "the resource task must commit only the final pending navigation"
+    );
+    assert_eq!(
+        eval_string_value(&mut runtime, "savedChild.location.href"),
+        Some(format!("http://127.0.0.1:{port}/frame/final.html"))
+    );
+
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            r#"(() => {
+                  const frame = document.getElementById('f');
+                  frame.src = '/frame/discarded.html';
+                  frame.src = '/frame/final.html';
+                  return savedChild.location.href;
+                })()"#,
+        ),
+        Some(format!("http://127.0.0.1:{port}/frame/final.html")),
+    );
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        runtime.host_state.borrow().iframe_documents[&iframe_id]
+            .document
+            .identity(),
+        committed_document,
+        "returning to the loaded resource must leave its Document active"
+    );
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        ["/frame/child.html", "/frame/final.html"],
+        "a queued load that returns to the active resource must not fetch"
+    );
+
+    let settled_url = format!("http://127.0.0.1:{port}/frame/final.html#settled");
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            "savedChild.location.href = savedChild.location.href + '#settled'; \
+             savedChild.location.href",
+        ),
+        Some(settled_url.clone()),
+    );
+    runtime.run_until_idle().unwrap();
+    let state = runtime.host_state.borrow();
+    let settled_entry = &state.iframe_documents[&iframe_id];
+    assert_eq!(
+        settled_entry.document.identity(),
+        committed_document,
+        "a fragment navigation after the no-op task must stay in the active Document"
+    );
+    assert_eq!(settled_entry.document_url, settled_url);
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        ["/frame/child.html", "/frame/final.html"],
+        "settling the pending state must avoid a follow-up resource fetch"
+    );
+}
+
+#[test]
+fn discarding_parent_iframe_does_not_fetch_a_pending_child_navigation() {
+    use crate::html::TreeBuilder;
+
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let inner_requests = requests.clone();
+    let (inner_port, _inner_server) = spawn_reusable_http_server(move |path, _| {
+        inner_requests.lock().unwrap().push(format!("inner{path}"));
+        let body = format!("<html><body>{path}</body></html>");
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    });
+    let outer_requests = requests.clone();
+    let (outer_port, _outer_server) = spawn_reusable_http_server(move |path, _| {
+        outer_requests.lock().unwrap().push(format!("outer{path}"));
+        let body = if path == "/outer/initial.html" {
+            format!(
+                "<html><body><iframe id=inner src=http://127.0.0.1:{inner_port}/inner/initial.html></iframe></body></html>"
+            )
+        } else {
+            format!("<html><body>{path}</body></html>")
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    });
+    let document = TreeBuilder::parse(
+        r#"<html><body><iframe id="outer" src="/outer/initial.html"></iframe></body></html>"#,
+    )
+    .document();
+    let outer_id = document.query_selector("#outer").unwrap().identity();
+    let mut runtime = JsRuntime::with_document_and_url(
+        document,
+        &format!("http://127.0.0.1:{outer_port}/parent.html"),
+    )
+    .unwrap();
+
+    runtime
+        .eval(
+            "globalThis.outer = document.getElementById('outer'); \
+             globalThis.outerDocument = outer.contentDocument;",
+        )
+        .unwrap();
+    let inner = {
+        let state = runtime.host_state.borrow();
+        state.iframe_documents[&outer_id]
+            .document
+            .query_selector("#inner")
+            .unwrap()
+    };
+    let inner_id = inner.identity();
+    let inner_document_id = runtime
+        .host_state
+        .borrow_mut()
+        .iframe_content_document(&inner)
+        .unwrap()
+        .identity();
+    let inner_realm = runtime
+        .ensure_iframe_realm(inner_id, inner_document_id)
+        .unwrap();
+    let parent_realm = runtime.context.enter_realm(inner_realm);
+    let navigation = runtime.eval("location.href = '/inner/pending.html'");
+    runtime.context.enter_realm(parent_realm);
+    navigation.unwrap();
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        ["outer/outer/initial.html", "inner/inner/initial.html"],
+        "starting a child navigation must leave its network load queued"
+    );
+
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            r#"(() => {
+                  outer.src = '/outer/final.html';
+                  void outer.contentDocument;
+                  return outer.contentDocument.URL;
+                })()"#,
+        ),
+        Some(format!("http://127.0.0.1:{outer_port}/outer/final.html")),
+    );
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        [
+            "outer/outer/initial.html",
+            "inner/inner/initial.html",
+            "outer/outer/final.html",
+        ],
+        "discard preparation must not fetch a child navigation that teardown cancels"
     );
 }
 
@@ -25087,6 +25509,96 @@ fn page_scripts_cannot_reach_host_bindings_or_change_the_private_document_id() {
         PromiseState::Fulfilled(_)
     ));
     assert_eq!(eval_str(&mut runtime, "pageImportMetaPrivate"), "undefined");
+}
+
+#[test]
+fn cross_origin_iframe_document_events_reach_its_own_window_listeners() {
+    use crate::html::TreeBuilder;
+    let (port, _server) = spawn_static_http_server(
+        "text/html",
+        r#"<html><body onload='document.documentElement.setAttribute("data-window-load", "yes")'><script>
+          let calls = 0;
+          let identity = false;
+          window.addEventListener('child-event', function(event) {
+            calls++;
+            identity = this === document.defaultView && event.currentTarget === document.defaultView;
+          }, {once:true});
+          document.dispatchEvent(new Event('child-event', {bubbles:true}));
+          document.dispatchEvent(new Event('child-event', {bubbles:true}));
+          document.documentElement.setAttribute('data-window-events', calls + '|' + identity);
+          document.documentElement.setAttribute('data-window-this', [
+            this === window,
+            globalThis === window,
+            self === window,
+            frames === window,
+            (0, eval)('this') === window,
+            Function('return this')() === window,
+            window.document === document,
+            window.localStorage === localStorage,
+          ].join('|'));
+          let directIdentity = false;
+          window.addEventListener('direct-event', function(event) {
+            directIdentity = this === window && event.target === window && event.currentTarget === window;
+          }, {once:true});
+          window.dispatchEvent(new Event('direct-event'));
+          document.documentElement.setAttribute('data-direct-window-event', String(directIdentity));
+          const ownView = document.defaultView;
+          document.documentElement.setAttribute('data-own-location',
+            String(ownView.location.href === document.URL && ownView.location === window.location));
+        </script></body></html>"#,
+    );
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe id='child' src='http://127.0.0.1:{port}/child.html'></iframe></body></html>"
+    )).document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "http://other-origin.test/page").unwrap();
+    pump_zero_delay_tasks(&mut runtime);
+    pump_zero_delay_tasks(&mut runtime);
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    let state = runtime.host_state.borrow();
+    let frame = state.document.query_selector("#child").unwrap();
+    let child = &state.iframe_documents[&frame.identity()].document;
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-window-load")
+            .as_deref(),
+        Some("yes")
+    );
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-window-events")
+            .as_deref(),
+        Some("1|true")
+    );
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-window-this")
+            .as_deref(),
+        Some("true|true|true|true|true|true|true|true")
+    );
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-direct-window-event")
+            .as_deref(),
+        Some("true")
+    );
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-own-location")
+            .as_deref(),
+        Some("true"),
+        "a cross-origin child can still read its own WindowProxy Location"
+    );
 }
 
 #[test]
@@ -26086,7 +26598,7 @@ fn removing_parent_iframe_recursively_discards_descendant_context_state() {
     assert_eq!(
         eval_string_value(
             &mut runtime,
-            "[outerWindow.closed, outerWindow.document === null, innerWindow.closed, innerWindow.document === null, outerDocument.defaultView === null, innerDocument.defaultView === null].join('|')"
+            "[outerWindow.closed, outerWindow.document === outerDocument, innerWindow.closed, innerWindow.document === innerDocument, outerDocument.defaultView === null, innerDocument.defaultView === null].join('|')"
         )
         .as_deref(),
         Some("true|true|true|true|true|true")
@@ -26130,14 +26642,17 @@ fn detached_iframe_closes_nested_context_until_reconnected() {
                 "var f = document.getElementById('f'); \
                      var first = f.contentDocument; \
                      var win = f.contentWindow; \
+                     var oldRegistry = win.customElements; \
+                     var oldLocal = win.localStorage; \
+                     var oldSession = win.sessionStorage; \
                      var oldHistory = win.history; \
                      oldHistory.pushState({ detached: true }, ''); \
                      document.body.removeChild(f); \
                      var oldHistoryError = 'none'; \
                      try { oldHistory.length; } catch (error) { oldHistoryError = error.name; } \
-                     [f.contentDocument === null, win.document === null, win.closed, \
-                      win.customElements === null, win.localStorage === null, \
-                      win.sessionStorage === null, win.history === undefined, \
+                     [f.contentDocument === null, win.document === first, win.closed, \
+                      win.customElements === oldRegistry, win.localStorage === oldLocal, \
+                      win.sessionStorage === oldSession, win.history === oldHistory, \
                       oldHistoryError].join('|')",
             )
             .unwrap()
@@ -26151,7 +26666,7 @@ fn detached_iframe_closes_nested_context_until_reconnected() {
     pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         runtime
-            .eval("[f.contentWindow !== win, f.contentDocument !== first, f.contentWindow.document === f.contentDocument, f.contentWindow.closed, f.contentWindow.history.length, win.closed, win.document === null, first.defaultView === null].join('|')")
+            .eval("[f.contentWindow !== win, f.contentDocument !== first, f.contentWindow.document === f.contentDocument, f.contentWindow.closed, f.contentWindow.history.length, win.closed, win.document === first, first.defaultView === null].join('|')")
             .unwrap()
             .as_string()
             .map(|value| value.to_std_string_escaped())
@@ -26939,7 +27454,7 @@ fn document_open_retires_nested_browsing_contexts_and_owned_tasks() {
     assert_eq!(
         eval_string_value(
             &mut runtime,
-            "[oldWindow.closed, oldWindow.document === null, oldDocument.defaultView === null, oldDocument.URL].join('|')"
+            "[oldWindow.closed, oldWindow.document === oldDocument, oldDocument.defaultView === null, oldDocument.URL].join('|')"
         )
         .as_deref(),
         Some("true|true|true|about:blank")
@@ -27039,7 +27554,7 @@ fn discarded_wrapper_cleanup_uses_pristine_collection_intrinsics() {
                     staleNode.__id !== null,
                     frame.__id !== null,
                     staleWindow.closed,
-                    staleWindow.document === null,
+                    staleWindow.document === staleDocument,
                     staleDocument.nodeType === 9,
                     staleChildNode.nodeName === "HTML" && staleChildNode.ownerDocument === staleDocument,
                     staleDocument.defaultView === null,
@@ -30522,4 +31037,86 @@ fn cache_storage_snapshots_match_options_and_delivers_on_networking_tasks() {
     assert_eq!(eval_str(&mut opaque_origin, "cacheError"), "");
     opaque_origin.run_until_idle().unwrap();
     assert_eq!(eval_str(&mut opaque_origin, "cacheError"), "SecurityError");
+}
+
+#[test]
+fn async_dynamic_non_cors_script_mutes_exception_and_rejection() {
+    let listener = bind_loopback().unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+        let body = "Promise.reject('private');throw new Error('private');";
+        write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+    });
+    let doc = crate::html::TreeBuilder::parse("<!doctype html><body></body>").document();
+    let mut runtime = JsRuntime::with_document_and_url(doc, "http://127.0.0.1:1/page").unwrap();
+    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    runtime.eval("globalThis.reports=[];addEventListener('error',e=>{reports.push(e.message+':'+(e.error===null));e.preventDefault()});addEventListener('unhandledrejection',e=>{reports.push('leaked');e.preventDefault()});").unwrap();
+    runtime.eval(&format!("const s=document.createElement('script');s.src='http://{address}/private.js';document.body.appendChild(s);")).unwrap();
+    {
+        let mut future = Box::pin(runtime.run_until_idle_async());
+        let mut context = FutureContext::from_waker(Waker::noop());
+        let mut completed = false;
+        for _ in 0..100 {
+            if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
+                result.unwrap();
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "async task must complete");
+    }
+    runtime.run_until_idle().unwrap();
+    server.join();
+    assert_eq!(
+        runtime
+            .eval("reports.join(',')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "Script error.:true"
+    );
+}
+
+#[test]
+fn initial_owned_document_task_mutes_cross_origin_script_reports() {
+    let listener = bind_loopback().unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+        let body = "Promise.reject('private');throw new Error('private');";
+        write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+    });
+    let doc = crate::html::TreeBuilder::parse(&format!(
+        "<!doctype html><script src='http://{address}/private.js'></script>"
+    ))
+    .document();
+    let mut runtime = JsRuntime::with_document_and_url(doc, "http://127.0.0.1:1/page").unwrap();
+    runtime.eval("globalThis.reports=[];addEventListener('error',e=>{reports.push(e.message+':'+(e.error===null));e.preventDefault()});addEventListener('unhandledrejection',e=>{reports.push('leaked');e.preventDefault()});").unwrap();
+    let base = format!("http://{address}/").parse().unwrap();
+    let mut task = Box::pin(runtime.into_document_page_task(1, Some(base)));
+    let mut context = FutureContext::from_waker(Waker::noop());
+    let mut completed = None;
+    for _ in 0..100 {
+        if let Poll::Ready(result) = task.as_mut().poll(&mut context) {
+            completed = Some(result);
+            break;
+        }
+    }
+    let completed = completed.expect("page task must complete");
+    assert_eq!(completed.result.unwrap().len(), 1);
+    let mut runtime = completed.runtime;
+    server.join();
+    assert_eq!(
+        runtime
+            .eval("reports.join(',')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "Script error.:true"
+    );
 }

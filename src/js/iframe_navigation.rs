@@ -55,6 +55,7 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
         4,
         NativeFunction::from_copy_closure(|_, args, context| {
             let document = parse_node_id(args.first(), context)?;
+            ensure_history_document_active(document, args.get(1), context)?;
             let navigates = args
                 .get(1)
                 .and_then(JsValue::as_string)
@@ -205,5 +206,33 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
             })
         }),
     )?;
+    Ok(())
+}
+
+/// History operations require a fully active Document, including reads.
+/// Construct the exception after releasing the host-state borrow.
+fn ensure_history_document_active(
+    document: usize,
+    operation: Option<&JsValue>,
+    context: &mut Context,
+) -> JsResult<()> {
+    let history_operation = operation
+        .and_then(JsValue::as_string)
+        .is_some_and(|operation| {
+            matches!(
+                operation.to_std_string_escaped().as_str(),
+                "length"
+                    | "state"
+                    | "scroll-restoration"
+                    | "set-scroll-restoration"
+                    | "push-state"
+                    | "replace-state"
+                    | "go"
+            )
+        });
+    if history_operation && !with_host_state(|host| Ok(host.borrow().document_is_active(document)))?
+    {
+        return Err(cross_origin_access_error(context)?);
+    }
     Ok(())
 }

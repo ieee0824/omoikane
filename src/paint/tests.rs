@@ -2139,6 +2139,7 @@ fn absolute_inline_content_paints_above_float_siblings() {
                     baseline: 0.0,
                     fragments: vec![InlineFragment {
                         node: generated,
+                        text_source: Vec::new(),
                         content: InlineFragmentContent::GeneratedBox(generated_style),
                         rect: Rect {
                             x: 0.0,
@@ -9980,6 +9981,7 @@ fn form_control_label_uses_web_font_variant() {
             baseline: 12.8,
             fragments: vec![InlineFragment {
                 node: button,
+                text_source: Vec::new(),
                 content: InlineFragmentContent::FormControl(
                     control_style.clone(),
                     "AB".to_string(),
@@ -10065,6 +10067,7 @@ fn focused_text_control_paints_selection_and_caret() {
     };
     let fragment = |value: &str, start, end| InlineFragment {
         node: input.clone(),
+        text_source: Vec::new(),
         content: InlineFragmentContent::FormControl(
             control_style.clone(),
             value.to_string(),

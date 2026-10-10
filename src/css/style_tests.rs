@@ -6927,6 +6927,54 @@ fn ua_defaults_body_has_eight_pixel_margin() {
 }
 
 #[test]
+fn xhtml_body_receives_the_same_user_agent_margin_as_html_body() {
+    let document =
+        crate::xml::parse(b"<html xmlns='http://www.w3.org/1999/xhtml'><body/></html>").unwrap();
+    let body = document.child_nodes()[0].child_nodes()[0].clone();
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&body);
+    for side in ["top", "right", "bottom", "left"] {
+        assert_eq!(
+            style.get(&format!("margin-{side}")),
+            Some(&ComputedValue::Px(8.0))
+        );
+    }
+}
+
+#[test]
+fn xhtml_hidden_attribute_receives_user_agent_display_style() {
+    let document = crate::xml::parse(
+        b"<html xmlns='http://www.w3.org/1999/xhtml'><body><div hidden=''/></body></html>",
+    )
+    .unwrap();
+    let div = document.child_nodes()[0].child_nodes()[0].child_nodes()[0].clone();
+    let mut resolver = StyleResolver::new();
+    assert_eq!(
+        resolver.computed_style(&div).get("display"),
+        Some(&ComputedValue::Keyword("none".to_owned()))
+    );
+}
+
+#[test]
+fn xhtml_body_user_agent_margin_uses_namespace_and_case_sensitive_local_name() {
+    for (namespace, name, expected) in [
+        (Some("http://www.w3.org/1999/xhtml"), "x:body", Some(8.0)),
+        (Some("http://www.w3.org/1999/xhtml"), "BODY", None),
+        (Some("http://www.w3.org/2000/svg"), "body", None),
+        (Some("urn:custom"), "body", None),
+        (None, "body", None),
+    ] {
+        let body = NodeHandle::xml_element(name, namespace.map(str::to_owned));
+        let mut resolver = StyleResolver::new();
+        assert_eq!(
+            resolver.computed_style(&body).get("margin-left"),
+            expected.map(ComputedValue::Px).as_ref(),
+            "namespace={namespace:?}, name={name}"
+        );
+    }
+}
+
+#[test]
 fn author_css_overrides_body_ua_margin() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
@@ -10269,4 +10317,41 @@ fn implemented_table_layout_is_recognized_and_validated() {
         style.get("table-layout"),
         Some(&ComputedValue::Keyword("fixed".to_string()))
     );
+}
+
+#[test]
+fn hidden_attribute_uses_overridable_user_agent_styles() {
+    for (hidden, property, expected) in [
+        ("", "display", "none"),
+        ("hidden", "display", "none"),
+        ("invalid", "display", "none"),
+        ("UNTIL-FOUND", "content-visibility", "hidden"),
+    ] {
+        let node = NodeHandle::element("div");
+        node.set_attribute("hidden", hidden);
+        let mut resolver = StyleResolver::new();
+        assert_eq!(
+            resolver.computed_style(&node).get(property),
+            Some(&ComputedValue::Keyword(expected.to_owned()))
+        );
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("div { display:block; content-visibility:visible }").unwrap(),
+        );
+        let keyword = if property == "display" {
+            "block"
+        } else {
+            "visible"
+        };
+        assert_eq!(
+            resolver.computed_style(&node).get(property),
+            Some(&ComputedValue::Keyword(keyword.to_owned()))
+        );
+        node.set_attribute("style", format!("{property}:revert"));
+        resolver.invalidate_style_cache();
+        assert_eq!(
+            resolver.computed_style(&node).get(property),
+            Some(&ComputedValue::Keyword(expected.to_owned()))
+        );
+    }
 }

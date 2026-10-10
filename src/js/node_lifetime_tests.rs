@@ -16,6 +16,240 @@ fn collect(runtime: &mut JsRuntime) {
 }
 
 #[test]
+fn retained_detached_child_keeps_active_document_parent_and_expandos_alive() {
+    let document = TreeBuilder::parse("<body></body>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    runtime
+        .eval(
+            r#"
+            (() => {
+                const parent = document.createElement('a');
+                parent.marker = { value: 42 };
+                globalThis.retainedText = document.createTextNode('kept');
+                parent.appendChild(retainedText);
+                document.body.appendChild(parent);
+                document.body.removeChild(parent);
+            })();
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    collect(&mut runtime);
+    collect(&mut runtime);
+    assert_eq!(
+        runtime
+            .eval(
+                "retainedText.data === 'kept' && retainedText.parentNode.nodeName === 'A' && \
+                 retainedText.parentNode.marker.value === 42 && \
+                 retainedText.ownerDocument === document && \
+                 retainedText.parentNode.ownerDocument === document && \
+                 !retainedText.isConnected",
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
+fn iframe_history_snapshot_does_not_initialize_a_scriptless_realm() {
+    let mut runtime = runtime();
+    assert_eq!(
+        runtime
+            .eval("var frame = document.getElementById('f'); var child = frame.contentWindow; child.closed")
+            .unwrap()
+            .as_boolean(),
+        Some(false)
+    );
+    let state = runtime.host_state.borrow();
+    assert_eq!(state.iframe_documents.len(), 1);
+    assert!(
+        state
+            .iframe_documents
+            .values()
+            .all(|entry| entry.realm.is_none()),
+        "recording the initial history entry must not bootstrap a child Realm"
+    );
+    drop(state);
+
+    assert_eq!(
+        runtime
+            .eval("child.location.href")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "about:srcdoc"
+    );
+    assert!(
+        runtime
+            .host_state
+            .borrow()
+            .iframe_documents
+            .values()
+            .all(|entry| entry.realm.is_none()),
+        "reading Location must not bootstrap a child Realm"
+    );
+
+    assert_eq!(
+        runtime
+            .eval(
+                "child.location.href = 'data:text/html,<p>navigated</p>'; child === frame.contentWindow && !child.closed"
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert!(
+        runtime
+            .host_state
+            .borrow()
+            .iframe_documents
+            .values()
+            .all(|entry| entry.realm.is_none()),
+        "scriptless cross-document navigation must not bootstrap a departing child Realm"
+    );
+
+    assert_eq!(
+        runtime
+            .eval("frame.srcdoc = '<p>replacement</p>'; child === frame.contentWindow && !child.closed")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    let state = runtime.host_state.borrow();
+    assert_eq!(state.iframe_documents.len(), 1);
+    let entry = state.iframe_documents.values().next().unwrap();
+    assert_eq!(entry.document_url, "about:srcdoc");
+    assert!(
+        entry.realm.is_none(),
+        "snapshotting a new history generation must keep its Realm lazy"
+    );
+    drop(state);
+
+    assert_eq!(
+        runtime
+            .eval("Object.getPrototypeOf(child.document) === child.Document.prototype && child.document.defaultView === child")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert!(
+        runtime
+            .host_state
+            .borrow()
+            .iframe_documents
+            .values()
+            .all(|entry| entry.realm.is_some()),
+        "explicit Document access still creates the owning child Realm"
+    );
+}
+
+#[test]
+fn iframe_history_snapshot_ignores_public_document_url_getters() {
+    let mut runtime = runtime();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"
+                var frame = document.getElementById('f');
+                var childDocument = frame.contentDocument;
+                var urlReads = 0;
+                Object.defineProperty(childDocument, 'URL', {
+                    get() { urlReads++; throw new Error('author getter must not run'); },
+                    configurable: true,
+                });
+                var child = frame.contentWindow;
+                !child.closed && urlReads === 0;
+                "#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
+fn iframe_history_snapshot_preserves_state_urls_across_navigation_and_detachment() {
+    let document = TreeBuilder::parse("<iframe id=f></iframe>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://history.example/parent.html").unwrap();
+    runtime
+        .eval(
+            r#"
+            var frame = document.getElementById('f');
+            var child = frame.contentWindow;
+            child.history.pushState({ step: 1 }, '', '/one');
+            child.history.pushState({ step: 2 }, '', '/two');
+            frame.srcdoc = '<p>new generation</p>';
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        runtime
+            .eval("child.history.length === 4 && child.document.URL === 'about:srcdoc'")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        runtime
+            .eval(
+                r#"
+                child.history.back();
+                var restored = child.document;
+                var restoredState = child.history.state.step === 2 &&
+                    restored.URL === 'https://history.example/two';
+                child.history.back();
+                restoredState && child.document === restored && child.history.state.step === 1 &&
+                    restored.URL === 'https://history.example/one';
+                "#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        runtime
+            .eval("frame.remove(); child.closed && frame.contentDocument === null && frame.contentWindow === null && restored.URL === 'https://history.example/one'")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
+fn iframe_history_snapshot_keeps_opaque_documents_private_without_bootstrap() {
+    let document =
+        TreeBuilder::parse("<iframe id=f sandbox srcdoc='<p>opaque</p>'></iframe>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://history.example/parent.html").unwrap();
+    assert_eq!(
+        runtime
+            .eval("var frame = document.getElementById('f'); var child = frame.contentWindow; !child.closed && frame.contentDocument === null")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    let state = runtime.host_state.borrow();
+    assert_eq!(state.iframe_documents.len(), 1);
+    assert!(
+        state
+            .iframe_documents
+            .values()
+            .all(|entry| entry.realm.is_none())
+    );
+    drop(state);
+    assert_eq!(
+        runtime
+            .eval("try { child.document; false } catch (error) { error.name === 'SecurityError' }")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
 fn shared_listener_state_survives_retirement_only_while_referenced() {
     let mut runtime = runtime();
     runtime.eval(r#"
@@ -156,16 +390,17 @@ fn retained_old_node_keeps_document_ancestors_and_expandos_alive() {
 fn old_document_generations_are_kept_by_references_without_an_eviction_limit() {
     let mut runtime = runtime();
     runtime
-        .eval(
-            r#"
-        var frame = document.getElementById('f'); var held = [];
-        for (var i = 0; i < 80; i++) {
-            frame.srcdoc = '<p>' + i + '</p>';
-            held.push(frame.contentDocument);
-        }
-    "#,
-        )
+        .eval("var frame = document.getElementById('f'); var held = [];")
         .unwrap();
+    // Each navigation is a separate script job, as it would be when initiated
+    // by successive page tasks. Keep all 80 generations reachable throughout.
+    for index in 0..80 {
+        runtime
+            .eval(&format!(
+                "frame.srcdoc = '<p>{index}</p>'; held.push(frame.contentDocument);"
+            ))
+            .unwrap();
+    }
     collect(&mut runtime);
     assert_eq!(
         runtime
@@ -228,12 +463,13 @@ fn inert_and_cloned_document_style_caches_follow_javascript_lifetime() {
 }
 
 #[test]
-fn adopting_retained_old_node_releases_its_previous_document() {
+fn adopted_node_keeps_its_creation_realm_until_references_are_released() {
     let mut runtime = runtime();
     runtime
         .eval(
             r#"
         var frame = document.getElementById('f');
+        var oldDocumentId = frame.contentDocument.__id;
         var held = frame.contentDocument.getElementById('old'); held.marker = 42;
         frame.srcdoc = '<p>new</p>'; void frame.contentDocument;
         document.body.appendChild(held);
@@ -242,6 +478,22 @@ fn adopting_retained_old_node_releases_its_previous_document() {
         .unwrap();
     collect(&mut runtime);
     assert_eq!(runtime.eval("held.ownerDocument === document && held.marker === 42 && document.getElementById('old') === held").unwrap().as_boolean(), Some(true));
+    assert_eq!(
+        runtime
+            .eval("held.constructor.constructor('return document')().__id === oldDocumentId")
+            .unwrap()
+            .as_boolean(),
+        Some(true),
+        "the adopted wrapper keeps the constructors from its creation Realm"
+    );
+    assert_eq!(
+        runtime.host_state.borrow().node_lifetimes.document_count(),
+        3
+    );
+    runtime.eval("held.remove(); held = null").unwrap();
+    // Pending Promise reactions are real Realm roots until the checkpoint.
+    runtime.run_jobs().unwrap();
+    collect(&mut runtime);
     assert!(runtime.host_state.borrow().node_lifetimes.document_count() <= 2);
 }
 
@@ -401,6 +653,8 @@ fn retained_document_groups_trace_new_wrappers_after_minor_collection() {
         );
     }
     runtime.eval("oldDoc = null").unwrap();
+    // Check reclamation after the last script's microtask checkpoint.
+    runtime.run_jobs().unwrap();
     collect(&mut runtime);
     assert_eq!(
         runtime.host_state.borrow().node_lifetimes.document_count(),
@@ -465,9 +719,90 @@ fn adoption_updates_all_realm_aliases_across_minor_collection() {
         .unwrap();
     runtime.context.clear_kept_objects();
     boa_gc::force_minor_collect();
-    assert_eq!(runtime.eval("mainAlias.__id === childAlias.__id && childAlias.ownerDocument.__id === document.__id && mainAlias.marker.value === 41 && childAlias.marker.value === 42").unwrap().as_boolean(), Some(true));
+    assert_eq!(runtime.eval("mainAlias === childAlias && childAlias.ownerDocument === document && mainAlias.marker.value === 42 && childAlias.marker.value === 42").unwrap().as_boolean(), Some(true));
     runtime.eval("childAlias = null").unwrap();
     collect(&mut runtime);
     assert_eq!(runtime.eval("document.getElementById('old') === mainAlias && mainAlias.ownerDocument === document").unwrap().as_boolean(), Some(true));
+    assert_eq!(
+        runtime.host_state.borrow().node_lifetimes.document_count(),
+        3
+    );
+    runtime
+        .eval("mainAlias.remove(); mainAlias = null")
+        .unwrap();
+    // Pending Promise reactions are real Realm roots until the checkpoint.
+    runtime.run_jobs().unwrap();
+    collect(&mut runtime);
     assert!(runtime.host_state.borrow().node_lifetimes.document_count() <= 2);
+}
+
+#[test]
+fn lazy_retired_window_keeps_same_origin_document_and_opaque_boundary() {
+    let document = TreeBuilder::parse(
+        "<iframe id=normal srcdoc='<p id=old>kept-normal</p>'></iframe>\
+         <iframe id=scriptless sandbox='allow-same-origin' srcdoc='<p id=old>kept-sandbox</p>'></iframe>\
+         <iframe id=opaque sandbox srcdoc='<p id=old>opaque</p>'></iframe>",
+    )
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://retained.example/parent").unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                "var lazyFrames = ['normal', 'scriptless', 'opaque'].map(id => document.getElementById(id)); \
+                 var lazyWindows = lazyFrames.map(frame => frame.contentWindow); \
+                 lazyWindows.every(window => !window.closed)",
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    {
+        let state = runtime.host_state.borrow();
+        assert_eq!(state.iframe_documents.len(), 3);
+        assert!(
+            state
+                .iframe_documents
+                .values()
+                .all(|entry| entry.realm.is_none()),
+            "holding WindowProxy alone must keep scriptless child Realms lazy"
+        );
+    }
+    runtime
+        .eval(
+            r#"
+            lazyFrames.forEach(frame => frame.remove());
+            var lazyDocuments = [lazyWindows[0].document, lazyWindows[1].document];
+            var lazyNodes = lazyDocuments.map(doc => doc.getElementById('old'));
+            var lazyTexts = lazyNodes.map(node => node.firstChild);
+            lazyNodes.forEach(node => { node.marker = { value: 42 }; });
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    collect(&mut runtime);
+    collect(&mut runtime);
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+                if (!lazyWindows.every(window => window.closed)) return false;
+                if (!lazyFrames.every(frame => frame.contentWindow === null &&
+                    frame.contentDocument === null)) return false;
+                for (let index = 0; index < 2; index++) {
+                    const doc = lazyDocuments[index], node = lazyNodes[index];
+                    if (lazyWindows[index].document !== doc || node.ownerDocument !== doc ||
+                        doc.getElementById('old') !== node || node.parentNode !== doc.body ||
+                        lazyTexts[index].parentNode !== node || lazyTexts[index].ownerDocument !== doc ||
+                        lazyTexts[index].data !== ['kept-normal', 'kept-sandbox'][index] ||
+                        node.marker.value !== 42) return false;
+                }
+                try { lazyWindows[2].document; return false; }
+                catch (error) { return error.name === 'SecurityError'; }
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
 }

@@ -1405,7 +1405,10 @@ impl<'ctx> ByteCompiler<'ctx> {
     /// Compile an [`Expression`].
     #[inline]
     pub(crate) fn compile_expr(&mut self, expr: &Expression, dst: &'_ Register) {
-        self.compile_expr_impl(expr, dst);
+        // Every expression can throw (including a bare identifier lookup).
+        // Keep its span active while emitting bytecode, restoring the enclosing
+        // position after recursively compiling child expressions.
+        self.position_guard(expr).compile_expr_impl(expr, dst);
     }
 
     /// Compile a property access expression, prepending `this` to the property value in the stack.

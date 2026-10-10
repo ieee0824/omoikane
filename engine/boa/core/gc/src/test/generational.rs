@@ -508,3 +508,320 @@ fn dirty_ephemeron_parent_is_reclaimed_when_its_key_dies() {
         Harness::assert_strong_allocations(0);
     });
 }
+
+#[test]
+fn old_unit_ephemeron_survives_minor_but_does_not_root_its_key_for_major() {
+    run_test(|| {
+        let key = Rooted::new(7_u32);
+        let weak = WeakGcEdge::new_rooted(&key);
+        let _weak_root = weak.root();
+        force_minor_collect();
+        force_minor_collect();
+        assert!(is_old(&key));
+        assert!(weak.inner().inner().header.is_old());
+
+        drop(key);
+        let _minor_seed = Rooted::new(1_u32);
+        force_minor_collect();
+        assert_eq!(weak.upgrade().as_deref().copied(), Some(7));
+
+        force_collect();
+        assert!(weak.upgrade().is_none());
+        let _next_minor_seed = Rooted::new(2_u32);
+        force_minor_collect();
+        assert!(!weak.is_upgradable());
+    });
+}
+
+#[test]
+fn young_unit_ephemeron_with_old_key_remains_a_valid_weak_handle() {
+    run_test(|| {
+        let key = Rooted::new(7_u32);
+        force_minor_collect();
+        force_minor_collect();
+        assert!(is_old(&key));
+
+        let weak = WeakGcEdge::new_rooted(&key);
+        let _weak_root = weak.root();
+        assert!(weak.inner().inner().header.is_young());
+        let pointer = weak.inner().erased_inner_ptr();
+        force_minor_collect();
+        assert_ephemeron_allocation_exists(pointer);
+        assert_eq!(weak.upgrade().as_deref().copied(), Some(7));
+        force_minor_collect();
+        assert_ephemeron_allocation_exists(pointer);
+        assert_eq!(weak.upgrade().as_deref().copied(), Some(7));
+
+        drop(key);
+        force_collect();
+        assert!(weak.upgrade().is_none());
+    });
+}
+
+#[test]
+fn old_unit_ephemeron_retarget_to_dead_young_key_clears_and_can_retarget_again() {
+    run_test(|| {
+        let first = Rooted::new(1_u32);
+        let mut weak = WeakGcEdge::new_rooted(&first);
+        let _weak_root = weak.root();
+        force_minor_collect();
+        force_minor_collect();
+        assert!(is_old(&first));
+        assert!(weak.inner().inner().header.is_old());
+
+        let dead_young = Rooted::new(2_u32).into_edge();
+        assert!(!edge_is_old(&dead_young));
+        weak.retarget_edge(&dead_young);
+        drop(dead_young);
+        force_minor_collect();
+        assert!(!weak.is_upgradable());
+
+        let live_young = Rooted::new(3_u32);
+        assert!(!is_old(&live_young));
+        weak.retarget_edge(&live_young.clone().into_edge());
+        force_minor_collect();
+        assert_eq!(weak.upgrade().as_deref().copied(), Some(3));
+        force_minor_collect();
+        assert!(is_old(&live_young));
+        assert_eq!(weak.upgrade().as_deref().copied(), Some(3));
+
+        drop(live_young);
+        force_collect();
+        assert!(!weak.is_upgradable());
+    });
+}
+
+#[test]
+fn old_non_unit_zero_sized_ephemeron_preserves_its_custom_trace() {
+    thread_local! {
+        static TRACE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    struct ZeroSizedTrace;
+    impl Finalize for ZeroSizedTrace {}
+    unsafe impl Trace for ZeroSizedTrace {
+        unsafe fn trace(&self, _tracer: &mut Tracer) {
+            TRACE_CALLS.with(|calls| calls.set(calls.get() + 1));
+        }
+
+        fn run_finalizer(&self) {
+            Finalize::finalize(self);
+        }
+    }
+
+    run_test(|| {
+        let key = Rooted::new(7_u32);
+        let edge = crate::EphemeronEdge::new(&key.clone().into_edge(), ZeroSizedTrace);
+        let _ephemeron = Ephemeron::from_edge(edge.clone());
+        force_minor_collect();
+        force_minor_collect();
+        assert!(is_old(&key));
+        assert!(edge.inner().header.is_old());
+        let before = TRACE_CALLS.with(std::cell::Cell::get);
+
+        let _minor_seed = Rooted::new(1_u32);
+        force_minor_collect();
+        assert!(TRACE_CALLS.with(std::cell::Cell::get) > before);
+    });
+}
+
+fn assert_ephemeron_allocation_exists(pointer: crate::EphemeronPointer) {
+    crate::BOA_GC.with(|gc| {
+        let gc = gc.borrow();
+        assert!(
+            gc.young_weaks
+                .iter()
+                .chain(&gc.old_weaks)
+                .any(|entry| std::ptr::addr_eq(entry.as_ptr(), pointer.as_ptr())),
+            "a rooted ephemeron must remain allocated before accessing its key"
+        );
+    });
+}
+
+#[derive(Debug, Finalize, Trace)]
+struct MinorRetargetKey {
+    value: GcEdge<u32>,
+}
+
+type MinorRetargetParent = GcRefCell<Option<GcEdge<MinorRetargetKey>>>;
+type MinorRetargetWeak = GcRefCell<WeakGcEdge<MinorRetargetKey>>;
+
+#[derive(Debug)]
+struct MinorRetargetFinalizer {
+    parent: GcEdge<MinorRetargetParent>,
+    weak: GcEdge<MinorRetargetWeak>,
+    target: GcEdge<MinorRetargetKey>,
+    resurrect: bool,
+}
+
+impl Finalize for MinorRetargetFinalizer {
+    fn finalize(&self) {
+        self.weak.borrow_mut().retarget_edge(&self.target);
+        if self.resurrect {
+            *self.parent.borrow_mut() = Some(self.target.clone());
+        }
+    }
+}
+
+// SAFETY: all three GC edges are forwarded to the collector without retaining
+// a borrow or changing any edge during tracing.
+unsafe impl Trace for MinorRetargetFinalizer {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        unsafe {
+            self.parent.trace(tracer);
+            self.weak.trace(tracer);
+            self.target.trace(tracer);
+        }
+    }
+
+    fn run_finalizer(&self) {
+        Finalize::finalize(self);
+    }
+}
+
+/// Checks allocation identity without dereferencing a possibly swept pointer.
+fn assert_strong_allocation_presence(pointer: crate::GcErasedPointer, present: bool) {
+    crate::BOA_GC.with(|gc| {
+        let gc = gc.borrow();
+        assert_eq!(
+            gc.youngs
+                .iter()
+                .chain(&gc.old_strongs)
+                .any(|entry| std::ptr::addr_eq(entry.as_ptr(), pointer.as_ptr())),
+            present,
+            "allocation membership must be checked before following a GC edge"
+        );
+    });
+}
+
+fn check_minor_finalizer_retarget(resurrect: bool) {
+    let original = Rooted::new(MinorRetargetKey {
+        value: GcEdge::new(7_u32),
+    });
+    let parent: Rooted<MinorRetargetParent> = Rooted::new(GcRefCell::new(None));
+    let weak = Rooted::new(GcRefCell::new(WeakGcEdge::new_rooted(&original)));
+    let ephemeron_pointer = weak.borrow().inner().erased_inner_ptr();
+    force_minor_collect();
+    force_minor_collect();
+    assert!(is_old(&original));
+    assert!(is_old(&parent));
+    assert!(is_old(&weak));
+    assert_ephemeron_allocation_exists(ephemeron_pointer);
+    assert!(weak.borrow().inner().inner().header.is_old());
+
+    let value = GcEdge::new(99_u32);
+    let value_pointer = value.as_gc().inner_ptr.cast();
+    let target = GcEdge::new(MinorRetargetKey { value });
+    let target_pointer = target.as_gc().inner_ptr.cast();
+    assert!(!edge_is_old(&target));
+    assert!(!edge_is_old(&target.value));
+    let _unreachable_finalizer = GcEdge::new(MinorRetargetFinalizer {
+        parent: parent.clone().into_edge(),
+        weak: weak.clone().into_edge(),
+        target,
+        resurrect,
+    });
+
+    // The first mark sees an old unit ephemeron with its original old key.
+    // Only finalization retargets it; the second mark must use the new key.
+    force_minor_collect();
+    assert_ephemeron_allocation_exists(ephemeron_pointer);
+    assert_strong_allocation_presence(target_pointer, resurrect);
+    assert_strong_allocation_presence(value_pointer, resurrect);
+    if resurrect {
+        let weak_key = weak
+            .borrow()
+            .upgrade()
+            .expect("resurrected key remains live");
+        assert!(std::ptr::addr_eq(
+            weak_key.as_gc().inner_ptr.as_ptr(),
+            target_pointer.as_ptr()
+        ));
+        assert_eq!(*weak_key.value, 99);
+        assert!(!edge_is_old(&weak_key));
+        assert!(!edge_is_old(&weak_key.value));
+        assert_eq!(parent.borrow().as_ref().map(|key| *key.value), Some(99));
+        drop(weak_key);
+        *parent.borrow_mut() = None;
+
+        // A weak retarget does not make the newly resurrected graph a major root.
+        force_collect();
+        assert_ephemeron_allocation_exists(ephemeron_pointer);
+        assert_strong_allocation_presence(target_pointer, false);
+        assert_strong_allocation_presence(value_pointer, false);
+        assert!(!weak.borrow().is_upgradable());
+    } else {
+        assert!(parent.borrow().is_none());
+        assert!(!weak.borrow().is_upgradable());
+    }
+}
+
+#[test]
+fn minor_second_mark_observes_finalizer_retarget_without_rooting_a_dead_key() {
+    run_test(|| check_minor_finalizer_retarget(true));
+    run_test(|| check_minor_finalizer_retarget(false));
+}
+
+#[test]
+fn promoted_weak_map_tracker_keeps_new_entries_until_their_keys_die() {
+    run_test(|| {
+        let mut map: WeakMap<u32, GcEdge<u32>> = WeakMap::new();
+        // This isolated collector has one externally rooted ephemeron: the
+        // unit-valued WeakMap registry tracker, not the unrooted map entries.
+        let tracker = crate::EPHEMERON_ROOT_REGISTRY.with(|roots| {
+            let roots = roots.borrow();
+            assert_eq!(roots.len(), 1);
+            *roots
+                .iter()
+                .next()
+                .expect("WeakMap registry tracker exists")
+        });
+        let original_key = Rooted::new(1_u32);
+        let original_value = GcEdge::new(11_u32);
+        let original_value_pointer = original_value.as_gc().inner_ptr.cast();
+        map.insert(&original_key, original_value);
+        force_minor_collect();
+        force_minor_collect();
+        assert!(is_old(&map.inner));
+        assert!(is_old(&original_key));
+        assert_ephemeron_allocation_exists(tracker);
+        // SAFETY: membership was verified immediately above; no collection,
+        // allocation or callback occurs before this header read.
+        assert!(unsafe { tracker.as_ref() }.header().is_old());
+        assert_strong_allocation_presence(original_value_pointer, true);
+        assert_eq!(map.get(&original_key).as_deref().copied(), Some(11));
+
+        let young_key = Rooted::new(2_u32);
+        let young_value = GcEdge::new(42_u32);
+        let young_value_pointer = young_value.as_gc().inner_ptr.cast();
+        map.insert(&young_key, young_value);
+        force_minor_collect();
+        assert_ephemeron_allocation_exists(tracker);
+        assert_strong_allocation_presence(young_value_pointer, true);
+        assert_eq!(map.get(&young_key).as_deref().copied(), Some(42));
+        assert_eq!(map.get(&original_key).as_deref().copied(), Some(11));
+        assert_eq!(map.inner.borrow().len(), 2);
+        assert!(!is_old(&young_key));
+
+        drop(young_key);
+        force_minor_collect();
+        assert_ephemeron_allocation_exists(tracker);
+        assert_strong_allocation_presence(young_value_pointer, false);
+        assert_eq!(map.inner.borrow().len(), 1);
+        assert_eq!(map.get(&original_key).as_deref().copied(), Some(11));
+
+        drop(original_key);
+        force_collect();
+        assert_ephemeron_allocation_exists(tracker);
+        assert_strong_allocation_presence(original_value_pointer, false);
+        assert!(map.inner.borrow().is_empty());
+        assert!(crate::has_weak_maps());
+        drop(map);
+        force_collect();
+        assert!(!crate::has_weak_maps());
+        Harness::assert_strong_allocations(0);
+        // The registry drops its unit ephemeron root after sweep, so a second
+        // major collection reclaims that now-unrooted tracker allocation.
+        force_collect();
+        Harness::assert_empty_gc();
+    });
+}

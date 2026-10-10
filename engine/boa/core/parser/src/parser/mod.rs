@@ -157,7 +157,7 @@ impl<'a, R: ReadChar> Parser<'a, R> {
     pub fn new(source: Source<'a, R>) -> Self {
         Self {
             path: source.path,
-            cursor: Cursor::new(source.reader),
+            cursor: Cursor::new_with_start_position(source.reader, source.start_position),
         }
     }
 

@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use boa_engine::{JsValue, realm::Realm};
 use boa_gc::{Finalize, Trace, Tracer};
 
+use super::script_errors::WorkerErrorNotification;
 use super::{DocumentSecurityOrigin, NavigationRequest, TimerPayload, VisitSource};
 
 /// The HTML task source responsible for a queued task.
@@ -123,7 +124,7 @@ pub(crate) enum Task {
         owner: Option<JsValue>,
         /// Realm of the page-side Worker object, if it was already bound.
         realm: Option<Realm>,
-        message: String,
+        report: WorkerErrorNotification,
     },
 }
 
@@ -238,7 +239,8 @@ impl Default for EventLoop {
             next_task_id: 1,
             queues: HashMap::new(),
             order: VecDeque::new(),
-            next_timer_id: 0,
+            // HTML timer handles are positive; clearing null converts to zero.
+            next_timer_id: 1,
             now_ms: 0,
             timers: Vec::new(),
             next_animation_frame_id: 0,
@@ -498,17 +500,44 @@ impl EventLoop {
         worker_id: u64,
         owner: Option<JsValue>,
         realm: Option<Realm>,
-        message: String,
+        report: impl Into<WorkerErrorNotification>,
     ) {
         self.enqueue(
-            TaskSource::PostedMessage,
+            TaskSource::DomManipulation,
             Task::WorkerError {
                 worker_id,
                 owner,
                 realm,
-                message,
+                report: report.into(),
             },
         );
+    }
+
+    /// Binds errors queued during startup before the Worker object existed.
+    /// The task keeps its recipient even if startup closes the worker runtime.
+    pub(crate) fn bind_worker_error_owner(
+        &mut self,
+        worker_id: u64,
+        object: &JsValue,
+        realm: &Option<Realm>,
+    ) {
+        let Some(queue) = self.queues.get_mut(&TaskSource::DomManipulation) else {
+            return;
+        };
+        for (_, task) in queue {
+            if let Task::WorkerError {
+                worker_id: id,
+                owner,
+                realm: target_realm,
+                ..
+            } = task
+                && *id == worker_id
+                && owner.is_none()
+            {
+                *owner = Some(object.clone());
+                *target_realm = realm.clone();
+            }
+        }
     }
 
     pub(crate) fn pop_task(&mut self) -> Option<(TaskSource, Task)> {

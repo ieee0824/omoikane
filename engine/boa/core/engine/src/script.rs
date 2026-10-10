@@ -146,6 +146,19 @@ impl Script {
         realm: Option<Realm>,
         context: &mut Context,
     ) -> JsResult<Self> {
+        Self::parse_with_host_defined(src, realm, HostDefined::default(), context)
+    }
+
+    /// Parses a script with owned host metadata attached to its script record.
+    ///
+    /// The metadata is traced with the script and remains available when a
+    /// function created by the script runs after the initial evaluation.
+    pub fn parse_with_host_defined<R: ReadChar>(
+        src: Source<'_, R>,
+        realm: Option<Realm>,
+        host_defined: HostDefined,
+        context: &mut Context,
+    ) -> JsResult<Self> {
         let path = src.path().map(Path::to_path_buf);
         let mut parser = Parser::new(src);
         parser.set_identifier(context.next_parser_identifier());
@@ -168,7 +181,7 @@ impl Script {
                 source_text,
                 codeblock: GcRefCell::default(),
                 loaded_modules: GcRefCell::default(),
-                host_defined: HostDefined::default(),
+                host_defined,
                 path,
             }),
         })
@@ -229,10 +242,17 @@ impl Script {
     ///
     /// [`JobExecutor::run_jobs`]: crate::job::JobExecutor::run_jobs
     pub fn evaluate(&self, context: &mut Context) -> JsResult<JsValue> {
+        let native_continuation_depth = context.vm.native_call_continuations.len();
         self.prepare_run(context)?;
         let record = context.run();
 
         context.vm.pop_frame();
+        // Host aborts skip callback continuations. Do not leave their frame
+        // boundaries available to unrelated functions in a later script.
+        context
+            .vm
+            .native_call_continuations
+            .truncate(native_continuation_depth);
         record.consume()
     }
 

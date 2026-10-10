@@ -27,11 +27,11 @@ impl<K: Trace + ?Sized, V: Trace + Clone> ErasedWeakMapBox for WeakMapBox<K, V> 
     }
 
     fn is_live(&self) -> bool {
-        self.map.upgrade().is_some()
+        self.map.is_upgradable()
     }
 
     unsafe fn trace(&self, tracer: &mut Tracer) {
-        if self.map.upgrade().is_some() {
+        if self.map.is_upgradable() {
             // SAFETY: When the weak map is live, the weak reference should be traced.
             unsafe { self.map.trace(tracer) }
         }

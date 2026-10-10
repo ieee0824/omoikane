@@ -22,7 +22,7 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use crate::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
 };
-use crate::html::{TreeBuilder, decode_html_response};
+use crate::html::{DecodedHtml, TreeBuilder, decode_html_response};
 use crate::http::{Client, HttpRequest, Method};
 use crate::http::{HttpParseError, url::UrlParseError};
 #[cfg(test)]

@@ -483,6 +483,30 @@ impl JsPromise {
             .clone()
     }
 
+    /// Returns whether a reaction has been attached to this Promise.
+    ///
+    /// Hosts use this internal state when deciding whether a rejection is still
+    /// unhandled at notification time; author properties are not consulted.
+    #[must_use]
+    pub fn is_handled(&self) -> bool {
+        self.inner
+            .downcast_ref::<Promise>()
+            .expect("objects cannot change type after creation")
+            .is_handled()
+    }
+
+    /// Marks a host-owned promise handled without reading author properties.
+    ///
+    /// This sets the internal flag directly, without installing reactions or
+    /// invoking the rejection tracker. Hosts use it where a platform algorithm
+    /// explicitly sets `[[PromiseIsHandled]]`, such as Streams' closed promises.
+    pub fn mark_handled(&self) {
+        self.inner
+            .downcast_mut::<Promise>()
+            .expect("objects cannot change type after creation")
+            .mark_handled();
+    }
+
     /// Schedules callback functions to run when the promise settles.
     ///
     /// Equivalent to the [`Promise.prototype.then`] method.

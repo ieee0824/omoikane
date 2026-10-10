@@ -93,10 +93,17 @@ impl FetchedChildResource {
 pub(super) fn parse_child_document(mime_type: &str, body: &[u8]) -> Option<NodeHandle> {
     if is_html_mime_type(mime_type) {
         let html = crate::html::encoding::decode_html_bytes(body, Some(mime_type));
-        return Some(crate::html::TreeBuilder::parse(&html).document());
+        return Some(crate::html::TreeBuilder::parse_decoded(&html).document());
     }
     if is_xml_mime_type(mime_type) {
-        return Some(crate::xml::parse(body).unwrap_or_else(|_| blank_html_document()));
+        return Some(match crate::xml::parse(body) {
+            Ok(document) => {
+                let essence = mime_type.split(';').next().unwrap_or("").trim();
+                document.set_document_content_type(essence.to_ascii_lowercase());
+                document
+            }
+            Err(_) => blank_html_document(),
+        });
     }
     let essence = mime_type.split(';').next().unwrap_or("").trim();
     essence

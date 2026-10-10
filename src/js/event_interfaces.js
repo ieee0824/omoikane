@@ -62,6 +62,13 @@
         ["colno", value => (+value) >>> 0, 0], ["error", value => value, undefined],
         ["filename", usvString, ""], ["lineno", value => (+value) >>> 0, 0], ["message", string, ""],
       ]),
+      PromiseRejectionEvent: payloadEvent(Event, "PromiseRejectionEvent", [
+        ["promise", value => {
+          if (!context.isPromise(value)) throw new TypeErrorIntrinsic("promise must be a Promise");
+          return value;
+        }, undefined, true],
+        ["reason", value => value, undefined],
+      ], true),
       PopStateEvent: payloadEvent(Event, "PopStateEvent", [
         ["hasUAVisualTransition", Boolean, false], ["state", value => value, null],
       ]),

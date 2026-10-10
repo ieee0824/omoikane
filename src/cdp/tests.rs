@@ -137,12 +137,12 @@ fn completed_page_task_errors_are_formatted_for_script_logging() {
 }
 
 #[test]
-fn completed_page_task_drains_startup_timer_errors_once() {
+fn completed_page_task_drains_startup_and_timer_errors_once() {
     let runtime = JsRuntime::new().unwrap();
     let mut task = Box::pin(runtime.into_page_task(
         1,
         vec![PageTaskSource::Classic {
-            source: "setTimeout(() => { throw new Error('startup timer failed') }, 0)".to_string(),
+            source: "setTimeout(() => { throw new Error('startup timer failed') }, 0); throw new Error('initial script failed')".to_string(),
             label: "startup".to_string(),
             script_node_id: None,
         }],
@@ -156,9 +156,26 @@ fn completed_page_task_drains_startup_timer_errors_once() {
     };
 
     let lines = take_page_task_script_error_lines(&mut completed);
-    assert_eq!(lines.len(), 1);
-    assert!(lines[0].starts_with("[omoikane][js-error] "));
-    assert!(lines[0].contains("startup timer failed"));
+    assert_eq!(lines.len(), 2);
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.starts_with("[omoikane][js-error] "))
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("startup timer failed"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("initial script failed"))
+            .count(),
+        1
+    );
     assert!(take_page_task_script_error_lines(&mut completed).is_empty());
 }
 

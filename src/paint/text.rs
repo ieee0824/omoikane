@@ -1425,7 +1425,7 @@ fn fragment_text_for_paint<'a>(
 /// `plaintext` lets UAX#9 derive each paragraph's level from its first strong
 /// character. Directional override modes force every grapheme cluster into
 /// the declared direction while preserving the logical DOM/layout string.
-fn bidi_visual_text<'a>(text: &'a str, style: &FragmentStyle) -> Cow<'a, str> {
+pub(super) fn bidi_visual_text<'a>(text: &'a str, style: &FragmentStyle) -> Cow<'a, str> {
     if text.is_empty() {
         return Cow::Borrowed(text);
     }
@@ -1506,7 +1506,10 @@ fn vertical_paint_characters(text: &str, direction_rtl: bool) -> Vec<char> {
     }
 }
 
-fn fallback_font_for_cluster(fonts: &[FontFallbackCandidate<'_>], cluster: &str) -> Option<usize> {
+pub(super) fn fallback_font_for_cluster(
+    fonts: &[FontFallbackCandidate<'_>],
+    cluster: &str,
+) -> Option<usize> {
     fonts
         .iter()
         .position(|candidate| {
@@ -2552,7 +2555,7 @@ fn is_text_align_center(style: &ComputedStyle) -> bool {
 
 /// Shares layout's family list and numeric CSS weight, while preserving support
 /// for callers that explicitly construct a fragment with style-only font data.
-fn select_fragment_font<'a>(
+pub(super) fn select_fragment_font<'a>(
     web_fonts: Option<&'a WebFontRegistry>,
     fragment: &crate::layout::InlineFragment,
     fonts: &[Arc<Font>],
@@ -2591,7 +2594,7 @@ fn select_fragment_font<'a>(
     )
 }
 
-fn select_fragment_web_fonts<'a>(
+pub(super) fn select_fragment_web_fonts<'a>(
     web_fonts: Option<&'a WebFontRegistry>,
     fragment: &crate::layout::InlineFragment,
 ) -> Vec<WebFontCandidate<'a>> {

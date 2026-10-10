@@ -746,6 +746,9 @@ impl FragmentStyle {
 pub struct InlineFragment {
     pub node: NodeHandle,
     pub content: InlineFragmentContent,
+    /// Source Text nodes and UTF-16 ranges for this fragment's rendered text.
+    /// Generated content and non-text payloads have no DOM text source.
+    pub text_source: Vec<InlineTextSource>,
     pub rect: Rect,
     pub metrics: FontMetrics,
     pub vertical_align: VerticalAlign,
@@ -757,6 +760,21 @@ pub struct InlineFragment {
     /// `text-decoration`, and `color` rather than inheriting from the
     /// containing block's style.
     pub style: FragmentStyle,
+}
+
+/// An owned mapping from a rendered text span to its original DOM Text node.
+/// Adjacent Text nodes can share one shaped fragment without losing identity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InlineTextSource {
+    /// Original Text node; this can differ from the fragment's paint owner.
+    pub node: NodeHandle,
+    /// UTF-8 byte range in the fragment's rendered text.
+    pub text_range: std::ops::Range<usize>,
+    /// UTF-16 code-unit range in the original Text node.
+    pub dom_range: std::ops::Range<usize>,
+    /// Whether rendered UTF-16 positions map directly within `dom_range`.
+    /// False denotes collapsed whitespace or a length-changing case transform.
+    pub direct: bool,
 }
 
 /// A laid out inline fragment payload.

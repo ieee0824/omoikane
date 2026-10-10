@@ -7,7 +7,8 @@ use crate::dom::{Node, NodeHandle};
 
 mod serializer;
 
-pub use serializer::serialize;
+pub(crate) use serializer::serialize_children_utf16;
+pub use serializer::{serialize, serialize_utf16};
 
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
@@ -123,10 +124,12 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn new(input: &'a str) -> Self {
+        let document = NodeHandle::document();
+        document.set_document_content_type("application/xml".to_owned());
         Self {
             input,
             pos: 0,
-            document: NodeHandle::document(),
+            document,
             stack: Vec::new(),
         }
     }

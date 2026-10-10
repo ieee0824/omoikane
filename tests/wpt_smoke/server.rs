@@ -22,19 +22,23 @@ impl StaticServer {
     pub(super) fn start(root: PathBuf) -> Self {
         let listener = bind_loopback().expect("bind WPT server");
         let address = listener.local_addr().expect("WPT server address");
+        let secondary = bind_loopback().expect("bind secondary WPT server");
+        let secondary_port = secondary.local_addr().unwrap().port();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let worker = FixtureWorker::spawn(move || {
             while !worker_stop.load(Ordering::Relaxed) {
-                match accept_with_timeout(&listener, Duration::from_millis(50)) {
-                    Ok(stream) => serve(stream, &root),
-                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
-                    Err(error) => panic!("WPT server accept: {error}"),
+                for listener in [&listener, &secondary] {
+                    match accept_with_timeout(listener, Duration::from_millis(25)) {
+                        Ok(stream) => serve(stream, &root, secondary_port),
+                        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
+                        Err(error) => panic!("WPT server accept: {error}"),
+                    }
                 }
             }
         });
         Self {
-            base_url: format!("http://{address}"),
+            base_url: format!("http://localhost:{}", address.port()),
             stop,
             worker: Some(worker),
         }
@@ -77,7 +81,7 @@ fn echo_endpoint_preserves_crlf_and_escapes_request_bytes() {
     );
 }
 
-fn serve(mut stream: TcpStream, root: &Path) {
+fn serve(mut stream: TcpStream, root: &Path, secondary_port: u16) {
     let Ok(headers) = read_request_headers(&mut stream, READ_TIMEOUT) else {
         return;
     };
@@ -104,6 +108,9 @@ fn serve(mut stream: TcpStream, root: &Path) {
     }
     let target = request_line.split_whitespace().nth(1).unwrap_or("/");
     let path = target.split("?").next().unwrap_or("/");
+    if super::cross_origin::serve(&mut stream, root, target, secondary_port) {
+        return;
+    }
     if path == "/FileAPI/file/resources/echo-content-escaped.py" {
         // Equivalent to the pinned wptserve endpoint: echo actual request
         // bytes, escaping controls/non-ASCII/backslashes and preserving CRLF.
@@ -142,6 +149,10 @@ setup({output:false});
 globalThis.__wpt_results = [];
 globalThis.__wpt_harness_status = -1;
 globalThis.__wpt_complete = false;
+globalThis.__wpt_allow_uncaught_exception = false;
+if (typeof add_start_callback === 'function') {
+  add_start_callback(properties => { globalThis.__wpt_allow_uncaught_exception = properties.allow_uncaught_exception === true; });
+}
 add_result_callback(test => globalThis.__wpt_results.push({name:String(test.name),status:Number(test.status),message:String(test.message||"")}));
 add_completion_callback((tests,status) => { globalThis.__wpt_harness_status=Number(status.status); globalThis.__wpt_harness_message=String(status.message||""); globalThis.__wpt_complete=true; });
 "#;
@@ -149,19 +160,12 @@ add_completion_callback((tests,status) => { globalThis.__wpt_harness_status=Numb
         return;
     }
     if path == "/resources/testdriver-vendor.js" {
-        // The pinned visibility-state WPT asks the browser to minimize and
-        // restore its window. Queue these requests for the Rust test runner,
-        // which owns the page's host visibility state.
-        let body = br#"
-globalThis.__wpt_window_commands = [];
-test_driver_internal.minimize_window = () => new Promise(resolve => {
-  __wpt_window_commands.push({hidden: true, resolve});
-});
-test_driver_internal.set_window_rect = () => new Promise(resolve => {
-  __wpt_window_commands.push({hidden: false, resolve});
-});
-"#;
-        respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
+        respond(
+            &mut stream,
+            200,
+            "text/javascript; charset=utf-8",
+            super::testdriver::VENDOR_SCRIPT.as_bytes(),
+        );
         return;
     }
     // wptserve's canonical rewrite supports the historical IDL parser URL.
@@ -182,7 +186,7 @@ test_driver_internal.set_window_rect = () => new Promise(resolve => {
     }
 }
 
-fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) {
+pub(super) fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) {
     let reason = if status == 200 { "OK" } else { "Error" };
     let header = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -193,7 +197,9 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
 }
 fn content_type(path: &Path) -> &str {
     match path.extension().and_then(|value| value.to_str()) {
-        Some("html" | "htm") => "text/html; charset=utf-8",
+        // Match wptserve's default MIME mapping: an HTML fixture's encoding
+        // declaration must not be overridden by an invented transport charset.
+        Some("html" | "htm") => "text/html",
         Some("js") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
         Some("json") => "application/json",
@@ -251,12 +257,12 @@ mod tests {
         )
         .unwrap();
         let server = StaticServer::start(root.clone());
-        assert!(server.base_url.starts_with("http://127.0.0.1:"));
+        assert!(server.base_url.starts_with("http://localhost:"));
 
         let (header, body) = get(&server, "/hello.html?cache=1");
         assert_eq!(
             header,
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 5\r\nConnection: close"
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 5\r\nConnection: close"
         );
         assert_eq!(body, b"hello");
         let (header, body) = get(&server, "/resources/WebIDLParser.js");
@@ -348,8 +354,8 @@ mod tests {
     #[test]
     fn content_types_match_fixture_extensions() {
         for (path, expected) in [
-            ("page.html", "text/html; charset=utf-8"),
-            ("page.htm", "text/html; charset=utf-8"),
+            ("page.html", "text/html"),
+            ("page.htm", "text/html"),
             ("script.js", "text/javascript; charset=utf-8"),
             ("style.css", "text/css; charset=utf-8"),
             ("data.json", "application/json"),

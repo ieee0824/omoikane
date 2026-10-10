@@ -119,7 +119,7 @@ pub struct RealmInner {
     scope: Scope,
 
     global_object: JsObject,
-    global_this: JsObject,
+    global_this: GcRefCell<JsObject>,
     template_map: GcRefCell<FxHashMap<u64, JsObject>>,
     loaded_modules: GcRefCell<FxHashMap<JsString, ModuleEdge>>,
     host_classes: GcRefCell<FxHashMap<TypeId, StandardConstructor>>,
@@ -168,7 +168,7 @@ impl Realm {
                     environment,
                     scope,
                     global_object,
-                    global_this,
+                    global_this: GcRefCell::new(global_this),
                     template_map: GcRefCell::default(),
                     loaded_modules: GcRefCell::default(),
                     host_classes: GcRefCell::default(),
@@ -261,8 +261,12 @@ impl<H: RealmHandle> Realm<H> {
         &self.inner.global_object
     }
 
-    pub(crate) fn global_this(&self) -> &JsObject {
-        &self.inner.global_this
+    pub(crate) fn global_this(&self) -> JsObject {
+        self.inner.global_this.borrow().clone()
+    }
+
+    pub(crate) fn set_global_this(&self, global_this: JsObject) {
+        *self.inner.global_this.borrow_mut() = global_this;
     }
 
     pub(crate) fn loaded_modules(&self) -> &GcRefCell<FxHashMap<JsString, ModuleEdge>> {

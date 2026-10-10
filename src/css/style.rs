@@ -10156,46 +10156,82 @@ fn collect_builtin_ua_candidates(
     source_order: &mut usize,
     candidates: &mut Vec<Candidate>,
 ) {
-    if pseudo.is_some()
-        || node.node_type() != NodeType::Element
-        || !node
-            .tag_name()
-            .is_some_and(|tag| tag.eq_ignore_ascii_case("body"))
-    {
+    let html_namespace = node.namespace_uri().map_or_else(
+        || node.is_html_element(),
+        |namespace| namespace == "http://www.w3.org/1999/xhtml",
+    );
+    if pseudo.is_some() || !html_namespace {
         return;
     }
-
-    // Keep browser defaults in the cascade as UA-origin declarations. Besides
-    // letting author rules win normally, this makes `revert` expose the UA
-    // value while keeping the rule out of the document's author CSSOM.
-    let layer_context = LayerContextKey {
-        origin: Origin::UserAgent,
-        scope_root: None,
-    };
-    let rule_order = *source_order;
-    for side in ["top", "right", "bottom", "left"] {
-        candidates.push(Candidate {
-            name: format!("margin-{side}"),
-            prefixed_alias: false,
-            value: Value::Length(8.0, "px".to_string()),
-            important: false,
-            origin: Origin::UserAgent,
-            inline: false,
-            specificity: Specificity {
+    if let Some(hidden) = node.get_attribute("hidden") {
+        let (name, keyword) = if hidden.eq_ignore_ascii_case("until-found") {
+            ("content-visibility", "hidden")
+        } else {
+            ("display", "none")
+        };
+        let rule_order = *source_order;
+        push_builtin_ua_candidate(
+            name.to_owned(),
+            Value::Keyword(keyword.to_owned()),
+            Specificity {
                 ids: 0,
-                classes: 0,
-                elements: 1,
+                classes: 1,
+                elements: 0,
             },
-            scope_proximity: None,
-            source_order: *source_order,
             rule_order,
-            encapsulation_order: 0,
-            layer_context,
-            layer_path: None,
-            layer_order: vec![usize::MAX],
-        });
-        *source_order += 1;
+            source_order,
+            candidates,
+        );
     }
+    if node.local_name().as_deref() == Some("body") {
+        let rule_order = *source_order;
+        for side in ["top", "right", "bottom", "left"] {
+            push_builtin_ua_candidate(
+                format!("margin-{side}"),
+                Value::Length(8.0, "px".to_owned()),
+                Specificity {
+                    ids: 0,
+                    classes: 0,
+                    elements: 1,
+                },
+                rule_order,
+                source_order,
+                candidates,
+            );
+        }
+    }
+}
+
+// Browser defaults participate at UA origin, so author rules and `revert`
+// expose the appropriate value without adding rules to author CSSOM.
+fn push_builtin_ua_candidate(
+    name: String,
+    value: Value,
+    specificity: Specificity,
+    rule_order: usize,
+    source_order: &mut usize,
+    candidates: &mut Vec<Candidate>,
+) {
+    candidates.push(Candidate {
+        name,
+        prefixed_alias: false,
+        value,
+        important: false,
+        origin: Origin::UserAgent,
+        inline: false,
+        specificity,
+        scope_proximity: None,
+        source_order: *source_order,
+        rule_order,
+        encapsulation_order: 0,
+        layer_context: LayerContextKey {
+            origin: Origin::UserAgent,
+            scope_root: None,
+        },
+        layer_path: None,
+        layer_order: vec![usize::MAX],
+    });
+    *source_order += 1;
 }
 
 /// A property's CSS initial value, expressed so it can live in a `static`

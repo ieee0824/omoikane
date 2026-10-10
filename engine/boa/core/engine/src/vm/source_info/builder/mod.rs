@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, ops::Range};
+use std::ops::Range;
 
 use boa_ast::Position;
 use itertools::Itertools;
@@ -28,7 +28,15 @@ impl EntryRange {
 #[derive(Debug, Default)]
 pub(crate) struct SourceMapBuilder {
     entries: Vec<EntryRange>,
-    stack: Vec<u32>,
+    stack: Vec<SourceScope>,
+}
+
+/// The whole scope's start is distinct from its latest range after nested
+/// expressions restore the enclosing position.
+#[derive(Debug, Clone, Copy)]
+struct SourceScope {
+    start: u32,
+    entry: usize,
 }
 
 impl SourceMapBuilder {
@@ -58,63 +66,44 @@ impl SourceMapBuilder {
     }
 
     pub(crate) fn push_source_position(&mut self, start_pc: u32, position: Option<Position>) {
-        let index = self.entries.len() as u32;
+        let index = self.entries.len();
         self.entries.push(EntryRange {
             start: start_pc,
             end: u32::MAX,
             position,
         });
-        self.stack.push(index);
+        self.stack.push(SourceScope {
+            start: start_pc,
+            entry: index,
+        });
     }
 
     // TODO: document implementation range flattening.
     pub(crate) fn pop_source_position(&mut self, current_start_pc: u32) {
-        let Some(index) = self.stack.pop().map(|index| index as usize) else {
+        let Some(scope) = self.stack.pop() else {
             panic!("popped more than pushed");
         };
 
-        self.entries[index].end = current_start_pc;
+        self.entries[scope.entry].end = current_start_pc;
 
-        if self.entries[index].range().is_empty() {
+        if scope.start == current_start_pc {
             return;
         }
 
-        let Some(parent) = self.stack.last().copied().map(|index| index as usize) else {
+        let Some(parent) = self.stack.last_mut() else {
             return;
         };
-
-        let ordering = self.entries[parent].start.cmp(&self.entries[index].start);
-
-        let new_parent_index = match ordering {
-            Ordering::Equal => {
-                self.entries.swap(parent, index);
-                let (parent, index) = (index, parent);
-
-                self.entries[parent].start = self.entries[index].end;
-
-                parent
-            }
-            Ordering::Less => {
-                let old_end = self.entries[parent].end;
-                assert_eq!(old_end, u32::MAX, "parent end position should not be set");
-
-                self.entries[parent].end = self.entries[index].start;
-
-                let new_index = self.entries.len();
-                self.entries.push(EntryRange {
-                    start: self.entries[index].end,
-                    end: u32::MAX,
-                    position: self.entries[parent].position,
-                });
-                new_index
-            }
-            Ordering::Greater => {
-                unreachable!("Parent source scope cannot be greater than child scope")
-            }
-        };
-
-        if let Some(parent) = self.stack.last_mut() {
-            *parent = new_parent_index as u32;
-        }
+        let range = &mut self.entries[parent.entry];
+        assert_eq!(range.end, u32::MAX, "parent source scope must remain open");
+        // Exclude the entire child scope, not just its final range. Otherwise
+        // grandchildren leave overlapping ranges and erase the throw position.
+        range.end = scope.start;
+        let position = range.position;
+        parent.entry = self.entries.len();
+        self.entries.push(EntryRange {
+            start: current_start_pc,
+            end: u32::MAX,
+            position,
+        });
     }
 }

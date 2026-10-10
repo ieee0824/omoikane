@@ -1140,9 +1140,17 @@ impl Context {
     }
 
     fn handle_throw(&mut self) -> ControlFlow<CompletionRecord> {
+        let source_script = self.active_script();
         if let Some(err) = &mut self.vm.pending_exception
             && err.backtrace.is_none()
         {
+            err.source_script_metadata = source_script.map(|script| {
+                script
+                    .host_defined()
+                    .get::<crate::error::ScriptErrorMetadata>()
+                    .cloned()
+                    .unwrap_or_default()
+            });
             err.backtrace = Some(
                 self.vm
                     .shadow_stack

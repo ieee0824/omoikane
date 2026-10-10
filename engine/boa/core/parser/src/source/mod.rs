@@ -19,6 +19,7 @@ mod utf8;
 #[derive(Debug)]
 pub struct Source<'path, R> {
     pub(crate) reader: R,
+    pub(crate) start_position: boa_ast::Position,
     pub(crate) path: Option<&'path Path>,
 }
 
@@ -40,6 +41,7 @@ impl<'bytes> Source<'static, UTF8Input<&'bytes [u8]>> {
         Self {
             reader: UTF8Input::new(source.as_ref()),
             path: None,
+            start_position: boa_ast::Position::new(1, 1),
         }
     }
 }
@@ -62,6 +64,7 @@ impl<'input> Source<'static, UTF16Input<'input>> {
         Self {
             reader: UTF16Input::new(input),
             path: None,
+            start_position: boa_ast::Position::new(1, 1),
         }
     }
 }
@@ -89,6 +92,7 @@ impl<'path> Source<'path, UTF8Input<BufReader<File>>> {
         Ok(Self {
             reader: UTF8Input::new(BufReader::new(reader)),
             path: Some(source),
+            start_position: boa_ast::Position::new(1, 1),
         })
     }
 }
@@ -116,15 +120,31 @@ impl<'path, R: Read> Source<'path, UTF8Input<R>> {
         Self {
             reader: UTF8Input::new(reader),
             path,
+            start_position: boa_ast::Position::new(1, 1),
         }
     }
 }
 
 impl<'path, R> Source<'path, R> {
+    /// Sets the one-based coordinates of this source's first code unit.
+    ///
+    /// This preserves embedding positions for inline scripts and functions
+    /// subsequently compiled from them without modifying their source text.
+    ///
+    /// # Panics
+    /// Panics when `line` or `column` is zero.
+    #[must_use]
+    pub fn with_start_position(mut self, line: u32, column: u32) -> Self {
+        assert!(line > 0 && column > 0, "source coordinates are one-based");
+        self.start_position = boa_ast::Position::new(line, column);
+        self
+    }
+
     /// Sets the path of this [`Source`].
     pub fn with_path(self, new_path: &Path) -> Source<'_, R> {
         Source {
             reader: self.reader,
+            start_position: self.start_position,
             path: Some(new_path),
         }
     }

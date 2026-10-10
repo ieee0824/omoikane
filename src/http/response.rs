@@ -85,6 +85,11 @@ impl HttpResponse {
         &self.body
     }
 
+    /// Consumes the response and returns its owned body bytes.
+    pub fn into_body(self) -> Vec<u8> {
+        self.body
+    }
+
     /// Returns the final URL after redirects when the response came from [`Client`](super::Client).
     pub fn effective_url(&self) -> Option<&Url> {
         self.effective_url.as_ref()

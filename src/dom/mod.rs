@@ -21,12 +21,21 @@ static NEXT_NODE_ID: AtomicUsize = AtomicUsize::new(1);
 static NEXT_TOP_LAYER_ORDER: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
+mod document_body_tests;
+
+#[cfg(test)]
 mod slot_cache_tests;
 
 #[cfg(test)]
 thread_local! {
     static SLOT_ASSIGNMENT_WORK: std::cell::Cell<(usize, usize, usize)> = const {
         std::cell::Cell::new((0, 0, 0))
+    };
+    static CHILD_SNAPSHOT_HANDLE_CLONES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static CHARACTER_DATA_UTF16_COPY_WORK: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
     };
 }
 
@@ -57,6 +66,26 @@ fn invalidate_slot_assignments() {
 /// Whether any element on this thread holds a non-zero scroll offset.
 pub(crate) fn any_element_scrolled() -> bool {
     SCROLLED_ELEMENTS.with(|count| count.get() > 0)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_child_snapshot_handle_clones() {
+    CHILD_SNAPSHOT_HANDLE_CLONES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn child_snapshot_handle_clones() -> usize {
+    CHILD_SNAPSHOT_HANDLE_CLONES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_character_data_utf16_copy_work() {
+    CHARACTER_DATA_UTF16_COPY_WORK.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn character_data_utf16_copy_work() -> usize {
+    CHARACTER_DATA_UTF16_COPY_WORK.with(std::cell::Cell::get)
 }
 
 /// Returns whether an HTML form control is actually disabled.
@@ -150,7 +179,7 @@ struct NodeInner {
 
 #[derive(Debug, Clone)]
 enum NodeData {
-    Document(Document),
+    Document(Document, DocumentMetadata),
     DocumentFragment,
     ShadowRoot(ShadowRoot),
     Element(Element),
@@ -219,6 +248,21 @@ pub enum ShadowRootMode {
     Closed,
 }
 
+/// Owned shadow-root options shared by parsing, DOM APIs and serialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShadowRootSettings {
+    /// Include this root when serializable shadow trees are requested.
+    pub serializable: bool,
+    /// Delegate host focus into the shadow tree.
+    pub delegates_focus: bool,
+    /// Permit the shadow tree to be included in cloning operations.
+    pub clonable: bool,
+    /// Whether this root was created by declarative HTML parsing.
+    pub declarative: bool,
+    /// Whether slot assignments are explicitly managed by script.
+    pub manual_slot_assignment: bool,
+}
+
 /// Basic DOM node operations.
 pub trait Node {
     /// Returns the DOM node type.
@@ -238,11 +282,28 @@ pub trait Node {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Document;
 
+/// Parser-selected properties owned by one document, independent of its tree.
+#[derive(Debug, Clone)]
+struct DocumentMetadata {
+    character_encoding: String,
+    content_type: String,
+}
+
+impl Default for DocumentMetadata {
+    fn default() -> Self {
+        Self {
+            character_encoding: "UTF-8".to_owned(),
+            content_type: "text/html".to_owned(),
+        }
+    }
+}
+
 /// The host relationship and visibility of a shadow tree root.
 #[derive(Debug, Clone)]
 struct ShadowRoot {
     host: Weak<RefCell<NodeInner>>,
     mode: ShadowRootMode,
+    settings: ShadowRootSettings,
     assignments: Option<(u64, Rc<SlotAssignments>)>,
 }
 
@@ -272,6 +333,7 @@ pub struct Element {
     selected: bool,
     dirty_selectedness: bool,
     form_associated_custom: bool,
+    script_source_position: Option<(u32, u32)>,
     css_validity: Option<bool>,
     /// Dynamic selector state shared by style resolution and DOM queries.
     user_action_state: u8,
@@ -325,6 +387,7 @@ impl PartialEq for ParserFormOwner {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AttributeRecord {
+    utf16: Option<Vec<u16>>,
     qualified_name: String,
     namespace_uri: Option<String>,
     local_name: String,
@@ -370,6 +433,7 @@ impl Element {
             selected: false,
             dirty_selectedness: false,
             form_associated_custom: false,
+            script_source_position: None,
             css_validity: None,
             user_action_state: 0,
             parser_form_owner: None,
@@ -390,12 +454,24 @@ impl Element {
             .split_once(':')
             .map(|(prefix, local)| (Some(prefix.to_string()), local.to_string()))
             .unwrap_or_else(|| (None, tag_name.clone()));
+        Self::new_named(tag_name, namespace_uri, prefix, local_name, false)
+    }
+
+    fn new_named(
+        tag_name: String,
+        namespace_uri: Option<String>,
+        prefix: Option<String>,
+        local_name: String,
+        html: bool,
+    ) -> Self {
+        let template_content = (html && local_name.eq_ignore_ascii_case("template"))
+            .then(NodeHandle::document_fragment);
         Self {
             tag_name,
             namespace_uri,
             prefix,
             local_name,
-            html: false,
+            html,
             attributes: BTreeMap::new(),
             attribute_records: Vec::new(),
             checked: false,
@@ -403,12 +479,13 @@ impl Element {
             selected: false,
             dirty_selectedness: false,
             form_associated_custom: false,
+            script_source_position: None,
             css_validity: None,
             user_action_state: 0,
             parser_form_owner: None,
             text_control_state: None,
             scroll_offset: (0.0, 0.0),
-            template_content: None,
+            template_content,
             shadow_root: None,
             popover_open: false,
             modal_dialog: false,
@@ -472,6 +549,8 @@ pub(crate) struct TextControlState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Text {
     data: String,
+    utf16: Option<Vec<u16>>,
+    unpaired_surrogates: u32,
     cdata_section: bool,
 }
 
@@ -480,6 +559,8 @@ impl Text {
     pub fn new(data: impl Into<String>) -> Self {
         Self {
             data: data.into(),
+            utf16: None,
+            unpaired_surrogates: 0,
             cdata_section: false,
         }
     }
@@ -488,6 +569,8 @@ impl Text {
     pub fn new_cdata_section(data: impl Into<String>) -> Self {
         Self {
             data: data.into(),
+            utf16: None,
+            unpaired_surrogates: 0,
             cdata_section: true,
         }
     }
@@ -498,16 +581,37 @@ impl Text {
     }
 }
 
+fn decode_utf16_lossy_with_unpaired_count(units: &[u16]) -> (String, u32) {
+    let mut data = String::new();
+    let mut unpaired = 0_u32;
+    for point in char::decode_utf16(units.iter().copied()) {
+        match point {
+            Ok(value) => data.push(value),
+            Err(_) => {
+                data.push(char::REPLACEMENT_CHARACTER);
+                unpaired = unpaired
+                    .checked_add(1)
+                    .expect("UTF-16 unpaired surrogate count exhausted");
+            }
+        }
+    }
+    (data, unpaired)
+}
+
 /// A DOM comment node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Comment {
     data: String,
+    utf16: Option<Vec<u16>>,
 }
 
 impl Comment {
     /// Creates a new comment payload.
     pub fn new(data: impl Into<String>) -> Self {
-        Self { data: data.into() }
+        Self {
+            data: data.into(),
+            utf16: None,
+        }
     }
 
     /// Returns the comment contents.
@@ -521,6 +625,7 @@ impl Comment {
 pub struct ProcessingInstruction {
     target: String,
     data: String,
+    utf16: Option<Vec<u16>>,
 }
 
 impl ProcessingInstruction {
@@ -529,6 +634,7 @@ impl ProcessingInstruction {
         Self {
             target: target.into(),
             data: data.into(),
+            utf16: None,
         }
     }
 }
@@ -598,7 +704,47 @@ impl std::error::Error for DomError {}
 impl NodeHandle {
     /// Creates a document node.
     pub fn document() -> Self {
-        Self::new(NodeData::Document(Document))
+        Self::new(NodeData::Document(Document, DocumentMetadata::default()))
+    }
+
+    /// Returns the document's decoder-selected canonical character encoding.
+    ///
+    /// Other node types return `None`. Later changes to meta elements do not
+    /// change this value: it describes the bytes used to construct the tree.
+    pub fn document_character_encoding(&self) -> Option<String> {
+        match &self.0.borrow().data {
+            NodeData::Document(_, metadata) => Some(metadata.character_encoding.clone()),
+            _ => None,
+        }
+    }
+
+    /// Records the actual encoding selected by a resource decoder.
+    pub(crate) fn set_document_character_encoding(&self, encoding: String) {
+        if let NodeData::Document(_, metadata) = &mut self.0.borrow_mut().data {
+            metadata.character_encoding = encoding;
+        }
+    }
+
+    /// Returns the parser or creation API's MIME type for this Document.
+    /// Other node types return `None`; changes to the tree do not change it.
+    pub fn document_content_type(&self) -> Option<String> {
+        match &self.0.borrow().data {
+            NodeData::Document(_, metadata) => Some(metadata.content_type.clone()),
+            _ => None,
+        }
+    }
+
+    /// Returns whether this node is an HTML Document, independent of its tree.
+    pub fn is_html_document(&self) -> bool {
+        matches!(&self.0.borrow().data,
+            NodeData::Document(_, metadata) if metadata.content_type == "text/html")
+    }
+
+    /// Records the MIME type selected by a parser or trusted creation API.
+    pub(crate) fn set_document_content_type(&self, content_type: String) {
+        if let NodeData::Document(_, metadata) = &mut self.0.borrow_mut().data {
+            metadata.content_type = content_type;
+        }
     }
 
     /// Creates a document fragment node.
@@ -609,6 +755,26 @@ impl NodeHandle {
     /// Creates an element node.
     pub fn element(tag_name: impl Into<String>) -> Self {
         Self::new(NodeData::Element(Element::new(tag_name)))
+    }
+
+    /// Creates an element from separated name metadata without case folding.
+    pub(crate) fn element_with_name(
+        local_name: String,
+        namespace_uri: Option<String>,
+        prefix: Option<String>,
+        html: bool,
+    ) -> Self {
+        let tag_name = prefix.as_ref().map_or_else(
+            || local_name.clone(),
+            |prefix| format!("{prefix}:{local_name}"),
+        );
+        Self::new(NodeData::Element(Element::new_named(
+            tag_name,
+            namespace_uri,
+            prefix,
+            local_name,
+            html,
+        )))
     }
 
     /// Creates an HTML element with explicit namespace metadata.
@@ -625,6 +791,20 @@ impl NodeHandle {
     /// Creates an XML element, preserving its qualified name and namespace.
     pub fn xml_element(tag_name: impl Into<String>, namespace_uri: Option<String>) -> Self {
         Self::new(NodeData::Element(Element::new_xml(tag_name, namespace_uri)))
+    }
+
+    /// Retains the parser's one-based script content coordinates as owned data.
+    pub(crate) fn set_script_source_position(&self, position: Option<(u32, u32)>) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.script_source_position = position;
+        }
+    }
+
+    pub(crate) fn script_source_position(&self) -> Option<(u32, u32)> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.script_source_position,
+            _ => None,
+        }
     }
 
     /// Creates a text node.
@@ -721,6 +901,7 @@ impl NodeHandle {
         let root = Self::new(NodeData::ShadowRoot(ShadowRoot {
             host: Rc::downgrade(&self.0),
             mode,
+            settings: ShadowRootSettings::default(),
             assignments: None,
         }));
         element.shadow_root = Some(root.clone());
@@ -749,6 +930,24 @@ impl NodeHandle {
             NodeData::ShadowRoot(root) => Some(root.mode),
             _ => None,
         }
+    }
+
+    /// Returns an owned copy of this shadow root's options.
+    pub fn shadow_root_settings(&self) -> Option<ShadowRootSettings> {
+        match &self.0.borrow().data {
+            NodeData::ShadowRoot(root) => Some(root.settings),
+            _ => None,
+        }
+    }
+
+    /// Replaces shadow-root options; returns false for ordinary nodes.
+    pub fn set_shadow_root_settings(&self, settings: ShadowRootSettings) -> bool {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::ShadowRoot(root) = &mut inner.data else {
+            return false;
+        };
+        root.settings = settings;
+        true
     }
 
     /// Returns the shadow root containing this node, if it is in a shadow tree.
@@ -953,6 +1152,81 @@ impl NodeHandle {
         Ok(removed)
     }
 
+    /// Returns the first child without cloning the other child handles.
+    pub fn first_child(&self) -> Option<NodeHandle> {
+        self.0.borrow().children.first().cloned()
+    }
+
+    /// Returns the last child without cloning the other child handles.
+    pub fn last_child(&self) -> Option<NodeHandle> {
+        self.0.borrow().children.last().cloned()
+    }
+
+    /// Returns the next ordinary sibling without copying its parent's child list.
+    pub fn next_sibling(&self) -> Option<NodeHandle> {
+        self.adjacent_sibling(false)
+    }
+
+    /// Returns the previous ordinary sibling without copying its parent's child list.
+    pub fn previous_sibling(&self) -> Option<NodeHandle> {
+        self.adjacent_sibling(true)
+    }
+
+    fn adjacent_sibling(&self, previous: bool) -> Option<NodeHandle> {
+        let parent = self.parent_node()?;
+        let inner = parent.0.borrow();
+        let position = inner.children.iter().position(|child| child == self)?;
+        let adjacent = if previous {
+            position.checked_sub(1)?
+        } else {
+            position.checked_add(1)?
+        };
+        inner.children.get(adjacent).cloned()
+    }
+
+    /// Returns the first HTML `body` or `frameset` child of the document's HTML root.
+    ///
+    /// Namespace and local names are read from native state, without descendant
+    /// traversal, child snapshots, or persistent references to the result.
+    pub(crate) fn document_body(&self) -> Option<NodeHandle> {
+        fn html_namespace(element: &Element) -> bool {
+            match element.namespace_uri() {
+                Some(namespace) => namespace == "http://www.w3.org/1999/xhtml",
+                // Legacy parser/default HTML nodes predate namespace storage.
+                None => element.is_html(),
+            }
+        }
+
+        let root = {
+            let document = self.0.borrow();
+            if !matches!(&document.data, NodeData::Document(..)) {
+                return None;
+            }
+            document
+                .children
+                .iter()
+                .find(|child| matches!(&child.0.borrow().data, NodeData::Element(_)))
+                .cloned()?
+        };
+        let root_inner = root.0.borrow();
+        let NodeData::Element(element) = &root_inner.data else {
+            return None;
+        };
+        if !html_namespace(element) || element.local_name() != "html" {
+            return None;
+        }
+        root_inner
+            .children
+            .iter()
+            .find(|child| {
+                let child = child.0.borrow();
+                matches!(&child.data, NodeData::Element(element)
+                    if html_namespace(element)
+                        && matches!(element.local_name(), "body" | "frameset"))
+            })
+            .cloned()
+    }
+
     /// Returns the element tag name, if this is an element node.
     pub fn tag_name(&self) -> Option<String> {
         self.with_tag_name(|name| name.map(str::to_owned))
@@ -1013,6 +1287,105 @@ impl NodeHandle {
         }
     }
 
+    /// Returns attribute records with exact UTF-16 values in insertion order.
+    pub fn attribute_records_utf16(
+        &self,
+    ) -> Option<Vec<(String, Option<String>, String, Vec<u16>)>> {
+        let inner = self.0.borrow();
+        let NodeData::Element(element) = &inner.data else {
+            return None;
+        };
+        Some(
+            element
+                .attribute_records
+                .iter()
+                .map(|record| {
+                    (
+                        record.qualified_name.clone(),
+                        record.namespace_uri.clone(),
+                        record.local_name.clone(),
+                        record
+                            .utf16
+                            .clone()
+                            .unwrap_or_else(|| record.value.encode_utf16().collect()),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// Returns one attribute record with its exact UTF-16 value.
+    pub fn attribute_record_utf16_at(
+        &self,
+        index: usize,
+    ) -> Option<(String, Option<String>, String, Vec<u16>)> {
+        let inner = self.0.borrow();
+        let NodeData::Element(element) = &inner.data else {
+            return None;
+        };
+        let record = element.attribute_records.get(index)?;
+        Some((
+            record.qualified_name.clone(),
+            record.namespace_uri.clone(),
+            record.local_name.clone(),
+            record
+                .utf16
+                .clone()
+                .unwrap_or_else(|| record.value.encode_utf16().collect()),
+        ))
+    }
+
+    /// Returns exact attribute value units by namespace and local name.
+    pub fn attribute_value_ns_utf16(
+        &self,
+        namespace: Option<&str>,
+        local_name: &str,
+    ) -> Option<Vec<u16>> {
+        let inner = self.0.borrow();
+        let NodeData::Element(element) = &inner.data else {
+            return None;
+        };
+        let record = element.attribute_records.iter().find(|record| {
+            record.namespace_uri.as_deref() == namespace && record.local_name == local_name
+        })?;
+        Some(
+            record
+                .utf16
+                .clone()
+                .unwrap_or_else(|| record.value.encode_utf16().collect()),
+        )
+    }
+
+    /// Updates an existing attribute's exact UTF-16 value; absent attributes are unchanged.
+    /// Its scalar projection uses replacement characters for unpaired surrogates.
+    pub fn set_attribute_value_ns_utf16(
+        &self,
+        namespace: Option<&str>,
+        local_name: &str,
+        units: &[u16],
+    ) {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut inner.data else {
+            return;
+        };
+        let Some(record) = element.attribute_records.iter_mut().find(|record| {
+            record.namespace_uri.as_deref() == namespace && record.local_name == local_name
+        }) else {
+            return;
+        };
+        match String::from_utf16(units) {
+            Ok(value) => {
+                record.value = value;
+                record.utf16 = None;
+            }
+            Err(_) => {
+                record.value = String::from_utf16_lossy(units);
+                record.utf16 = Some(units.to_vec());
+            }
+        }
+        rebuild_attribute_projection(element);
+    }
+
     /// Returns the number of attributes without cloning their records.
     pub fn attribute_record_count(&self) -> Option<usize> {
         match &self.0.borrow().data {
@@ -1035,32 +1408,15 @@ impl NodeHandle {
         }
     }
 
-    /// Returns the value of one namespace/local-name pair without cloning the
-    /// other attributes. Legacy prefixed records are normalized like the DOM
-    /// binding's attribute-record path.
+    /// Returns an attribute by its stored namespace and local name.
+    /// A colon in an unnamespaced attribute name does not assign a namespace.
     pub fn attribute_value_ns(&self, namespace: Option<&str>, local_name: &str) -> Option<String> {
         let inner = self.0.borrow();
         let NodeData::Element(element) = &inner.data else {
             return None;
         };
         element.attribute_records.iter().find_map(|attribute| {
-            let (effective_namespace, effective_local_name) = if attribute.namespace_uri.is_none() {
-                if let Some(local) = attribute.qualified_name.strip_prefix("xlink:") {
-                    (Some("http://www.w3.org/1999/xlink"), local)
-                } else if attribute.qualified_name == "xmlns" {
-                    (Some("http://www.w3.org/2000/xmlns/"), "xmlns")
-                } else if let Some(local) = attribute.qualified_name.strip_prefix("xmlns:") {
-                    (Some("http://www.w3.org/2000/xmlns/"), local)
-                } else {
-                    (None, attribute.local_name.as_str())
-                }
-            } else {
-                (
-                    attribute.namespace_uri.as_deref(),
-                    attribute.local_name.as_str(),
-                )
-            };
-            (effective_namespace == namespace && effective_local_name == local_name)
+            (attribute.namespace_uri.as_deref() == namespace && attribute.local_name == local_name)
                 .then(|| attribute.value.clone())
         })
     }
@@ -1110,6 +1466,61 @@ impl NodeHandle {
         self.with_attribute(name, |value| value == Some(expected))
     }
 
+    /// Returns an attribute value as exact UTF-16 code units.
+    /// Name matching follows [`Self::get_attribute`].
+    pub fn get_attribute_utf16(&self, name: &str) -> Option<Vec<u16>> {
+        let inner = self.0.borrow();
+        let NodeData::Element(element) = &inner.data else {
+            return None;
+        };
+        let record = element
+            .attribute_records
+            .iter()
+            .find(|record| record.qualified_name == name)
+            .or_else(|| {
+                element
+                    .html
+                    .then(|| {
+                        element
+                            .attribute_records
+                            .iter()
+                            .find(|record| record.qualified_name == name.to_ascii_lowercase())
+                    })
+                    .flatten()
+            })?;
+        Some(
+            record
+                .utf16
+                .clone()
+                .unwrap_or_else(|| record.value.encode_utf16().collect()),
+        )
+    }
+
+    /// Sets an unqualified attribute while retaining unpaired UTF-16 surrogates.
+    /// The scalar attribute view uses replacement characters only for consumers
+    /// requiring Unicode scalar values; the original DOM value remains owned.
+    pub fn set_attribute_utf16(&self, name: &str, units: &[u16]) {
+        let (value, original) = match String::from_utf16(units) {
+            Ok(value) => (value, None),
+            Err(_) => (String::from_utf16_lossy(units), Some(units.to_vec())),
+        };
+        self.set_attribute(name, value);
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            let name = if element.html {
+                name.to_ascii_lowercase()
+            } else {
+                name.to_owned()
+            };
+            if let Some(record) = element
+                .attribute_records
+                .iter_mut()
+                .find(|record| record.qualified_name == name)
+            {
+                record.utf16 = original;
+            }
+        }
+    }
+
     /// Sets an attribute on an element node. No-op for other node kinds.
     pub fn set_attribute(&self, name: impl Into<String>, value: impl Into<String>) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
@@ -1138,8 +1549,10 @@ impl NodeHandle {
                 .find(|attribute| attribute.qualified_name == name)
             {
                 attribute.value = value;
+                attribute.utf16 = None;
             } else {
                 element.attribute_records.push(AttributeRecord {
+                    utf16: None,
                     qualified_name: name.clone(),
                     namespace_uri: None,
                     local_name: name,
@@ -1222,8 +1635,10 @@ impl NodeHandle {
                     attribute.qualified_name = qualified_name;
                 }
                 attribute.value = value;
+                attribute.utf16 = None;
             } else {
                 element.attribute_records.push(AttributeRecord {
+                    utf16: None,
                     qualified_name,
                     namespace_uri,
                     local_name,
@@ -1715,9 +2130,19 @@ impl NodeHandle {
     /// Sets the data for a text or comment node. No-op for other node kinds.
     pub fn set_data(&self, data: &str) {
         match &mut self.0.borrow_mut().data {
-            NodeData::Text(text) => text.data = data.to_string(),
-            NodeData::Comment(comment) => comment.data = data.to_string(),
-            NodeData::ProcessingInstruction(pi) => pi.data = data.to_string(),
+            NodeData::Text(text) => {
+                text.data = data.to_string();
+                text.utf16 = None;
+                text.unpaired_surrogates = 0;
+            }
+            NodeData::Comment(comment) => {
+                comment.data = data.to_string();
+                comment.utf16 = None;
+            }
+            NodeData::ProcessingInstruction(pi) => {
+                pi.data = data.to_string();
+                pi.utf16 = None;
+            }
             _ => {}
         }
     }
@@ -1731,6 +2156,190 @@ impl NodeHandle {
             NodeData::DocumentType(doctype) => Some(doctype.name().to_string()),
             _ => None,
         }
+    }
+
+    /// Sets exact UTF-16 CharacterData, retaining unpaired surrogates.
+    /// The scalar view replaces unpaired surrogates for rendering only.
+    pub fn set_data_utf16(&self, units: &[u16]) {
+        let mut inner = self.0.borrow_mut();
+        if !matches!(
+            inner.data,
+            NodeData::Text(_) | NodeData::Comment(_) | NodeData::ProcessingInstruction(_)
+        ) {
+            return;
+        }
+        #[cfg(test)]
+        CHARACTER_DATA_UTF16_COPY_WORK.with(|count| {
+            count.set(count.get().saturating_add(units.len()));
+        });
+        let (value, unpaired_surrogates) = decode_utf16_lossy_with_unpaired_count(units);
+        if let NodeData::Text(text) = &mut inner.data {
+            text.data = value;
+            text.unpaired_surrogates = unpaired_surrogates;
+            text.utf16 = (unpaired_surrogates != 0).then(|| units.to_vec());
+            return;
+        }
+        let (data, utf16) = match &mut inner.data {
+            NodeData::Comment(comment) => (&mut comment.data, &mut comment.utf16),
+            NodeData::ProcessingInstruction(pi) => (&mut pi.data, &mut pi.utf16),
+            _ => return,
+        };
+        *data = value;
+        *utf16 = (unpaired_surrogates != 0).then(|| units.to_vec());
+    }
+
+    /// Appends scalar text without copying the existing text payload.
+    ///
+    /// Exact UTF-16 storage is extended as well when the node already retains
+    /// original code units. No-op for node kinds other than Text.
+    pub(crate) fn append_text_data(&self, suffix: &str) {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Text(text) = &mut inner.data else {
+            return;
+        };
+        text.data.push_str(suffix);
+        if let Some(units) = &mut text.utf16 {
+            units.extend(suffix.encode_utf16());
+        }
+    }
+
+    /// Appends exact UTF-16 while keeping both the scalar and code-unit views.
+    /// Existing scalar data is promoted only for the first unpaired surrogate.
+    pub(crate) fn append_text_utf16(&self, suffix: &[u16]) {
+        if suffix.is_empty() {
+            return;
+        }
+        let single_surrogate =
+            (suffix.len() == 1 && (0xd800..=0xdfff).contains(&suffix[0])).then_some(suffix[0]);
+        let decoded_suffix = single_surrogate
+            .is_none()
+            .then(|| decode_utf16_lossy_with_unpaired_count(suffix));
+        let suffix_unpaired = decoded_suffix.as_ref().map_or(1, |(_, count)| *count);
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Text(text) = &mut inner.data else {
+            return;
+        };
+        if suffix_unpaired == 0 {
+            let suffix_data = &decoded_suffix.as_ref().expect("decoded scalar suffix").0;
+            text.data.push_str(&suffix_data);
+            if let Some(units) = &mut text.utf16 {
+                #[cfg(test)]
+                CHARACTER_DATA_UTF16_COPY_WORK.with(|count| {
+                    count.set(count.get().saturating_add(suffix.len()));
+                });
+                units.extend_from_slice(suffix);
+            }
+            return;
+        }
+
+        let previous_high = text
+            .utf16
+            .as_ref()
+            .and_then(|units| units.last().copied())
+            .filter(|unit| (0xd800..=0xdbff).contains(unit));
+        let joins_boundary_pair = previous_high
+            .zip(suffix.first().copied())
+            .filter(|(_, low)| (0xdc00..=0xdfff).contains(low));
+        #[cfg(test)]
+        let promoted = text.utf16.is_none();
+        let mut exact = text
+            .utf16
+            .take()
+            .unwrap_or_else(|| text.data.encode_utf16().collect());
+        #[cfg(test)]
+        let promoted_units = promoted.then_some(exact.len()).unwrap_or(0);
+        exact.extend_from_slice(suffix);
+        #[cfg(test)]
+        CHARACTER_DATA_UTF16_COPY_WORK.with(|count| {
+            count.set(
+                count
+                    .get()
+                    .saturating_add(promoted_units)
+                    .saturating_add(suffix.len()),
+            );
+        });
+
+        if let Some((high, low)) = joins_boundary_pair {
+            debug_assert!(text.unpaired_surrogates != 0);
+            debug_assert!(suffix_unpaired != 0);
+            let previous = text.data.pop();
+            debug_assert_eq!(previous, Some(char::REPLACEMENT_CHARACTER));
+            let joined = char::decode_utf16([high, low])
+                .next()
+                .and_then(Result::ok)
+                .expect("validated surrogate pair");
+            text.data.push(joined);
+            if let Some((suffix_data, _)) = &decoded_suffix {
+                text.data.push_str(
+                    suffix_data
+                        .strip_prefix(char::REPLACEMENT_CHARACTER)
+                        .expect("lone low surrogate projects to replacement"),
+                );
+            }
+            text.unpaired_surrogates = text
+                .unpaired_surrogates
+                .checked_sub(1)
+                .and_then(|count| count.checked_add(suffix_unpaired - 1))
+                .expect("UTF-16 unpaired surrogate count exhausted");
+        } else {
+            if single_surrogate.is_some() {
+                text.data.push(char::REPLACEMENT_CHARACTER);
+            } else {
+                text.data
+                    .push_str(&decoded_suffix.as_ref().expect("decoded suffix").0);
+            }
+            text.unpaired_surrogates = text
+                .unpaired_surrogates
+                .checked_add(suffix_unpaired)
+                .expect("UTF-16 unpaired surrogate count exhausted");
+        }
+        // Keep the exact buffer after a later append completes a split pair.
+        // Dropping it here would make every following lone surrogate re-encode
+        // the entire scalar prefix and restore quadratic behavior.
+        text.utf16 = Some(exact);
+    }
+
+    /// Reads CharacterData without copying its scalar or original UTF-16 data.
+    ///
+    /// Original code units are present after exact UTF-16 input introduces an
+    /// unpaired surrogate. They may remain after a later append completes it.
+    /// Text, CDATA, Comment and ProcessingInstruction are supported; document
+    /// types are excluded. The node is immutably borrowed while `read` runs;
+    /// do not mutate it or invoke author code in the callback.
+    pub fn with_character_data<R>(
+        &self,
+        read: impl FnOnce(&str, Option<&[u16]>) -> R,
+    ) -> Option<R> {
+        let inner = self.0.borrow();
+        let (data, utf16) = match &inner.data {
+            NodeData::Text(text) => (&text.data, &text.utf16),
+            NodeData::Comment(comment) => (&comment.data, &comment.utf16),
+            NodeData::ProcessingInstruction(pi) => (&pi.data, &pi.utf16),
+            _ => return None,
+        };
+        Some(read(data, utf16.as_deref()))
+    }
+
+    /// Returns exact UTF-16 leaf data, including unpaired surrogates.
+    pub fn data_utf16(&self) -> Option<Vec<u16>> {
+        let inner = self.0.borrow();
+        let (data, utf16) = match &inner.data {
+            NodeData::Text(text) => (&text.data, &text.utf16),
+            NodeData::Comment(comment) => (&comment.data, &comment.utf16),
+            NodeData::ProcessingInstruction(pi) => (&pi.data, &pi.utf16),
+            NodeData::DocumentType(doctype) => {
+                return Some(doctype.name().encode_utf16().collect());
+            }
+            _ => return None,
+        };
+        let units = utf16
+            .clone()
+            .unwrap_or_else(|| data.encode_utf16().collect::<Vec<_>>());
+        #[cfg(test)]
+        CHARACTER_DATA_UTF16_COPY_WORK.with(|count| {
+            count.set(count.get().saturating_add(units.len()));
+        });
+        Some(units)
     }
 
     /// Returns whether this text-like node is a CDATA section.
@@ -1777,7 +2386,7 @@ impl NodeHandle {
 impl Node for NodeHandle {
     fn node_type(&self) -> NodeType {
         match &self.0.borrow().data {
-            NodeData::Document(_) => NodeType::Document,
+            NodeData::Document(..) => NodeType::Document,
             NodeData::DocumentFragment | NodeData::ShadowRoot(_) => NodeType::DocumentFragment,
             NodeData::Element(_) => NodeType::Element,
             NodeData::Text(_) => NodeType::Text,
@@ -1789,7 +2398,7 @@ impl Node for NodeHandle {
 
     fn node_name(&self) -> String {
         match &self.0.borrow().data {
-            NodeData::Document(_) => "#document".to_string(),
+            NodeData::Document(..) => "#document".to_string(),
             NodeData::DocumentFragment | NodeData::ShadowRoot(_) => {
                 "#document-fragment".to_string()
             }
@@ -1815,7 +2424,12 @@ impl Node for NodeHandle {
     }
 
     fn child_nodes(&self) -> Vec<NodeHandle> {
-        self.0.borrow().children.clone()
+        let inner = self.0.borrow();
+        #[cfg(test)]
+        CHILD_SNAPSHOT_HANDLE_CLONES.with(|count| {
+            count.set(count.get().saturating_add(inner.children.len()));
+        });
+        inner.children.clone()
     }
 }
 
@@ -2049,6 +2663,61 @@ fn parse_attribute_selector(selector: &str) -> Option<AttributeSelector> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appending_scalar_text_preserves_exact_utf16_data() {
+        let text = NodeHandle::text("");
+        text.set_data_utf16(&[0xd800]);
+        text.append_text_data("x😀");
+
+        assert_eq!(text.data(), Some("\u{fffd}x😀".to_owned()));
+        assert_eq!(
+            text.data_utf16(),
+            Some(vec![0xd800, u16::from(b'x'), 0xd83d, 0xde00])
+        );
+    }
+
+    #[test]
+    fn appending_utf16_completes_a_split_surrogate_pair() {
+        let text = NodeHandle::text("");
+        text.set_data_utf16(&[0xd83d]);
+        text.append_text_utf16(&[0xde00]);
+
+        assert_eq!(text.data().as_deref(), Some("😀"));
+        assert_eq!(text.data_utf16(), Some(vec![0xd83d, 0xde00]));
+        assert_eq!(
+            text.with_character_data(|_, exact| exact == Some(&[0xd83d, 0xde00])),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn repeated_split_surrogate_pairs_have_linear_copy_work() {
+        fn append_copy_work(items: usize) -> usize {
+            let text = NodeHandle::text("");
+            reset_character_data_utf16_copy_work();
+            for _ in 0..items {
+                text.append_text_utf16(&[0xd83d]);
+                text.append_text_utf16(&[0xde00]);
+            }
+            assert_eq!(text.data().unwrap().chars().count(), items);
+            assert_eq!(text.data_utf16().unwrap().len(), items * 2);
+            character_data_utf16_copy_work()
+        }
+
+        let small = append_copy_work(256);
+        let large = append_copy_work(512);
+        assert!(
+            large < small * 3,
+            "doubling split pairs grew copy work from {small} to {large}"
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn text_payload_stays_within_existing_padding() {
+        assert_eq!(std::mem::size_of::<Text>(), 56);
+    }
 
     #[test]
     fn descendant_text_preserves_each_traversal_contract() {

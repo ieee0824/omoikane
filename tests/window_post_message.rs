@@ -374,8 +374,10 @@ fn navigated_iframe_does_not_receive_its_previous_documents_message() {
             const child = iframe.contentWindow;
             child.addEventListener('message', () => received.push('stale'));
             child.postMessage('before navigation', '*');
-            // Location.replace commits the new Document before the queued task.
             child.location.replace('data:text/html,replacement');
+            // Reading contentDocument explicitly commits the replacement before
+            // the queued message task can target the previous Document.
+            void iframe.contentDocument;
         "#,
         )
         .unwrap();

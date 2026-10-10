@@ -334,7 +334,16 @@
     { "path": "dom/nodes/MutationObserver-takeRecords.html" },
     { "path": "dom/nodes/MutationObserver-disconnect.html" },
     { "path": "dom/nodes/MutationObserver-attributes.html" },
-    { "path": "dom/nodes/MutationObserver-characterData.html" },
+    {
+      "path": "dom/nodes/MutationObserver-characterData.html",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "The 2014 fixture expects <?processing data?> to be a bogus comment with data ?processing data?. Current HTML processing-instruction tokenization produces a ProcessingInstruction with data data. Keep the original fixture and assertions; only this named subtest is a tracked specification mismatch.",
+        "issue": "#1323",
+        "expires": "2026-11-08",
+        "failed_subtests": ["characterData ProcessingInstruction: data mutations"]
+      }
+    },
     { "path": "html/semantics/popovers/toggleevent-interface.html" },
     { "path": "html/semantics/popovers/togglePopover.html" },
     { "path": "fullscreen/api/document-fullscreen-enabled.html" },
@@ -478,6 +487,18 @@
     { "path": "css/css-transforms/parsing/rotate-parsing-computed.html" },
     { "path": "css/css-transforms/parsing/scale-parsing-valid.html" },
     { "path": "css/css-transforms/parsing/scale-parsing-invalid.html" },
-    { "path": "css/css-transforms/parsing/scale-parsing-computed.html" }
+    { "path": "css/css-transforms/parsing/scale-parsing-computed.html" },
+    {"path": "html/webappapis/scripting/processing-model-2/addEventListener.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/runtime-error-in-setTimeout.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/runtime-error.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/promise-rejection-event-constructor.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/promise-rejection-event-during-parse.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/promise-rejection-events-attached-in-event.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/promise-rejection-events.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/window-onerror-runtime-error.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/promise-rejection-events-iframe.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/promise-rejection-events.dedicatedworker.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/allow-crossorigin.html"},
+    {"path": "html/webappapis/scripting/processing-model-2/unhandled-promise-rejections/disallow-crossorigin.html"}
   ]
 }

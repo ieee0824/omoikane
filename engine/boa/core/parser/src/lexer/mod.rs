@@ -111,6 +111,14 @@ impl<R> Lexer<R> {
         }
     }
 
+    pub(crate) fn with_start_position(mut self, position: boa_ast::Position) -> Self
+    where
+        R: ReadChar,
+    {
+        self.cursor.set_start_position(position);
+        self
+    }
+
     /// Handles lexing of a token starting '/' with the '/' already being consumed.
     /// This could be a divide symbol or the start of a regex.
     ///

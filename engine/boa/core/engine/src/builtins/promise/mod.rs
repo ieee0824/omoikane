@@ -151,6 +151,9 @@ macro_rules! if_abrupt_reject_promise {
         match $value {
             // 1. If value is an abrupt completion, then
             Err(err) => {
+                if !err.is_catchable() {
+                    return Err(err);
+                }
                 let err = err.to_opaque($context);
                 // a. Perform ? Call(capability.[[Reject]], undefined, « value.[[Value]] »).
                 $capability
@@ -540,6 +543,14 @@ impl Promise {
         &self.state
     }
 
+    pub(crate) const fn is_handled(&self) -> bool {
+        self.handled
+    }
+
+    pub(crate) fn mark_handled(&mut self) {
+        self.handled = true;
+    }
+
     /// [`Promise.try ( callbackfn, ...args )`][spec]
     ///
     /// Calls the given function and returns a new promise that is resolved if the function
@@ -569,6 +580,9 @@ impl Promise {
         match status {
             // 5. If status is an abrupt completion, then
             Err(err) => {
+                if !err.is_catchable() {
+                    return Err(err);
+                }
                 let value = err.to_opaque(context);
 
                 // a. Perform ? Call(promiseCapability.[[Reject]], undefined, « status.[[Value]] »).
@@ -1773,7 +1787,8 @@ impl Promise {
                         .call(&JsValue::undefined(), &[], context)?;
 
                     // ii. Let promise be ? PromiseResolve(C, result).
-                    let promise = Self::promise_resolve(&captures.c, result, context)?;
+                    // Keep the detached promise alive while creating the thunk below.
+                    let promise = Self::promise_resolve(&captures.c, result, context)?.root();
 
                     // iii. Let returnValue be a new Abstract Closure with no parameters that captures value and performs the following steps when called:
                     let return_value = FunctionObjectBuilder::new(
@@ -1793,7 +1808,11 @@ impl Promise {
                     let value_thunk = return_value.length(0).name("").build();
 
                     // v. Return ? Invoke(promise, "then", « valueThunk »).
-                    promise.invoke(js_string!("then"), &[value_thunk.into()], context)
+                    promise.invoke(
+                        js_string!("then"),
+                        &[JsObject::clone(&*value_thunk).into()],
+                        context,
+                    )
                 },
                 FinallyCaptures {
                     on_finally: on_finally.clone().into_edge(),
@@ -1824,7 +1843,8 @@ impl Promise {
                         .call(&JsValue::undefined(), &[], context)?;
 
                     // ii. Let promise be ? PromiseResolve(C, result).
-                    let promise = Self::promise_resolve(&captures.c, result, context)?;
+                    // Keep the detached promise alive while creating the thunk below.
+                    let promise = Self::promise_resolve(&captures.c, result, context)?.root();
 
                     // iii. Let throwReason be a new Abstract Closure with no parameters that captures reason and performs the following steps when called:
                     let throw_reason = FunctionObjectBuilder::new(
@@ -1844,7 +1864,11 @@ impl Promise {
                     let thrower = throw_reason.length(0).name("").build();
 
                     // v. Return ? Invoke(promise, "then", « thrower »).
-                    promise.invoke(js_string!("then"), &[thrower.into()], context)
+                    promise.invoke(
+                        js_string!("then"),
+                        &[JsObject::clone(&*thrower).into()],
+                        context,
+                    )
                 },
                 FinallyCaptures {
                     on_finally: on_finally.into_edge(),
@@ -2258,6 +2282,9 @@ impl Promise {
                     let then_action = match then.get(js_string!("then"), context) {
                         // 10. If then is an abrupt completion, then
                         Err(e) => {
+                            if !e.is_catchable() {
+                                return Err(e);
+                            }
                             //   a. Perform RejectPromise(promise, then.[[Value]]).
                             reject_promise(&promise, e.to_opaque(context), context);
 
@@ -2410,7 +2437,12 @@ fn new_promise_reaction_job(
                 } else {
                     hooks.call_job_callback(handler, &this, &args, &mut context)
                 };
-                result.map_err(|e| e.to_opaque(&mut context))
+                match result {
+                    // Host execution limits abort the job; they are not
+                    // JavaScript throw completions that reject a promise.
+                    Err(error) if !error.is_catchable() => return Err(error),
+                    result => result.map_err(|error| error.to_opaque(&mut context)),
+                }
             }
         };
 
@@ -2515,6 +2547,9 @@ fn new_promise_resolve_thenable_job(
 
         //    c. If thenCallResult is an abrupt completion, then
         if let Err(value) = then_call_result {
+            if !value.is_catchable() {
+                return Err(value);
+            }
             let value = value.to_opaque(&mut context);
             //    i. Return ? Call(resolvingFunctions.[[Reject]], undefined, « thenCallResult.[[Value]] »).
             return if context.async_jobs_enabled {

@@ -3,8 +3,10 @@
 (() => {
   const native = globalThis.__omoikane_font_loading;
   const task = globalThis.__omoikane_queue_font_loading_task;
+  const installMutationHook = globalThis.__omoikane_install_font_mutation_hook;
   delete globalThis.__omoikane_font_loading;
   delete globalThis.__omoikane_queue_font_loading_task;
+  delete globalThis.__omoikane_install_font_mutation_hook;
   const [faces, sets, documents] = globalThis.__omoikane_font_maps;
   delete globalThis.__omoikane_font_maps;
   const defaults = {
@@ -127,9 +129,21 @@
       if (state.failed.length) set.dispatchEvent(state.event('loadingerror', state.failed));
     });
   }
+  function fontStatusPromise(face) {
+    const state = faceState(face);
+    if (!state.promise) {
+      state.promise = new Promise((resolve, reject) => {
+        state.resolve = resolve;
+        state.reject = reject;
+      });
+      if (state.status === 'loaded') state.resolve(face);
+      else if (state.status === 'error') state.reject(state.error);
+    }
+    return state.promise;
+  }
   function start(face) {
     const state = faceState(face);
-    if (state.status !== 'unloaded') return state.promise;
+    if (state.status !== 'unloaded') return;
     state.status = 'loading';
     for (const set of state.sets) beginSet(set, face);
     task(() => {
@@ -142,13 +156,14 @@
         finishSet(set);
       }
     });
-    return state.promise;
   }
   class FontFace {
     constructor(family, source, descriptors = {}) {
       if (arguments.length < 2) throw new TypeError('FontFace requires family and source');
       const state = { descriptors: {...defaults}, status: 'unloaded', sets: new Set(), id: null, binary: false };
-      state.promise = new Promise((resolve, reject) => { state.resolve = resolve; state.reject = reject; });
+      // Expose a promise only when loaded/load is requested, as browser engines do.
+      state.resolve = () => {};
+      state.reject = error => { state.error = error; };
       faces.set(this, state);
       let bytes = null;
       if (ArrayBuffer.isView(source)) bytes = new Uint8Array(source.buffer, source.byteOffset, source.byteLength).slice();
@@ -168,8 +183,8 @@
       if (state.binary && state.status === 'unloaded') task(() => start(this));
     }
     get status() { return faceState(this).status; }
-    get loaded() { return faceState(this).promise; }
-    load() { return start(this); }
+    get loaded() { return fontStatusPromise(this); }
+    load() { start(this); return fontStatusPromise(this); }
   }
   for (const name of Object.keys(defaults)) {
     Object.defineProperty(FontFace.prototype, name, {
@@ -430,12 +445,14 @@
     const set = new FontFaceSet();
     setState(set).document = document;
     documents.set(document, set);
-    const observer = new MutationObserver(() => {
-      if (documents.has(document)) {
-        const set = documents.get(document); syncCSS(set); requestUsedFonts(set);
+    installMutationHook(document, currentDocument => {
+      // A queued maintenance notification may outlive its browsing context.
+      // Retired windows must not create internal rejection reports or restart
+      // font work. The private host predicate uses this callback's Realm.
+      if (!native('is-live')) return;
+      if (documents.has(currentDocument)) {
+        const set = documents.get(currentDocument); syncCSS(set); requestUsedFonts(set);
       }
     });
-    observer.observe(document, {subtree: true, childList: true, characterData: true,
-      attributes: true, attributeFilter: ['href', 'rel', 'media', 'disabled']});
   }
 })();

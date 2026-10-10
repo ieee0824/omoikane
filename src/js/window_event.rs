@@ -48,6 +48,38 @@ pub(super) fn register(
     register_private_callable(
         context,
         bindings,
+        js_string!("__omoikane_document_window"),
+        1,
+        NativeFunction::from_copy_closure(document_window_native),
+    )?;
+    register_private_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_window_event_document"),
+        1,
+        NativeFunction::from_copy_closure(|_, args, context| {
+            Ok(JsValue::from(
+                receiver_document_id(args.first(), context)? as f64
+            ))
+        }),
+    )?;
+    register_private_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_window_proxy_global"),
+        2,
+        NativeFunction::from_copy_closure(window_proxy_global_native),
+    )?;
+    register_private_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_retained_window_global"),
+        1,
+        NativeFunction::from_copy_closure(retained_window_global_native),
+    )?;
+    register_private_callable(
+        context,
+        bindings,
         js_string!("__omoikane_register_platform_event_factory"),
         2,
         NativeFunction::from_copy_closure(register_event_factory_native),
@@ -73,6 +105,100 @@ pub(super) fn register(
         1,
         NativeFunction::from_copy_closure(iframe_nodes_in_subtree_native),
     )
+}
+
+/// Returns only a retained Realm's actual Window global. Listener placeholders
+/// belong to the creator Realm and must not stand in for a retired child Window.
+fn retained_window_global_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(window) = args.first().and_then(JsValue::as_object) else {
+        return Ok(JsValue::null());
+    };
+    let Some(realm) = window.associated_realm() else {
+        return Ok(JsValue::null());
+    };
+    let previous = context.enter_realm(realm.clone());
+    let global = context.global_object();
+    context.enter_realm(previous);
+    if !JsObject::equals(&window, &global) {
+        return Ok(JsValue::null());
+    }
+    let Some(document) = realm
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .map(|value| value.0)
+    else {
+        return Ok(JsValue::null());
+    };
+    // Keep the caller Realm restored before checking the retained Document.
+    if same_origin_document(context, document)? {
+        Ok(window.into())
+    } else {
+        Ok(JsValue::null())
+    }
+}
+
+/// Resolves a child or popup Document's WindowProxy in its creator's Realm.
+/// The caller can access its own Document without being allowed to inspect
+/// the cross-origin frame element that embeds it. The private owner callback
+/// creates or retrieves the proxy without exposing that element to the caller.
+fn document_window_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document)?;
+    window_for_document(document, context)
+}
+
+/// Trusted initialization lookup, also used after the public binding checks
+/// access to the Document. It never exposes its owner frame to page code.
+pub(super) fn window_for_document(document: usize, context: &mut Context) -> JsResult<JsValue> {
+    let owner = with_host_state(|host| {
+        let state = host.borrow();
+        let frame = state
+            .iframe_documents
+            .iter()
+            .find_map(|(frame, entry)| (entry.document.identity() == document).then_some(*frame));
+        let target = if let Some(frame) = frame {
+            let owner = state
+                .get_node(frame)
+                .as_ref()
+                .and_then(owner_document_for_node)
+                .ok_or_else(|| JsNativeError::typ().with_message("iframe has no owner Document"))?;
+            Some((frame as f64, owner.identity(), "window"))
+        } else {
+            state.auxiliary_contexts.iter().find_map(|(id, entry)| {
+                (entry.document.identity() == document).then_some((
+                    *id as f64,
+                    entry.opener_document_id,
+                    "auxiliary-window",
+                ))
+            })
+        };
+        let Some((id, owner, kind)) = target else {
+            return Ok(None);
+        };
+        let callback = state.iframe_navigation.owner(owner).ok_or_else(|| {
+            JsNativeError::typ().with_message("browsing context owner is no longer active")
+        })?;
+        Ok(Some((id, callback, kind)))
+    })?;
+    let Some((id, callback, kind)) = owner else {
+        return Ok(JsValue::null());
+    };
+    callback
+        .as_callable()
+        .expect("registered browsing context handler")
+        .call(
+            &JsValue::undefined(),
+            &[JsValue::from(id), JsValue::null(), js_string!(kind).into()],
+            context,
+        )
 }
 
 /// Snapshots frame identities in light-tree order without allocating JS views
@@ -226,6 +352,23 @@ pub(super) fn receiver_document_id(
     receiver: Option<&JsValue>,
     context: &mut Context,
 ) -> JsResult<usize> {
+    let document = resolve_receiver_document_id(receiver, context)?;
+    ensure_same_origin_document(context, document)?;
+    Ok(document)
+}
+
+fn resolve_receiver_document_id(
+    receiver: Option<&JsValue>,
+    context: &mut Context,
+) -> JsResult<usize> {
+    resolve_receiver_document_id_with_pending(receiver, context, true)
+}
+
+fn resolve_receiver_document_id_with_pending(
+    receiver: Option<&JsValue>,
+    context: &mut Context,
+    commit_pending_navigation: bool,
+) -> JsResult<usize> {
     let receiver = match receiver {
         None => context.global_object(),
         Some(value) if value.is_null_or_undefined() => context.global_object(),
@@ -242,15 +385,31 @@ pub(super) fn receiver_document_id(
     )?;
     let document_id = if let Some(frame) = target.as_number() {
         let frame = frame as usize;
-        let document = iframe_content_document_native(
-            &JsValue::undefined(),
-            &[JsValue::new(frame as f64)],
-            context,
-        )?;
-        match document.as_number() {
-            Some(document) => document as usize,
-            None => return Err(cross_origin_access_error(context)?),
-        }
+        // A genuine WindowProxy can refer to the caller's own child Window
+        // even when its embedding element belongs to a cross-origin parent.
+        // Resolve the browsing context here; the Document-origin check below
+        // protects the Window's slots without requiring DOM access to its frame.
+        with_host_state(|host| {
+            let mut state = host.borrow_mut();
+            let node = state
+                .get_node(frame)
+                .filter(|node| state.node_is_in_active_document(node))
+                .ok_or_else(|| JsNativeError::typ().with_message("WindowProxy is closed"))?;
+            let document = if commit_pending_navigation {
+                state
+                    .iframe_content_document(&node)
+                    .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?
+            } else {
+                state
+                    .iframe_documents
+                    .get(&frame)
+                    .map(|entry| entry.document.clone())
+                    .ok_or_else(|| {
+                        JsNativeError::typ().with_message("WindowProxy is not initialized")
+                    })?
+            };
+            Ok(document.identity())
+        })?
     } else if let Some(auxiliary) = target.as_string() {
         let auxiliary = auxiliary
             .to_std_string_escaped()
@@ -286,6 +445,74 @@ pub(super) fn receiver_document_id(
         }
         document_id
     };
-    ensure_same_origin_document(context, document_id)?;
     Ok(document_id)
+}
+
+/// Called directly by a WindowProxy trap so the immediate caller is the
+/// script inspecting the proxy, rather than the Realm that created its facade.
+fn window_proxy_global_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let create_if_missing = args.get(1).is_none_or(JsValue::to_boolean);
+    let document =
+        resolve_receiver_document_id_with_pending(args.first(), context, create_if_missing)?;
+    if !same_origin_document(context, document)? {
+        return Ok(JsValue::null());
+    }
+    with_host_state(|host| {
+        let (realm, frame, auxiliary) = {
+            let state = host.borrow();
+            let frame = state
+                .iframe_documents
+                .iter()
+                .find_map(|(id, entry)| (entry.document.identity() == document).then_some(*id));
+            let auxiliary = state
+                .auxiliary_contexts
+                .iter()
+                .find_map(|(id, entry)| (entry.document.identity() == document).then_some(*id));
+            let realm = (state.document.identity() == document)
+                .then(|| state.main_realm.clone())
+                .flatten();
+            (realm, frame, auxiliary)
+        };
+        let realm = if let Some(realm) = realm {
+            realm
+        } else if let Some(frame) = frame {
+            if create_if_missing {
+                ensure_iframe_realm(context, host, frame, document)?
+            } else {
+                let Some(realm) = host
+                    .borrow()
+                    .iframe_documents
+                    .get(&frame)
+                    .and_then(|entry| entry.realm.clone())
+                else {
+                    return Ok(JsValue::null());
+                };
+                realm
+            }
+        } else if let Some(auxiliary) = auxiliary {
+            if create_if_missing {
+                ensure_auxiliary_realm(context, host, auxiliary)?
+            } else {
+                let Some(realm) = host
+                    .borrow()
+                    .auxiliary_contexts
+                    .get(&auxiliary)
+                    .and_then(|entry| entry.realm.clone())
+                else {
+                    return Ok(JsValue::null());
+                };
+                realm
+            }
+        } else {
+            return Ok(JsValue::null());
+        };
+        let previous = context.enter_realm(realm);
+        let global = context.global_object();
+        context.enter_realm(previous);
+        Ok(global.into())
+    })
 }

@@ -118,7 +118,7 @@ fn worker_startup_and_task_failures_keep_owner_errors_and_sanitize_reports() {
 }
 
 #[test]
-fn shared_worker_startup_failure_is_recorded_without_stopping_page() {
+fn shared_worker_runtime_exception_is_recorded_without_owner_error_or_page_failure() {
     let database = TestDatabase::new();
     let reporter = database.reporter();
     let mut runtime = JsRuntime::new().unwrap();
@@ -133,7 +133,9 @@ fn shared_worker_startup_failure_is_recorded_without_stopping_page() {
     runtime.tick(1).unwrap();
     assert_eq!(
         runtime.eval("sharedErrors.length").unwrap().as_number(),
-        Some(1.0)
+        // Runtime errors are reported at SharedWorkerGlobalScope. Only a
+        // DedicatedWorkerGlobalScope forwards them to its Worker object.
+        Some(0.0)
     );
     assert_eq!(runtime.eval("3 + 4").unwrap().as_number(), Some(7.0));
     reporter.flush().unwrap();
@@ -197,4 +199,164 @@ fn imported_module_load_failure_preserves_evaluation_error() {
         "execute",
     );
     database.assert_no_secrets();
+}
+
+#[test]
+fn explicit_worker_error_is_recorded_once_and_canceled_error_is_not_recorded() {
+    let database = TestDatabase::new();
+    let reporter = database.reporter();
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_error_reporter(Arc::clone(&reporter), ExecutionSurface::Headless);
+    runtime
+        .eval(
+            r#"
+        globalThis.ownerReports = 0;
+        for (const cancel of [true, false]) {
+            const source = `onerror = () => ${cancel}; reportError(new Error('BODY_SECRET_936'));`;
+            const worker = new Worker('data:text/javascript,' + encodeURIComponent(source));
+            worker.onerror = event => { ownerReports++; event.preventDefault(); };
+        }
+    "#,
+        )
+        .unwrap();
+    runtime.run_timers(20, 1, 80);
+    assert_eq!(runtime.eval("ownerReports").unwrap().as_number(), Some(1.0));
+    reporter.flush().unwrap();
+    database.assert_report(ErrorCategory::Worker, "WORKER_RUNTIME_FAILED", "execute");
+    database.assert_no_secrets();
+}
+
+#[test]
+fn shared_worker_runtime_errors_record_once_and_respect_global_cancellation() {
+    for trigger in [
+        "reportError(new Error('BODY_SECRET_936'))",
+        "queueMicrotask(() => { throw new Error('BODY_SECRET_936'); })",
+        "setTimeout(() => { throw new Error('BODY_SECRET_936'); }, 0)",
+        "throw new Error('BODY_SECRET_936')",
+    ] {
+        let database = TestDatabase::new();
+        let reporter = database.reporter();
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_error_reporter(Arc::clone(&reporter), ExecutionSurface::Headless);
+        let trigger = serde_json::to_string(trigger).unwrap();
+        runtime.eval(&format!(r#"
+            globalThis.sharedLocalReports = [];
+            globalThis.sharedOwnerReports = 0;
+            for (const canceled of [false, true]) {{
+                const source = `onconnect = event => {{
+                    const port = event.ports[0];
+                    onerror = message => {{ port.postMessage(message); return ${{canceled}}; }};
+                    port.onmessage = () => {{ ${{{trigger}}} }};
+                }};`;
+                const worker = new SharedWorker('data:text/javascript,' + encodeURIComponent(source));
+                worker.onerror = () => sharedOwnerReports++;
+                worker.port.onmessage = event => sharedLocalReports.push(event.data);
+                worker.port.postMessage('trigger');
+            }}
+        "#)).unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.tick(0).unwrap();
+        assert_eq!(
+            runtime
+                .eval("sharedLocalReports.length")
+                .unwrap()
+                .as_number(),
+            Some(2.0)
+        );
+        assert_eq!(
+            runtime.eval("sharedOwnerReports").unwrap().as_number(),
+            Some(0.0)
+        );
+        reporter.flush().unwrap();
+        database.assert_report(
+            ErrorCategory::Worker,
+            "SHARED_WORKER_RUNTIME_FAILED",
+            "execute",
+        );
+        database.assert_no_secrets();
+    }
+}
+
+#[test]
+fn worker_startup_host_abort_records_diagnostic_without_author_error_event() {
+    let database = TestDatabase::new();
+    let reporter = database.reporter();
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_error_reporter(Arc::clone(&reporter), ExecutionSurface::Headless);
+    runtime
+        .eval(
+            r#"
+        globalThis.abortOwnerEvents = 0;
+        const source = 'while (true) {}';
+        for (const Constructor of [Worker, SharedWorker]) {
+            const worker = new Constructor('data:text/javascript,' + encodeURIComponent(source));
+            worker.onerror = event => { abortOwnerEvents++; event.preventDefault(); };
+        }
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        runtime.eval("abortOwnerEvents").unwrap().as_number(),
+        Some(0.0)
+    );
+    assert_eq!(runtime.eval("2 + 3").unwrap().as_number(), Some(5.0));
+    reporter.flush().unwrap();
+    database.assert_report(ErrorCategory::Worker, "WORKER_STARTUP_FAILED", "execute");
+    database.assert_report(
+        ErrorCategory::Worker,
+        "SHARED_WORKER_STARTUP_FAILED",
+        "execute",
+    );
+    database.assert_no_secrets();
+}
+
+#[test]
+fn worker_task_host_aborts_record_diagnostics_without_author_error_events() {
+    for trigger in [
+        "setTimeout(() => { while (true) {} }, 0)",
+        "queueMicrotask(() => { while (true) {} })",
+        "while (true) {}",
+    ] {
+        eprintln!("host-abort trigger: {trigger}");
+        let database = TestDatabase::new();
+        let reporter = database.reporter();
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_error_reporter(Arc::clone(&reporter), ExecutionSurface::Headless);
+        let trigger = serde_json::to_string(trigger).unwrap();
+        runtime.eval(&format!(r#"
+            globalThis.abortAuthorEvents = 0;
+            const dedicatedSource = `onerror = () => {{ postMessage('unexpected'); }};
+                onmessage = () => {{ ${{{trigger}}} }};`;
+            const dedicated = new Worker('data:text/javascript,' + encodeURIComponent(dedicatedSource));
+            dedicated.onerror = event => {{ abortAuthorEvents++; event.preventDefault(); }};
+            dedicated.onmessage = () => abortAuthorEvents++;
+            dedicated.postMessage('trigger');
+            const sharedSource = `onconnect = event => {{
+                const port = event.ports[0];
+                onerror = () => {{ port.postMessage('unexpected'); }};
+                port.onmessage = () => {{ ${{{trigger}}} }};
+            }};`;
+            const shared = new SharedWorker('data:text/javascript,' + encodeURIComponent(sharedSource));
+            shared.onerror = event => {{ abortAuthorEvents++; event.preventDefault(); }};
+            shared.port.onmessage = () => abortAuthorEvents++;
+            shared.port.postMessage('trigger');
+        "#)).unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.tick(0).unwrap();
+        assert_eq!(
+            runtime.eval("abortAuthorEvents").unwrap().as_number(),
+            Some(0.0),
+            "{trigger}"
+        );
+        assert_eq!(runtime.eval("2 + 3").unwrap().as_number(), Some(5.0));
+        reporter.flush().unwrap();
+        database.assert_report(ErrorCategory::Worker, "WORKER_RUNTIME_FAILED", "execute");
+        database.assert_report(
+            ErrorCategory::Worker,
+            "SHARED_WORKER_RUNTIME_FAILED",
+            "execute",
+        );
+        database.assert_no_secrets();
+    }
 }

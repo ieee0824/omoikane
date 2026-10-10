@@ -50,8 +50,12 @@ where
 {
     /// Creates a new cursor with the given reader.
     pub(super) fn new(reader: R) -> Self {
+        Self::new_with_start_position(reader, boa_ast::Position::new(1, 1))
+    }
+
+    pub(super) fn new_with_start_position(reader: R, position: boa_ast::Position) -> Self {
         Self {
-            buffered_lexer: Lexer::new(reader).into(),
+            buffered_lexer: Lexer::new(reader).with_start_position(position).into(),
             parser_stack_start: 0,
             parser_depth: 0,
             arrow: false,
