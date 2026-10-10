@@ -1787,7 +1787,8 @@ impl Promise {
                         .call(&JsValue::undefined(), &[], context)?;
 
                     // ii. Let promise be ? PromiseResolve(C, result).
-                    let promise = Self::promise_resolve(&captures.c, result, context)?;
+                    // Keep the detached promise alive while creating the thunk below.
+                    let promise = Self::promise_resolve(&captures.c, result, context)?.root();
 
                     // iii. Let returnValue be a new Abstract Closure with no parameters that captures value and performs the following steps when called:
                     let return_value = FunctionObjectBuilder::new(
@@ -1807,7 +1808,11 @@ impl Promise {
                     let value_thunk = return_value.length(0).name("").build();
 
                     // v. Return ? Invoke(promise, "then", « valueThunk »).
-                    promise.invoke(js_string!("then"), &[value_thunk.into()], context)
+                    promise.invoke(
+                        js_string!("then"),
+                        &[JsObject::clone(&*value_thunk).into()],
+                        context,
+                    )
                 },
                 FinallyCaptures {
                     on_finally: on_finally.clone().into_edge(),
@@ -1838,7 +1843,8 @@ impl Promise {
                         .call(&JsValue::undefined(), &[], context)?;
 
                     // ii. Let promise be ? PromiseResolve(C, result).
-                    let promise = Self::promise_resolve(&captures.c, result, context)?;
+                    // Keep the detached promise alive while creating the thunk below.
+                    let promise = Self::promise_resolve(&captures.c, result, context)?.root();
 
                     // iii. Let throwReason be a new Abstract Closure with no parameters that captures reason and performs the following steps when called:
                     let throw_reason = FunctionObjectBuilder::new(
@@ -1858,7 +1864,11 @@ impl Promise {
                     let thrower = throw_reason.length(0).name("").build();
 
                     // v. Return ? Invoke(promise, "then", « thrower »).
-                    promise.invoke(js_string!("then"), &[thrower.into()], context)
+                    promise.invoke(
+                        js_string!("then"),
+                        &[JsObject::clone(&*thrower).into()],
+                        context,
+                    )
                 },
                 FinallyCaptures {
                     on_finally: on_finally.into_edge(),
