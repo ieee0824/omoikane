@@ -14,15 +14,30 @@ pub enum PseudoElement {
     Before,
     After,
     Backdrop,
+    /// The first formatted letter of the originating element.
+    FirstLetter,
+    /// The first formatted line of the originating element.
+    FirstLine,
+    /// The list marker of the originating element.
+    Marker,
+    /// The list marker whose originating pseudo-element is `::before`.
+    BeforeMarker,
+    /// The list marker whose originating pseudo-element is `::after`.
+    AfterMarker,
 }
 
 impl PseudoElement {
-    /// Returns the CSS identifier for this pseudo-element.
+    /// Returns the pseudo-element name or chain without the leading `::`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Before => "before",
             Self::After => "after",
             Self::Backdrop => "backdrop",
+            Self::FirstLetter => "first-letter",
+            Self::FirstLine => "first-line",
+            Self::Marker => "marker",
+            Self::BeforeMarker => "before::marker",
+            Self::AfterMarker => "after::marker",
         }
     }
 }
@@ -208,7 +223,10 @@ pub fn selector_pseudo_element(selector: &Selector) -> Option<PseudoElement> {
             let name = match simple {
                 SimpleSelector::PseudoElement(name) => Some(name.as_str()),
                 SimpleSelector::PseudoClass(name)
-                    if matches!(name.as_str(), "before" | "after") =>
+                    if matches!(
+                        name.as_str(),
+                        "before" | "after" | "first-letter" | "first-line"
+                    ) =>
                 {
                     Some(name.as_str())
                 }
@@ -219,12 +237,21 @@ pub fn selector_pseudo_element(selector: &Selector) -> Option<PseudoElement> {
                     "before" => PseudoElement::Before,
                     "after" => PseudoElement::After,
                     "backdrop" => PseudoElement::Backdrop,
+                    "first-letter" => PseudoElement::FirstLetter,
+                    "first-line" => PseudoElement::FirstLine,
+                    "marker" => PseudoElement::Marker,
                     _ => return None,
                 };
-                if pseudo.is_some() {
-                    return None;
-                }
-                pseudo = Some(current);
+                pseudo = Some(match (pseudo, current) {
+                    (None, current) => current,
+                    (Some(PseudoElement::Before), PseudoElement::Marker) => {
+                        PseudoElement::BeforeMarker
+                    }
+                    (Some(PseudoElement::After), PseudoElement::Marker) => {
+                        PseudoElement::AfterMarker
+                    }
+                    _ => return None,
+                });
             }
         }
     }
@@ -711,8 +738,16 @@ fn matches_pseudo_class(
 
     let name = name.to_ascii_lowercase();
     match name.as_str() {
-        "before" => pseudo == Some(PseudoElement::Before),
-        "after" => pseudo == Some(PseudoElement::After),
+        "before" => matches!(
+            pseudo,
+            Some(PseudoElement::Before | PseudoElement::BeforeMarker)
+        ),
+        "after" => matches!(
+            pseudo,
+            Some(PseudoElement::After | PseudoElement::AfterMarker)
+        ),
+        "first-letter" => pseudo == Some(PseudoElement::FirstLetter),
+        "first-line" => pseudo == Some(PseudoElement::FirstLine),
         "popover-open" => pseudo.is_none() && node.is_popover_open(),
         "modal" => pseudo.is_none() && node.is_modal_dialog(),
         "fullscreen" => pseudo.is_none() && node.is_fullscreen(),
@@ -806,9 +841,21 @@ fn functional_pseudo(name: &str) -> Option<(&str, &str)> {
 fn matches_pseudo_element(name: &str, pseudo: Option<PseudoElement>) -> bool {
     // Pseudo-element names are ASCII case-insensitive (`::BEFORE`).
     match name.to_ascii_lowercase().as_str() {
-        "before" => pseudo == Some(PseudoElement::Before),
-        "after" => pseudo == Some(PseudoElement::After),
+        "before" => matches!(
+            pseudo,
+            Some(PseudoElement::Before | PseudoElement::BeforeMarker)
+        ),
+        "after" => matches!(
+            pseudo,
+            Some(PseudoElement::After | PseudoElement::AfterMarker)
+        ),
+        "first-letter" => pseudo == Some(PseudoElement::FirstLetter),
+        "first-line" => pseudo == Some(PseudoElement::FirstLine),
         "backdrop" => pseudo == Some(PseudoElement::Backdrop),
+        "marker" => matches!(
+            pseudo,
+            Some(PseudoElement::Marker | PseudoElement::BeforeMarker | PseudoElement::AfterMarker)
+        ),
         _ => false,
     }
 }

@@ -1807,6 +1807,7 @@ fn is_mask_image_function(name: &str) -> bool {
 
 fn render_mask_value(value: &Value) -> String {
     match value {
+        Value::TreeCounting { .. } => super::style::render_value(value),
         Value::Keyword(value) => value.clone(),
         Value::Length(number, unit) => format!("{number}{unit}"),
         Value::Color(value) | Value::String(value) => value.clone(),

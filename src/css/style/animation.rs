@@ -21,6 +21,11 @@ pub(super) fn snapshot_shadow_base(
         })
 }
 
+/// Shares phase, iteration, fill and direction rules with the owned live clock.
+pub(super) fn snapshot_progress(properties: &PropertyMap, elapsed: f32) -> Option<f32> {
+    AnimationSpec::from_properties("", None, properties).progress(elapsed)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum AnimationDirection {
     Normal,
@@ -286,12 +291,24 @@ impl StyleResolver {
         properties: &mut PropertyMap,
         important: &HashSet<String>,
         scope: Option<usize>,
-    ) {
-        if self.animation_timeline.is_some() {
-            self.apply_live_animation(node, pseudo, properties, important, scope);
+        custom_properties: &BTreeMap<String, Value>,
+    ) -> BTreeMap<String, Value> {
+        let untyped = if self.animation_timeline.is_some() {
+            self.apply_live_animation(
+                node,
+                pseudo,
+                properties,
+                important,
+                scope,
+                custom_properties,
+            )
         } else {
-            self.apply_animation_snapshot(node, properties, important, scope);
+            self.apply_animation_snapshot(node, properties, important, scope, custom_properties)
+        };
+        for (name, value) in &untyped {
+            properties.insert(name.clone(), ComputedValue::Keyword(render_value(value)));
         }
+        untyped
     }
 
     /// Enables explicit live sampling, preserving the clock and start times on
@@ -350,9 +367,10 @@ impl StyleResolver {
         properties: &mut PropertyMap,
         important: &HashSet<String>,
         scope: Option<usize>,
-    ) {
+        custom_properties: &BTreeMap<String, Value>,
+    ) -> BTreeMap<String, Value> {
         let Some(timeline) = &self.animation_timeline else {
-            return;
+            return BTreeMap::new();
         };
         let name = match properties.get(&PropertyId::AnimationName) {
             Some(ComputedValue::Keyword(name) | ComputedValue::String(name)) => name.clone(),
@@ -368,7 +386,7 @@ impl StyleResolver {
                 .borrow_mut()
                 .elements
                 .remove(&(node.identity(), pseudo));
-            return;
+            return BTreeMap::new();
         };
         let spec = AnimationSpec::from_properties(&name, scope, properties);
         let paused = matches!(
@@ -379,15 +397,30 @@ impl StyleResolver {
             .borrow_mut()
             .sample(node.identity(), pseudo, spec.clone(), paused);
         if let Some(progress) = progress {
-            self.interpolate_live_keyframes(
+            let steps = resolve_animation_keyframes(
                 steps,
+                node,
+                custom_properties,
+                &self.registered_custom_properties,
+            );
+            self.interpolate_live_keyframes(
+                &steps,
                 progress,
                 &spec.timing,
                 self.color_container_size(node),
                 properties,
                 important,
             );
+            return sample_untyped_custom_values(
+                &steps,
+                progress,
+                &spec.timing,
+                custom_properties,
+                &self.registered_custom_properties,
+                important,
+            );
         }
+        BTreeMap::new()
     }
 
     fn interpolate_live_keyframes(
@@ -473,6 +506,12 @@ impl StyleResolver {
                     &current_color,
                 )
                 .unwrap_or_else(|| if eased_progress < 0.5 { lower } else { upper });
+                let value = if let Some(registration) = self.registered_custom_properties.get(name)
+                {
+                    normalize_registered_numeric(value, &registration.syntax)
+                } else {
+                    value
+                };
                 let flow = logical_flow_from_properties(properties);
                 insert_computed_property(properties, name, value, flow);
             }
@@ -486,4 +525,57 @@ fn declaration_in<'a>(step: &'a KeyframeStep, name: &str) -> Option<(f32, &'a Va
         .rev()
         .find(|declaration| declaration.name == name)
         .map(|declaration| (step.offset, &declaration.value))
+}
+
+/// Samples discrete custom-property token streams without losing their source scopes.
+/// The caller supplies resolved keyframes, timing, base values and registrations.
+pub(super) fn sample_untyped_custom_values(
+    steps: &[KeyframeStep],
+    progress: f32,
+    timing: &str,
+    custom: &BTreeMap<String, Value>,
+    registrations: &BTreeMap<String, RegisteredCustomProperty>,
+    important: &HashSet<String>,
+) -> BTreeMap<String, Value> {
+    let names: std::collections::BTreeSet<_> = steps
+        .iter()
+        .flat_map(|step| {
+            step.declarations
+                .iter()
+                .map(|declaration| declaration.name.as_str())
+        })
+        .filter(|name| name.starts_with("--") && !important.contains(*name))
+        .filter(|name| {
+            registrations.get(*name).is_none_or(|registration| {
+                matches!(registration.syntax, RegisteredPropertySyntax::Universal)
+            })
+        })
+        .collect();
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let lower = steps
+                .iter()
+                .rev()
+                .filter(|step| step.offset <= progress)
+                .find_map(|step| declaration_in(step, name));
+            let upper = steps
+                .iter()
+                .filter(|step| step.offset >= progress)
+                .find_map(|step| declaration_in(step, name));
+            let start = lower.map_or(0.0, |entry| entry.0);
+            let end = upper.map_or(1.0, |entry| entry.0);
+            let fraction = if end > start {
+                ((progress - start) / (end - start)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let eased = super::super::transition::animation_timing_progress(timing, fraction);
+            let endpoint = if eased < 0.5 { lower } else { upper };
+            endpoint
+                .map(|entry| entry.1)
+                .or_else(|| custom.get(name))
+                .map(|value| (name.to_string(), value.clone()))
+        })
+        .collect()
 }

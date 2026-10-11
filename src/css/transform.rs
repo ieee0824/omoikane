@@ -473,6 +473,54 @@ pub(crate) fn parse_perspective_origin(
     ))
 }
 
+/// Serializes a resolved matrix without rounding explicit small values to zero.
+pub(crate) fn serialize_transform_matrix(
+    value: &str,
+    reference: TransformReferenceBox,
+) -> Option<String> {
+    if value.eq_ignore_ascii_case("none") {
+        return Some("none".into());
+    }
+    let matrix = parse_transform_matrix(value, reference)?;
+    let values = matrix.values;
+    let is_2d = [2, 6, 8, 9, 11, 12, 13, 14]
+        .into_iter()
+        .all(|index| values[index] == 0.0)
+        && values[10] == 1.0
+        && values[15] == 1.0;
+    let (name, serialized) = if is_2d {
+        (
+            "matrix",
+            [0, 4, 1, 5, 3, 7]
+                .into_iter()
+                .map(|index| values[index])
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        (
+            "matrix3d",
+            (0..16)
+                .map(|index| values[(index % 4) * 4 + index / 4])
+                .collect(),
+        )
+    };
+    if serialized.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    Some(format!(
+        "{name}({})",
+        serialized
+            .into_iter()
+            .map(|value| if value == 0.0 {
+                "0".into()
+            } else {
+                value.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 fn parse_transform_matrix(value: &str, reference: TransformReferenceBox) -> Option<Matrix4> {
     let functions = parse_transform_functions(value)?;
     if functions.is_empty() {
@@ -1028,26 +1076,55 @@ fn split_args(value: &str) -> Option<Vec<&str>> {
     if value.trim().is_empty() {
         return Some(Vec::new());
     }
-    if value.contains(',') {
-        let args = value.split(',').map(str::trim).collect::<Vec<_>>();
-        if args
-            .iter()
-            .any(|arg| arg.is_empty() || arg.contains(char::is_whitespace))
-        {
-            return None;
+    let mut depth = 0usize;
+    let mut commas = Vec::new();
+    let mut spaces = Vec::new();
+    for (index, byte) in value.bytes().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth = depth.checked_sub(1)?,
+            b',' if depth == 0 => commas.push(index),
+            byte if depth == 0 && byte.is_ascii_whitespace() => spaces.push(index),
+            _ => {}
         }
-        Some(args)
-    } else {
-        Some(value.split_whitespace().collect())
     }
+    if depth != 0 {
+        return None;
+    }
+    let comma_separated = !commas.is_empty();
+    let separators = if comma_separated { commas } else { spaces };
+    let mut args = Vec::new();
+    let mut start = 0;
+    for end in separators.into_iter().chain(std::iter::once(value.len())) {
+        let argument = value[start..end].trim();
+        if argument.is_empty() {
+            if comma_separated {
+                return None;
+            }
+        } else {
+            args.push(argument);
+        }
+        start = end + 1;
+    }
+    Some(args)
 }
 
 fn parse_number(value: &str) -> Option<f32> {
-    let number = value.trim().parse::<f32>().ok()?;
+    let number = value.trim().parse::<f32>().ok().or_else(|| {
+        value
+            .contains('(')
+            .then(|| super::style::transform_number_math(value))
+            .flatten()
+    })?;
     number.is_finite().then_some(number)
 }
 
 fn parse_scale(value: &str) -> Option<f32> {
+    if value.contains('(')
+        && let Some(percent) = super::style::transform_percentage_math(value)
+    {
+        return Some(percent / 100.0);
+    }
     if let Some(percent) = value.trim().strip_suffix('%') {
         return Some(parse_number(percent)? / 100.0);
     }
@@ -1059,6 +1136,9 @@ fn parse_length_percentage(
     percentage_basis: f32,
     reference: TransformReferenceBox,
 ) -> Option<f32> {
+    if value.contains('(') {
+        return super::style::transform_length_math(value, Some(percentage_basis), reference);
+    }
     let normalized = value.trim().to_ascii_lowercase();
     let value = normalized.as_str();
     if let Some(percent) = value.strip_suffix('%') {
@@ -1078,6 +1158,9 @@ fn parse_length_percentage(
 }
 
 fn parse_length(value: &str, reference: TransformReferenceBox) -> Option<f32> {
+    if value.contains('(') {
+        return super::style::transform_length_math(value, None, reference);
+    }
     let normalized = value.trim().to_ascii_lowercase();
     let value = normalized.as_str();
     if let Some(px) = value.strip_suffix("px") {
@@ -1100,6 +1183,9 @@ fn parse_zero_length(value: &str) -> bool {
 }
 
 fn parse_angle(value: &str) -> Option<f32> {
+    if value.contains('(') {
+        return super::style::transform_angle_math(value);
+    }
     use super::angle::{CssAngle, UnitlessZero};
     let angle = CssAngle::parse(value, UnitlessZero::Numeric, true)?;
     // Historically `rad` matched before `grad`, making gradians invalid here.
@@ -1218,6 +1304,27 @@ mod tests {
             font_size: 16.0,
             root_font_size: 16.0,
         }
+    }
+
+    #[test]
+    fn nested_numeric_math_preserves_argument_boundaries_and_dimensions() {
+        let matrix = parse_transform_list(
+            "translate(calc(20% + 10px), min(20px, 30px)) scale(calc(1 / 2)) rotate(calc(cos(0deg) * 0deg))",
+            reference(),
+        ).unwrap();
+        assert_eq!(
+            (matrix.a, matrix.d, matrix.e, matrix.f),
+            (0.5, 0.5, 50.0, 20.0)
+        );
+        let scale = parse_transform_list("scale(calc(50%))", reference()).unwrap();
+        assert_eq!((scale.a, scale.d), (0.5, 0.5));
+        assert!(parse_transform_list("scale(pi)", reference()).is_none());
+        let relative = parse_transform_list("translateX(calc(1em + 1rem))", reference()).unwrap();
+        assert_eq!(relative.e, 32.0);
+        assert!(parse_transform_list("scale(calc(1px))", reference()).is_none());
+        assert!(parse_transform_list("rotate(calc(1px))", reference()).is_none());
+        assert!(parse_transform_list("translateZ(calc(10%))", reference()).is_none());
+        assert!(parse_transform_list("translate(1px 2px, 3px)", reference()).is_none());
     }
 
     #[test]

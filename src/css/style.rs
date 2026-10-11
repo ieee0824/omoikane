@@ -1,12 +1,17 @@
 //! CSS cascade and computed style resolution.
 
 mod animation;
+mod font_palette;
 mod forced_colors;
+mod generic_transform;
 pub(crate) mod grid_properties;
 pub(crate) mod individual_transform;
 mod page;
 mod property_id;
+mod sibling_functions;
+mod specified_math;
 pub(crate) mod text_shadow;
+mod typed_math;
 mod will_change;
 
 pub use page::{
@@ -128,6 +133,19 @@ pub enum LengthPercentageMath {
     Min(Vec<Self>),
     /// The largest argument after resolving every argument against one basis.
     Max(Vec<Self>),
+    /// The absolute value after resolving its percentage basis.
+    Abs(Box<Self>),
+    /// The Euclidean norm after resolving all arguments against one basis.
+    Hypot(Vec<Self>),
+    /// A modulo or remainder operation with a shared percentage basis.
+    Modulo {
+        /// The value being divided.
+        dividend: Box<Self>,
+        /// The divisor.
+        divisor: Box<Self>,
+        /// True for `rem()`, false for `mod()`.
+        remainder: bool,
+    },
     /// `max(minimum, min(preferred, maximum))`.
     Clamp {
         /// The lower bound.
@@ -144,28 +162,72 @@ impl LengthPercentageMath {
     /// `100%`.
     #[must_use]
     pub fn resolve(&self, basis: f32) -> f32 {
+        let value = self.resolve_unclamped(basis);
+        if value.is_nan() {
+            0.0
+        } else {
+            value.clamp(-f32::MAX, f32::MAX)
+        }
+    }
+
+    fn resolve_unclamped(&self, basis: f32) -> f32 {
         match self {
             Self::Linear { px, percentage } => px + basis * percentage / 100.0,
-            Self::Sum(values) => values.iter().map(|value| value.resolve(basis)).sum(),
-            Self::Scale { factor, value } => factor * value.resolve(basis),
+            Self::Sum(values) => values
+                .iter()
+                .map(|value| value.resolve_unclamped(basis))
+                .sum(),
+            Self::Scale { factor, value } => factor * value.resolve_unclamped(basis),
             Self::Min(values) => values
                 .iter()
-                .map(|value| value.resolve(basis))
+                .map(|value| value.resolve_unclamped(basis))
                 .reduce(f32::min)
                 .unwrap_or(0.0),
             Self::Max(values) => values
                 .iter()
-                .map(|value| value.resolve(basis))
+                .map(|value| value.resolve_unclamped(basis))
                 .reduce(f32::max)
                 .unwrap_or(0.0),
+            Self::Abs(value) => value.resolve_unclamped(basis).abs(),
+            Self::Hypot(values) => values.iter().fold(0.0, |norm, value| {
+                norm.hypot(value.resolve_unclamped(basis))
+            }),
+            Self::Modulo {
+                dividend,
+                divisor,
+                remainder,
+            } => {
+                let a = dividend.resolve_unclamped(basis);
+                let b = divisor.resolve_unclamped(basis);
+                if *remainder {
+                    a % b
+                } else if b == 0.0 || a.is_infinite() {
+                    f32::NAN
+                } else if b.is_infinite() {
+                    if a == 0.0 || a.is_sign_negative() == b.is_sign_negative() {
+                        a
+                    } else {
+                        f32::NAN
+                    }
+                } else {
+                    let value = a % b;
+                    if value == 0.0 {
+                        0.0_f32.copysign(b)
+                    } else if value.is_sign_negative() != b.is_sign_negative() {
+                        value + b
+                    } else {
+                        value
+                    }
+                }
+            }
             Self::Clamp {
                 minimum,
                 preferred,
                 maximum,
             } => preferred
-                .resolve(basis)
-                .min(maximum.resolve(basis))
-                .max(minimum.resolve(basis)),
+                .resolve_unclamped(basis)
+                .min(maximum.resolve_unclamped(basis))
+                .max(minimum.resolve_unclamped(basis)),
         }
     }
 
@@ -179,7 +241,12 @@ impl LengthPercentageMath {
             Self::Scale { factor, value } => value
                 .linear_components()
                 .map(|(px, percentage)| (factor * px, factor * percentage)),
-            Self::Min(_) | Self::Max(_) | Self::Clamp { .. } => None,
+            Self::Min(_)
+            | Self::Max(_)
+            | Self::Clamp { .. }
+            | Self::Abs(_)
+            | Self::Hypot(_)
+            | Self::Modulo { .. } => None,
         }
     }
 
@@ -217,10 +284,14 @@ impl LengthPercentageMath {
     fn is_pure_px(&self) -> bool {
         match self {
             Self::Linear { percentage, .. } => *percentage == 0.0,
-            Self::Sum(values) | Self::Min(values) | Self::Max(values) => {
+            Self::Sum(values) | Self::Min(values) | Self::Max(values) | Self::Hypot(values) => {
                 !values.is_empty() && values.iter().all(Self::is_pure_px)
             }
             Self::Scale { value, .. } => value.is_pure_px(),
+            Self::Abs(value) => value.is_pure_px(),
+            Self::Modulo {
+                dividend, divisor, ..
+            } => dividend.is_pure_px() && divisor.is_pure_px(),
             Self::Clamp {
                 minimum,
                 preferred,
@@ -234,7 +305,12 @@ impl LengthPercentageMath {
             Self::Linear { px, percentage } if *px == 0.0 || *percentage == 0.0 => {
                 self.expression_text()
             }
-            Self::Min(_) | Self::Max(_) | Self::Clamp { .. } => self.expression_text(),
+            Self::Min(_)
+            | Self::Max(_)
+            | Self::Clamp { .. }
+            | Self::Abs(_)
+            | Self::Hypot(_)
+            | Self::Modulo { .. } => self.expression_text(),
             Self::Linear { .. } | Self::Sum(_) | Self::Scale { .. } => {
                 format!("calc({})", self.expression_text())
             }
@@ -246,6 +322,25 @@ impl LengthPercentageMath {
     /// must not gain a nested `calc()` wrapper there.
     fn expression_text(&self) -> String {
         match self {
+            Self::Abs(value) => format!("abs({})", value.expression_text()),
+            Self::Hypot(values) => format!(
+                "hypot({})",
+                values
+                    .iter()
+                    .map(Self::expression_text)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Modulo {
+                dividend,
+                divisor,
+                remainder,
+            } => format!(
+                "{}({}, {})",
+                if *remainder { "rem" } else { "mod" },
+                dividend.expression_text(),
+                divisor.expression_text()
+            ),
             Self::Linear { px, percentage } if *percentage == 0.0 => format!("{px}px"),
             Self::Linear { px, percentage } if *px == 0.0 => format!("{percentage}%"),
             Self::Linear { px, percentage } if *px < 0.0 => {
@@ -415,6 +510,23 @@ impl ComputedStyle {
     /// Replaces a computed property with a layout-resolved CSS pixel value.
     pub(crate) fn set_resolved_px(&mut self, name: &str, value: f32) {
         self.properties.insert(name, ComputedValue::Px(value));
+    }
+
+    /// Serializes the computed transform using the element's actual reference box.
+    pub(crate) fn set_resolved_transform(&mut self, reference: super::TransformReferenceBox) {
+        let Some(ComputedValue::Keyword(value)) = self.get("transform") else {
+            return;
+        };
+        if let Some(value) = super::serialize_transform_matrix(value, reference) {
+            self.properties
+                .insert(PropertyId::Transform, ComputedValue::Keyword(value));
+        }
+    }
+
+    /// Resolves CSSOM transform to none when no rendered box exists.
+    pub(crate) fn set_unrendered_transform(&mut self) {
+        self.properties
+            .insert(PropertyId::Transform, ComputedValue::Keyword("none".into()));
     }
 
     /// Exposes logical aliases of the final physical values to computed CSSOM.
@@ -1129,35 +1241,35 @@ fn registered_value_matches_kind(value: &Value, kind: &RegisteredSyntaxKind) -> 
         },
         RegisteredSyntaxKind::Number => match value {
             Value::Number(_) => true,
-            Value::Function { name, .. } if name.eq_ignore_ascii_case("calc") => matches!(
-                compute_value(value, "--registered", ResolutionContext::default()),
-                ComputedValue::Number(_)
-            ),
+            Value::Function { .. } => {
+                typed_math::infer(value, None) == Some(typed_math::NumericType::NUMBER)
+            }
             _ => false,
         },
         RegisteredSyntaxKind::Integer => match value {
             Value::Number(value) => value.fract() == 0.0,
-            Value::Function { name, .. } if name.eq_ignore_ascii_case("calc") => matches!(
-                compute_value(value, "--registered", ResolutionContext::default()),
-                ComputedValue::Number(value) if value.fract() == 0.0
-            ),
+            Value::Function { .. } => {
+                typed_math::infer(value, None) == Some(typed_math::NumericType::NUMBER)
+            }
             _ => false,
         },
         RegisteredSyntaxKind::Percentage => match value {
             Value::Percentage(_) => true,
-            Value::Function { name, .. } if name.eq_ignore_ascii_case("calc") => matches!(
-                compute_value(value, "--registered", ResolutionContext::default()),
-                ComputedValue::Percentage(_)
-            ),
+            Value::Function { .. } => {
+                typed_math::infer(value, None) == Some(typed_math::NumericType::PERCENTAGE)
+            }
             _ => false,
         },
         RegisteredSyntaxKind::Color => is_valid_css_color_text(&render_value(value)),
         RegisteredSyntaxKind::Angle => {
-            matches!(value, Value::Length(_, unit) if matches!(unit.to_ascii_lowercase().as_str(), "deg" | "grad" | "rad" | "turn"))
+            typed_math::infer(value, None) == Some(typed_math::NumericType::ANGLE)
         }
-        RegisteredSyntaxKind::Time => resolve_time_seconds(value).is_some(),
+        RegisteredSyntaxKind::Time => {
+            typed_math::infer(value, None) == Some(typed_math::NumericType::TIME)
+        }
         RegisteredSyntaxKind::Resolution => {
-            matches!(value, Value::Length(number, unit) if *number >= 0.0 && matches!(unit.to_ascii_lowercase().as_str(), "dpi" | "dpcm" | "dppx" | "x"))
+            typed_math::infer(value, None) == Some(typed_math::NumericType::RESOLUTION)
+                && !matches!(value, Value::Length(number, _) if *number < 0.0)
         }
         RegisteredSyntaxKind::TransformFunction => matches!(value, Value::Function { .. }),
         RegisteredSyntaxKind::TransformList => match value {
@@ -1486,6 +1598,54 @@ pub(crate) struct ContainerContext {
     pub container_type: String,
     pub names: Vec<String>,
     pub units: super::ContainerUnitContext,
+    pub style: ContainerStyleSnapshot,
+}
+
+/// Owned custom values and their registered syntax captured for a query container.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ContainerStyleSnapshot {
+    values: BTreeMap<String, Value>,
+    syntax: BTreeMap<String, RegisteredPropertySyntax>,
+}
+
+impl ContainerStyleSnapshot {
+    /// Compares custom-property values using explicit container units and query scope.
+    pub(crate) fn matches(
+        &self,
+        name: &str,
+        value: &Value,
+        units: super::ContainerUnitContext,
+        node: &NodeHandle,
+        scope: Option<&NodeHandle>,
+    ) -> bool {
+        let Some(actual) = self.values.get(name) else {
+            return false;
+        };
+        let value = sibling_functions::annotate(value, &sibling_functions::scope_ancestry(scope));
+        let Some(value) = resolve_value_with_custom_properties(&value, &self.values) else {
+            return false;
+        };
+        let Some(syntax) = self.syntax.get(name) else {
+            return render_value(&value) == render_value(actual);
+        };
+        if matches!(syntax, RegisteredPropertySyntax::Universal) {
+            return render_value(&value) == render_value(actual);
+        }
+        let value = sibling_functions::resolve(&value, node);
+        if !registered_value_matches_syntax(&value, syntax) {
+            return false;
+        }
+        let ctx = ResolutionContext {
+            parent_font_size: units.font_size,
+            root_font_size: units.root_font_size,
+            line_height: units.line_height,
+            root_line_height: units.root_line_height,
+            font_metrics: units.metrics,
+            ..ResolutionContext::default()
+        };
+        compute_registered_value(&value, syntax, ctx).css_text()
+            == compute_registered_value(actual, syntax, ctx).css_text()
+    }
 }
 
 /// Deterministic post-load instant used for static screenshots.
@@ -1539,6 +1699,22 @@ impl StyleResolver {
     pub(crate) fn set_web_fonts(&mut self, fonts: Arc<WebFontRegistry>) {
         self.font_resources.web_fonts = Some(fonts);
         self.invalidate_style_cache();
+    }
+
+    /// Captures owned values and only the registration syntax used by this container.
+    pub(crate) fn container_style_snapshot(&self, style: &ComputedStyle) -> ContainerStyleSnapshot {
+        ContainerStyleSnapshot {
+            values: style.custom_properties.clone(),
+            syntax: style
+                .custom_properties
+                .keys()
+                .filter_map(|name| {
+                    self.registered_custom_properties
+                        .get(name)
+                        .map(|registration| (name.clone(), registration.syntax.clone()))
+                })
+                .collect(),
+        }
     }
 
     pub(crate) fn container_unit_context(
@@ -2060,6 +2236,7 @@ impl StyleResolver {
                 input.origin,
                 self.stylesheet_ids[position],
                 layer_context.scope_root,
+                &sibling_functions::scope_ancestry(scope.root.as_ref()),
                 layer_order,
                 None,
                 &mut source_order,
@@ -2092,6 +2269,7 @@ impl StyleResolver {
             input.origin,
             self.stylesheet_ids[position],
             layer_context.scope_root,
+            &sibling_functions::scope_ancestry(scope.root.as_ref()),
             layer_order,
             None,
             &mut self.next_keyframes_source_order,
@@ -2499,7 +2677,15 @@ impl StyleResolver {
             return Some(style.clone());
         }
 
-        let parent_style = self.computed_style(node);
+        let parent_style = match pseudo {
+            PseudoElement::BeforeMarker => {
+                self.computed_pseudo_style(node, PseudoElement::Before)?
+            }
+            PseudoElement::AfterMarker => self.computed_pseudo_style(node, PseudoElement::After)?,
+            _ => self.computed_style(node),
+        };
+        // Inherit from the immediate originating pseudo, while numeric tree
+        // counting still receives the ultimate originating DOM element.
         let style = self.compute_style_with_pseudo(node, Some(&parent_style), Some(pseudo), None);
         if style.properties.is_empty() {
             return None;
@@ -2508,6 +2694,28 @@ impl StyleResolver {
         let style = Arc::new(style);
         self.pseudo_cache.insert(key, Arc::clone(&style));
         Some(style)
+    }
+
+    /// Attaches owned declaration scope IDs before variable alias substitution.
+    fn annotate_tree_counting_candidates(&self, node: &NodeHandle, candidates: &mut [Candidate]) {
+        for candidate in candidates {
+            if !sibling_functions::contains(&candidate.value) {
+                continue;
+            }
+            let root = candidate.layer_context.scope_root.and_then(|id| {
+                self.stylesheet_scopes
+                    .iter()
+                    .filter_map(|scope| scope.root.as_ref())
+                    .find(|root| root.identity() == id)
+                    .cloned()
+                    .or_else(|| {
+                        node.containing_shadow_root()
+                            .filter(|root| root.identity() == id)
+                    })
+            });
+            let ancestry = sibling_functions::scope_ancestry(root.as_ref());
+            candidate.value = sibling_functions::annotate(&candidate.value, &ancestry);
+        }
     }
 
     fn compute_style(
@@ -2621,6 +2829,7 @@ impl StyleResolver {
             }
         }
 
+        self.annotate_tree_counting_candidates(node, &mut candidates);
         candidates.sort_by(compare_candidate_priority);
         let unexpanded_candidates = candidates.clone();
 
@@ -2709,22 +2918,37 @@ impl StyleResolver {
         let mut font_family_scope_root =
             parent_style.and_then(ComputedStyle::font_family_scope_root);
 
+        let font_ctx = ResolutionContext {
+            parent_font_size,
+            root_font_size,
+            line_height: parent_line_height,
+            root_line_height,
+            font_metrics: parent_font_metrics,
+            viewport_width: self.viewport_width,
+            viewport_height: self.viewport_height,
+            color_container_size: None,
+        };
+        custom_properties = resolve_font_numeric_custom_properties(
+            custom_properties,
+            paint_custom_properties.unwrap_or(&specified_custom_properties),
+            &inherited_custom_properties,
+            &self.registered_custom_properties,
+            font_ctx,
+            node,
+        );
+
         // Process font-size first so that em units in other properties
         // resolve against the element's own computed font-size.
-        if let Some(fs_candidate) = candidates.iter().rfind(|c| c.name == "font-size")
-            && let Some(resolved_value) =
-                resolve_value_with_custom_properties(&fs_candidate.value, &custom_properties)
+        if let Some((fs_candidate, resolved_value)) = candidates
+            .iter()
+            .rev()
+            .filter(|candidate| candidate.name == "font-size")
+            .find_map(|candidate| {
+                resolve_cascaded_value(candidate, &custom_properties, node)
+                    .map(|(value, _)| (candidate, value))
+            })
         {
-            let ctx = ResolutionContext {
-                parent_font_size,
-                root_font_size,
-                line_height: parent_line_height,
-                root_line_height,
-                font_metrics: parent_font_metrics,
-                viewport_width: self.viewport_width,
-                viewport_height: self.viewport_height,
-                color_container_size: None,
-            };
+            let ctx = font_ctx;
             let computed = compute_value(&resolved_value, "font-size", ctx);
             // Resolve font-size keywords "smaller" / "larger" relative to parent.
             let resolved = match &computed {
@@ -2757,7 +2981,7 @@ impl StyleResolver {
 
         let element_font_size = inherited_font_size(parent_style, &properties);
         let (font_properties, font_scope_root) =
-            candidate_font_properties(&candidates, &custom_properties, parent_style);
+            candidate_font_properties(&candidates, &custom_properties, parent_style, node);
         let element_font_metrics = if uses_font_metrics {
             self.css_font_metrics(&font_properties, font_scope_root, element_font_size)
         } else {
@@ -2765,11 +2989,14 @@ impl StyleResolver {
         };
         // `lh` on line-height uses the parent's computed line-height, while
         // other properties use this element's resulting line-height.
-        if let Some(candidate) = candidates
+        if let Some((candidate, value)) = candidates
             .iter()
-            .rfind(|candidate| candidate.name == "line-height")
-            && let Some(value) =
-                resolve_value_with_custom_properties(&candidate.value, &custom_properties)
+            .rev()
+            .filter(|candidate| candidate.name == "line-height")
+            .find_map(|candidate| {
+                resolve_cascaded_value(candidate, &custom_properties, node)
+                    .map(|(value, _)| (candidate, value))
+            })
         {
             let ctx = ResolutionContext {
                 parent_font_size: element_font_size,
@@ -2815,14 +3042,13 @@ impl StyleResolver {
         }
         let (computed_custom_properties, typed_custom_properties) =
             compute_registered_custom_properties(
-                &specified_custom_properties,
+                paint_custom_properties.unwrap_or(&specified_custom_properties),
                 &inherited_custom_properties,
                 &self.registered_custom_properties,
                 custom_ctx,
+                node,
             );
-        custom_properties = paint_custom_properties
-            .cloned()
-            .unwrap_or(computed_custom_properties);
+        custom_properties = computed_custom_properties;
         for (name, value) in typed_custom_properties {
             properties.insert(name, value);
         }
@@ -2834,6 +3060,12 @@ impl StyleResolver {
         remove_reverted_candidates(&mut candidates, Some(&custom_properties), Some(flow));
         let logical_flow =
             logical_flow_from_candidates(&candidates, &custom_properties, parent_style);
+        important_properties.extend(
+            candidates
+                .iter()
+                .filter(|candidate| candidate.name.starts_with("--") && candidate.important)
+                .map(|candidate| candidate.name.clone()),
+        );
 
         for candidate in candidates {
             if matches!(candidate.name.as_str(), "font-size" | "line-height")
@@ -2842,15 +3074,13 @@ impl StyleResolver {
                 continue; // already processed above
             }
             log_unsupported_css_if_enabled(&candidate.name, &candidate.value);
-            let Some(resolved_value) =
-                resolve_value_with_custom_properties(&candidate.value, &custom_properties)
+            let Some((resolved_value, validation)) =
+                resolve_cascaded_value(&candidate, &custom_properties, node)
             else {
                 continue;
             };
-            // Per-property value validation runs before the value enters the
-            // cascade so an invalid declaration is dropped entirely (CSS error
-            // handling), never overriding an earlier valid declaration.
-            match validate_declaration(&candidate.name, &resolved_value) {
+            // Failed variable substitution computes as unset after the cascade.
+            match validation {
                 DeclarationValidation::Valid(computed) => {
                     record_component_value(&mut component_values, &candidate.name, &resolved_value);
                     if candidate.name.eq_ignore_ascii_case("animation-name") {
@@ -2979,13 +3209,33 @@ impl StyleResolver {
         // CSS Animations contribute below CSS Transitions in the cascade. The
         // transition compares and samples the animation-adjusted before/after
         // values, then its active value wins for the transitioned property.
-        self.apply_animation_effect(
+        let animated_untyped = self.apply_animation_effect(
             node,
             pseudo,
             &mut properties,
             &important_properties,
             animation_name_scope_root,
+            &custom_properties,
         );
+        // Animated custom values participate in var() substitution and
+        // inheritance. Re-cascade their dependants before transitions sample
+        // the final animation-adjusted style; the override prevents recursion.
+        if paint_custom_properties.is_none()
+            && let Some(animated_custom) = animated_custom_property_values(
+                &specified_custom_properties,
+                &custom_properties,
+                &properties,
+                &self.registered_custom_properties,
+                &animated_untyped,
+            )
+        {
+            return self.compute_style_with_pseudo(
+                node,
+                parent_style,
+                pseudo,
+                Some(&animated_custom),
+            );
+        }
         if pseudo.is_none() {
             self.transition_timeline
                 .sample(node.identity(), &mut properties);
@@ -3022,7 +3272,7 @@ impl StyleResolver {
 
     /// Applies a deterministic animation snapshot. Paused animations are
     /// sampled at timeline time zero, completed forwards/both animations keep
-    /// their final state, and running infinite animations are sampled at a
+    /// their final state, and active animations are sampled at a
     /// fixed post-load instant so screenshots remain stable.
     fn apply_animation_snapshot(
         &self,
@@ -3030,94 +3280,38 @@ impl StyleResolver {
         properties: &mut PropertyMap,
         important_properties: &HashSet<String>,
         animation_name_scope_root: Option<usize>,
-    ) {
+        custom_properties: &BTreeMap<String, Value>,
+    ) -> BTreeMap<String, Value> {
         let anim_name = match properties.get(&PropertyId::AnimationName) {
             Some(ComputedValue::Keyword(name) | ComputedValue::String(name)) => name.clone(),
-            _ => return,
+            _ => return BTreeMap::new(),
         };
         if anim_name.eq_ignore_ascii_case("none") || anim_name.is_empty() {
-            return;
+            return BTreeMap::new();
         }
         let Some(steps) = self.keyframes_for(node, animation_name_scope_root, &anim_name) else {
-            return;
+            return BTreeMap::new();
         };
 
-        let fill_mode = match properties.get(&PropertyId::AnimationFillMode) {
-            Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
-            _ => "none".to_string(),
-        };
-        let infinite = matches!(
-            properties.get(&PropertyId::AnimationIterationCount),
-            Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("infinite")
+        let resolved_steps = resolve_animation_keyframes(
+            steps,
+            node,
+            custom_properties,
+            &self.registered_custom_properties,
         );
-        let paused = matches!(
-            properties.get(&PropertyId::AnimationPlayState),
-            Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("paused")
-        );
-        let declarations = if paused {
-            let duration =
-                animation_seconds(properties.get(&PropertyId::AnimationDuration)).unwrap_or(0.0);
-            let delay =
-                animation_seconds(properties.get(&PropertyId::AnimationDelay)).unwrap_or(0.0);
-            if delay > 0.0 {
-                if fill_mode == "backwards" || fill_mode == "both" {
-                    steps.first().map(|step| &step.declarations)
-                } else {
-                    None
-                }
-            } else if duration <= 0.0 {
-                if fill_mode == "forwards" || fill_mode == "both" {
-                    steps.last().map(|step| &step.declarations)
-                } else {
-                    None
-                }
-            } else {
-                let elapsed = -delay;
-                if infinite {
-                    let progress = (elapsed / duration).rem_euclid(1.0);
-                    steps
-                        .iter()
-                        .rev()
-                        .find(|step| step.offset <= progress)
-                        .map(|step| &step.declarations)
-                } else if elapsed <= duration {
-                    let progress = (elapsed / duration).clamp(0.0, 1.0);
-                    steps
-                        .iter()
-                        .rev()
-                        .find(|step| step.offset <= progress)
-                        .map(|step| &step.declarations)
-                } else if fill_mode == "forwards" || fill_mode == "both" {
-                    steps.last().map(|step| &step.declarations)
-                } else {
-                    None
-                }
-            }
-        } else if fill_mode == "forwards" || fill_mode == "both" {
-            steps.last().map(|step| &step.declarations)
-        } else if infinite {
-            let duration =
-                animation_seconds(properties.get(&PropertyId::AnimationDuration)).unwrap_or(0.0);
-            let delay =
-                animation_seconds(properties.get(&PropertyId::AnimationDelay)).unwrap_or(0.0);
-            if duration <= 0.0 || STATIC_ANIMATION_TIME_SECONDS < delay {
-                None
-            } else {
-                let progress = ((STATIC_ANIMATION_TIME_SECONDS - delay) / duration).rem_euclid(1.0);
-                steps
-                    .iter()
-                    .rev()
-                    .find(|step| step.offset <= progress)
-                    .map(|step| &step.declarations)
-            }
-        } else {
-            None
+        let steps = resolved_steps.as_slice();
+        let Some(progress) = animation_snapshot_progress(properties) else {
+            return BTreeMap::new();
         };
+        let declarations = steps
+            .iter()
+            .rev()
+            .find(|step| step.offset <= progress)
+            .map(|step| &step.declarations);
         let Some(declarations) = declarations else {
-            return;
+            return BTreeMap::new();
         };
-        let animation_progress =
-            animation_snapshot_progress(properties, fill_mode.as_str(), infinite, paused);
+        let animation_progress = Some(progress);
         let shadow_base = animation::snapshot_shadow_base(steps, properties);
         let transform_base =
             ["translate", "rotate", "scale"].map(|name| properties.get(name).cloned());
@@ -3142,12 +3336,6 @@ impl StyleResolver {
             viewport_height: self.viewport_height,
             color_container_size: None,
         };
-        let custom_properties: BTreeMap<String, Value> = properties
-            .iter()
-            .filter(|(name, _)| name.starts_with("--"))
-            .map(|(name, value)| (name.to_string(), computed_value_to_value(value)))
-            .collect();
-
         let standard_properties: HashSet<&str> = declarations
             .iter()
             .filter(|declaration| !is_prefixed_property_alias(&declaration.name))
@@ -3164,8 +3352,13 @@ impl StyleResolver {
                 continue;
             }
             let resolved =
-                resolve_value_with_custom_properties(&declaration.value, &custom_properties)
+                resolve_value_with_custom_properties(&declaration.value, custom_properties)
                     .unwrap_or_else(|| declaration.value.clone());
+            let resolved = if sibling_functions::contains(&resolved) {
+                sibling_functions::resolve(&resolved, node)
+            } else {
+                resolved
+            };
             let computed = compute_value(&resolved, property_name, ctx);
             let flow = logical_flow_from_properties(properties);
             insert_computed_property(properties, property_name, computed, flow);
@@ -3176,7 +3369,7 @@ impl StyleResolver {
                 progress,
                 properties,
                 ctx,
-                &custom_properties,
+                custom_properties,
                 important_properties,
             );
             individual_transform::snapshot::interpolate(
@@ -3184,7 +3377,7 @@ impl StyleResolver {
                 progress,
                 properties,
                 ctx,
-                &custom_properties,
+                custom_properties,
                 important_properties,
                 transform_base,
             );
@@ -3196,6 +3389,17 @@ impl StyleResolver {
                 shadow_base,
             );
         }
+        let timing = properties
+            .get(&PropertyId::AnimationTimingFunction)
+            .map_or_else(|| "ease".into(), ComputedValue::css_text);
+        animation::sample_untyped_custom_values(
+            steps,
+            progress,
+            &timing,
+            custom_properties,
+            &self.registered_custom_properties,
+            important_properties,
+        )
     }
 
     fn apply_registered_animation_interpolation(
@@ -3266,10 +3470,28 @@ impl StyleResolver {
             } else {
                 0.0
             };
+            let timing = properties
+                .get(&PropertyId::AnimationTimingFunction)
+                .map(ComputedValue::css_text)
+                .unwrap_or_else(|| "ease".into());
+            let span = super::transition::animation_timing_progress(&timing, span);
+            // An exact endpoint keeps its computed representation, including
+            // the color space serialization required by registered colors.
+            if span <= 0.0 {
+                properties.insert(name.clone(), lower);
+                continue;
+            }
+            if span >= 1.0 {
+                properties.insert(name.clone(), upper);
+                continue;
+            }
             if let Some(value) =
                 super::transition::interpolate_custom_property(name, &lower, &upper, span)
             {
-                properties.insert(name.clone(), value);
+                properties.insert(
+                    name.clone(),
+                    normalize_registered_numeric(value, &registration.syntax),
+                );
             }
         }
     }
@@ -3402,39 +3624,56 @@ fn animation_seconds(value: Option<&ComputedValue>) -> Option<f32> {
     }
 }
 
-fn animation_snapshot_progress(
-    properties: &PropertyMap,
-    fill_mode: &str,
-    infinite: bool,
-    paused: bool,
-) -> Option<f32> {
-    let duration = animation_seconds(properties.get(&PropertyId::AnimationDuration)).unwrap_or(0.0);
-    let delay = animation_seconds(properties.get(&PropertyId::AnimationDelay)).unwrap_or(0.0);
-    let backwards = fill_mode == "backwards" || fill_mode == "both";
-    let forwards = fill_mode == "forwards" || fill_mode == "both";
-    if paused {
-        if delay > 0.0 {
-            return backwards.then_some(0.0);
-        }
-        if duration <= 0.0 {
-            return forwards.then_some(1.0);
-        }
-        let elapsed = -delay;
-        if infinite {
-            return Some((elapsed / duration).rem_euclid(1.0));
-        }
-        if elapsed <= duration {
-            return Some((elapsed / duration).clamp(0.0, 1.0));
-        }
-        return forwards.then_some(1.0);
-    }
-    if forwards {
-        return Some(1.0);
-    }
-    if infinite && duration > 0.0 && STATIC_ANIMATION_TIME_SECONDS >= delay {
-        return Some(((STATIC_ANIMATION_TIME_SECONDS - delay) / duration).rem_euclid(1.0));
-    }
-    None
+/// Resolves variables with their owned source scopes before evaluating this element's counts.
+fn resolve_animation_keyframes(
+    steps: &[KeyframeStep],
+    node: &NodeHandle,
+    custom_properties: &BTreeMap<String, Value>,
+    registrations: &BTreeMap<String, RegisteredCustomProperty>,
+) -> Vec<KeyframeStep> {
+    steps
+        .iter()
+        .map(|step| KeyframeStep {
+            offset: step.offset,
+            declarations: step
+                .declarations
+                .iter()
+                .map(|declaration| {
+                    let value =
+                        resolve_value_with_custom_properties(&declaration.value, custom_properties)
+                            .unwrap_or_else(|| declaration.value.clone());
+                    let untyped = declaration.name.starts_with("--")
+                        && registrations
+                            .get(&declaration.name)
+                            .is_none_or(|registration| {
+                                matches!(registration.syntax, RegisteredPropertySyntax::Universal)
+                            });
+                    let value = if !untyped && sibling_functions::contains(&value) {
+                        sibling_functions::resolve(&value, node)
+                    } else {
+                        value
+                    };
+                    Declaration {
+                        value,
+                        ..declaration.clone()
+                    }
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn animation_snapshot_progress(properties: &PropertyMap) -> Option<f32> {
+    let paused = matches!(properties.get(&PropertyId::AnimationPlayState),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("paused"));
+    animation::snapshot_progress(
+        properties,
+        if paused {
+            0.0
+        } else {
+            STATIC_ANIMATION_TIME_SECONDS
+        },
+    )
 }
 
 fn animation_reference_scope_root(
@@ -3644,6 +3883,44 @@ fn inherited_flow_keyword<'a>(
         Some(ComputedValue::Keyword(value)) => value,
         _ => initial,
     }
+}
+
+/// Resolves a declaration while preserving invalid-at-computed-value-time winners.
+fn resolve_cascaded_value(
+    candidate: &Candidate,
+    custom_properties: &BTreeMap<String, Value>,
+    node: &NodeHandle,
+) -> Option<(Value, DeclarationValidation)> {
+    if !resolved_property_is_supported(&candidate.name) {
+        return None;
+    }
+    let has_variables = value_contains_var_function(&candidate.value);
+    let unset = || {
+        (
+            Value::Keyword("unset".into()),
+            DeclarationValidation::Unvalidated,
+        )
+    };
+    let Some(value) = resolve_value_with_custom_properties(&candidate.value, custom_properties)
+    else {
+        return has_variables.then(unset);
+    };
+    if matches!(
+        validate_tree_counting_numeric_declaration(&candidate.name, &value),
+        Some(DeclarationValidation::Invalid)
+    ) {
+        return has_variables.then(unset);
+    }
+    let value = if sibling_functions::contains(&value) {
+        sibling_functions::resolve(&value, node)
+    } else {
+        value
+    };
+    let validation = validate_declaration(&candidate.name, &value);
+    if matches!(validation, DeclarationValidation::Invalid) {
+        return has_variables.then(unset);
+    }
+    Some((value, validation))
 }
 
 fn logical_flow_from_candidates(
@@ -3861,7 +4138,77 @@ fn is_color_property(name: &str) -> bool {
         || name.eq_ignore_ascii_case("text-decoration-color")
 }
 
+/// Checks runtime color channels structurally without inventing DOM values.
+fn runtime_color_channels_are_valid(value: &Value) -> bool {
+    use typed_math::NumericType as T;
+    let Value::Function { name, arguments } = value else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    let values = match arguments.as_slice() {
+        [Value::List(values)] => values.as_slice(),
+        values => values,
+    };
+    let (values, hue) = if name == "color" {
+        let Some((Value::Keyword(profile), values)) = values.split_first() else {
+            return false;
+        };
+        if !matches!(
+            profile.to_ascii_lowercase().as_str(),
+            "srgb"
+                | "srgb-linear"
+                | "display-p3"
+                | "a98-rgb"
+                | "prophoto-rgb"
+                | "rec2020"
+                | "xyz"
+                | "xyz-d50"
+                | "xyz-d65"
+        ) {
+            return false;
+        }
+        (values, None)
+    } else {
+        let hue = match name.as_str() {
+            "rgb" | "rgba" | "lab" | "oklab" => None,
+            "lch" | "oklch" => Some(2),
+            "hsl" | "hsla" | "hwb" => Some(0),
+            _ => return false,
+        };
+        (values, hue)
+    };
+    let valid = |value: &Value, angular: bool| {
+        if matches!(value, Value::Keyword(name) if name.eq_ignore_ascii_case("none")) {
+            return true;
+        }
+        if angular {
+            matches!(typed_math::infer(value, None), Some(T::NUMBER | T::ANGLE))
+        } else {
+            typed_math::infer(value, Some(T::NUMBER)) == Some(T::NUMBER)
+        }
+    };
+    if !matches!(values.len(), 3 | 5) {
+        return false;
+    }
+    if !values[..3]
+        .iter()
+        .enumerate()
+        .all(|(index, value)| valid(value, hue == Some(index)))
+    {
+        return false;
+    }
+    values.len() == 3
+        || (matches!(&values[3], Value::Keyword(name) if name == "/") && valid(&values[4], false))
+}
+
 fn validate_color_value(value: &Value) -> DeclarationValidation {
+    if sibling_functions::contains(value) {
+        return if runtime_color_channels_are_valid(value) {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
     if let Value::Keyword(keyword) = value {
         let lower = keyword.to_ascii_lowercase();
         if is_css_wide_keyword(&lower) || lower == "currentcolor" {
@@ -4073,19 +4420,280 @@ fn validate_retained_shorthand(name: &str, value: &Value) -> DeclarationValidati
     }
 }
 
+/// Validates and serializes numeric declarations containing tree-counting functions.
+pub(crate) fn normalize_tree_counting_numeric(property: &str, text: &str) -> Option<String> {
+    if !text
+        .as_bytes()
+        .windows(7)
+        .any(|word| word.eq_ignore_ascii_case(b"sibling"))
+    {
+        return None;
+    }
+    let value = super::parse_style_attribute(&format!("{property}: {text}"))
+        .into_iter()
+        .find(|declaration| declaration.name == property)?
+        .value;
+    if !sibling_functions::contains(&value) {
+        return None;
+    }
+    match validate_tree_counting_numeric_declaration(property, &value)? {
+        DeclarationValidation::Invalid => None,
+        _ => Some(render_value(&canonical_tree_counting_numeric(&value))),
+    }
+}
+
+fn canonical_tree_counting_numeric(value: &Value) -> Value {
+    match value {
+        Value::Length(number, unit) if unit.eq_ignore_ascii_case("ms") => {
+            Value::Length(number / 1000.0, "s".into())
+        }
+        Value::Length(number, unit) if unit.eq_ignore_ascii_case("turn") => {
+            Value::Length(number * 360.0, "deg".into())
+        }
+        Value::Function { name, arguments } => {
+            let mut arguments: Vec<_> = arguments
+                .iter()
+                .map(canonical_tree_counting_numeric)
+                .collect();
+            if name.eq_ignore_ascii_case("calc") && arguments.len() == 1 {
+                if let Some(folded) = specified_math::fold_fixed_angle_product(&arguments[0]) {
+                    arguments[0] = folded;
+                }
+            }
+            if name.eq_ignore_ascii_case("calc")
+                && arguments.len() == 1
+                && matches!(&arguments[0], Value::Function { name, arguments } if arguments.is_empty() && matches!(name.as_str(), "sibling-index" | "sibling-count"))
+            {
+                return arguments.into_iter().next().unwrap();
+            }
+            Value::Function {
+                name: name.clone(),
+                arguments,
+            }
+        }
+        Value::List(values) => {
+            Value::List(values.iter().map(canonical_tree_counting_numeric).collect())
+        }
+        Value::CommaList(values) => {
+            Value::CommaList(values.iter().map(canonical_tree_counting_numeric).collect())
+        }
+        _ => value.clone(),
+    }
+}
+
+/// Checks element-dependent numeric types without evaluating DOM placeholders.
+fn validate_tree_counting_numeric_declaration(
+    name: &str,
+    value: &Value,
+) -> Option<DeclarationValidation> {
+    use typed_math::NumericType as T;
+    if !sibling_functions::contains(value) || name.starts_with("--") {
+        return None;
+    }
+    if !sibling_functions::valid_arguments(value) {
+        return Some(DeclarationValidation::Invalid);
+    }
+    let name = name.to_ascii_lowercase();
+    if let Some(validation) = validate_complex_font_numeric_declaration(&name, value) {
+        return Some(validation);
+    }
+    if name == "transform" {
+        return Some(if generic_transform::valid(value) {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        });
+    }
+    if name == "line-height" {
+        let numeric_type = typed_math::infer(value, Some(T::LENGTH));
+        let valid = matches!(numeric_type, Some(kind) if kind == T::NUMBER || kind == T::LENGTH);
+        return Some(if valid {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        });
+    }
+    let expected = match name.as_str() {
+        "flex-grow" | "flex-shrink" | "opacity" | "z-index" | "order" | "column-count"
+        | "font-weight" | "orphans" | "widows" | "tab-size" | "scale" => T::NUMBER,
+        "rotate" => T::ANGLE,
+        "animation-duration" | "animation-delay" | "transition-duration" | "transition-delay" => {
+            T::TIME
+        }
+        "width"
+        | "height"
+        | "min-width"
+        | "max-width"
+        | "min-height"
+        | "max-height"
+        | "inline-size"
+        | "block-size"
+        | "min-inline-size"
+        | "max-inline-size"
+        | "min-block-size"
+        | "max-block-size"
+        | "left"
+        | "right"
+        | "top"
+        | "bottom"
+        | "font-size"
+        | "column-width"
+        | "row-gap"
+        | "column-gap"
+        | "text-indent"
+        | "flex-basis"
+        | "perspective"
+        | "text-underline-offset"
+        | "text-decoration-thickness" => T::LENGTH,
+        _ if name.starts_with("padding-")
+            || name.starts_with("margin-")
+            || name.starts_with("inset-")
+            || (name.starts_with("border-") && name.ends_with("-width")) =>
+        {
+            T::LENGTH
+        }
+        _ => return None,
+    };
+    let hint = (expected == T::LENGTH).then_some(T::LENGTH);
+    let valid = match value {
+        Value::CommaList(values) if expected == T::TIME => {
+            !values.is_empty()
+                && values
+                    .iter()
+                    .all(|value| typed_math::infer(value, hint) == Some(expected))
+        }
+        _ => typed_math::infer(value, hint) == Some(expected),
+    };
+    Some(if valid {
+        DeclarationValidation::Unvalidated
+    } else {
+        DeclarationValidation::Invalid
+    })
+}
+
+/// Checks compound font grammars using types, without numerical placeholders.
+fn validate_complex_font_numeric_declaration(
+    name: &str,
+    value: &Value,
+) -> Option<DeclarationValidation> {
+    use typed_math::NumericType as T;
+    let valid = match name {
+        "font-style" => match value {
+            Value::Keyword(word) => {
+                is_css_wide_keyword(word)
+                    || matches!(
+                        word.to_ascii_lowercase().as_str(),
+                        "normal" | "italic" | "oblique"
+                    )
+            }
+            Value::List(values) => matches!(values.as_slice(), [Value::Keyword(word), angle]
+                if word.eq_ignore_ascii_case("oblique") && typed_math::infer(angle, None) == Some(T::ANGLE)),
+            _ => false,
+        },
+        "font-variation-settings" => {
+            fn valid_axis(value: &Value) -> bool {
+                let Value::List(values) = value else {
+                    return false;
+                };
+                matches!(values.as_slice(), [Value::String(tag), amount]
+                    if tag.len() == 4 && tag.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+                        && typed_math::infer(amount, None) == Some(T::NUMBER))
+            }
+            match value {
+                Value::Keyword(word) => {
+                    word.eq_ignore_ascii_case("none") || is_css_wide_keyword(word)
+                }
+                Value::CommaList(values) => !values.is_empty() && values.iter().all(valid_axis),
+                value => valid_axis(value),
+            }
+        }
+        _ => return None,
+    };
+    Some(if valid {
+        DeclarationValidation::Unvalidated
+    } else {
+        DeclarationValidation::Invalid
+    })
+}
+
+/// Checks font numeric grammars even after registered values have computed.
+fn validate_font_numeric_declaration(name: &str, value: &Value) -> Option<DeclarationValidation> {
+    use typed_math::NumericType as T;
+    let is_size = name.eq_ignore_ascii_case("font-size");
+    if !is_size && !name.eq_ignore_ascii_case("line-height") {
+        return None;
+    }
+    let valid = match value {
+        Value::Keyword(keyword) => {
+            let keyword = keyword.to_ascii_lowercase();
+            is_css_wide_keyword(&keyword)
+                || if is_size {
+                    matches!(
+                        keyword.as_str(),
+                        "xx-small"
+                            | "x-small"
+                            | "small"
+                            | "medium"
+                            | "large"
+                            | "x-large"
+                            | "xx-large"
+                            | "xxx-large"
+                            | "smaller"
+                            | "larger"
+                            | "math"
+                    )
+                } else {
+                    keyword == "normal"
+                }
+        }
+        Value::Number(number) => {
+            number.is_finite()
+                && if is_size {
+                    *number == 0.0
+                } else {
+                    *number >= 0.0
+                }
+        }
+        Value::Length(number, _) | Value::Percentage(number)
+            if !number.is_finite() || *number < 0.0 =>
+        {
+            false
+        }
+        _ => matches!(typed_math::infer(value, Some(T::LENGTH)), Some(kind)
+            if kind == T::LENGTH || (!is_size && kind == T::NUMBER)),
+    };
+    Some(if valid {
+        DeclarationValidation::Unvalidated
+    } else {
+        DeclarationValidation::Invalid
+    })
+}
+
 /// Validates a resolved declaration value against the property's grammar.
 ///
-/// This is the single extension point for per-property value validation.
-/// Properties with syntax or normalization requirements are validated here;
-/// properties without a dedicated branch fall through unchanged. To add a
-/// property, match its name and return [`DeclarationValidation::Valid`] /
-/// [`DeclarationValidation::Invalid`].
+/// This is the extension point for per-property validation and normalization.
 fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if !resolved_property_is_supported(name) {
         return DeclarationValidation::Invalid;
     }
+    if let Some(validation) = validate_tree_counting_numeric_declaration(name, value) {
+        return validation;
+    }
+    if let Some(validation) = validate_font_numeric_declaration(name, value) {
+        return validation;
+    }
+    if let Some(validation) = validate_complex_font_numeric_declaration(name, value) {
+        return validation;
+    }
     if super::shorthand::is_deferred_var_shorthand(name) {
         return validate_retained_shorthand(name, value);
+    }
+    if name.eq_ignore_ascii_case("font-palette") {
+        return if font_palette::valid(value) {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        };
     }
     if let Some(validation) = forced_colors::validate(name, value) {
         return validation;
@@ -4510,7 +5118,140 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
 /// paint module's gradient parser, and everything else must be `none`,
 /// `url(...)`, or a CSS-wide keyword (left `Unvalidated` for the generic
 /// compute path).
+/// Canonicalizes computed colors and resolution units within owned image values.
+/// Serializes context-free opaque legacy colors inside computed image values.
+fn opaque_image_color(value: &Value) -> Option<Value> {
+    let color = crate::paint::color::parse_color(&render_value(value))?;
+    (color.a == 255).then(|| Value::Keyword(format!("rgb({}, {}, {})", color.r, color.g, color.b)))
+}
+
+fn computed_image_components(value: &Value) -> Value {
+    if matches!(value, Value::Function { .. }) && !sibling_functions::contains(value) {
+        if typed_math::infer(value, None) == Some(typed_math::NumericType::NUMBER) {
+            if let Some(LengthMathValue::Number(number)) =
+                evaluate_length_math_value(value, ResolutionContext::default())
+            {
+                return Value::Number(number);
+            }
+        }
+    }
+    if let Value::Function { name, .. } = value {
+        if name.eq_ignore_ascii_case("url") {
+            return value.clone();
+        }
+    }
+    if !matches!(value, Value::Keyword(name) if name.eq_ignore_ascii_case("currentcolor")) {
+        if let Some(color) = crate::paint::color4::CssColor::parse(&render_value(value)) {
+            return Value::Keyword(color.serialize_computed());
+        }
+        if let Some(color) = opaque_image_color(value) {
+            return color;
+        }
+    }
+    let resolved = match value {
+        Value::Length(number, unit) if unit.eq_ignore_ascii_case("x") => {
+            Value::Length(*number, "dppx".into())
+        }
+        Value::Function { name, arguments } => Value::Function {
+            name: name.clone(),
+            arguments: arguments.iter().map(computed_image_components).collect(),
+        },
+        Value::List(values) => Value::List(values.iter().map(computed_image_components).collect()),
+        Value::CommaList(values) => {
+            Value::CommaList(values.iter().map(computed_image_components).collect())
+        }
+        _ => value.clone(),
+    };
+    if let Value::Function { .. } = &resolved {
+        if let Some(color) = crate::paint::color4::CssColor::parse(&render_value(&resolved)) {
+            return Value::Keyword(color.serialize_computed());
+        }
+        if let Some(color) = opaque_image_color(&resolved) {
+            return color;
+        }
+    }
+    resolved
+}
+
+fn valid_composite_image(value: &Value) -> bool {
+    let Value::Function { name, arguments } = value else {
+        return false;
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "cross-fade" if arguments.len() >= 2 => arguments.iter().all(|value| {
+            let values = match value {
+                Value::List(values) => values.as_slice(),
+                value => std::slice::from_ref(value),
+            };
+            let image_valid =
+                |value: &Value| valid_image_component(value) || is_valid_color_value(value);
+            match values {
+                [image] => image_valid(image),
+                [image, Value::Percentage(amount)] => {
+                    amount.is_finite() && *amount >= 0.0 && image_valid(image)
+                }
+                _ => false,
+            }
+        }),
+        "image-set" | "-webkit-image-set" if !arguments.is_empty() => {
+            arguments.iter().all(valid_image_set_entry)
+        }
+        _ => false,
+    }
+}
+
+fn valid_image_component(value: &Value) -> bool {
+    match value {
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => true,
+        Value::Function { name, .. } if name.to_ascii_lowercase().ends_with("gradient") => {
+            crate::paint::parse_gradient(&render_value(value)).is_some()
+        }
+        value => valid_composite_image(value),
+    }
+}
+
+fn valid_image_set_entry(value: &Value) -> bool {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let Some((image, descriptors)) = values.split_first() else {
+        return false;
+    };
+    if !matches!(image, Value::String(_)) && !valid_image_component(image) {
+        return false;
+    }
+    let mut resolution = false;
+    let mut mime_type = false;
+    for descriptor in descriptors {
+        match descriptor {
+            Value::Length(number, unit)
+                if !resolution
+                    && number.is_finite()
+                    && *number > 0.0
+                    && matches!(unit.to_ascii_lowercase().as_str(), "dppx" | "dpi" | "dpcm") =>
+            {
+                resolution = true
+            }
+            Value::Function { name, arguments }
+                if !mime_type
+                    && name.eq_ignore_ascii_case("type")
+                    && matches!(arguments.as_slice(), [Value::String(_)]) =>
+            {
+                mime_type = true
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
 fn validate_background_image_declaration(value: &Value) -> DeclarationValidation {
+    let computed = computed_image_components(value);
+    if valid_composite_image(&computed) {
+        return DeclarationValidation::Valid(ComputedValue::Keyword(render_value(&computed)));
+    }
+    let value = &computed;
     if let Value::Function { name: function, .. } = value {
         let lower = function.to_ascii_lowercase();
         if matches!(
@@ -4715,10 +5456,8 @@ fn validation_transform_reference_box() -> super::TransformReferenceBox {
 
 /// Validates `transform` by parsing it as a transform function list.
 fn validate_transform_declaration(value: &Value) -> DeclarationValidation {
-    let rendered = render_value(value);
-    let reference = validation_transform_reference_box();
-    if super::parse_transform_list(&rendered, reference).is_some() {
-        DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
+    if generic_transform::valid(value) {
+        DeclarationValidation::Unvalidated
     } else {
         DeclarationValidation::Invalid
     }
@@ -5128,15 +5867,12 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
         Value::Percentage(number) if *number >= 0.0 => DeclarationValidation::Unvalidated,
         Value::Number(number) if *number == 0.0 => DeclarationValidation::Unvalidated,
         Value::Function { name: function, .. } if is_length_percentage_math_function(function) => {
-            let computed = compute_value(value, name, ResolutionContext::default());
-            match computed {
-                ComputedValue::Px(_)
-                | ComputedValue::Percentage(_)
-                | ComputedValue::LengthPercentage(_) => DeclarationValidation::Unvalidated,
-                ComputedValue::Number(number) if number == 0.0 => {
-                    DeclarationValidation::Unvalidated
-                }
-                _ => DeclarationValidation::Invalid,
+            if typed_math::infer(value, Some(typed_math::NumericType::LENGTH))
+                == Some(typed_math::NumericType::LENGTH)
+            {
+                DeclarationValidation::Unvalidated
+            } else {
+                DeclarationValidation::Invalid
             }
         }
         _ => DeclarationValidation::Invalid,
@@ -5146,7 +5882,7 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
 fn is_length_percentage_math_function(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "calc" | "min" | "max" | "clamp"
+        "calc" | "min" | "max" | "clamp" | "hypot" | "abs" | "mod" | "rem"
     )
 }
 
@@ -6196,6 +6932,7 @@ fn collect_rule_candidates(
                     } else if at_rule.name.eq_ignore_ascii_case("container") {
                         container_query_matches(
                             node,
+                            shadow_scope,
                             &at_rule.prelude,
                             container_cache,
                             container_contexts,
@@ -6529,8 +7266,42 @@ fn media_query_matches(
     })
 }
 
+/// Parses a structurally valid length expression without substituting DOM values.
+pub(crate) fn parse_container_length_expression(text: &str) -> Option<Value> {
+    let value = parse_registered_initial_value(text)?;
+    (typed_math::infer(&value, None) == Some(typed_math::NumericType::LENGTH)).then_some(value)
+}
+
+/// Computes a query length from explicit units and a short-lived container scope input.
+pub(crate) fn compute_container_length(
+    value: &Value,
+    units: super::ContainerUnitContext,
+    element: Option<(&NodeHandle, Option<&NodeHandle>)>,
+) -> Option<f32> {
+    let value = if sibling_functions::contains(value) {
+        let (node, scope) = element?;
+        let value = sibling_functions::annotate(value, &sibling_functions::scope_ancestry(scope));
+        sibling_functions::resolve(&value, node)
+    } else {
+        value.clone()
+    };
+    let ctx = ResolutionContext {
+        parent_font_size: units.font_size,
+        root_font_size: units.root_font_size,
+        line_height: units.line_height,
+        root_line_height: units.root_line_height,
+        font_metrics: units.metrics,
+        ..ResolutionContext::default()
+    };
+    match compute_value(&value, "width", ctx) {
+        ComputedValue::Px(value) => Some(value),
+        _ => None,
+    }
+}
+
 fn container_query_matches(
     node: &NodeHandle,
+    declaration_scope: Option<&NodeHandle>,
     prelude: &str,
     cache: &mut HashMap<String, Option<super::ContainerQuery>>,
     contexts: &HashMap<usize, ContainerContext>,
@@ -6548,7 +7319,8 @@ fn container_query_matches(
         if candidate.node_type() == NodeType::Element
             && let Some(context) = contexts.get(&candidate.identity())
         {
-            let supports_axis = context.container_type.eq_ignore_ascii_case("size")
+            let supports_axis = !query.requires_size_containment()
+                || context.container_type.eq_ignore_ascii_case("size")
                 || (!query.requires_block_size()
                     && context.container_type.eq_ignore_ascii_case("inline-size"));
             let name_matches = query
@@ -6556,7 +7328,14 @@ fn container_query_matches(
                 .as_ref()
                 .is_none_or(|name| context.names.iter().any(|candidate| candidate == name));
             if supports_axis && name_matches {
-                return query.matches_with_units(context.width, context.height, context.units);
+                return query.matches_for_element(
+                    context.width,
+                    context.height,
+                    context.units,
+                    &candidate,
+                    declaration_scope,
+                    &context.style,
+                );
             }
         }
         ancestor = candidate.parent_node();
@@ -6646,6 +7425,7 @@ fn collect_keyframes(
     origin: Origin,
     stylesheet_id: usize,
     scope_root: Option<usize>,
+    scope_ancestry: &[Option<usize>],
     layer_order: &CascadeLayerOrder,
     active_layer: Option<&LayerPath>,
     source_order: &mut usize,
@@ -6679,7 +7459,7 @@ fn collect_keyframes(
                         origin,
                         layer_order: layer_order.rank(active_layer),
                         source_order: *source_order,
-                        steps: parse_keyframe_steps(&block_text),
+                        steps: parse_scoped_keyframe_steps(&block_text, scope_ancestry),
                     };
                     let definitions = keyframes.entry(scope_root).or_default();
                     match definitions.entry(animation_name) {
@@ -6719,6 +7499,7 @@ fn collect_keyframes(
                         origin,
                         stylesheet_id,
                         scope_root,
+                        scope_ancestry,
                         layer_order,
                         Some(&path),
                         source_order,
@@ -6735,6 +7516,7 @@ fn collect_keyframes(
                         origin,
                         stylesheet_id,
                         scope_root,
+                        scope_ancestry,
                         layer_order,
                         active_layer,
                         source_order,
@@ -7097,6 +7879,18 @@ fn parse_keyframes_name(prelude: &str) -> Option<String> {
         CssToken::String(name) => (!name.is_empty()).then_some(name),
         _ => None,
     }
+}
+
+fn parse_scoped_keyframe_steps(text: &str, ancestry: &[Option<usize>]) -> Vec<KeyframeStep> {
+    let mut steps = parse_keyframe_steps(text);
+    for step in &mut steps {
+        for declaration in &mut step.declarations {
+            if sibling_functions::contains(&declaration.value) {
+                declaration.value = sibling_functions::annotate(&declaration.value, ancestry);
+            }
+        }
+    }
+    steps
 }
 
 fn parse_keyframe_steps(block_text: &str) -> Vec<KeyframeStep> {
@@ -7982,7 +8776,101 @@ pub(crate) fn normalize_underline_value(property: &str, value: &str) -> Option<S
     }
 }
 
-pub(super) fn value_contains_var_function(value: &Value) -> bool {
+/// Evaluates fixed transform number math without DOM or layout placeholders.
+pub(crate) fn transform_number_math(text: &str) -> Option<f32> {
+    let declarations = super::parse_style_attribute(&format!("--transform: {text}"));
+    individual_transform::fixed_number_expression(&declarations.first()?.value)
+}
+
+/// Evaluates fixed percentage math for a transform scale argument.
+pub(crate) fn transform_percentage_math(text: &str) -> Option<f32> {
+    let declarations = super::parse_style_attribute(&format!("--transform: {text}"));
+    individual_transform::fixed_percentage_expression(&declarations.first()?.value)
+}
+
+/// Evaluates fixed transform angle math and converts the result to radians.
+pub(crate) fn transform_angle_math(text: &str) -> Option<f32> {
+    let declarations = super::parse_style_attribute(&format!("--transform: {text}"));
+    let Value::Length(angle, _) =
+        individual_transform::fixed_angle_expression(&declarations.first()?.value)?
+    else {
+        return None;
+    };
+    Some(angle.to_radians())
+}
+
+/// Resolves supported transform length math against explicit box/font inputs.
+pub(crate) fn transform_length_math(
+    text: &str,
+    percentage_basis: Option<f32>,
+    reference: super::TransformReferenceBox,
+) -> Option<f32> {
+    fn supported_units(value: &Value) -> bool {
+        match value {
+            Value::Length(_, unit) => {
+                matches!(unit.to_ascii_lowercase().as_str(), "px" | "em" | "rem")
+            }
+            Value::Function { arguments, .. } | Value::List(arguments) => {
+                arguments.iter().all(supported_units)
+            }
+            _ => true,
+        }
+    }
+    let declarations = super::parse_style_attribute(&format!("--transform: {text}"));
+    let value = &declarations.first()?.value;
+    if !supported_units(value) {
+        return None;
+    }
+    let hint = percentage_basis.map(|_| typed_math::NumericType::LENGTH);
+    if typed_math::infer(value, hint) != Some(typed_math::NumericType::LENGTH) {
+        return None;
+    }
+    let context = ResolutionContext {
+        parent_font_size: reference.font_size,
+        root_font_size: reference.root_font_size,
+        ..ResolutionContext::default()
+    };
+    let result =
+        evaluate_length_percentage_math(value, context)?.resolve(percentage_basis.unwrap_or(0.0));
+    result.is_finite().then_some(result)
+}
+
+/// Computes context-independent, nonnegative integer font feature values.
+/// Runtime values and units requiring font or layout inputs are rejected.
+pub(crate) fn font_feature_integer_values(text: &str) -> Option<Vec<u32>> {
+    let declarations = super::parse_style_attribute(&format!("--feature: {text}"));
+    let value = &declarations.first()?.value;
+    let components = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if components.is_empty() {
+        return None;
+    }
+    components
+        .iter()
+        .map(|value| {
+            if matches!(value, Value::Number(number) if number.fract() != 0.0)
+                || matches!(value, Value::Keyword(_))
+            {
+                return None;
+            }
+            let number = individual_transform::fixed_number_expression(value)?;
+            if number < 0.0 || f64::from(number) > f64::from(u32::MAX) {
+                return None;
+            }
+            Some(number.round() as u32)
+        })
+        .collect()
+}
+
+/// Reports element-dependent tree counts, including nested component values.
+pub(crate) fn value_contains_tree_counting(value: &Value) -> bool {
+    sibling_functions::contains(value)
+}
+
+/// Reports whether substitution is required anywhere in a component value.
+pub(crate) fn value_contains_var_function(value: &Value) -> bool {
     match value {
         Value::Function { name, arguments } => {
             name.eq_ignore_ascii_case("var") || arguments.iter().any(value_contains_var_function)
@@ -8073,7 +8961,133 @@ fn resolve_time_calc(value: &Value) -> Option<f32> {
     (!expects_value).then_some(total)
 }
 
+/// Computes each axis value while preserving the quoted OpenType axis tag.
+fn compute_font_variation_settings(value: &Value, ctx: ResolutionContext) -> Option<ComputedValue> {
+    fn axis(value: &Value, ctx: ResolutionContext) -> Option<String> {
+        let Value::List(values) = value else {
+            return None;
+        };
+        let [Value::String(tag), amount] = values.as_slice() else {
+            return None;
+        };
+        if tag.len() != 4 || !tag.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
+            return None;
+        }
+        let LengthMathValue::Number(number) = evaluate_length_math_value(amount, ctx)? else {
+            return None;
+        };
+        let tag = tag.replace('\\', "\\\\").replace('"', "\\\"");
+        Some(format!("\"{tag}\" {number}"))
+    }
+    let text = match value {
+        Value::CommaList(values) => values
+            .iter()
+            .map(|value| axis(value, ctx))
+            .collect::<Option<Vec<_>>>()?
+            .join(", "),
+        value => axis(value, ctx)?,
+    };
+    Some(ComputedValue::Keyword(text))
+}
+
+fn round_css_integer(value: f32) -> f32 {
+    (f64::from(value) + 0.5).floor() as f32
+}
+
+fn normalize_numeric_property(name: &str, value: f32) -> f32 {
+    let value = if value.is_nan() {
+        0.0
+    } else {
+        value.clamp(-f32::MAX, f32::MAX)
+    };
+    match name {
+        "opacity" => value.clamp(0.0, 1.0),
+        "flex-grow" | "flex-shrink" => value.max(0.0),
+        "order" | "z-index" => round_css_integer(value),
+        "column-count" | "orphans" | "widows" => round_css_integer(value).max(1.0),
+        _ => value,
+    }
+}
+
+fn compute_standalone_numeric_math(
+    value: &Value,
+    name: &str,
+    ctx: ResolutionContext,
+) -> Option<ComputedValue> {
+    let Value::Function { name: function, .. } = value else {
+        return None;
+    };
+    if !matches!(
+        function.to_ascii_lowercase().as_str(),
+        "hypot"
+            | "abs"
+            | "sign"
+            | "mod"
+            | "rem"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "atan2"
+    ) {
+        return None;
+    }
+    if let Some(length) = evaluate_length_percentage_math(value, ctx) {
+        return Some(computed_length_percentage_math(length, name, ctx));
+    }
+    Some(
+        match individual_transform::computed_numeric_expression(value, ctx)? {
+            Value::Number(value) => ComputedValue::Number(normalize_numeric_property(name, value)),
+            Value::Percentage(value) => ComputedValue::Percentage(value),
+            Value::Length(value, unit) => ComputedValue::Keyword(format!("{value}{unit}")),
+            _ => return None,
+        },
+    )
+}
+
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
+    if property_name.eq_ignore_ascii_case("font-size")
+        && matches!(value, Value::Number(number) if *number == 0.0)
+    {
+        return ComputedValue::Px(0.0);
+    }
+    // Percentages inherit as absolute lengths; unitless factors remain numbers.
+    if property_name.eq_ignore_ascii_case("line-height") {
+        if let Some(length) = evaluate_length_percentage_math(value, ctx) {
+            return ComputedValue::Px(length.resolve(ctx.parent_font_size).max(0.0));
+        }
+    }
+    if property_name.eq_ignore_ascii_case("transform") {
+        return ComputedValue::Keyword(
+            generic_transform::compute(value, ctx)
+                .as_ref()
+                .map(render_value)
+                .unwrap_or_else(|| "none".into()),
+        );
+    }
+    if property_name.eq_ignore_ascii_case("font-palette") {
+        return ComputedValue::Keyword(font_palette::compute(value));
+    }
+    if property_name.eq_ignore_ascii_case("font-variation-settings") {
+        if let Some(value) = compute_font_variation_settings(value, ctx) {
+            return value;
+        }
+    }
+    if property_name.eq_ignore_ascii_case("font-style") {
+        if let Value::List(values) = value {
+            if let [Value::Keyword(keyword), angle] = values.as_slice() {
+                if keyword.eq_ignore_ascii_case("oblique") {
+                    if let Some(angle) =
+                        compute_registered_dimension(angle, &RegisteredSyntaxKind::Angle, ctx)
+                    {
+                        return ComputedValue::Keyword(format!("oblique {}", render_value(&angle)));
+                    }
+                }
+            }
+        }
+    }
     if matches!(property_name, "translate" | "rotate" | "scale") {
         return ComputedValue::Keyword(individual_transform::compute(property_name, value, ctx));
     }
@@ -8118,6 +9132,9 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         return resolve_time_seconds(value)
             .map(ComputedValue::Number)
             .unwrap_or_else(|| ComputedValue::Keyword(render_value(value)));
+    }
+    if let Some(computed) = compute_standalone_numeric_math(value, property_name, ctx) {
+        return computed;
     }
     if property_name.eq_ignore_ascii_case("shape-outside") {
         return ComputedValue::Keyword(render_shape_outside_value(value, ctx));
@@ -8198,7 +9215,10 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         }
         Value::Color(color) => ComputedValue::Color(color.clone()),
         Value::String(value) => ComputedValue::String(value.clone()),
-        Value::Number(value) => ComputedValue::Number(*value),
+        Value::Number(value) => {
+            ComputedValue::Number(normalize_numeric_property(property_name, *value))
+        }
+        Value::TreeCounting { .. } => ComputedValue::Keyword(render_value(value)),
         Value::Function { name, .. }
             if matches!(
                 name.to_ascii_lowercase().as_str(),
@@ -8246,7 +9266,9 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                             ComputedValue::Percentage(value)
                         }
                     }
-                    CalcUnit::Unitless => ComputedValue::Number(value),
+                    CalcUnit::Unitless => {
+                        ComputedValue::Number(normalize_numeric_property(property_name, value))
+                    }
                 };
             }
             ComputedValue::Keyword(render_value(value))
@@ -8254,8 +9276,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         Value::Function { name, .. }
             if name.eq_ignore_ascii_case("min") || name.eq_ignore_ascii_case("max") =>
         {
-            evaluate_length_percentage_math(value, ctx)
-                .map(|value| computed_length_percentage_math(value, property_name, ctx))
+            compute_math_comparison(value, property_name, ctx)
                 .unwrap_or_else(|| ComputedValue::Keyword(render_value(value)))
         }
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("clamp") => {
@@ -8968,6 +9989,7 @@ fn evaluate_length_math_value(value: &Value, ctx: ResolutionContext) -> Option<L
                 return None;
             };
             evaluate_length_math_expression(expression, ctx)
+                .or_else(|| scalar_length_math_value(value, ctx))
         }
         Value::Function { name, arguments }
             if name.eq_ignore_ascii_case("min") || name.eq_ignore_ascii_case("max") =>
@@ -8977,27 +9999,145 @@ fn evaluate_length_math_value(value: &Value, ctx: ResolutionContext) -> Option<L
             }
             let values = arguments
                 .iter()
-                .map(|argument| evaluate_length_percentage_math(argument, ctx))
+                .map(|argument| evaluate_length_math_value(argument, ctx))
                 .collect::<Option<Vec<_>>>()?;
-            Some(LengthMathValue::Length(
-                if name.eq_ignore_ascii_case("min") {
-                    LengthPercentageMath::Min(values)
-                } else {
-                    LengthPercentageMath::Max(values)
-                },
-            ))
+            compare_math_values(values, name.eq_ignore_ascii_case("min"))
         }
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("clamp") => {
             let [minimum, preferred, maximum] = arguments.as_slice() else {
                 return None;
             };
-            Some(LengthMathValue::Length(LengthPercentageMath::Clamp {
-                minimum: Box::new(evaluate_length_percentage_math(minimum, ctx)?),
-                preferred: Box::new(evaluate_length_percentage_math(preferred, ctx)?),
-                maximum: Box::new(evaluate_length_percentage_math(maximum, ctx)?),
+            clamp_math_values(
+                evaluate_length_math_value(minimum, ctx)?,
+                evaluate_length_math_value(preferred, ctx)?,
+                evaluate_length_math_value(maximum, ctx)?,
+            )
+        }
+        Value::Function { name, arguments }
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "hypot" | "abs" | "mod" | "rem"
+            ) =>
+        {
+            scalar_length_math_value(value, ctx)
+                .or_else(|| evaluate_deferred_length_function(name, arguments, ctx))
+        }
+        _ => scalar_length_math_value(value, ctx),
+    }
+}
+
+/// Keeps percentages symbolic until a consuming property supplies its layout basis.
+fn evaluate_deferred_length_function(
+    name: &str,
+    arguments: &[Value],
+    ctx: ResolutionContext,
+) -> Option<LengthMathValue> {
+    let values = arguments
+        .iter()
+        .map(|value| match evaluate_length_math_value(value, ctx)? {
+            LengthMathValue::Length(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let value = match name.to_ascii_lowercase().as_str() {
+        "hypot" if !values.is_empty() => LengthPercentageMath::Hypot(values),
+        "abs" if values.len() == 1 => {
+            LengthPercentageMath::Abs(Box::new(values.into_iter().next()?))
+        }
+        "mod" | "rem" if values.len() == 2 => {
+            let mut values = values.into_iter();
+            LengthPercentageMath::Modulo {
+                dividend: Box::new(values.next()?),
+                divisor: Box::new(values.next()?),
+                remainder: name.eq_ignore_ascii_case("rem"),
+            }
+        }
+        _ => return None,
+    };
+    Some(LengthMathValue::Length(value))
+}
+
+fn scalar_length_math_value(value: &Value, ctx: ResolutionContext) -> Option<LengthMathValue> {
+    match individual_transform::computed_numeric_expression(value, ctx)? {
+        Value::Number(number) => Some(LengthMathValue::Number(number)),
+        Value::Percentage(percentage) => {
+            Some(LengthMathValue::Length(LengthPercentageMath::Linear {
+                px: 0.0,
+                percentage,
+            }))
+        }
+        Value::Length(px, unit) if unit == "px" => {
+            Some(LengthMathValue::Length(LengthPercentageMath::Linear {
+                px,
+                percentage: 0.0,
             }))
         }
         _ => None,
+    }
+}
+
+fn compare_math_values(values: Vec<LengthMathValue>, minimum: bool) -> Option<LengthMathValue> {
+    if matches!(values.first()?, LengthMathValue::Number(_)) {
+        let numbers = values
+            .into_iter()
+            .map(|value| match value {
+                LengthMathValue::Number(number) => Some(number),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let result = numbers
+            .into_iter()
+            .reduce(if minimum { f32::min } else { f32::max })?;
+        return Some(LengthMathValue::Number(result));
+    }
+    let values = values
+        .into_iter()
+        .map(|value| match value {
+            LengthMathValue::Length(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(LengthMathValue::Length(if minimum {
+        LengthPercentageMath::Min(values)
+    } else {
+        LengthPercentageMath::Max(values)
+    }))
+}
+
+fn clamp_math_values(
+    minimum: LengthMathValue,
+    preferred: LengthMathValue,
+    maximum: LengthMathValue,
+) -> Option<LengthMathValue> {
+    match (minimum, preferred, maximum) {
+        (
+            LengthMathValue::Number(min),
+            LengthMathValue::Number(value),
+            LengthMathValue::Number(max),
+        ) => Some(LengthMathValue::Number(value.min(max).max(min))),
+        (
+            LengthMathValue::Length(minimum),
+            LengthMathValue::Length(preferred),
+            LengthMathValue::Length(maximum),
+        ) => Some(LengthMathValue::Length(LengthPercentageMath::Clamp {
+            minimum: Box::new(minimum),
+            preferred: Box::new(preferred),
+            maximum: Box::new(maximum),
+        })),
+        _ => None,
+    }
+}
+
+fn compute_math_comparison(
+    value: &Value,
+    property: &str,
+    ctx: ResolutionContext,
+) -> Option<ComputedValue> {
+    match evaluate_length_math_value(value, ctx)? {
+        LengthMathValue::Number(value) => Some(ComputedValue::Number(value)),
+        LengthMathValue::Length(value) => {
+            Some(computed_length_percentage_math(value, property, ctx))
+        }
     }
 }
 
@@ -9110,7 +10250,7 @@ fn computed_length_percentage_math(
     ctx: ResolutionContext,
 ) -> ComputedValue {
     if property_name.eq_ignore_ascii_case("font-size") {
-        return ComputedValue::Px(value.resolve(ctx.parent_font_size));
+        return ComputedValue::Px(value.resolve(ctx.parent_font_size).max(0.0));
     }
     if value.is_pure_px() {
         let px = value.resolve(0.0);
@@ -9133,6 +10273,38 @@ fn computed_length_percentage_math(
 }
 
 fn evaluate_calc(arguments: &[Value], ctx: ResolutionContext) -> Option<CalcQuantity> {
+    let quantity = evaluate_calc_unclamped(arguments, ctx).or_else(|| {
+        let value = Value::Function {
+            name: "calc".into(),
+            arguments: arguments.to_vec(),
+        };
+        match individual_transform::computed_numeric_expression(&value, ctx)? {
+            Value::Number(value) => Some(CalcQuantity {
+                value,
+                unit: CalcUnit::Unitless,
+            }),
+            Value::Percentage(value) => Some(CalcQuantity {
+                value,
+                unit: CalcUnit::Percentage,
+            }),
+            Value::Length(value, unit) if unit == "px" => Some(CalcQuantity {
+                value,
+                unit: CalcUnit::Px,
+            }),
+            _ => None,
+        }
+    })?;
+    Some(CalcQuantity {
+        value: if quantity.value.is_nan() {
+            0.0
+        } else {
+            quantity.value.clamp(-f32::MAX, f32::MAX)
+        },
+        unit: quantity.unit,
+    })
+}
+
+fn evaluate_calc_unclamped(arguments: &[Value], ctx: ResolutionContext) -> Option<CalcQuantity> {
     let expression = arguments.first()?;
     let mut tokens = Vec::new();
     collect_calc_tokens(expression, ctx, &mut tokens)?;
@@ -9183,6 +10355,18 @@ fn collect_calc_tokens(
         Value::Number(number) => {
             out.push(CalcToken::Value(CalcQuantity {
                 value: *number,
+                unit: CalcUnit::Unitless,
+            }));
+            Some(())
+        }
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            out.push(CalcToken::Value(evaluate_calc_unclamped(arguments, ctx)?));
+            Some(())
+        }
+        Value::Function { .. } => {
+            let number = individual_transform::unclamped_number_expression(value, ctx)?;
+            out.push(CalcToken::Value(CalcQuantity {
+                value: number,
                 unit: CalcUnit::Unitless,
             }));
             Some(())
@@ -9290,7 +10474,7 @@ fn multiply_calc_quantities(left: CalcQuantity, right: CalcQuantity) -> Option<C
 }
 
 fn divide_calc_quantities(left: CalcQuantity, right: CalcQuantity) -> Option<CalcQuantity> {
-    if right.value == 0.0 || right.unit != CalcUnit::Unitless {
+    if right.unit != CalcUnit::Unitless {
         return None;
     }
     Some(CalcQuantity {
@@ -10286,6 +11470,8 @@ const INITIAL_VALUES: &[(&str, InitialValue)] = &[
     ("rotate", InitialValue::Keyword("none")),
     ("scale", InitialValue::Keyword("none")),
     ("order", InitialValue::Number(0.0)),
+    ("flex-grow", InitialValue::Number(0.0)),
+    ("flex-shrink", InitialValue::Number(1.0)),
     ("grid-auto-flow", InitialValue::Keyword("row")),
     ("grid-auto-columns", InitialValue::Keyword("auto")),
     ("grid-auto-rows", InitialValue::Keyword("auto")),
@@ -10298,10 +11484,12 @@ const INITIAL_VALUES: &[(&str, InitialValue)] = &[
     ("background-origin", InitialValue::Keyword("padding-box")),
     ("color", InitialValue::Color("black")),
     ("font-size", InitialValue::Px(16.0)),
+    ("font-palette", InitialValue::Keyword("normal")),
     ("direction", InitialValue::Keyword("ltr")),
     ("writing-mode", InitialValue::Keyword("horizontal-tb")),
     ("unicode-bidi", InitialValue::Keyword("normal")),
     ("text-transform", InitialValue::Keyword("none")),
+    ("white-space", InitialValue::Keyword("normal")),
     ("text-overflow", InitialValue::Keyword("clip")),
     ("text-shadow", InitialValue::Keyword("none")),
     ("text-decoration-line", InitialValue::Keyword("none")),
@@ -10632,8 +11820,10 @@ const INHERITED_PROPERTIES: &[&str] = &[
     "direction",
     "font-family",
     "font-size",
+    "font-palette",
     "font-style",
     "font-stretch",
+    "font-variation-settings",
     "font-weight",
     "letter-spacing",
     "line-height",
@@ -10690,6 +11880,7 @@ fn candidate_font_properties(
     candidates: &[Candidate],
     custom_properties: &BTreeMap<String, Value>,
     parent_style: Option<&ComputedStyle>,
+    node: &NodeHandle,
 ) -> (PropertyMap, Option<usize>) {
     let mut properties = PropertyMap::new();
     let mut scope_root = parent_style.and_then(ComputedStyle::font_family_scope_root);
@@ -10710,6 +11901,11 @@ fn candidate_font_properties(
         let Some(value) = resolve_value_with_custom_properties(&candidate.value, custom_properties)
         else {
             continue;
+        };
+        let value = if sibling_functions::contains(&value) {
+            sibling_functions::resolve(&value, node)
+        } else {
+            value
         };
         if let Value::Keyword(keyword) = &value {
             if matches!(keyword.to_ascii_lowercase().as_str(), "inherit" | "unset") {
@@ -11074,6 +12270,12 @@ fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
 
 pub(super) fn render_value(value: &Value) -> String {
     match value {
+        Value::TreeCounting { index, .. } => if *index {
+            "sibling-index()"
+        } else {
+            "sibling-count()"
+        }
+        .to_string(),
         Value::Keyword(value) => value.clone(),
         Value::Length(number, unit) => format!("{number}{unit}"),
         Value::Color(value) => value.clone(),
@@ -11162,10 +12364,84 @@ fn render_font_family_value(values: &[Value]) -> String {
         .join(", ")
 }
 
+/// Captures changed animation values and preserves original alias expressions.
+/// The returned owned values are inputs to a second cascade in the same frame.
+fn animated_custom_property_values(
+    specified: &BTreeMap<String, Value>,
+    custom: &BTreeMap<String, Value>,
+    properties: &PropertyMap,
+    registrations: &BTreeMap<String, RegisteredCustomProperty>,
+    untyped: &BTreeMap<String, Value>,
+) -> Option<BTreeMap<String, Value>> {
+    let mut changed: Vec<_> = registrations
+        .iter()
+        .filter_map(|(name, registration)| {
+            if matches!(registration.syntax, RegisteredPropertySyntax::Universal) {
+                return None;
+            }
+            let value = properties.get(name)?;
+            (custom.get(name).map(render_value).as_deref() != Some(value.css_text().as_str())).then(
+                || {
+                    (
+                        name.clone(),
+                        parse_registered_initial_value(&value.css_text())
+                            .unwrap_or_else(|| computed_value_to_value(value)),
+                    )
+                },
+            )
+        })
+        .collect();
+    changed.extend(
+        untyped
+            .iter()
+            .filter(|(name, value)| custom.get(*name) != Some(*value))
+            .map(|(name, value)| (name.clone(), value.clone())),
+    );
+    if changed.is_empty() {
+        return None;
+    }
+    let mut values = custom.clone();
+    // Re-resolve aliases specified on this element against its animated values.
+    // Inherited aliases already have their parent's computed substitutions.
+    values.extend(
+        specified
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone())),
+    );
+    values.extend(changed);
+    Some(values)
+}
+
 fn inherited_custom_properties(parent_style: Option<&ComputedStyle>) -> BTreeMap<String, Value> {
     parent_style
         .map(|style| style.custom_properties.clone())
         .unwrap_or_default()
+}
+
+/// Resolves context-independent registered numbers before the font prepass.
+/// Relative-font calculations remain in the subsequent element-context pass.
+fn resolve_font_numeric_custom_properties(
+    current: BTreeMap<String, Value>,
+    specified: &BTreeMap<String, Value>,
+    inherited: &BTreeMap<String, Value>,
+    registrations: &BTreeMap<String, RegisteredCustomProperty>,
+    ctx: ResolutionContext,
+    node: &NodeHandle,
+) -> BTreeMap<String, Value> {
+    let numeric = registrations.iter().filter(|(name, registration)| {
+        let numeric = matches!(&registration.syntax, RegisteredPropertySyntax::Alternatives(parts)
+            if parts.len() == 1 && parts[0].multiplier == RegisteredSyntaxMultiplier::Single
+                && matches!(parts[0].kind, RegisteredSyntaxKind::Number | RegisteredSyntaxKind::Integer));
+        numeric && current.get(*name).is_none_or(|value| {
+            let value = sibling_functions::resolve(value, node);
+            typed_math::infer(&value, None) != Some(typed_math::NumericType::NUMBER)
+                || individual_transform::fixed_number_expression(&value).is_some()
+        })
+    }).map(|(name, registration)| (name.clone(), registration.clone())).collect::<BTreeMap<_, _>>();
+    if numeric.is_empty() {
+        return current;
+    }
+    compute_registered_custom_properties(specified, inherited, &numeric, ctx, node).0
 }
 
 fn compute_registered_custom_properties(
@@ -11173,6 +12449,7 @@ fn compute_registered_custom_properties(
     inherited: &BTreeMap<String, Value>,
     registrations: &BTreeMap<String, RegisteredCustomProperty>,
     ctx: ResolutionContext,
+    node: &NodeHandle,
 ) -> (BTreeMap<String, Value>, BTreeMap<String, ComputedValue>) {
     let mut values = inherited.clone();
 
@@ -11250,6 +12527,14 @@ fn compute_registered_custom_properties(
     }
 
     let mut resolved = resolve_custom_property_values(&values);
+    for registration in registrations.values() {
+        if !matches!(registration.syntax, RegisteredPropertySyntax::Universal)
+            && let Some(value) = resolved.get_mut(&registration.name)
+            && sibling_functions::contains(value)
+        {
+            *value = sibling_functions::resolve(value, node);
+        }
+    }
     // A registered value that does not match its syntax computes as `unset`.
     // Apply those fallbacks before resolving dependent var() references again.
     for registration in registrations.values() {
@@ -11288,11 +12573,89 @@ fn compute_registered_custom_properties(
         computed.insert(name.clone(), value);
     }
     for (name, value) in &computed {
-        if registrations.contains_key(name) {
-            resolved.insert(name.clone(), computed_value_to_value(value));
+        if let Some(registration) = registrations.get(name) {
+            // Universal registrations retain the substituted token stream,
+            // including the declaration scope of tree-counting functions.
+            if matches!(registration.syntax, RegisteredPropertySyntax::Universal) {
+                continue;
+            }
+            let tokens = parse_registered_initial_value(&value.css_text())
+                .unwrap_or_else(|| computed_value_to_value(value));
+            resolved.insert(name.clone(), tokens);
         }
     }
+    let resolved = finish_registered_aliases(values, &resolved, registrations, &mut computed);
     (resolved, computed)
+}
+
+/// Substitutes computed registered values into original aliases before inheritance.
+fn finish_registered_aliases(
+    mut original: BTreeMap<String, Value>,
+    resolved: &BTreeMap<String, Value>,
+    registrations: &BTreeMap<String, RegisteredCustomProperty>,
+    computed: &mut BTreeMap<String, ComputedValue>,
+) -> BTreeMap<String, Value> {
+    // Keep invalid/cyclic aliases invalid rather than reviving their original tokens.
+    original.retain(|name, _| resolved.contains_key(name));
+    for name in registrations.keys() {
+        if let Some(value) = resolved.get(name) {
+            original.insert(name.clone(), value.clone());
+        }
+    }
+    let resolved = resolve_custom_property_values(&original);
+    for (name, value) in &resolved {
+        if !registrations.contains_key(name) {
+            computed.insert(name.clone(), ComputedValue::Keyword(render_value(value)));
+        }
+    }
+    resolved
+}
+
+/// Computes a dimension with a fixed canonical unit using the shared math evaluator.
+fn compute_registered_dimension(
+    value: &Value,
+    kind: &RegisteredSyntaxKind,
+    ctx: ResolutionContext,
+) -> Option<Value> {
+    use typed_math::NumericType;
+    let (expected, unit) = match kind {
+        RegisteredSyntaxKind::Time => (NumericType::TIME, "s"),
+        RegisteredSyntaxKind::Angle => (NumericType::ANGLE, "deg"),
+        RegisteredSyntaxKind::Resolution => (NumericType::RESOLUTION, "dppx"),
+        _ => return None,
+    };
+    if typed_math::infer(value, None)? != expected {
+        return None;
+    }
+    let Value::Length(mut number, computed_unit) =
+        individual_transform::computed_numeric_expression(value, ctx)?
+    else {
+        return None;
+    };
+    if expected == NumericType::TIME && computed_unit == "ms" {
+        number /= 1000.0;
+    }
+    if expected == NumericType::RESOLUTION {
+        number = number.max(0.0);
+    }
+    Some(Value::Length(number, unit.into()))
+}
+
+fn normalize_registered_numeric(
+    value: ComputedValue,
+    syntax: &RegisteredPropertySyntax,
+) -> ComputedValue {
+    if let (ComputedValue::Number(number), RegisteredPropertySyntax::Alternatives(parts)) =
+        (&value, syntax)
+    {
+        if parts.len() == 1
+            && parts[0].multiplier == RegisteredSyntaxMultiplier::Single
+            && matches!(parts[0].kind, RegisteredSyntaxKind::Integer)
+        {
+            return ComputedValue::Number(round_css_integer(*number));
+        }
+    }
+    value
 }
 
 fn compute_registered_value(
@@ -11300,6 +12663,15 @@ fn compute_registered_value(
     syntax: &RegisteredPropertySyntax,
     ctx: ResolutionContext,
 ) -> ComputedValue {
+    if let RegisteredPropertySyntax::Alternatives(parts) = syntax {
+        for part in parts {
+            if part.multiplier == RegisteredSyntaxMultiplier::Single {
+                if let Some(value) = compute_registered_dimension(value, &part.kind, ctx) {
+                    return ComputedValue::Keyword(render_value(&value));
+                }
+            }
+        }
+    }
     let scalar = match syntax {
         RegisteredPropertySyntax::Alternatives(parts) => parts.iter().find(|part| {
             part.multiplier == RegisteredSyntaxMultiplier::Single
@@ -11315,7 +12687,7 @@ fn compute_registered_value(
             | RegisteredSyntaxKind::Integer
             | RegisteredSyntaxKind::Percentage
             | RegisteredSyntaxKind::Color,
-        ) => compute_value(value, "--registered", ctx),
+        ) => normalize_registered_numeric(compute_value(value, "--registered", ctx), syntax),
         _ => ComputedValue::Keyword(render_value(value)),
     }
 }

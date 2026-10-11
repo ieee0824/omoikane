@@ -35,6 +35,7 @@ pub(crate) struct ContainerQuery {
 #[derive(Debug, Clone, PartialEq)]
 enum Condition {
     Feature(Feature),
+    Style { name: String, value: super::Value },
     And(Vec<Condition>),
     Or(Vec<Condition>),
     Not(Box<Condition>),
@@ -46,15 +47,16 @@ enum Axis {
     Block,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Feature {
     axis: Axis,
     comparison: Comparison,
     value: LengthValue,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct LengthValue {
+    expression: Option<super::Value>,
     number: f32,
     unit: LengthUnit,
 }
@@ -73,19 +75,28 @@ enum LengthUnit {
 }
 
 impl LengthValue {
-    fn resolve(self, context: ContainerUnitContext) -> f32 {
-        self.number
-            * match self.unit {
-                LengthUnit::Px => 1.0,
-                LengthUnit::Em => context.font_size,
-                LengthUnit::Rem => context.root_font_size,
-                LengthUnit::Ex => context.metrics.ex,
-                LengthUnit::Ch => context.metrics.ch,
-                LengthUnit::Cap => context.metrics.cap,
-                LengthUnit::Ic => context.metrics.ic,
-                LengthUnit::Lh => context.line_height,
-                LengthUnit::Rlh => context.root_line_height,
-            }
+    fn resolve(
+        &self,
+        context: ContainerUnitContext,
+        evaluate: &dyn Fn(&super::Value) -> Option<f32>,
+    ) -> Option<f32> {
+        if let Some(value) = &self.expression {
+            return evaluate(value);
+        }
+        Some(
+            self.number
+                * match self.unit {
+                    LengthUnit::Px => 1.0,
+                    LengthUnit::Em => context.font_size,
+                    LengthUnit::Rem => context.root_font_size,
+                    LengthUnit::Ex => context.metrics.ex,
+                    LengthUnit::Ch => context.metrics.ch,
+                    LengthUnit::Cap => context.metrics.cap,
+                    LengthUnit::Ic => context.metrics.ic,
+                    LengthUnit::Lh => context.line_height,
+                    LengthUnit::Rlh => context.root_line_height,
+                },
+        )
     }
 }
 
@@ -110,7 +121,37 @@ impl ContainerQuery {
         height: f32,
         units: ContainerUnitContext,
     ) -> bool {
-        self.condition.matches(width, height, units)
+        self.condition.matches(
+            width,
+            height,
+            units,
+            &|value| super::style::compute_container_length(value, units, None),
+            &|_, _| false,
+        )
+    }
+
+    /// Evaluates runtime expressions for the selected container and declaration tree scope.
+    pub(crate) fn matches_for_element(
+        &self,
+        width: f32,
+        height: f32,
+        units: ContainerUnitContext,
+        node: &crate::dom::NodeHandle,
+        scope: Option<&crate::dom::NodeHandle>,
+        styles: &super::style::ContainerStyleSnapshot,
+    ) -> bool {
+        self.condition.matches(
+            width,
+            height,
+            units,
+            &|value| super::style::compute_container_length(value, units, Some((node, scope))),
+            &|name, value| styles.matches(name, value, units, node, scope),
+        )
+    }
+
+    /// Whether any size feature requires size containment on the selected container.
+    pub(crate) fn requires_size_containment(&self) -> bool {
+        self.condition.requires_size_containment()
     }
 
     /// Whether evaluating this query requires block-axis size containment.
@@ -120,22 +161,44 @@ impl ContainerQuery {
 }
 
 impl Condition {
-    fn matches(&self, width: f32, height: f32, units: ContainerUnitContext) -> bool {
+    fn matches(
+        &self,
+        width: f32,
+        height: f32,
+        units: ContainerUnitContext,
+        evaluate: &dyn Fn(&super::Value) -> Option<f32>,
+        style_matches: &dyn Fn(&str, &super::Value) -> bool,
+    ) -> bool {
         match self {
-            Self::Feature(feature) => feature.matches(width, height, units),
+            Self::Style { name, value } => style_matches(name, value),
+            Self::Feature(feature) => feature.matches(width, height, units, evaluate),
             Self::And(conditions) => conditions
                 .iter()
-                .all(|condition| condition.matches(width, height, units)),
+                .all(|condition| condition.matches(width, height, units, evaluate, style_matches)),
             Self::Or(conditions) => conditions
                 .iter()
-                .any(|condition| condition.matches(width, height, units)),
-            Self::Not(condition) => !condition.matches(width, height, units),
+                .any(|condition| condition.matches(width, height, units, evaluate, style_matches)),
+            Self::Not(condition) => {
+                !condition.matches(width, height, units, evaluate, style_matches)
+            }
+        }
+    }
+
+    fn requires_size_containment(&self) -> bool {
+        match self {
+            Self::Feature(_) => true,
+            Self::Style { .. } => false,
+            Self::And(values) | Self::Or(values) => {
+                values.iter().any(Self::requires_size_containment)
+            }
+            Self::Not(value) => value.requires_size_containment(),
         }
     }
 
     fn requires_block_size(&self) -> bool {
         match self {
             Self::Feature(feature) => feature.axis == Axis::Block,
+            Self::Style { .. } => false,
             Self::And(conditions) | Self::Or(conditions) => {
                 conditions.iter().any(Self::requires_block_size)
             }
@@ -145,12 +208,20 @@ impl Condition {
 }
 
 impl Feature {
-    fn matches(&self, width: f32, height: f32, units: ContainerUnitContext) -> bool {
+    fn matches(
+        &self,
+        width: f32,
+        height: f32,
+        units: ContainerUnitContext,
+        evaluate: &dyn Fn(&super::Value) -> Option<f32>,
+    ) -> bool {
         let actual = match self.axis {
             Axis::Inline => width,
             Axis::Block => height,
         };
-        let expected = self.value.resolve(units);
+        let Some(expected) = self.value.resolve(units, evaluate) else {
+            return false;
+        };
         match self.comparison {
             Comparison::Less => actual < expected,
             Comparison::LessEqual => actual <= expected,
@@ -167,6 +238,10 @@ impl Feature {
 pub(crate) fn parse_container_query(input: &str) -> Option<ContainerQuery> {
     let input = input.trim();
     let condition_start = input.find('(')?;
+    let condition_start = input[..condition_start]
+        .trim_end()
+        .strip_suffix("style")
+        .map_or(condition_start, |prefix| prefix.len());
     let name_text = input[..condition_start].trim();
     let (name, condition_text) = if name_text.is_empty() {
         (None, &input[condition_start..])
@@ -183,6 +258,24 @@ pub(crate) fn parse_container_query(input: &str) -> Option<ContainerQuery> {
 
 fn parse_condition(input: &str) -> Option<Condition> {
     let input = input.trim();
+    if let Some(body) = input
+        .strip_prefix("style(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        let (name, value) = body.split_once(':')?;
+        let name = name.trim();
+        if !name.starts_with("--") || name.len() <= 2 {
+            return None;
+        }
+        let value = super::parse_style_attribute(&format!("{name}: {value}"))
+            .into_iter()
+            .find(|declaration| declaration.name == name)?
+            .value;
+        return Some(Condition::Style {
+            name: name.into(),
+            value,
+        });
+    }
     if let Some(rest) = strip_keyword(input, "not") {
         return Some(Condition::Not(Box::new(parse_in_parens(rest.trim())?)));
     }
@@ -214,6 +307,9 @@ fn parse_condition(input: &str) -> Option<Condition> {
 
 fn parse_in_parens(input: &str) -> Option<Condition> {
     let input = input.trim();
+    if input.starts_with("style(") {
+        return parse_condition(input);
+    }
     if !input.starts_with('(') || matching_close(input)? != input.len() - 1 {
         return None;
     }
@@ -280,6 +376,7 @@ fn parse_feature(input: &str) -> Option<Feature> {
             axis,
             comparison: Comparison::Greater,
             value: LengthValue {
+                expression: None,
                 number: 0.0,
                 unit: LengthUnit::Px,
             },
@@ -302,22 +399,19 @@ fn parse_feature(input: &str) -> Option<Feature> {
         });
     }
 
-    let compact: String = input
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect();
+    let compact = input;
     for operator in [">=", "<=", ">", "<", "="] {
         let Some((left, right)) = compact.split_once(operator) else {
             continue;
         };
-        if let Some(axis) = parse_axis(&left.to_ascii_lowercase()) {
+        if let Some(axis) = parse_axis(&left.trim().to_ascii_lowercase()) {
             return Some(Feature {
                 axis,
                 comparison: parse_comparison(operator)?,
                 value: parse_length(right)?,
             });
         }
-        if let Some(axis) = parse_axis(&right.to_ascii_lowercase()) {
+        if let Some(axis) = parse_axis(&right.trim().to_ascii_lowercase()) {
             return Some(Feature {
                 axis,
                 comparison: reverse_comparison(parse_comparison(operator)?),
@@ -359,8 +453,16 @@ fn reverse_comparison(comparison: Comparison) -> Comparison {
 
 fn parse_length(input: &str) -> Option<LengthValue> {
     let lower = input.trim().to_ascii_lowercase();
+    if lower.contains('(') {
+        return Some(LengthValue {
+            expression: Some(super::style::parse_container_length_expression(input)?),
+            number: 0.0,
+            unit: LengthUnit::Px,
+        });
+    }
     if lower == "0" {
         return Some(LengthValue {
+            expression: None,
             number: 0.0,
             unit: LengthUnit::Px,
         });
@@ -382,7 +484,11 @@ fn parse_length(input: &str) -> Option<LengthValue> {
                 .parse::<f32>()
                 .ok()
                 .filter(|value| *value >= 0.0)
-                .map(|number| LengthValue { number, unit });
+                .map(|number| LengthValue {
+                    number,
+                    unit,
+                    expression: None,
+                });
         }
     }
     None
@@ -517,7 +623,10 @@ mod tests {
                 .as_deref(),
             Some("--card")
         );
-        assert!(parse_container_query("card style(--theme: dark)").is_none());
+        let style = parse_container_query("card style(--theme: dark)").unwrap();
+        assert_eq!(style.name.as_deref(), Some("card"));
+        assert!(!style.requires_size_containment());
+        assert!(parse_container_query("card style(color: red)").is_none());
         assert!(parse_container_query("card (orientation: landscape)").is_none());
     }
 

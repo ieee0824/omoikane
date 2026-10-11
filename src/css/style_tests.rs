@@ -3691,13 +3691,13 @@ fn invalid_color_at_higher_layer_does_not_override_valid_color() {
 }
 
 #[test]
-fn invalid_color_after_var_substitution_does_not_override_valid_color() {
+fn invalid_color_after_var_substitution_inherits_instead_of_reviving_an_earlier_color() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
-            ":root { --invalid-color: not-a-color; } \
+            ":root { --invalid-color: not-a-color; } body { color: green; } \
              h1 { color: blue; color: var(--invalid-color); }",
         )
         .unwrap(),
@@ -3705,7 +3705,7 @@ fn invalid_color_after_var_substitution_does_not_override_valid_color() {
 
     assert_eq!(
         resolver.computed_style(&title).get("color"),
-        Some(&ComputedValue::Color("blue".to_string()))
+        Some(&ComputedValue::Color("green".to_string()))
     );
 }
 
@@ -8222,7 +8222,9 @@ fn length_percentage_math_uses_one_grammar_for_supports_shorthands_and_cascade()
         .unwrap(),
     );
     let style = resolver.computed_style(&div);
-    assert_eq!(style.get("width"), Some(&ComputedValue::Px(31.0)));
+    // Invalid at computed-value time resets to the initial auto width.
+    // The internal map omits this implicit initial value.
+    assert_eq!(style.get("width"), None);
     assert_eq!(
         style.get("height").map(ComputedValue::css_text),
         Some("max(10% + 5px, 20px)".to_string())
@@ -8525,7 +8527,7 @@ fn invalid_higher_declaration_does_not_hide_revert_layer() {
 }
 
 #[test]
-fn unresolved_var_does_not_hide_revert_layer() {
+fn unresolved_var_resets_to_initial_instead_of_reviving_revert_layer() {
     let document = NodeHandle::document();
     let target = NodeHandle::element("div");
     document.append_child(target.clone());
@@ -8546,8 +8548,8 @@ fn unresolved_var_does_not_hide_revert_layer() {
 
     assert_eq!(
         resolver.computed_style(&target).get("white-space"),
-        Some(&ComputedValue::Keyword("pre-wrap".to_string())),
-        "an unresolved var() must be discarded before revert-layer is resolved"
+        Some(&ComputedValue::Keyword("normal".to_string())),
+        "an unresolved var() wins the cascade and computes as unset"
     );
 }
 
@@ -9211,7 +9213,7 @@ fn invalid_conic_angle_syntax_drops_the_whole_declaration() {
                 ),
                 "background-image",
             ),
-            "linear-gradient(red, red)",
+            "linear-gradient(rgb(255, 0, 0), rgb(255, 0, 0))",
             "accepted {invalid}",
         );
     }
@@ -9898,13 +9900,17 @@ fn out_of_range_calc_aspect_ratio_is_clamped_not_dropped() {
         "3 / 2"
     );
 
-    // Values that overflow the float range are dropped here, because the calc
-    // evaluator reports no result for them. Firefox 152 saturates at the largest
-    // float instead (`3.40282e38 / 1`).
-    for value in ["1e40", "calc(1e40)", "calc(1/0)", "calc(0/0)"] {
+    // Values outside the representable range clamp at computation time.
+    // NaN becomes zero; infinity uses the largest supported finite float.
+    for (value, expected) in [
+        ("1e40", format!("{} / 1", f32::MAX)),
+        ("calc(1e40)", format!("{} / 1", f32::MAX)),
+        ("calc(1/0)", format!("{} / 1", f32::MAX)),
+        ("calc(0/0)", "0 / 1".to_string()),
+    ] {
         assert_eq!(
             image_computed_keyword(&format!("aspect-ratio: {value}"), "aspect-ratio"),
-            "auto",
+            expected,
             "aspect-ratio: {value}"
         );
     }

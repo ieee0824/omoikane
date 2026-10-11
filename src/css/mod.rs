@@ -231,7 +231,7 @@ pub use transform::AffineTransform;
 pub(crate) use transform::{
     Matrix4, TransformReferenceBox, interpolate_transform_lists, parse_composed_transform,
     parse_perspective_matrix, parse_perspective_origin, parse_perspective_with_origin,
-    parse_transform_list, parse_transform_with_origin,
+    parse_transform_with_origin, serialize_transform_matrix,
 };
 
 mod font_shorthand;
@@ -539,6 +539,14 @@ pub enum Value {
     Function {
         name: String,
         arguments: Vec<Value>,
+    },
+    /// An element-dependent integer function with its declaration tree scope.
+    /// This internal computed-value annotation serializes as the original function.
+    TreeCounting {
+        /// True for sibling-index(); false for sibling-count().
+        index: bool,
+        /// Declaration tree followed by ancestor tree IDs; None is the document.
+        scope_ancestry: Vec<Option<usize>>,
     },
     List(Vec<Value>),
     /// A top-level comma-separated list. Unlike `List`, separators are

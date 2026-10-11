@@ -567,6 +567,10 @@
     "scroll-margin-inline-start", "scroll-margin-inline-end",
     "scroll-margin-block-start", "scroll-margin-block-end",
   ]);
+  const needsStyleValueNormalization = (name, value) =>
+    name === "transition" || name.startsWith("transition-") ||
+    validatesSpecialStyleProperties.has(name) ||
+    (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
   const styleShorthandLonghands = Object.freeze({
     "inset": ["top", "right", "bottom", "left"],
     "inset-inline": ["inset-inline-start", "inset-inline-end"],
@@ -3318,9 +3322,7 @@
         for (const declaration of declarations) {
           if (!declaration.name.startsWith("--") &&
               !nativeStyleSupports(declaration.name, declaration.value)) continue;
-          if (declaration.name === "transition" ||
-              declaration.name.startsWith("transition-") ||
-              validatesSpecialStyleProperties.has(declaration.name)) {
+          if (needsStyleValueNormalization(declaration.name, declaration.value)) {
             const value = __omoikane_normalize_style_value(
               declaration.name, declaration.value
             );
@@ -3405,7 +3407,7 @@
       const setValue = (kebab, value, priority) => {
         value = String(value);
         if (!kebab.startsWith("--") && !nativeStyleSupports(kebab, value)) return;
-        if (kebab === "transition" || kebab.startsWith("transition-") || validatesSpecialStyleProperties.has(kebab)) {
+        if (needsStyleValueNormalization(kebab, value)) {
           const normalized = __omoikane_normalize_style_value(kebab, value);
           if (normalized === null) return;
           value = normalized;
@@ -8051,12 +8053,14 @@
     catch (_) { return false; }
   }
 
-  function declarationView(block, onChange = null, validateProperties = true) {
+  function declarationView(block, onChange = null, validateProperties = true, elementContext = true) {
     let source = String(block || "");
     let cachedSource = null;
     let cachedDeclarations = [];
-    const accepts = (name, value) => !validateProperties || name.startsWith("--") ||
-      nativeStyleSupports(name, value.replace(/\s*!\s*important\s*$/i, ""));
+    const accepts = (name, value) =>
+      (elementContext || JSON.parse(__omoikane_css_declarations(name + ": " + value, true)).length > 0) &&
+      (!validateProperties || name.startsWith("--") ||
+       nativeStyleSupports(name, value.replace(/\s*!\s*important\s*$/i, "")));
     const declarations = () => {
       if (cachedSource !== source) {
         const parsed = JSON.parse(__omoikane_css_declarations(source)).map(
@@ -8090,7 +8094,7 @@
       value = String(value);
       if (!key || value === "") return removeValue(key);
       if (!accepts(key, value)) return;
-      if (key === "transition" || key.startsWith("transition-") || validatesSpecialStyleProperties.has(key)) {
+      if (needsStyleValueNormalization(key, value)) {
         const normalized = __omoikane_normalize_style_value(key, value);
         if (normalized === null) return;
         value = normalized;
@@ -8395,6 +8399,7 @@
           this.__text = this.__serializeCssText();
           if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
         },
+        !this.__selectorText.startsWith("@"),
         !this.__selectorText.startsWith("@")
       );
       this.__innerSheet = new CSSStyleSheet(null, {
@@ -8476,6 +8481,7 @@
             globalThis.__omoikane_font_face_rule_changed(this, name);
           }
         },
+        false,
         false
       );
       if (this.__sheet) this.__sheet.__registerRuleView(this);
@@ -8483,6 +8489,145 @@
     get type() { return 5; }
     get cssText() { return "@font-face { " + this.style.cssText + " }"; }
     get style() { return this.__style; }
+  }
+
+  // Descriptor rules have no originating element for tree-dependent values.
+  class CSSDescriptorRule {
+    constructor(text, sheet, index) {
+      this.__sheet = sheet;
+      this.__index = index;
+      const open = cssRuleBlockStart(text), close = text.lastIndexOf("}");
+      this.__prelude = text.slice(0, open).trim();
+      this.__style = declarationView(text.slice(open + 1, close), () => {
+        this.__text = this.cssText;
+        if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
+      }, false, false);
+      this.__text = text;
+      if (sheet) sheet.__registerRuleView(this);
+    }
+    get cssText() { return this.__prelude + " { " + this.__style.cssText + " }"; }
+    get parentRule() { return this.__sheet ? this.__sheet.__parentRule : null; }
+    get parentStyleSheet() { return this.__sheet; }
+  }
+
+  class CSSFontPaletteValuesRule extends CSSDescriptorRule {
+    get type() { return 0; }
+    get name() { return this.__prelude.replace(/^@font-palette-values\s+/i, ""); }
+    get fontFamily() { return this.__style.getPropertyValue("font-family"); }
+    get basePalette() { return this.__style.getPropertyValue("base-palette"); }
+    get overrideColors() { return this.__style.getPropertyValue("override-colors"); }
+  }
+
+  class CSSCounterStyleRule extends CSSDescriptorRule {
+    get type() { return 11; }
+    get name() { return this.__prelude.replace(/^@counter-style\s+/i, ""); }
+    set name(value) {
+      const name = String(value);
+      if (!/^(?:--)?[a-z_][a-z0-9_-]*$/i.test(name)) return;
+      this.__prelude = "@counter-style " + name;
+      this.__text = this.cssText;
+      if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
+    }
+  }
+  for (const attribute of ["system", "symbols", "additiveSymbols", "negative", "prefix",
+    "suffix", "range", "pad", "fallback", "speakAs"]) {
+    const descriptor = attribute.replace(/[A-Z]/g, letter => "-" + letter.toLowerCase());
+    Object.defineProperty(CSSCounterStyleRule.prototype, attribute, {
+      configurable: true, enumerable: true,
+      get() { return this.__style.getPropertyValue(descriptor); },
+      set(value) { this.__style.setProperty(descriptor, String(value)); },
+    });
+  }
+
+  class CSSFontFeatureValuesMap {
+    constructor(limit, onChange) {
+      this.__values = new Map();
+      this.__limit = limit;
+      this.__onChange = onChange;
+    }
+    get size() { return this.__values.size; }
+    get(key) { const value = this.__values.get(String(key)); return value && value.slice(); }
+    has(key) { return this.__values.has(String(key)); }
+    set(key, input) {
+      const iterable = input !== null && (typeof input === "object" || typeof input === "function")
+        && typeof input[Symbol.iterator] === "function";
+      const values = iterable ? Array.from(input) : [input];
+      if (values.length > this.__limit)
+        throw new DOMException("Invalid number of feature values.", "InvalidAccessError");
+      this.__values.set(String(key), values.map(value => {
+        if (typeof value === "bigint") throw new TypeError("Cannot convert BigInt to unsigned long.");
+        return Number(value) >>> 0;
+      }));
+      this.__onChange();
+    }
+    delete(key) {
+      const removed = this.__values.delete(String(key));
+      if (removed) this.__onChange();
+      return removed;
+    }
+    clear() { this.__values.clear(); this.__onChange(); }
+    *entries() { for (const [key, values] of this.__values) yield [key, values.slice()]; }
+    keys() { return this.__values.keys(); }
+    *values() { for (const values of this.__values.values()) yield values.slice(); }
+    [Symbol.iterator]() { return this.entries(); }
+    forEach(callback, thisArg) {
+      for (const [key, values] of this) callback.call(thisArg, values, key, this);
+    }
+  }
+
+  const featureValueBlocks = [
+    ["annotation", "annotation", 1], ["ornaments", "ornaments", 1],
+    ["stylistic", "stylistic", 1], ["swash", "swash", 1],
+    ["characterVariant", "character-variant", 2], ["styleset", "styleset", Infinity],
+    ["historicalForms", "historical-forms", 1],
+  ];
+  class CSSFontFeatureValuesRule {
+    constructor(text, sheet = null, index = -1) {
+      this.__sheet = sheet;
+      this.__index = index;
+      const open = cssRuleBlockStart(text), close = text.lastIndexOf("}");
+      this.__family = text.slice(0, open).replace(/^@font-feature-values\s+/i, "").trim();
+      this.__maps = new Map(featureValueBlocks.map(([attribute, block, limit]) =>
+        [block, new CSSFontFeatureValuesMap(limit, () => this.__sync())]));
+      for (const source of JSON.parse(__omoikane_css_rule_sources(text.slice(open + 1, close)))) {
+        const start = cssRuleBlockStart(source), end = source.lastIndexOf("}");
+        const block = source.slice(0, start).trim().replace(/^@/, "").toLowerCase();
+        const map = this.__maps.get(block);
+        if (!map) continue;
+        for (const [name, value] of JSON.parse(__omoikane_css_declarations(source.slice(start + 1, end), true))) {
+          const encoded = __omoikane_css_feature_values(value);
+          if (encoded === null) continue;
+          const values = JSON.parse(encoded);
+          if (values.length > map.__limit) continue;
+          map.__values.set(name, values);
+        }
+      }
+      this.__text = text;
+      if (sheet) sheet.__registerRuleView(this);
+    }
+    get type() { return 14; }
+    get fontFamily() { return this.__family; }
+    set fontFamily(value) { this.__family = String(value); this.__sync(); }
+    get parentRule() { return this.__sheet ? this.__sheet.__parentRule : null; }
+    get parentStyleSheet() { return this.__sheet; }
+    get cssText() {
+      const blocks = [];
+      for (const [block, map] of this.__maps) {
+        if (map.size) blocks.push("@" + block + " { " + [...map].map(
+          ([name, values]) => name + ": " + values.join(" ") + ";").join(" ") + " }");
+      }
+      return "@font-feature-values " + this.fontFamily + " { " + blocks.join(" ") + " }";
+    }
+    __sync() {
+      this.__text = this.cssText;
+      if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
+    }
+  }
+  for (const [attribute, block] of featureValueBlocks) {
+    Object.defineProperty(CSSFontFeatureValuesRule.prototype, attribute, {
+      configurable: true, enumerable: true,
+      get() { return this.__maps.get(block); },
+    });
   }
 
   class CSSPropertyRule {
@@ -8856,6 +9001,12 @@
       ? new CSSNestedDeclarations(text, sheet, index)
       : /^@font-face(?=\s|\/\*|\{)/i.test(ruleSource)
       ? new CSSFontFaceRule(text, sheet, index)
+      : /^@font-palette-values(?=\s|\/\*)/i.test(ruleSource)
+      ? new CSSFontPaletteValuesRule(text, sheet, index)
+      : /^@counter-style(?=\s|\/\*)/i.test(ruleSource)
+      ? new CSSCounterStyleRule(text, sheet, index)
+      : /^@font-feature-values(?=\s|\/\*)/i.test(ruleSource)
+      ? new CSSFontFeatureValuesRule(text, sheet, index)
       : /^@property(?=\s|\/\*|\{)/i.test(ruleSource)
       ? new CSSPropertyRule(text, sheet, index)
       : /^@import(?=\s|\/\*)/i.test(ruleSource)
@@ -16284,6 +16435,10 @@
   globalThis.CSSNestedDeclarations = CSSNestedDeclarations;
   globalThis.CSSMediaRule = CSSMediaRule;
   globalThis.CSSFontFaceRule = CSSFontFaceRule;
+  globalThis.CSSFontPaletteValuesRule = CSSFontPaletteValuesRule;
+  globalThis.CSSCounterStyleRule = CSSCounterStyleRule;
+  globalThis.CSSFontFeatureValuesRule = CSSFontFeatureValuesRule;
+  globalThis.CSSFontFeatureValuesMap = CSSFontFeatureValuesMap;
   globalThis.CSSPropertyRule = CSSPropertyRule;
   globalThis.CSSImportRule = CSSImportRule;
   globalThis.CSSLayerBlockRule = CSSLayerBlockRule;

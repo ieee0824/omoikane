@@ -3,7 +3,7 @@ use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
 
 #[test]
-fn unsupported_properties_agree_with_css_supports_and_cascade() {
+fn property_support_agrees_with_css_supports_and_cascade() {
     let mut runtime = JsRuntime::with_document(TreeBuilder::parse(
         "<style>#probe { rotate:10deg; font-feature-settings: \"liga\" 0; scrollbar-color:red blue; }</style><div id=probe></div>"
     ).document()).unwrap();
@@ -20,6 +20,11 @@ fn unsupported_properties_agree_with_css_supports_and_cascade() {
             if (name === 'rotate' && CSS.supports(name, value)) {
                 return element.style.getPropertyValue(name) === '10deg' &&
                     getComputedStyle(element).getPropertyValue(name) === '10deg';
+            }
+            if (name === 'font-variation-settings') {
+                return CSS.supports(name, value) &&
+                    element.style.getPropertyValue(name) === value &&
+                    getComputedStyle(element).getPropertyValue(name) === value;
             }
             return !CSS.supports(name, value) && element.style.getPropertyValue(name) === '' && getComputedStyle(element).getPropertyValue(name) === '';
         });

@@ -15,6 +15,8 @@ mod anonymous;
 #[derive(Debug, Clone)]
 struct FlexItemSpec {
     node: NodeHandle,
+    /// The flex container's content width, independent of this item's allocation.
+    percentage_basis: f32,
     order: i32,
     text_nodes: Vec<NodeHandle>,
     base_main_size: f32,
@@ -292,6 +294,7 @@ fn collect_flex_items(
         let (main_start_auto, main_end_auto) = main_axis_auto_margins(&child_style, direction);
         items.push(FlexItemSpec {
             node: child,
+            percentage_basis: width,
             order: item_order(&child_style),
             text_nodes: Vec::new(),
             base_main_size,
@@ -1061,13 +1064,13 @@ fn layout_item(
     if !item.text_nodes.is_empty() {
         return Some(anonymous::layout(item, resolver, containing, used_height));
     }
-    super::layout_element(
+    super::layout_element_with_percentage_basis(
         &item.node,
         resolver,
         containing,
         viewport,
         None,
-        None,
         used_height,
+        item.percentage_basis,
     )
 }

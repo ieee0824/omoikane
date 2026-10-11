@@ -253,16 +253,30 @@ pub(super) fn consume_number(chars: &[char], index: &mut usize) -> Result<f32, C
         value.push(sign);
         *index += 1;
     }
-    if chars.get(*index) == Some(&'.') {
-        value.push('.');
+    while chars.get(*index).is_some_and(char::is_ascii_digit) {
+        value.push(chars[*index]);
         *index += 1;
     }
-    while let Some(&ch) = chars.get(*index) {
-        if ch.is_ascii_digit() || ch == '.' {
-            value.push(ch);
+    if chars.get(*index) == Some(&'.') && chars.get(*index + 1).is_some_and(char::is_ascii_digit) {
+        value.push('.');
+        *index += 1;
+        while chars.get(*index).is_some_and(char::is_ascii_digit) {
+            value.push(chars[*index]);
             *index += 1;
-        } else {
-            break;
+        }
+    }
+    if matches!(chars.get(*index), Some('e' | 'E')) {
+        let signed = matches!(chars.get(*index + 1), Some('+' | '-'));
+        let digit = *index + if signed { 2 } else { 1 };
+        if chars.get(digit).is_some_and(char::is_ascii_digit) {
+            while *index < digit {
+                value.push(chars[*index]);
+                *index += 1;
+            }
+            while chars.get(*index).is_some_and(char::is_ascii_digit) {
+                value.push(chars[*index]);
+                *index += 1;
+            }
         }
     }
     value
@@ -324,4 +338,29 @@ pub(super) fn trimmed_number(value: f32) -> String {
         text.truncate(text.len() - 2);
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_exponents_do_not_consume_em_units_or_extra_decimal_points() {
+        let tokens = tokenize("1e-9 2E+3px 3em 1e 1.2.3").unwrap();
+        let tokens = tokens
+            .into_iter()
+            .filter(|token| !matches!(token, CssToken::Whitespace))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tokens,
+            vec![
+                CssToken::Number(1e-9),
+                CssToken::Dimension(2000.0, "px".into()),
+                CssToken::Dimension(3.0, "em".into()),
+                CssToken::Dimension(1.0, "e".into()),
+                CssToken::Number(1.2),
+                CssToken::Number(0.3),
+            ]
+        );
+    }
 }
