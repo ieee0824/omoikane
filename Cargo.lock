@@ -293,6 +293,7 @@ dependencies = [
  "icu_properties",
  "icu_provider",
  "icu_segmenter",
+ "icu_time",
  "indexmap",
  "intrusive-collections",
  "itertools",
@@ -355,6 +356,7 @@ dependencies = [
  "icu_provider_adapters",
  "icu_provider_blob",
  "icu_segmenter",
+ "icu_time",
  "once_cell",
  "paste",
 ]

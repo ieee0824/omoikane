@@ -394,6 +394,7 @@ dependencies = [
  "icu_properties",
  "icu_provider",
  "icu_segmenter",
+ "icu_time",
  "indexmap",
  "indoc",
  "intrusive-collections",
@@ -481,6 +482,7 @@ dependencies = [
  "icu_provider_adapters",
  "icu_provider_blob",
  "icu_segmenter",
+ "icu_time",
  "once_cell",
  "paste",
  "serde",
@@ -2430,12 +2432,19 @@ dependencies = [
  "icu_calendar",
  "icu_locale_core",
  "icu_provider",
+ "icu_time_data",
  "serde",
  "tinystr",
  "writeable",
  "zerotrie",
  "zerovec",
 ]
+
+[[package]]
+name = "icu_time_data"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8472be4410d26a03d7208cae3a76c798dd6766e8226ab977cd8b2d349a6dbf08"
 
 [[package]]
 name = "idna"

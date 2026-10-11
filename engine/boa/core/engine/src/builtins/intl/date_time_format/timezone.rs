@@ -11,19 +11,22 @@ pub(super) struct ResolvedTimeZone {
 
 impl ResolvedTimeZone {
     /// Validates minute-precision offsets or an available IANA identifier.
-    /// The provider fixes case and resolves IANA links to their primary ID.
+    /// The provider fixes case. Temporal's Intl integration retains named links;
+    /// the non-Temporal ECMA-402 path resolves them to their primary identifier.
     fn resolve(identifier: &str, context: &Context) -> JsResult<Self> {
         let zone =
             TimeZone::try_from_identifier_str_with_provider(identifier, context.tz_provider())
                 .map_err(time_zone_error)?;
+        #[cfg(not(feature = "temporal"))]
         let zone = zone
             .primary_identifier_with_provider(context.tz_provider())
             .map_err(time_zone_error)?;
         let identifier = zone
             .identifier_with_provider(context.tz_provider())
             .map_err(time_zone_error)?;
-        // ECMA-402 represents these equivalent named zones as UTC. Fixed
-        // offsets, including +00:00, retain their offset identifier.
+        // The non-Temporal ECMA-402 path represents these zones as UTC.
+        // Temporal retains their normalized identifier, including named links.
+        #[cfg(not(feature = "temporal"))]
         let identifier = if ["Etc/UTC", "Etc/GMT", "GMT"].contains(&identifier.as_str()) {
             "UTC".to_owned()
         } else {
@@ -37,6 +40,26 @@ impl ResolvedTimeZone {
 
     pub(super) fn identifier(&self) -> &JsString {
         &self.identifier
+    }
+
+    #[cfg(feature = "temporal")]
+    fn primary(mut self, context: &Context) -> JsResult<Self> {
+        self.zone = self
+            .zone
+            .primary_identifier_with_provider(context.tz_provider())
+            .map_err(time_zone_error)?;
+        let identifier = self
+            .zone
+            .identifier_with_provider(context.tz_provider())
+            .map_err(time_zone_error)?;
+        self.identifier = js_string!(
+            if ["Etc/UTC", "Etc/GMT", "GMT"].contains(&identifier.as_str()) {
+                "UTC".to_owned()
+            } else {
+                identifier
+            }
+        );
+        Ok(self)
     }
 
     /// Calculates the offset for an explicit clipped epoch using the TZDB.
@@ -56,11 +79,20 @@ pub(super) fn read_time_zone(
     context: &mut Context,
 ) -> JsResult<ResolvedTimeZone> {
     let identifier = get_option::<JsString>(options, js_string!("timeZone"), context)?;
+    #[cfg(feature = "temporal")]
+    let default_zone = identifier.is_none();
     let identifier = identifier.map_or_else(
         || iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_owned()),
         |identifier| identifier.to_std_string_escaped(),
     );
-    ResolvedTimeZone::resolve(&identifier, context)
+    let resolved = ResolvedTimeZone::resolve(&identifier, context)?;
+    #[cfg(feature = "temporal")]
+    let resolved = if default_zone {
+        resolved.primary(context)?
+    } else {
+        resolved
+    };
+    Ok(resolved)
 }
 
 fn time_zone_error(error: temporal_rs::TemporalError) -> crate::JsError {

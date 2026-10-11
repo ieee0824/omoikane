@@ -40,6 +40,7 @@ pub(crate) mod number_format;
 pub(crate) mod plural_rules;
 pub(crate) mod relative_time_format;
 pub(crate) mod segmenter;
+mod supported_values;
 
 pub(crate) use self::{
     collator::Collator, date_time_format::DateTimeFormat, display_names::DisplayNames,
@@ -173,6 +174,11 @@ impl IntrinsicObject for Intl {
             .static_method(
                 Self::get_canonical_locales,
                 js_string!("getCanonicalLocales"),
+                1,
+            )
+            .static_method(
+                supported_values::supported_values_of,
+                js_string!("supportedValuesOf"),
                 1,
             )
             .build();

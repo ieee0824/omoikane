@@ -258,12 +258,9 @@ fn flexible_profile(
             }
         }
     }
-    // ICU4X 2.0 does not expose the flexible `B` writer yet. Its native `b`
-    // writer preserves the requested field, width, typed part and the
-    // locale-specific noon/midnight distinction while falling back to AM/PM
-    // for the remaining periods. ECMA-402 permits an implementation-dependent
-    // best-fit record, so retain the original `B` metadata for matching and use
-    // this native fallback only for rendering.
+    // Retain CLDR's flexible-period metadata while using native `b` for typed
+    // field boundaries. The backend replaces that field with source B names
+    // and day-period rules after native formatting.
     let mut native = String::with_capacity(raw.len());
     let mut quoted = false;
     let mut chars = raw.chars().peekable();

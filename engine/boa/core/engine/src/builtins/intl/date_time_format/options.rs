@@ -68,7 +68,7 @@ impl Components {
         required: super::DateTimeReqs,
         defaults: super::DateTimeReqs,
         context: &mut Context,
-    ) -> JsResult<Self> {
+    ) -> JsResult<(Self, Self)> {
         let mut result = Self {
             weekday: string_option(options, "weekday", TEXT, context)?,
             era: string_option(options, "era", TEXT, context)?,
@@ -128,8 +128,9 @@ impl Components {
                 .with_message("styles cannot be combined with date/time components")
                 .into());
         }
+        let raw = result.clone();
         result.apply_defaults(required, defaults)?;
-        Ok(result)
+        Ok((raw, result))
     }
 
     fn apply_defaults(

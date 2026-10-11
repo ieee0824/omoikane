@@ -46,6 +46,14 @@ pub struct PlainTime {
     inner: PlainTimeInner,
 }
 
+impl PlainTime {
+    /// Returns native wall-clock fields for a short borrow during Intl formatting.
+    #[cfg(feature = "intl")]
+    pub(crate) fn inner(&self) -> &PlainTimeInner {
+        &self.inner
+    }
+}
+
 impl BuiltInObject for PlainTime {
     const NAME: JsString = StaticJsStrings::PLAIN_TIME_NAME;
 }

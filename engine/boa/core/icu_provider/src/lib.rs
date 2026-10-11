@@ -142,7 +142,30 @@ static PROVIDER: Lazy<LocaleFallbackProvider<MultiForkByMarkerProvider<LazyBuffe
             },
             provider_from_icu_crate!(icu_casemap),
             provider_from_icu_crate!(icu_collator),
+            LazyBufferProvider {
+                provider: OnceCell::new(),
+                bytes: include_bytes!("../data/icu_hijri_eras.postcard"),
+                // CLDR 48 names cover both AH and BH emitted by ICU calendar.
+                valid_markers: &[icu_datetime::provider::neo::DatetimeNamesYearHijriV1::INFO],
+            },
+            LazyBufferProvider {
+                provider: OnceCell::new(),
+                bytes: include_bytes!("../data/icu_hebrew_months.postcard"),
+                // Current calendar codes distinguish Adar I (M05L) from Adar II (M06L).
+                valid_markers: &[icu_datetime::provider::neo::DatetimeNamesMonthHebrewV1::INFO],
+            },
             provider_from_icu_crate!(icu_datetime),
+            LazyBufferProvider {
+                provider: OnceCell::new(),
+                bytes: include_bytes!("../data/icu_time.postcard"),
+                // Named-zone formatting and identifier enumeration need only
+                // these global records; the Windows mapping is not exported.
+                valid_markers: &[
+                    icu_time::provider::iana::TimezoneIdentifiersIanaCoreV1::INFO,
+                    icu_time::provider::iana::TimezoneIdentifiersIanaExtendedV1::INFO,
+                    icu_time::provider::TimezoneVariantsOffsetsV1::INFO,
+                ],
+            },
             provider_from_icu_crate!(icu_decimal),
             provider_from_icu_crate!(icu_list),
             provider_from_icu_crate!(icu_locale),

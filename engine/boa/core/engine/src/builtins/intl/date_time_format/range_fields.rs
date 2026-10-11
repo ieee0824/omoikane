@@ -76,7 +76,17 @@ impl RangeFields {
             && self.day == other.day
     }
 
-    pub(super) fn difference(&self, other: &Self, selected: &PatternFields) -> Option<Difference> {
+    #[cfg(test)]
+    fn difference(&self, other: &Self, selected: &PatternFields) -> Option<Difference> {
+        self.difference_with_period(other, selected, None)
+    }
+
+    pub(super) fn difference_with_period(
+        &self,
+        other: &Self,
+        selected: &PatternFields,
+        flexible_period_differs: Option<bool>,
+    ) -> Option<Difference> {
         use Difference::*;
         let fraction = selected.fraction;
         let differences = [
@@ -92,7 +102,9 @@ impl RangeFields {
             (Day, self.day != other.day || self.weekday != other.weekday),
             (
                 Period,
-                selected.has(FieldId::DayPeriod) && self.period(selected) != other.period(selected),
+                selected.has(FieldId::DayPeriod)
+                    && flexible_period_differs
+                        .unwrap_or_else(|| self.period(selected) != other.period(selected)),
             ),
             (Hour, self.hour != other.hour),
             (Minute, self.minute != other.minute),

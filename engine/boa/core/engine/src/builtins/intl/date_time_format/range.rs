@@ -49,20 +49,26 @@ fn range_parts(
             .with_message("range endpoints must be defined")
             .into());
     }
-    let start = start.to_number(context)?;
-    let end = end.to_number(context)?;
+    let start = super::input::read(start, context)?;
+    let end = super::input::read(end, context)?;
+    if !start.same_type(&end) {
+        return Err(JsNativeError::typ()
+            .with_message("range endpoints must have the same Temporal type")
+            .into());
+    }
     // Both conversions precede TimeClip/NaN checks. Descending numeric endpoints
     // are accepted by the current specification and pinned Test262 contract.
     let mut data = object.borrow_mut();
     let data = data.data_mut();
-    let (first, first_offset) = data.epoch_datetime(start, context)?;
-    let (last, last_offset) = data.epoch_datetime(end, context)?;
-    data.backend
+    let (first, first_offset, kind) = data.prepare_input(start, context)?;
+    let (last, last_offset, _) = data.prepare_input(end, context)?;
+    let (components, backend) = data.native_format(kind, context)?;
+    backend
         .format_range_parts(
             context.intl_provider().erased_provider(),
             &first,
             &last,
-            data.components.widths(),
+            components.widths(),
             first_offset,
             last_offset,
         )

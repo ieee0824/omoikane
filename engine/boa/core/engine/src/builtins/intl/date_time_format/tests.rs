@@ -17,6 +17,136 @@ fn assert_script(script: &str) {
 }
 
 #[test]
+fn resolved_options_places_fractional_seconds_before_zone_names() {
+    assert_script(
+        r#"(() => {
+        for (const formatMatcher of ['basic', 'best fit']) {
+            const options = new Intl.DateTimeFormat('en-US', {
+                formatMatcher, timeZone:'UTC', hour:'numeric', minute:'numeric',
+                second:'numeric', fractionalSecondDigits:3, timeZoneName:'short'
+            }).resolvedOptions();
+            const keys = Object.keys(options);
+            if (options.fractionalSecondDigits !== 3 || options.timeZoneName !== 'short' ||
+                keys.indexOf('fractionalSecondDigits') >= keys.indexOf('timeZoneName'))
+                throw new Error(formatMatcher + ': ' + keys.join(','));
+        }
+        return true;
+        })()"#,
+    );
+}
+
+#[test]
+fn legacy_constructor_shares_the_intl_symbol_and_unwraps_only_supported_methods() {
+    assert_script(
+        r#"(() => {
+        const receiver = Object.create(Intl.DateTimeFormat.prototype);
+        const returned = Intl.DateTimeFormat.call(receiver, 'en', {timeZone:'UTC', year:'numeric'});
+        if (returned !== receiver) throw new Error('receiver was replaced');
+        const symbols = Object.getOwnPropertySymbols(receiver);
+        if (symbols.length !== 1 || symbols[0].description !== 'IntlLegacyConstructedSymbol')
+            throw new Error('missing legacy symbol');
+        const descriptor = Object.getOwnPropertyDescriptor(receiver, symbols[0]);
+        if (descriptor.writable || descriptor.enumerable || descriptor.configurable ||
+            !(descriptor.value instanceof Intl.DateTimeFormat)) throw new Error('legacy descriptor');
+        const number = Object.create(Intl.NumberFormat.prototype);
+        Intl.NumberFormat.call(number);
+        if (Object.getOwnPropertySymbols(number)[0] !== symbols[0]) throw new Error('symbol differs');
+        const proxy = new Proxy(receiver, {get(target, key) {
+            if (key !== symbols[0]) throw new Error('unexpected property read');
+            return target[key];
+        }});
+        const options = Intl.DateTimeFormat.prototype.resolvedOptions.call(proxy);
+        const getFormat = Object.getOwnPropertyDescriptor(Intl.DateTimeFormat.prototype,'format').get;
+        const format = getFormat.call(proxy);
+        if (options.timeZone !== 'UTC' || format(Date.UTC(2020,0,1)) !== '2020' ||
+            getFormat.call(proxy) !== format) throw new Error('unwrap failed');
+        for (const name of ['formatToParts','formatRange','formatRangeToParts']) {
+            try { Intl.DateTimeFormat.prototype[name].call(receiver, 0, 1); }
+            catch (error) { if (error instanceof TypeError) continue; throw error; }
+            throw new Error(name + ' accepted a legacy receiver');
+        }
+        try { Intl.DateTimeFormat.call(receiver); }
+        catch (error) { return error instanceof TypeError; }
+        throw new Error('nonconfigurable symbol was replaced');
+    })()"#,
+    );
+}
+
+#[cfg(feature = "temporal")]
+#[test]
+fn temporal_formatting_preserves_wall_time_kind_calendar_and_coercion_order() {
+    assert_script(
+        r#"(() => {
+        const plain = new Temporal.PlainDateTime(2024,9,19,12,23,37,847);
+        const f = new Intl.DateTimeFormat('en', {timeZone:'America/Vancouver',
+            calendar:'iso8601', year:'numeric', month:'numeric', day:'numeric',
+            hour:'numeric', minute:'numeric', second:'numeric', fractionalSecondDigits:3,
+            hourCycle:'h23'});
+        const utc = new Intl.DateTimeFormat('en', {...f.resolvedOptions(), timeZone:'UTC'});
+        if (f.format(plain) !== utc.format(Date.UTC(2024,8,19,12,23,37,847)) ||
+            f.formatToParts(plain).map(p => p.value).join('') !== f.format(plain))
+            throw new Error('plain wall time was shifted');
+        const year = new Intl.DateTimeFormat('en', {year:'numeric',calendar:'iso8601',timeZone:'UTC'});
+        if (year.format(new Temporal.PlainYearMonth(2024,9)) !== '2024')
+            throw new Error('year-month format');
+        const reject = callback => {
+            try { callback(); } catch (error) { if (error instanceof TypeError) return; throw error; }
+            throw new Error('expected TypeError');
+        };
+        reject(() => year.format(new Temporal.PlainTime(12)));
+        reject(() => f.formatRange(plain, new Temporal.PlainDate(2024,9,19)));
+        let calls = 0;
+        reject(() => f.formatRange(plain, {valueOf() { ++calls; return 0; }}));
+        if (calls !== 1) throw new Error('end conversion was skipped');
+        const gregorian = new Intl.DateTimeFormat('en', {calendar:'gregory',timeZone:'UTC'});
+        try { gregorian.format(new Temporal.PlainYearMonth(2024,9)); }
+        catch (error) { if (error instanceof RangeError) return true; throw error; }
+        throw new Error('year-month calendar mismatch was accepted');
+    })()"#,
+    );
+}
+
+#[cfg(feature = "temporal")]
+#[test]
+fn temporal_year_month_keeps_reference_dates_outside_instant_limits() {
+    assert_script(
+        r#"(() => {
+        for (const calendar of ['iso8601','gregory']) {
+            const f = new Intl.DateTimeFormat('en', {calendar, timeZone:'UTC'});
+            for (const [year,month] of [[-271821,4],[275760,9]]) {
+                const value = new Temporal.PlainYearMonth(year,month,calendar);
+                const text = f.format(value), parts = f.formatToParts(value);
+                if (!text.includes(String(month)) || !parts.some(p => p.type === 'year') ||
+                    parts.map(p => p.value).join('') !== text ||
+                    f.formatRange(value,value) !== text ||
+                    f.formatRangeToParts(value,value).map(p => p.value).join('') !== text)
+                    throw new Error('YearMonth reference date was clipped');
+            }
+        }
+        return true;
+    })()"#,
+    );
+}
+
+#[cfg(feature = "temporal")]
+#[test]
+fn temporal_intl_keeps_named_zone_identifiers_while_normalizing_case() {
+    assert_script(
+        r#"(() => {
+        for (const name of ['Etc/GMT','Etc/UTC','GMT','UTC','Asia/Calcutta','Europe/Bratislava']) {
+            const ordinary = new Intl.DateTimeFormat('en', {timeZone:name,year:'numeric',month:'numeric',day:'numeric'});
+            for (const input of [name,name.toLowerCase(),name.toUpperCase()]) {
+                const f = new Intl.DateTimeFormat('en', {timeZone:input,year:'numeric',month:'numeric',day:'numeric'});
+                if (f.resolvedOptions().timeZone !== name || f.format(0) !== ordinary.format(0))
+                    throw new Error('named zone identifier or offset changed: ' + name);
+            }
+        }
+        return true;
+    })()"#,
+    );
+}
+
+#[test]
 fn basic_fixed_pattern_reuses_data_without_retaining_input_year_or_midnight_hour() {
     assert_script(
         r#"(() => {
@@ -407,6 +537,24 @@ fn locale_default_calendars_use_likely_regions_and_iso_uses_civil_iso_fields() {
 }
 
 #[test]
+fn regional_twelve_hour_cycle_keeps_japanese_zero_based_hours() {
+    assert_script(
+        r#"(() => {
+        for (const locale of ['en','fr','it','ja','zh','ko','ar','hi']) {
+            const formatter = new Intl.DateTimeFormat(locale, {
+                timeZone:'UTC', hour:'numeric', hour12:true
+            });
+            const expected = locale === 'ja' ? 'h11' : 'h12';
+            if (formatter.resolvedOptions().hourCycle !== expected) return false;
+            if (locale === 'ja' && !formatter.formatToParts(0).some(
+                part => part.type === 'hour' && part.value === '0')) return false;
+        }
+        return true;
+    })()"#,
+    );
+}
+
+#[test]
 fn all_four_hour_cycles_format_midnight_and_noon_and_report_the_same_cycle() {
     assert_script(
         r#"(() => {
@@ -503,6 +651,43 @@ fn option_getters_keep_spec_order_and_hour_cycle_is_read_even_with_hour12() {
         catch (error) { if (!(error instanceof RangeError)) throw error; }
         return JSON.stringify(calls) === '["calendar"]';
     })()"#,
+    );
+}
+
+#[test]
+fn flexible_day_periods_follow_source_boundaries_and_fractional_wall_time() {
+    assert_script(
+        r#"(() => {
+            for (const dayPeriod of ['long', 'short', 'narrow']) {
+                const formatter = new Intl.DateTimeFormat('en', {timeZone:'UTC', dayPeriod});
+                const noon = dayPeriod === 'narrow' ? 'n' : 'noon';
+                for (const [hour, minute, second, millis, expected] of [
+                    [0,0,0,0,'in the morning'], [11,59,59,999,'in the morning'],
+                    [12,0,0,0,noon], [12,30,1,1,noon], [13,0,0,0,'in the afternoon'],
+                    [17,59,59,999,'in the afternoon'], [18,0,0,0,'in the evening'],
+                    [20,59,59,999,'in the evening'], [21,0,0,0,'at night']
+                ]) {
+                    const instant = Date.UTC(2024,0,1,hour,minute,second,millis);
+                    const parts = formatter.formatToParts(instant);
+                    if (formatter.format(instant) !== expected ||
+                        parts.map(part => part.value).join('') !== expected ||
+                        parts.filter(part => part.type === 'dayPeriod').length !== 1)
+                        throw new Error(JSON.stringify({dayPeriod,hour,minute,second,millis,parts}));
+                }
+            }
+            for (const [options, minute, second, expected] of [
+                [{minute:'numeric'}, 0, 1, 'noon'],
+                [{minute:'numeric'}, 1, 0, 'in the afternoon'],
+                [{second:'numeric'}, 30, 0, 'noon'],
+                [{second:'numeric'}, 0, 1, 'in the afternoon']
+            ]) {
+                const formatter = new Intl.DateTimeFormat('en', {...options, dayPeriod:'long', timeZone:'UTC'});
+                const period = formatter.formatToParts(Date.UTC(2024,0,1,12,minute,second))
+                    .find(part => part.type === 'dayPeriod');
+                if (period?.value !== expected) throw new Error(JSON.stringify({options,minute,second,period}));
+            }
+            return true;
+        })()"#,
     );
 }
 
@@ -606,6 +791,110 @@ fn time_zone_text_writes_are_repeatable_and_match_parts() {
                     }
                 }
             }
+        }
+        return true;
+    })()"#,
+    );
+}
+
+#[test]
+fn lunisolar_temporal_year_roundtrips_related_year_fields() {
+    assert_script(
+        r#"(() => {
+        for (const calendar of ['chinese','dangi']) {
+            const date = new Temporal.PlainDate(2050,1,1,calendar);
+            if (date.year !== 2049) return false;
+            const from = Temporal.PlainDate.from({calendar,year:date.year,month:1,day:30});
+            if (from.year !== 2049 || from.toString() !== '2049-03-03[u-ca='+calendar+']')
+                return false;
+            const parts = new Intl.DateTimeFormat('en', {
+                calendar,timeZone:'UTC',year:'numeric',month:'numeric',day:'numeric'
+            }).formatToParts(from);
+            if (!parts.some(part => part.type === 'relatedYear' && part.value === '2049'))
+                return false;
+        }
+        return true;
+    })()"#,
+    );
+}
+
+#[test]
+fn hijri_eras_use_source_names_before_and_after_the_epoch() {
+    assert_script(
+        r#"(() => {
+        for (const calendar of ['islamic-civil','islamic-tbla','islamic-umalqura']) {
+            for (const era of ['long','short','narrow']) {
+                const formatter = new Intl.DateTimeFormat('en', {
+                    calendar,timeZone:'UTC',era,year:'numeric'
+                });
+                const names = [];
+                for (const isoYear of [600,2025]) {
+                    const date = new Date(0); date.setUTCFullYear(isoYear,5,15);
+                    const parts = formatter.formatToParts(date);
+                    if (parts.map(p=>p.value).join('') !== formatter.format(date)) return false;
+                    const name = parts.find(p=>p.type === 'era');
+                    if (!name || !name.value.length) return false;
+                    names.push(name.value);
+                }
+                const expected = era === 'long' ? ['Before Hijrah','Anno Hegirae'] : ['BH','AH'];
+                if (JSON.stringify(names) !== JSON.stringify(expected)) return false;
+            }
+        }
+        return true;
+    })()"#,
+    );
+}
+
+#[test]
+fn lunar_month_numbers_follow_codes_and_preserve_leap_patterns() {
+    assert_script(
+        r#"(() => {
+        for (const calendar of ['chinese','dangi']) {
+            for (const [month,expected] of [['numeric','5bis'],['2-digit','05bis'],['narrow','5b']]) {
+                const formatter = new Intl.DateTimeFormat('en', {calendar,timeZone:'UTC',month});
+                const date = Date.UTC(2047,6,22);
+                const parts = formatter.formatToParts(date);
+                if (parts.find(p=>p.type==='month')?.value !== expected ||
+                    formatter.format(date) !== parts.map(p=>p.value).join('')) return false;
+                const range = formatter.formatRangeToParts(date,date);
+                if (range.find(p=>p.type==='month')?.value !== expected ||
+                    formatter.formatRange(date,date) !== range.map(p=>p.value).join('')) return false;
+            }
+        }
+        const formatter = new Intl.DateTimeFormat('en', {
+            calendar:'chinese',timeZone:'UTC',year:'numeric',month:'numeric',day:'numeric'
+        });
+        const parts = formatter.formatToParts(Date.UTC(2100,0,1));
+        if (parts.find(p=>p.type==='month')?.value !== '11' ||
+            parts.find(p=>p.type==='day')?.value !== '21' ||
+            parts.find(p=>p.type==='relatedYear')?.value !== '2099') return false;
+        return true;
+    })()"#,
+    );
+}
+
+#[test]
+fn hebrew_adar_names_follow_regular_and_leap_month_codes() {
+    assert_script(
+        r#"(() => {
+        const year = new Temporal.PlainDate(2049,3,4,'hebrew').year;
+        for (const [offset,code,name] of [[0,'M05L','Adar I'],[0,'M06','Adar II'],[1,'M06','Adar']]) {
+            const date = Temporal.PlainDate.from({calendar:'hebrew',year:year+offset,monthCode:code,day:1});
+            if (date.monthCode !== code) return false;
+            for (const month of ['numeric','2-digit','short','long']) {
+                const formatter = new Intl.DateTimeFormat('en', {calendar:'hebrew',timeZone:'UTC',month});
+                const expected = month === 'numeric' ? String(date.month) :
+                    month === '2-digit' ? String(date.month).padStart(2,'0') : name;
+                const parts = formatter.formatToParts(date);
+                if (parts.find(p=>p.type==='month')?.value !== expected ||
+                    formatter.format(date) !== parts.map(p=>p.value).join('')) return false;
+                const range = formatter.formatRangeToParts(date,date);
+                if (range.find(p=>p.type==='month')?.value !== expected ||
+                    formatter.formatRange(date,date) !== range.map(p=>p.value).join('')) return false;
+            }
+            const fields = new Intl.DateTimeFormat('en', {calendar:'hebrew',timeZone:'UTC',
+                year:'numeric',month:'numeric',day:'numeric'}).formatToParts(date);
+            if (fields.find(p=>p.type==='month')?.value !== name) return false;
         }
         return true;
     })()"#,

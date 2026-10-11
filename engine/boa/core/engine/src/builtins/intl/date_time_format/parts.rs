@@ -214,8 +214,8 @@ impl DateTimeFormat {
                 JsNativeError::typ().with_message("receiver is not an Intl.DateTimeFormat")
             })?;
         let _object_root = object.clone().root();
-        let epoch = super::format::input_epoch(args.get_or_undefined(0), context)?;
-        let parts = object.borrow_mut().data_mut().parts_epoch(epoch, context)?;
+        let input = super::input::read(args.get_or_undefined(0), context)?;
+        let parts = object.borrow_mut().data_mut().parts_input(input, context)?;
         parts_array(parts, context).map(Into::into)
     }
 }

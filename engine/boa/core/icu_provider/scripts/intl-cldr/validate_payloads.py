@@ -16,6 +16,7 @@ def validate(directory):
     if provenance['rootSource']['sha256'] != ROOT_SHA256 or provenance['rootSource']['commit'] != ROOT_COMMIT:
         raise ValueError('unexpected CLDR XML root source pin')
     required = {'number_symbols.json', 'number_patterns.json', 'currency_patterns.json', 'currency_names.json', 'currency_digits.json', 'locale_metadata.json', 'duration_unit_patterns.json', 'all_unit_patterns.json', 'root_number_symbols.json', 'calendar_date_patterns.json', 'calendar_interval_patterns.json', 'compact_patterns.json', 'number_range_patterns.json', 'relative_time_patterns.json', 'display_names.json'}
+    required.update({'datetime_style_patterns.json', 'day_periods.json', 'supported_values.json'})
     if set(provenance['outputFiles']) != required:
         raise ValueError('the exporter requires the complete expanded dataset')
     for name, record in provenance['outputFiles'].items():
@@ -29,7 +30,7 @@ def validate(directory):
             raise ValueError('unexpected generator filename')
         if hashlib.sha256((Path(__file__).parent / name).read_bytes()).hexdigest() != expected:
             raise ValueError(f'generator hash mismatch: {name}')
-    print('CLDR payload pins and all fifteen dataset hashes: PASS')
+    print('CLDR payload pins and all eighteen dataset hashes: PASS')
 
 
 if __name__ == '__main__':

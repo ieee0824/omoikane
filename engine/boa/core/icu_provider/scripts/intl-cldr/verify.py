@@ -5,6 +5,8 @@ import hashlib
 import json
 import pathlib
 import zipfile
+from verify_datetime_extras import compare_datetime_extras
+from verify_supported_values import compare_supported_values
 
 from generate import SOURCE_SHA256, SOURCE_URL, CLDR_COMMIT, CLDR_TAG
 from root_symbols import ROOT_SHA256, ROOT_URL, ROOT_COMMIT
@@ -265,6 +267,8 @@ def verify(source, output, compare=None, root_xml=None, legacy=None):
         range_counts = compare_number_range_records(archive, data, root_content)
         interval_counts = compare_calendar_interval_records(archive, data)
         native_name_counts = compare_native_names(archive, data)
+        datetime_extra_counts = compare_datetime_extras(archive, data)
+        inventory_counts = compare_supported_values(archive, data)
         digits = data["currency_digits.json"]
         assert set(digits["currencies"]) == set(source_fractions)
         assert digits["defaultDigits"] == int(source_fractions["DEFAULT"]["_digits"])
@@ -317,7 +321,7 @@ def verify(source, output, compare=None, root_xml=None, legacy=None):
         for path in output.iterdir():
             assert path.read_bytes() == (compare / path.name).read_bytes(), path.name
             repeated += 1
-    print(json.dumps({"result": "PASS", "sourceLocalesCompared": locale_count, "currencyRecordsCompared": currency_count, "calendarPayloadsCompared": calendar_count, "availableFormatPatternsCompared": calendar_patterns, "compactPayloadsCompared": compact_count, "compactPatternsCompared": compact_patterns, **range_counts, **interval_counts, **native_name_counts, "legacyDatasetFilesByteIdentical": legacy_files, "sourceInputFilesHashed": len(provenance["inputFiles"]), "byteIdenticalRepeatedFiles": repeated}, indent=2))
+    print(json.dumps({"result": "PASS", "sourceLocalesCompared": locale_count, "currencyRecordsCompared": currency_count, "calendarPayloadsCompared": calendar_count, "availableFormatPatternsCompared": calendar_patterns, "compactPayloadsCompared": compact_count, "compactPatternsCompared": compact_patterns, **range_counts, **interval_counts, **native_name_counts, **datetime_extra_counts, **inventory_counts, "legacyDatasetFilesByteIdentical": legacy_files, "sourceInputFilesHashed": len(provenance["inputFiles"]), "byteIdenticalRepeatedFiles": repeated}, indent=2))
 
 
 if __name__ == "__main__":

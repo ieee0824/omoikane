@@ -5,11 +5,13 @@ mod calendar_intervals;
 mod compact;
 mod currency;
 mod datetime;
+mod datetime_extras;
 mod names;
 mod number;
 mod number_range;
 mod root_currency;
 mod support;
+mod supported_values;
 mod units;
 
 use boa_intl_data::MARKERS;
@@ -48,6 +50,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     root_currency::export(&source, &exporter, &mut counts)?;
     units::export(&source, &exporter, &mut counts)?;
     datetime::export(&source, &exporter, &mut counts)?;
+    datetime_extras::export(&source, &exporter, &mut counts)?;
+    supported_values::export(&source, &exporter, &mut counts)?;
     compact::export(&source, &exporter, &mut counts)?;
     number_range::export(&source, &exporter, &mut counts)?;
     calendar_intervals::export(&source, &exporter, &mut counts)?;

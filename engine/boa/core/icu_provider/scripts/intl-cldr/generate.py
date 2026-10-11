@@ -14,6 +14,8 @@ from patterns import parse_number_pattern
 from root_symbols import extract_root
 from calendar_patterns import extract_calendar_patterns, validate_calendar_patterns
 from calendar_intervals import extract_calendar_intervals, validate_calendar_intervals
+from datetime_extras import extract_datetime_extras, validate_datetime_extras
+from supported_values import TIME_DATA_FILE, COLLATIONS_FILE, extract_supported_values, validate_supported_values
 from compact_patterns import extract_compact_patterns, validate_compact_patterns
 from number_range_patterns import (PLURAL_RANGES_FILE, extract_number_ranges, extract_plural_ranges,
                                    assemble_number_ranges, validate_number_ranges)
@@ -162,6 +164,9 @@ def extract_all(source_zip):
         calendar_patterns = extract_calendar_patterns(archive, lambda name: read_json(archive, name, inputs))
         calendar_intervals = extract_calendar_intervals(archive, lambda name: read_json(archive, name, inputs))
         native_names = extract_relative_display_names(archive, locales, lambda name: read_json(archive, name, inputs))
+        datetime_extras = extract_datetime_extras(
+            archive, lambda name: read_json(archive, name, inputs),
+        )
     coverage = supplemental["cldr-core/coverageLevels.json"]["coverageLevels"]
     metadata = {"locales": locales, "coverageLevels": coverage, "directModernLocales": sorted(locale for locale, level in coverage.items() if level == "modern"), "defaultContent": supplemental["cldr-core/defaultContent.json"]["defaultContent"], "parentLocales": supplemental["cldr-core/supplemental/parentLocales.json"]["supplemental"]["parentLocales"], "numberingSystems": supplemental["cldr-core/supplemental/numberingSystems.json"]["supplemental"]["numberingSystems"]}
     datasets = {"number_symbols.json": symbols, "number_patterns.json": number_patterns, "currency_patterns.json": patterns, "currency_names.json": names, "currency_digits.json": extract_fractions(supplemental["cldr-core/supplemental/currencyData.json"]), "locale_metadata.json": metadata, "duration_unit_patterns.json": duration, "all_unit_patterns.json": units}
@@ -169,6 +174,7 @@ def extract_all(source_zip):
     datasets["calendar_interval_patterns.json"] = calendar_intervals
     datasets["compact_patterns.json"] = compact
     datasets.update(native_names)
+    datasets.update(datetime_extras)
     return datasets, inputs, license_data, number_ranges, plural_ranges
 
 
@@ -210,6 +216,7 @@ def validate_datasets(datasets):
     counts["locales"] = len(symbols)
     counts.update(validate_calendar_patterns(datasets["calendar_date_patterns.json"], symbols))
     counts.update(validate_calendar_intervals(datasets["calendar_interval_patterns.json"], datasets["calendar_date_patterns.json"]))
+    counts.update(validate_datetime_extras(datasets, symbols))
     counts.update(validate_compact_patterns(datasets["compact_patterns.json"], symbols))
     counts.update(validate_relative_display_names(datasets, symbols))
     counts["directModernLocales"] = len(datasets["locale_metadata.json"]["directModernLocales"])
@@ -278,6 +285,12 @@ def generate(source_zip, output_dir, verify_upstream_tag=False, source_root_xml=
     validation = validate_datasets(datasets)
     root_data, root_provenance = extract_root(source_root_xml or source_zip.parent / "root-47.xml")
     datasets["root_number_symbols.json"] = root_data
+    with zipfile.ZipFile(source_zip) as archive:
+        inventory = extract_supported_values(datasets, read_json(archive, COLLATIONS_FILE, inputs),
+                                             read_json(archive, TIME_DATA_FILE, inputs))
+    validate_supported_values(inventory)
+    datasets["supported_values.json"] = inventory
+    validation["supportedValueInventoryCounts"] = {key: len(values) for key, values in inventory.items()}
     range_data = assemble_number_ranges(number_ranges, plural_ranges, source_root_xml or source_zip.parent / "root-47.xml")
     datasets["number_range_patterns.json"] = range_data
     validation.update(validate_number_ranges(range_data, datasets["number_symbols.json"], root_data["numberingSystemSymbols"]))
@@ -290,7 +303,7 @@ def generate(source_zip, output_dir, verify_upstream_tag=False, source_root_xml=
         files[name] = {"bytes": len(data), "sha256": digest(data), "exploratoryZlib9Bytes": len(zlib.compress(data, 9))}
     (output_dir / "UNICODE-LICENSE.txt").write_bytes(license_data)
     script_dir = pathlib.Path(__file__).parent
-    generator_files = {name: digest((script_dir / name).read_bytes()) for name in ("generate.py", "patterns.py", "root_symbols.py", "calendar_patterns.py", "compact_patterns.py", "number_range_patterns.py", "calendar_intervals.py", "relative_display_names.py")}
+    generator_files = {name: digest((script_dir / name).read_bytes()) for name in ("generate.py", "patterns.py", "root_symbols.py", "calendar_patterns.py", "compact_patterns.py", "number_range_patterns.py", "calendar_intervals.py", "relative_display_names.py", "datetime_extras.py", "supported_values.py")}
     provenance = {"schemaVersion": 1, "source": {"repository": "https://github.com/unicode-org/cldr-json", "tag": CLDR_TAG, "commit": CLDR_COMMIT, "url": SOURCE_URL, "sha256": SOURCE_SHA256, "bytes": len(source_bytes)}, "rootSource": root_provenance, "generatorFiles": generator_files, "inputFiles": inputs, "outputFiles": files, "validation": validation, "sizeMeasurementScope": "canonical JSON and exploratory zlib, not runtime postcard or executable size"}
     (output_dir / "provenance.json").write_bytes(canonical_json(provenance))
     print(json.dumps({"output": str(output_dir), "validation": validation, "files": files}, ensure_ascii=False, indent=2))
