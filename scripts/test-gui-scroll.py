@@ -9,15 +9,13 @@ import time
 
 from PIL import ImageGrab
 from gui_navigation_fixture import NavigationFixture
-from gui_x11 import GuiSession, geometry
+from gui_x11 import GuiSession, geometry, trace_records
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def records(gui, kind):
-    prefix = 'OMOIKANE_' + kind + ' '
-    return [json.loads(line[len(prefix):]) for line in
-            (gui.out / 'browser.log').read_text().splitlines() if line.startswith(prefix)]
+    return trace_records(gui.out / 'browser.log', kind)
 
 
 def status(gui, window):
