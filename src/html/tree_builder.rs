@@ -3106,3 +3106,81 @@ mod script_position_tests {
         assert_eq!(find(&doc).unwrap().script_source_position(), Some((2, 22)));
     }
 }
+
+#[cfg(test)]
+mod sibling_position_tests {
+    use super::{TreeBuilder, WriteParser};
+    use crate::dom::{
+        Node, NodeHandle, NodeType, reset_sibling_position_work, sibling_position_work,
+    };
+
+    fn write_boundary_work(items: usize) -> usize {
+        let document = TreeBuilder::parse("<body>").document();
+        let body = document.query_selector("body").unwrap();
+        for _ in 0..items {
+            body.append_child(NodeHandle::element("b"));
+        }
+        let anchor = NodeHandle::element("script");
+        let tail = NodeHandle::element("span");
+        body.append_child(anchor.clone());
+        body.append_child(tail.clone());
+        for _ in 1..items {
+            body.append_child(NodeHandle::element("span"));
+        }
+        let mut parser = WriteParser::new(document, Some(anchor.clone()));
+        reset_sibling_position_work();
+        for _ in 0..items {
+            parser.push_input("<p></p>x");
+            assert!(parser.advance(false).is_none());
+        }
+        assert!(parser.advance(true).is_none());
+        let work = sibling_position_work();
+        let children = body.child_nodes();
+        assert_eq!(children.len(), items * 4 + 1);
+        assert_eq!(children[items], anchor);
+        assert_eq!(children.get(items * 3 + 1), Some(&tail));
+        for pair in children[items + 1..items * 3 + 1].chunks_exact(2) {
+            assert_eq!(pair[0].tag_name().as_deref(), Some("p"));
+            assert_eq!(pair[1].node_type(), NodeType::Text);
+            assert_eq!(pair[1].data().as_deref(), Some("x"));
+        }
+        work
+    }
+
+    fn foster_parent_work(items: usize) -> usize {
+        let input = format!(
+            "<body>{}<table>{}</table>",
+            "<p>pre</p>".repeat(items),
+            "x<div></div>".repeat(items)
+        );
+        reset_sibling_position_work();
+        let document = TreeBuilder::parse(&input).document();
+        let work = sibling_position_work();
+        let body = document.query_selector("body").unwrap();
+        let children = body.child_nodes();
+        assert_eq!(children.len(), items * 3 + 1);
+        assert_eq!(
+            children.last().unwrap().tag_name().as_deref(),
+            Some("table")
+        );
+        for pair in children[items..children.len() - 1].chunks_exact(2) {
+            assert_eq!(pair[0].data().as_deref(), Some("x"));
+            assert_eq!(pair[1].tag_name().as_deref(), Some("div"));
+        }
+        work
+    }
+
+    #[test]
+    fn fixed_references_have_linear_position_work() {
+        for (kind, measure) in [
+            ("write", write_boundary_work as fn(usize) -> usize),
+            ("foster", foster_parent_work as fn(usize) -> usize),
+        ] {
+            let small = measure(128);
+            let large = measure(256);
+            eprintln!("SIBLING_POSITION kind={kind} N=128 work={small} twice_N=256 work={large}");
+            assert!(small > 0, "position operations must be counted");
+            assert!(large <= small * 2 + 32, "{kind}: {small} -> {large}");
+        }
+    }
+}

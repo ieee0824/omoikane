@@ -9,6 +9,7 @@ use std::fmt;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+mod children;
 mod string;
 pub(crate) use string::DomString;
 
@@ -106,6 +107,26 @@ pub(crate) fn attribute_utf16_copy_work() -> usize {
     ATTRIBUTE_UTF16_COPY_WORK.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+thread_local! {
+    static SIBLING_POSITION_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_sibling_position_work() {
+    SIBLING_POSITION_WORK.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn sibling_position_work() -> usize {
+    SIBLING_POSITION_WORK.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_sibling_position_work(steps: usize) {
+    SIBLING_POSITION_WORK.with(|count| count.set(count.get() + steps));
+}
+
 /// Returns whether an HTML form control is actually disabled.
 ///
 /// Besides a control's own `disabled` attribute, a disabled `fieldset`
@@ -191,8 +212,23 @@ struct NodeInner {
     id: usize,
     parent: Option<Weak<RefCell<NodeInner>>>,
     parent_revision: u64,
-    children: Vec<NodeHandle>,
+    /// Stable slot in the parent's owned child storage, validated by identity.
+    /// Root/detached nodes use zero and have no parent to query.
+    parent_slot: usize,
+    children: children::Children,
     data: NodeData,
+}
+
+impl NodeInner {
+    fn child_slot(&self, child: &NodeHandle) -> Option<usize> {
+        #[cfg(test)]
+        record_sibling_position_work(1);
+        let slot = child.0.borrow().parent_slot;
+        self.children
+            .get_slot(slot)
+            .is_some_and(|candidate| candidate == child)
+            .then_some(slot)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -863,7 +899,8 @@ impl NodeHandle {
             id: NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed),
             parent: None,
             parent_revision: 0,
-            children: Vec::new(),
+            parent_slot: 0,
+            children: children::Children::default(),
             data,
         })))
     }
@@ -1081,7 +1118,9 @@ impl NodeHandle {
         }
         detach_from_parent(&child);
         child.set_parent_link(Some(self));
-        self.0.borrow_mut().children.push(child);
+        let mut parent = self.0.borrow_mut();
+        parent.children.push(child);
+        drop(parent);
         invalidate_slot_assignments();
     }
 
@@ -1098,38 +1137,40 @@ impl NodeHandle {
             return Err(DomError::HierarchyRequest);
         }
 
-        // The DOM pre-insert algorithm replaces a self-reference with the
-        // node's next sibling. More generally, detach a moving node before
-        // resolving the reference index: when the node was an earlier sibling,
-        // its removal shifts that index left. Resolving the index first would
-        // incorrectly place it after the reference child.
+        // Resolve a self-reference to its original next sibling before detach.
+        // Validate the surviving reference again before changing the new
+        // child's parent link; storage slots are stable across other moves.
         let reference_after_move = {
             let parent = self.0.borrow();
             let reference_index = parent
-                .children
-                .iter()
-                .position(|child| child == reference_child)
+                .child_slot(reference_child)
                 .ok_or(DomError::ReferenceChildNotFound)?;
             if &new_child == reference_child {
-                parent.children.get(reference_index + 1).cloned()
+                parent.children.adjacent(reference_index, false).cloned()
             } else {
                 Some(reference_child.clone())
             }
         };
 
         detach_from_parent(&new_child);
-        let index = if let Some(reference) = reference_after_move {
-            self.0
-                .borrow()
-                .children
-                .iter()
-                .position(|child| child == &reference)
-                .ok_or(DomError::ReferenceChildNotFound)?
+        let reference_slot = if let Some(reference) = reference_after_move {
+            Some(
+                self.0
+                    .borrow()
+                    .child_slot(&reference)
+                    .ok_or(DomError::ReferenceChildNotFound)?,
+            )
         } else {
-            self.0.borrow().children.len()
+            None
         };
         new_child.set_parent_link(Some(self));
-        self.0.borrow_mut().children.insert(index, new_child);
+        let mut parent = self.0.borrow_mut();
+        if let Some(slot) = reference_slot {
+            parent.children.insert_before(new_child, slot);
+        } else {
+            parent.children.push(new_child);
+        }
+        drop(parent);
         invalidate_slot_assignments();
         Ok(())
     }
@@ -1152,12 +1193,11 @@ impl NodeHandle {
         let index = self
             .0
             .borrow()
-            .children
-            .iter()
-            .position(|candidate| candidate == child)
+            .child_slot(child)
             .ok_or(DomError::ChildNotFound)?;
-
-        let removed = self.0.borrow_mut().children.remove(index);
+        let mut parent = self.0.borrow_mut();
+        let removed = parent.children.remove(index);
+        drop(parent);
         removed.set_parent_link(None);
         clear_top_layer_state(&removed);
         invalidate_slot_assignments();
@@ -1180,12 +1220,12 @@ impl NodeHandle {
         self.0.borrow().children.last().cloned()
     }
 
-    /// Returns the next ordinary sibling without copying its parent's child list.
+    /// Returns the next ordinary sibling with constant-time position lookup.
     pub fn next_sibling(&self) -> Option<NodeHandle> {
         self.adjacent_sibling(false)
     }
 
-    /// Returns the previous ordinary sibling without copying its parent's child list.
+    /// Returns the previous ordinary sibling with constant-time position lookup.
     pub fn previous_sibling(&self) -> Option<NodeHandle> {
         self.adjacent_sibling(true)
     }
@@ -1193,13 +1233,8 @@ impl NodeHandle {
     fn adjacent_sibling(&self, previous: bool) -> Option<NodeHandle> {
         let parent = self.parent_node()?;
         let inner = parent.0.borrow();
-        let position = inner.children.iter().position(|child| child == self)?;
-        let adjacent = if previous {
-            position.checked_sub(1)?
-        } else {
-            position.checked_add(1)?
-        };
-        inner.children.get(adjacent).cloned()
+        let slot = inner.child_slot(self)?;
+        inner.children.adjacent(slot, previous).cloned()
     }
 
     /// Returns the first HTML `body` or `frameset` child of the document's HTML root.
@@ -1947,6 +1982,9 @@ impl NodeHandle {
     fn set_parent_link(&self, parent: Option<&Self>) {
         let mut inner = self.0.borrow_mut();
         inner.parent = parent.map(|node| Rc::downgrade(&node.0));
+        if parent.is_none() {
+            inner.parent_slot = 0;
+        }
         inner.parent_revision = inner
             .parent_revision
             .checked_add(1)
@@ -2522,7 +2560,9 @@ impl Node for NodeHandle {
         CHILD_SNAPSHOT_HANDLE_CLONES.with(|count| {
             count.set(count.get().saturating_add(inner.children.len()));
         });
-        inner.children.clone()
+        let mut children = Vec::with_capacity(inner.children.len());
+        children.extend(inner.children.iter().cloned());
+        children
     }
 }
 
@@ -3388,5 +3428,172 @@ mod tests {
         assert!(!child.is_popover_open());
         assert_eq!(parent.top_layer_order(), None);
         assert_eq!(child.top_layer_order(), None);
+    }
+}
+
+#[cfg(test)]
+mod sibling_slot_tests {
+    use super::*;
+
+    fn assert_siblings(parent: &NodeHandle) {
+        let children = parent.child_nodes();
+        for (index, child) in children.iter().enumerate() {
+            assert_eq!(child.parent_node().as_ref(), Some(parent));
+            assert_eq!(
+                child.previous_sibling(),
+                index
+                    .checked_sub(1)
+                    .and_then(|at| children.get(at))
+                    .cloned()
+            );
+            assert_eq!(child.next_sibling(), children.get(index + 1).cloned());
+        }
+    }
+
+    #[test]
+    fn child_snapshot_reserves_only_the_live_handle_count() {
+        for count in [0, 1, 2, 3, 5, 8, 16] {
+            let parent = NodeHandle::element("div");
+            for _ in 0..count {
+                parent.append_child(NodeHandle::text("x"));
+            }
+            let snapshot = parent.child_nodes();
+            assert_eq!(snapshot.len(), count);
+            assert_eq!(snapshot.capacity(), count, "count={count}");
+        }
+    }
+
+    #[test]
+    fn sibling_slots_match_ordered_vectors_through_mixed_mutations() {
+        let parents = [NodeHandle::element("div"), NodeHandle::element("div")];
+        let nodes: Vec<_> = (0..32).map(|_| NodeHandle::text("node")).collect();
+        let mut model = [Vec::<usize>::new(), Vec::<usize>::new()];
+        let mut seed = 0x1234_5678_u64;
+        for step in 0..2048 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let node = (seed >> 32) as usize % nodes.len();
+            let parent = (seed >> 16) as usize % 2;
+            match seed % 3 {
+                0 => {
+                    for order in &mut model {
+                        if let Some(at) = order.iter().position(|&item| item == node) {
+                            order.remove(at);
+                        }
+                    }
+                    parents[parent].append_child(nodes[node].clone());
+                    model[parent].push(node);
+                }
+                1 if !model[parent].is_empty() => {
+                    let reference = model[parent][(seed >> 24) as usize % model[parent].len()];
+                    parents[parent]
+                        .insert_before(nodes[node].clone(), &nodes[reference])
+                        .unwrap();
+                    if node != reference {
+                        for order in &mut model {
+                            if let Some(at) = order.iter().position(|&item| item == node) {
+                                order.remove(at);
+                            }
+                        }
+                        let at = model[parent]
+                            .iter()
+                            .position(|&item| item == reference)
+                            .unwrap();
+                        model[parent].insert(at, node);
+                    }
+                }
+                _ => {
+                    let at = model[parent].iter().position(|&item| item == node);
+                    if let Some(at) = at {
+                        assert_eq!(
+                            parents[parent].remove_child(&nodes[node]).unwrap(),
+                            nodes[node]
+                        );
+                        model[parent].remove(at);
+                    } else {
+                        assert_eq!(
+                            parents[parent].remove_child(&nodes[node]),
+                            Err(DomError::ChildNotFound)
+                        );
+                    }
+                }
+            }
+            for parent in 0..2 {
+                let expected: Vec<_> = model[parent].iter().map(|&at| nodes[at].clone()).collect();
+                assert_eq!(parents[parent].child_nodes(), expected, "step={step}");
+                assert_siblings(&parents[parent]);
+            }
+            for (index, node) in nodes.iter().enumerate() {
+                let owner = model.iter().position(|order| order.contains(&index));
+                assert_eq!(node.parent_node(), owner.map(|at| parents[at].clone()));
+                if owner.is_none() {
+                    assert!(node.previous_sibling().is_none());
+                    assert!(node.next_sibling().is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sibling_slots_semantics_and_memory() {
+        let (container, arena, slot) = children::layout_sizes();
+        eprintln!(
+            "SIBLING_MEMORY node_inner_bytes={} handle_bytes={} container_bytes={container} arena_bytes={arena} slot_bytes={slot}",
+            std::mem::size_of::<NodeInner>(),
+            std::mem::size_of::<NodeHandle>()
+        );
+        let first = NodeHandle::element("div");
+        let second = NodeHandle::element("div");
+        let nodes: Vec<_> = (0..4).map(|_| NodeHandle::element("i")).collect();
+        for child in &nodes {
+            first.append_child(child.clone());
+        }
+        assert_siblings(&first);
+        first.insert_before(nodes[2].clone(), &nodes[1]).unwrap();
+        assert_eq!(
+            first.child_nodes(),
+            vec![
+                nodes[0].clone(),
+                nodes[2].clone(),
+                nodes[1].clone(),
+                nodes[3].clone()
+            ]
+        );
+        first.insert_before(nodes[2].clone(), &nodes[2]).unwrap();
+        assert_siblings(&first);
+        first.append_child(nodes[0].clone());
+        assert_siblings(&first);
+        second.append_child(nodes[1].clone());
+        assert_siblings(&first);
+        assert_siblings(&second);
+        first.remove_child(&nodes[3]).unwrap();
+        assert_siblings(&first);
+        assert!(nodes[3].previous_sibling().is_none());
+        assert!(nodes[3].next_sibling().is_none());
+        first.insert_before(nodes[3].clone(), &nodes[0]).unwrap();
+        assert_siblings(&first);
+        first.remove_child(&nodes[3]).unwrap();
+        second.append_child(nodes[3].clone());
+        assert_siblings(&first);
+        assert_siblings(&second);
+        assert_eq!(
+            first.insert_before(nodes[2].clone(), &nodes[1]),
+            Err(DomError::ReferenceChildNotFound)
+        );
+        assert_siblings(&first);
+        let orphan = {
+            let parent = NodeHandle::element("div");
+            parent.append_child(NodeHandle::text("before"));
+            let child = NodeHandle::text("kept");
+            parent.append_child(child.clone());
+            child
+        };
+        assert!(orphan.parent_node().is_none());
+        assert!(orphan.previous_sibling().is_none());
+        assert!(orphan.next_sibling().is_none());
+        second.append_child(orphan.clone());
+        assert_eq!(orphan.parent_node(), Some(second.clone()));
+        assert_eq!(orphan.previous_sibling(), Some(nodes[3].clone()));
+        assert!(orphan.next_sibling().is_none());
+        assert_siblings(&second);
     }
 }
