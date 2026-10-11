@@ -30658,6 +30658,59 @@ fn browsing_context_focus_events_observe_the_state_they_announce() {
 }
 
 #[test]
+fn window_message_ports_survive_collection_during_source_resolution() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .context
+        .register_global_builtin_callable(
+            js_string!("collectMessagePorts"),
+            0,
+            NativeFunction::from_copy_closure(|_, _, _| {
+                boa_gc::force_collect();
+                Ok(JsValue::undefined())
+            }),
+        )
+        .unwrap();
+    runtime
+        .eval(
+            r#"
+        globalThis.messagePortMarker = null;
+        globalThis.__omoikane_window_message_source = () => {
+            collectMessagePorts();
+            return globalThis;
+        };
+        globalThis.__omoikane_receive_window_message = (_, origin, source, ports) => {
+            messagePortMarker = ports[0].marker;
+        };
+    "#,
+        )
+        .unwrap();
+    // Only the dequeued task owns this array; the source resolver allocates
+    // and collects before the receiver's argument list reaches the VM stack.
+    let ports = runtime.eval("[{marker: 42}]").unwrap();
+    let document_id = runtime.host_state.borrow().document.identity();
+    runtime
+        .run_window_posted_message(
+            document_id,
+            None,
+            None,
+            document_id,
+            None,
+            None,
+            None,
+            "",
+            "*",
+            "",
+            ports,
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.eval("messagePortMarker").unwrap().as_number(),
+        Some(42.0)
+    );
+}
+
+#[test]
 fn message_ports_deliver_fifo_tasks_with_microtask_checkpoints() {
     let mut runtime = JsRuntime::new().unwrap();
     assert_eq!(
