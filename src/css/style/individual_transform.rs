@@ -33,6 +33,98 @@ pub(super) fn compute(property: &str, value: &Value, context: ResolutionContext)
     parse(property, value, context).map_or_else(|| "none".into(), |value| value.serialize())
 }
 
+/// Evaluates a fixed angle expression without font, geometry or DOM inputs.
+/// Only numbers, angle units and mathematical constants can enter this path.
+pub(super) fn fixed_angle_expression(value: &Value) -> Option<Value> {
+    if !is_fixed_expression(value) {
+        return None;
+    }
+    let scalar = math::evaluate(value, ResolutionContext::default())?;
+    (scalar.dimension == math::Dimension::Angle).then(|| Value::Length(scalar.value, "deg".into()))
+}
+
+/// Evaluates typed numeric math with the caller's font and viewport context.
+pub(super) fn computed_numeric_expression(
+    value: &Value,
+    context: ResolutionContext,
+) -> Option<Value> {
+    let scalar = math::evaluate(value, context)?;
+    Some(match scalar.dimension {
+        math::Dimension::Number => Value::Number(scalar.value),
+        math::Dimension::Percentage => Value::Percentage(scalar.value),
+        math::Dimension::Angle => Value::Length(scalar.value, "deg".into()),
+        math::Dimension::Length => Value::Length(scalar.value, "px".into()),
+        math::Dimension::Compound(kind) if kind == typed_math::NumericType::TIME => {
+            Value::Length(scalar.value, "ms".into())
+        }
+        math::Dimension::Compound(kind) if kind == typed_math::NumericType::RESOLUTION => {
+            Value::Length(scalar.value, "dppx".into())
+        }
+        math::Dimension::Compound(_) => return None,
+    })
+}
+
+/// Evaluates a number without introducing font, geometry or DOM dependencies.
+pub(super) fn fixed_number_expression(value: &Value) -> Option<f32> {
+    if !is_fixed_expression(value) {
+        return None;
+    }
+    let scalar = math::evaluate(value, ResolutionContext::default())?;
+    (scalar.dimension == math::Dimension::Number).then_some(scalar.value)
+}
+
+/// Evaluates an intermediate number without clamping subexpressions early.
+pub(super) fn unclamped_number_expression(
+    value: &Value,
+    context: ResolutionContext,
+) -> Option<f32> {
+    let scalar = math::evaluate_unclamped(value, context)?;
+    (scalar.dimension == math::Dimension::Number).then_some(scalar.value)
+}
+
+/// Evaluates fixed percentage math after any element-dependent tokens resolve.
+pub(super) fn fixed_percentage_expression(value: &Value) -> Option<f32> {
+    if !is_fixed_expression(value) {
+        return None;
+    }
+    let scalar = math::evaluate(value, ResolutionContext::default())?;
+    (scalar.dimension == math::Dimension::Percentage).then_some(scalar.value)
+}
+
+fn is_fixed_expression(value: &Value) -> bool {
+    match value {
+        Value::Number(_) | Value::Percentage(_) => true,
+        Value::Length(_, unit) => matches!(
+            unit.to_ascii_lowercase().as_str(),
+            "deg"
+                | "rad"
+                | "grad"
+                | "turn"
+                | "s"
+                | "ms"
+                | "dpi"
+                | "dpcm"
+                | "dppx"
+                | "x"
+                | "px"
+                | "cm"
+                | "mm"
+                | "q"
+                | "in"
+                | "pt"
+                | "pc"
+        ),
+        Value::Keyword(word) => matches!(
+            word.to_ascii_lowercase().as_str(),
+            "pi" | "e" | "infinity" | "-infinity" | "nan" | "+" | "-" | "*" | "/"
+        ),
+        Value::Function { arguments, .. } | Value::List(arguments) => {
+            arguments.iter().all(is_fixed_expression)
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn parse_computed(property: &str, text: &str) -> Option<IndividualTransform> {
     let declarations = super::super::parse_style_attribute(&format!("{property}:{text}"));
     parse(

@@ -1679,7 +1679,15 @@ fn parse_value_sequence_with_mode(
                         index = end + 1;
                         continue;
                     }
-                    let arguments = if is_math_function {
+                    let arguments = if matches!(
+                        name.to_ascii_lowercase().as_str(),
+                        "sibling-index" | "sibling-count"
+                    ) && tokens[start..end]
+                        .iter()
+                        .all(|token| matches!(token, CssToken::Whitespace))
+                    {
+                        Vec::new()
+                    } else if is_math_function {
                         parse_function_arguments_with_mode(&tokens[start..end], true)?
                     } else {
                         parse_function_arguments_with_mode(

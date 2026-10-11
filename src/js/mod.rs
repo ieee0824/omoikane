@@ -11908,6 +11908,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(css_declarations_native),
         ),
         (
+            js_string!("__omoikane_css_feature_values"),
+            1,
+            NativeFunction::from_copy_closure(css_feature_values_native),
+        ),
+        (
             js_string!("__omoikane_css_property_rule"),
             1,
             NativeFunction::from_copy_closure(css_property_rule_native),
@@ -13081,6 +13086,13 @@ fn computed_style_property_to_css_string(
     value: &ComputedValue,
     style: &ComputedStyle,
 ) -> String {
+    if property_name == "line-height" {
+        if let ComputedValue::Number(factor) = value {
+            if let Some(ComputedValue::Px(font_size)) = style.get("font-size") {
+                return format!("{}px", format_css_number(factor * font_size));
+            }
+        }
+    }
     if property_name == "text-shadow" {
         let current_color = style
             .get("color")
@@ -13527,17 +13539,26 @@ fn compute_replaced_fragment_metrics(fragments: Vec<InlineFragmentGeometry>) -> 
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct LayoutUsedSize {
+    non_replaced_inline: bool,
     content_width: f32,
     content_height: f32,
     border_width: f32,
     border_height: f32,
+    edges: Option<(crate::layout::EdgeSizes, crate::layout::EdgeSizes)>,
 }
 
 /// Returns the untransformed used box size for CSSOM resolved values. Ordinary
 /// block boxes store it directly in the layout tree. Inline replaced elements
-/// store it in an inline fragment; non-replaced inline fragments are excluded
-/// because the CSS `width` and `height` properties do not apply to them.
-fn layout_used_size(root: &LayoutBox, node: &NodeHandle) -> Option<LayoutUsedSize> {
+/// store it in an inline fragment. Non-replaced inline boxes carry a flag so
+/// transform resolution can use an empty reference box without changing CSS widths.
+fn layout_used_size(
+    root: &LayoutBox,
+    node: &NodeHandle,
+    pseudo: Option<PseudoElement>,
+) -> Option<LayoutUsedSize> {
+    if let Some(pseudo) = pseudo {
+        return pseudo_layout_used_size(root, node, pseudo);
+    }
     let mut fragments = Vec::new();
     if let Some((layout, _)) =
         find_layout_box_with_transform(root, node, AffineTransform::identity(), &mut fragments)
@@ -13546,6 +13567,8 @@ fn layout_used_size(root: &LayoutBox, node: &NodeHandle) -> Option<LayoutUsedSiz
         let padding = layout.dimensions.padding;
         let border = layout.dimensions.border;
         return Some(LayoutUsedSize {
+            edges: Some((layout.dimensions.margin, padding)),
+            non_replaced_inline: false,
             content_width: content.width,
             content_height: content.height,
             border_width: content.width + padding.left + padding.right + border.left + border.right,
@@ -13558,12 +13581,11 @@ fn layout_used_size(root: &LayoutBox, node: &NodeHandle) -> Option<LayoutUsedSiz
     }
 
     let first = fragments.first()?;
-    if first.non_replaced {
-        return None;
-    }
     let padding = edge_sizes(&first.style, "padding");
     let border = edge_sizes(&first.style, "border");
     Some(LayoutUsedSize {
+        edges: None,
+        non_replaced_inline: first.non_replaced,
         content_width: (first.rect.width
             - padding.left
             - padding.right
@@ -13581,6 +13603,51 @@ fn layout_used_size(root: &LayoutBox, node: &NodeHandle) -> Option<LayoutUsedSiz
     })
 }
 
+/// Finds a generated box without confusing it with the originating element.
+fn pseudo_layout_used_size(
+    root: &LayoutBox,
+    node: &NodeHandle,
+    pseudo: PseudoElement,
+) -> Option<LayoutUsedSize> {
+    if &root.node == node && root.pseudo == Some(pseudo) {
+        let content = root.dimensions.content;
+        let padding = root.dimensions.padding;
+        let border = root.dimensions.border;
+        return Some(LayoutUsedSize {
+            edges: Some((root.dimensions.margin, padding)),
+            non_replaced_inline: false,
+            content_width: content.width,
+            content_height: content.height,
+            border_width: content.width + padding.left + padding.right + border.left + border.right,
+            border_height: content.height
+                + padding.top
+                + padding.bottom
+                + border.top
+                + border.bottom,
+        });
+    }
+    for child in &root.children {
+        if let Some(size) = pseudo_layout_used_size(child, node, pseudo) {
+            return Some(size);
+        }
+    }
+    for line in &root.lines {
+        for fragment in &line.fragments {
+            if &fragment.node == node && fragment.style.pseudo == Some(pseudo) {
+                return Some(LayoutUsedSize {
+                    edges: None,
+                    non_replaced_inline: true,
+                    content_width: fragment.rect.width,
+                    content_height: fragment.rect.height,
+                    border_width: fragment.rect.width,
+                    border_height: fragment.rect.height,
+                });
+            }
+        }
+    }
+    None
+}
+
 /// Resolves the layout tree belonging to `document` and returns `node`'s used
 /// size. The top-level document reuses its cached layout. A child browsing
 /// context is laid out against its own viewport, stylesheet resolver, resource
@@ -13589,6 +13656,7 @@ fn resolved_layout_size(
     state: &mut HostState,
     document: &NodeHandle,
     node: &NodeHandle,
+    pseudo: Option<PseudoElement>,
 ) -> Option<LayoutUsedSize> {
     let document_id = document.identity();
     if document_id == state.document.identity() {
@@ -13596,7 +13664,7 @@ fn resolved_layout_size(
         return state
             .layout_root
             .as_ref()
-            .and_then(|root| layout_used_size(root, node));
+            .and_then(|root| layout_used_size(root, node, pseudo));
     }
 
     let viewport = state.viewport_for_document(document);
@@ -13634,7 +13702,7 @@ fn resolved_layout_size(
         });
     layout
         .as_ref()
-        .and_then(|root| layout_used_size(root, node))
+        .and_then(|root| layout_used_size(root, node, pseudo))
 }
 
 fn resolved_width_applies(style: &ComputedStyle) -> bool {
@@ -13706,14 +13774,18 @@ fn computed_style_native(
 }
 
 /// Reports whether a computed CSSOM property reads a layout-resolved used
-/// size. Only `width`, `height` and their logical aliases replace the cascaded
-/// value with the box size, so other named reads can skip layout.
+/// size. Widths, heights, margins, padding and transforms depend on the box;
+/// other named reads can skip layout.
 fn cssom_property_uses_used_size(name: &str) -> bool {
-    matches!(name, "width" | "height" | "inline-size" | "block-size")
+    matches!(
+        name,
+        "width" | "height" | "inline-size" | "block-size" | "transform" | "margin" | "padding"
+    ) || name.starts_with("margin-")
+        || name.starts_with("padding-")
 }
 
 /// Resolves an owned CSSOM snapshot before constructing any JavaScript objects.
-/// Layout runs only when `needs_used_size` asks for resolved `width`/`height`.
+/// Layout runs when `needs_used_size` asks for resolved sizes or a transform matrix.
 fn resolve_native_computed_style(
     args: &[JsValue],
     needs_used_size: bool,
@@ -13728,6 +13800,11 @@ fn resolve_native_computed_style(
                 match name.trim().to_ascii_lowercase().as_str() {
                     ":before" | "::before" => Some(PseudoElement::Before),
                     ":after" | "::after" => Some(PseudoElement::After),
+                    ":first-letter" | "::first-letter" => Some(PseudoElement::FirstLetter),
+                    ":first-line" | "::first-line" => Some(PseudoElement::FirstLine),
+                    "::marker" => Some(PseudoElement::Marker),
+                    "::before::marker" => Some(PseudoElement::BeforeMarker),
+                    "::after::marker" => Some(PseudoElement::AfterMarker),
                     _ => return Ok(None),
                 }
             } else {
@@ -13800,11 +13877,36 @@ fn resolve_cssom_style(
             None => Some(resolver.computed_style(node)),
         }
     };
-    if pseudo.is_none() && needs_used_size {
-        let used_size = resolved_layout_size(state, document, node);
+    if needs_used_size {
+        let used_size = resolved_layout_size(state, document, node, pseudo);
         let mut style = compute(state)?;
         if let Some(used_size) = used_size {
-            apply_cssom_used_size(&mut style, used_size);
+            let root_font_size = document_style_resolver(state, document)?.root_font_size();
+            let font_size = match style.get("font-size") {
+                Some(ComputedValue::Px(value)) => *value,
+                _ => 16.0,
+            };
+            style.set_resolved_transform(crate::css::TransformReferenceBox {
+                x: 0.0,
+                y: 0.0,
+                width: if used_size.non_replaced_inline {
+                    0.0
+                } else {
+                    used_size.border_width
+                },
+                height: if used_size.non_replaced_inline {
+                    0.0
+                } else {
+                    used_size.border_height
+                },
+                font_size,
+                root_font_size,
+            });
+            if !used_size.non_replaced_inline {
+                apply_cssom_used_size(&mut style, used_size);
+            }
+        } else if pseudo.is_some() || style.is_display_none() {
+            style.set_unrendered_transform();
         }
         return Some(style);
     }
@@ -13816,12 +13918,15 @@ fn resolve_cssom_style(
     if !needs_containers {
         return Some(style);
     }
-    resolved_layout_size(state, document, node);
+    resolved_layout_size(state, document, node, None);
     compute(state)
 }
 
 /// Applies CSSOM's resolved width and height while retaining box sizing rules.
 fn apply_cssom_used_size(style: &mut ComputedStyle, size: LayoutUsedSize) {
+    if let Some((margin, padding)) = size.edges {
+        apply_cssom_used_edges(style, margin, padding);
+    }
     let border_box = crate::layout::is_border_box(style);
     if resolved_width_applies(style) {
         style.set_resolved_px(
@@ -13842,6 +13947,26 @@ fn apply_cssom_used_size(style: &mut ComputedStyle, size: LayoutUsedSize) {
                 size.content_height
             },
         );
+    }
+}
+
+/// Copies the layout's resolved edge values into an owned CSSOM snapshot.
+fn apply_cssom_used_edges(
+    style: &mut ComputedStyle,
+    margin: crate::layout::EdgeSizes,
+    padding: crate::layout::EdgeSizes,
+) {
+    for (name, value) in [
+        ("margin-top", margin.top),
+        ("margin-right", margin.right),
+        ("margin-bottom", margin.bottom),
+        ("margin-left", margin.left),
+        ("padding-top", padding.top),
+        ("padding-right", padding.right),
+        ("padding-bottom", padding.bottom),
+        ("padding-left", padding.left),
+    ] {
+        style.set_resolved_px(name, value);
     }
 }
 
@@ -16081,6 +16206,26 @@ fn register_property_native(
 }
 
 /// Returns source-preserving declarations for CSSOM descriptor blocks.
+/// Parses fixed integer descriptor math without an element or resolution context.
+fn css_feature_values_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let value = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let Some(values) = crate::css::style::font_feature_integer_values(&value) else {
+        return Ok(JsValue::null());
+    };
+    let encoded = serde_json::to_string(&values)
+        .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
+    Ok(js_string!(encoded.as_str()).into())
+}
+
 fn css_declarations_native(
     _: &JsValue,
     args: &[JsValue],
@@ -16092,8 +16237,17 @@ fn css_declarations_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
+    let descriptor_context = args.get(1).is_some_and(JsValue::to_boolean);
     let declarations = font_descriptors::declarations(&block)
         .into_iter()
+        .filter(|(name, value)| {
+            !descriptor_context
+                || !crate::css::parse_style_attribute(&format!("{name}: {value}"))
+                    .iter()
+                    .any(|declaration| {
+                        crate::css::style::value_contains_tree_counting(&declaration.value)
+                    })
+        })
         .map(|(name, value)| {
             let value = crate::paint::color4::CssColor::parse(&value)
                 .map_or(value, |color| color.serialize());

@@ -103,6 +103,21 @@ const VALIDATED_PROPERTIES: &[&str] = &[
 ];
 
 pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
+    if (value
+        .as_bytes()
+        .windows(3)
+        .any(|word| word.eq_ignore_ascii_case(b"var"))
+        || value.contains('\\'))
+        && crate::css::parse_style_attribute(&format!("{property}: {value}"))
+            .iter()
+            .any(|declaration| crate::css::style::value_contains_var_function(&declaration.value))
+    {
+        return crate::css::style::supports_declaration(property, value)
+            .then(|| value.trim().to_owned());
+    }
+    if let Some(value) = crate::css::style::normalize_tree_counting_numeric(property, value) {
+        return Some(value);
+    }
     if matches!(property, "translate" | "rotate" | "scale") {
         return crate::css::style::individual_transform::normalize_specified(property, value);
     }

@@ -527,7 +527,7 @@ fn size_grid_tracks_and_layout_items(
         let item_width = if justify != Alignment::Stretch
             && resolved_length(&child_style, "width", cell_width).is_none()
         {
-            let margin = edge_sizes(&child_style, "margin");
+            let margin = super::edge_sizes_with_basis(&child_style, "margin", cell_width);
             (intrinsic_width(child, resolver) + margin.horizontal()).min(cell_width)
         } else {
             cell_width
@@ -555,16 +555,16 @@ fn size_grid_tracks_and_layout_items(
                     .all(|track| fixed_track(*track, row_basis).is_some())
             });
         let stretch_height = fixed_height
-            .then(|| stretched_item_height(style, &child_style, height))
+            .then(|| stretched_item_height(style, &child_style, height, cell_width))
             .flatten();
-        let layout = super::layout_element(
+        let layout = super::layout_element_with_percentage_basis(
             child,
             resolver,
             containing,
             viewport,
-            None,
             inherited,
             stretch_height,
+            cell_width,
         );
         if let Some(layout) = layout {
             let occupied = content_row_heights[placement.row..placement.row + placement.row_span]
@@ -705,7 +705,7 @@ fn align_grid_tracks_and_reflow_items(
         let item_width = if justify != Alignment::Stretch
             && resolved_length(&child_style, "width", cell_width).is_none()
         {
-            let margin = edge_sizes(&child_style, "margin");
+            let margin = super::edge_sizes_with_basis(&child_style, "margin", cell_width);
             (intrinsic_width(child, resolver) + margin.horizontal()).min(cell_width)
         } else {
             cell_width
@@ -716,7 +716,7 @@ fn align_grid_tracks_and_reflow_items(
             width: item_width,
             height: cell_height,
         };
-        let stretch_height = stretched_item_height(style, &child_style, cell_height);
+        let stretch_height = stretched_item_height(style, &child_style, cell_height, cell_width);
         if inherited.is_none()
             && (stretch_height.is_none()
                 || stretch_height.map(|height| height.value)
@@ -724,14 +724,14 @@ fn align_grid_tracks_and_reflow_items(
         {
             continue;
         }
-        if let Some(relayout) = super::layout_element(
+        if let Some(relayout) = super::layout_element_with_percentage_basis(
             child,
             resolver,
             containing,
             viewport,
-            None,
             inherited,
             stretch_height,
+            cell_width,
         ) {
             *layout = relayout;
         }
@@ -805,6 +805,7 @@ fn stretched_item_height(
     container_style: &ComputedStyle,
     style: &ComputedStyle,
     area_height: f32,
+    area_width: f32,
 ) -> Option<super::UsedHeight> {
     let align = self_alignment(style, "align-self")
         .unwrap_or_else(|| alignment(container_style, "align-items", Alignment::Stretch));
@@ -816,8 +817,8 @@ fn stretched_item_height(
     if align != Alignment::Stretch || !auto_height || auto_margin {
         return None;
     }
-    let margin = edge_sizes(style, "margin");
-    let padding = edge_sizes(style, "padding");
+    let margin = super::edge_sizes_with_basis(style, "margin", area_width);
+    let padding = super::edge_sizes_with_basis(style, "padding", area_width);
     let border = edge_sizes(style, "border");
     let height =
         (area_height - margin.vertical() - padding.vertical() - border.vertical()).max(0.0);

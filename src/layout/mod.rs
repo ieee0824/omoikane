@@ -1580,7 +1580,7 @@ fn collect_container_contexts(
         Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
         _ => "normal".to_string(),
     };
-    if container_type == "inline-size" || container_type == "size" {
+    if layout.node.node_type() == crate::dom::NodeType::Element {
         let names = match style.get("container-name") {
             Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("none") => {
                 value.split_whitespace().map(str::to_string).collect()
@@ -1595,6 +1595,7 @@ fn collect_container_contexts(
                 container_type,
                 names,
                 units: resolver.container_unit_context(&style),
+                style: resolver.container_style_snapshot(&style),
             },
         );
     }
@@ -2297,6 +2298,30 @@ fn layout_element(
         subgrid,
         used_height,
         None,
+        containing_block.width,
+    )
+}
+
+/// Lays out an allocated item while retaining its actual percentage basis.
+fn layout_element_with_percentage_basis(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    containing_block: Rect,
+    viewport: LayoutViewport,
+    subgrid: Option<grid::SubgridContext>,
+    used_height: Option<UsedHeight>,
+    percentage_basis: f32,
+) -> Option<LayoutBox> {
+    layout_element_with_cell(
+        node,
+        resolver,
+        containing_block,
+        viewport,
+        None,
+        subgrid,
+        used_height,
+        None,
+        percentage_basis,
     )
 }
 
@@ -2579,9 +2604,9 @@ fn layout_generated_pseudo_box(
     _viewport: LayoutViewport,
     _positioned_ancestor: Option<BoxDimensions>,
 ) -> LayoutBox {
-    let padding = edge_sizes(style, "padding");
+    let padding = edge_sizes_with_basis(style, "padding", containing_block.width);
     let border = edge_sizes(style, "border");
-    let mut margin = edge_sizes(style, "margin");
+    let mut margin = edge_sizes_with_basis(style, "margin", containing_block.width);
     let width = compute_width(
         node,
         resolver,
@@ -2652,6 +2677,7 @@ fn layout_element_with_cell(
     subgrid: Option<grid::SubgridContext>,
     used_height: Option<UsedHeight>,
     table_cell: Option<EdgeSizes>,
+    percentage_basis: f32,
 ) -> Option<LayoutBox> {
     margins::forget(node);
     if is_non_rendered_html_element(node) {
@@ -2678,6 +2704,7 @@ fn layout_element_with_cell(
         containing_block,
         table_cell,
         used_height,
+        percentage_basis,
     );
     let CellBoxMetrics {
         padding,
@@ -2828,13 +2855,14 @@ fn resolve_cell_box_metrics(
     containing_block: Rect,
     table_cell: Option<EdgeSizes>,
     used_height: Option<UsedHeight>,
+    percentage_basis: f32,
 ) -> CellBoxMetrics {
-    let padding = edge_sizes(style, "padding");
+    let padding = edge_sizes_with_basis(style, "padding", percentage_basis);
     let border = table_cell.unwrap_or_else(|| edge_sizes(style, "border"));
     let mut margin = if table_cell.is_some() {
         EdgeSizes::default()
     } else {
-        edge_sizes(style, "margin")
+        edge_sizes_with_basis(style, "margin", percentage_basis)
     };
     let used_height = used_height.map(|height| UsedHeight {
         value: clamp_content_height(
@@ -4317,6 +4345,33 @@ fn clear_cursor_y_for_side(
 // ── Edge sizes / length resolution ──────────────────────────────────────────
 
 pub(crate) fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
+    edge_sizes_using_basis(style, prefix, None)
+}
+
+/// Resolves margin and padding percentages against an explicit containing width.
+/// A zero width is a definite basis; intrinsic callers retain the no-basis path.
+pub(crate) fn edge_sizes_with_basis(
+    style: &ComputedStyle,
+    prefix: &str,
+    containing_width: f32,
+) -> EdgeSizes {
+    edge_sizes_using_basis(style, prefix, Some(containing_width))
+}
+
+fn edge_sizes_using_basis(style: &ComputedStyle, prefix: &str, basis: Option<f32>) -> EdgeSizes {
+    let length = |property: &str| {
+        explicit_length(style, property)
+            .or_else(|| {
+                basis.and_then(|basis| style.get(property)?.resolve_length_percentage(basis))
+            })
+            .map(|value| {
+                if prefix == "padding" {
+                    value.max(0.0)
+                } else {
+                    value
+                }
+            })
+    };
     let shorthand_property = match prefix {
         "border" => "border-width",
         _ => prefix,
@@ -4325,15 +4380,14 @@ pub(crate) fn edge_sizes(style: &ComputedStyle, prefix: &str) -> EdgeSizes {
         "border" => "border-{}-width",
         _ => "{prefix}-{}",
     };
-    let shorthand = explicit_length(style, shorthand_property).unwrap_or(0.0);
+    let shorthand = length(shorthand_property).unwrap_or(0.0);
     let physical = |side: &str| {
-        explicit_length(
-            style,
+        length(
             &side_property
                 .replace("{}", side)
                 .replace("{prefix}", prefix),
         )
-        .or_else(|| explicit_length(style, &format!("{prefix}-{side}")))
+        .or_else(|| length(&format!("{prefix}-{side}")))
     };
 
     // The cascade already mapped logical declarations to physical sides in
@@ -4502,9 +4556,9 @@ fn shrink_to_fit_layout_width(
     available_width: f32,
 ) -> f32 {
     let style = resolver.computed_style(node);
-    let padding = edge_sizes(&style, "padding");
+    let padding = edge_sizes_with_basis(&style, "padding", available_width);
     let border = edge_sizes(&style, "border");
-    let mut margin = edge_sizes(&style, "margin");
+    let mut margin = edge_sizes_with_basis(&style, "margin", available_width);
     if margin_start_is_auto(&style) {
         margin.left = 0.0;
     }

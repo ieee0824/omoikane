@@ -11343,7 +11343,7 @@ fn css_registered_custom_properties_validate_cssom_and_computed_values() {
         .unwrap());
 
     let animated = crate::html::TreeBuilder::parse(
-        "<html><head><style>@property --progress { syntax: '<number>'; inherits: false; initial-value: 0; } @keyframes grow { from { --progress: 0; } to { --progress: 10; } } #target { animation-name: grow; animation-duration: 10s; animation-delay: -5s; animation-play-state: paused; }</style></head><body><div id='target'></div></body></html>",
+        "<html><head><style>@property --progress { syntax: '<number>'; inherits: false; initial-value: 0; } @keyframes grow { from { --progress: 0; } to { --progress: 10; } } #target { animation-name: grow; animation-duration: 10s; animation-delay: -5s; animation-timing-function: linear; animation-play-state: paused; }</style></head><body><div id='target'></div></body></html>",
     )
     .document();
     let mut animated_runtime = JsRuntime::with_document(animated).unwrap();
@@ -11353,6 +11353,23 @@ fn css_registered_custom_properties_validate_cssom_and_computed_values() {
             "getComputedStyle(document.getElementById('target')).getPropertyValue('--progress')"
         ),
         "5"
+    );
+    animated_runtime
+        .eval("document.getElementById('target').style.animationTimingFunction = 'ease'")
+        .unwrap();
+    let eased = eval_str(
+        &mut animated_runtime,
+        "getComputedStyle(document.getElementById('target')).getPropertyValue('--progress')",
+    );
+    // Chrome's independent paused-halfway reference is 8.02403.
+    assert!((eased.parse::<f64>().unwrap() - 8.02403).abs() < 0.0001);
+    animated_runtime.tick(1000).unwrap();
+    assert_eq!(
+        eval_str(
+            &mut animated_runtime,
+            "getComputedStyle(document.getElementById('target')).getPropertyValue('--progress')"
+        ),
+        eased
     );
 }
 
@@ -17469,11 +17486,37 @@ fn timer_and_animation_frame_share_one_transition_clock() {
     );
 }
 
+fn assert_css_transform_matrix(runtime: &mut JsRuntime, expression: &str, expected: &[f64]) {
+    let value = eval_str(runtime, expression);
+    let prefix = if expected.len() == 6 {
+        "matrix("
+    } else {
+        "matrix3d("
+    };
+    let values = value
+        .strip_prefix(prefix)
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("expected a resolved matrix, got {value}"))
+        .split(',')
+        .map(|value| value.trim().parse::<f64>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), expected.len());
+    // f32 matrix math and the existing six-decimal transition angle serializer
+    // contribute sub-micro-unit error; retain exact component counts and signs.
+    for (actual, expected) in values.into_iter().zip(expected) {
+        let tolerance = 8.0 * f64::from(f32::EPSILON) * expected.abs().max(1.0);
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "matrix component {actual} differs from {expected} by more than {tolerance}"
+        );
+    }
+}
+
 #[test]
 fn css_transition_interpolates_transform_lists_with_relative_lengths() {
     let document = crate::html::TreeBuilder::parse(
         r#"<html><head><style>
-                #target { transform: none; transition: transform 1s linear; }
+                #target { width: 100px; height: 50px; transform: none; transition: transform 1s linear; }
             </style></head><body><div id="target"></div></body></html>"#,
     )
     .document();
@@ -17488,14 +17531,16 @@ fn css_transition_interpolates_transform_lists_with_relative_lengths() {
         .unwrap();
 
     assert_eq!(runtime.run_animation_frame(500).unwrap(), 0);
-    assert_eq!(
-        eval_str(&mut runtime, "getComputedStyle(target).transform"),
-        "translate(25%, 1rem) rotate(1.570796rad)"
+    assert_css_transform_matrix(
+        &mut runtime,
+        "getComputedStyle(target).transform",
+        &[0.0, 1.0, -1.0, 0.0, 25.0, 16.0],
     );
     assert_eq!(runtime.run_animation_frame(500).unwrap(), 0);
-    assert_eq!(
-        eval_str(&mut runtime, "getComputedStyle(target).transform"),
-        "translate(50%, 2rem) rotate(180deg)"
+    assert_css_transform_matrix(
+        &mut runtime,
+        "getComputedStyle(target).transform",
+        &[-1.0, 0.0, 0.0, -1.0, 50.0, 32.0],
     );
 }
 
@@ -20879,7 +20924,7 @@ fn bounding_client_rect_handles_3d_perspective_without_changing_offset_size() {
             const rect = box.getBoundingClientRect();
             const computed = getComputedStyle(box).transform;
             return [rect.width, rect.height, box.offsetWidth, box.offsetHeight,
-                    Number.isFinite(rect.left), computed.includes('perspective')].join('|');
+                    Number.isFinite(rect.left), computed.startsWith('matrix3d(')].join('|');
         })()"#;
 
     let values = eval_str(&mut runtime, expression)
@@ -20894,6 +20939,29 @@ fn bounding_client_rect_handles_3d_perspective_without_changing_offset_size() {
     assert_eq!(values[3], "50");
     assert_eq!(values[4], "true");
     assert_eq!(values[5], "true");
+    let sqrt_three = 3.0_f64.sqrt();
+    assert_css_transform_matrix(
+        &mut runtime,
+        "getComputedStyle(document.getElementById('box')).transform",
+        &[
+            sqrt_three / 2.0,
+            0.0,
+            -0.5,
+            0.001,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.5,
+            0.0,
+            sqrt_three / 2.0,
+            -sqrt_three / 1000.0,
+            10.0,
+            0.0,
+            10.0 * sqrt_three,
+            1.0 - sqrt_three / 50.0,
+        ],
+    );
 }
 
 #[test]
