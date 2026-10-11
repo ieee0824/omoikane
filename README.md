@@ -249,6 +249,15 @@ export CARGO_TARGET_DIR="/target/$(basename "$PWD")"
 python3 scripts/cargo-space-guard.py run -- cargo build --locked
 ```
 
+Dockerfile・`.dockerignore`・`docker-entrypoint.sh` だけの変更（ドキュメントの同時更新を含む）では、CI は amd64 / arm64 の Docker ビルドを実行し、Rust の全体検証を省略します。ソースや CI 設定も変更した場合は、全体検証を実行します。
+
+参照ブラウザとして Firefox と Chrome for Testing 155.0.8059.39、同版の ChromeDriver を含みます。Chrome は amd64 / arm64 に対応し、配布 ZIP の SHA256 を検証してインストールします。`dev` ユーザーから sandbox 有効でヘッドレス実行できます。
+
+```bash
+google-chrome --headless --dump-dom https://example.com
+chromedriver --version
+```
+
 - ビルド成果物はホストの `target/` と分け、worktreeごとの専用ディレクトリへ出力します。同じtargetを別worktreeで再利用せず、Cargoを `sudo` で実行しないでください。guardは初回実行時にtargetをworktreeの絶対パスと実行UIDへ紐付け、別worktree・別UIDによる再利用と、所有者または書込み権限が不整合な成果物をCargo起動前に拒否します。
 - targetはvirtiofsのホスト共有領域を避け、`/target/<worktree>` のようなローカルボリュームへ置きます。[Issue #1025](https://github.com/ieee0824/omoikane/issues/1025)では、virtiofs上で権限操作が断続的に失敗し、正常終了したリンカーのELFに実行ビットが付かない現象を確認しました。guardはLinuxのmount情報からvirtiofsのtargetを判定し、Cargo起動前に拒否します。調査環境では `/workspace` がvirtiofs、`/target` がext4で、ext4上の専用targetで全体テストを確認しています。
 - 全体テストなど容量が大きい処理では、開始時22 GiB・実行中2 GiBの空きと、target 20 GiBの上限もguardが確認します。

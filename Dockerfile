@@ -70,6 +70,61 @@ RUN install -d -m 0755 /etc/apt/keyrings \
     && apt-get install -y --no-install-recommends firefox firefox-l10n-ja \
     && rm -rf /var/lib/apt/lists/*
 
+# Chrome for Testing と同版の ChromeDriver。WPT・描画の参照ブラウザ用。
+# バージョン更新時は、両アーキテクチャの Chrome / ChromeDriver の SHA256 も更新する。
+# 配布物の chrome_sandbox に標準名 chrome-sandbox を付け、非 root でも sandbox を有効にする。
+ARG CHROME_VERSION=155.0.8059.39
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libasound2 \
+        libatk-bridge2.0-0 \
+        libatk1.0-0 \
+        libcups2 \
+        libdrm2 \
+        libgbm1 \
+        libgtk-3-0 \
+        libnspr4 \
+        libnss3 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxext6 \
+        libxkbcommon0 \
+        libxrandr2 \
+        unzip \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) \
+            chrome_platform=linux64; \
+            chrome_sha256=55672d1f392fd3e7b7a08621b6e804e6bcb39d40cf155504abb74b3a021ea8ea; \
+            chromedriver_sha256=a65f025c692e686ec2a21fa6b9639c69fa9813683a47af9cabf1ba0b1f453e42 ;; \
+        arm64) \
+            chrome_platform=linux-arm64; \
+            chrome_sha256=b9d44e5d183260ca941a4c4d8d21c8a437d81ef778a489047ef98968b0475dc5; \
+            chromedriver_sha256=e375914dc2ee52c38ffc6db4ee8276b462a2872f94ca458c18d787e0f761b129 ;; \
+        *) echo "Unsupported Chrome architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    chrome_tmp=$(mktemp -d); \
+    trap 'rm -rf "$chrome_tmp"' EXIT; \
+    chrome_base_url="https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/${chrome_platform}"; \
+    curl -fsSL "${chrome_base_url}/chrome-${chrome_platform}.zip" -o "$chrome_tmp/chrome.zip"; \
+    curl -fsSL "${chrome_base_url}/chromedriver-${chrome_platform}.zip" -o "$chrome_tmp/chromedriver.zip"; \
+    printf '%s  %s\n%s  %s\n' \
+        "$chrome_sha256" "$chrome_tmp/chrome.zip" \
+        "$chromedriver_sha256" "$chrome_tmp/chromedriver.zip" | sha256sum -c -; \
+    install -d -m 0755 /opt/chrome-for-testing; \
+    unzip -q "$chrome_tmp/chrome.zip" -d /opt/chrome-for-testing; \
+    unzip -q "$chrome_tmp/chromedriver.zip" -d /opt/chrome-for-testing; \
+    mv "/opt/chrome-for-testing/chrome-${chrome_platform}" /opt/chrome-for-testing/chrome; \
+    mv "/opt/chrome-for-testing/chromedriver-${chrome_platform}" /opt/chrome-for-testing/chromedriver; \
+    chown root:root /opt/chrome-for-testing/chrome/chrome_sandbox; \
+    chmod 4755 /opt/chrome-for-testing/chrome/chrome_sandbox; \
+    ln -s chrome_sandbox /opt/chrome-for-testing/chrome/chrome-sandbox; \
+    ln -s /opt/chrome-for-testing/chrome/chrome /usr/local/bin/google-chrome; \
+    ln -s /opt/chrome-for-testing/chrome/chrome /usr/local/bin/chrome; \
+    ln -s /opt/chrome-for-testing/chromedriver/chromedriver /usr/local/bin/chromedriver; \
+    google-chrome --version; \
+    chromedriver --version
+
 # GitHub CLI（gh）。PR 作成などの Claude Code / PR ワークフローで使う。
 # 公式 apt リポジトリ（cli.github.com/packages）を鍵付きで追加してインストールする。
 RUN mkdir -p -m 755 /etc/apt/keyrings \

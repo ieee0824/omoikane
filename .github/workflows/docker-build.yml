@@ -1,0 +1,47 @@
+name: Docker build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: docker-build-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    uses: ./.github/workflows/change-scope.yml
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.run_docker == 'true'
+    name: Docker (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Build development image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          cache-from: type=gha,scope=dev-container-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=dev-container-${{ matrix.arch }}

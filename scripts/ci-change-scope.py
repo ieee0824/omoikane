@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tell CI whether a change can use the documentation-only path."""
+"""Classify changes for full checks and development-container builds."""
 
 import json
 import os
@@ -14,6 +14,23 @@ def is_documentation_only(paths):
         or (path.startswith("docs/") and path.endswith(".md"))
         for path in paths
     )
+
+
+DOCKER_PATHS = {"Dockerfile", ".dockerignore", "docker-entrypoint.sh"}
+
+
+def check_scope(paths):
+    """Keep unknown/code changes on full CI; isolate container-only changes."""
+    container_only = bool(paths) and all(
+        path in DOCKER_PATHS or is_documentation_only([path]) for path in paths
+    )
+    return {
+        "run_full": not container_only,
+        "run_docker": paths is None or any(path in DOCKER_PATHS for path in paths)
+        or any(path in {".github/workflows/docker-build.yml",
+                       ".github/workflows/change-scope.yml",
+                       "scripts/ci-change-scope.py"} for path in paths),
+    }
 
 
 def github_json(path, token):
@@ -61,10 +78,11 @@ def main():
     except (OSError, KeyError, ValueError) as error:
         print(f"Could not classify the complete change set: {error}")
         paths = None
-    run_full = not is_documentation_only(paths)
-    print(f"Changed files: {len(paths) if paths is not None else 'unknown'}; run_full={run_full}")
+    checks = check_scope(paths)
+    print(f"Changed files: {len(paths) if paths is not None else 'unknown'}; {checks}")
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
-        output.write(f"run_full={str(run_full).lower()}\n")
+        for name, enabled in checks.items():
+            output.write(f"{name}={str(enabled).lower()}\n")
 
 
 if __name__ == "__main__":
