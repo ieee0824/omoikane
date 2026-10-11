@@ -95,6 +95,9 @@ fn keyword(
 
 fn calendar_algorithm(value: &Value) -> Option<icu_calendar::preferences::CalendarAlgorithm> {
     use icu_calendar::preferences::CalendarAlgorithm;
+    if value.to_string() == "ethiopic-amete-alem" {
+        return Some(CalendarAlgorithm::Ethioaa);
+    }
     match CalendarAlgorithm::try_from(value).ok()? {
         // CLDR ISO8601 date names alias Gregorian. ECMA-402 exposes civil
         // year/month/day/era fields; use their shared Gregorian pattern families
@@ -104,7 +107,7 @@ fn calendar_algorithm(value: &Value) -> Option<icu_calendar::preferences::Calend
     }
 }
 
-fn supports_calendar(
+pub(in crate::builtins::intl) fn supports_calendar(
     value: &Value,
     mut prefs: DateTimeFormatterPreferences,
     provider: &IntlProvider,
@@ -115,11 +118,26 @@ fn supports_calendar(
     prefs.calendar_algorithm = Some(algorithm);
     DateTimeFormatter::try_new_with_buffer_provider(provider.erased_provider(), prefs, YMD::short())
         .is_ok_and(|formatter| {
-            formatter.calendar().as_calendar().calendar_algorithm() == Some(algorithm)
+            native_calendar_algorithm(formatter.calendar().as_calendar()) == Some(algorithm)
         })
 }
 
-fn supports_numbering(value: &Value, provider: &IntlProvider) -> bool {
+/// ICU's Ethiopian calendar reports `ethiopic` for both era styles.
+/// Preserve its actual owned calendar kind when exposing or checking `ethioaa`.
+pub(super) fn native_calendar_algorithm(
+    calendar: &icu_calendar::AnyCalendar,
+) -> Option<icu_calendar::preferences::CalendarAlgorithm> {
+    if calendar.kind() == icu_calendar::AnyCalendarKind::EthiopianAmeteAlem {
+        Some(icu_calendar::preferences::CalendarAlgorithm::Ethioaa)
+    } else {
+        calendar.calendar_algorithm()
+    }
+}
+
+pub(in crate::builtins::intl) fn supports_numbering(
+    value: &Value,
+    provider: &IntlProvider,
+) -> bool {
     let Ok(numbering): Result<icu_decimal::preferences::NumberingSystem, _> =
         value.clone().try_into()
     else {

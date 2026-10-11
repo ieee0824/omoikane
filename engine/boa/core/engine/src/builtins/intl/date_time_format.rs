@@ -30,9 +30,14 @@ mod backend;
 mod calendar_patterns;
 mod calendar_period;
 mod candidates;
+mod day_periods;
 mod format;
+mod fractional;
 mod hour_cycle;
 mod initialization;
+mod input;
+mod legacy;
+mod lunisolar_months;
 mod match_fields;
 mod matcher;
 mod negotiation;
@@ -46,7 +51,12 @@ mod range_parts;
 mod range_pattern;
 mod range_selection;
 mod resolution;
+mod style_formats;
+#[cfg(feature = "temporal")]
+mod temporal_formats;
 mod timezone;
+mod zone_input;
+pub(super) use negotiation::{supports_calendar, supports_numbering};
 
 #[cfg(test)]
 mod tests;
@@ -58,11 +68,13 @@ pub(crate) struct DateTimeFormat {
     time_zone: timezone::ResolvedTimeZone,
     components: options::Components,
     backend: backend::DateTimeBackend,
+    #[cfg(feature = "temporal")]
+    temporal_formats: temporal_formats::TemporalFormats,
     bound_format: Option<crate::object::JsFunctionEdge>,
 }
 
-// SAFETY: bound_format is the only GC-managed field. ICU data and JsString
-// component values own their data independently of the JavaScript GC.
+// SAFETY: bound_format is the only GC-managed field. ICU data, cached native
+// formats, and JsString component values own their data outside the JS GC.
 unsafe impl Trace for DateTimeFormat {
     custom_trace!(this, mark, mark(&this.bound_format));
 }
@@ -129,8 +141,12 @@ impl BuiltInConstructor for DateTimeFormat {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let this = context
+            .native_call_receiver()
+            .unwrap_or_else(JsValue::undefined);
+        let _this_root = this.as_object().map(|object| object.root());
         // 1. If NewTarget is undefined, let newTarget be the active function object, else let newTarget be NewTarget.
-        let new_target = &if new_target.is_undefined() {
+        let effective_new_target = &if new_target.is_undefined() {
             context
                 .active_function_object()
                 .unwrap_or_else(|| {
@@ -145,7 +161,7 @@ impl BuiltInConstructor for DateTimeFormat {
             new_target.clone()
         };
         let prototype = get_prototype_from_constructor(
-            new_target,
+            effective_new_target,
             StandardConstructors::date_time_format,
             context,
         )?;
@@ -154,8 +170,8 @@ impl BuiltInConstructor for DateTimeFormat {
         let date_time_format =
             JsObject::from_proto_and_data_with_shared_shape(context.root_shape(), prototype, data);
 
-        // 5. Return dateTimeFormat.
-        Ok(date_time_format.into())
+        let _formatter_root = date_time_format.clone().root();
+        legacy::chain(date_time_format, new_target, this, context)
     }
 }
 

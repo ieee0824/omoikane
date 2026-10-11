@@ -45,6 +45,7 @@ intl = [
     "icu_normalizer/serde",
     "dep:icu_locale",
     "dep:icu_datetime",
+    "dep:icu_time",
     "dep:icu_plurals",
     "dep:icu_provider",
     "dep:icu_properties",
@@ -160,6 +161,7 @@ icu_datetime = { workspace = true, default-features = false, features = [
     "experimental",
 ], optional = true }
 icu_calendar = { workspace = true, default-features = false, optional = true }
+icu_time = { workspace = true, features = ["serde"], optional = true }
 icu_collator = { workspace = true, default-features = false, features = [
     "serde",
 ], optional = true }

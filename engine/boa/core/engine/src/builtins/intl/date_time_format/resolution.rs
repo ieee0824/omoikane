@@ -3,7 +3,7 @@ use super::matcher::MatchComponents;
 use icu_datetime::{
     pattern::DateTimePattern,
     provider::{
-        fields::{Day, FieldLength, FieldSymbol, Hour, Second, Year},
+        fields::{Day, DayPeriod, FieldLength, FieldSymbol, Hour, Second, Year},
         pattern::{PatternItem, runtime::Pattern},
     },
 };
@@ -65,6 +65,7 @@ impl ResolvedPattern {
                 )),
                 FieldSymbol::Day(Day::DayOfMonth) => Some(("day", numeric)),
                 FieldSymbol::Weekday(_) => Some(("weekday", text)),
+                FieldSymbol::DayPeriod(DayPeriod::AmPm) => None,
                 FieldSymbol::DayPeriod(_) => Some(("dayPeriod", text)),
                 FieldSymbol::Hour(hour) => {
                     result.hour_cycle = Some(match hour {

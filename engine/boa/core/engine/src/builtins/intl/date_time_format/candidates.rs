@@ -11,7 +11,7 @@ use icu_datetime::{
     DateTimeFormatterPreferences,
     pattern::DateTimePattern,
     provider::{
-        fields::{DecimalSecond, FieldSymbol, Hour, Second, Year},
+        fields::{DecimalSecond, FieldSymbol, Hour, Second},
         neo::marker_attrs::PatternLength,
         pattern::{PatternItem, runtime::Pattern},
     },
@@ -25,7 +25,6 @@ use std::sync::Arc;
 pub(super) struct SelectedFormat {
     pattern: Arc<DateTimePattern>,
     range_pattern: Arc<Pattern<'static>>,
-    pub(super) related_year: bool,
     pub(super) fields: MatchComponents,
     // Range matching uses the CLDR source identity before rendered widths.
     interval_skeleton: String,
@@ -48,6 +47,23 @@ struct Choice {
 }
 
 impl SelectedFormat {
+    pub(super) fn from_style(
+        pattern: Pattern<'static>,
+        cycle: DateTimeHourCycle,
+    ) -> Result<Self, String> {
+        let pattern = ordinary_day_period_spaces(adapt_clock(pattern, None, cycle).into());
+        let pattern: Pattern<'static> = pattern.into();
+        let fields = components_from_pattern(&pattern)
+            .map_err(|error| format!("style metadata: {error:?}"))?;
+        Ok(Self {
+            interval_skeleton: semantic_skeleton(fields, cycle),
+            range_pattern: Arc::new(pattern.clone()),
+            pattern: Arc::new(pattern.into()),
+            fields,
+            hour_cycle: cycle,
+        })
+    }
+
     pub(super) fn load<P: BufferProvider + ?Sized>(
         provider: &P,
         prefs: DateTimeFormatterPreferences,
@@ -93,14 +109,10 @@ impl SelectedFormat {
             (None, Some(time)) => time.to_owned(),
             _ => semantic_skeleton(fields, hour_cycle),
         };
-        let related_year = pattern.items.iter().any(|item| {
-            matches!(item, PatternItem::Field(field) if field.symbol == FieldSymbol::Year(Year::RelatedIso))
-        });
         Ok(Self {
             interval_skeleton,
             range_pattern: Arc::new(pattern.clone()),
             pattern: Arc::new(pattern.into()),
-            related_year,
             fields,
             hour_cycle,
         })
@@ -132,7 +144,6 @@ impl SelectedFormat {
         Ok(Some(Self {
             pattern: Arc::new(pattern.clone().into()),
             range_pattern: Arc::new(pattern),
-            related_year: false,
             fields: request,
             interval_skeleton: "B".repeat(width.length()),
             hour_cycle,

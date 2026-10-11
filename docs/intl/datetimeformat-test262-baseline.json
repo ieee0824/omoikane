@@ -1,0 +1,1171 @@
+{
+  "pin": "2e0a56762801e275a9fdf96dc49d90ba0cddcf63",
+  "baseline": {
+    "total": 245,
+    "pass": 163,
+    "fail": 82,
+    "ignored": 0,
+    "panic": 0
+  },
+  "stage44_C": {
+    "pass": 244,
+    "fail": 1,
+    "ignored": 0,
+    "panic": 0
+  },
+  "stage44_en_US": {
+    "pass": 245,
+    "fail": 0,
+    "ignored": 0,
+    "panic": 0
+  },
+  "baseline_failures": [
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/to-datetime-formattable-with-different-arg-kinds.js",
+      "classification": "implementation: both argument conversions and native Temporal kind validation",
+      "original_error": "Uncaught Test262Error {\n    message: \"Expected SameValue(«1», «2») to be true\"\n}\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:92:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/to-datetime-formattable-with-different-arg-kinds.js:75:19)",
+      "fixture_sha256": "cf7b612de1c6bbbe47136ae456091ee20e805d68593f1eb73000e1c82dac85df",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/fractionalSecondDigits.js",
+      "classification": "implementation: fractional numeric field widths and parts/range consistency",
+      "original_error": "Uncaught Test262Error {\n    message: \"Expected SameValue(«7», «3») to be true\"\n}\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:92:9)\n    at zip (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/fractionalSecondDigits.js:19:19)\n    at next (native)\n    at compare (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/fractionalSecondDigits.js:25:36)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/fractionalSecondDigits.js:50:8)",
+      "fixture_sha256": "13dd324665f7abb6708ae637bc3d327c3151d697e3f719b959c8ec364bcd2f89",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/temporal-objects-format-with-era.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-format-with-era.js:23:45)",
+      "fixture_sha256": "5c32852e9e1d5857775bfefc2f9a37347f8925ac788a765c135730f871b3d027",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/temporal-objects-no-time-clip.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-no-time-clip.js:?:?)",
+      "fixture_sha256": "e6fd51c6fd5ea3e2c67169480525f6634f13d1b5d8a14d3fa390cf1872c52e1a",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/temporal-objects-not-overlapping-options.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-not-overlapping-options.js:25:70)",
+      "fixture_sha256": "83f04727446de3e851ca5a1e16c93dda1b3d4e12309ad6dd42129cc72e858182",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/chinese-calendar-dates.js",
+      "classification": "implementation/data: related year and lunar month codes from source CLDR patterns",
+      "original_error": "Uncaught Test262Error {\n    message: \"month component of 2100-01-01T00:00Z formatted in chinese has unexpected value\"\n}\n    at findAll (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/chinese-calendar-dates.js:20:48)\n    at compareFormatRangeToPartsSnapshot (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/chinese-calendar-dates.js:35:10)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/chinese-calendar-dates.js:48:34)",
+      "fixture_sha256": "99dee450501de783ea816d5feea4869fdbca3a6c9b2212f0c4a927dbaea7ce3f",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/temporal-plaindatetime-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-plaindatetime-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "dc5f5d874809dc032cb007c1c6321f7a25b97024f1ce43ffef746f6e81683d22",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/temporal-plainmonthday-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-plainmonthday-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "e3105d68895a43adff4f1744e30bbdc3ae15ca3016d1058dee6366622c2cca62",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/temporal-objects-ignore-timezone.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-ignore-timezone.js:35:40)",
+      "fixture_sha256": "95d8c03782daf4fbd2f4cfe4e0e46445318bdaaafceabe314f18df8a42bee112",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/temporal-objects-resolved-time-zone.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-resolved-time-zone.js:27:48)",
+      "fixture_sha256": "ffadc9d589be1252123a0851d5b1a200d21e4b956d0775d7b7be1503560aee08",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/temporal-objects-throws-with-different-calendars.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught Test262Error {\n    message: \"Expected a RangeError but got a TypeError\"\n}\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:138:13)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-throws-with-different-calendars.js:14:14)",
+      "fixture_sha256": "c571c1312c8263229956d4a79c91ca58442acd2df174075fc94e086bc05f3556",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/temporal-plaintime-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-plaintime-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "6c2ca0760132fcc60664f2e1b5c4a24687b9ab65dd347128091bba0d0d26d215",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/temporal-plainyearmonth-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-plainyearmonth-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "ae34aca46c86d2f9ce4cf2eb38410c349391e91dd8c3a3cd8819a29fb81dccf1",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/temporal-objects-no-time-clip-weekday.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-no-time-clip-weekday.js:31:35)",
+      "fixture_sha256": "71c420e73715c90a445b03aa82c07783b5e761e2593b2cb80769671f03100a0f",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRangeToParts/temporal-plaindate-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-plaindate-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "59bc1ce7f993468f221ac1c8f23383e6b0c3697a290728c92bde5ee6805dc26d",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/numbering-system.js",
+      "classification": "implementation: semantic numeric field widths with locale digits",
+      "original_error": "Uncaught Test262Error {\n    message: \"en-US-u-nu-arab: display with fractionalSecondDigits Expected SameValue(«false», «true») to be true\"\n}\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/numbering-system.js:?:?)",
+      "fixture_sha256": "7e9691cc92ffd7dcdd014046ab5ebea4ecffd8da608cc239689ebd481e9decb9",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/dayPeriod-long-en.js",
+      "classification": "implementation/data: CLDR flexible day-period rules and names",
+      "original_error": "Uncaught Test262Error {\n    message: \"Actual [midnight, AM, AM, AM, AM, AM, AM, AM, AM, AM, AM, AM, PM, PM, PM, PM, PM, PM, PM, PM, PM, PM, PM] and expected [] should have the same contents. unexpected dayPeriods: midnight,AM,AM,AM,AM,AM,AM,AM,AM,AM,AM,AM,PM,PM,PM,PM,PM,PM,PM,PM,PM,PM,PM\"\n}\n    at assert (/tmp/omoikane-p1-test262-20261009/harness/assert.js:61:9)\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:163:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/dayPeriod-long-en.js:44:20)",
+      "fixture_sha256": "c9a5afc70387c3439ca0e3804a3670a01da4140b3892e6ec82f08102a74a1842",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/fractionalSecondDigits.js",
+      "classification": "implementation: fractional numeric field widths and parts/range consistency",
+      "original_error": "Uncaught Test262Error {\n    message: \"no fractionalSecondDigits Expected SameValue(«\\\"1:02:03 AM\\\"», «\\\"02:03\\\"») to be true\"\n}\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:92:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/fractionalSecondDigits.js:16:17)",
+      "fixture_sha256": "edf0724feece5a6792d52f91b8f6c86152686e70f69ac40dbccd652c427961e5",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/timedatestyle-en.js",
+      "classification": "implementation/data: exact CLDR date/time style composition",
+      "original_error": "Uncaught Test262Error {\n    message: \"Result for short Expected SameValue(«\\\"5/1/1886\\\"», «\\\"5/1/86\\\"») to be true\"\n}\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/timedatestyle-en.js:57:19)",
+      "fixture_sha256": "cafe5a8d3e90d45d28a684e94bbc655de128a44eb79a867d494a2f5a4c12a0e6",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-objects-format-with-era.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-objects-format-with-era.js:15:24)",
+      "fixture_sha256": "529dde29e5b706d120781405cb777dd92e963536f5e8ed03fc037dbe6d7b21e0",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-objects-no-time-clip.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-objects-no-time-clip.js:?:?)",
+      "fixture_sha256": "e508bf0fb692a8d7230b8a16a69deb28cd57cb0864819653d76f79ad01e2de05",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-objects-not-overlapping-options.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-objects-not-overlapping-options.js:25:43)",
+      "fixture_sha256": "5586711e924131be640ddfc43a3d94220bb64cc4aff0746b4b7863bd3bfe1ebe",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-plaindatetime-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-plaindatetime-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "c2699bf1378d6ec6328977cf608185ac1b3151933fa6560b80988c6157abcc45",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-plainmonthday-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-plainmonthday-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "24d9e510f5b99f5c1db24fd4704b3a771752029e3960a34f956a6912da0a9650",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-plainmonthday-formatting-datetime-style.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-plainmonthday-formatting-datetime-style.js:?:?)",
+      "fixture_sha256": "d2adf6e87e0ca6f6cf930bc5fc6a46362d5b5be98f2e0bf174b422ccf6c5da18",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-objects-ignore-timezone.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-objects-ignore-timezone.js:28:40)",
+      "fixture_sha256": "c7f7974a948f006987f4c045e23f4810bcd29cc9744e58138eb35a96ede7bebe",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-plaindate-formatting-datetime-style.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-plaindate-formatting-datetime-style.js:?:?)",
+      "fixture_sha256": "150529449dc2ecb5126c265bb0f5bddef41e4289d635f44595372e599ad3242e",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-objects-resolved-time-zone.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-objects-resolved-time-zone.js:22:36)",
+      "fixture_sha256": "46b0e3f122d7e8dc2cb5edddbed8407ff10cd4bdcbf1e971e433c65230ae14a4",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-objects-format-weekday-long.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-objects-format-weekday-long.js:30:30)",
+      "fixture_sha256": "bf0f5461163aed1a34f2055927c0967eb4aff687f1bdd3359a36a1c063f6bfce",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-plaintime-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-plaintime-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "0f4561435017424c2bd6957d44958131c000af1b4024df3953dc3ba856ca03c1",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-objects-no-time-clip-non-latin-numerals.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-objects-no-time-clip-non-latin-numerals.js:29:24)",
+      "fixture_sha256": "62a5a45883efdc6137c85a0a6d4b6289f66c8376be371dac9980fcf033357d0b",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-plainyearmonth-formatting-datetime-style.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-plainyearmonth-formatting-datetime-style.js:?:?)",
+      "fixture_sha256": "cef222f6322ea9bf52709e873ff83bcd5a6cfa39b761ce14ec7bea7791d99147",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-plaindatetime-formatting-datetime-style.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-plaindatetime-formatting-datetime-style.js:137:19)",
+      "fixture_sha256": "3909a075078c525e24139d39b5bfca439d5dc7786555d72489e032bbdc6819b5",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/dayPeriod-short-en.js",
+      "classification": "implementation/data: CLDR flexible day-period rules and names",
+      "original_error": "Uncaught Test262Error {\n    message: \"Actual [midnight, AM, AM, AM, AM, AM, AM, AM, AM, AM, AM, AM, PM, PM, PM, PM, PM, PM, PM, PM, PM, PM, PM] and expected [] should have the same contents. unexpected dayPeriods: midnight,AM,AM,AM,AM,AM,AM,AM,AM,AM,AM,AM,PM,PM,PM,PM,PM,PM,PM,PM,PM,PM,PM\"\n}\n    at assert (/tmp/omoikane-p1-test262-20261009/harness/assert.js:61:9)\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:163:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/dayPeriod-short-en.js:44:20)",
+      "fixture_sha256": "92ba1ef32042121fe6bfc78a1d31be373856081a1ccd17b328a08018cf2988f8",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/dayPeriod-narrow-en.js",
+      "classification": "implementation/data: CLDR flexible day-period rules and names",
+      "original_error": "Uncaught Test262Error {\n    message: \"Actual [mi, a, a, a, a, a, a, a, a, a, a, a, p, p, p, p, p, p, p, p, p, p, p] and expected [] should have the same contents. unexpected dayPeriods: mi,a,a,a,a,a,a,a,a,a,a,a,p,p,p,p,p,p,p,p,p,p,p\"\n}\n    at assert (/tmp/omoikane-p1-test262-20261009/harness/assert.js:61:9)\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:163:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/dayPeriod-narrow-en.js:44:20)",
+      "fixture_sha256": "0760eee3f3997a39aa583b709de9870d9159fd3369e7d8bd54512ce8abdde1cd",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-plaintime-formatting-datetime-style.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-plaintime-formatting-datetime-style.js:?:?)",
+      "fixture_sha256": "6d6d1b93314dc1bce8529d13c95793dd31f1587480a91749f35a0d5e0d64cc99",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-plainyearmonth-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-plainyearmonth-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "6939f1aa8f749372455aa717b3b998ba846650b1b8e4574cabbccfd8a5eb73aa",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-objects-no-time-clip-weekday.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-objects-no-time-clip-weekday.js:32:27)",
+      "fixture_sha256": "faf5b4b4d8ffc6bde14c13a52963b20529085857a975f4d83814c6704a52be72",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/format/temporal-plaindate-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/format/temporal-plaindate-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "abea3b0880513ab448982b812a1d18786a61dc24227865acc4af64309601273f",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/dayPeriod-long-en.js",
+      "classification": "implementation/data: CLDR flexible day-period rules and names",
+      "original_error": "Uncaught Test262Error {\n    message: \"Actual [midnight, AM, AM, AM, AM, AM, AM, AM, AM, AM, AM, AM, PM, PM, PM, PM, PM, PM, PM, PM, PM, PM, PM] and expected [] should have the same contents. unexpected dayPeriods: midnight,AM,AM,AM,AM,AM,AM,AM,AM,AM,AM,AM,PM,PM,PM,PM,PM,PM,PM,PM,PM,PM,PM\"\n}\n    at assert (/tmp/omoikane-p1-test262-20261009/harness/assert.js:61:9)\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:163:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/dayPeriod-long-en.js:51:20)",
+      "fixture_sha256": "715716900acf6e868d3e367defe8e8a19cf58db3f117c0a6ff610c0f3500462d",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/fractionalSecondDigits.js",
+      "classification": "implementation: fractional numeric field widths and parts/range consistency",
+      "original_error": "Uncaught Test262Error {\n    message: \"length should be 3, no fractionalSecondDigits round down Expected SameValue(«7», «3») to be true\"\n}\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:92:9)\n    at assertParts (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/fractionalSecondDigits.js:16:21)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/fractionalSecondDigits.js:46:12)",
+      "fixture_sha256": "a41479d032a9864abef33675017b5e36fe1ed0dbf964f8e73dba6ff893eed35d",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/temporal-objects-format-with-era.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-format-with-era.js:23:40)",
+      "fixture_sha256": "9f1ae6f8e7daa53d8147d08407d34cf019760d5e27f6e5f2c95bfc72eb9199fb",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/temporal-objects-no-time-clip.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-no-time-clip.js:?:?)",
+      "fixture_sha256": "0ed099e670fed599096ccd92eaa933b1d86f55f3e6caa9bf94fb05a79c64f43f",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/temporal-objects-not-overlapping-options.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-not-overlapping-options.js:25:65)",
+      "fixture_sha256": "0439e55fe1d4592b333c1eeefca64e7e1845a7a557fc95ac85c192f81e7eb4e6",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/chinese-calendar-dates.js",
+      "classification": "implementation/data: related year and lunar month codes from source CLDR patterns",
+      "original_error": "Uncaught Test262Error {\n    message: \"month component of 2100-01-01T00:00Z formatted in chinese has unexpected value\"\n}\n    at compareFormatToPartsSnapshot (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/chinese-calendar-dates.js:14:70)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/chinese-calendar-dates.js:43:29)",
+      "fixture_sha256": "7df1d424b9907c7b042a4bd378af49e62e2218fc17c06fe777fcfbd0e134054c",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/era.js",
+      "classification": "implementation/data: era fields and native Hijri AH/BH names",
+      "original_error": "Uncaught RangeError: pattern formatting: InvalidEra(\"bh\")\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/era.js:58:19)",
+      "fixture_sha256": "90e53949e1ba1da401c94706a73ad05526bb4dbf243463ce42c5c4c94f832794",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/temporal-plaindatetime-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/temporal-plaindatetime-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "02f90733cc0a7757e68cdd97f3fe7f6a3ecfa5ad3ab142b9c4f48c93ba01dbaf",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/temporal-plainmonthday-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/temporal-plainmonthday-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "ddce1d32d98334eacdc3d1a3e2f65df74e60526adbbbdde3f3df66ab8a0b4e74",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/temporal-objects-ignore-timezone.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-ignore-timezone.js:33:35)",
+      "fixture_sha256": "1c31e5c570d3a3a8b3c23addb7bc8d7b12ddd68912b9f56a7451c47ebb61aac9",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/temporal-objects-resolved-time-zone.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-resolved-time-zone.js:23:43)",
+      "fixture_sha256": "bde271b1b25659677fd88eeeb96d946b9ae97454a81756c7f47a769284cd10ca",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/temporal-plaintime-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/temporal-plaintime-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "6d4d28e4c426840700cbb025e663c15e08253ffcfbb40b75e3a7eef3023f7a22",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/compare-to-temporal-lunisolar.js",
+      "classification": "implementation/data: Temporal arithmetic year, lunar code versus ordinal, native Hebrew leap names",
+      "original_error": "Uncaught Test262Error {\n    message: \"date = 4686-02-27[u-ca=chinese], year Expected SameValue(«4686», «7323») to be true\"\n}\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/compare-to-temporal-lunisolar.js:?:?)",
+      "fixture_sha256": "a2aaeb68a67e1f4e95c81a7eec113474f4ee4e730b804e8df09a1387d446489e",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/dayPeriod-short-en.js",
+      "classification": "implementation/data: CLDR flexible day-period rules and names",
+      "original_error": "Uncaught Test262Error {\n    message: \"Actual [midnight, AM, AM, AM, AM, AM, AM, AM, AM, AM, AM, AM, PM, PM, PM, PM, PM, PM, PM, PM, PM, PM, PM] and expected [] should have the same contents. unexpected dayPeriods: midnight,AM,AM,AM,AM,AM,AM,AM,AM,AM,AM,AM,PM,PM,PM,PM,PM,PM,PM,PM,PM,PM,PM\"\n}\n    at assert (/tmp/omoikane-p1-test262-20261009/harness/assert.js:61:9)\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:163:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/dayPeriod-short-en.js:51:20)",
+      "fixture_sha256": "fe08e26203324320096dc1dae0baf3f1acce0dd870e193bdf36de9aa25f2b514",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/dayPeriod-narrow-en.js",
+      "classification": "implementation/data: CLDR flexible day-period rules and names",
+      "original_error": "Uncaught Test262Error {\n    message: \"Actual [mi, a, a, a, a, a, a, a, a, a, a, a, p, p, p, p, p, p, p, p, p, p, p] and expected [] should have the same contents. unexpected dayPeriods: mi,a,a,a,a,a,a,a,a,a,a,a,p,p,p,p,p,p,p,p,p,p,p\"\n}\n    at assert (/tmp/omoikane-p1-test262-20261009/harness/assert.js:61:9)\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:163:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/dayPeriod-narrow-en.js:51:20)",
+      "fixture_sha256": "e77267ff386e82fef9f2816b092bbfe86f8fae3238806c4ff5937966c4844f20",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/temporal-plainyearmonth-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/temporal-plainyearmonth-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "4ef2973ec91ea8de19698e2d3f158a4e6731d9f2a86dd1a2e68e251aa6d59265",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/temporal-objects-no-time-clip-weekday.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-no-time-clip-weekday.js:26:30)",
+      "fixture_sha256": "945843be16bf5718ab921e9bb9268eee47f219b5a0513564c787e27fa8cd9c73",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/compare-to-temporal.js",
+      "classification": "implementation/data: calendar date overflow and native Hijri AH/BH names",
+      "original_error": "Uncaught RangeError: Day out of range.\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/compare-to-temporal.js:?:?)",
+      "fixture_sha256": "3489c3e391a369c778724256779a7306b7ab14cf8b49a1752d0453faf4246b95",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatToParts/temporal-plaindate-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatToParts/temporal-plaindate-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "526afda7acf7ac88aee0d32baf0bea98a2683ea07daaa1006fe3cef66f83244e",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/to-datetime-formattable-with-different-arg-kinds.js",
+      "classification": "implementation: both argument conversions and native Temporal kind validation",
+      "original_error": "Uncaught Test262Error {\n    message: \"Expected SameValue(«1», «2») to be true\"\n}\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:92:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/to-datetime-formattable-with-different-arg-kinds.js:76:19)",
+      "fixture_sha256": "76f80e11480bee77fbe41bbdb4b7df8384e57c102c724bee6fc234ef33ab33ac",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/fractionalSecondDigits.js",
+      "classification": "implementation: fractional numeric field widths and parts/range consistency",
+      "original_error": "Uncaught Test262Error {\n    message: \"no fractionalSecondDigits Expected SameValue(«\\\"1:02:03 AM\\\"», «\\\"02:03\\\"») to be true\"\n}\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:92:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/fractionalSecondDigits.js:24:17)",
+      "fixture_sha256": "2a07ddcb87ba1e1eb60ca42f8fe281bd7475011184b98f5b6ad331d60f73c479",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/temporal-objects-format-with-era.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/temporal-objects-format-with-era.js:15:29)",
+      "fixture_sha256": "88bd9eb2a1879367b9ff9a3535e3b5690d57b14016e313c8186e3ca7cfcb723d",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/temporal-objects-no-time-clip.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/temporal-objects-no-time-clip.js:?:?)",
+      "fixture_sha256": "d70a52f7376ef3bee2e88c5023149e6781d6b3c9df533fd4202775bd5387b72e",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/temporal-objects-not-overlapping-options.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/temporal-objects-not-overlapping-options.js:25:48)",
+      "fixture_sha256": "8c9a3226c003af112d17ad5be3aa0b7dca29a2aa0f38595b806451ca7a84b206",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/temporal-plaindatetime-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/temporal-plaindatetime-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "d749b0dcf28000390bf3fb6d3b2defaaaa9d61ee6865ca4eeb6ed74538d38ca0",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/temporal-plainmonthday-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/temporal-plainmonthday-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "6a3071b1a1a2c6e0535e8a970935ebb82effbeb51ff09d5e427cf27c28d55375",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/temporal-objects-ignore-timezone.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/temporal-objects-ignore-timezone.js:28:45)",
+      "fixture_sha256": "d094b04237847bd500d4601bb199deb9e67d812b75b75a6e112039f155823caa",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/temporal-objects-resolved-time-zone.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/temporal-objects-resolved-time-zone.js:26:41)",
+      "fixture_sha256": "e8a03699a09fa810410e1625eeb7afe49c4464f9d8f961aec9822dbc3b988305",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/temporal-objects-throws-with-different-calendars.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught Test262Error {\n    message: \"Expected a RangeError but got a TypeError\"\n}\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:138:13)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/temporal-objects-throws-with-different-calendars.js:14:14)",
+      "fixture_sha256": "dce8dafeadaf86f3a90ef8d4dcf1b123eb1431eda9d8d23c8b0b2da3de3e7023",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/temporal-plaintime-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/temporal-plaintime-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "994b574346506828825e603fbb33ddb94ffaa382fdc1ab5c438122ce1baa8f6b",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/temporal-plainyearmonth-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/temporal-plainyearmonth-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "7bc69cae2bcc098ef2eb79ef1bba7ba8522ecd0557cfa46218c2c01930461a2e",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/temporal-objects-no-time-clip-weekday.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/temporal-objects-no-time-clip-weekday.js:31:29)",
+      "fixture_sha256": "605ce4eaac1288ec7a798448a0755b2050e1fead674d1d24b93035d7483456dc",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/formatRange/temporal-plaindate-formatting-timezonename.js",
+      "classification": "implementation: owned native Temporal inputs, relevant-field formatting and calendar/timezone/range validation",
+      "original_error": "Uncaught TypeError: `valueOf` not supported by Temporal built-ins. See 'compare', 'equals', or `toString`\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/formatRange/temporal-plaindate-formatting-timezonename.js:?:?)",
+      "fixture_sha256": "48370c77fff4eaa6b6759a71736ba8c7a489b8db03d98403448ab000b5bcbd41",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/resolvedOptions/order-dayPeriod.js",
+      "classification": "environment: default locale clock style (retained C failure; en-US passes)",
+      "original_error": "Uncaught Test262Error {\n    message: \"\\\"hour12\\\" precedes \\\"dayPeriod\\\"\"\n}\n    at assert (/tmp/omoikane-p1-test262-20261009/harness/assert.js:61:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/resolvedOptions/order-dayPeriod.js:35:9)",
+      "fixture_sha256": "a50af3cdb7d9b907cf80f55b8842a748d5e17bf4bf66bb7d3f927f18bd920a74",
+      "stage44_C": [
+        "Failed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/resolvedOptions/calendar.js",
+      "classification": "implementation/data: supported calendar enumeration and canonical resolution",
+      "original_error": "Uncaught Test262Error {\n    message: \"Resolved calendar Expected SameValue(«\\\"gregory\\\"», «\\\"ethioaa\\\"») to be true\"\n}\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/resolvedOptions/calendar.js:33:19)",
+      "fixture_sha256": "336522e785a2e2be046dc465bca993dcd7e8fdc8629b3bd7869fc7870ac46f07",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/prototype/resolvedOptions/hourCycle-default.js",
+      "classification": "implementation/data: locale-specific preferred twelve-hour cycle",
+      "original_error": "Uncaught Test262Error {\n    message: \"Expected SameValue(«\\\"h12\\\"», «\\\"h11\\\"») to be true\"\n}\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/prototype/resolvedOptions/hourCycle-default.js:?:?)",
+      "fixture_sha256": "8667903fa2969dc801b45e2505d96c878b2c15e278bad0af3b2a25c64ee749a3",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/canonicalize-utc-timezone.js",
+      "classification": "implementation: named timezone case, link and UTC resolution",
+      "original_error": "Uncaught Test262Error {\n    message: \"Time zone name Etc/GMT should be preserved and not canonicalized to 'UTC' Expected SameValue(«\\\"UTC\\\"», «\\\"Etc/GMT\\\"») to be true\"\n}\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/canonicalize-utc-timezone.js:?:?)",
+      "fixture_sha256": "ef506ec6b87791db2a6cc14c2ab757473c033e4b0e9c33482fa30a9f6a469f94",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/intl-legacy-constructed-symbol-on-unwrap.js",
+      "classification": "implementation: shared fallback symbol and observable legacy receiver unwrapping",
+      "original_error": "Uncaught TypeError: receiver is not an Intl.DateTimeFormat\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/intl-legacy-constructed-symbol-on-unwrap.js:22:51)",
+      "fixture_sha256": "9db71ebea0711275589c552f06b3b41af2ca703064b62726fd4f3c071fc08dfc",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/canonicalize-timezone.js",
+      "classification": "implementation: named timezone case, link and UTC resolution",
+      "original_error": "Uncaught Test262Error {\n    message: \"Time zone name Europe/Bratislava should be preserved and not canonicalized to Europe/Bratislava Expected SameValue(«\\\"Europe/Prague\\\"», «\\\"Europe/Bratislava\\\"») to be true\"\n}\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/canonicalize-timezone.js:?:?)",
+      "fixture_sha256": "da7f3f0788d890ef5cb4ab6933292173a27f60e09d019f1e4ddb13178237fc0e",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/intl-legacy-constructed-symbol-property.js",
+      "classification": "implementation: shared fallback symbol and observable legacy receiver unwrapping",
+      "original_error": "Uncaught Test262Error {\n    message: \"return value of Intl.DateTimeFormat constructor Expected SameValue(«[object Intl.DateTimeFormat]», «[object Intl.DateTimeFormat]») to be true\"\n}\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:92:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/intl-legacy-constructed-symbol-property.js:19:17)",
+      "fixture_sha256": "c24c6b41fc34f2d379c7edfa4419e59923fb7d49332e849cda28463d9299ee4b",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/intl-legacy-constructed-symbol.js",
+      "classification": "implementation: shared fallback symbol and observable legacy receiver unwrapping",
+      "original_error": "Uncaught Test262Error {\n    message: \"Expected true but got false\"\n}\n    at assert (/tmp/omoikane-p1-test262-20261009/harness/assert.js:61:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/intl-legacy-constructed-symbol.js:16:7)",
+      "fixture_sha256": "26b6f7b5564a2ba36c9bf692f70b23162583de1e5b7b5ada1866e28edd424f87",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/timezone-not-canonicalized.js",
+      "classification": "implementation: named timezone case, link and UTC resolution",
+      "original_error": "Uncaught Test262Error {\n    message: \"Expected SameValue(«\\\"Asia/Kolkata\\\"», «\\\"Asia/Calcutta\\\"») to be true\"\n}\n    at <anonymous> (/tmp/omoikane-p1-test262-20261009/harness/assert.js:92:9)\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/timezone-not-canonicalized.js:28:17)",
+      "fixture_sha256": "54e16be11bf11bf91a14ae48aedffc40a9f80d4f3a4acb1cd3bbddbca60595c6",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    },
+    {
+      "path": "DateTimeFormat/timezone-case-insensitive.js",
+      "classification": "implementation: named timezone case, link and UTC resolution",
+      "original_error": "Uncaught TypeError: not a callable function\n    at <main> (/tmp/omoikane-p1-test262-20261009/test/intl402/DateTimeFormat/timezone-case-insensitive.js:617:75)",
+      "fixture_sha256": "6d515b19d93696d0a118dd727feeea44ed20ad4b9367a1215ddfb7c06c966db6",
+      "stage44_C": [
+        "Passed",
+        "Passed"
+      ],
+      "stage44_en_US": [
+        "Passed",
+        "Passed"
+      ]
+    }
+  ]
+}

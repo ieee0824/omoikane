@@ -5,7 +5,7 @@ use super::{
     candidates::SelectedFormat,
     hour_cycle::DateTimeHourCycle,
     matcher::{MatchComponents, ZoneName},
-    options::DateTimeFields,
+    options::{Components, DateTimeFields},
     parts::DateTimePart,
     pattern::ComponentWidths,
     range_data::RangeData,
@@ -13,10 +13,12 @@ use super::{
     range_parts::{RangePart, RangeSource},
     range_selection::RangePlan,
 };
-use icu_calendar::{AnyCalendar, AnyCalendarKind, AsCalendar, Calendar, Iso, Ref, cal};
+use icu_calendar::{AnyCalendar, AnyCalendarKind, AsCalendar, Iso, Ref, cal};
 use icu_datetime::{
-    DateTimeFormatter, DateTimeFormatterPreferences, fieldsets::enums::CompositeDateTimeFieldSet,
-    input::DateTime, pattern::FixedCalendarDateTimeNames,
+    DateTimeFormatter, DateTimeFormatterPreferences,
+    fieldsets::enums::{CompositeDateTimeFieldSet, CompositeFieldSet},
+    input::DateTime,
+    pattern::FixedCalendarDateTimeNames,
 };
 use icu_provider::prelude::*;
 use std::sync::Arc;
@@ -100,7 +102,8 @@ macro_rules! calendar_names {
         enum CalendarNames {
             $( $calendar {
                 calendar: cal::$calendar,
-                names: FixedCalendarDateTimeNames<cal::$calendar, CompositeDateTimeFieldSet>,
+                names: FixedCalendarDateTimeNames<cal::$calendar, CompositeFieldSet>,
+                lunar_months: Option<super::lunisolar_months::LunarMonthNames>,
             }, )+
         }
 
@@ -122,8 +125,12 @@ macro_rules! calendar_names {
                 match selected {
                     $( AnyCalendar::$calendar(calendar) => {
                         let calendar = calendar.clone();
+                        let lunar_months = super::lunisolar_months::LunarMonthNames::load(
+                            provider, prefs, &calendar_identifier(selected)
+                        )?;
                         Ok(Self::$calendar {
                             calendar,
+                            lunar_months,
                             // Load textual names only after applying requested widths.
                             // Preloading semantic-skeleton widths would prevent loading
                             // another width into ICU's single-width name containers.
@@ -140,12 +147,14 @@ macro_rules! calendar_names {
                 provider: &P,
                 pattern: &icu_datetime::pattern::DateTimePattern,
                 datetime: &DateTime<Iso>,
+                zone: super::zone_input::FullZone,
             ) -> Result<String, String> {
                 match self {
-                    $( Self::$calendar { calendar, names } => {
-                        let converted = DateTime {
+                    $( Self::$calendar { calendar, names, .. } => {
+                        let converted = icu_datetime::input::ZonedDateTime {
                             date: datetime.date.to_calendar(Ref(&*calendar)),
                             time: datetime.time,
+                            zone,
                         };
                         let formatter = names.load_for_pattern(&provider.as_deserializing(), pattern)
                             .map_err(|error| format!("pattern data: {error:?}"))?;
@@ -162,12 +171,14 @@ macro_rules! calendar_names {
                 pattern: &icu_datetime::pattern::DateTimePattern,
                 datetime: &DateTime<Iso>,
                 related_year_formatter: Option<&icu_decimal::DecimalFormatter>,
+                zone: super::zone_input::FullZone,
             ) -> Result<Vec<DateTimePart>, String> {
                 match self {
-                    $( Self::$calendar { calendar, names } => {
-                        let converted = DateTime {
+                    $( Self::$calendar { calendar, names, lunar_months } => {
+                        let converted = icu_datetime::input::ZonedDateTime {
                             date: datetime.date.to_calendar(Ref(&*calendar)),
                             time: datetime.time,
+                            zone,
                         };
                         let formatter = names.load_for_pattern(&provider.as_deserializing(), pattern)
                             .map_err(|error| format!("pattern data: {error:?}"))?;
@@ -176,6 +187,9 @@ macro_rules! calendar_names {
                             (converted.date.year().cyclic(), related_year_formatter)
                         {
                             super::parts::localize_related_year(&mut parts, year.related_iso, numeric);
+                        }
+                        if let (Some(months), Some(decimal)) = (lunar_months, related_year_formatter) {
+                            months.replace(&mut parts, pattern, converted.date.month(), decimal)?;
                         }
                         Ok(parts)
                     }, )+
@@ -222,6 +236,9 @@ pub(super) struct DateTimeBackend {
     range_names_template: CalendarNames,
     range_names: Vec<RangeNames>,
     zone_writer: Option<ZoneWriter>,
+    flexible_periods: Option<super::day_periods::FlexiblePeriods>,
+    zone_input: Option<super::zone_input::ZoneInput>,
+    fractional_separator: Option<super::fractional::FractionalSeparator>,
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +282,111 @@ impl<P: BufferProvider + ?Sized> DynamicDataProvider<BufferMarker> for Numbering
 }
 
 impl DateTimeBackend {
+    /// Selects native provider data using already observed component options.
+    pub(super) fn create<P: BufferProvider + ?Sized>(
+        provider: &P,
+        preferences: DateTimeFormatterPreferences,
+        components: &Components,
+        iso_calendar: bool,
+        cycle: DateTimeHourCycle,
+    ) -> Result<Self, String> {
+        let mut backend = if components.date_style.is_some() || components.time_style.is_some() {
+            Self::new_style(provider, preferences, components, iso_calendar, cycle)
+        } else if components.format_matcher == super::matcher::FormatMatcher::Basic
+            || components.day_period.is_some()
+            || (components.hour.is_none()
+                && (components.minute.is_some()
+                    || components.second.is_some()
+                    || components.fractional_digits.is_some()))
+        {
+            Self::new_basic(
+                provider,
+                preferences,
+                MatchComponents::requested(components),
+                iso_calendar,
+                cycle,
+            )
+        } else {
+            let fields = components
+                .fields()
+                .map_err(|error| format!("date/time fields: {error:?}"))?;
+            let zone = components
+                .zone_name
+                .as_ref()
+                .and_then(|name| ZoneName::from_str(&name.to_std_string_escaped()));
+            Self::new(provider, preferences, fields, zone, iso_calendar, cycle)
+        }?;
+        if components.fractional_digits.is_some() {
+            backend.fractional_separator = Some(super::fractional::FractionalSeparator::load(
+                provider,
+                preferences,
+                &backend.numbering_system,
+            )?);
+        }
+        Ok(backend)
+    }
+
+    pub(super) fn new_style<P: BufferProvider + ?Sized>(
+        provider: &P,
+        preferences: DateTimeFormatterPreferences,
+        options: &Components,
+        iso_calendar: bool,
+        cycle: DateTimeHourCycle,
+    ) -> Result<Self, String> {
+        let inspection = NumberingInspection {
+            inner: provider,
+            numbering_system: Default::default(),
+        };
+        let calendar = AnyCalendar::try_new_with_buffer_provider(
+            &inspection,
+            AnyCalendarKind::new((&preferences).into()),
+        )
+        .map_err(|error| format!("style calendar data: {error:?}"))?;
+        let calendar_name = calendar_identifier(&calendar);
+        let selected =
+            super::style_formats::select(&inspection, preferences, &calendar_name, options, cycle)?;
+        let names = CalendarNames::from_calendar(&inspection, preferences, &calendar)?;
+        let length = options
+            .fields()
+            .map_err(|error| format!("style fields: {error:?}"))?
+            .length;
+        Self::finish(
+            inspection,
+            preferences,
+            PatternSelection::Basic(selected),
+            names,
+            calendar_name,
+            iso_calendar,
+            cycle,
+            length,
+            None,
+        )
+    }
+
+    pub(super) fn set_inline_zone<P: BufferProvider + ?Sized>(
+        &mut self,
+        provider: &P,
+        identifier: &str,
+    ) -> Result<(), String> {
+        if matches!(&self.selection, PatternSelection::Basic(selected) if selected.fields.zone_name.is_some())
+            && self.zone_writer.is_none()
+        {
+            self.zone_input = Some(super::zone_input::ZoneInput::load(provider, identifier)?);
+        }
+        Ok(())
+    }
+
+    fn zone_at(
+        &self,
+        datetime: &DateTime<Iso>,
+        offset: i32,
+    ) -> Result<super::zone_input::FullZone, String> {
+        self.zone_input.as_ref().map_or_else(
+            || Ok(super::zone_input::utc_at(datetime)),
+            |zone| zone.at(datetime, offset),
+        )
+    }
+
     pub(super) fn new<P: BufferProvider + ?Sized>(
         provider: &P,
         prefs: DateTimeFormatterPreferences,
@@ -428,6 +550,9 @@ impl DateTimeBackend {
             range: None,
             range_names: Vec::new(),
             zone_writer,
+            flexible_periods: None,
+            zone_input: None,
+            fractional_separator: None,
         })
     }
 
@@ -465,6 +590,9 @@ impl DateTimeBackend {
         &self,
         widths: ComponentWidths,
     ) -> icu_datetime::pattern::DateTimePattern {
+        if let PatternSelection::Basic(selected) = &self.selection {
+            return selected.range_pattern().as_ref().clone().into();
+        }
         let input = DateTime {
             date: icu_calendar::Date::try_new_iso(1970, 1, 1).expect("valid ISO reference date"),
             time: icu_datetime::input::Time::start_of_day(),
@@ -483,22 +611,21 @@ impl DateTimeBackend {
         widths: ComponentWidths,
         offset_seconds: i32,
     ) -> Result<String, String> {
-        let semantic = self.semantic_pattern_for(datetime, widths).map(|pattern| {
-            if self.related_year_formatter.is_some() {
-                related_year_pattern(pattern)
-            } else {
-                (pattern, false)
-            }
-        });
-        let (pattern, related_year) = match &self.selection {
-            PatternSelection::Basic(selected) => (selected.pattern(), selected.related_year),
+        if widths.day_period.is_some() || self.fractional_separator.is_some() {
+            return self
+                .format_parts(provider, datetime, widths, offset_seconds)
+                .map(super::parts::join);
+        }
+        let semantic = self.semantic_pattern_for(datetime, widths);
+        let pattern = match &self.selection {
+            PatternSelection::Basic(selected) => selected.pattern(),
             PatternSelection::Semantic { .. } => {
-                let (pattern, related_year) = semantic.as_ref().expect("semantic pattern selected");
-                (pattern, *related_year)
+                semantic.as_ref().expect("semantic pattern selected")
             }
         };
-        let needs_parts = (related_year && self.related_year_formatter.is_some())
+        let needs_parts = self.related_year_formatter.is_some()
             || (self.hour_cycle == DateTimeHourCycle::H24 && datetime.time.hour.number() == 0);
+        let zone = self.zone_at(datetime, offset_seconds)?;
         let mut value = if needs_parts {
             let parts = Self::parts_for_pattern(
                 &mut self.names,
@@ -507,10 +634,11 @@ impl DateTimeBackend {
                 pattern,
                 self.related_year_formatter.as_ref(),
                 self.midnight_hour.as_deref(),
+                zone,
             )?;
             super::parts::join(parts)
         } else {
-            self.names.format(provider, pattern, datetime)?
+            self.names.format(provider, pattern, datetime, zone)?
         };
         self.append_zone_text(&mut value, offset_seconds)?;
         Ok(value)
@@ -524,6 +652,8 @@ impl DateTimeBackend {
         widths: ComponentWidths,
         offset_seconds: i32,
     ) -> Result<Vec<DateTimePart>, String> {
+        self.prepare_flexible_periods(provider, widths)?;
+        let zone = self.zone_at(datetime, offset_seconds)?;
         let semantic = self.semantic_pattern_for(datetime, widths);
         let pattern = match &self.selection {
             PatternSelection::Basic(selected) => selected.pattern(),
@@ -538,9 +668,40 @@ impl DateTimeBackend {
             pattern,
             self.related_year_formatter.as_ref(),
             self.midnight_hour.as_deref(),
+            zone,
         )?;
+        if let Some(separator) = &self.fractional_separator {
+            separator.replace(&mut parts)?;
+        }
+        self.replace_flexible_periods(&mut parts, datetime, widths)?;
         self.append_zone(&mut parts, offset_seconds)?;
         Ok(parts)
+    }
+
+    fn prepare_flexible_periods<P: BufferProvider + ?Sized>(
+        &mut self,
+        provider: &P,
+        widths: ComponentWidths,
+    ) -> Result<(), String> {
+        if widths.day_period.is_some() && self.flexible_periods.is_none() {
+            self.flexible_periods = Some(super::day_periods::FlexiblePeriods::load(
+                provider,
+                self.range_preferences,
+            )?);
+        }
+        Ok(())
+    }
+
+    fn replace_flexible_periods(
+        &self,
+        parts: &mut [DateTimePart],
+        datetime: &DateTime<Iso>,
+        widths: ComponentWidths,
+    ) -> Result<(), String> {
+        if let Some(periods) = &self.flexible_periods {
+            periods.replace(parts, &datetime.time, widths)?;
+        }
+        Ok(())
     }
 
     /// Formats owned interval parts with only temporary provider/calendar borrows.
@@ -554,6 +715,7 @@ impl DateTimeBackend {
         start_offset_seconds: i32,
         end_offset_seconds: i32,
     ) -> Result<Vec<RangePart>, String> {
+        self.prepare_flexible_periods(provider, widths)?;
         let selected = |input| -> super::range_selection::SharedPattern {
             match &self.selection {
                 PatternSelection::Basic(selected) => selected.range_pattern(),
@@ -569,7 +731,12 @@ impl DateTimeBackend {
         let fields = super::range_pattern::PatternFields::new(&first_pattern)?;
         let first = self.names.range_fields(start);
         let last = self.names.range_fields(end);
-        let difference = first.difference(&last, &fields);
+        let flexible_period_differs = widths.day_period.and_then(|_| {
+            self.flexible_periods.as_ref().map(|periods| {
+                periods.period(&start.time, widths) != periods.period(&end.time, widths)
+            })
+        });
+        let difference = first.difference_with_period(&last, &fields, flexible_period_differs);
         let plan = if difference.is_none() && first_pattern == last_pattern {
             Arc::new(RangePlan::Single(first_pattern))
         } else {
@@ -596,7 +763,27 @@ impl DateTimeBackend {
                 interval_skeleton,
             )?
         };
-        let mut parts = super::range_parts::render(&plan, &mut |pattern, is_end| {
+        let zones = (
+            self.zone_at(start, start_offset_seconds)?,
+            self.zone_at(end, end_offset_seconds)?,
+        );
+        let mut parts = self.render_range_plan(provider, start, end, widths, &plan, zones)?;
+        self.append_range_zone(&mut parts, start_offset_seconds, end_offset_seconds)?;
+        Ok(parts)
+    }
+
+    fn render_range_plan<P: BufferProvider + ?Sized>(
+        &mut self,
+        provider: &P,
+        start: &DateTime<Iso>,
+        end: &DateTime<Iso>,
+        widths: ComponentWidths,
+        plan: &RangePlan,
+        zones: (super::zone_input::FullZone, super::zone_input::FullZone),
+    ) -> Result<Vec<RangePart>, String> {
+        let flexible_periods = &self.flexible_periods;
+        let fractional_separator = &self.fractional_separator;
+        super::range_parts::render(plan, &mut |pattern, is_end| {
             let position = self
                 .range_names
                 .iter()
@@ -615,17 +802,24 @@ impl DateTimeBackend {
                 self.range_names.len() - 1
             };
             let entry = &mut self.range_names[position];
-            Self::parts_for_pattern(
+            let input = if is_end { end } else { start };
+            let mut parts = Self::parts_for_pattern(
                 &mut entry.names,
                 provider,
-                if is_end { end } else { start },
+                input,
                 &entry.writer_pattern,
                 self.related_year_formatter.as_ref(),
                 self.midnight_hour.as_deref(),
-            )
-        })?;
-        self.append_range_zone(&mut parts, start_offset_seconds, end_offset_seconds)?;
-        Ok(parts)
+                if is_end { zones.1 } else { zones.0 },
+            )?;
+            if let Some(separator) = fractional_separator {
+                separator.replace(&mut parts)?;
+            }
+            if let Some(periods) = flexible_periods {
+                periods.replace(&mut parts, &input.time, widths)?;
+            }
+            Ok(parts)
+        })
     }
 
     fn append_zone(
@@ -722,8 +916,10 @@ impl DateTimeBackend {
         pattern: &icu_datetime::pattern::DateTimePattern,
         related_year_formatter: Option<&icu_decimal::DecimalFormatter>,
         midnight_hour: Option<&str>,
+        zone: super::zone_input::FullZone,
     ) -> Result<Vec<DateTimePart>, String> {
-        let mut parts = names.format_parts(provider, pattern, datetime, related_year_formatter)?;
+        let mut parts =
+            names.format_parts(provider, pattern, datetime, related_year_formatter, zone)?;
         if datetime.time.hour.number() == 0 {
             if let Some(hour) = midnight_hour {
                 super::parts::replace_hour(&mut parts, hour);
@@ -737,7 +933,7 @@ impl DateTimeBackend {
     fn semantic_pattern_for(
         &self,
         datetime: &DateTime<Iso>,
-        widths: ComponentWidths,
+        mut widths: ComponentWidths,
     ) -> Option<icu_datetime::pattern::DateTimePattern> {
         let (formatter, calendar_period_time, calendar_component_pattern) = match &self.selection {
             PatternSelection::Basic(_) => return None,
@@ -757,29 +953,32 @@ impl DateTimeBackend {
         } else {
             date
         };
+        // Hebrew yM/yMd patterns use month names even for numeric requests;
+        // a standalone M pattern can still be numeric. Preserve that CLDR choice.
+        if self.calendar_name == "hebrew"
+            && matches!(
+                widths.month,
+                Some(
+                    icu_datetime::provider::fields::FieldLength::One
+                        | icu_datetime::provider::fields::FieldLength::Two
+                )
+            )
+            && !matches!(
+                icu_datetime::provider::fields::components::Bag::from(&pattern).month,
+                Some(
+                    icu_datetime::provider::fields::components::Month::Numeric
+                        | icu_datetime::provider::fields::components::Month::TwoDigit
+                )
+            )
+        {
+            widths.month = None;
+        }
         Some(widths.apply(pattern))
     }
 }
 
-/// Inspects typed fields by moving the owned pattern into and out of ICU's
-/// public runtime representation; neither pattern text nor output is parsed.
-fn related_year_pattern(
-    pattern: icu_datetime::pattern::DateTimePattern,
-) -> (icu_datetime::pattern::DateTimePattern, bool) {
-    use icu_datetime::provider::{
-        fields::{FieldSymbol, Year},
-        pattern::{PatternItem, runtime::Pattern},
-    };
-    let native: Pattern<'static> = pattern.into();
-    let related_year = native.items.iter().any(|item| {
-        matches!(item, PatternItem::Field(field) if field.symbol == FieldSymbol::Year(Year::RelatedIso))
-    });
-    (native.into(), related_year)
-}
-
 fn calendar_identifier(calendar: &AnyCalendar) -> String {
-    calendar
-        .calendar_algorithm()
+    super::negotiation::native_calendar_algorithm(calendar)
         .map(|value| icu_locale::extensions::unicode::Value::from(value).to_string())
         .unwrap_or_else(|| "gregory".to_owned())
 }

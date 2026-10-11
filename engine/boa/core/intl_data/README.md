@@ -28,6 +28,8 @@ patterns that intentionally omit `{0}`.
 | `OmoikaneCalendarDatePatternsV1` | Unicode calendar ID, e.g. `gregory`, `chinese`, `ethioaa` | Exact CLDR availableFormats skeleton/pattern map |
 | `OmoikaneCompactPatternsV1` | `decimal-short-<nu>`, `decimal-long-<nu>`, `currency-short-<nu>` | Raw compact patterns by threshold and plural category |
 | `OmoikaneNumberRangePatternsV1` | numbering system, or empty for locale default | Raw range/approximately patterns and explicit ordered cardinal plural rules |
+| `OmoikaneDateTimeStylePatternsV1` | Unicode calendar ID | Raw date/time styles, combination patterns and source numbering overrides |
+| `OmoikaneDayPeriodsV1` | empty | Format-width names, inherited supplemental time bounds and their source locale |
 
 `DurationDigitalField::TimeSeparator` preserves the locale's explicit numeric
 separator when present and otherwise uses the CLDR root separator for that

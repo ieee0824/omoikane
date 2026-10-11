@@ -12,6 +12,54 @@ use icu_provider::{buf::AsDeserializingBufferProvider, prelude::*};
 use yoke::Yokeable;
 
 #[test]
+fn datetime_styles_and_flexible_periods_preserve_source_and_borrow_blob_storage() {
+    use boa_intl_data::{OmoikaneDateTimeStylePatternsV1, OmoikaneDayPeriodsV1};
+    let styles = load::<OmoikaneDateTimeStylePatternsV1>("en-US", "gregory");
+    assert_eq!(styles.get().get("date", "short"), Some("M/d/yy"));
+    assert_eq!(
+        styles.get().get("time", "full"),
+        Some("h:mm:ss\u{202f}a zzzz")
+    );
+    let hawaiian = load::<OmoikaneDateTimeStylePatternsV1>("haw", "gregory");
+    assert_eq!(hawaiian.get().get("date", "short"), Some("d/M/yy"));
+    assert_eq!(
+        hawaiian.get().numbering_overrides.get_2d("date", "short"),
+        Some("M=romanlow")
+    );
+    let periods = load::<OmoikaneDayPeriodsV1>("en-GB", "");
+    assert_eq!(periods.get().source_rule_locale(), Some("en"));
+    assert_eq!(
+        periods.get().name("wide", "morning1"),
+        Some("in the morning")
+    );
+    assert_eq!(periods.get().name("narrow", "noon"), Some("n"));
+    assert_eq!(periods.get().rules.get_2d("night1", "_from"), Some("21:00"));
+    assert_eq!(periods.get().rules.get_2d("midnight", "_at"), Some("00:00"));
+    let bytes = include_bytes!("../data/omoikane_intl.postcard");
+    let provider = icu_provider_blob::BlobDataProvider::try_new_from_static_blob(bytes).unwrap();
+    let locale: DataLocale = "en".parse().unwrap();
+    let payload = DataProvider::<OmoikaneDayPeriodsV1>::load(
+        &provider.as_deserializing(),
+        DataRequest {
+            id: DataIdentifierBorrowed::for_locale(&locale),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .payload;
+    for text in [
+        payload.get().name("wide", "morning1"),
+        payload.get().rules.get_2d("noon", "_at"),
+        payload.get().source_rule_locale(),
+    ] {
+        let text = text.unwrap();
+        let start = bytes.as_ptr() as usize;
+        let pointer = text.as_ptr() as usize;
+        assert!(pointer >= start && pointer + text.len() <= start + bytes.len());
+    }
+}
+
+#[test]
 fn full_calendar_intervals_borrow_raw_patterns_and_preserve_locale_order() {
     let gregorian = load::<OmoikaneCalendarIntervalPatternsV1>("en-US", "gregory");
     assert_eq!(
@@ -472,6 +520,133 @@ fn native_name_payloads_are_borrowed_from_blob_for_outside_modern_locales() {
                 pointer >= bytes.as_ptr() as usize
                     && pointer + value.len() <= bytes.as_ptr() as usize + bytes.len()
             );
+        }
+    }
+}
+
+#[test]
+fn named_zone_singletons_preserve_matching_checksums_and_parser_support() {
+    use icu_time::provider::iana::{
+        TimezoneIdentifiersIanaCoreV1, TimezoneIdentifiersIanaExtendedV1,
+    };
+    let provider = boa_icu_provider::buffer();
+    let core = DataProvider::<TimezoneIdentifiersIanaCoreV1>::load(
+        &provider.as_deserializing(),
+        DataRequest::default(),
+    )
+    .unwrap();
+    let extended = DataProvider::<TimezoneIdentifiersIanaExtendedV1>::load(
+        &provider.as_deserializing(),
+        DataRequest::default(),
+    )
+    .unwrap();
+    assert!(core.metadata.checksum.is_some());
+    assert_eq!(core.metadata.checksum, extended.metadata.checksum);
+    let parser =
+        icu_time::zone::iana::IanaParserExtended::try_new_with_buffer_provider(&provider).unwrap();
+    let entries: Vec<_> = parser.as_borrowed().iter().collect();
+    assert!(entries.len() >= 400);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.canonical == "America/New_York")
+    );
+    assert!(entries.iter().any(|entry| entry.canonical == "Etc/UTC"));
+}
+
+#[test]
+fn supported_value_inventories_keep_canonical_identifiers_in_blob_storage() {
+    use boa_intl_data::OmoikaneSupportedValuesV1;
+    let payload = load::<OmoikaneSupportedValuesV1>("und", "");
+    for (category, identifier) in [
+        ("calendar", "iso8601"),
+        ("currency", "USD"),
+        ("numberingSystem", "latn"),
+        ("collation", "phonebk"),
+    ] {
+        assert!(
+            payload
+                .get()
+                .identifiers(category)
+                .any(|value| value == identifier)
+        );
+    }
+    let calendars: Vec<_> = payload.get().identifiers("calendar").collect();
+    assert!(calendars.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
+fn hijri_native_era_payload_keeps_both_source_names_in_blob_storage() {
+    use icu_datetime::provider::neo::{DatetimeNamesYearHijriV1, YearNames, marker_attrs};
+    let bytes = include_bytes!("../data/icu_hijri_eras.postcard");
+    let provider = icu_provider_blob::BlobDataProvider::try_new_from_static_blob(bytes).unwrap();
+    for (name, expected) in [
+        ("en", ["Anno Hegirae", "Before Hijrah"]),
+        ("ja", ["AH", "BH"]),
+    ] {
+        let locale: DataLocale = name.parse().unwrap();
+        let payload = DataProvider::<DatetimeNamesYearHijriV1>::load(
+            &provider.as_deserializing(),
+            DataRequest {
+                id: DataIdentifierBorrowed::for_marker_attributes_and_locale(
+                    marker_attrs::WIDE,
+                    &locale,
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .payload;
+        let YearNames::FixedEras(names) = payload.get() else {
+            panic!("Hijri must use fixed era indexes");
+        };
+        assert_eq!(names.len(), 2);
+        for (index, expected) in expected.into_iter().enumerate() {
+            let actual = names.get(index).unwrap();
+            assert_eq!(actual, expected);
+            let pointer = actual.as_ptr() as usize;
+            assert!(
+                pointer >= bytes.as_ptr() as usize
+                    && pointer + actual.len() <= bytes.as_ptr() as usize + bytes.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn hebrew_native_month_payload_uses_current_leap_codes_in_blob_storage() {
+    use icu_datetime::provider::neo::{DatetimeNamesMonthHebrewV1, MonthNames, marker_attrs};
+    let bytes = include_bytes!("../data/icu_hebrew_months.postcard");
+    let provider = icu_provider_blob::BlobDataProvider::try_new_from_static_blob(bytes).unwrap();
+    let locale: DataLocale = "en".parse().unwrap();
+    let payload = DataProvider::<DatetimeNamesMonthHebrewV1>::load(
+        &provider.as_deserializing(),
+        DataRequest {
+            id: DataIdentifierBorrowed::for_marker_attributes_and_locale(
+                marker_attrs::WIDE,
+                &locale,
+            ),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .payload;
+    let MonthNames::LeapLinear(names) = payload.get() else {
+        panic!("Hebrew must retain distinct regular and leap month codes");
+    };
+    assert_eq!(names.len(), 24);
+    for (index, expected) in [(5, "Adar"), (6, "Nisan"), (16, "Adar I"), (17, "Adar II")] {
+        let actual = names.get(index).unwrap();
+        assert_eq!(actual, expected);
+        let pointer = actual.as_ptr() as usize;
+        assert!(
+            pointer >= bytes.as_ptr() as usize
+                && pointer + actual.len() <= bytes.as_ptr() as usize + bytes.len()
+        );
+    }
+    for index in 12..24 {
+        if !matches!(index, 16 | 17) {
+            assert_eq!(names.get(index), Some(""));
         }
     }
 }

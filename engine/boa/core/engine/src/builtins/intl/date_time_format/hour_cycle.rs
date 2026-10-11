@@ -55,6 +55,9 @@ pub(super) fn locale_cycle(
     attributes: &str,
 ) -> Result<DateTimeHourCycle, String> {
     use icu_datetime::provider::pattern::PatternItem;
+    if attributes == "h" && prefers_h11(provider, locale)? {
+        return Ok(DateTimeHourCycle::H11);
+    }
     let locale = DataLocale::from(locale.clone());
     let attributes = DataMarkerAttributes::from_str_or_panic(attributes);
     let data = DataProvider::<DatetimePatternsTimeV1>::load(
@@ -82,4 +85,28 @@ pub(super) fn locale_cycle(
             _ => None,
         })
         .ok_or_else(|| "locale time pattern has no hour field".to_owned())
+}
+
+/// Native alternate time patterns normalize K to h. Consult CLDR's ordered
+/// regional alternatives before choosing a 12-hour family for `hour12: true`.
+fn prefers_h11(provider: &IntlProvider, locale: &LanguageIdentifier) -> Result<bool, String> {
+    use boa_intl_data::OmoikaneSupportedValuesV1;
+    let mut expanded = locale.clone();
+    provider
+        .locale_expander()
+        .map_err(|error| error.to_string())?
+        .maximize(&mut expanded);
+    let Some(region) = expanded.region else {
+        return Ok(false);
+    };
+    let payload = DataProvider::<OmoikaneSupportedValuesV1>::load(
+        &provider.erased_provider().as_deserializing(),
+        DataRequest::default(),
+    )
+    .map_err(|error| format!("regional hour-cycle data: {error:?}"))?
+    .payload;
+    Ok(payload
+        .get()
+        .identifiers("hourCycle12h11Regions")
+        .any(|identifier| identifier == region.as_str()))
 }

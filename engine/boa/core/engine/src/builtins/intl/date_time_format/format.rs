@@ -9,12 +9,7 @@ impl DateTimeFormat {
         _: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
-        let object = this
-            .as_object()
-            .and_then(|object| object.downcast::<Self>().ok())
-            .ok_or_else(|| {
-                JsNativeError::typ().with_message("receiver is not an Intl.DateTimeFormat")
-            })?;
+        let object = super::legacy::unwrap(this, context)?;
         let _object_root = object.clone().root();
         let data = object.borrow();
         let data = data.data();
@@ -74,7 +69,6 @@ impl DateTimeFormat {
                 "hour",
                 "minute",
                 "second",
-                "timeZoneName",
             ] {
                 if name == "dayPeriod"
                     && selected_fields.is_none()
@@ -88,6 +82,13 @@ impl DateTimeFormat {
             }
             if let Some(digits) = resolved.fractional_digits {
                 result.property(js_string!("fractionalSecondDigits"), digits, attributes);
+            }
+            if let Some((_, value)) = resolved
+                .fields
+                .iter()
+                .find(|(field, _)| *field == "timeZoneName")
+            {
+                result.property(js_string!("timeZoneName"), js_string!(*value), attributes);
             }
             if let Some(zone) = data
                 .components
@@ -114,12 +115,7 @@ impl DateTimeFormat {
         _: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
-        let object = this
-            .as_object()
-            .and_then(|object| object.downcast::<Self>().ok())
-            .ok_or_else(|| {
-                JsNativeError::typ().with_message("receiver is not an Intl.DateTimeFormat")
-            })?;
+        let object = super::legacy::unwrap(this, context)?;
         let rooted = object.clone().root();
         if let Some(format) = &object.borrow().data().bound_format {
             return Ok(format.clone().root().into());
@@ -130,11 +126,11 @@ impl DateTimeFormat {
                 |_, args, formatter, context| {
                     let _root = formatter.clone().root();
                     // Coercion can execute author code. Release all object borrows first.
-                    let value = input_epoch(args.get_or_undefined(0), context)?;
+                    let value = super::input::read(args.get_or_undefined(0), context)?;
                     formatter
                         .borrow_mut()
                         .data_mut()
-                        .format_epoch(value, context)
+                        .format_input(value, context)
                 },
                 object.clone(),
             ),
@@ -148,34 +144,108 @@ impl DateTimeFormat {
     }
 
     pub(crate) fn format_epoch(&mut self, value: f64, context: &mut Context) -> JsResult<JsValue> {
-        let (datetime, offset_seconds) = self.epoch_datetime(value, context)?;
-        let value = self
-            .backend
+        self.format_input(super::input::Input::Number(value), context)
+    }
+
+    pub(super) fn format_input(
+        &mut self,
+        value: super::input::Input,
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        let (datetime, offset_seconds, kind) = self.prepare_input(value, context)?;
+        let (components, backend) = self.native_format(kind, context)?;
+        let value = backend
             .format(
                 context.intl_provider().erased_provider(),
                 &datetime,
-                self.components.widths(),
+                components.widths(),
                 offset_seconds,
             )
             .map_err(|error| JsNativeError::range().with_message(error))?;
         Ok(js_string!(value).into())
     }
 
-    /// Returns owned parts after clipping the input and resolving its zone offset.
-    pub(super) fn parts_epoch(
+    /// Returns owned parts after converting the already observed input.
+    pub(super) fn parts_input(
         &mut self,
-        value: f64,
+        value: super::input::Input,
         context: &mut Context,
     ) -> JsResult<Vec<DateTimePart>> {
-        let (datetime, offset_seconds) = self.epoch_datetime(value, context)?;
-        self.backend
+        let (datetime, offset_seconds, kind) = self.prepare_input(value, context)?;
+        let (components, backend) = self.native_format(kind, context)?;
+        backend
             .format_parts(
                 context.intl_provider().erased_provider(),
                 &datetime,
-                self.components.widths(),
+                components.widths(),
                 offset_seconds,
             )
             .map_err(|error| JsNativeError::range().with_message(error).into())
+    }
+
+    pub(super) fn prepare_input(
+        &self,
+        value: super::input::Input,
+        context: &Context,
+    ) -> JsResult<(
+        icu_datetime::input::DateTime<icu_calendar::Iso>,
+        i32,
+        Option<super::input::Kind>,
+    )> {
+        use super::input::Input;
+        let kind = value.kind();
+        match value {
+            Input::Number(epoch) => self
+                .epoch_datetime(epoch, context)
+                .map(|(date, offset)| (date, offset, kind)),
+            #[cfg(feature = "temporal")]
+            Input::Instant(epoch) => self
+                .epoch_datetime(epoch, context)
+                .map(|(date, offset)| (date, offset, kind)),
+            #[cfg(feature = "temporal")]
+            Input::Plain {
+                kind: plain_kind,
+                datetime,
+                calendar,
+            } => {
+                if let Some(calendar) = calendar {
+                    let exact = matches!(
+                        plain_kind,
+                        super::input::Kind::YearMonth | super::input::Kind::MonthDay
+                    );
+                    if calendar != self.backend.calendar_name() && (exact || calendar != "iso8601")
+                    {
+                        return Err(JsNativeError::range()
+                            .with_message("Temporal calendar does not match formatter calendar")
+                            .into());
+                    }
+                }
+                Ok((datetime, 0, kind))
+            }
+            #[cfg(feature = "temporal")]
+            Input::UnsupportedTemporal => Err(JsNativeError::typ()
+                .with_message("Temporal.ZonedDateTime cannot be formatted by Intl.DateTimeFormat")
+                .into()),
+        }
+    }
+
+    pub(super) fn native_format(
+        &mut self,
+        _kind: Option<super::input::Kind>,
+        context: &Context,
+    ) -> JsResult<(
+        &super::options::Components,
+        &mut super::backend::DateTimeBackend,
+    )> {
+        #[cfg(feature = "temporal")]
+        if let Some(kind) = _kind {
+            let (components, backend) =
+                self.temporal_formats
+                    .get(kind, &self.backend, &self.components, context)?;
+            return Ok((components, backend));
+        }
+        let _ = context;
+        Ok((&self.components, &mut self.backend))
     }
 
     pub(super) fn epoch_datetime(
@@ -192,15 +262,5 @@ impl DateTimeFormat {
         let offset = self.time_zone.offset_millis(value, context)?;
         let datetime = crate::builtins::date::Date::intl_utc_datetime(value + offset)?;
         Ok((datetime, (offset / 1_000.0) as i32))
-    }
-}
-
-/// Performs the one observable numeric conversion before borrowing the formatter.
-pub(super) fn input_epoch(value: &JsValue, context: &mut Context) -> JsResult<f64> {
-    let _value_root = value.as_object().map(|object| object.root());
-    if value.is_undefined() {
-        Ok(context.clock().now().millis_since_epoch() as f64)
-    } else {
-        value.to_number(context)
     }
 }

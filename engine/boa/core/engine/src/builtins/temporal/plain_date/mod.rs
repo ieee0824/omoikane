@@ -2,6 +2,8 @@
 //!
 //! This implementation is a ECMAScript compliant wrapper around the `temporal_rs` library.
 
+mod calendar_fields;
+
 use std::str::FromStr;
 
 use crate::{
@@ -424,7 +426,7 @@ impl PlainDate {
                 .into());
         };
 
-        Ok(date.inner.year().into())
+        Ok(calendar_fields::arithmetic_year(&date.inner).into())
     }
 
     /// 3.3.7 get `Temporal.PlainDate.prototype.month`
@@ -1361,7 +1363,7 @@ pub(crate) fn to_temporal_date(
         let overflow = get_option::<Overflow>(&resolved_options, js_string!("overflow"), context)?;
         // h. Let isoDate be ? CalendarDateFromFields(calendar, fields, overflow).
         // i. Return ! CreateTemporalDate(isoDate, calendar).
-        return Ok(InnerDate::from_partial(partial, overflow)?);
+        return Ok(calendar_fields::from_partial(partial, overflow)?);
     }
 
     // 5. If item is not a String, throw a TypeError exception.

@@ -37,7 +37,7 @@ fn native_datetime_initialization_validates_zones_and_filters_supported_locales(
             if (!rejected) throw new Error('invalid zone: '+timeZone);
         }
         for (const [input, expected] of [['+03','+03:00'],['-0232','-02:32'],['-00','+00:00'],
-            ['utc','UTC'],['eTc/gMt','UTC'],['aSIA/tOKYO','Asia/Tokyo'],['asia/calcutta','Asia/Kolkata']]) {
+            ['utc','UTC'],['eTc/gMt','Etc/GMT'],['aSIA/tOKYO','Asia/Tokyo'],['asia/calcutta','Asia/Calcutta']]) {
             const actual = new Intl.DateTimeFormat('en-US',{timeZone:input}).resolvedOptions().timeZone;
             if (actual !== expected) throw new Error('zone '+input+': '+actual);
         }

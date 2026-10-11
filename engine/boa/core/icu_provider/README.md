@@ -21,7 +21,7 @@ Compare and record the generated file's hash before replacing
 and blob export features are dev dependencies, not requirements of the runtime
 buffer provider.
 
-The separate `omoikane_intl.postcard` extension is defined by 17 shared typed
+The separate `omoikane_intl.postcard` extension is defined by 20 shared typed
 markers from `boa_intl_data`. The first fourteen retain the number, currency,
 unit, duration, calendar-date, compact-number and number-range schemas. The
 additional three supply DateTimeFormat interval patterns, RelativeTimeFormat
@@ -60,7 +60,7 @@ The subsequent exporter uses the shared 45 sanctioned-unit mapping to omit
 CLDR simple units that the ECMAScript API cannot request. This changes the
 unit-pattern marker from 410,811 to 101,982 identifiers while retaining all
 739 locales, supported compound units and all 77 numeric numbering systems.
-The currently installed seventeen-marker blob is **19,117,677 bytes**, SHA256
+The prior seventeen-marker blob was **19,117,677 bytes**, SHA256
 `1bb37c3ffa1d9a8a72c7c7031fd0ece81ec1b6a777edcfa39d035414d6db16e0`.
 Two exports from the current source were byte-identical to that installed blob;
 proof is retained in the owned-cache evidence directory under
@@ -111,3 +111,34 @@ contracts also check all 77 systems and typed
 parts. Unicode 17 `tols` is outside the pinned source and remains unsupported.
 See [the exporter and source checks](scripts/intl-cldr/README.md#standard-decimal-digits)
 for reproduction.
+
+
+The current extension adds raw date/time style patterns, flexible day-period
+names/rules and canonical supported-value candidate inventories. It contains
+20 markers in **20,095,641 bytes**, SHA256
+`ecc54c1ca6f6215bb436f88b96699c4329ce43daab78f7d2f781588d855e7de5`.
+The fixed-source validation and repeat-generation evidence are described in
+[the generator instructions](scripts/intl-cldr/README.md).
+
+Named-zone formatting and enumeration additionally use `icu_time.postcard`:
+three singleton markers from the locked `icu_time_data` 2.0.1 baked dataset.
+[The exporter](examples/export_time_data.rs) preserves each marker's response
+checksum; core and extended IANA identifiers must have matching checksums for
+ICU's parser to accept them. Two exports were byte-identical at **32,673 bytes**,
+SHA256 `661c1d55d63498044aedf38ef0363145327a1ce8ed6c7fb01d66a09b568205a4`.
+The source crate checksum is
+`8472be4410d26a03d7208cae3a76c798dd6766e8226ab977cd8b2d349a6dbf08`.
+The baked source is used only by the exporter; runtime loads the bundled blob.
+
+Hijri era names additionally use `icu_hijri_eras.postcard`, overriding only
+`DatetimeNamesYearHijriV1`. ICU calendar emits two eras (AH and BH), while the
+older datetime bundle contained only AH. The pinned CLDR JSON 48.0.0 source
+supplies both era names for all 766 source locales and three widths (2,298
+payloads). Source hashes and license are retained beside the bundle.
+See [the extraction instructions](scripts/intl-cldr/README.md#hijri-era-names).
+
+Hebrew month names use `icu_hebrew_months.postcard`, overriding only
+`DatetimeNamesMonthHebrewV1` with CLDR 47 source names indexed by current
+calendar month codes. This covers all 739 source locales, two contexts and
+three widths. The report/license and [reproduction instructions](scripts/intl-cldr/README.md#hebrew-month-names)
+are retained with the bundle.

@@ -11,10 +11,12 @@ extern crate alloc;
 mod compact;
 mod currency;
 mod datetime;
+mod datetime_extras;
 mod names;
 mod number;
 mod number_range;
 mod strings;
+mod supported_values;
 mod units;
 
 pub use compact::{CompactPatterns, OmoikaneCompactPatternsV1};
@@ -27,6 +29,9 @@ pub use datetime::{
     CalendarDatePatterns, CalendarIntervalPatterns, OmoikaneCalendarDatePatternsV1,
     OmoikaneCalendarIntervalPatternsV1,
 };
+pub use datetime_extras::{
+    DateTimeStylePatterns, DayPeriods, OmoikaneDateTimeStylePatternsV1, OmoikaneDayPeriodsV1,
+};
 pub use names::{
     DisplayNamesData, OmoikaneDisplayNamesV1, OmoikaneRelativeTimePatternsV1, RelativeTimePatterns,
 };
@@ -37,6 +42,7 @@ pub use number::{
 };
 pub use number_range::{NumberRangePatterns, OmoikaneNumberRangePatternsV1};
 pub use strings::{PluralCategory, PluralPatterns, StringFields};
+pub use supported_values::{OmoikaneSupportedValuesV1, SupportedValues};
 pub use units::{
     CANONICAL_COMPOUND_UNIT_IDENTIFIERS, CompoundUnitPatterns, DurationDigital,
     DurationDigitalField, OmoikaneCompoundUnitPatternsV1, OmoikaneDurationDigitalV1,
@@ -65,4 +71,7 @@ pub const MARKERS: &[DataMarkerInfo] = &[
     OmoikaneCalendarIntervalPatternsV1::INFO,
     OmoikaneRelativeTimePatternsV1::INFO,
     OmoikaneDisplayNamesV1::INFO,
+    OmoikaneDateTimeStylePatternsV1::INFO,
+    OmoikaneDayPeriodsV1::INFO,
+    OmoikaneSupportedValuesV1::INFO,
 ];

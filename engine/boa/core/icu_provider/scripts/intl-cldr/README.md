@@ -5,7 +5,7 @@ JSON for the generator. Runtime Intl does not read these JSON files. The
 independent `boa_intl_data` example turns them into typed ICU4X 2.0 postcard
 payloads consumed through `boa_icu_provider::buffer()`.
 
-The current schema has **17 typed markers and 15 JSON datasets**. The original
+The current schema has **20 typed markers and 18 JSON datasets**. The original
 fourteen markers and twelve datasets are retained, followed by date-time
 interval, relative-time and display-name data. The existing ICU component
 providers keep their own coverage; this extension uses the pinned full
@@ -41,7 +41,7 @@ Missing source paths are downloaded from the fixed URLs and checked against
 their pinned SHA256 before extraction. Existing output directories are rejected.
 `--verify-tag` additionally checks that the upstream JSON tag still resolves to
 the recorded commit. Final-schema JSON provenance records source hashes, all
-18,604 input-file hashes, eight extractor source hashes, fifteen dataset hashes,
+18,606 input-file hashes, ten extractor source hashes, eighteen dataset hashes,
 counts and sizes.
 `verify.py` compares every source locale/currency/unit record independently,
 including XML aliases and ordering. Generate a second directory and pass
@@ -184,8 +184,8 @@ Schema contracts cover ordered asymmetry, missing rules and invalid custom
 payloads. Bundled provider contracts check locale/default/explicit-system
 aliases, language inheritance and actual zero-copy string/vector storage.
 The original number-range addition kept the then-existing eleven datasets and
-thirteen marker contracts unchanged; the current complete schema has fifteen
-datasets and seventeen markers.
+thirteen marker contracts unchanged; the DateTimeFormat style and day-period extension has seventeen
+datasets and nineteen markers.
 
 ## Date-time intervals, relative time and display names
 
@@ -237,6 +237,24 @@ This removes 308,829 unreachable unit payloads and five unused strings from
 each of 57,642 digital-duration payloads, reducing the postcard by 6,184,608
 bytes (24.44%).
 
+The DateTimeFormat extension adds two markers without changing the preceding
+seventeen contracts. `datetime_style_patterns.json` preserves 12,563 locale /
+calendar style records, including all 89 structured `_numbers` overrides.
+`day_periods.json` preserves 739 format-name and supplemental-rule records.
+Supplemental rules inherit by removing locale subtags, as in ICU's day-period
+lookup; their original bounds and supplying locale remain in each payload.
+The exporter stores the `standard` at-time style family found in every source
+record. Midnight interpretation and displayed-time precision belong to the
+runtime consumer rather than the extractor.
+
+Two extractions produced nineteen byte-identical files (seventeen datasets,
+license and provenance). Independent verification compared every additional
+record against the pinned ZIP and found the previous fifteen datasets byte
+identical. Two exports produced byte-identical nineteen-marker postcards of
+**19,637,003 bytes**, SHA256
+`c1e7f152a2e58125dd3fa9958cdac871c501d89b7c86db78b69c4c3e1698414e`.
+This is serialized bundle size; it does not measure executable memory or startup.
+
 Canonical JSON and exploratory zlib sizes in extraction reports are not runtime
 size measurements. Use the actual postcard report and executable size after
 export/build to assess bundle growth. The full coverage is deliberately larger
@@ -282,3 +300,70 @@ blob hash and both completed equality checks. The exporter checks old values;
 the independent post-export validation supplies the serialized-byte proof.
 The behavioral provider test verifies 770 real ICU outputs. These data bytes
 and generation checks are not executable-size or startup measurements.
+
+
+`OmoikaneSupportedValuesV1` adds a global canonical source inventory for calendars,
+collations, currencies and numeric numbering systems, plus source locales used
+for native collation availability queries. The additional source is the pinned
+`cldr-bcp47/bcp47/collation.json`; deprecated, search and standard collation keys
+are excluded. Runtime provider availability is checked by the consumer rather
+than encoded as an assertion that every source candidate is supported.
+
+Independent source verification compared five inventories and 1,154 entries.
+Two extractions produced twenty byte-identical files (eighteen datasets, license
+and provenance); all original fifteen datasets remained byte-identical. Two
+locked exports produced identical twenty-marker blobs of **19,645,373 bytes**,
+SHA256 `3ee09a26c4e6237c0f50d752af547449ebab03b52972b80a07dcb4608cf76450`.
+
+## Hijri era names
+
+The existing datetime bundle predates ICU calendar's two-era Hijri model. A
+separate native `DatetimeNamesYearHijriV1` override supplies both AH and BH;
+no other datetime marker is replaced. The source is CLDR JSON 48.0.0, commit
+`4d06be52b51bb2f75688d0abe55c52a66afed790`, full ZIP SHA256
+`25ab2651a1a874dd62a727d3c213d7c6bf0fc269b09d2937f0499b82d99fa58e`.
+The extractor checks the entire archive before preserving 766 locales, three
+widths and source era indexes 0/1. The TSV is a generation input only.
+
+```sh
+python3 engine/boa/core/icu_provider/scripts/intl-cldr/extract_hijri_eras.py \
+  /tmp/cldr-48.0.0-json-full.zip /tmp/hijri-eras.tsv
+# From engine/boa, with a worktree-specific target and capacity guard:
+cargo run --locked -p boa_icu_provider --example export_hijri_eras -- \
+  /tmp/hijri-eras.tsv /tmp/icu_hijri_eras.postcard
+```
+
+Use fresh paths, independently compare every extracted locale/width/name to
+its source, export twice and compare the binaries before installing the blob
+and source report/license under `core/icu_provider/data/icu_hijri_eras.*`.
+Runtime does not load JSON or TSV. The exporter uses ICU's native marker,
+public width attributes and the calendar's source era index order.
+
+The CLDR 47 style payload also retains numeric and narrow lunar month patterns.
+Native DateTimeFormat uses the month code's number for Chinese/Dangi, retaining
+the CLDR leap prefix/suffix and selected decimal numbering. It does not use the
+ordinal position of the month in a leap year as the displayed month number.
+
+## Hebrew month names
+
+`icu_hebrew_months.postcard` overrides only `DatetimeNamesMonthHebrewV1`,
+using the existing CLDR JSON 47 pin above. CLDR numbers its source months
+ordinally: 6 is Adar I, 7 is Adar, and `7-yeartype-leap` is Adar II. Current
+calendar formatting codes instead use M05L for Adar I, M06 for common Adar and
+M06L for Adar II. The extractor stores twelve regular and twelve leap slots,
+with unused leap codes left empty, for each locale/context/width.
+
+```sh
+python3 engine/boa/core/icu_provider/scripts/intl-cldr/extract_hebrew_months.py \
+  /tmp/cldr-47.0.0-json-full.zip /tmp/hebrew-months.tsv
+# From engine/boa, with a worktree-specific target and capacity guard:
+cargo run --locked -p boa_icu_provider --example export_hebrew_months -- \
+  /tmp/hebrew-months.tsv /tmp/icu_hebrew_months.postcard
+```
+
+Independently compare all 739 locales × two contexts × three widths (4,434
+payloads) against the source month names and code mapping, then export twice
+and compare the binaries before installing the bundle, report and license.
+Both extractors reject existing output paths and archives whose SHA256 does
+not match their fixed source. The tests retain distinct Adar I/Adar/Adar II
+expectations; no existing fixture or assertion is weakened.
