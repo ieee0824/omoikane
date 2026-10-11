@@ -1,12 +1,13 @@
 """Failure-path contracts for the isolated GUI harness (requires Xvfb/Openbox)."""
 from pathlib import Path
+import json
 import subprocess
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from gui_x11 import GuiSession, wait_for
+from gui_x11 import GuiSession, wait_for, trace_records
 
 
 class GuiFailureTests(unittest.TestCase):
@@ -71,3 +72,31 @@ class GuiFailureTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TraceRecordTests(unittest.TestCase):
+    def test_every_partial_write_waits_for_newline(self):
+        line = 'OMOIKANE_PAINT {"sequence":1,"viewport":[640,400]}\n'
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'browser.log'
+            for length in range(len(line)):
+                path.write_text(line[:length])
+                self.assertEqual(trace_records(path, 'PAINT'), [], length)
+            path.write_text(line)
+            self.assertEqual(trace_records(path, 'PAINT'),
+                             [{'sequence': 1, 'viewport': [640, 400]}])
+
+    def test_prior_complete_records_survive_partial_next_record(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'browser.log'
+            path.write_text('unrelated\nOMOIKANE_WHEEL {"success":true}\n'
+                            'OMOIKANE_PAINT {"sequence":1}\nOMOIKANE_PAINT {')
+            self.assertEqual(trace_records(path, 'PAINT'), [{'sequence': 1}])
+            self.assertEqual(trace_records(path, 'WHEEL'), [{'success': True}])
+
+    def test_malformed_completed_record_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'browser.log'
+            path.write_text('OMOIKANE_PAINT {"sequence"}\n')
+            with self.assertRaises(json.JSONDecodeError):
+                trace_records(path, 'PAINT')

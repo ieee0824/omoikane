@@ -18,6 +18,21 @@ from PIL import Image, ImageGrab
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def trace_records(path, kind):
+    """Read complete trace lines from a growing log, rejecting malformed records.
+
+    A writer may be partway through the final line when the snapshot is read.
+    That line becomes observable only once its terminating newline is present.
+    """
+    prefix = 'OMOIKANE_' + kind + ' '
+    snapshot = Path(path).read_text()
+    complete, separator, _ = snapshot.rpartition('\n')
+    if not separator:
+        return []
+    return [json.loads(line[len(prefix):]) for line in complete.split('\n')
+            if line.startswith(prefix)]
+
+
 def wait_for(label, probe, predicate, seconds=20, evidence=None):
     """Observe a condition until its monotonic deadline, retaining the last value."""
     deadline = time.monotonic() + seconds
