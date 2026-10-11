@@ -18,8 +18,8 @@ impl HtmlOutput {
         self.0.extend_from_slice(value.encode_utf16(&mut units));
     }
 
-    fn attribute(&mut self, units: &[u16]) {
-        for &unit in units {
+    fn attribute(&mut self, units: impl IntoIterator<Item = u16>) {
+        for unit in units {
             match unit {
                 0x26 => self.push_str("&amp;"),
                 0x22 => self.push_str("&quot;"),
@@ -31,8 +31,8 @@ impl HtmlOutput {
         }
     }
 
-    fn text(&mut self, units: &[u16], raw: bool) {
-        for &unit in units {
+    fn text(&mut self, units: impl IntoIterator<Item = u16>, raw: bool) {
+        for unit in units {
             let escaped = if raw {
                 None
             } else {
@@ -268,19 +268,23 @@ fn serialize(
             let tag = serialized_tag_name(node);
             html.push('<');
             html.push_str(&tag);
-            if let Some(attributes) = node.attribute_records_utf16() {
-                for (name, namespace, local_name, value) in &attributes {
+            node.with_attribute_records(|attributes| {
+                for attribute in attributes {
                     html.push(' ');
                     html.push_str(&serialized_attribute_name(
-                        name,
-                        namespace.as_deref(),
-                        local_name,
+                        &attribute.qualified_name,
+                        attribute.namespace_uri.as_deref(),
+                        &attribute.local_name,
                     ));
                     html.push_str("=\"");
-                    html.attribute(value);
+                    if let Some(exact) = &attribute.utf16 {
+                        html.attribute(exact.iter().copied());
+                    } else {
+                        html.attribute(attribute.value.encode_utf16());
+                    }
                     html.push('"');
                 }
-            }
+            });
             html.push('>');
             if !is_void(node) {
                 fragment(node, options, state, html);
@@ -290,18 +294,18 @@ fn serialize(
             }
         }
         NodeType::Text => {
-            html.text(&node.data_utf16().unwrap_or_default(), raw);
+            write_character_data(node, raw, html);
         }
         NodeType::Comment => {
             html.push_str("<!--");
-            html.text(&node.data_utf16().unwrap_or_default(), true);
+            write_character_data(node, true, html);
             html.push_str("-->");
         }
         NodeType::ProcessingInstruction => {
             html.push_str("<?");
             html.push_str(&node.node_name());
             html.push(' ');
-            html.text(&node.data_utf16().unwrap_or_default(), true);
+            write_character_data(node, true, html);
             html.push_str("?>");
         }
         NodeType::DocumentType => {
@@ -311,6 +315,16 @@ fn serialize(
         }
         _ => fragment(node, options, state, html),
     }
+}
+
+fn write_character_data(node: &NodeHandle, raw: bool, html: &mut HtmlOutput) {
+    node.with_character_data(|scalar, exact| {
+        if let Some(exact) = exact {
+            html.text(exact.iter().copied(), raw);
+        } else {
+            html.text(scalar.encode_utf16(), raw);
+        }
+    });
 }
 
 fn serialized_tag_name(node: &NodeHandle) -> String {
@@ -366,4 +380,55 @@ fn is_raw_text_context(context: &NodeHandle, scripting_enabled: bool) -> bool {
             Some("noscript") => scripting_enabled,
             _ => false,
         }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::dom::{
+        attribute_utf16_copy_work, character_data_utf16_copy_work, reset_attribute_utf16_copy_work,
+        reset_character_data_utf16_copy_work,
+    };
+    use crate::html::TreeBuilder;
+    use crate::js::JsRuntime;
+
+    #[test]
+    fn serializers_do_not_snapshot_character_or_attribute_payloads() {
+        let mut copied_payload = false;
+        for value in [
+            "'aé😀'.repeat(1024)",
+            "'aé😀'.repeat(2048)",
+            "'\\ud800é😀\\udfff'",
+        ] {
+            let mut runtime =
+                JsRuntime::with_document(TreeBuilder::parse("<body>").document()).unwrap();
+            runtime
+                .eval(&format!(
+                    r#"
+                globalThis.payload = {value};
+                globalThis.host = document.createElement('div');
+                host.setAttribute('z', payload); host.setAttribute('a', payload);
+                host.append(document.createTextNode(payload), document.createComment(payload),
+                    document.createProcessingInstruction('probe', payload));
+                globalThis.contents = payload + '<!--' + payload + '--><?probe ' + payload + '?>';
+                globalThis.attributes = ' z="' + payload + '" a="' + payload + '"';
+            "#
+                ))
+                .unwrap();
+            reset_character_data_utf16_copy_work();
+            reset_attribute_utf16_copy_work();
+            assert_eq!(runtime.eval(r#"
+                host.getHTML() === contents &&
+                host.outerHTML === '<div' + attributes + '>' + contents + '</div>' &&
+                new XMLSerializer().serializeToString(host) ===
+                    '<div xmlns="http://www.w3.org/1999/xhtml"' + attributes + '>' + contents + '</div>'
+            "#).unwrap().as_boolean(), Some(true));
+            let character_units = character_data_utf16_copy_work();
+            let attribute_units = attribute_utf16_copy_work();
+            eprintln!(
+                "SERIALIZER_COPY input={value} character_units={character_units} attribute_units={attribute_units}"
+            );
+            copied_payload |= character_units != 0 || attribute_units != 0;
+        }
+        assert!(!copied_payload, "serializer copied DOM payload snapshots");
+    }
 }

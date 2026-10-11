@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::dom::{Node, NodeHandle, NodeType};
+use crate::dom::{AttributeRecord, Node, NodeHandle, NodeType};
 
 const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
 const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
@@ -23,23 +23,6 @@ impl XmlOutput {
 }
 
 type Namespace = Option<String>;
-
-#[derive(Clone, Debug)]
-struct AttributeRecord {
-    qualified_name: String,
-    namespace: Namespace,
-    local_name: String,
-    value: String,
-    value_utf16: Vec<u16>,
-}
-
-impl AttributeRecord {
-    fn prefix(&self) -> Option<&str> {
-        self.qualified_name
-            .split_once(':')
-            .map(|(prefix, _)| prefix)
-    }
-}
 
 #[derive(Debug, Default)]
 struct NamespacePrefixMap {
@@ -159,7 +142,7 @@ fn serialize_node(
 ) {
     if node.is_cdata_section() {
         output.push_str("<![CDATA[");
-        output.push_units(&node.data_utf16().unwrap_or_default());
+        write_character_data(node, false, output);
         output.push_str("]]>");
         return;
     }
@@ -179,17 +162,17 @@ fn serialize_node(
                 );
             }
         }
-        NodeType::Text => append_escaped_text(&node.data_utf16().unwrap_or_default(), output),
+        NodeType::Text => write_character_data(node, true, output),
         NodeType::Comment => {
             output.push_str("<!--");
-            output.push_units(&node.data_utf16().unwrap_or_default());
+            write_character_data(node, false, output);
             output.push_str("-->");
         }
         NodeType::ProcessingInstruction => {
             output.push_str("<?");
             output.push_str(&node.node_name());
             output.push(' ');
-            output.push_units(&node.data_utf16().unwrap_or_default());
+            write_character_data(node, false, output);
             output.push_str("?>");
         }
         NodeType::DocumentType => serialize_document_type(node, output),
@@ -203,104 +186,23 @@ fn serialize_element(
     prefix_index: &mut usize,
     output: &mut XmlOutput,
 ) {
-    let attributes = node
-        .attribute_records_utf16()
-        .unwrap_or_default()
-        .into_iter()
-        .map(
-            |(qualified_name, namespace, local_name, value)| AttributeRecord {
-                qualified_name,
-                namespace,
-                local_name,
-                value: String::from_utf16_lossy(&value),
-                value_utf16: value,
-            },
-        )
-        .collect::<Vec<_>>();
     let namespace_checkpoint = namespaces.checkpoint();
-    let mut local_prefixes = HashMap::new();
-    let (local_default_namespace, has_empty_namespace_prefix) =
-        record_namespace_information(&attributes, namespaces, &mut local_prefixes);
-
     let namespace = effective_element_namespace(node);
     let local_name = node.local_name().unwrap_or_else(|| node.node_name());
-    let original_prefix = node.prefix();
-    let mut child_namespace = inherited_namespace.clone();
-    let mut ignore_default_namespace_attribute = false;
-    let mut generated_declaration = XmlOutput::default();
-
-    let qualified_name = if inherited_namespace == namespace {
-        if local_default_namespace.is_some() && !has_empty_namespace_prefix {
-            ignore_default_namespace_attribute = true;
-        }
-        if namespace.as_deref() == Some(XML_NAMESPACE) {
-            format!("xml:{local_name}")
-        } else {
-            local_name.clone()
-        }
-    } else {
-        let mut candidate = namespaces.preferred(&namespace, original_prefix.as_deref());
-        if original_prefix.as_deref() == Some("xmlns") {
-            candidate = Some("xmlns".to_string());
-        }
-
-        if let Some(candidate) = candidate {
-            if let Some(local_default) = &local_default_namespace
-                && local_default != XML_NAMESPACE
-            {
-                child_namespace = normalize_namespace(local_default);
-            }
-            format!("{candidate}:{local_name}")
-        } else if let Some(mut prefix) = original_prefix {
-            if local_prefixes.contains_key(&prefix) {
-                prefix = generate_prefix(namespaces, namespace.clone(), prefix_index);
-            } else {
-                namespaces.add(namespace.clone(), prefix.clone());
-            }
-            generated_declaration.push_str(" xmlns:");
-            generated_declaration.push_str(&prefix);
-            generated_declaration.push_str("=\"");
-            append_escaped_attribute(
-                namespace.as_deref().unwrap_or(""),
-                &mut generated_declaration,
-            );
-            generated_declaration.push('"');
-            if let Some(local_default) = &local_default_namespace {
-                child_namespace = normalize_namespace(local_default);
-            }
-            format!("{prefix}:{local_name}")
-        } else if local_default_namespace
-            .as_ref()
-            .map(|value| normalize_namespace(value))
-            .as_ref()
-            != Some(&namespace)
-        {
-            ignore_default_namespace_attribute = true;
-            child_namespace = namespace.clone();
-            generated_declaration.push_str(" xmlns=\"");
-            append_escaped_attribute(
-                namespace.as_deref().unwrap_or(""),
-                &mut generated_declaration,
-            );
-            generated_declaration.push('"');
-            local_name.clone()
-        } else {
-            child_namespace = namespace.clone();
-            local_name.clone()
-        }
-    };
-
-    output.push('<');
-    output.push_str(&qualified_name);
-    output.push_units(&generated_declaration.0);
-    serialize_attributes(
-        &attributes,
-        output,
-        namespaces,
-        prefix_index,
-        &mut local_prefixes,
-        ignore_default_namespace_attribute,
-    );
+    let (qualified_name, child_namespace) = node
+        .with_attribute_records(|attributes| {
+            serialize_start_tag(
+                node,
+                attributes,
+                inherited_namespace,
+                &namespace,
+                &local_name,
+                namespaces,
+                prefix_index,
+                output,
+            )
+        })
+        .expect("element attributes");
 
     let children = if namespace.as_deref() == Some(HTML_NAMESPACE)
         && local_name.eq_ignore_ascii_case("template")
@@ -340,6 +242,101 @@ fn serialize_element(
     namespaces.restore(namespace_checkpoint);
 }
 
+fn serialize_start_tag(
+    node: &NodeHandle,
+    attributes: &[AttributeRecord],
+    inherited_namespace: Namespace,
+    namespace: &Namespace,
+    local_name: &str,
+    namespaces: &mut NamespacePrefixMap,
+    prefix_index: &mut usize,
+    output: &mut XmlOutput,
+) -> (String, Namespace) {
+    let mut local_prefixes = HashMap::new();
+    let (local_default_namespace, has_empty_namespace_prefix) =
+        record_namespace_information(attributes, namespaces, &mut local_prefixes);
+
+    let original_prefix = node.prefix();
+    let mut child_namespace = inherited_namespace.clone();
+    let mut ignore_default_namespace_attribute = false;
+    let mut generated_declaration = XmlOutput::default();
+
+    let qualified_name = if inherited_namespace == *namespace {
+        if local_default_namespace.is_some() && !has_empty_namespace_prefix {
+            ignore_default_namespace_attribute = true;
+        }
+        if namespace.as_deref() == Some(XML_NAMESPACE) {
+            format!("xml:{local_name}")
+        } else {
+            local_name.to_owned()
+        }
+    } else {
+        let mut candidate = namespaces.preferred(namespace, original_prefix.as_deref());
+        if original_prefix.as_deref() == Some("xmlns") {
+            candidate = Some("xmlns".to_string());
+        }
+
+        if let Some(candidate) = candidate {
+            if let Some(local_default) = &local_default_namespace
+                && local_default != XML_NAMESPACE
+            {
+                child_namespace = normalize_namespace(local_default);
+            }
+            format!("{candidate}:{local_name}")
+        } else if let Some(mut prefix) = original_prefix {
+            if local_prefixes.contains_key(&prefix) {
+                prefix = generate_prefix(namespaces, namespace.clone(), prefix_index);
+            } else {
+                namespaces.add(namespace.clone(), prefix.clone());
+            }
+            generated_declaration.push_str(" xmlns:");
+            generated_declaration.push_str(&prefix);
+            generated_declaration.push_str("=\"");
+            append_escaped_attribute(
+                namespace.as_deref().unwrap_or(""),
+                &mut generated_declaration,
+            );
+            generated_declaration.push('"');
+            if let Some(local_default) = &local_default_namespace {
+                child_namespace = normalize_namespace(local_default);
+            }
+            format!("{prefix}:{local_name}")
+        } else if local_default_namespace
+            .as_ref()
+            .map(|value| normalize_namespace(value))
+            .as_ref()
+            != Some(namespace)
+        {
+            ignore_default_namespace_attribute = true;
+            child_namespace = namespace.clone();
+            generated_declaration.push_str(" xmlns=\"");
+            append_escaped_attribute(
+                namespace.as_deref().unwrap_or(""),
+                &mut generated_declaration,
+            );
+            generated_declaration.push('"');
+            local_name.to_owned()
+        } else {
+            child_namespace = namespace.clone();
+            local_name.to_owned()
+        }
+    };
+
+    output.push('<');
+    output.push_str(&qualified_name);
+    output.push_units(&generated_declaration.0);
+    serialize_attributes(
+        attributes,
+        output,
+        namespaces,
+        prefix_index,
+        &mut local_prefixes,
+        ignore_default_namespace_attribute,
+    );
+
+    (qualified_name, child_namespace)
+}
+
 fn record_namespace_information(
     attributes: &[AttributeRecord],
     map: &mut NamespacePrefixMap,
@@ -348,10 +345,14 @@ fn record_namespace_information(
     let mut default_namespace = None;
     let mut has_empty_namespace_prefix = false;
     for attribute in attributes {
-        if attribute.namespace.as_deref() != Some(XMLNS_NAMESPACE) {
+        if attribute.namespace_uri.as_deref() != Some(XMLNS_NAMESPACE) {
             continue;
         }
-        let Some(prefix) = attribute.prefix() else {
+        let Some(prefix) = attribute
+            .qualified_name
+            .split_once(':')
+            .map(|(prefix, _)| prefix)
+        else {
             default_namespace = Some(attribute.value.clone());
             continue;
         };
@@ -378,8 +379,11 @@ fn serialize_attributes(
     ignore_default_namespace_attribute: bool,
 ) {
     for attribute in attributes {
-        let namespace = &attribute.namespace;
-        let prefix = attribute.prefix();
+        let namespace = &attribute.namespace_uri;
+        let prefix = attribute
+            .qualified_name
+            .split_once(':')
+            .map(|(prefix, _)| prefix);
         let mut candidate = None;
 
         if namespace.is_some() {
@@ -432,7 +436,11 @@ fn serialize_attributes(
         }
         output.push_str(&attribute.local_name);
         output.push_str("=\"");
-        append_escaped_attribute_utf16(&attribute.value_utf16, output);
+        if let Some(exact) = &attribute.utf16 {
+            append_escaped_attribute_utf16(exact.iter().copied(), output);
+        } else {
+            append_escaped_attribute_utf16(attribute.value.encode_utf16(), output);
+        }
         output.push('"');
     }
 }
@@ -457,8 +465,24 @@ fn generate_prefix(
     prefix
 }
 
-fn append_escaped_text(value: &[u16], output: &mut XmlOutput) {
-    for &unit in value {
+fn write_character_data(node: &NodeHandle, escaped: bool, output: &mut XmlOutput) {
+    node.with_character_data(|scalar, exact| {
+        if escaped {
+            if let Some(exact) = exact {
+                append_escaped_text(exact.iter().copied(), output);
+            } else {
+                append_escaped_text(scalar.encode_utf16(), output);
+            }
+        } else if let Some(exact) = exact {
+            output.push_units(exact);
+        } else {
+            output.push_str(scalar);
+        }
+    });
+}
+
+fn append_escaped_text(value: impl IntoIterator<Item = u16>, output: &mut XmlOutput) {
+    for unit in value {
         match unit {
             0x26 => output.push_str("&amp;"),
             0x3c => output.push_str("&lt;"),
@@ -469,11 +493,11 @@ fn append_escaped_text(value: &[u16], output: &mut XmlOutput) {
 }
 
 fn append_escaped_attribute(value: &str, output: &mut XmlOutput) {
-    append_escaped_attribute_utf16(&value.encode_utf16().collect::<Vec<u16>>(), output);
+    append_escaped_attribute_utf16(value.encode_utf16(), output);
 }
 
-fn append_escaped_attribute_utf16(value: &[u16], output: &mut XmlOutput) {
-    for &unit in value {
+fn append_escaped_attribute_utf16(value: impl IntoIterator<Item = u16>, output: &mut XmlOutput) {
+    for unit in value {
         match unit {
             0x26 => output.push_str("&amp;"),
             0x22 => output.push_str("&quot;"),
