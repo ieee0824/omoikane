@@ -5,6 +5,8 @@ on:
     outputs:
       run_full:
         value: ${{ jobs.classify.outputs.run_full }}
+      run_docker:
+        value: ${{ jobs.classify.outputs.run_docker }}
 
 permissions:
   contents: read
@@ -15,6 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       run_full: ${{ steps.scope.outputs.run_full }}
+      run_docker: ${{ steps.scope.outputs.run_docker }}
     steps:
       - uses: actions/checkout@v4
       - name: Verify change classification

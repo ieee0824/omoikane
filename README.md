@@ -249,6 +249,8 @@ export CARGO_TARGET_DIR="/target/$(basename "$PWD")"
 python3 scripts/cargo-space-guard.py run -- cargo build --locked
 ```
 
+Dockerfile・`.dockerignore`・`docker-entrypoint.sh` だけの変更（ドキュメントの同時更新を含む）では、CI は amd64 / arm64 の Docker ビルドを実行し、Rust の全体検証を省略します。ソースや CI 設定も変更した場合は、全体検証を実行します。
+
 参照ブラウザとして Firefox と Chrome for Testing 155.0.8059.39、同版の ChromeDriver を含みます。Chrome は amd64 / arm64 に対応し、配布 ZIP の SHA256 を検証してインストールします。`dev` ユーザーから sandbox 有効でヘッドレス実行できます。
 
 ```bash
