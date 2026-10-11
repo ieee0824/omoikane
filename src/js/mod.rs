@@ -7435,6 +7435,12 @@ impl JsRuntime {
         wire: &str,
         ports: JsValue,
     ) -> JsResult<()> {
+        // The task has left the host queue. Keep its transferred ports traced
+        // while creating the receiving realm and resolving its message source.
+        let port_roots = Box::new(ports.clone());
+        // SAFETY: The immutable boxed value stays at this address until the
+        // guard is dropped, before the box leaves this function.
+        let _port_roots = unsafe { RootProvider::register(std::ptr::NonNull::from(&*port_roots)) };
         let source = (|| {
             let state = self.host_state.borrow();
             if let Some(auxiliary_id) = target_auxiliary_id {
