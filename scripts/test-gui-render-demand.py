@@ -7,7 +7,7 @@ from pathlib import Path
 import time
 from PIL import ImageGrab
 from gui_navigation_fixture import NavigationFixture
-from gui_x11 import GuiSession, geometry
+from gui_x11 import GuiSession, geometry, trace_records
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / 'tests/fixtures/gui-render-demand'
@@ -20,9 +20,7 @@ def cpu_seconds(pid):
 
 def paints(gui):
     """Require the paint trace, so an uninstrumented binary cannot pass idle."""
-    records = [json.loads(line.removeprefix('OMOIKANE_PAINT '))
-               for line in (gui.out / 'browser.log').read_text().splitlines()
-               if line.startswith('OMOIKANE_PAINT ')]
+    records = trace_records(gui.out / 'browser.log', 'PAINT')
     assert records, 'No paint trace: run a build with OMOIKANE_TRACE_PAINT support'
     assert [r['sequence'] for r in records] == list(range(1, len(records) + 1))
     return len(records)
