@@ -383,3 +383,23 @@ required Float16 cases passed everywhere. One retained cross-platform difference
 fails on Linux; it belongs to the remaining DateTimeFormat compatibility work
 in Issue #1334. These results do not mean all Test262 cases pass. The local
 unoptimized complete-suite comparison and remaining publication CI are pending.
+
+### Ephemeron allocation identity
+
+The collector's ephemeron sets use allocation addresses for both equality and
+hashing ([Issue #1327](https://github.com/ieee0824/omoikane/issues/1327)). Separate
+typed-to-erased coercions can produce different vtable metadata for the same
+allocation. `boa/core/gc/src/ephemeron_set.rs` retains the original wide pointer,
+vtable and provenance for dispatch while comparing only its address; it never
+reconstructs pointers from integer addresses. Root registries, remembered sets,
+promotion traversal, discovered/pending queues and dead-allocation deduplication
+share this policy. Strong-pointer sets and collection ordering are unchanged.
+
+The regression tests in `boa/core/gc/src/test/ephemeron_identity.rs` compare
+allocation and edge coercions in a controlled minor-tracer pass, check membership
+and last-root removal across those representations, and check that swept
+addresses leave no registry or remembered entry before the next allocation.
+The diagnostic maps and trace counters exist only in tests. These correctness
+checks do not establish general production duplicate frequency, crash causality,
+or CPU/RSS improvement. The imported source manifest remains unchanged; this
+collector change is tracked in Omoikane's commit history.

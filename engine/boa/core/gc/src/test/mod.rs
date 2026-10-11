@@ -2,6 +2,7 @@ use crate::{BOA_GC, REMEMBERED_EPHEMERONS};
 
 mod allocation;
 mod cell;
+mod ephemeron_identity;
 mod erased;
 mod generational;
 mod rooted;
