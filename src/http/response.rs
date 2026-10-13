@@ -38,6 +38,7 @@ pub struct HttpResponse {
     body: Vec<u8>,
     effective_url: Option<Url>,
     redirect_count: usize,
+    final_request_referrer: Option<String>,
 }
 
 impl HttpResponse {
@@ -54,6 +55,7 @@ impl HttpResponse {
             body,
             effective_url: None,
             redirect_count: 0,
+            final_request_referrer: None,
         }
     }
 
@@ -107,6 +109,15 @@ impl HttpResponse {
 
     pub(crate) fn set_effective_url(&mut self, url: Url) {
         self.effective_url = Some(url);
+    }
+
+    /// Returns the Referer sent for the final request, after redirects.
+    pub(crate) fn final_request_referrer(&self) -> Option<&str> {
+        self.final_request_referrer.as_deref()
+    }
+
+    pub(crate) fn set_final_request_referrer(&mut self, referrer: Option<&str>) {
+        self.final_request_referrer = referrer.map(str::to_owned);
     }
 
     /// Parses an HTTP/1.1 response from a readable stream.

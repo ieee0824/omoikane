@@ -166,6 +166,7 @@ pub(super) fn write(
                 if let Some(content) = node.template_content() {
                     host.nodes.insert(content.identity(), content);
                 }
+                host.apply_connected_referrer_meta(node);
                 if matches!(node.tag_name().as_deref(), Some("iframe" | "object")) {
                     host.schedule_connected_resource_loads(node, false);
                 }

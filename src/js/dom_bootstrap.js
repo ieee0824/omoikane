@@ -268,6 +268,7 @@
   delete globalThis.__omoikane_document_content_type;
   delete globalThis.__omoikane_set_document_content_type;
   const nativeDocumentURL = globalThis.__omoikane_document_url;
+  const nativeDocumentReferrer = globalThis.__omoikane_document_referrer;
   const nativeCommitHistoryApiURL = globalThis.__omoikane_commit_history_api_url;
   const nativeCommitFragmentURL = globalThis.__omoikane_commit_fragment_url;
   const nativeDocumentBaseURL = globalThis.__omoikane_document_base_url;
@@ -317,6 +318,7 @@
   delete globalThis.__omoikane_iframe_replay_submission;
   delete globalThis.__omoikane_take_discarded_node_ids;
   delete globalThis.__omoikane_document_url;
+  delete globalThis.__omoikane_document_referrer;
   delete globalThis.__omoikane_document_base_url;
   delete globalThis.__omoikane_set_user_action_target;
 
@@ -7745,7 +7747,8 @@
     }
 
     get referrer() {
-      return "";
+      requireNodeReceiver(this);
+      return nativeDocumentReferrer(internalNodeId(this)) ?? "";
     }
 
     get contentType() {
@@ -13204,6 +13207,18 @@
   }
 
   class HTMLMetaElement extends HTMLElement {
+    get name() {
+      return this.getAttribute("name") || "";
+    }
+    set name(v) {
+      this.setAttribute("name", String(v));
+    }
+    get content() {
+      return this.getAttribute("content") || "";
+    }
+    set content(v) {
+      this.setAttribute("content", String(v));
+    }
     get httpEquiv() {
       return this.getAttribute("http-equiv") || "";
     }

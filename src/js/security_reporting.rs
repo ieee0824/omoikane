@@ -2,6 +2,9 @@
 use super::*;
 #[path = "security_reporting/endpoints.rs"]
 mod endpoints;
+pub(super) use crate::http::{
+    ReferrerPolicy, navigation_referrer_with_policy, response_referrer_policy,
+};
 pub(super) use endpoints::parse_reporting_endpoints;
 #[cfg(test)]
 #[path = "security_reporting/sample_tests.rs"]
@@ -12,6 +15,9 @@ mod sample_tests;
 pub(super) struct DocumentReportingMetadata {
     pub(super) creation_url: String,
     pub(super) response_status: u16,
+    /// The referrer assigned when this Document was created, not its current URL.
+    pub(super) referrer: String,
+    pub(super) referrer_policy: ReferrerPolicy,
 }
 
 /// Owned author-script provenance captured before an asynchronous Web API
@@ -78,6 +84,34 @@ fn strip_url_for_report(input: &str) -> String {
     let _ = parsed.set_username("");
     let _ = parsed.set_password(None);
     parsed.to_string()
+}
+
+/// Computes the default navigation referrer for policy unit tests.
+#[cfg(test)]
+pub(super) fn navigation_referrer(source: &str, destination: &str) -> String {
+    navigation_referrer_with_policy(source, destination, ReferrerPolicy::default())
+}
+
+/// Derives the Document referrer from the final navigation request. Initial
+/// `about:blank` uses the creator URL, while `srcdoc` has no navigation request.
+pub(super) fn loaded_document_referrer(
+    final_request_referrer: Option<&str>,
+    destination: Option<&str>,
+    source: &str,
+    policy: ReferrerPolicy,
+    initial_about_blank_creator_url: Option<&str>,
+) -> String {
+    if let Some(creator_url) = initial_about_blank_creator_url {
+        return creator_url.to_owned();
+    }
+    if destination == Some("about:srcdoc") {
+        return String::new();
+    }
+    final_request_referrer
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            navigation_referrer_with_policy(source, destination.unwrap_or("about:blank"), policy)
+        })
 }
 
 /// Converts the runtime's inline markers and relative request references into
@@ -272,6 +306,12 @@ impl JsRuntime {
         let policy =
             CspPolicy::from_response_headers_and_document(headers, &document, &state.location_href);
         state.document_csp.insert(document.identity(), policy);
+        if let Some(policy) = response_referrer_policy(headers)
+            && let Some(metadata) = state.document_reporting.get_mut(&document.identity())
+        {
+            metadata.referrer_policy = policy;
+        }
+        state.apply_connected_referrer_metas(&document);
     }
 
     /// Sets the actual document response status before its first script runs.
@@ -439,8 +479,60 @@ impl HostState {
             DocumentReportingMetadata {
                 creation_url: url.to_owned(),
                 response_status,
+                referrer: String::new(),
+                referrer_policy: ReferrerPolicy::default(),
             },
         );
+    }
+
+    /// Returns the policy container value updated by headers and connected meta
+    /// elements. Removing a meta element does not restore an older policy.
+    pub(super) fn referrer_policy_for_document(&self, document_id: usize) -> ReferrerPolicy {
+        self.document_reporting
+            .get(&document_id)
+            .map_or(ReferrerPolicy::default(), |metadata| {
+                metadata.referrer_policy
+            })
+    }
+
+    /// Applies a connected meta element at insertion or relevant attribute
+    /// change time, preserving its effect after the element is removed.
+    pub(super) fn apply_connected_referrer_meta(&mut self, node: &NodeHandle) {
+        if !node.is_html_element()
+            || !node.has_tag_name("meta")
+            || !node
+                .get_attribute("name")
+                .is_some_and(|name| name.eq_ignore_ascii_case("referrer"))
+        {
+            return;
+        }
+        let Some(policy) = node
+            .get_attribute("content")
+            .and_then(|content| ReferrerPolicy::parse_meta(&content))
+        else {
+            return;
+        };
+        // A shadow tree has a Document as its shadow-including root, but is
+        // not itself a document tree. Follow parent links only here.
+        let mut root = node.clone();
+        while let Some(parent) = root.parent_node() {
+            root = parent;
+        }
+        if root.node_type() != NodeType::Document {
+            return;
+        }
+        if let Some(metadata) = self.document_reporting.get_mut(&root.identity()) {
+            metadata.referrer_policy = policy;
+        }
+    }
+
+    /// Applies parser-created or newly inserted meta elements in insertion
+    /// order, including descendants of an inserted subtree.
+    pub(super) fn apply_connected_referrer_metas(&mut self, root: &NodeHandle) {
+        self.apply_connected_referrer_meta(root);
+        for child in root.child_nodes() {
+            self.apply_connected_referrer_metas(&child);
+        }
     }
 
     fn report_url_for_document(&self, document_id: usize) -> String {
@@ -898,7 +990,8 @@ impl HostState {
                 "violatedDirective": directive,
                 "originalPolicy": policy.serialized,
                 "disposition": disposition,
-                "referrer": "",
+                "referrer": self.document_reporting.get(&document_id)
+                    .map_or("", |metadata| metadata.referrer.as_str()),
                 "sample": if policy.report_sample { sample } else { "" },
                 "sourceFile": source_file.as_deref(),
                 "lineNumber": line_number,
@@ -921,6 +1014,722 @@ impl HostState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_referrer_obeys_default_origin_and_downgrade_rules() {
+        let source = "https://user:password@example.test/path?q=1#private";
+        assert_eq!(
+            navigation_referrer(source, "https://example.test/child"),
+            "https://example.test/path?q=1"
+        );
+        assert_eq!(
+            navigation_referrer(source, "https://other.test/child"),
+            "https://example.test/"
+        );
+        assert_eq!(navigation_referrer(source, "http://other.test/child"), "");
+        assert_eq!(
+            navigation_referrer("http://127.0.0.2/private", "http://other.test/child"),
+            ""
+        );
+        assert_eq!(
+            navigation_referrer("http://localhost/private", "http://other.test/child"),
+            ""
+        );
+        assert_eq!(
+            navigation_referrer("http://[::1]/private", "http://other.test/child"),
+            ""
+        );
+        assert_eq!(
+            navigation_referrer(source, "http://localhost/child"),
+            "https://example.test/"
+        );
+        assert_eq!(navigation_referrer(source, "about:srcdoc"), "");
+        assert_eq!(
+            navigation_referrer("data:text/html,source", "https://example.test/"),
+            ""
+        );
+        assert_eq!(
+            navigation_referrer_with_policy(
+                source,
+                "https://other.test/child",
+                ReferrerPolicy::NoReferrer,
+            ),
+            ""
+        );
+        assert_eq!(
+            navigation_referrer_with_policy(
+                source,
+                "https://other.test/child",
+                ReferrerPolicy::UnsafeUrl,
+            ),
+            "https://example.test/path?q=1"
+        );
+        assert_eq!(
+            navigation_referrer_with_policy(
+                source,
+                "https://other.test/child",
+                ReferrerPolicy::SameOrigin,
+            ),
+            ""
+        );
+        assert_eq!(
+            response_referrer_policy(&[
+                (
+                    "Referrer-Policy".into(),
+                    "no-referrer, future-policy".into()
+                ),
+                ("referrer-policy".into(), "origin".into()),
+            ]),
+            Some(ReferrerPolicy::Origin)
+        );
+        assert_eq!(
+            ReferrerPolicy::parse_meta("never"),
+            Some(ReferrerPolicy::NoReferrer)
+        );
+        assert_eq!(
+            ReferrerPolicy::parse_meta("ALWAYS"),
+            Some(ReferrerPolicy::UnsafeUrl)
+        );
+        assert_eq!(
+            ReferrerPolicy::parse_meta("default"),
+            Some(ReferrerPolicy::default())
+        );
+        assert_eq!(
+            ReferrerPolicy::parse_meta("origin-when-crossorigin"),
+            Some(ReferrerPolicy::OriginWhenCrossOrigin)
+        );
+        assert_eq!(ReferrerPolicy::parse_meta(" never "), None);
+    }
+
+    #[test]
+    fn meta_referrer_policy_follows_mutation_time_and_survives_removal() {
+        struct Transport(Arc<Mutex<Vec<Option<String>>>>);
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(request.header("Referer").map(str::to_owned));
+                crate::http::HttpResponse::parse(
+                    &mut &b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n"[..],
+                )
+            }
+        }
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/private").unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport(sent.clone()))));
+        runtime.eval("const first=document.createElement('meta'); first.name='referrer'; first.content='origin'; document.head.appendChild(first); const second=document.createElement('meta'); second.setAttribute('name','referrer'); second.setAttribute('content','unsafe-url'); document.head.appendChild(second); first.content='never'; first.remove(); const frame=document.createElement('iframe'); frame.src='https://other.test/child'; document.body.appendChild(frame)").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(sent.lock().unwrap().as_slice(), &[None]);
+        runtime.eval("const host=document.createElement('div'); document.body.appendChild(host); const shadow=host.attachShadow({mode:'open'}); const hidden=document.createElement('meta'); hidden.setAttribute('name','referrer'); hidden.setAttribute('content','unsafe-url'); shadow.appendChild(hidden); const next=document.createElement('iframe'); next.src='https://other.test/next'; document.body.appendChild(next)").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(sent.lock().unwrap().as_slice(), &[None, None]);
+        runtime.eval("const moved=document.createElement('meta'); moved.setAttribute('name','referrer'); moved.setAttribute('content','no-referrer'); document.head.appendChild(moved); const last=document.createElement('meta'); last.setAttribute('name','referrer'); last.setAttribute('content','origin'); document.head.appendChild(last); document.head.moveBefore(moved, null); const afterMove=document.createElement('iframe'); afterMove.src='https://other.test/after-move'; document.body.appendChild(afterMove)").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            sent.lock().unwrap().as_slice(),
+            &[None, None, Some("https://example.test/".into())]
+        );
+    }
+
+    #[test]
+    fn initial_about_blank_uses_the_creator_url_even_with_no_referrer_policy() {
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/parent#fragment")
+                .unwrap();
+        runtime
+            .install_response_security_headers(&[("Referrer-Policy".into(), "no-referrer".into())]);
+        assert!(runtime
+            .eval("const frame=document.createElement('iframe'); document.body.appendChild(frame); frame.contentDocument.referrer === 'https://example.test/parent#fragment'")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        assert!(runtime
+            .eval("window.open('', 'blank').document.referrer === 'https://example.test/parent#fragment'")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+    }
+
+    #[test]
+    fn source_referrer_policy_suppresses_child_navigation_and_csp_referrer() {
+        struct Transport(Arc<Mutex<Vec<Option<String>>>>);
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(request.header("Referer").map(str::to_owned));
+                crate::http::HttpResponse::parse(
+                    &mut &b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Security-Policy: connect-src 'none'\r\nContent-Length: 0\r\n\r\n"[..],
+                )
+            }
+        }
+        for source_policy in ["header", "meta", "attribute"] {
+            let document = crate::html::TreeBuilder::parse("<body></body>").document();
+            let mut runtime =
+                JsRuntime::with_document_and_url(document, "https://example.test/parent#secret")
+                    .unwrap();
+            if source_policy == "header" {
+                runtime.install_response_security_headers(&[(
+                    "Referrer-Policy".into(),
+                    "no-referrer".into(),
+                )]);
+            }
+            let sent = Arc::new(Mutex::new(Vec::new()));
+            runtime
+                .host_state
+                .borrow_mut()
+                .http_client
+                .set_transport(Some(Arc::new(Transport(sent.clone()))));
+            runtime
+                .eval(&format!(
+                    "{}globalThis.frame=document.createElement('iframe'); {}frame.src='/child'; document.body.appendChild(frame);",
+                    if source_policy == "meta" {
+                        "const meta=document.createElement('meta'); meta.setAttribute('name','referrer'); meta.setAttribute('content','no-referrer'); document.head.appendChild(meta);"
+                    } else {
+                        ""
+                    },
+                    if source_policy == "attribute" {
+                        "frame.setAttribute('referrerpolicy','no-referrer'); "
+                    } else {
+                        ""
+                    }
+                ))
+                .unwrap();
+            runtime.run_until_idle().unwrap();
+            assert!(
+                runtime
+                    .eval("frame.contentDocument.referrer === ''")
+                    .unwrap()
+                    .as_boolean()
+                    .unwrap(),
+                "source_policy={source_policy}"
+            );
+            assert_eq!(sent.lock().unwrap().as_slice(), &[None], "{source_policy}");
+        }
+    }
+
+    #[test]
+    fn same_origin_redirect_keeps_the_navigation_referrer() {
+        type Sent = (String, Option<String>);
+        struct Transport(Arc<Mutex<Vec<Sent>>>);
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                let url = request.url().to_string();
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((url.clone(), request.header("Referer").map(str::to_owned)));
+                let response = if url.ends_with("/redirect") {
+                    "HTTP/1.1 302 Found\r\nLocation: /child\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n"
+                };
+                crate::http::HttpResponse::parse(&mut response.as_bytes())
+            }
+        }
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/parent#secret")
+                .unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport(sent.clone()))));
+        runtime
+            .eval("globalThis.frame=document.createElement('iframe'); frame.src='/redirect'; document.body.appendChild(frame);")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(
+            runtime
+                .eval("frame.contentDocument.referrer === 'https://example.test/parent'")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert_eq!(
+            sent.lock().unwrap().as_slice(),
+            &[
+                (
+                    "https://example.test/redirect".into(),
+                    Some("https://example.test/parent".into()),
+                ),
+                (
+                    "https://example.test/child".into(),
+                    Some("https://example.test/parent".into()),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn redirect_response_policy_recomputes_the_final_request_referrer() {
+        struct Transport(Arc<Mutex<Vec<Option<String>>>>);
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(request.header("Referer").map(str::to_owned));
+                let response = if request.url().path() == "/redirect" {
+                    "HTTP/1.1 302 Found\r\nLocation: /child\r\nReferrer-Policy: no-referrer\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n"
+                };
+                crate::http::HttpResponse::parse(&mut response.as_bytes())
+            }
+        }
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/parent").unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport(sent.clone()))));
+        runtime.eval("globalThis.frame=document.createElement('iframe'); frame.src='/redirect'; document.body.appendChild(frame)").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            sent.lock().unwrap().as_slice(),
+            &[Some("https://example.test/parent".into()), None]
+        );
+        assert!(
+            runtime
+                .eval("frame.contentDocument.referrer === ''")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn cross_origin_redirect_reduces_the_default_referrer_to_origin() {
+        struct Transport(Arc<Mutex<Vec<(String, Option<String>)>>>);
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                self.0.lock().unwrap().push((
+                    request.url().to_string(),
+                    request.header("Referer").map(str::to_owned),
+                ));
+                let response = if request.url().path() == "/redirect" {
+                    "HTTP/1.1 302 Found\r\nLocation: https://other.test/child\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n"
+                };
+                crate::http::HttpResponse::parse(&mut response.as_bytes())
+            }
+        }
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/parent/path#private")
+                .unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport(sent.clone()))));
+        runtime.eval("globalThis.frame=document.createElement('iframe'); frame.src='/redirect'; document.body.appendChild(frame)").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            sent.lock().unwrap().as_slice(),
+            &[
+                (
+                    "https://example.test/redirect".into(),
+                    Some("https://example.test/parent/path".into())
+                ),
+                (
+                    "https://other.test/child".into(),
+                    Some("https://example.test/".into())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn redirect_does_not_restore_a_removed_or_reduced_referrer() {
+        struct Transport {
+            sent: Arc<Mutex<Vec<Option<String>>>>,
+            destination: &'static str,
+        }
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                self.sent
+                    .lock()
+                    .unwrap()
+                    .push(request.header("Referer").map(str::to_owned));
+                let response = if request.url().path() == "/redirect" {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {}\r\nReferrer-Policy: unsafe-url\r\nContent-Length: 0\r\n\r\n",
+                        self.destination
+                    )
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n"
+                        .to_owned()
+                };
+                crate::http::HttpResponse::parse(&mut response.as_bytes())
+            }
+        }
+        for (policy, initial, destination, expected) in [
+            (
+                Some("no-referrer"),
+                "/redirect",
+                "https://evil.test/final",
+                None,
+            ),
+            (
+                None,
+                "https://middle.test/redirect",
+                "https://last.test/final",
+                Some("https://example.test/"),
+            ),
+        ] {
+            let document = crate::html::TreeBuilder::parse("<body></body>").document();
+            let mut runtime =
+                JsRuntime::with_document_and_url(document, "https://example.test/private#fragment")
+                    .unwrap();
+            if let Some(policy) = policy {
+                runtime.install_response_security_headers(&[(
+                    "Referrer-Policy".into(),
+                    policy.into(),
+                )]);
+            }
+            let sent = Arc::new(Mutex::new(Vec::new()));
+            runtime
+                .host_state
+                .borrow_mut()
+                .http_client
+                .set_transport(Some(Arc::new(Transport {
+                    sent: sent.clone(),
+                    destination,
+                })));
+            runtime
+                .eval(&format!("const frame=document.createElement('iframe'); frame.src={initial:?}; document.body.appendChild(frame)"))
+                .unwrap();
+            runtime.run_until_idle().unwrap();
+            assert_eq!(
+                sent.lock().unwrap().as_slice(),
+                &[expected.map(str::to_owned), expected.map(str::to_owned)],
+                "initial={initial}"
+            );
+        }
+    }
+
+    #[test]
+    fn queued_child_navigation_uses_the_departing_document_as_referrer() {
+        struct Transport(Arc<Mutex<Vec<(String, Option<String>)>>>);
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                self.0.lock().unwrap().push((
+                    request.url().to_string(),
+                    request.header("Referer").map(str::to_owned),
+                ));
+                crate::http::HttpResponse::parse(
+                    &mut &b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n"[..],
+                )
+            }
+        }
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/parent").unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport(sent.clone()))));
+        runtime.eval("globalThis.frame=document.createElement('iframe'); frame.src='/child'; document.body.appendChild(frame)").unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime
+            .eval("frame.contentWindow.eval(\"location.assign('/next')\")")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            sent.lock().unwrap().as_slice(),
+            &[
+                (
+                    "https://example.test/child".into(),
+                    Some("https://example.test/parent".into())
+                ),
+                (
+                    "https://example.test/next".into(),
+                    Some("https://example.test/child".into())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn srcdoc_descendant_request_uses_the_container_url_after_fragment_navigation() {
+        struct Transport(Arc<Mutex<Vec<Option<String>>>>);
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(request.header("Referer").map(str::to_owned));
+                crate::http::HttpResponse::parse(
+                    &mut &b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n"[..],
+                )
+            }
+        }
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/parent").unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport(sent.clone()))));
+        runtime.eval("globalThis.frame=document.createElement('iframe'); frame.srcdoc='<body></body>'; document.body.appendChild(frame)").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(
+            runtime
+                .eval("frame.contentDocument.referrer === ''")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        runtime.eval("frame.contentWindow.eval(\"location.hash='#x'; const nested=document.createElement('iframe'); nested.src='/grandchild'; document.body.appendChild(nested)\")").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            sent.lock().unwrap().as_slice(),
+            &[Some("https://example.test/parent".into())]
+        );
+    }
+
+    #[test]
+    fn sibling_frame_form_uses_the_form_documents_referrer() {
+        struct Transport(Arc<Mutex<Vec<(String, Option<String>)>>>);
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                self.0.lock().unwrap().push((
+                    request.url().to_string(),
+                    request.header("Referer").map(str::to_owned),
+                ));
+                crate::http::HttpResponse::parse(
+                    &mut &b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n"[..],
+                )
+            }
+        }
+        let document = crate::html::TreeBuilder::parse(
+            "<body><iframe id=a name=a src=/a></iframe><iframe id=b name=b src=/b></iframe></body>",
+        )
+        .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/parent").unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport(sent.clone()))));
+        runtime.run_until_idle().unwrap();
+        runtime.eval("document.querySelector('#a').contentWindow.eval(\"const form=document.createElement('form'); form.action='/submitted'; form.target='b'; document.body.appendChild(form); form.submit()\")").unwrap();
+        runtime.run_until_idle().unwrap();
+        let sent = sent.lock().unwrap();
+        let submission = sent
+            .iter()
+            .find(|(url, _)| url.ends_with("/submitted"))
+            .expect("sibling frame form submission");
+        assert_eq!(submission.1.as_deref(), Some("https://example.test/a"));
+    }
+
+    #[test]
+    fn opaque_sandbox_document_does_not_send_a_referrer() {
+        struct Transport(Arc<Mutex<Vec<Option<String>>>>);
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(request.header("Referer").map(str::to_owned));
+                crate::http::HttpResponse::parse(
+                    &mut &b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n"[..],
+                )
+            }
+        }
+        let document = crate::html::TreeBuilder::parse(
+            r#"<body><iframe sandbox="allow-scripts" srcdoc="<script>const nested=document.createElement('iframe'); nested.src='/opaque-child'; document.body.appendChild(nested);</script>"></iframe></body>"#,
+        )
+        .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/parent").unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport(sent.clone()))));
+        runtime.run_until_idle().unwrap();
+        assert_eq!(sent.lock().unwrap().as_slice(), &[None]);
+    }
+
+    #[test]
+    fn reused_popup_navigation_uses_the_calling_document_referrer() {
+        struct Transport(Arc<Mutex<Vec<(String, Option<String>)>>>);
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                self.0.lock().unwrap().push((
+                    request.url().to_string(),
+                    request.header("Referer").map(str::to_owned),
+                ));
+                crate::http::HttpResponse::parse(
+                    &mut &b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n"[..],
+                )
+            }
+        }
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/opener").unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport(sent.clone()))));
+        runtime.eval("window.open('/old', 'named')").unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.eval("window.open('/new', 'named')").unwrap();
+        runtime.run_until_idle().unwrap();
+        let sent = sent.lock().unwrap();
+        let new = sent
+            .iter()
+            .find(|(url, _)| url.ends_with("/new"))
+            .expect("reused popup navigation");
+        assert_eq!(new.1.as_deref(), Some("https://example.test/opener"));
+    }
+
+    #[test]
+    fn child_csp_reports_the_navigation_referrer_after_parent_history_changes() {
+        type Sent = (String, Option<String>, Option<serde_json::Value>);
+        struct Transport(Arc<Mutex<Vec<Sent>>>);
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                let url = request.url().to_string();
+                self.0.lock().unwrap().push((
+                    url.clone(),
+                    request.header("Referer").map(str::to_owned),
+                    request
+                        .body()
+                        .map(|body| serde_json::from_slice(body).unwrap()),
+                ));
+                let response = if url.ends_with("/child") {
+                    let body = "<html><body></body></html>";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Security-Policy: connect-src 'none'; report-uri /collector\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else {
+                    "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".to_owned()
+                };
+                crate::http::HttpResponse::parse(&mut response.as_bytes())
+            }
+        }
+
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            document,
+            "https://example.test/parent/path?q=1#private",
+        )
+        .unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport(sent.clone()))));
+        runtime
+            .eval("globalThis.frame=document.createElement('iframe'); frame.src='/child'; document.body.appendChild(frame);")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime
+            .eval(
+                "globalThis.events=[]; const child=frame.contentDocument; child.addEventListener('securitypolicyviolation', event => events.push(event.referrer)); history.pushState(null,'','/changed'); frame.contentWindow.eval(\"fetch('/blocked').catch(()=>{})\");",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime
+            .eval("frame.contentDocument.referrer === 'https://example.test/parent/path?q=1' && events.length === 1 && events[0] === frame.contentDocument.referrer")
+            .unwrap()
+            .as_boolean()
+            .unwrap());
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent[0].0, "https://example.test/child");
+        assert_eq!(
+            sent[0].1.as_deref(),
+            Some("https://example.test/parent/path?q=1")
+        );
+        let report = sent
+            .iter()
+            .find(|(url, _, _)| url.ends_with("/collector"))
+            .and_then(|(_, _, body)| body.as_ref())
+            .expect("legacy CSP report");
+        assert_eq!(
+            report["csp-report"]["referrer"],
+            "https://example.test/parent/path?q=1"
+        );
+    }
 
     #[test]
     fn data_worker_inherits_csp_rules_but_not_the_creators_reporting_endpoints() {

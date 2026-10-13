@@ -11,6 +11,7 @@ mod cookie;
 pub mod cors;
 mod data_uri;
 mod http2;
+mod referrer;
 mod request;
 mod response;
 mod site;
@@ -27,6 +28,9 @@ pub use connection::{send, send_with_options};
 pub use cookie::{Cookie, CookieJar, SameSite};
 pub(crate) use data_uri::percent_decode_bytes;
 pub use data_uri::{DataUri, parse_data_uri};
+pub(crate) use referrer::{
+    ReferrerPolicy, navigation_referrer_with_policy, response_referrer_policy,
+};
 pub use request::{HttpRequest, Method, default_user_agent};
 pub(crate) use request::{is_forbidden_request_header, is_http_token, is_valid_header};
 pub use response::{HttpParseError, HttpResponse};

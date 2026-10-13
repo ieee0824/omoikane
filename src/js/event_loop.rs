@@ -11,7 +11,9 @@ use boa_engine::{JsValue, realm::Realm};
 use boa_gc::{Finalize, Trace, Tracer};
 
 use super::script_errors::WorkerErrorNotification;
-use super::{DocumentSecurityOrigin, NavigationRequest, TimerPayload, VisitSource};
+use super::{
+    DocumentSecurityOrigin, NavigationReferrerSource, NavigationRequest, TimerPayload, VisitSource,
+};
 
 /// The HTML task source responsible for a queued task.
 #[allow(dead_code)]
@@ -65,6 +67,7 @@ pub(crate) enum Task {
         id: u64,
         url: String,
         source: Option<VisitSource>,
+        referrer_source: NavigationReferrerSource,
     },
     PostedMessage {
         port: JsValue,
@@ -360,10 +363,16 @@ impl EventLoop {
         id: u64,
         url: String,
         source: Option<VisitSource>,
+        referrer_source: NavigationReferrerSource,
     ) {
         self.enqueue(
             TaskSource::Navigation,
-            Task::AuxiliaryNavigate { id, url, source },
+            Task::AuxiliaryNavigate {
+                id,
+                url,
+                source,
+                referrer_source,
+            },
         );
     }
 

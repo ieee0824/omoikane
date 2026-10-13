@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use super::referrer::{ReferrerPolicy, navigation_referrer_with_policy};
 use super::url::Url;
 
 /// Returns the default `User-Agent` header sent by Omoikane HTTP requests.
@@ -79,6 +80,7 @@ pub struct HttpRequest {
     require_public_ip: bool,
     site_for_cookies: Option<Url>,
     top_level_navigation: bool,
+    referrer_source: Option<(String, ReferrerPolicy)>,
 }
 
 impl HttpRequest {
@@ -96,6 +98,7 @@ impl HttpRequest {
             require_public_ip: false,
             site_for_cookies: None,
             top_level_navigation: true,
+            referrer_source: None,
         };
         req.headers.push(("Host".to_string(), host));
         req.headers
@@ -213,6 +216,22 @@ impl HttpRequest {
     pub fn remove_header(&mut self, name: &str) {
         self.headers
             .retain(|(header_name, _)| !header_name.eq_ignore_ascii_case(name));
+    }
+
+    /// Captures the navigation initiator for redirect-time policy updates.
+    pub(crate) fn set_referrer_source(&mut self, source: String, policy: ReferrerPolicy) {
+        let value = navigation_referrer_with_policy(&source, &self.url.to_string(), policy);
+        self.referrer_source = Some((source, policy));
+        self.remove_header("Referer");
+        if !value.is_empty() {
+            self.set_header("Referer", value);
+        }
+    }
+
+    pub(crate) fn referrer_source(&self) -> Option<(&str, ReferrerPolicy)> {
+        self.referrer_source
+            .as_ref()
+            .map(|(source, policy)| (source.as_str(), *policy))
     }
 
     /// Sets the request body and automatically sets the `Content-Length` header.
@@ -342,6 +361,12 @@ pub(crate) fn copy_header_on_redirect(name: &str, preserve_body: bool, same_orig
         .any(|internal| name.eq_ignore_ascii_case(internal))
     {
         return false;
+    }
+    if name.eq_ignore_ascii_case("referer") {
+        // The generic HTTP client does not know the original source policy.
+        // Preserve the value within the same origin; avoid forwarding a full
+        // URL to another origin without recomputing it for that destination.
+        return same_origin;
     }
     if !same_origin
         && ["authorization", "proxy-authorization"]

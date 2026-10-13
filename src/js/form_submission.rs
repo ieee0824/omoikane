@@ -220,12 +220,15 @@ impl HostState {
             self.pending_resource_loads.remove(&frame.identity());
             let frame_id = frame.identity();
             self.pending_iframe_visits.remove(&frame_id);
+            self.pending_iframe_referrers.remove(&frame_id);
             let visit_source = self.visit_source_for_document(source.identity());
+            let referrer_source = self.navigation_referrer_source_for_document(source.identity());
             self.event_loop.enqueue_timer_for_document(
                 TimerPayload::FormSubmission {
                     node_id: frame.identity(),
                     request,
                     visit_source,
+                    referrer_source,
                 },
                 Some(source.identity()),
             );
@@ -256,12 +259,33 @@ impl HostState {
         &mut self,
         submission: &Submission,
     ) -> Result<LoadedChildDocument, JsHostError> {
+        self.load_iframe_form_submission_with_referrer(
+            submission,
+            "",
+            security_reporting::ReferrerPolicy::default(),
+        )
+    }
+
+    pub(super) fn load_iframe_form_submission_with_referrer(
+        &mut self,
+        submission: &Submission,
+        source_url: &str,
+        policy: security_reporting::ReferrerPolicy,
+    ) -> Result<LoadedChildDocument, JsHostError> {
         if submission.method.eq_ignore_ascii_case("GET") {
             let site = self.location_href.parse::<crate::http::Url>().ok();
-            return Ok(self.load_iframe_document(&submission.url, site.as_ref()));
+            return Ok(self.load_iframe_document_with_referrer(
+                &submission.url,
+                site.as_ref(),
+                source_url,
+                policy,
+            ));
         }
         let url: crate::http::Url = submission.url.parse()?;
         let mut request = crate::http::HttpRequest::new(crate::http::Method::Post, url);
+        if !source_url.is_empty() {
+            request.set_referrer_source(source_url.to_owned(), policy);
+        }
         if let Ok(site) = self.location_href.parse::<crate::http::Url>() {
             request.set_cookie_context(site, false);
         }
@@ -281,6 +305,12 @@ impl HostState {
         Ok(LoadedChildDocument {
             document,
             response_status: response.status_code(),
+            final_request_referrer: Some(
+                response
+                    .final_request_referrer()
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
             security_headers: child_document::response_security_headers(&response),
             url: Some(url),
         })
@@ -408,6 +438,7 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 .to_std_string_escaped();
             with_host_state(|host| {
                 let mut state = host.borrow_mut();
+                let source_document = state.csp_document_for_context(context)?.identity();
                 let Some(frame) = state.get_node(id) else {
                     return Ok(JsValue::undefined());
                 };
@@ -418,6 +449,7 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                     .event_loop
                     .cancel_resource_loads_for_nodes(&HashSet::from([id]));
                 state.pending_resource_loads.remove(&id);
+                state.capture_iframe_referrer_source(id, source_document);
                 state
                     .iframe_document_with_submission(&frame, Some(&request))
                     .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;

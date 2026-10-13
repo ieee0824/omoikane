@@ -572,6 +572,7 @@ impl CdpSession {
                     "content-security-policy"
                         | "content-security-policy-report-only"
                         | "reporting-endpoints"
+                        | "referrer-policy"
                 )
             })
             .cloned()

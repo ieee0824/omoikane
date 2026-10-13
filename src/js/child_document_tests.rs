@@ -68,6 +68,7 @@ fn rendered_child_resources_parse_by_content_type() {
 fn get_resources_drop_csp_only_when_the_content_type_is_not_rendered() {
     let resource = |mime_type: &str| FetchedChildResource {
         response_status: 404,
+        final_request_referrer: String::new(),
         mime_type: mime_type.to_owned(),
         body: b"<p id=x>body</p>".to_vec(),
         security_headers: vec![("Content-Security-Policy".to_owned(), CSP.to_owned())],

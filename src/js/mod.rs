@@ -1176,6 +1176,7 @@ enum TimerPayload {
         node_id: usize,
         request: form_submission::Submission,
         visit_source: Option<VisitSource>,
+        referrer_source: NavigationReferrerSource,
     },
     /// A geolocation request whose timeout has elapsed.
     GeolocationTimeout { request_id: u64 },
@@ -1589,6 +1590,14 @@ impl From<String> for TaskErrorRecord {
     }
 }
 
+/// The request initiator captured before an asynchronous iframe navigation.
+#[derive(Debug, Clone)]
+struct NavigationReferrerSource {
+    url: String,
+    document_policy: security_reporting::ReferrerPolicy,
+    policy: security_reporting::ReferrerPolicy,
+}
+
 struct HostState {
     runtime_identity: Rc<()>,
     /// Monotonic clock origin used by `performance.now()` for this global.
@@ -1786,6 +1795,7 @@ struct HostState {
     pending_forced_iframe_navigations: HashSet<usize>,
     /// Source captured before an iframe navigation's asynchronous load.
     pending_iframe_visits: HashMap<usize, VisitSource>,
+    pending_iframe_referrers: HashMap<usize, NavigationReferrerSource>,
     /// Preserves a child Window's initiator while its callback changes `src`.
     active_child_navigation_frame: Option<usize>,
     navigation_requests: VecDeque<(NavigationRequest, Option<VisitSource>)>,
@@ -2295,6 +2305,7 @@ impl HostState {
             pending_resource_loads: HashSet::new(),
             pending_forced_iframe_navigations: HashSet::new(),
             pending_iframe_visits: HashMap::new(),
+            pending_iframe_referrers: HashMap::new(),
             active_child_navigation_frame: None,
             navigation_requests: VecDeque::new(),
             fullscreen_elements: HashMap::new(),
@@ -2318,6 +2329,8 @@ impl HostState {
                 security_reporting::DocumentReportingMetadata {
                     creation_url: location_href,
                     response_status: 0,
+                    referrer: String::new(),
+                    referrer_policy: security_reporting::ReferrerPolicy::default(),
                 },
             )]),
             document_targets: HashMap::new(),
@@ -2346,6 +2359,7 @@ impl HostState {
             adopted_stylesheets: HashMap::new(),
         };
         state.register_tree(&document);
+        state.apply_connected_referrer_metas(&document);
         let initial_url = state.location_href.clone();
         state.update_document_target(&document, &initial_url);
         state
@@ -2402,6 +2416,85 @@ impl HostState {
                 .as_str()
         };
         VisitSource::new(origin.clone(), top_url)
+    }
+
+    /// A srcdoc Document uses its container Document's URL as the source for
+    /// subsequent requests. Keep the initiating URL separate from its own URL.
+    fn referrer_source_url_for_document(&self, mut document_id: usize) -> String {
+        for _ in 0..=self.iframe_documents.len() {
+            let Some(url) = self.document_urls.get(&document_id) else {
+                break;
+            };
+            if url.split('#').next() != Some("about:srcdoc") {
+                return url.clone();
+            }
+            let Some(frame_id) = self.iframe_documents.iter().find_map(|(frame_id, entry)| {
+                (entry.document.identity() == document_id).then_some(*frame_id)
+            }) else {
+                break;
+            };
+            let Some(owner) = self
+                .get_node(frame_id)
+                .and_then(|frame| owner_document_for_node(&frame))
+            else {
+                break;
+            };
+            document_id = owner.identity();
+        }
+        String::new()
+    }
+
+    fn navigation_referrer_source_for_document(
+        &self,
+        document_id: usize,
+    ) -> NavigationReferrerSource {
+        let policy = self.referrer_policy_for_document(document_id);
+        let url = if matches!(
+            self.document_security_origins.get(&document_id),
+            Some(DocumentSecurityOrigin::Tuple(_))
+        ) {
+            self.referrer_source_url_for_document(document_id)
+        } else {
+            String::new()
+        };
+        NavigationReferrerSource {
+            url,
+            document_policy: policy,
+            policy,
+        }
+    }
+
+    /// Uses the captured initiator of a queued navigation, or derives one for
+    /// a synchronous iframe load. The iframe's attribute overrides only its
+    /// navigation request, not the created Document's inherited policy.
+    fn referrer_source_for_iframe_navigation(
+        &self,
+        iframe: &NodeHandle,
+        owner_document_id: usize,
+        has_submission: bool,
+    ) -> NavigationReferrerSource {
+        let iframe_id = iframe.identity();
+        if let Some(source) = self.pending_iframe_referrers.get(&iframe_id) {
+            return source.clone();
+        }
+        let child_navigation = self.active_child_navigation_frame == Some(iframe_id);
+        let source_document_id = if child_navigation {
+            self.iframe_documents
+                .get(&iframe_id)
+                .map_or(owner_document_id, |entry| entry.document.identity())
+        } else {
+            owner_document_id
+        };
+        let mut source = self.navigation_referrer_source_for_document(source_document_id);
+        if !child_navigation
+            && !has_submission
+            && let Some(policy) = iframe
+                .get_attribute("referrerpolicy")
+                .and_then(|value| security_reporting::ReferrerPolicy::parse(&value))
+        {
+            source.policy = policy;
+        }
+        source
     }
 
     /// Collects the current document's visited links for a private paint pass.
@@ -2474,6 +2567,18 @@ impl HostState {
         if self.active_child_navigation_frame == Some(iframe_id) {
             return;
         }
+        if let Some(owner) = owner_document_for_node(iframe) {
+            let mut source = self.navigation_referrer_source_for_document(owner.identity());
+            if let Some(policy) = iframe
+                .get_attribute("referrerpolicy")
+                .and_then(|value| security_reporting::ReferrerPolicy::parse(&value))
+            {
+                source.policy = policy;
+            }
+            self.pending_iframe_referrers.insert(iframe_id, source);
+        } else {
+            self.pending_iframe_referrers.remove(&iframe_id);
+        }
         let source = owner_document_for_node(iframe)
             .and_then(|owner| self.visit_source_for_document(owner.identity()));
         if let Some(source) = source {
@@ -2481,6 +2586,11 @@ impl HostState {
         } else {
             self.pending_iframe_visits.remove(&iframe_id);
         }
+    }
+
+    fn capture_iframe_referrer_source(&mut self, iframe_id: usize, document_id: usize) {
+        let source = self.navigation_referrer_source_for_document(document_id);
+        self.pending_iframe_referrers.insert(iframe_id, source);
     }
 
     fn clear_document_target(&mut self, document_id: usize) {
@@ -2721,6 +2831,17 @@ impl HostState {
         };
         let navigation_url =
             submission.map_or_else(|| resource.clone(), |request| request.url.clone());
+        let source = self.referrer_source_for_iframe_navigation(
+            iframe,
+            owner_document_id,
+            submission.is_some(),
+        );
+        let source_url = source.url;
+        let request_policy = source.policy;
+        let inherited_policy = source.document_policy;
+        let initial_about_blank = !self.iframe_documents.contains_key(&iframe_id)
+            && submission.is_none()
+            && navigation_url.is_empty();
         let inherits_creator_origin = submission.is_none() && resource_attribute == "srcdoc"
             || navigation_url.is_empty()
             || matches_about_blank_url(&navigation_url);
@@ -2728,14 +2849,34 @@ impl HostState {
             document,
             security_headers,
             response_status,
+            final_request_referrer,
             url: child_url,
         } = if let Some(request) = submission {
-            self.load_iframe_form_submission(request)?
+            self.load_iframe_form_submission_with_referrer(request, &source_url, request_policy)?
         } else if resource_attribute == "srcdoc" {
             LoadedChildDocument::srcdoc(&resource)
         } else {
-            self.load_iframe_document(&resource, resource_base.as_ref())
+            self.load_iframe_document_with_referrer(
+                &resource,
+                resource_base.as_ref(),
+                &source_url,
+                request_policy,
+            )
         };
+        let creator_url = initial_about_blank
+            .then(|| {
+                self.document_urls
+                    .get(&owner_document_id)
+                    .map(String::as_str)
+            })
+            .flatten();
+        let referrer = security_reporting::loaded_document_referrer(
+            final_request_referrer.as_deref(),
+            child_url.as_deref(),
+            &source_url,
+            request_policy,
+            creator_url,
+        );
         let child_base_url = if inherits_creator_origin {
             resource_base.clone()
         } else {
@@ -2791,6 +2932,15 @@ impl HostState {
         self.document_urls
             .insert(document.identity(), committed_url.clone());
         self.register_document_reporting(document.identity(), &committed_url, response_status);
+        if let Some(metadata) = self.document_reporting.get_mut(&document.identity()) {
+            metadata.referrer = referrer;
+            metadata.referrer_policy = if inherits_creator_origin {
+                inherited_policy
+            } else {
+                security_reporting::response_referrer_policy(&security_headers).unwrap_or_default()
+            };
+        }
+        self.apply_connected_referrer_metas(&document);
         self.update_document_target(&document, &committed_url);
         if let Some(child_base_url) = child_base_url.clone() {
             self.document_base_urls
@@ -2885,6 +3035,7 @@ impl HostState {
         // script ever reads their contentDocument.
         self.schedule_connected_resource_loads(&document, false);
         let visit_source = self.pending_iframe_visits.remove(&iframe_id);
+        self.pending_iframe_referrers.remove(&iframe_id);
         if let (Some(visit_source), Some(committed_url)) = (visit_source, child_url.as_deref()) {
             let requested_url = resolve_url_reference(&navigation_url, resource_base.as_ref());
             self.storage_manager.record_page_navigation(
@@ -2941,7 +3092,17 @@ impl HostState {
             .insert(document_id, security_origin);
         self.document_urls
             .insert(document_id, "about:blank".to_owned());
+        let opener_referrer_policy = self.referrer_policy_for_document(opener_document_id);
+        let opener_referrer = self
+            .document_urls
+            .get(&opener_document_id)
+            .cloned()
+            .unwrap_or_default();
         self.register_document_reporting(document_id, "about:blank", 200);
+        if let Some(metadata) = self.document_reporting.get_mut(&document_id) {
+            metadata.referrer = opener_referrer;
+            metadata.referrer_policy = opener_referrer_policy;
+        }
         if let Some(base) = base {
             self.document_base_urls.insert(document_id, base);
         }
@@ -2987,6 +3148,7 @@ impl HostState {
         &mut self,
         id: u64,
         requested: &str,
+        source: &NavigationReferrerSource,
     ) -> Result<usize, JsHostError> {
         let (opener_document_id, current_document_id) = {
             let entry = self
@@ -2998,12 +3160,27 @@ impl HostState {
         let base = self
             .base_url_for_document(current_document_id)
             .or_else(|| self.base_url_for_document(opener_document_id));
+        let source_url = source.url.as_str();
+        let source_policy = source.policy;
         let LoadedChildDocument {
             document,
             security_headers: headers,
             response_status,
+            final_request_referrer,
             url: effective_url,
-        } = self.load_iframe_document(requested, base.as_ref());
+        } = self.load_iframe_document_with_referrer(
+            requested,
+            base.as_ref(),
+            source_url,
+            source_policy,
+        );
+        let referrer = security_reporting::loaded_document_referrer(
+            final_request_referrer.as_deref(),
+            effective_url.as_deref(),
+            source_url,
+            source_policy,
+            None,
+        );
         let document_id = document.identity();
         let document_url = effective_url.unwrap_or_else(|| "about:blank".to_owned());
         let inherits_opener = requested.is_empty() || matches_about_blank_url(requested);
@@ -3046,7 +3223,7 @@ impl HostState {
             .auxiliary_contexts
             .get_mut(&id)
             .ok_or(JsHostError::AuxiliaryContextClosedDuringNavigation)?;
-        let old_document = std::mem::replace(&mut entry.document, document);
+        let old_document = std::mem::replace(&mut entry.document, document.clone());
         let _old_realm = entry.realm.take();
         entry.document_url = document_url.clone();
         self.retire_document_tree(&old_document);
@@ -3054,6 +3231,15 @@ impl HostState {
         self.document_security_origins
             .insert(document_id, security_origin);
         self.register_document_reporting(document_id, &document_url, response_status);
+        if let Some(metadata) = self.document_reporting.get_mut(&document_id) {
+            metadata.referrer = referrer;
+            metadata.referrer_policy = if inherits_opener {
+                source_policy
+            } else {
+                security_reporting::response_referrer_policy(&headers).unwrap_or_default()
+            };
+        }
+        self.apply_connected_referrer_metas(&document);
         self.document_urls.insert(document_id, document_url);
         if let Some(base) = new_base {
             self.document_base_urls.insert(document_id, base);
@@ -3100,11 +3286,26 @@ impl HostState {
         src: &str,
         base_url: Option<&crate::http::Url>,
     ) -> LoadedChildDocument {
+        self.load_iframe_document_with_referrer(
+            src,
+            base_url,
+            "",
+            security_reporting::ReferrerPolicy::default(),
+        )
+    }
+
+    fn load_iframe_document_with_referrer(
+        &mut self,
+        src: &str,
+        base_url: Option<&crate::http::Url>,
+        source_url: &str,
+        policy: security_reporting::ReferrerPolicy,
+    ) -> LoadedChildDocument {
         if src.is_empty() || matches_about_blank_url(src) {
             let url = if src.is_empty() { "about:blank" } else { src };
             return LoadedChildDocument::about_blank(url.to_owned());
         }
-        self.fetch_child_resource(src, base_url)
+        self.fetch_child_resource(src, base_url, source_url, policy)
             .map_or_else(LoadedChildDocument::fetch_failed, |resource| {
                 resource.into_get_document()
             })
@@ -3123,6 +3324,8 @@ impl HostState {
         &mut self,
         src: &str,
         base_url: Option<&crate::http::Url>,
+        source_url: &str,
+        policy: security_reporting::ReferrerPolicy,
     ) -> Option<FetchedChildResource> {
         let url = match resolve_resource_ref(src, base_url)? {
             ResolvedResource::Data { mime_type, data } => {
@@ -3130,6 +3333,7 @@ impl HostState {
                     mime_type,
                     body: data,
                     response_status: 200,
+                    final_request_referrer: String::new(),
                     security_headers: Vec::new(),
                     effective_url: src.to_owned(),
                 });
@@ -3137,6 +3341,9 @@ impl HostState {
             ResolvedResource::Url(url) => url,
         };
         let mut request = crate::http::HttpRequest::get(&url).ok()?;
+        if !source_url.is_empty() {
+            request.set_referrer_source(source_url.to_owned(), policy);
+        }
         if let Ok(site) = self.location_href.parse::<crate::http::Url>() {
             request.set_cookie_context(site, false);
         }
@@ -3156,6 +3363,10 @@ impl HostState {
             mime_type,
             security_headers,
             response_status: response.status_code(),
+            final_request_referrer: response
+                .final_request_referrer()
+                .unwrap_or_default()
+                .to_owned(),
             body: response.into_body(),
             effective_url,
         })
@@ -3306,6 +3517,8 @@ impl HostState {
             .retain(|id| !tree_ids.contains(id));
         self.pending_forced_iframe_navigations
             .retain(|id| !tree_ids.contains(id));
+        self.pending_iframe_referrers
+            .retain(|id, _| !tree_ids.contains(id));
         self.event_loop.cancel_resource_loads_for_nodes(&tree_ids);
         self.discarded_node_ids.extend(tree_ids.iter().copied());
         self.unregister_tree(document);
@@ -3408,6 +3621,8 @@ impl HostState {
 
         self.pending_resource_loads
             .retain(|node_id| !tree_ids.contains(node_id));
+        self.pending_iframe_referrers
+            .retain(|id, _| !tree_ids.contains(id));
         self.event_loop.cancel_resource_loads_for_nodes(&tree_ids);
         self.discarded_node_ids.extend(tree_ids.iter().copied());
         self.unregister_tree(&previous.document);
@@ -3419,6 +3634,7 @@ impl HostState {
         self.retire_iframe_document(iframe_id);
         self.pending_forced_iframe_navigations.remove(&iframe_id);
         self.pending_iframe_visits.remove(&iframe_id);
+        self.pending_iframe_referrers.remove(&iframe_id);
         self.iframe_context_ids.remove(&iframe_id);
         self.browsing_context_names.remove(&iframe_id);
     }
@@ -3443,6 +3659,8 @@ impl HostState {
         self.pending_forced_iframe_navigations
             .retain(|node_id| !subtree_ids.contains(node_id));
         self.pending_iframe_visits
+            .retain(|node_id, _| !subtree_ids.contains(node_id));
+        self.pending_iframe_referrers
             .retain(|node_id, _| !subtree_ids.contains(node_id));
         self.event_loop
             .cancel_resource_loads_for_nodes(&subtree_ids);
@@ -7732,6 +7950,7 @@ impl JsRuntime {
         id: u64,
         url: &str,
         source: Option<VisitSource>,
+        referrer_source: NavigationReferrerSource,
     ) -> JsResult<()> {
         if !self
             .host_state
@@ -7744,7 +7963,7 @@ impl JsRuntime {
         let document_id = self
             .host_state
             .borrow_mut()
-            .navigate_auxiliary_context(id, url)
+            .navigate_auxiliary_context(id, url, &referrer_source)
             .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
         if let Some(source) = source {
             let state = self.host_state.borrow();
@@ -8835,9 +9054,12 @@ impl JsRuntime {
                 &wire,
                 ports,
             ),
-            Task::AuxiliaryNavigate { id, url, source } => {
-                self.run_auxiliary_navigation(id, &url, source)
-            }
+            Task::AuxiliaryNavigate {
+                id,
+                url,
+                source,
+                referrer_source,
+            } => self.run_auxiliary_navigation(id, &url, source, referrer_source),
             Task::BroadcastChannelMessage {
                 channel_id,
                 data,
@@ -9132,21 +9354,20 @@ impl JsRuntime {
                 node_id,
                 request,
                 visit_source,
+                referrer_source,
             } => {
                 let frame = self.host_state.borrow().get_node(node_id);
                 let Some(frame) = frame else {
-                    self.host_state
-                        .borrow_mut()
-                        .pending_iframe_visits
-                        .remove(&node_id);
+                    let mut state = self.host_state.borrow_mut();
+                    state.pending_iframe_visits.remove(&node_id);
+                    state.pending_iframe_referrers.remove(&node_id);
                     return Ok(());
                 };
                 let frame_is_active = self.host_state.borrow().node_is_in_active_document(&frame);
                 if !frame_is_active {
-                    self.host_state
-                        .borrow_mut()
-                        .pending_iframe_visits
-                        .remove(&node_id);
+                    let mut state = self.host_state.borrow_mut();
+                    state.pending_iframe_visits.remove(&node_id);
+                    state.pending_iframe_referrers.remove(&node_id);
                     return Ok(());
                 }
                 if let Some(visit_source) = visit_source {
@@ -9160,15 +9381,18 @@ impl JsRuntime {
                         .pending_iframe_visits
                         .remove(&node_id);
                 }
+                self.host_state
+                    .borrow_mut()
+                    .pending_iframe_referrers
+                    .insert(node_id, referrer_source);
                 let loaded = self
                     .host_state
                     .borrow_mut()
                     .iframe_document_with_submission(&frame, Some(&request));
                 if let Err(error) = loaded {
-                    self.host_state
-                        .borrow_mut()
-                        .pending_iframe_visits
-                        .remove(&node_id);
+                    let mut state = self.host_state.borrow_mut();
+                    state.pending_iframe_visits.remove(&node_id);
+                    state.pending_iframe_referrers.remove(&node_id);
                     return Err(JsNativeError::typ().with_message(error.to_string()).into());
                 }
                 self.run_timer_payload(TimerPayload::ResourceLoad { node_id })
@@ -9256,6 +9480,7 @@ impl JsRuntime {
         state.pending_resource_loads.remove(&node_id);
         let Some(node) = state.get_node(node_id) else {
             state.pending_iframe_visits.remove(&node_id);
+            state.pending_iframe_referrers.remove(&node_id);
             return Ok(None);
         };
         let resource_document_id = document_root_for_node(&node)
@@ -9263,6 +9488,7 @@ impl JsRuntime {
             .unwrap_or_else(|| state.document.identity());
         if !state.node_is_in_active_document(&node) {
             state.pending_iframe_visits.remove(&node_id);
+            state.pending_iframe_referrers.remove(&node_id);
             Ok(Some((false, Vec::new(), None, resource_document_id)))
         } else {
             let mut initial_scripts: Vec<NodeHandle> = Vec::new();
@@ -9305,6 +9531,7 @@ impl JsRuntime {
                     Ok(document) => document,
                     Err(error) => {
                         state.pending_iframe_visits.remove(&node_id);
+                        state.pending_iframe_referrers.remove(&node_id);
                         return Err(JsNativeError::error()
                             .with_message(error.to_string())
                             .into());
@@ -9315,6 +9542,7 @@ impl JsRuntime {
                     // contentDocument read must not clear a later
                     // form submission's pending visit source.
                     state.pending_iframe_visits.remove(&node_id);
+                    state.pending_iframe_referrers.remove(&node_id);
                 }
                 let ids = state
                     .iframe_documents
@@ -12201,6 +12429,11 @@ fn register_host_bindings(
             js_string!("__omoikane_document_url"),
             1,
             NativeFunction::from_copy_closure(document_url_native),
+        ),
+        (
+            js_string!("__omoikane_document_referrer"),
+            1,
+            NativeFunction::from_copy_closure(document_referrer_native),
         ),
         (
             js_string!("__omoikane_commit_history_api_url"),
@@ -15600,6 +15833,7 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             // is queued below. Scripts only re-run for an actual cross-document
             // move; iframe/object navigation applies to every insertion.
             if target_document.is_some() {
+                state.apply_connected_referrer_metas(&child);
                 state.schedule_connected_resource_loads(&child, source_document != target_document);
             }
         }
@@ -15689,6 +15923,24 @@ fn document_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             .document_urls
             .get(&document_id)
             .map(|url| JsValue::from(js_string!(url.as_str())))
+            .unwrap_or_else(JsValue::null))
+    })
+}
+
+/// Returns the referrer fixed when a live Document was created.
+fn document_referrer_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
+    with_host_state(|state| {
+        Ok(state
+            .borrow()
+            .document_reporting
+            .get(&document_id)
+            .map(|metadata| JsValue::from(js_string!(metadata.referrer.as_str())))
             .unwrap_or_else(JsValue::null))
     })
 }
@@ -16755,6 +17007,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         .to_string(context)?;
     let is_name_attribute = name.eq_ignore_ascii_case("name");
     let is_style_attribute = name.eq_ignore_ascii_case("style");
+    let is_meta_referrer_attribute = is_name_attribute || name.eq_ignore_ascii_case("content");
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -16777,6 +17030,9 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             }
         });
         node.set_attribute_owned(name, dom_string::from_js(&value));
+        if node.has_tag_name("meta") && is_meta_referrer_attribute {
+            state.borrow_mut().apply_connected_referrer_meta(&node);
+        }
         if is_name_attribute {
             state.borrow_mut().refresh_iframe_context_name(&node);
         }
@@ -16834,6 +17090,9 @@ fn set_attribute_ns_native(
     let replace_qualified_name = args.get(5).and_then(JsValue::as_boolean).unwrap_or(false);
     let is_name_attribute = namespace.is_none() && qualified_name == "name";
     let is_style_attribute = namespace.is_none() && qualified_name == "style";
+    let is_meta_referrer_attribute = namespace.is_none()
+        && (qualified_name.eq_ignore_ascii_case("name")
+            || qualified_name.eq_ignore_ascii_case("content"));
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -16861,6 +17120,9 @@ fn set_attribute_ns_native(
             value,
             replace_qualified_name,
         );
+        if node.has_tag_name("meta") && is_meta_referrer_attribute {
+            state.borrow_mut().apply_connected_referrer_meta(&node);
+        }
         if is_name_attribute {
             state.borrow_mut().refresh_iframe_context_name(&node);
         }
@@ -17520,13 +17782,19 @@ fn open_auxiliary_window_native(
             let mut state = host.borrow_mut();
             let source = opener_document_id
                 .and_then(|document_id| state.visit_source_for_document(document_id));
+            let referrer_source = state.navigation_referrer_source_for_document(
+                opener_document_id.unwrap_or_else(|| state.document.identity()),
+            );
             let resolved_url = opener_document_id
                 .and_then(|document_id| state.base_url_for_document(document_id))
                 .map(|base| resolve_url_reference(&url, Some(&base)))
                 .unwrap_or(url);
-            state
-                .event_loop
-                .enqueue_auxiliary_navigation(id, resolved_url, source);
+            state.event_loop.enqueue_auxiliary_navigation(
+                id,
+                resolved_url,
+                source,
+                referrer_source,
+            );
         }
         Ok(JsValue::from(id as f64))
     })
@@ -17554,7 +17822,7 @@ fn navigate_named_link_target_native(
         .to_string(context)?
         .to_std_string_escaped();
     with_host_state(|host| {
-        let (frame_id, document_id, callback, document_url, event_state, visit_source) = {
+        let (frame_id, document_id, callback, document_url, event_state, visit_source, initiator) = {
             let mut state = host.borrow_mut();
             let Some(link) = state.get_node(link_id) else {
                 return Ok(JsValue::from(false));
@@ -17590,11 +17858,13 @@ fn navigate_named_link_target_native(
                 document_url,
                 event_state,
                 visit_source,
+                owner_document_for_node(&link).map(|document| document.identity()),
             )
         };
         let previous_active = {
             let mut state = host.borrow_mut();
             state.pending_iframe_visits.remove(&frame_id);
+            state.capture_iframe_referrer_source(frame_id, initiator.unwrap_or(document_id));
             if let Some(source) = &visit_source {
                 state.pending_iframe_visits.insert(frame_id, source.clone());
             }
@@ -17624,6 +17894,7 @@ fn navigate_named_link_target_native(
                 }
             } else {
                 state.pending_iframe_visits.remove(&frame_id);
+                state.pending_iframe_referrers.remove(&frame_id);
             }
         }
         result.map(|_| JsValue::from(true))
@@ -17648,13 +17919,23 @@ fn navigate_auxiliary_window_native(
         if state.auxiliary_contexts.contains_key(&id) {
             let source =
                 caller.and_then(|document_id| state.visit_source_for_document(document_id));
+            let referrer_source = caller
+                .map(|document_id| state.navigation_referrer_source_for_document(document_id))
+                .unwrap_or(NavigationReferrerSource {
+                    url: String::new(),
+                    document_policy: security_reporting::ReferrerPolicy::default(),
+                    policy: security_reporting::ReferrerPolicy::default(),
+                });
             let resolved_url = caller
                 .and_then(|document_id| state.base_url_for_document(document_id))
                 .map(|base| resolve_url_reference(&url, Some(&base)))
                 .unwrap_or(url);
-            state
-                .event_loop
-                .enqueue_auxiliary_navigation(id, resolved_url, source);
+            state.event_loop.enqueue_auxiliary_navigation(
+                id,
+                resolved_url,
+                source,
+                referrer_source,
+            );
         }
         Ok(JsValue::undefined())
     })
@@ -19179,13 +19460,21 @@ fn set_inner_html_native(
                 state.destroy_iframe_contexts_in_subtree(child);
             }
         }
+        let mut inserted_children = Vec::new();
         if !html.is_empty() {
             let parsed = crate::html::TreeBuilder::parse_fragment(&html, &node).fragment();
             for child in parsed.child_nodes() {
+                inserted_children.push(child.clone());
                 target.append_child(child);
             }
         }
-        state.borrow_mut().register_tree(&target);
+        {
+            let mut state = state.borrow_mut();
+            state.register_tree(&target);
+            for child in &inserted_children {
+                state.apply_connected_referrer_metas(child);
+            }
+        }
         // The node stays attached to its document; invalidate that document's
         // resolver so a `<style>` inside the new markup is picked up.
         state.borrow_mut().mark_style_dirty_for_node(&node);
@@ -19601,6 +19890,7 @@ fn insert_before_native_impl(
             // See `append_child_native`: insertion into a live document creates
             // a fresh iframe/object context, including an in-document reorder.
             if !preserve_state && target_document.is_some() {
+                state.apply_connected_referrer_metas(&new_node);
                 state.schedule_connected_resource_loads(
                     &new_node,
                     source_document != target_document,

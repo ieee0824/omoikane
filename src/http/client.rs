@@ -2,6 +2,7 @@
 
 use super::connection;
 use super::cookie::CookieJar;
+use super::referrer::response_referrer_policy;
 use super::request::{HttpRequest, Method, copy_header_on_redirect, default_user_agent};
 use super::response::{HttpParseError, HttpResponse};
 use super::url::{Url, resolve_url};
@@ -288,6 +289,7 @@ impl Client {
             if !is_redirect(response.status_code()) {
                 response.set_effective_url(request.url().clone());
                 response.set_redirect_count((self.max_redirects - redirects_remaining) as usize);
+                response.set_final_request_referrer(request.header("Referer"));
                 return Ok(response);
             }
 
@@ -310,6 +312,12 @@ impl Client {
                 && request.url().host().eq_ignore_ascii_case(new_url.host())
                 && request.url().port() == new_url.port();
             let preserve_body = new_method == request.method();
+            let redirect_referrer_source = request.referrer_source().map(|(_, policy)| {
+                (
+                    request.header("Referer").map(str::to_owned),
+                    response_referrer_policy(response.headers()).unwrap_or(policy),
+                )
+            });
 
             let mut new_request = HttpRequest::new(new_method, new_url);
             if request.requires_public_ip() {
@@ -320,9 +328,15 @@ impl Client {
             }
 
             for (name, value) in request.headers() {
+                if redirect_referrer_source.is_some() && name.eq_ignore_ascii_case("Referer") {
+                    continue;
+                }
                 if copy_header_on_redirect(name, preserve_body, same_origin) {
                     new_request.add_header(name.clone(), value.clone());
                 }
+            }
+            if let Some((Some(source), policy)) = redirect_referrer_source {
+                new_request.set_referrer_source(source, policy);
             }
 
             if preserve_body && let Some(body) = request.body() {
@@ -526,6 +540,7 @@ mod tests {
         let mut request = HttpRequest::new(Method::Get, "http://first.test/start".parse().unwrap());
         request.require_public_ip();
         request.set_header("Authorization", "secret");
+        request.set_header("Referer", "http://first.test/private");
         let response = client.send(request).unwrap();
         assert_eq!(
             response.effective_url().unwrap().to_string(),
@@ -535,7 +550,12 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].0.url().to_string(), "http://first.test/start");
         assert_eq!(requests[0].0.header("authorization"), Some("secret"));
+        assert_eq!(
+            requests[0].0.header("referer"),
+            Some("http://first.test/private")
+        );
         assert_eq!(requests[1].0.header("authorization"), None);
+        assert_eq!(requests[1].0.header("referer"), None);
         assert!(
             requests
                 .iter()
