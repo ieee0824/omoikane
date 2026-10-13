@@ -4497,6 +4497,13 @@ pub(crate) fn establishes_fixed_containing_block(style: &ComputedStyle) -> bool 
             computed_keyword(style, property)
                 .is_some_and(|value| !value.eq_ignore_ascii_case("none"))
         })
+        || computed_keyword(style, "will-change").is_some_and(|features| {
+            features.split(',').any(|feature| {
+                ["transform", "translate", "rotate", "scale", "perspective"]
+                    .iter()
+                    .any(|name| feature.trim().eq_ignore_ascii_case(name))
+            })
+        })
         || has_containment(style, "layout")
         || has_containment(style, "paint")
 }
@@ -5082,25 +5089,22 @@ fn layout_positioned_child_mode(
         width: child_width,
         height: origin.height,
     };
-    let mut layout_child = if top_layer_root {
-        layout_element(
-            child,
-            resolver,
-            child_containing,
-            viewport,
-            Some(parent_box),
-            None,
-            None,
-        )?
-    } else {
-        layout_node(
-            child,
-            resolver,
-            child_containing,
-            viewport,
-            Some(parent_box),
-        )?
-    };
+    if !top_layer_root && child.top_layer_order().is_some() {
+        return None;
+    }
+    // Shrink-to-fit changes the allocated width, not the containing block
+    // against which percentage margins and padding are resolved.
+    let mut layout_child = layout_element_with_cell(
+        child,
+        resolver,
+        child_containing,
+        viewport,
+        Some(parent_box),
+        None,
+        None,
+        None,
+        origin.width,
+    )?;
     if specified_width.is_none() {
         let auto_width =
             positioned_auto_content_width(child, resolver, style, &layout_child, origin.width);
@@ -5116,25 +5120,17 @@ fn layout_positioned_child_mode(
                 width: auto_width + outside_width,
                 ..child_containing
             };
-            layout_child = if top_layer_root {
-                layout_element(
-                    child,
-                    resolver,
-                    relayout_containing,
-                    viewport,
-                    Some(parent_box),
-                    None,
-                    None,
-                )?
-            } else {
-                layout_node(
-                    child,
-                    resolver,
-                    relayout_containing,
-                    viewport,
-                    Some(parent_box),
-                )?
-            };
+            layout_child = layout_element_with_cell(
+                child,
+                resolver,
+                relayout_containing,
+                viewport,
+                Some(parent_box),
+                None,
+                None,
+                None,
+                origin.width,
+            )?;
         }
         layout_child.dimensions.content.width =
             positioned_auto_content_width(child, resolver, style, &layout_child, origin.width);

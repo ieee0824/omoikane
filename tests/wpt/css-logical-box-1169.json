@@ -1,0 +1,28 @@
+{
+  "tests": [
+    {
+      "path": "css/css-logical/parsing/margin-block-inline-computed.html"
+    },
+    {
+      "path": "css/css-logical/parsing/margin-block-inline-invalid.html"
+    },
+    {
+      "path": "css/css-logical/parsing/margin-block-inline-shorthand.html"
+    },
+    {
+      "path": "css/css-logical/parsing/margin-block-inline-valid.html"
+    },
+    {
+      "path": "css/css-logical/parsing/padding-block-inline-computed.html"
+    },
+    {
+      "path": "css/css-logical/parsing/padding-block-inline-invalid.html"
+    },
+    {
+      "path": "css/css-logical/parsing/padding-block-inline-shorthand.html"
+    },
+    {
+      "path": "css/css-logical/parsing/padding-block-inline-valid.html"
+    }
+  ]
+}

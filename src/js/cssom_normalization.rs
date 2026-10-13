@@ -143,8 +143,20 @@ pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
             | "inset-inline-end"
             | "inset-block-start"
             | "inset-block-end"
+            | "margin-inline"
+            | "margin-block"
+            | "margin-inline-start"
+            | "margin-inline-end"
+            | "margin-block-start"
+            | "margin-block-end"
+            | "padding-inline"
+            | "padding-block"
+            | "padding-inline-start"
+            | "padding-inline-end"
+            | "padding-block-start"
+            | "padding-block-end"
     ) {
-        crate::css::style::normalize_logical_inset(property, value)
+        crate::css::style::normalize_box_lengths(property, value)
     } else if matches!(
         property,
         "border-inline-start-width"

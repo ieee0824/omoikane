@@ -687,6 +687,21 @@ fn normalize_background_position(values: &[Value]) -> Option<(Value, Value)> {
 }
 
 fn expand_logical_axis_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
+    if matches!(
+        name,
+        "margin-inline" | "margin-block" | "padding-inline" | "padding-block"
+    ) {
+        let valid = match &value {
+            Value::List(values) => (1..=2).contains(&values.len()) && values.iter().all(|value| {
+                !matches!(value, Value::Keyword(keyword) if super::is_css_wide_keyword_case_insensitive(keyword))
+                    && super::style::box_spacing_component_is_valid(&format!("{name}-start"), value)
+            }),
+            value => super::style::box_spacing_component_is_valid(&format!("{name}-start"), value),
+        };
+        if !valid {
+            return Vec::new();
+        }
+    }
     let values = match value {
         Value::List(values) => values,
         value => vec![value],

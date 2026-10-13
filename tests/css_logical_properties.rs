@@ -209,3 +209,178 @@ fn later_physical_auto_offset_clears_logical_offset() {
         "getComputedStyle(document.getElementById('target')).right === 'auto'",
     );
 }
+
+#[test]
+fn logical_box_cssom_expands_normalizes_and_removes_shorthands() {
+    let mut runtime = runtime("");
+    check(
+        &mut runtime,
+        "(() => { const s = document.getElementById('target').style;
+         for (const prefix of ['margin', 'padding']) {
+           for (const axis of ['block', 'inline']) {
+             const name = prefix + '-' + axis;
+             s.setProperty(name, '0 0');
+             if (s.getPropertyValue(name) !== '0px' ||
+                 s.getPropertyValue(name + '-start') !== '0px' ||
+                 s.getPropertyValue(name + '-end') !== '0px') return false;
+             s.setProperty(name + '-end', '12px');
+             if (s.getPropertyValue(name) !== '0px 12px') return false;
+             s.removeProperty(name);
+             if (s.getPropertyValue(name + '-start') !== '' ||
+                 s.getPropertyValue(name + '-end') !== '') return false;
+           }
+         }
+         s.marginBlock = 'auto auto';
+         return s.marginBlock === 'auto' && s.marginBlockEnd === 'auto'; })()",
+    );
+}
+
+#[test]
+fn logical_box_invalid_values_preserve_existing_declarations() {
+    let mut runtime = runtime("");
+    check(
+        &mut runtime,
+        "(() => { const s = document.getElementById('target').style;
+         for (const name of ['padding-block', 'padding-inline']) {
+           s.setProperty(name, '2px 3px');
+           for (const value of ['auto', '-1px', '4px -1%', '1px, 2px', '1px 2px 3px', 'calc(1)']) {
+             if (CSS.supports(name, value)) return false;
+             s.setProperty(name, value);
+             if (s.getPropertyValue(name) !== '2px 3px') return false;
+           }
+         }
+         s.marginInlineStart = '7px';
+         for (const value of ['none', '1px 2px', '10', '1px, 2px', 'calc(1)']) {
+           if (CSS.supports('margin-inline-start', value)) return false;
+           s.marginInlineStart = value;
+           if (s.marginInlineStart !== '7px') return false;
+         }
+         return true; })()",
+    );
+}
+
+#[test]
+fn logical_box_resolved_values_follow_live_flow_and_containing_width() {
+    let mut runtime = runtime(
+        "#target { width:100px; margin-inline:10% calc(10% + 2px); \
+         padding-block:calc(1px - 2px) 5%; }",
+    );
+    check(
+        &mut runtime,
+        "(() => { const target = document.getElementById('target');
+         const parent = document.createElement('div');
+         parent.style.width = '200px'; document.body.appendChild(parent);
+         parent.appendChild(target);
+         const s = getComputedStyle(target);
+         if (s.marginInline !== '20px 22px' || s.marginLeft !== '20px' ||
+             s.paddingBlock !== '0px 10px' || s.paddingTop !== '0px') return false;
+         target.style.direction = 'rtl';
+         if (s.marginInlineStart !== '20px' || s.marginRight !== '20px') return false;
+         target.style.writingMode = 'vertical-rl';
+         return s.marginInlineStart === s.marginBottom &&
+             s.paddingBlockStart === s.paddingRight && s.paddingBlockEnd === s.paddingLeft;
+         })()",
+    );
+}
+
+#[test]
+fn logical_box_css_text_preserves_priority_and_css_wide_values() {
+    let mut runtime = runtime("");
+    check(
+        &mut runtime,
+        "(() => { const s = document.getElementById('target').style;
+         s.cssText = 'margin-inline: 2px 3px !important; padding-block: 0 0';
+         if (s.marginInlineStart !== '2px' || s.marginInlineEnd !== '3px' ||
+             s.paddingBlock !== '0px' || s.getPropertyPriority('margin-inline') !== 'important') return false;
+         s.setProperty('margin-inline-end', '4px');
+         if (s.marginInline !== '' || s.getPropertyPriority('margin-inline') !== '') return false;
+         s.paddingBlock = 'inherit';
+         if (s.paddingBlock !== 'inherit' || s.paddingBlockStart !== 'inherit') return false;
+         s.paddingBlockEnd = 'initial';
+         if (s.paddingBlock !== '') return false;
+         s.marginBlock = '5px 6px';
+         return s.removeProperty('margin-block') === '5px 6px' && s.marginBlockStart === ''; })()",
+    );
+}
+
+#[test]
+fn will_change_transform_anchors_absolute_and_fixed_percentage_edges() {
+    for position in ["absolute", "fixed"] {
+        for hint in [
+            "transform",
+            "opacity, TRANSFORM",
+            "translate",
+            "rotate",
+            "scale",
+            "perspective",
+        ] {
+            let mut runtime = JsRuntime::with_document(
+                TreeBuilder::parse(&format!(
+                    "<style>#container {{ width:200px; will-change:{hint}; }} \
+                     #parent {{ width:0; }} #target {{ position:{position}; width:20px; \
+                     margin-block-end:10%; padding-inline-end:calc(10% + 40px); }}</style>\
+                     <div id='container'><div id='parent'><div id='target'></div></div></div>"
+                ))
+                .document(),
+            )
+            .expect("create runtime");
+            check(
+                &mut runtime,
+                "(() => { const s = getComputedStyle(document.getElementById('target'));
+                 return s.marginBlockEnd === '20px' && s.paddingInlineEnd === '60px'; })()",
+            );
+        }
+    }
+}
+
+#[test]
+fn logical_box_pending_substitution_keeps_specified_shorthand() {
+    let mut runtime = runtime("");
+    check(
+        &mut runtime,
+        "(() => { const target = document.getElementById('target'); const s = target.style;
+         s.setProperty('--edges', '3px 4px');
+         s.marginBlock = 'var(--edges)';
+         if (s.marginBlock !== 'var(--edges)' || s.marginBlockStart !== '') return false;
+         const c = getComputedStyle(target);
+         if (c.marginBlock !== '3px 4px') return false;
+         s.marginBlockEnd = '8px';
+         if (s.marginBlock !== '' || c.marginBlock !== '3px 8px') return false;
+         s.setProperty('margin-block', 'var(--edges)', 'important');
+         return s.getPropertyPriority('margin-block') === 'important'; })()",
+    );
+}
+
+#[test]
+fn invalid_logical_box_shorthands_do_not_partially_enter_stylesheet_cascade() {
+    let mut runtime = runtime(
+        "#target { padding-block:2px 3px; padding-block:4px -1px; \
+         margin-inline:5px 6px; margin-inline:7px none; \
+         padding-inline:8px 9px; padding-inline:inherit 10px; }",
+    );
+    check(
+        &mut runtime,
+        "(() => { const s = getComputedStyle(document.getElementById('target'));
+         return s.paddingBlock === '2px 3px' && s.marginInline === '5px 6px' &&
+             s.paddingInline === '8px 9px' && !CSS.supports('padding-inline', 'INHERIT 10px'); })()",
+    );
+}
+
+#[test]
+fn logical_box_math_keeps_element_dependent_lengths_until_cascade() {
+    let mut runtime = runtime("");
+    check(
+        &mut runtime,
+        "(() => { const target = document.getElementById('target');
+         const parent = document.createElement('div'); document.body.appendChild(parent);
+         parent.appendChild(target); parent.appendChild(document.createElement('div'));
+         if (!CSS.supports('margin-inline', 'calc(sibling-index() * 2px)') ||
+             !CSS.supports('padding-block', 'calc(sibling-count() * 3px)')) return false;
+         target.style.marginInline = 'calc(sibling-index() * 2px)';
+         target.style.paddingBlock = 'calc(sibling-count() * 3px)';
+         const s = getComputedStyle(target);
+         if (s.marginInline !== '2px' || s.paddingBlock !== '6px') return false;
+         parent.prepend(document.createElement('div'));
+         return s.marginInline === '4px' && s.paddingBlock === '9px'; })()",
+    );
+}

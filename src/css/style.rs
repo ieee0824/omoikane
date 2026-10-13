@@ -4715,6 +4715,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if is_color_property(name) {
         return validate_color_value(value);
     }
+    if let Some(validation) = validate_box_spacing_declaration(name, value) {
+        return validation;
+    }
     if let Some(validation) = validate_logical_box_declaration(name, value) {
         return validation;
     }
@@ -5499,6 +5502,38 @@ fn validate_perspective_origin_declaration(value: &Value) -> DeclarationValidati
         DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
     } else {
         DeclarationValidation::Invalid
+    }
+}
+
+fn validate_box_spacing_declaration(name: &str, value: &Value) -> Option<DeclarationValidation> {
+    if !is_margin_or_padding_longhand(name) {
+        return None;
+    }
+    Some(if box_spacing_component_is_valid(name, value) {
+        DeclarationValidation::Unvalidated
+    } else {
+        DeclarationValidation::Invalid
+    })
+}
+
+/// Checks a margin or padding component before shorthand expansion.
+pub(super) fn box_spacing_component_is_valid(name: &str, value: &Value) -> bool {
+    let margin = name.starts_with("margin-");
+    match value {
+        Value::Keyword(keyword) => {
+            is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                || (margin && keyword.eq_ignore_ascii_case("auto"))
+        }
+        Value::Function { .. } if sibling_functions::contains(value) => {
+            // Element-dependent expressions must be checked structurally:
+            // their numbers are unavailable while parsing the stylesheet.
+            let length = typed_math::NumericType::LENGTH;
+            typed_math::infer(value, Some(length)) == Some(length)
+        }
+        // Math expressions may become negative after resolving relative units.
+        // Padding clamps the resulting used value to zero in layout.
+        Value::Function { .. } => valid_logical_length(value, true, true),
+        value => valid_logical_length(value, margin, true),
     }
 }
 
@@ -8597,6 +8632,8 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
         return false;
     }
     if (property.starts_with("inset")
+        || property.starts_with("margin-")
+        || property.starts_with("padding-")
         || property.starts_with("border-inline")
         || property.starts_with("border-block"))
         && super::split_top_level_commas(value).len() > 1
@@ -8679,8 +8716,8 @@ fn normalize_border_width_component(value: &Value) -> String {
     render_value(value)
 }
 
-/// Validates and canonicalizes logical inset shorthands and longhands.
-pub(crate) fn normalize_logical_inset(property: &str, text: &str) -> Option<String> {
+/// Validates and canonicalizes inset and logical margin/padding lengths.
+pub(crate) fn normalize_box_lengths(property: &str, text: &str) -> Option<String> {
     if !supports_declaration(property, text) {
         return None;
     }

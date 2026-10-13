@@ -567,11 +567,21 @@
     "scroll-margin-inline-start", "scroll-margin-inline-end",
     "scroll-margin-block-start", "scroll-margin-block-end",
   ]);
+  const logicalBoxStyleProperties = new Set([
+    "margin-block", "margin-inline", "padding-block", "padding-inline",
+    "margin-block-start", "margin-block-end", "margin-inline-start", "margin-inline-end",
+    "padding-block-start", "padding-block-end", "padding-inline-start", "padding-inline-end",
+  ]);
   const needsStyleValueNormalization = (name, value) =>
     name === "transition" || name.startsWith("transition-") ||
+    logicalBoxStyleProperties.has(name) ||
     validatesSpecialStyleProperties.has(name) ||
     (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
   const styleShorthandLonghands = Object.freeze({
+    "margin-block": ["margin-block-start", "margin-block-end"],
+    "margin-inline": ["margin-inline-start", "margin-inline-end"],
+    "padding-block": ["padding-block-start", "padding-block-end"],
+    "padding-inline": ["padding-inline-start", "padding-inline-end"],
     "inset": ["top", "right", "bottom", "left"],
     "inset-inline": ["inset-inline-start", "inset-inline-end"],
     "inset-block": ["inset-block-start", "inset-block-end"],
@@ -609,18 +619,37 @@
     const longhands = styleShorthandLonghands[kebab];
     if (!longhands) return null;
     const values = new Map();
+    const priorities = new Map();
+    let pendingValue = null;
+    let pendingOverridden = false;
     for (const declaration of declarations) {
       if (declaration.name === kebab) {
+        pendingValue = null;
+        pendingOverridden = false;
         try {
           for (const [name, value] of JSON.parse(__omoikane_expand_style_shorthand(
             kebab, declaration.value
-          ))) values.set(name, value);
+          ))) {
+            if (name === kebab && logicalBoxStyleProperties.has(kebab)) {
+              pendingValue = value;
+            }
+            values.set(name, value);
+            priorities.set(name, declaration.priority || "");
+          }
         } catch (_) {}
       } else if (longhands.includes(declaration.name)) {
+        if (pendingValue !== null) pendingOverridden = true;
         values.set(declaration.name, declaration.value);
+        priorities.set(declaration.name, declaration.priority || "");
       }
     }
+    if (pendingValue !== null) return pendingOverridden ? "" : pendingValue;
     const parts = longhands.map(name => values.get(name));
+    if (logicalBoxStyleProperties.has(kebab)) {
+      if (longhands.some(name => priorities.get(name) !== priorities.get(longhands[0]))) return "";
+      if (parts.some(value => /^(initial|inherit|unset|revert|revert-layer)$/.test(value)) &&
+          !parts.every(value => value === parts[0])) return "";
+    }
     if (kebab === "border-inline" || kebab === "border-block") {
       return parts.slice(0, 3).every((value, index) => value === parts[index + 3])
         ? parts.slice(0, 3).filter(Boolean).join(" ") : "";
@@ -643,7 +672,8 @@
   }
 
   function computedLogicalShorthand(map, kebab) {
-    if (kebab !== "inset" && kebab !== "inset-inline" && kebab !== "inset-block" &&
+    if (!logicalBoxStyleProperties.has(kebab) &&
+        kebab !== "inset" && kebab !== "inset-inline" && kebab !== "inset-block" &&
         kebab !== "border-inline" && kebab !== "border-block" &&
         !kebab.startsWith("border-inline-") && !kebab.startsWith("border-block-")) {
       return null;
@@ -3329,7 +3359,14 @@
             if (value === null) continue;
             declaration.value = value;
           }
-          normalized.push(declaration);
+          if (logicalBoxStyleProperties.has(declaration.name) &&
+              styleShorthandLonghands[declaration.name]) {
+            for (const [name, value] of JSON.parse(__omoikane_expand_style_shorthand(
+              declaration.name, declaration.value
+            ))) normalized.push({ name, value, priority: declaration.priority });
+          } else {
+            normalized.push(declaration);
+          }
         }
         return normalized;
       };
@@ -3366,7 +3403,8 @@
       // Later declarations win, matching the inline cascade.
       const getValue = (kebab) => {
         const decls = parseDecls();
-        if (kebab === "inset" || kebab.startsWith("inset-") ||
+        if (logicalBoxStyleProperties.has(kebab) ||
+            kebab === "inset" || kebab.startsWith("inset-") ||
             kebab === "border-inline" || kebab.startsWith("border-inline-") ||
             kebab === "border-block" || kebab.startsWith("border-block-")) {
           const shorthand = logicalShorthandValue(kebab, decls);
@@ -3395,6 +3433,14 @@
       };
       const getPriority = (kebab) => {
         const decls = parseDecls();
+        const longhands = logicalBoxStyleProperties.has(kebab) && styleShorthandLonghands[kebab];
+        if (longhands) {
+          if (!logicalShorthandValue(kebab, decls)) return "";
+          for (let i = decls.length - 1; i >= 0; i--) {
+            if (decls[i].name === kebab) return decls[i].priority;
+          }
+          return getPriority(longhands[0]);
+        }
         for (let i = decls.length - 1; i >= 0; i--) {
           if (decls[i].name === kebab) return decls[i].priority;
         }
@@ -3440,6 +3486,9 @@
         const remaining = decls.filter(d => !removed.has(d.name));
         if (remaining.length === decls.length) return "";
         let old = "";
+        if (logicalBoxStyleProperties.has(kebab) && longhands.length) {
+          old = logicalShorthandValue(kebab, decls) || "";
+        }
         for (let i = decls.length - 1; i >= 0; i--) {
           if (decls[i].name === kebab) { old = decls[i].value; break; }
         }
