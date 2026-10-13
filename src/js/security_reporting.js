@@ -103,6 +103,9 @@
         notify(report);
       },
       queueTestReport(message, url) { notify({ type: "test", url, body: { message } }); },
+      queueReport(report) {
+        notify({ type: report.type, url: report.url, body: report.body });
+      },
     };
   });
 })();

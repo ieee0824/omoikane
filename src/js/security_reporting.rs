@@ -18,6 +18,8 @@ pub(super) struct DocumentReportingMetadata {
     /// The referrer assigned when this Document was created, not its current URL.
     pub(super) referrer: String,
     pub(super) referrer_policy: ReferrerPolicy,
+    /// Changes whenever this Document receives a new reporting endpoint map.
+    pub(super) endpoint_revision: u64,
 }
 
 /// Owned author-script provenance captured before an asynchronous Web API
@@ -72,8 +74,21 @@ pub(super) struct ModuleCspViolation {
     pub(super) report_reference: String,
 }
 
+#[cfg(test)]
+fn wait_for_report_delivery(runtime: &mut JsRuntime) {
+    let mut state = runtime.host_state.borrow_mut();
+    let completions = state
+        .report_delivery
+        .as_mut()
+        .map(report_delivery::ReportDelivery::wait_for_pending)
+        .unwrap_or_default();
+    state.apply_report_completions(completions);
+}
+
 /// Removes URL credentials and fragments; non-HTTP URLs disclose their scheme.
-fn strip_url_for_report(input: &str) -> String {
+/// Unparseable source-location sentinels, such as `inline`, are preserved, so
+/// callers handling untrusted URLs must validate them before calling this.
+pub(super) fn strip_url_for_report(input: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(input) else {
         return input.to_owned();
     };
@@ -156,9 +171,9 @@ impl JsRuntime {
         result.map(|_| ())
     }
 
-    /// Sends legacy CSP reports after the violation's event has been dispatched.
-    /// Delivery is best-effort and bypasses page connect-src checks to avoid
-    /// recursively reporting the report request itself.
+    /// Queues legacy CSP reports after the violation's event has been
+    /// dispatched. Delivery is best-effort and bypasses page connect-src
+    /// checks to avoid recursively reporting the report request itself.
     pub(super) fn deliver_csp_report(&mut self, document_id: usize, payload: &str) {
         let Ok(event) = serde_json::from_str::<serde_json::Value>(payload) else {
             return;
@@ -209,11 +224,12 @@ impl JsRuntime {
             if requires_public_fetch(&url, base.as_ref()) {
                 request.require_public_ip();
             }
-            let _ = state.http_client.send_once_with_timeout(
+            let client = state.http_client.fork_for_reporting();
+            state.queue_report(report_delivery::ReportRequest::Legacy {
+                client,
                 request,
                 credentials,
-                Some(Duration::from_secs(2)),
-            );
+            });
         }
     }
 
@@ -242,69 +258,63 @@ impl JsRuntime {
         self.deliver_modern_report(document_id, group, body);
     }
 
-    fn deliver_modern_report(
+    /// Queues a Reporting API envelope for the named endpoint group.
+    /// COOP, COEP, CSP, and test reports share this HTTP delivery path.
+    pub(super) fn deliver_modern_report(
         &mut self,
         document_id: usize,
         group: &str,
         report: serde_json::Value,
     ) {
-        let mut state = self.host_state.borrow_mut();
-        let Some(endpoint) = state
-            .document_csp
-            .get(&document_id)
-            .and_then(|policy| policy.reporting_endpoint(group))
-        else {
-            return;
-        };
-        let Ok(url) = endpoint.parse::<crate::http::Url>() else {
-            return;
-        };
-        let base = state.base_url_for_document(document_id);
-        // Reporting groups delivery by the origin of each report's creation
-        // URL. Unlike legacy CSP delivery, this is not the global's origin.
-        let origin = report["url"]
-            .as_str()
-            .and_then(|url| url.parse::<crate::http::Url>().ok())
-            .as_ref()
-            .map(CorsOrigin::from_url)
-            .unwrap_or_else(CorsOrigin::opaque);
-        let body = serde_json::json!([report]).to_string().into_bytes();
-        let mut request = HttpRequest::new(Method::Post, url.clone());
-        request.set_header("Content-Type", "application/reports+json");
-        request.set_body(body);
-        if let Some(base) = base.as_ref() {
-            request.set_cookie_context(base.clone(), false);
-        }
-        if requires_public_fetch(&url, base.as_ref()) {
-            request.require_public_ip();
-        }
-        let HostState {
-            http_client,
-            cors_preflight_cache,
-            ..
-        } = &mut *state;
-        let result = crate::http::cors::fetch_with_timeout_restricting_redirects(
-            http_client,
-            request,
-            &origin,
-            RequestMode::Cors,
-            CredentialsMode::SameOrigin,
-            RedirectMode::Follow,
-            cors_preflight_cache,
-            Some(Duration::from_secs(2)),
-        );
-        if result.is_ok_and(|fetched| fetched.response.status_code() == 410) {
-            if let Some(policy) = state.document_csp.get_mut(&document_id) {
-                policy.remove_reporting_endpoint(group);
-            }
-        }
+        self.host_state
+            .borrow_mut()
+            .queue_modern_report(document_id, group, report);
     }
+
+    /// Adds a platform report to this Document's ReportingObserver queue.
+    /// Its HTTP delivery can be queued separately before a navigation retires
+    /// the old Document's endpoint configuration.
+    pub(super) fn queue_reporting_observer_report(
+        &mut self,
+        document_id: usize,
+        report: &serde_json::Value,
+    ) -> JsResult<()> {
+        let realm = self.realm_for_document(document_id)?;
+        if document_id != self.document().identity() && realm.is_none() {
+            return Ok(());
+        }
+        let dispatcher = self
+            .host_state
+            .borrow()
+            .report_observer_dispatchers
+            .get(&document_id)
+            .cloned();
+        let Some(dispatcher) = dispatcher else {
+            return Ok(());
+        };
+        let old_realm = realm.map(|realm| self.context.enter_realm(realm));
+        let result = self.with_active_host(|context| {
+            let value = JsValue::from_json(report, context)?;
+            let callable = dispatcher.as_callable().ok_or_else(|| {
+                JsNativeError::typ().with_message("report observer dispatcher is not callable")
+            })?;
+            callable.call(&JsValue::undefined(), &[value], context)?;
+            Ok(())
+        });
+        let result = result.and_then(|()| self.run_jobs());
+        if let Some(old_realm) = old_realm {
+            self.context.enter_realm(old_realm);
+        }
+        result
+    }
+
     /// Installs CSP response policies before the first document script runs.
     pub(crate) fn install_response_security_headers(&mut self, headers: &[(String, String)]) {
         let document = self.document();
         let mut state = self.host_state.borrow_mut();
         let policy =
             CspPolicy::from_response_headers_and_document(headers, &document, &state.location_href);
+        state.advance_report_endpoint_revision(document.identity());
         state.document_csp.insert(document.identity(), policy);
         if let Some(policy) = response_referrer_policy(headers)
             && let Some(metadata) = state.document_reporting.get_mut(&document.identity())
@@ -339,6 +349,7 @@ impl JsRuntime {
         {
             let mut state = self.host_state.borrow_mut();
             let document_id = state.document.identity();
+            state.advance_report_endpoint_revision(document_id);
             state
                 .document_csp
                 .insert(document_id, creator_policy.inherited_for_new_global());
@@ -468,6 +479,107 @@ impl HttpModuleLoader {
 }
 
 impl HostState {
+    /// Snapshots one report's endpoint and HTTP policy while its owner
+    /// Document is still live, then queues owned data for background delivery.
+    pub(super) fn queue_modern_report(
+        &mut self,
+        document_id: usize,
+        group: &str,
+        report: serde_json::Value,
+    ) {
+        self.drain_report_completions();
+        let Some(endpoint) = self
+            .document_csp
+            .get(&document_id)
+            .and_then(|policy| policy.reporting_endpoint(group))
+        else {
+            return;
+        };
+        let Ok(url) = endpoint.parse::<crate::http::Url>() else {
+            return;
+        };
+        let base = self.base_url_for_document(document_id);
+        // Reporting groups delivery by the report creation URL's origin.
+        let origin = report["url"]
+            .as_str()
+            .and_then(|url| url.parse::<crate::http::Url>().ok())
+            .as_ref()
+            .map(CorsOrigin::from_url)
+            .unwrap_or_else(CorsOrigin::opaque);
+        let body = serde_json::json!([report]).to_string().into_bytes();
+        let mut request = HttpRequest::new(Method::Post, url.clone());
+        request.set_header("Content-Type", "application/reports+json");
+        request.set_body(body);
+        if let Some(base) = base.as_ref() {
+            request.set_cookie_context(base.clone(), false);
+        }
+        if requires_public_fetch(&url, base.as_ref()) {
+            request.require_public_ip();
+        }
+        let endpoint = report_delivery::EndpointKey {
+            document_id,
+            revision: self
+                .document_reporting
+                .get(&document_id)
+                .map_or(0, |metadata| metadata.endpoint_revision),
+            group: group.to_owned(),
+            url: endpoint,
+        };
+        let client = self.http_client.fork_for_reporting();
+        self.queue_report(report_delivery::ReportRequest::Modern {
+            client,
+            request,
+            origin,
+            endpoint,
+        });
+    }
+
+    pub(super) fn advance_report_endpoint_revision(&mut self, document_id: usize) {
+        if let Some(metadata) = self.document_reporting.get_mut(&document_id) {
+            metadata.endpoint_revision = metadata.endpoint_revision.wrapping_add(1);
+        }
+    }
+
+    fn apply_report_completions(&mut self, completions: Vec<report_delivery::ReportCompletion>) {
+        for completion in completions {
+            let report_delivery::ReportCompletion::Gone(endpoint) = completion else {
+                continue;
+            };
+            if !self
+                .document_reporting
+                .get(&endpoint.document_id)
+                .is_some_and(|metadata| metadata.endpoint_revision == endpoint.revision)
+            {
+                continue;
+            }
+            if let Some(policy) = self.document_csp.get_mut(&endpoint.document_id)
+                && policy.reporting_endpoint(&endpoint.group).as_deref()
+                    == Some(endpoint.url.as_str())
+            {
+                policy.remove_reporting_endpoint(&endpoint.group);
+            }
+        }
+    }
+
+    fn drain_report_completions(&mut self) {
+        let completions = self
+            .report_delivery
+            .as_mut()
+            .map(report_delivery::ReportDelivery::drain)
+            .unwrap_or_default();
+        self.apply_report_completions(completions);
+    }
+
+    fn queue_report(&mut self, report: report_delivery::ReportRequest) {
+        self.drain_report_completions();
+        if self.report_delivery.is_none() {
+            self.report_delivery = report_delivery::ReportDelivery::new().ok();
+        }
+        if let Some(delivery) = self.report_delivery.as_mut() {
+            delivery.enqueue(report);
+        }
+    }
+
     pub(super) fn register_document_reporting(
         &mut self,
         document_id: usize,
@@ -481,6 +593,7 @@ impl HostState {
                 response_status,
                 referrer: String::new(),
                 referrer_policy: ReferrerPolicy::default(),
+                endpoint_revision: 0,
             },
         );
     }
@@ -535,12 +648,17 @@ impl HostState {
         }
     }
 
-    fn report_url_for_document(&self, document_id: usize) -> String {
+    /// Returns the Document's creation URL for Reporting, without credentials
+    /// or fragments. Invalid creation URLs are redacted rather than echoed.
+    pub(super) fn report_url_for_document(&self, document_id: usize) -> String {
         let url = self
             .document_reporting
             .get(&document_id)
             .map(|metadata| metadata.creation_url.as_str())
             .unwrap_or("");
+        if url::Url::parse(url).is_err() {
+            return String::new();
+        }
         strip_url_for_report(url)
     }
 
@@ -1014,6 +1132,179 @@ impl HostState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_slow_report_endpoint_does_not_block_following_task(policy: &str) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::{Receiver, Sender, channel};
+
+        struct SlowTransport {
+            started: Sender<()>,
+            release: Mutex<Receiver<()>>,
+            completed: Arc<AtomicBool>,
+        }
+
+        impl crate::http::HttpTransport for SlowTransport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                assert_eq!(request.url().to_string(), "https://example.test/reports");
+                self.started.send(()).unwrap();
+                // The timeout only releases a failing, synchronous implementation.
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2));
+                self.completed.store(true, Ordering::Release);
+                crate::http::HttpResponse::parse(
+                    &mut &b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"[..],
+                )
+            }
+        }
+
+        let document = crate::html::TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_response_security_headers(&[
+            ("Content-Security-Policy".into(), policy.into()),
+            ("Reporting-Endpoints".into(), "reports=\"/reports\"".into()),
+        ]);
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(SlowTransport {
+                started: started_tx,
+                release: Mutex::new(release_rx),
+                completed: Arc::clone(&completed),
+            })));
+
+        runtime.eval("globalThis.afterReport = false; globalThis.violations = 0; document.addEventListener('securitypolicyviolation', () => violations++); fetch('/blocked').catch(() => {}); setTimeout(() => afterReport = true, 0);").unwrap();
+        runtime.run_jobs().unwrap();
+        runtime.run_timers(10, 1, 30);
+        assert!(
+            runtime
+                .eval("violations === 1 && afterReport")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(!completed.load(Ordering::Acquire));
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn slow_legacy_report_endpoint_does_not_block_following_task() {
+        assert_slow_report_endpoint_does_not_block_following_task(
+            "connect-src 'none'; report-uri /reports",
+        );
+    }
+
+    #[test]
+    fn slow_modern_report_endpoint_does_not_block_following_task() {
+        assert_slow_report_endpoint_does_not_block_following_task(
+            "connect-src 'none'; report-to reports",
+        );
+    }
+
+    #[test]
+    fn full_report_queue_keeps_violation_events_and_observer_reports() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::{Receiver, Sender, channel};
+
+        struct SlowFirstReport {
+            started: Sender<()>,
+            release: Mutex<Receiver<()>>,
+            first: AtomicBool,
+            sent: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl crate::http::HttpTransport for SlowFirstReport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                self.sent.lock().unwrap().push(request.url().to_string());
+                if self.first.swap(false, Ordering::AcqRel) {
+                    self.started.send(()).unwrap();
+                    let _ = self
+                        .release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(2));
+                }
+                crate::http::HttpResponse::parse(
+                    &mut &b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"[..],
+                )
+            }
+        }
+
+        let document = crate::html::TreeBuilder::parse("<body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_response_security_headers(&[
+            (
+                "Content-Security-Policy".into(),
+                "connect-src 'none'; report-to reports".into(),
+            ),
+            ("Reporting-Endpoints".into(), "reports=\"/reports\"".into()),
+        ]);
+        runtime.host_state.borrow_mut().report_delivery =
+            Some(report_delivery::ReportDelivery::with_capacity(2).unwrap());
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(SlowFirstReport {
+                started: started_tx,
+                release: Mutex::new(release_rx),
+                first: AtomicBool::new(true),
+                sent: Arc::clone(&sent),
+            })));
+        runtime.eval("globalThis.events = 0; globalThis.observed = 0; document.addEventListener('securitypolicyviolation', () => events++); new ReportingObserver(batch => observed += batch.length).observe();").unwrap();
+        runtime.eval("fetch('/first').catch(() => {});").unwrap();
+        runtime.run_jobs().unwrap();
+        runtime.run_timers(10, 1, 30);
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        for path in ["/second", "/third"] {
+            runtime
+                .eval(&format!("fetch('{path}').catch(() => {{}});"))
+                .unwrap();
+            runtime.run_jobs().unwrap();
+            runtime.run_timers(10, 1, 30);
+        }
+        assert!(
+            runtime
+                .eval("events === 3 && observed === 3")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        assert_eq!(
+            runtime
+                .host_state
+                .borrow()
+                .report_delivery
+                .as_ref()
+                .unwrap()
+                .dropped(),
+            1
+        );
+        assert_eq!(sent.lock().unwrap().len(), 1);
+        release_tx.send(()).unwrap();
+        wait_for_report_delivery(&mut runtime);
+        assert_eq!(sent.lock().unwrap().len(), 2);
+    }
 
     #[test]
     fn navigation_referrer_obeys_default_origin_and_downgrade_rules() {
@@ -1709,6 +2000,7 @@ mod tests {
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
+        wait_for_report_delivery(&mut runtime);
         assert!(runtime
             .eval("frame.contentDocument.referrer === 'https://example.test/parent/path?q=1' && events.length === 1 && events[0] === frame.contentDocument.referrer")
             .unwrap()
@@ -1850,6 +2142,7 @@ mod tests {
             .set_transport(Some(Arc::new(Transport(sent.clone()))));
         runtime.eval("const frame=document.createElement('iframe'); frame.setAttribute('sandbox','allow-scripts'); frame.src='/frame'; document.body.appendChild(frame);").unwrap();
         runtime.run_until_idle().unwrap();
+        wait_for_report_delivery(&mut runtime);
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0.as_deref(), Some("null"));
@@ -1924,6 +2217,7 @@ mod tests {
                 )
                 .unwrap();
             runtime.run_until_idle().unwrap();
+            wait_for_report_delivery(&mut runtime);
             let observed = runtime.eval("JSON.stringify(reports)").unwrap();
             assert!(runtime.eval("reports.length===1 && reports[0].url==='about' && reports[0].body.statusCode===200").unwrap().as_boolean().unwrap(), "{create}: {observed:?}");
             assert_eq!(*sent.lock().unwrap(), 0, "{create}");
@@ -1936,6 +2230,7 @@ mod tests {
             );
             runtime.eval("const own=document.createElement('script'); own.src='/parent.js'; document.body.appendChild(own)").unwrap();
             runtime.run_until_idle().unwrap();
+            wait_for_report_delivery(&mut runtime);
             assert_eq!(*sent.lock().unwrap(), 1, "{create}");
         }
     }
@@ -1992,6 +2287,7 @@ mod tests {
             .generate_test_report("test after pushState")
             .unwrap();
         runtime.run_timers(10, 1, 30);
+        wait_for_report_delivery(&mut runtime);
         let observed = runtime.eval("JSON.stringify({events, reports})").unwrap();
         let observed: serde_json::Value =
             serde_json::from_str(&observed.as_string().unwrap().to_std_string_escaped()).unwrap();
@@ -2067,6 +2363,7 @@ mod tests {
                 runtime.eval("fetch('/blocked').catch(() => {});").unwrap();
                 runtime.run_jobs().unwrap();
                 runtime.run_timers(10, 1, 30);
+                wait_for_report_delivery(&mut runtime);
             }
             let sent = sent.lock().unwrap();
             assert_eq!(sent.len(), 2, "modern={modern}: {sent:?}");
@@ -2266,6 +2563,7 @@ mod tests {
             runtime.eval("globalThis.result='pending'; globalThis.events=[]; globalThis.reports=[]; document.addEventListener('securitypolicyviolation', e => events.push(e.blockedURI)); new ReportingObserver(batch => reports.push(...batch)).observe(); fetch('/redirect').then(() => result='loaded', error => result=error instanceof TypeError ? 'blocked' : 'wrong-error');").unwrap();
             runtime.run_jobs().unwrap();
             runtime.run_timers(10, 1, 30);
+            wait_for_report_delivery(&mut runtime);
             let observed = runtime.eval("JSON.stringify([result,events,reports.map(r=>[r.body.blockedURL,r.body.disposition]),document.cspViolations.map(v=>v.blockedURI)])").unwrap();
             let observed: serde_json::Value =
                 serde_json::from_str(&observed.as_string().unwrap().to_std_string_escaped())
@@ -2432,6 +2730,7 @@ mod tests {
             .generate_test_report_for_group("missing", "unconfigured")
             .unwrap();
         runtime.run_timers(10, 1, 30);
+        wait_for_report_delivery(&mut runtime);
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 2);
         for (index, (endpoint, body)) in sent.iter().enumerate() {
@@ -2493,10 +2792,154 @@ mod tests {
                 .unwrap();
             runtime.run_jobs().unwrap();
             runtime.run_timers(10, 1, 30);
+            wait_for_report_delivery(&mut runtime);
         }
         assert_eq!(*sent.lock().unwrap(), vec!["https://example.test/reports"]);
         let observed = runtime.eval("JSON.stringify({events, reports})").unwrap();
         assert!(runtime.eval("events.length === 2 && reports.length === 2 && events[0] === 'https://example.test/first' && events[1] === 'https://example.test/second' && reports[1].body.blockedURL === events[1]").unwrap().as_boolean().unwrap(), "{observed:?}");
+    }
+
+    #[test]
+    fn old_gone_response_does_not_remove_reinstalled_endpoint() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::{Receiver, Sender, channel};
+
+        struct GoneFirst {
+            started: Sender<()>,
+            release: Mutex<Receiver<()>>,
+            first: AtomicBool,
+            sent: Arc<Mutex<usize>>,
+        }
+
+        impl crate::http::HttpTransport for GoneFirst {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                assert_eq!(request.url().to_string(), "https://example.test/reports");
+                *self.sent.lock().unwrap() += 1;
+                let response = if self.first.swap(false, Ordering::AcqRel) {
+                    self.started.send(()).unwrap();
+                    let _ = self
+                        .release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(2));
+                    "HTTP/1.1 410 Gone\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+                };
+                crate::http::HttpResponse::parse(&mut response.as_bytes())
+            }
+        }
+
+        let document = crate::html::TreeBuilder::parse("<body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        let headers = [("Reporting-Endpoints".into(), "reports=\"/reports\"".into())];
+        runtime.install_response_security_headers(&headers);
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let sent = Arc::new(Mutex::new(0));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(GoneFirst {
+                started: started_tx,
+                release: Mutex::new(release_rx),
+                first: AtomicBool::new(true),
+                sent: Arc::clone(&sent),
+            })));
+        runtime
+            .generate_test_report_for_group("old", "reports")
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        runtime
+            .generate_test_report_for_group("also old", "reports")
+            .unwrap();
+        runtime.install_response_security_headers(&headers);
+        release_tx.send(()).unwrap();
+        wait_for_report_delivery(&mut runtime);
+        assert_eq!(*sent.lock().unwrap(), 1);
+        let document_id = runtime.document().identity();
+        assert_eq!(
+            runtime.host_state.borrow().document_csp[&document_id].reporting_endpoint("reports"),
+            Some("https://example.test/reports".into())
+        );
+        runtime
+            .generate_test_report_for_group("new", "reports")
+            .unwrap();
+        wait_for_report_delivery(&mut runtime);
+        assert_eq!(*sent.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn queued_reports_finish_after_runtime_teardown() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::{Receiver, Sender, channel};
+
+        struct SlowFirst {
+            first: AtomicBool,
+            started: Sender<()>,
+            release: Mutex<Receiver<()>>,
+            finished: Sender<()>,
+        }
+
+        impl crate::http::HttpTransport for SlowFirst {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                assert_eq!(request.url().to_string(), "https://example.test/reports");
+                if self.first.swap(false, Ordering::AcqRel) {
+                    self.started.send(()).unwrap();
+                    let _ = self
+                        .release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(2));
+                }
+                self.finished.send(()).unwrap();
+                crate::http::HttpResponse::parse(
+                    &mut &b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"[..],
+                )
+            }
+        }
+
+        let document = crate::html::TreeBuilder::parse("<body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_response_security_headers(&[(
+            "Reporting-Endpoints".into(),
+            "reports=\"/reports\"".into(),
+        )]);
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let (finished_tx, finished_rx) = channel();
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(SlowFirst {
+                first: AtomicBool::new(true),
+                started: started_tx,
+                release: Mutex::new(release_rx),
+                finished: finished_tx,
+            })));
+        runtime
+            .generate_test_report_for_group("first", "reports")
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        runtime
+            .generate_test_report_for_group("second", "reports")
+            .unwrap();
+        drop(runtime);
+        release_tx.send(()).unwrap();
+        finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     }
 
     #[test]
@@ -2542,6 +2985,7 @@ mod tests {
         runtime.run_jobs().unwrap();
         assert!(sent.lock().unwrap().is_empty());
         runtime.run_timers(10, 1, 30);
+        wait_for_report_delivery(&mut runtime);
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, "https://example.test/modern");
@@ -2635,6 +3079,7 @@ mod tests {
         runtime.eval("fetch('/blocked').catch(() => {});").unwrap();
         runtime.run_jobs().unwrap();
         runtime.run_timers(10, 1, 30);
+        wait_for_report_delivery(&mut runtime);
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0].0, Method::Options);
@@ -2710,6 +3155,7 @@ mod tests {
         runtime.run_jobs().unwrap();
         assert!(sent.lock().unwrap().is_empty());
         runtime.run_timers(10, 1, 30);
+        wait_for_report_delivery(&mut runtime);
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0].0, Method::Post);
@@ -2774,6 +3220,7 @@ mod tests {
         runtime.deliver_csp_report(document_id, &event.to_string());
         event["sourceFile"] = serde_json::Value::Null;
         runtime.deliver_csp_report(document_id, &event.to_string());
+        wait_for_report_delivery(&mut runtime);
 
         let sent = sent.lock().unwrap();
         let with_source = &sent[0]["csp-report"];
@@ -2881,6 +3328,51 @@ mod tests {
         assert_eq!(*requests.lock().unwrap(), 1);
         // Both the pre-request and post-request checks violate this policy.
         assert!(runtime.eval("fetchResult === 'ok' && roEvents.join(',') === 'report,report' && roReports.length === 2 && roReports.every(r => r.body.disposition === 'report') && document.cspViolations.length === 0").unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn generic_reporting_observer_entry_queues_coop_and_coep() {
+        let document = crate::html::TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        let document_id = runtime.document().identity();
+        runtime.eval("globalThis.received = []; new ReportingObserver(batch => received.push(...batch), {types: ['coop', 'coep']}).observe();").unwrap();
+        assert!(
+            runtime
+                .eval("typeof __omoikane_queue_reporting_api_report === 'undefined'")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        runtime.eval("globalThis.__omoikane_queue_reporting_api_report = () => {}; __omoikane_queue_reporting_api_report({type: 'coop', url: 'https://fake.test/', body: {}}); delete globalThis.__omoikane_queue_reporting_api_report;").unwrap();
+        runtime.run_timers(10, 1, 30);
+        assert_eq!(
+            runtime.eval("received.length").unwrap().as_number(),
+            Some(0.0)
+        );
+        for report_type in ["coop", "coep"] {
+            let report = serde_json::json!({
+                "type": report_type,
+                "url": "https://example.test/document",
+                "age": 0,
+                "user_agent": "test",
+                "body": {"reason": report_type},
+            });
+            runtime
+                .queue_reporting_observer_report(document_id, &report)
+                .unwrap();
+        }
+        runtime.run_timers(10, 1, 30);
+        assert!(runtime.eval("received.length === 2 && received[0].type === 'coop' && received[0].body.reason === 'coop' && received[1].type === 'coep' && received[1].body.reason === 'coep' && received.every(report => report.url === 'https://example.test/document')").unwrap().as_boolean().unwrap());
+        runtime.eval("globalThis.buffered = []; new ReportingObserver(batch => buffered.push(...batch), {types: ['coep'], buffered: true}).observe();").unwrap();
+        runtime.run_timers(10, 1, 30);
+        assert!(
+            runtime
+                .eval("buffered.length === 1 && buffered[0].body.reason === 'coep'")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -3126,6 +3618,17 @@ mod tests {
         );
         assert_eq!(strip_url_for_report("wss://example.test/private"), "wss");
         assert_eq!(strip_url_for_report("inline"), "inline");
+
+        let document = crate::html::TreeBuilder::parse("<body>").document();
+        let runtime = JsRuntime::with_document_and_url(document, "https://example.test/").unwrap();
+        let document_id = runtime.document().identity();
+        let mut state = runtime.host_state.borrow_mut();
+        state
+            .document_reporting
+            .get_mut(&document_id)
+            .unwrap()
+            .creation_url = "not a URL with a secret".into();
+        assert_eq!(state.report_url_for_document(document_id), "");
     }
 
     #[test]

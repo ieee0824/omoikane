@@ -176,6 +176,22 @@ impl Client {
         self.shared_cookie_store = Some(store);
     }
 
+    /// Copies HTTP policy for a background report without sharing live
+    /// connections with the caller's thread. Session cookies and an injected
+    /// transport remain shared, while the local cookie jar is snapshotted.
+    pub(crate) fn fork_for_reporting(&self) -> Self {
+        Self {
+            cookie_jar: self.cookie_jar.clone(),
+            shared_cookie_store: self.shared_cookie_store.clone(),
+            max_redirects: self.max_redirects,
+            user_agent: self.user_agent.clone(),
+            insecure: self.insecure,
+            connections: connection::ConnectionPool::default(),
+            transport: self.transport.clone(),
+            error_reporter: self.error_reporter.clone(),
+        }
+    }
+
     /// Sends a GET request to `url`, following redirects and managing cookies.
     pub fn get(&mut self, url: &str) -> Result<HttpResponse, HttpParseError> {
         let request = HttpRequest::get(url).map_err(|e| {

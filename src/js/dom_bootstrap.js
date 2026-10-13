@@ -1,3 +1,5 @@
+export let __omoikane_queue_reporting_api_report;
+
 (() => {
   // Capture intrinsic identities before author code can replace global Symbol.
   const windowProxyToStringTag = Symbol.toStringTag;
@@ -27721,6 +27723,9 @@
   };
   globalThis.__omoikane_generate_test_report = (message, reportURL) => {
     platformEventInterfaces.queueTestReport(message, reportURL);
+  };
+  __omoikane_queue_reporting_api_report = report => {
+    platformEventInterfaces.queueReport(report);
   };
   globalThis.__omoikane_install_touch_events = factory => {
     Object.assign(platformEventInterfaces, factory({ UIEvent, isTouch: platformEventInterfaces.isTouch }));

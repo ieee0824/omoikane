@@ -107,6 +107,7 @@ mod module_fetch;
 mod module_loading_tests;
 mod node_lifetime;
 mod pointer_lock;
+mod report_delivery;
 pub use pointer_lock::PointerLockTransition;
 #[cfg(test)]
 mod attribute_normalization_tests;
@@ -757,6 +758,20 @@ fn evaluate_dom_bootstrap(
                     .into());
             }
         }
+        // The module namespace is never exposed to page scripts. Capture the
+        // ReportingObserver dispatcher after bootstrap and root it in HostState.
+        let dispatcher = module
+            .namespace(context)
+            .get(js_string!("__omoikane_queue_reporting_api_report"), context)?;
+        if dispatcher.as_callable().is_none() {
+            return Err(JsNativeError::error()
+                .with_message("report observer dispatcher is unavailable")
+                .into());
+        }
+        host_state
+            .borrow_mut()
+            .report_observer_dispatchers
+            .insert(document_id, dispatcher);
         Ok(())
     })();
     loader.bootstrap_modules.borrow_mut().remove(&module);
@@ -1622,6 +1637,8 @@ struct HostState {
     /// Bootstrap-private resolver that accepts only canonical DOM wrappers and
     /// returns their native node identity.
     canonical_node_identity_resolver: Option<JsValue>,
+    /// Bootstrap-private ReportingObserver dispatchers, one per Document Realm.
+    report_observer_dispatchers: HashMap<usize, JsValue>,
     /// Legacy Window.event slots, isolated by the callback's Document realm.
     current_window_events: HashMap<usize, JsValue>,
     window_proxy_registry: Option<window_event::ProxyRegistry>,
@@ -1653,6 +1670,8 @@ struct HostState {
     geolocation: geolocation::State,
     compression_streams: compression_stream::Store,
     http_client: Client,
+    /// Lazily started HTTP worker for best-effort CSP/Reporting delivery.
+    report_delivery: Option<report_delivery::ReportDelivery>,
     cookie_store: Arc<Mutex<crate::http::CookieJar>>,
     websocket_clients: HashMap<u64, WebSocketConnection>,
     next_websocket_id: u64,
@@ -1896,6 +1915,9 @@ unsafe impl Trace for HostState {
         // alive without a separate Trace traversal (Realm exposes no `trace`).
         if let Some(resolver) = &self.canonical_node_identity_resolver {
             unsafe { resolver.trace(tracer) };
+        }
+        for dispatcher in self.report_observer_dispatchers.values() {
+            unsafe { dispatcher.trace(tracer) };
         }
         for bindings in self.bootstrap_bindings.values() {
             unsafe { bindings.trace(tracer) };
@@ -2213,6 +2235,7 @@ impl HostState {
             iframe_navigation: iframe_navigation::State::default(),
             form_validation: form_validation::State::default(),
             canonical_node_identity_resolver: None,
+            report_observer_dispatchers: HashMap::new(),
             current_window_events: HashMap::new(),
             window_proxy_registry: None,
             bootstrap_bindings: HashMap::new(),
@@ -2232,6 +2255,7 @@ impl HostState {
             geolocation: geolocation::State::default(),
             compression_streams: compression_stream::Store::new(),
             http_client,
+            report_delivery: None,
             cookie_store,
             websocket_clients: HashMap::new(),
             next_websocket_id: 1,
@@ -2331,6 +2355,7 @@ impl HostState {
                     response_status: 0,
                     referrer: String::new(),
                     referrer_policy: security_reporting::ReferrerPolicy::default(),
+                    endpoint_revision: 0,
                 },
             )]),
             document_targets: HashMap::new(),
@@ -3496,6 +3521,7 @@ impl HostState {
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
         self.document_reporting.remove(&document_id);
+        self.report_observer_dispatchers.remove(&document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
@@ -3601,6 +3627,7 @@ impl HostState {
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
         self.document_reporting.remove(&document_id);
+        self.report_observer_dispatchers.remove(&document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
@@ -6727,10 +6754,9 @@ impl JsRuntime {
         let document = self.document();
         let base_url = self.host_state.borrow().location_href.clone();
         let policy = CspPolicy::from_headers_and_document(headers, &document, &base_url);
-        self.host_state
-            .borrow_mut()
-            .document_csp
-            .insert(document.identity(), policy);
+        let mut state = self.host_state.borrow_mut();
+        state.advance_report_endpoint_revision(document.identity());
+        state.document_csp.insert(document.identity(), policy);
     }
 
     fn sync_module_csp_violations(&mut self) {

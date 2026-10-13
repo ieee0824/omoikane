@@ -561,6 +561,7 @@ fn inline_sample_is_identical_in_events_observers_and_both_report_transports() {
             ],
             &[(disposition, modern, "\n globalThis.endpointRan = true;")],
         );
+        wait_for_report_delivery(&mut runtime);
         let legacy_event = observed["events"]
             .as_array()
             .unwrap()
