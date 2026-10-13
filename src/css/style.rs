@@ -3246,6 +3246,7 @@ impl StyleResolver {
             &mut component_values,
             &self.media_environment,
         );
+        resolve_outline_auto_color(&mut properties);
         let text_decorations = propagated_text_decorations(
             &properties,
             parent_style,
@@ -4712,6 +4713,11 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     // a winner, so one malformed color cannot hide an earlier valid candidate.
     // This must precede the generic comma-list handling because a single color
     // never accepts a top-level comma-separated list.
+    if name.eq_ignore_ascii_case("outline-color")
+        && matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto"))
+    {
+        return DeclarationValidation::Valid(ComputedValue::Keyword("auto".into()));
+    }
     if is_color_property(name) {
         return validate_color_value(value);
     }
@@ -9151,6 +9157,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             | "border-block-start-width"
             | "border-block-end-width"
             | "column-rule-width"
+            | "outline-width"
     ) && let Value::Keyword(keyword) = value
     {
         let pixels = match keyword.to_ascii_lowercase().as_str() {
@@ -11576,6 +11583,10 @@ const INITIAL_VALUES: &[(&str, InitialValue)] = &[
     ("column-rule-width", InitialValue::Px(3.0)),
     // `column-rule-color`'s initial value is `currentcolor`.
     ("column-rule-color", InitialValue::CurrentColor),
+    ("outline-style", InitialValue::Keyword("none")),
+    ("outline-width", InitialValue::Px(3.0)),
+    ("outline-offset", InitialValue::Px(0.0)),
+    ("outline-color", InitialValue::Keyword("auto")),
     ("break-before", InitialValue::Keyword("auto")),
     ("break-after", InitialValue::Keyword("auto")),
     ("break-inside", InitialValue::Keyword("auto")),
@@ -11799,6 +11810,20 @@ fn resolve_column_rule_current_color(properties: &mut PropertyMap) {
     );
     if is_current_color {
         properties.copy_property("color", "column-rule-color");
+    }
+}
+
+fn resolve_outline_auto_color(properties: &mut PropertyMap) {
+    let color_is_auto = matches!(
+        properties.get(&PropertyId::OutlineColor),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("auto")
+    );
+    let style_is_auto = matches!(
+        properties.get(&PropertyId::OutlineStyle),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("auto")
+    );
+    if color_is_auto && !style_is_auto {
+        properties.copy_property("color", "outline-color");
     }
 }
 

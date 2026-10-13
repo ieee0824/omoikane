@@ -2719,7 +2719,7 @@ fn expand_outline_shorthand(value: Value, important: bool) -> Vec<Declaration> {
         },
         Declaration {
             name: "outline-color".to_string(),
-            value: color.unwrap_or_else(|| Value::Keyword("currentcolor".to_string())),
+            value: color.unwrap_or_else(|| Value::Keyword("auto".to_string())),
             important,
         },
     ]
