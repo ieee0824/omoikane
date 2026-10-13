@@ -5766,11 +5766,33 @@ impl JsRuntime {
     ) -> JsResult<()> {
         let realm = self.ensure_iframe_realm(iframe_id, document_id)?;
         let old_realm = self.context.enter_realm(realm);
-        let script_node = self.host_state.borrow().get_node(script_id);
+        let (script_node, document_url) = {
+            let state = self.host_state.borrow();
+            (
+                state.get_node(script_id),
+                state.document_urls.get(&document_id).cloned(),
+            )
+        };
+        let start_position = script_node
+            .as_ref()
+            .and_then(NodeHandle::script_source_position)
+            .unwrap_or((1, 1));
         self.host_state.borrow_mut().write_insertion_ref = script_node;
         let result = (|| {
             self.eval(&format!("__omoikane_set_current_script({script_id})"))?;
-            self.eval(source)?;
+            let evaluated = self.with_active_host(|context| {
+                let metadata = script_errors::classic_script_metadata(false, document_url.clone());
+                Script::parse_with_host_defined(
+                    Source::from_reader(source.as_bytes(), document_url.as_deref().map(Path::new))
+                        .with_start_position(start_position.0, start_position.1),
+                    None,
+                    metadata,
+                    context,
+                )?
+                .evaluate(context)
+            });
+            self.host_state.borrow_mut().pending_javascript_dialog = None;
+            evaluated?;
             self.run_jobs()
         })();
         let _ = self.eval("__omoikane_set_current_script(null)");

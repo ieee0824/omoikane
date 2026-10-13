@@ -112,6 +112,40 @@ fn local_and_failed_documents_have_fixed_response_metadata() {
 }
 
 #[test]
+fn initial_srcdoc_inline_script_reports_its_own_call_site() {
+    let document = crate::html::TreeBuilder::parse("<body></body>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://example.test/parent").unwrap();
+    runtime.install_csp_policy(&[
+        "script-src 'unsafe-inline'; connect-src 'none'; report-to observations".into(),
+    ]);
+    let child_html = "<body><script>\
+        globalThis.sourceEvent = null;\
+        document.addEventListener('securitypolicyviolation', event => {\
+          sourceEvent = {sourceFile: event.sourceFile, lineNumber: event.lineNumber, columnNumber: event.columnNumber};\
+        });\
+        </script><script>\n  fetch('https://blocked.test/resource').catch(() => {});\n</script>";
+    runtime
+        .eval(&format!(
+            "globalThis.frame=document.createElement('iframe');frame.srcdoc={};document.body.appendChild(frame)",
+            serde_json::to_string(child_html).unwrap()
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+
+    let observed = runtime
+        .eval("JSON.stringify(frame.contentWindow.sourceEvent)")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    let observed: serde_json::Value = serde_json::from_str(&observed).unwrap();
+    assert_eq!(observed["sourceFile"], "about");
+    assert_eq!(observed["lineNumber"], 2);
+    assert_eq!(observed["columnNumber"], 3);
+}
+
+#[test]
 fn iframe_get_loads_handle_blank_data_and_unreachable_references() {
     let document = crate::html::TreeBuilder::parse("<p>top</p>").document();
     let runtime = JsRuntime::with_document(document).unwrap();
