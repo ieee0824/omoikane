@@ -35,6 +35,10 @@ use crate::{
 };
 use boa_gc::{Finalize, GcRefCell, Trace};
 use rustc_hash::FxHashSet;
+
+#[cfg(test)]
+mod tests;
+
 /// Javascript `Proxy` object.
 #[derive(Debug, Clone, Trace, Finalize)]
 pub struct Proxy {
@@ -288,6 +292,8 @@ pub(crate) fn proxy_exotic_get_prototype_of(
                 .into());
         }
     };
+    // The target's extensibility and prototype checks can re-enter JavaScript.
+    let _handler_proto_root = handler_proto.as_ref().map(|obj| obj.clone().root());
 
     // 9. Let extensibleTarget be ? IsExtensible(target).
     // 10. If extensibleTarget is true, return handlerProto.
@@ -500,6 +506,9 @@ pub(crate) fn proxy_exotic_get_own_property(
             .with_message("Proxy trap result is neither object nor undefined")
             .into());
     }
+    // Target checks and descriptor conversion can re-enter JavaScript before
+    // the trap result has been converted to an owned descriptor.
+    let _trap_result_root = trap_result_obj.as_object().map(JsObject::root);
 
     // 9. Let targetDesc be ? target.[[GetOwnProperty]](P).
     let target_desc = target.__get_own_property__(key, context)?;
@@ -1033,6 +1042,8 @@ pub(crate) fn proxy_exotic_own_property_keys(
 
     // 7. Let trapResultArray be ? Call(trap, handler, « target »).
     let trap_result_array = trap.call(&handler.into(), &[target.clone().into()], context)?;
+    // Array-like length and indexed reads can re-enter JavaScript.
+    let _trap_result_root = trap_result_array.as_object().map(JsObject::root);
 
     // 8. Let trapResult be ? CreateListFromArrayLike(trapResultArray, « String, Symbol »).
     let trap_result_raw =
