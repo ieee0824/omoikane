@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    html, body { margin: 0; background: white; }
+    .box { position: absolute; width: 20px; height: 20px; background: #dddddd; }
+    #plain { left: 20px; top: 20px; outline: 3px solid red; }
+    #offset { left: 60px; top: 20px; outline: 2px solid blue; outline-offset: 4px; }
+    #inset { left: 100px; top: 20px; outline: 2px solid green; outline-offset: -4px; }
+    #hidden { left: 140px; top: 20px; overflow: hidden; outline: 2px solid purple; }
+    #round { left: 180px; top: 20px; border-radius: 8px; outline: 2px solid orange; }
+    #none { left: 220px; top: 20px; outline: 3px none red; }
+    #current { left: 20px; top: 60px; color: #008000; outline: 2px solid; outline-color: currentColor; }
+    #zero { left: 60px; top: 60px; outline: 0 solid red; }
+  </style>
+</head>
+<body>
+  <div id="plain" class="box"></div>
+  <div id="offset" class="box"></div>
+  <div id="inset" class="box"></div>
+  <div id="hidden" class="box"></div>
+  <div id="round" class="box"></div>
+  <div id="none" class="box"></div>
+  <div id="current" class="box"></div>
+  <div id="zero" class="box"></div>
+</body>
+</html>

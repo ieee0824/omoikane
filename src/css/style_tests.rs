@@ -8283,6 +8283,130 @@ fn outline_shorthand_expands_to_longhands_with_correct_values() {
 }
 
 #[test]
+fn outline_initials_and_width_keywords_have_computed_values() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    let initial = resolver.computed_style(&element);
+    assert_eq!(
+        initial.get("outline-style"),
+        Some(&ComputedValue::Keyword("none".into()))
+    );
+    assert_eq!(initial.get("outline-width"), Some(&ComputedValue::Px(3.0)));
+    assert_eq!(initial.get("outline-offset"), Some(&ComputedValue::Px(0.0)));
+    assert_eq!(initial.get("outline-color"), initial.get("color"));
+
+    element.set_attribute("style", "outline: solid; outline-offset: -4px");
+    resolver.invalidate_style_cache_for_test();
+    let solid = resolver.computed_style(&element);
+    assert_eq!(solid.get("outline-width"), Some(&ComputedValue::Px(3.0)));
+    assert_eq!(solid.get("outline-offset"), Some(&ComputedValue::Px(-4.0)));
+    assert_eq!(solid.get("outline-color"), solid.get("color"));
+
+    element.set_attribute(
+        "style",
+        "color: blue; outline-style: solid; outline-color: auto; outline-width: thick",
+    );
+    resolver.invalidate_style_cache_for_test();
+    let blue = resolver.computed_style(&element);
+    assert_eq!(blue.get("outline-color"), blue.get("color"));
+    assert_eq!(blue.get("outline-width"), Some(&ComputedValue::Px(5.0)));
+
+    element.set_attribute("style", "outline-style: auto; outline-color: auto");
+    resolver.invalidate_style_cache_for_test();
+    let automatic = resolver.computed_style(&element);
+    assert_eq!(
+        automatic.get("outline-color"),
+        Some(&ComputedValue::Keyword("auto".into()))
+    );
+}
+
+#[test]
+fn outline_auto_color_tracks_animated_text_color_and_outline_style() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes recolor { from { color: red } to { color: blue } } \
+             div { color: red; outline: 2px solid; outline-color: auto; \
+             animation: recolor 1s linear forwards }",
+        )
+        .unwrap(),
+    );
+    resolver.set_animation_time_ms(0.0);
+    resolver.computed_style(&element);
+    resolver.set_animation_time_ms(500.0);
+    let animated_color = resolver.computed_style(&element);
+    assert_ne!(
+        animated_color.get("color"),
+        Some(&ComputedValue::Color("red".into()))
+    );
+    assert_ne!(
+        animated_color.get("color"),
+        Some(&ComputedValue::Color("blue".into()))
+    );
+    assert_eq!(
+        animated_color.get("outline-color"),
+        animated_color.get("color")
+    );
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes stroke { from { outline-style: auto } to { outline-style: solid } } \
+             div { color: blue; outline-style: auto; outline-color: auto; \
+             animation: stroke 1s linear forwards }",
+        )
+        .unwrap(),
+    );
+    resolver.set_animation_time_ms(0.0);
+    let initial_style = resolver.computed_style(&element);
+    assert_eq!(
+        initial_style.get("outline-color"),
+        Some(&ComputedValue::Keyword("auto".into()))
+    );
+    resolver.set_animation_time_ms(1000.0);
+    let animated_style = resolver.computed_style(&element);
+    assert_eq!(
+        animated_style.get("outline-style"),
+        Some(&ComputedValue::Keyword("solid".into()))
+    );
+    assert_eq!(
+        animated_style.get("outline-color"),
+        animated_style.get("color")
+    );
+}
+
+#[test]
+fn outline_auto_color_tracks_transitioned_text_color() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "color:red;outline:2px solid;outline-color:auto;transition:color 1s linear",
+    );
+    let mut resolver = StyleResolver::new();
+    resolver.computed_style(&element);
+    element.set_attribute(
+        "style",
+        "color:blue;outline:2px solid;outline-color:auto;transition:color 1s linear",
+    );
+    resolver.invalidate_style_cache_for_test();
+    resolver.computed_style(&element);
+    resolver.set_transition_time_ms(500.0);
+    let middle = resolver.computed_style(&element);
+    assert_ne!(
+        middle.get("color"),
+        Some(&ComputedValue::Color("red".into()))
+    );
+    assert_ne!(
+        middle.get("color"),
+        Some(&ComputedValue::Color("blue".into()))
+    );
+    assert_eq!(middle.get("outline-color"), middle.get("color"));
+}
+
+#[test]
 fn outline_none_resets_all_longhands() {
     use crate::css::{Rule, Value, parse_stylesheet};
 
@@ -8311,7 +8435,7 @@ fn outline_none_resets_all_longhands() {
         .iter()
         .find(|d| d.name == "outline-color")
         .expect("outline: none should reset outline-color");
-    assert_eq!(color_decl.value, Value::Keyword("currentcolor".to_string()));
+    assert_eq!(color_decl.value, Value::Keyword("auto".to_string()));
 }
 
 #[test]

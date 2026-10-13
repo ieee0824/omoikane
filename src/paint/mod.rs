@@ -8,6 +8,7 @@ pub(crate) mod color;
 pub(crate) mod color4;
 pub(crate) mod form_control;
 pub(crate) mod image;
+mod outline;
 mod print_budget;
 
 pub use print_budget::{MAX_PRINT_DOCUMENT_PIXELS, MAX_PRINT_PAGE_DIMENSION};
@@ -406,9 +407,10 @@ pub enum DataUri {
     Binary { mime_type: String, data: Vec<u8> },
 }
 
-/// ボーダー描画で使う領域区分（角丸ボーダー時の色割り当て用）。
+/// Regions for rounded border and outline annulus painting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BorderRegion {
+    All,
     Top,
     Bottom,
     Left,
@@ -734,10 +736,10 @@ impl Canvas {
             .min(outer.height / 2.0)
             .max(0.0);
 
-        // Scan narrow edge strips plus corner squares. This keeps thin pill
-        // borders proportional to their perimeter instead of scanning the
-        // entire border-box area.
+        // Scan narrow edge strips plus corner squares. A uniform outline
+        // uses All so translucent rounded corners are blended only once.
         let strip = match region {
+            BorderRegion::All => outer,
             BorderRegion::Top => Rect {
                 x: outer.x,
                 y: outer.y,
@@ -813,38 +815,79 @@ impl Canvas {
         let y0 = strip.y.floor().max(0.0) as i32;
         let x1 = (strip.x + strip.width).ceil().min(self.width as f32) as i32;
         let y1 = (strip.y + strip.height).ceil().min(self.height as f32) as i32;
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
 
-        for py in y0..y1 {
-            for px in x0..x1 {
-                let fx = px as f32 + 0.5;
-                let fy = py as f32 + 0.5;
+        let mut scan_regions = [(x0, y0, x1, y1); 4];
+        let scan_count = if region == BorderRegion::All {
+            // The corner squares fit within the top/bottom bands. Split any
+            // overlapping bands at the midpoint, then scan only the side
+            // strips between them. These four ranges are disjoint, so an
+            // antialiased, translucent pixel is never blended twice.
+            let middle_y = ((outer.y + outer.height / 2.0).floor() as i32).clamp(y0, y1);
+            let top_reach = border_width.max(outer_tl.max(outer_tr));
+            let bottom_reach = border_width.max(outer_bl.max(outer_br));
+            let top_end = ((outer.y + top_reach).ceil() as i32)
+                .clamp(y0, y1)
+                .min(middle_y);
+            let bottom_start = ((outer.y + outer.height - bottom_reach).floor() as i32)
+                .clamp(y0, y1)
+                .max(middle_y);
+            let middle_x = ((outer.x + outer.width / 2.0).floor() as i32).clamp(x0, x1);
+            let left_end = ((outer.x + border_width).ceil() as i32)
+                .clamp(x0, x1)
+                .min(middle_x);
+            let right_start = ((outer.x + outer.width - border_width).floor() as i32)
+                .clamp(x0, x1)
+                .max(middle_x);
+            scan_regions = [
+                (x0, y0, x1, top_end),
+                (x0, bottom_start, x1, y1),
+                (x0, top_end, left_end, bottom_start),
+                (right_start, top_end, x1, bottom_start),
+            ];
+            4
+        } else {
+            1
+        };
 
-                // クリップチェック（ピクセル中心を基準に判定）
-                if let Some(ca) = clip_area
-                    && (fx < ca.x || fx >= ca.x + ca.width || fy < ca.y || fy >= ca.y + ca.height)
-                {
-                    continue;
+        for &(region_x0, region_y0, region_x1, region_y1) in &scan_regions[..scan_count] {
+            for py in region_y0..region_y1 {
+                for px in region_x0..region_x1 {
+                    let fx = px as f32 + 0.5;
+                    let fy = py as f32 + 0.5;
+
+                    // クリップチェック（ピクセル中心を基準に判定）
+                    if let Some(ca) = clip_area
+                        && (fx < ca.x
+                            || fx >= ca.x + ca.width
+                            || fy < ca.y
+                            || fy >= ca.y + ca.height)
+                    {
+                        continue;
+                    }
+
+                    let outer_coverage = rounded_rect_pixel_coverage(
+                        px,
+                        py,
+                        outer,
+                        (outer_tl, outer_tr, outer_br, outer_bl),
+                    );
+                    let inner_coverage = rounded_rect_pixel_coverage(
+                        px,
+                        py,
+                        inner,
+                        (inner_tl, inner_tr, inner_br, inner_bl),
+                    );
+                    let coverage = (outer_coverage - inner_coverage).clamp(0.0, 1.0);
+                    if coverage <= 0.0 {
+                        continue;
+                    }
+
+                    let index = ((py as u32 * self.width + px as u32) * 4) as usize;
+                    blend_pixel_with_coverage(&mut self.pixels[index..index + 4], color, coverage);
                 }
-
-                let outer_coverage = rounded_rect_pixel_coverage(
-                    px,
-                    py,
-                    outer,
-                    (outer_tl, outer_tr, outer_br, outer_bl),
-                );
-                let inner_coverage = rounded_rect_pixel_coverage(
-                    px,
-                    py,
-                    inner,
-                    (inner_tl, inner_tr, inner_br, inner_bl),
-                );
-                let coverage = (outer_coverage - inner_coverage).clamp(0.0, 1.0);
-                if coverage <= 0.0 {
-                    continue;
-                }
-
-                let index = ((py as u32 * self.width + px as u32) * 4) as usize;
-                blend_pixel_with_coverage(&mut self.pixels[index..index + 4], color, coverage);
             }
         }
     }
@@ -3773,6 +3816,9 @@ fn subtree_paint_bounds_internal(
     }
 
     let style = paint_box_style(layout, resolver);
+    if let Some(outline_bounds) = outline::solid_outline_bounds(&style, border_box_rect(layout)) {
+        bounds = union_rect(bounds, outline_bounds);
+    }
     let shadow_value = match style.get("box-shadow") {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
             Some(value.as_str())
@@ -4379,6 +4425,7 @@ fn paint_box_internal_to(
         // empty child list.
         if paint_decorations {
             border::paint_borders(canvas, layout, style, inherited_clip, offset);
+            outline::paint_solid_outline(canvas, style, border_box, inherited_clip);
         }
         return;
     }
@@ -4457,6 +4504,9 @@ fn paint_box_internal_to(
     }
     for child in positive_positioned_children {
         paint_box_internal(canvas, child, resolver, context, phase_options);
+    }
+    if paint_decorations {
+        outline::paint_solid_outline(canvas, style, border_box, inherited_clip);
     }
 }
 
@@ -7737,6 +7787,8 @@ impl Canvas {
 mod font_data_url_tests;
 #[cfg(test)]
 mod font_selection_tests;
+#[cfg(test)]
+mod outline_tests;
 #[cfg(test)]
 mod tests;
 
