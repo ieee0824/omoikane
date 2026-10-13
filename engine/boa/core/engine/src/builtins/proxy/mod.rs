@@ -35,6 +35,10 @@ use crate::{
 };
 use boa_gc::{Finalize, GcRefCell, Trace};
 use rustc_hash::FxHashSet;
+
+#[cfg(test)]
+mod tests;
+
 /// Javascript `Proxy` object.
 #[derive(Debug, Clone, Trace, Finalize)]
 pub struct Proxy {
@@ -822,6 +826,9 @@ pub(crate) fn proxy_exotic_get(
         &[target.clone().into(), key.clone().into(), receiver],
         context,
     )?;
+    // The invariant check below can re-enter JavaScript through a Proxy target
+    // and collect before this result has been published to a VM register.
+    let _trap_result_root = trap_result.as_object().map(JsObject::root);
 
     // 8. Let targetDesc be ? target.[[GetOwnProperty]](P).
     let target_desc = target.__get_own_property__(key, context)?;
