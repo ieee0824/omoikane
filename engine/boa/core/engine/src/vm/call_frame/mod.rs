@@ -4,7 +4,7 @@
 
 use super::{ActiveRunnable, ActiveRunnableEdge};
 use crate::{
-    JsValue,
+    HostDefined, JsValue,
     builtins::iterable::IteratorRecord,
     environments::{EnvironmentStack, EnvironmentStackEdges},
     realm::{Realm, RealmEdge},
@@ -114,6 +114,21 @@ where
             function_name: source_info.function_name().clone(),
             path: source_info.map().path().clone(),
             position: source_info.map().find(self.pc),
+        }
+    }
+}
+
+impl<H, E, R> CallFrame<H, E, R, ActiveRunnable> {
+    /// Returns the `[[HostDefined]]` data for this frame's script or module.
+    ///
+    /// The data belongs to the runnable stored on this frame, allowing hosts to
+    /// associate it with the same frame's [`Self::position`] in a stack trace.
+    /// Returns [`None`] when the frame has no active script or module.
+    #[must_use]
+    pub fn script_or_module_host_defined(&self) -> Option<&HostDefined> {
+        match self.active_runnable.as_ref()? {
+            ActiveRunnable::Script(script) => Some(script.host_defined()),
+            ActiveRunnable::Module(module) => Some(module.host_defined()),
         }
     }
 }
