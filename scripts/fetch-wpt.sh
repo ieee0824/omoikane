@@ -30,7 +30,8 @@ collect_pattern \
   "/trusted-types/TrustedTypePolicyFactory-createPolicy-unenforced.html" \
   "/trusted-types/TrustedTypePolicyFactory-isXXX.html" \
   "/trusted-types/TrustedTypePolicyFactory-createPolicy-cspTests.html" \
-  "/trusted-types/trusted-types-reporting-for-Element-innerHTML.html"
+  "/trusted-types/trusted-types-reporting-for-Element-innerHTML.html" \
+  "/trusted-types/trusted-types-reporting-for-DOMParser-parseFromString.html"
 collect_pattern \
   "/dom/events/AddEventListenerOptions-once.any.js" \
   "/dom/events/AddEventListenerOptions-passive.any.js" \

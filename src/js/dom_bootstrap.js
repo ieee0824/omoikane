@@ -504,7 +504,7 @@ export let __omoikane_cookie_change_reset;
     if (callback === undefined) {
       throw new IntrinsicTypeError("TrustedTypePolicy callback is missing");
     }
-    const output = safeApply(callback, undefined, [intrinsicString(input), ...extra]);
+    const output = safeApply(callback, undefined, [toDOMString(input), ...extra]);
     return createTrustedType(kind, output == null ? "" : output);
   }
 
@@ -532,9 +532,18 @@ export let __omoikane_cookie_change_reset;
       safeWeakMapSet(trustedPolicyStates, this, { name, ...options });
     }
     get name() { return policyState(this).name; }
-    createHTML(input, ...args) { return policyCreate(this, 0, input, args); }
-    createScript(input, ...args) { return policyCreate(this, 1, input, args); }
-    createScriptURL(input, ...args) { return policyCreate(this, 2, input, args); }
+    createHTML(input, ...args) {
+      if (arguments.length === 0) throw new IntrinsicTypeError("createHTML requires 1 argument");
+      return policyCreate(this, 0, input, args);
+    }
+    createScript(input, ...args) {
+      if (arguments.length === 0) throw new IntrinsicTypeError("createScript requires 1 argument");
+      return policyCreate(this, 1, input, args);
+    }
+    createScriptURL(input, ...args) {
+      if (arguments.length === 0) throw new IntrinsicTypeError("createScriptURL requires 1 argument");
+      return policyCreate(this, 2, input, args);
+    }
   }
 
   class TrustedTypePolicyFactory {
@@ -544,7 +553,7 @@ export let __omoikane_cookie_change_reset;
     createPolicy(name, options) {
       if (this !== trustedTypes) throw new IntrinsicTypeError("Illegal TrustedTypePolicyFactory receiver");
       if (arguments.length === 0) throw new IntrinsicTypeError("Policy name is required");
-      name = intrinsicString(name);
+      name = toDOMString(name);
       const dictionary = options == null ? {} : Object(options);
       const callbacks = {
         createHTML: dictionary.createHTML,
@@ -606,17 +615,19 @@ export let __omoikane_cookie_change_reset;
   globalThis.TrustedTypePolicyFactory = TrustedTypePolicyFactory;
   Object.defineProperty(globalThis, "trustedTypes", { value: trustedTypes, configurable: true });
 
-  function trustedHTMLForSink(value, nodeId) {
+  function trustedHTMLForSink(value, nodeId, sinkName = "Element innerHTML", convertedString) {
     if (nativeTrustedTypeIs(value, 0)) return nativeTrustedTypeValue(value, 0);
-    const input = value == null ? "" : intrinsicString(value);
+    // DOMParser converts its first Web IDL argument before validating MIME;
+    // reuse that string rather than invoking an author-defined coercion twice.
+    const input = arguments.length >= 4 ? convertedString : value == null ? "" : toDOMString(value);
     if (!nativeTrustedTypeSinkRequires(nodeId)) return input;
     const callback = nativeTrustedTypeDefaultHTMLForNode(nodeId);
     if (typeof callback === "function") {
-      const converted = safeApply(callback, undefined, [input, "TrustedHTML", "Element innerHTML"]);
-      if (converted != null) return intrinsicString(converted);
+      const converted = safeApply(callback, undefined, [input, "TrustedHTML", sinkName]);
+      if (converted != null) return toDOMString(converted);
     }
-    if (!nativeTrustedTypeSinkViolation(nodeId, input)) {
-      throw new IntrinsicTypeError("TrustedHTML is required for Element innerHTML");
+    if (!nativeTrustedTypeSinkViolation(nodeId, input, sinkName)) {
+      throw new IntrinsicTypeError(`TrustedHTML is required for ${sinkName}`);
     }
     return input;
   }
@@ -20378,13 +20389,15 @@ export let __omoikane_cookie_change_reset;
   globalThis.DOMParser = class DOMParser {
     parseFromString(source, type) {
       if (arguments.length < 2) throw new TypeError("parseFromString requires 2 arguments");
-      const input = String(source);
-      const mime = String(type).toLowerCase();
+      const trustedHTML = nativeTrustedTypeIs(source, 0);
+      const input = trustedHTML ? nativeTrustedTypeValue(source, 0) : toDOMString(source);
+      const mime = toDOMString(type).toLowerCase();
       const supported = ["text/html", "text/xml", "application/xml", "application/xhtml+xml", "image/svg+xml"];
       if (!supported.includes(mime)) throw new TypeError("Unsupported DOMParser MIME type: " + mime);
       if (mime === "text/html") {
+        const html = trustedHTMLForSink(source, document.__id, "DOMParser parseFromString", input);
         const parsed = document.implementation.createHTMLDocument("");
-        parsed.body.innerHTML = input;
+        parsed.body.innerHTML = createTrustedType(0, html);
         return parsed;
       }
       const parsedId = __omoikane_parse_xml(input);

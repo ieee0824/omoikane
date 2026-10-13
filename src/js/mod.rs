@@ -12253,7 +12253,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_trusted_type_sink_violation"),
-            2,
+            3,
             NativeFunction::from_copy_closure(trusted_types::sink_violation_native),
         ),
         (

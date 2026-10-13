@@ -516,6 +516,7 @@
     {"path": "trusted-types/TrustedTypePolicyFactory-isXXX.html"},
     {"path": "trusted-types/TrustedTypePolicyFactory-createPolicy-cspTests.html"},
     {"path": "trusted-types/trusted-types-reporting-for-Element-innerHTML.html"},
+    {"path": "trusted-types/trusted-types-reporting-for-DOMParser-parseFromString.html"},
     {"path": "reporting/idlharness.any.js"},
     {"path": "reporting/bufferSize.html"},
     {"path": "reporting/disconnect.html"},

@@ -190,6 +190,12 @@ pub(super) fn sink_violation_native(
         .cloned()
         .unwrap_or_default()
         .to_string(context)?;
+    let sink_name = args
+        .get(2)
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
     let source = super::security_reporting::capture_csp_source(context);
     with_host_state(|host| {
         let (document_id, blocking, reporting) = {
@@ -202,7 +208,7 @@ pub(super) fn sink_violation_native(
         };
         let allowed = blocking.is_empty();
         let sample = format!(
-            "Element innerHTML|{}",
+            "{sink_name}|{}",
             csp::inline_report_sample(&source_text.to_std_string_escaped())
         );
         let mut state = host.borrow_mut();

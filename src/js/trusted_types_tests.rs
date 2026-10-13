@@ -40,6 +40,11 @@ fn trusted_values_have_unforgeable_brands_and_policy_callbacks() {
           (() => { try { new TrustedTypePolicyFactory(); return false; } catch(e) { return e instanceof TypeError; } })(),
           (() => { try { policy.createHTML.call(forged, 'x'); return false; } catch(e) { return e instanceof TypeError; } })(),
           (() => { try { trustedTypes.isHTML.call({}, html); return false; } catch(e) { return e instanceof TypeError; } })(),
+          (() => { try { trustedTypes.createPolicy(Symbol(), {}); return false; } catch(e) { return e instanceof TypeError; } })(),
+          (() => { try { policy.createHTML(Symbol()); return false; } catch(e) { return e instanceof TypeError; } })(),
+          (() => { try { policy.createHTML(); return false; } catch(e) { return e instanceof TypeError; } })(),
+          (() => { try { policy.createScript(); return false; } catch(e) { return e instanceof TypeError; } })(),
+          (() => { try { policy.createScriptURL(); return false; } catch(e) { return e instanceof TypeError; } })(),
           trustedTypes.createPolicy('app', {}).name === 'app',
         ];
         checks.every(Boolean)
@@ -214,5 +219,75 @@ fn sink_uses_owning_document_policy_and_accepts_cross_realm_trusted_html() {
         rejected && preserved && crossRealmBrand &&
           target.firstChild.id === 'safe' && !frame.contentDocument.getElementById('blocked')
         "#,
+    );
+}
+
+#[test]
+fn dom_parser_gates_html_in_the_calling_document_before_creating_a_document() {
+    let mut runtime = runtime("<body>");
+    runtime.install_response_security_headers(&[(
+        "Content-Security-Policy".into(),
+        "require-trusted-types-for 'script'".into(),
+    )]);
+    assert_js_true(
+        &mut runtime,
+        r#"
+        globalThis.violations = [];
+        document.addEventListener('securitypolicyviolation', e => violations.push(e));
+        const parser = new DOMParser();
+        const implementationGetter = Object.getOwnPropertyDescriptor(Document.prototype, 'implementation').get;
+        let documentCreations = 0;
+        Object.defineProperty(document, 'implementation', { configurable: true, get() {
+          documentCreations++;
+          return implementationGetter.call(this);
+        }});
+        let rejected = false;
+        try { parser.parseFromString('<p id="blocked">bad</p>', 'text/html'); }
+        catch (e) { rejected = e instanceof TypeError; }
+        const rejectedBeforeCreation = rejected && documentCreations === 0;
+        const policy = trustedTypes.createPolicy('parser', {createHTML: s => s});
+        const trustedDocument = parser.parseFromString(policy.createHTML('<b id="trusted">safe</b>'), 'text/html');
+        const xmlDocument = parser.parseFromString('<root/>', 'text/xml');
+        let callbackArguments;
+        trustedTypes.createPolicy('default', {createHTML: (input, type, sink) => {
+          callbackArguments = [input, type, sink];
+          return input.replace('raw', 'safe');
+        }});
+        const convertedDocument = parser.parseFromString('<i>raw</i>', 'text/html');
+        delete document.implementation;
+        rejectedBeforeCreation && documentCreations === 2 &&
+          trustedDocument.body.firstChild.id === 'trusted' &&
+          xmlDocument.documentElement !== null &&
+          convertedDocument.body.innerHTML === '<i>safe</i>' &&
+          callbackArguments.join('|') === '<i>raw</i>|TrustedHTML|DOMParser parseFromString'
+        "#,
+    );
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "violations.length === 1 && violations[0].sample === 'DOMParser parseFromString|<p id=\"blocked\">bad</p>' && violations[0].blockedURI === 'trusted-types-sink'",
+    );
+}
+
+#[test]
+fn dom_parser_report_only_allows_html_and_reports() {
+    let mut runtime = runtime("<body>");
+    runtime.install_response_security_headers(&[(
+        "Content-Security-Policy-Report-Only".into(),
+        "require-trusted-types-for 'script'".into(),
+    )]);
+    assert_js_true(
+        &mut runtime,
+        r#"
+        globalThis.violations = [];
+        document.addEventListener('securitypolicyviolation', e => violations.push(e));
+        new DOMParser().parseFromString('<p id="allowed">plain</p>', 'text/html')
+          .body.firstChild.id === 'allowed'
+        "#,
+    );
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "violations.length === 1 && violations[0].disposition === 'report' && violations[0].sample === 'DOMParser parseFromString|<p id=\"allowed\">plain</p>'",
     );
 }
