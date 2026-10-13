@@ -146,6 +146,9 @@ mod html_sanitizer;
 mod html_serialization;
 mod security_reporting;
 mod storage;
+mod storage_access;
+#[cfg(test)]
+mod storage_access_tests;
 mod stylesheet;
 use csp::{CspPolicy, CspViolation, ResourceType};
 use event_loop::{EventLoop, Task};
@@ -1855,6 +1858,10 @@ struct HostState {
     /// when several same-origin Window realms share this runtime.
     web_lock_clients: HashMap<usize, u64>,
     document_origins: HashMap<usize, Option<StorageOrigin>>,
+    /// Grants are scoped to a top-level site and embedded origin for this browsing session.
+    storage_access_grants: HashSet<(crate::http::SchemefulSite, StorageOrigin)>,
+    /// Set only by the embedder while it dispatches a real activation input.
+    trusted_storage_access_input: bool,
     /// Visibility of this top-level traversable, shared by its iframe Documents.
     page_hidden: bool,
     live_css_animations: bool,
@@ -2082,6 +2089,7 @@ struct IframeSandboxPolicy {
     active: bool,
     allow_scripts: bool,
     allow_same_origin: bool,
+    allow_storage_access_by_user_activation: bool,
     allow_pointer_lock: bool,
     allow_forms: bool,
     allow_top_navigation: bool,
@@ -2093,6 +2101,7 @@ impl Default for IframeSandboxPolicy {
             active: false,
             allow_scripts: true,
             allow_same_origin: true,
+            allow_storage_access_by_user_activation: true,
             allow_pointer_lock: true,
             allow_forms: true,
             allow_top_navigation: true,
@@ -2113,6 +2122,8 @@ impl IframeSandboxPolicy {
             active: true,
             allow_scripts: tokens.contains("allow-scripts"),
             allow_same_origin: tokens.contains("allow-same-origin"),
+            allow_storage_access_by_user_activation: tokens
+                .contains("allow-storage-access-by-user-activation"),
             allow_pointer_lock: tokens.contains("allow-pointer-lock"),
             allow_forms: tokens.contains("allow-forms"),
             allow_top_navigation: tokens.contains("allow-top-navigation"),
@@ -2376,6 +2387,8 @@ impl HostState {
             storage_session_id,
             web_lock_clients,
             document_origins,
+            storage_access_grants: HashSet::new(),
+            trusted_storage_access_input: false,
             page_hidden: false,
             live_css_animations: false,
             image_timeline: Arc::new(Mutex::new(HashMap::new())),
@@ -11712,6 +11725,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(cookie_store::changes_native),
         ),
         (
+            js_string!("__omoikane_storage_access_state"),
+            1,
+            NativeFunction::from_copy_closure(storage_access::storage_access_state_native),
+        ),
+        (
+            js_string!("__omoikane_storage_access_request"),
+            2,
+            NativeFunction::from_copy_closure(storage_access::storage_access_request_native),
+        ),
+        (
             js_string!("__omoikane_document_visibility_state"),
             1,
             NativeFunction::from_copy_closure(document_visibility_state_native),
@@ -13332,10 +13355,7 @@ fn document_cookie_get_native(
     ensure_same_origin_document(context, document_id)?;
     with_host_state(|state| {
         let state = state.borrow();
-        let visible = state
-            .document_origins
-            .get(&document_id)
-            .is_some_and(Option::is_some);
+        let visible = state.storage_access_allows_document_cookies(document_id);
         let document_url = state
             .document_urls
             .get(&document_id)
@@ -13376,11 +13396,7 @@ fn document_cookie_set_native(
         .to_std_string_escaped();
     with_host_state(|state| {
         let state = state.borrow();
-        if !state
-            .document_origins
-            .get(&document_id)
-            .is_some_and(Option::is_some)
-        {
+        if !state.storage_access_allows_document_cookies(document_id) {
             return Ok(JsValue::undefined());
         }
         if let Some(url) = state
