@@ -54,9 +54,15 @@ pub(super) fn evaluate_worker_initial_script(
     context: &mut Context,
     source: &str,
     url: &str,
+    csp_requested_url: &str,
 ) -> JsResult<WorkerScriptOutcome> {
     let input = Source::from_reader(source.as_bytes(), Some(Path::new(url)));
-    let script = match Script::parse(input, None, context) {
+    let script = match Script::parse_with_host_defined(
+        input,
+        None,
+        classic_script_metadata(false, Some(csp_requested_url.to_owned())),
+        context,
+    ) {
         Ok(script) => script,
         Err(error) => {
             if error
@@ -91,13 +97,23 @@ struct ExceptionReport {
 #[derive(Debug, Trace, Finalize, boa_engine::JsData)]
 pub(super) struct ClassicScriptMetadata {
     pub(super) muted_errors: bool,
+    /// Initial request URL used by CSP reports, kept separate from the
+    /// effective filename used by ErrorEvent and module resolution.
+    #[unsafe_ignore_trace]
+    pub(super) csp_requested_url: Option<String>,
 }
 
 /// Builds the single provenance snapshot used by active and unwound scripts.
-pub(super) fn classic_script_metadata(muted_errors: bool) -> boa_engine::HostDefined {
+pub(super) fn classic_script_metadata(
+    muted_errors: bool,
+    csp_requested_url: Option<String>,
+) -> boa_engine::HostDefined {
     let mut metadata = boa_engine::HostDefined::default();
     metadata.insert(boa_engine::error::ScriptErrorMetadata::new(
-        ClassicScriptMetadata { muted_errors },
+        ClassicScriptMetadata {
+            muted_errors,
+            csp_requested_url,
+        },
     ));
     metadata
 }
@@ -887,7 +903,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         runtime.eval("globalThis.reports=[];addEventListener('unhandledrejection',e=>{reports.push('reject');e.preventDefault()});addEventListener('rejectionhandled',()=>reports.push('handle')); ").unwrap();
         runtime.with_active_host(|context| {
-            let metadata = classic_script_metadata(true);
+            let metadata = classic_script_metadata(true, None);
             let script = Script::parse_with_host_defined(
                 Source::from_bytes("globalThis.mutedReject=()=>Promise.reject(42);globalThis.mutedHandle=p=>p.catch(()=>{});"),
                 None, metadata, context)?;

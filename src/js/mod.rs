@@ -1311,6 +1311,7 @@ pub enum PageTaskSource {
 struct PreparedPageSource {
     source: PageTaskSource,
     filename: Option<String>,
+    csp_requested_url: Option<String>,
     start_position: (u32, u32),
     muted_errors: bool,
 }
@@ -1320,6 +1321,7 @@ impl From<PageTaskSource> for PreparedPageSource {
         Self {
             source,
             filename: None,
+            csp_requested_url: None,
             start_position: (1, 1),
             muted_errors: false,
         }
@@ -3732,6 +3734,24 @@ impl HostState {
         );
     }
 
+    fn record_csp_violation_with_source(
+        &mut self,
+        document: &NodeHandle,
+        resource_type: ResourceType,
+        blocked_uri: impl Into<String>,
+        source: Option<&security_reporting::CspSourceLocation>,
+    ) {
+        let blocked_uri = blocked_uri.into();
+        self.record_csp_violation_for_request_with_source(
+            document,
+            resource_type,
+            &blocked_uri,
+            0,
+            &blocked_uri,
+            source,
+        );
+    }
+
     fn record_csp_violation_history(
         &mut self,
         document: &NodeHandle,
@@ -5623,6 +5643,7 @@ impl JsRuntime {
         script_id: usize,
         source: &str,
         filename: &str,
+        csp_requested_url: &str,
         muted_errors: bool,
     ) -> JsResult<()> {
         let realm = self.realm_for_document(document_id)?;
@@ -5637,7 +5658,10 @@ impl JsRuntime {
         let result = (|| {
             self.eval(&format!("__omoikane_set_current_script({script_id})"))?;
             let evaluated = self.with_active_host(|context| {
-                let metadata = script_errors::classic_script_metadata(muted_errors);
+                let metadata = script_errors::classic_script_metadata(
+                    muted_errors,
+                    Some(csp_requested_url.to_owned()),
+                );
                 Script::parse_with_host_defined(
                     Source::from_reader(source.as_bytes(), Some(Path::new(filename))),
                     None,
@@ -6700,24 +6724,27 @@ impl JsRuntime {
         &'a mut self,
         source: &str,
     ) -> impl Future<Output = JsResult<JsValue>> + 'a {
-        self.eval_async_source(source, None, false, (1, 1))
+        self.eval_async_source(source, None, None, false, (1, 1))
     }
 
     fn eval_async_source<'a>(
         &'a mut self,
         source: &str,
         filename: Option<&str>,
+        csp_requested_url: Option<&str>,
         muted_errors: bool,
         start_position: (u32, u32),
     ) -> impl Future<Output = JsResult<JsValue>> + 'a {
         let filename = filename.map(str::to_owned);
+        let csp_requested_url = csp_requested_url.map(str::to_owned);
         let source = source.to_owned();
         let deadline = execution_deadline(self.sandbox.timeout);
         let host_state = Rc::clone(&self.host_state);
         let future = ActiveHostFuture::new(
             async move {
                 let mut context = self.context.enter_runtime_deadline(deadline);
-                let metadata = script_errors::classic_script_metadata(muted_errors);
+                let metadata =
+                    script_errors::classic_script_metadata(muted_errors, csp_requested_url);
                 let script = Script::parse_with_host_defined(
                     Source::from_reader(source.as_bytes(), filename.as_deref().map(Path::new))
                         .with_start_position(start_position.0, start_position.1),
@@ -6813,14 +6840,21 @@ impl JsRuntime {
         let mut deferred = Vec::new();
         let mut fetch_errors = Vec::new();
         for (script_index, script) in scripts.iter().enumerate() {
-            let Some((is_module, is_defer, has_src, source, label, muted_errors)) = self
-                .fetch_or_inline_document_script_source(
-                    script,
-                    script_index,
-                    base_url.as_ref(),
-                    false,
-                    &mut fetch_errors,
-                )
+            let Some((
+                is_module,
+                is_defer,
+                has_src,
+                source,
+                label,
+                muted_errors,
+                csp_requested_url,
+            )) = self.fetch_or_inline_document_script_source(
+                script,
+                script_index,
+                base_url.as_ref(),
+                false,
+                &mut fetch_errors,
+            )
             else {
                 continue;
             };
@@ -6858,6 +6892,7 @@ impl JsRuntime {
             let prepared = PreparedPageSource {
                 source,
                 filename,
+                csp_requested_url,
                 start_position,
                 muted_errors,
             };
@@ -6922,6 +6957,7 @@ impl JsRuntime {
                 let PreparedPageSource {
                     source,
                     filename,
+                    csp_requested_url,
                     start_position,
                     muted_errors,
                 } = prepared;
@@ -6973,6 +7009,7 @@ impl JsRuntime {
                             Box::pin(self.eval_async_source(
                                 &source,
                                 filename.as_deref(),
+                                csp_requested_url.as_deref(),
                                 muted_errors,
                                 start_position,
                             ))
@@ -7076,13 +7113,14 @@ impl JsRuntime {
         std::time::Duration,
         std::time::Duration,
     ) {
-        self.eval_safe_timed_source(source, None, (1, 1), false)
+        self.eval_safe_timed_source(source, None, None, (1, 1), false)
     }
 
     fn eval_safe_timed_source(
         &mut self,
         source: &str,
         filename: Option<&str>,
+        csp_requested_url: Option<&str>,
         start_position: (u32, u32),
         muted_errors: bool,
     ) -> (
@@ -7095,7 +7133,10 @@ impl JsRuntime {
             let parse_start = std::time::Instant::now();
             let input = Source::from_reader(source.as_bytes(), filename.map(Path::new))
                 .with_start_position(start_position.0, start_position.1);
-            let metadata = script_errors::classic_script_metadata(muted_errors);
+            let metadata = script_errors::classic_script_metadata(
+                muted_errors,
+                csp_requested_url.map(str::to_owned),
+            );
             let script = match Script::parse_with_host_defined(input, None, metadata, context) {
                 Ok(script) => script,
                 Err(error) => {
@@ -8001,6 +8042,7 @@ impl JsRuntime {
                     future: Box::pin(self.eval_async_source(
                         &source,
                         Some(&effective_url),
+                        Some(&timing_name),
                         muted_errors,
                         (1, 1),
                     )),
@@ -9529,6 +9571,7 @@ impl JsRuntime {
                                 script_node.identity(),
                                 &source,
                                 &effective_url,
+                                &timing_name,
                                 muted_errors,
                             )
                             .map(|_| JsValue::undefined())
@@ -9765,14 +9808,21 @@ impl JsRuntime {
         let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
 
         for (script_index, script) in scripts.iter().enumerate() {
-            let Some((is_module, is_defer, has_src, source_code, script_label, muted_errors)) =
-                self.fetch_or_inline_document_script_source(
-                    script,
-                    script_index,
-                    base_url,
-                    log_scripts,
-                    &mut errors,
-                )
+            let Some((
+                is_module,
+                is_defer,
+                has_src,
+                source_code,
+                script_label,
+                muted_errors,
+                csp_requested_url,
+            )) = self.fetch_or_inline_document_script_source(
+                script,
+                script_index,
+                base_url,
+                log_scripts,
+                &mut errors,
+            )
             else {
                 continue;
             };
@@ -9802,6 +9852,7 @@ impl JsRuntime {
                     script_label,
                     module_url,
                     muted_errors,
+                    csp_requested_url,
                 ));
                 continue;
             }
@@ -9809,6 +9860,7 @@ impl JsRuntime {
                 script,
                 &source_code,
                 &script_label,
+                csp_requested_url.as_deref(),
                 muted_errors,
                 log_scripts,
                 &mut errors,
@@ -9831,6 +9883,27 @@ impl JsRuntime {
 
         errors
     }
+    /// Returns the pre-redirect external URL or the inline script's document URL.
+    fn csp_requested_url_for_script(
+        &self,
+        script: &NodeHandle,
+        requested_reference: Option<&str>,
+        base_url: Option<&crate::http::Url>,
+    ) -> Option<String> {
+        requested_reference.map_or_else(
+            || {
+                document_root_for_node(script).and_then(|document| {
+                    self.host_state
+                        .borrow()
+                        .document_urls
+                        .get(&document.identity())
+                        .cloned()
+                })
+            },
+            |reference| Some(resource_reference_timing_name(reference, base_url)),
+        )
+    }
+
     /// Classifies one `<script>` element, enforces its CSP policy, and
     /// resolves its source: fetched for an external script, or its text
     /// content for an inline one. Returns `None` (after recording any CSP
@@ -9842,7 +9915,7 @@ impl JsRuntime {
         base_url: Option<&crate::http::Url>,
         log_scripts: bool,
         errors: &mut Vec<String>,
-    ) -> Option<(bool, bool, bool, String, String, bool)> {
+    ) -> Option<(bool, bool, bool, String, String, bool, Option<String>)> {
         let attrs = script.attributes().unwrap_or_default();
         let is_module = attrs
             .get("type")
@@ -9867,6 +9940,7 @@ impl JsRuntime {
 
         let src = attrs.get("src").cloned();
         let has_src = src.is_some();
+        let csp_requested_url = self.csp_requested_url_for_script(script, src.as_deref(), base_url);
         // HTML spec: defer only applies to external (src) scripts.
         let is_defer = is_module || (attrs.contains_key("defer") && src.is_some());
 
@@ -9972,6 +10046,7 @@ impl JsRuntime {
             source_code,
             script_label,
             muted_errors,
+            csp_requested_url,
         ))
     }
 
@@ -9983,6 +10058,7 @@ impl JsRuntime {
         script: &NodeHandle,
         source_code: &str,
         script_label: &str,
+        csp_requested_url: Option<&str>,
         muted_errors: bool,
         log_scripts: bool,
         errors: &mut Vec<String>,
@@ -10016,6 +10092,7 @@ impl JsRuntime {
             .eval_safe_timed_source(
                 source_code,
                 filename.as_deref(),
+                csp_requested_url,
                 start_position,
                 muted_errors,
             );
@@ -10055,11 +10132,20 @@ impl JsRuntime {
     /// as the immediate-execution path above.
     fn run_deferred_document_scripts(
         &mut self,
-        deferred: Vec<(String, NodeHandle, String, Option<String>, bool)>,
+        deferred: Vec<(
+            String,
+            NodeHandle,
+            String,
+            Option<String>,
+            bool,
+            Option<String>,
+        )>,
         log_scripts: bool,
         errors: &mut Vec<String>,
     ) {
-        for (source_code, script, script_label, module_url, muted_errors) in deferred {
+        for (source_code, script, script_label, module_url, muted_errors, csp_requested_url) in
+            deferred
+        {
             if let Err(error) = self.run_written_scripts_before(&script) {
                 self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
                 errors.push(format!("[written scripts] {error}"));
@@ -10072,6 +10158,7 @@ impl JsRuntime {
                     &script,
                     &source_code,
                     &script_label,
+                    csp_requested_url.as_deref(),
                     muted_errors,
                     log_scripts,
                     errors,
@@ -10101,6 +10188,7 @@ impl JsRuntime {
                     self.eval_safe_timed_source(
                         &source_code,
                         Some(&script_label),
+                        csp_requested_url.as_deref(),
                         (1, 1),
                         muted_errors,
                     )
@@ -11453,8 +11541,13 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(cancel_animation_frame_native),
         ),
         (
+            js_string!("__omoikane_capture_csp_source"),
+            0,
+            NativeFunction::from_copy_closure(capture_csp_source_native),
+        ),
+        (
             js_string!("__omoikane_fetch"),
-            4,
+            9,
             NativeFunction::from_copy_closure(fetch_native),
         ),
         (
@@ -11589,7 +11682,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_websocket_connect"),
-            2,
+            3,
             NativeFunction::from_copy_closure(websocket_connect_native),
         ),
         (
@@ -11609,7 +11702,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_event_source_fetch"),
-            3,
+            4,
             NativeFunction::from_copy_closure(event_source_fetch_native),
         ),
         (
@@ -17693,6 +17786,7 @@ fn evaluate_dedicated_worker_startup(
     worker_id: u64,
     source: &str,
     worker_url: &str,
+    csp_requested_url: &str,
 ) -> JsResult<Option<()>> {
     // Keep the entry out of the owner map while evaluating worker
     // startup. This lets self.close() remove the entry immediately
@@ -17707,7 +17801,12 @@ fn evaluate_dedicated_worker_startup(
         .runtime
         .with_active_host(|context| {
             use script_errors::WorkerScriptOutcome;
-            match script_errors::evaluate_worker_initial_script(context, source, worker_url)? {
+            match script_errors::evaluate_worker_initial_script(
+                context,
+                source,
+                worker_url,
+                csp_requested_url,
+            )? {
                 WorkerScriptOutcome::Completed => Ok(Some(())),
                 WorkerScriptOutcome::ParseFailure => Ok(None),
                 WorkerScriptOutcome::Exception(error) => {
@@ -17749,6 +17848,7 @@ fn evaluate_dedicated_worker_startup(
 struct PreparedDedicatedWorker {
     id: u64,
     url: String,
+    csp_requested_url: String,
     source: Option<String>,
     runtime: JsRuntime,
 }
@@ -17882,6 +17982,7 @@ fn prepare_dedicated_worker(
         id: creator.worker_id,
         // Boa uses the script path to resolve dynamic imports as well.
         url: source_url,
+        csp_requested_url: initial_url,
         source: loaded.map(|script| script.source),
         runtime: worker_runtime,
     })
@@ -17895,6 +17996,7 @@ fn create_worker_for_owner_state(
     let PreparedDedicatedWorker {
         id: worker_id,
         url: worker_url,
+        csp_requested_url,
         source,
         runtime: worker_runtime,
     } = prepare_dedicated_worker(&owner_state, requested_url, Some(document_id))?;
@@ -17913,8 +18015,13 @@ fn create_worker_for_owner_state(
     let source_loaded = source.is_some();
     let startup_error = match source {
         Some(source) => {
-            let result =
-                evaluate_dedicated_worker_startup(&owner_state, worker_id, &source, &worker_url);
+            let result = evaluate_dedicated_worker_startup(
+                &owner_state,
+                worker_id,
+                &source,
+                &worker_url,
+                &csp_requested_url,
+            );
             match result {
                 Ok(Some(())) => None,
                 Ok(None) => Some(script_errors::WorkerErrorNotification::LoadFailure),
@@ -18294,6 +18401,34 @@ fn websocket_address_policy(
     }
 }
 
+fn capture_csp_source_native(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let source = security_reporting::capture_csp_source(context);
+    let serialized = serde_json::to_string(&source).map_err(|error| {
+        JsNativeError::error().with_message(format!("CSP source serialization failed: {error}"))
+    })?;
+    Ok(js_string!(serialized).into())
+}
+
+fn csp_source_location_argument(
+    args: &[JsValue],
+    index: usize,
+    context: &mut Context,
+) -> JsResult<Option<security_reporting::CspSourceLocation>> {
+    let Some(value) = args.get(index) else {
+        return Ok(None);
+    };
+    let serialized = value.to_string(context)?.to_std_string_escaped();
+    serde_json::from_str(&serialized).map_err(|error| {
+        JsNativeError::typ()
+            .with_message(format!("invalid CSP source metadata: {error}"))
+            .into()
+    })
+}
+
 fn websocket_connect_native(
     _: &JsValue,
     args: &[JsValue],
@@ -18304,11 +18439,17 @@ fn websocket_connect_native(
     let protocols: Vec<String> = serde_json::from_str(&protocols_json).map_err(|_| {
         JsError::from(JsNativeError::typ().with_message("invalid WebSocket protocols"))
     })?;
+    let csp_source = csp_source_location_argument(args, 2, context)?;
     let payload = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let document = state.csp_document_for_context(context)?;
-        if !state.csp_allows_connect(&document, &url) {
-            state.record_csp_violation(&document, ResourceType::Connect, &url);
+        if !state.csp_allows_connect(&document, &url, csp_source.as_ref()) {
+            state.record_csp_violation_with_source(
+                &document,
+                ResourceType::Connect,
+                &url,
+                csp_source.as_ref(),
+            );
             return Err(JsNativeError::error()
                 .with_message("WebSocket connection blocked by CSP connect-src")
                 .into());
@@ -18453,14 +18594,20 @@ fn event_source_fetch_native(
     let url = string_argument(args.first(), "", context)?;
     let last_event_id = string_argument(args.get(1), "", context)?;
     let with_credentials = args.get(2).is_some_and(JsValue::to_boolean);
+    let csp_source = csp_source_location_argument(args, 3, context)?;
     let body = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let parsed = url
             .parse::<crate::http::Url>()
             .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
         let document = state.csp_document_for_context(context)?;
-        if !state.csp_allows_connect(&document, &url) {
-            state.record_csp_violation(&document, ResourceType::Connect, &url);
+        if !state.csp_allows_connect(&document, &url, csp_source.as_ref()) {
+            state.record_csp_violation_with_source(
+                &document,
+                ResourceType::Connect,
+                &url,
+                csp_source.as_ref(),
+            );
             return Err(JsNativeError::error()
                 .with_message("EventSource connection blocked by CSP connect-src")
                 .into());
@@ -18498,12 +18645,13 @@ fn event_source_fetch_native(
         )
         .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
         if let Some(effective_url) = fetched.response.effective_url()
-            && !state.csp_allows_response_for_document(
+            && !state.csp_allows_response_for_document_with_source(
                 &document,
                 ResourceType::Connect,
                 &effective_url.to_string(),
                 fetched.response.redirect_count(),
                 &url,
+                csp_source.as_ref(),
             )
         {
             return Err(JsNativeError::error()
@@ -18624,6 +18772,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
     } else {
         None
     };
+    let csp_source = csp_source_location_argument(args, 8, context)?;
 
     let payload = with_host_state(|state| {
         let mut state = state.borrow_mut();
@@ -18632,8 +18781,13 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
         let normalized_url = parsed_url.to_string();
         let document = state.csp_document_for_context(context)?;
-        if !state.csp_allows_connect(&document, &normalized_url) {
-            state.record_csp_violation(&document, ResourceType::Connect, &normalized_url);
+        if !state.csp_allows_connect(&document, &normalized_url, csp_source.as_ref()) {
+            state.record_csp_violation_with_source(
+                &document,
+                ResourceType::Connect,
+                &normalized_url,
+                csp_source.as_ref(),
+            );
             return Err(JsNativeError::typ()
                 .with_message("fetch blocked by CSP connect-src")
                 .into());
@@ -18688,12 +18842,13 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             }
         };
         if let Some(effective_url) = fetched.response.effective_url()
-            && !state.csp_allows_response_for_document(
+            && !state.csp_allows_response_for_document_with_source(
                 &document,
                 ResourceType::Connect,
                 &effective_url.to_string(),
                 fetched.response.redirect_count(),
                 &normalized_url,
+                csp_source.as_ref(),
             )
         {
             return Err(JsNativeError::typ()

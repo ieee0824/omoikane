@@ -732,14 +732,28 @@ fn csp_classic_script_redirects_work_in_parser_and_dynamic_execution_paths() {
         ),
         (
             "/other.js".into(),
-            route("globalThis.executions = (globalThis.executions || 0) + 1;"),
+            route(
+                "globalThis.executions = (globalThis.executions || 0) + 1;\
+                 fetch('https://blocked.test/from-script').catch(() => {});",
+            ),
         ),
     ]));
     for page_task in [false, true] {
         let document = TreeBuilder::parse("<html><body><script src='/allowed.js'></script><script defer src='/allowed.js'></script></body></html>").document();
         let url: crate::http::Url = format!("{}/index.html", server.origin).parse().unwrap();
         let mut runtime = JsRuntime::with_document_and_url(document, &url.to_string()).unwrap();
-        runtime.install_csp_policy(&[format!("script-src {}/allowed.js", server.origin)]);
+        runtime.install_csp_policy(&[format!(
+            "script-src {0}/allowed.js; connect-src 'none'; report-to observations",
+            server.origin
+        )]);
+        runtime
+            .eval(
+                "globalThis.scriptSourceReports=[];\
+                 new ReportingObserver(batch=>scriptSourceReports.push(...batch),{\
+                   types:['csp-violation']\
+                 }).observe();",
+            )
+            .unwrap();
         if page_task {
             use std::future::Future;
             use std::task::{Context, Poll, Waker};
@@ -765,12 +779,21 @@ fn csp_classic_script_redirects_work_in_parser_and_dynamic_execution_paths() {
         runtime.eval("const inserted = document.createElement('script'); inserted.src = '/allowed.js'; document.body.appendChild(inserted);").unwrap();
         runtime.run_until_idle().unwrap();
         assert_eq!(runtime.eval("executions").unwrap().as_number(), Some(3.0));
-        assert_eq!(
+        let requested_url = format!("{}/allowed.js", server.origin);
+        assert!(
             runtime
-                .eval("document.cspViolations.length")
+                .eval(&format!(
+                    "scriptSourceReports.length===3 && \
+                     scriptSourceReports.every(report=>\
+                       report.body.sourceFile==={} && \
+                       report.body.lineNumber===1 && report.body.columnNumber>0) && \
+                     document.cspViolations.length===1 && \
+                     document.cspViolations[0].resourceType==='connect'",
+                    serde_json::to_string(&requested_url).unwrap()
+                ))
                 .unwrap()
-                .as_number(),
-            Some(0.0)
+                .as_boolean()
+                .unwrap()
         );
         assert!(runtime.take_task_errors().is_empty());
     }

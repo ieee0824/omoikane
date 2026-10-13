@@ -36,16 +36,17 @@ fn import_scripts(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
             ) else {
                 return Ok(None);
             };
-            sources.push((filename, source, muted_errors));
+            let requested_url = resource_reference_timing_name(&url, base.as_ref());
+            sources.push((filename, source, muted_errors, requested_url));
         }
         Ok(Some(sources))
     })?;
     let Some(sources) = sources else {
         return Ok(JsValue::from(false));
     };
-    for (filename, source, muted_errors) in sources {
+    for (filename, source, muted_errors, requested_url) in sources {
         let input = Source::from_reader(source.as_bytes(), Some(Path::new(&filename)));
-        let metadata = script_errors::classic_script_metadata(muted_errors);
+        let metadata = script_errors::classic_script_metadata(muted_errors, Some(requested_url));
         let result = Script::parse_with_host_defined(input, None, metadata, context)
             .and_then(|script| script.evaluate(context));
         if let Err(error) = result {
@@ -72,6 +73,63 @@ mod tests {
         read_request_headers,
     };
     use std::io::Write;
+
+    #[test]
+    fn imported_scripts_keep_csp_source_location() {
+        let listener = bind_loopback().unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = FixtureWorker::spawn(move || {
+            let body = "fetch('https://blocked.test/imported').catch(()=>{});";
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let mut runtime =
+            JsRuntime::with_document_and_url(blank_html_document(), "http://127.0.0.1:1/worker.js")
+                .unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+        runtime.install_csp_policy(&["connect-src 'none'; report-to imports".into()]);
+        runtime
+            .eval(
+                "globalThis.importReports=[];\
+                 new ReportingObserver(batch=>importReports.push(...batch),{\
+                   types:['csp-violation']\
+                 }).observe();",
+            )
+            .unwrap();
+        let requested_url = format!("http://{address}/import.js");
+        let imported = runtime
+            .with_active_host(|context| {
+                import_scripts(
+                    &JsValue::undefined(),
+                    &[JsValue::from(JsString::from(requested_url.clone()))],
+                    context,
+                )
+            })
+            .unwrap();
+        assert_eq!(imported.as_boolean(), Some(true));
+        runtime.run_until_idle().unwrap();
+        assert!(
+            runtime
+                .eval(&format!(
+                    "importReports.length===1 && \
+                     importReports[0].body.sourceFile==={} && \
+                     importReports[0].body.lineNumber===1 && \
+                     importReports[0].body.columnNumber===1",
+                    serde_json::to_string(&requested_url).unwrap()
+                ))
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+        server.join();
+    }
 
     #[test]
     fn imported_non_cors_scripts_keep_muting_and_hide_thrown_values() {

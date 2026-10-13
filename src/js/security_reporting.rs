@@ -14,6 +14,49 @@ pub(super) struct DocumentReportingMetadata {
     pub(super) response_status: u16,
 }
 
+/// Owned author-script provenance captured before an asynchronous Web API
+/// wrapper loses its caller stack.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub(super) struct CspSourceLocation {
+    pub(super) source_file: String,
+    pub(super) line_number: u32,
+    pub(super) column_number: u32,
+}
+
+/// Finds the immediate classic author-script frame whose immutable metadata
+/// and source position belong to that same frame. Only frames from this
+/// bootstrap invocation are skipped; an unmarked author frame stops capture.
+pub(super) fn capture_csp_source(context: &Context) -> Option<CspSourceLocation> {
+    let mut frames = context.stack_trace();
+    // This private binding is invoked by the trusted bootstrap module. Skip
+    // only frames belonging to that exact runnable; the first different
+    // runnable is the author boundary. If it has no classic provenance, stop
+    // instead of attributing a module/eval/document.write call to an outer
+    // classic caller.
+    let bootstrap = frames.next()?.script_or_module_host_defined()?;
+    for frame in frames {
+        let host_defined = frame.script_or_module_host_defined()?;
+        if std::ptr::eq(host_defined, bootstrap) {
+            continue;
+        }
+        let location = frame.position();
+        if !matches!(location.path, boa_engine::vm::SourcePath::Path(_)) {
+            return None;
+        }
+        let position = location.position?;
+        let metadata = host_defined
+            .get::<boa_engine::error::ScriptErrorMetadata>()?
+            .get::<script_errors::ClassicScriptMetadata>()?;
+        let source_file = metadata.csp_requested_url.clone()?;
+        return Some(CspSourceLocation {
+            source_file,
+            line_number: position.line_number(),
+            column_number: position.column_number(),
+        });
+    }
+    None
+}
+
 /// A module check retains the initial request URL separately from its target.
 #[derive(Debug)]
 pub(super) struct ModuleCspViolation {
@@ -95,7 +138,7 @@ impl JsRuntime {
         }
         let endpoints =
             legacy_report_endpoints(policy, event["documentURI"].as_str().unwrap_or(""));
-        let body = serde_json::json!({"csp-report": {
+        let mut body = serde_json::json!({"csp-report": {
             "document-uri": event["documentURI"],
             "referrer": event["referrer"].as_str().unwrap_or(""),
             "blocked-uri": event["blockedURI"],
@@ -105,9 +148,15 @@ impl JsRuntime {
             "disposition": event["disposition"],
             "status-code": event["statusCode"].as_u64().unwrap_or(0),
             "script-sample": event["sample"].as_str().unwrap_or(""),
-        }})
-        .to_string()
-        .into_bytes();
+        }});
+        if let Some(report) = body["csp-report"].as_object_mut()
+            && let Some(source_file) = event["sourceFile"].as_str()
+        {
+            report.insert("source-file".into(), source_file.into());
+            report.insert("line-number".into(), event["lineNumber"].clone());
+            report.insert("column-number".into(), event["columnNumber"].clone());
+        }
+        let body = body.to_string().into_bytes();
         for endpoint in endpoints {
             let Ok(url) = endpoint.parse::<crate::http::Url>() else {
                 continue;
@@ -462,13 +511,51 @@ impl HostState {
         redirects: usize,
         report_reference: &str,
     ) -> bool {
-        self.csp_allows_response_for_node(
+        self.csp_allows_response_for_document_with_source(
             document,
             resource_type,
             reference,
             redirects,
             report_reference,
+            None,
         )
+    }
+
+    pub(super) fn csp_allows_response_for_document_with_source(
+        &mut self,
+        document: &NodeHandle,
+        resource_type: ResourceType,
+        reference: &str,
+        redirects: usize,
+        report_reference: &str,
+        source: Option<&CspSourceLocation>,
+    ) -> bool {
+        let policy = self.csp_policy_for_document(document);
+        let monitored =
+            policy.report_only_policy_texts_after_redirects(resource_type, reference, redirects);
+        self.queue_policy_violation_events_with_source(
+            document.identity(),
+            resource_type,
+            report_reference,
+            monitored,
+            "report",
+            source,
+        );
+        if policy.allows_reference_after_redirects(resource_type, reference, redirects) {
+            return true;
+        }
+        let enforced =
+            policy.blocking_policy_texts_after_redirects(resource_type, reference, redirects);
+        self.queue_policy_violation_events_with_source(
+            document.identity(),
+            resource_type,
+            report_reference,
+            enforced,
+            "enforce",
+            source,
+        );
+        self.record_csp_violation_history(document, resource_type, report_reference.to_owned());
+        false
     }
 
     pub(super) fn csp_allows_response_for_node(
@@ -566,53 +653,40 @@ impl HostState {
     }
 
     /// Observes monitoring policies and then evaluates enforced connect-src.
-    pub(super) fn csp_allows_connect(&mut self, document: &NodeHandle, reference: &str) -> bool {
-        self.queue_report_only_violation_events(
+    pub(super) fn csp_allows_connect(
+        &mut self,
+        document: &NodeHandle,
+        reference: &str,
+        source: Option<&CspSourceLocation>,
+    ) -> bool {
+        self.queue_report_only_violation_events_with_source(
             document.identity(),
             ResourceType::Connect,
             reference,
+            source,
         );
         self.csp_policy_for_document(document)
             .allows_reference(ResourceType::Connect, reference)
     }
-    pub(super) fn queue_report_only_violation_events(
+
+    fn queue_report_only_violation_events_with_source(
         &mut self,
         document_id: usize,
         resource_type: ResourceType,
         blocked_uri: &str,
+        source: Option<&CspSourceLocation>,
     ) {
         let Some(policy) = self.document_csp.get(&document_id) else {
             return;
         };
         let policies = policy.report_only_policy_texts(resource_type, blocked_uri);
-        self.queue_policy_violation_events(
+        self.queue_policy_violation_events_with_source(
             document_id,
             resource_type,
             blocked_uri,
             policies,
             "report",
-        );
-    }
-
-    pub(super) fn queue_csp_violation_events_after_redirects(
-        &mut self,
-        document_id: usize,
-        resource_type: ResourceType,
-        blocked_uri: &str,
-        redirects: usize,
-        report_reference: &str,
-    ) {
-        let Some(policy) = self.document_csp.get(&document_id) else {
-            return;
-        };
-        let policies =
-            policy.blocking_policy_texts_after_redirects(resource_type, blocked_uri, redirects);
-        self.queue_policy_violation_events(
-            document_id,
-            resource_type,
-            report_reference,
-            policies,
-            "enforce",
+            source,
         );
     }
 
@@ -624,12 +698,38 @@ impl HostState {
         redirects: usize,
         report_reference: &str,
     ) {
-        self.queue_csp_violation_events_after_redirects(
-            document.identity(),
+        self.record_csp_violation_for_request_with_source(
+            document,
             resource_type,
             reference,
             redirects,
             report_reference,
+            None,
+        );
+    }
+
+    pub(super) fn record_csp_violation_for_request_with_source(
+        &mut self,
+        document: &NodeHandle,
+        resource_type: ResourceType,
+        reference: &str,
+        redirects: usize,
+        report_reference: &str,
+        source: Option<&CspSourceLocation>,
+    ) {
+        let document_id = document.identity();
+        let Some(policy) = self.document_csp.get(&document_id) else {
+            return;
+        };
+        let policies =
+            policy.blocking_policy_texts_after_redirects(resource_type, reference, redirects);
+        self.queue_policy_violation_events_with_source(
+            document_id,
+            resource_type,
+            report_reference,
+            policies,
+            "enforce",
+            source,
         );
         self.record_csp_violation_history(document, resource_type, report_reference.to_owned());
     }
@@ -642,13 +742,33 @@ impl HostState {
         policies: Vec<csp::PolicyViolation>,
         disposition: &str,
     ) {
-        self.enqueue_policy_violation_events(
+        self.queue_policy_violation_events_with_source(
+            document_id,
+            resource_type,
+            blocked_uri,
+            policies,
+            disposition,
+            None,
+        );
+    }
+
+    fn queue_policy_violation_events_with_source(
+        &mut self,
+        document_id: usize,
+        resource_type: ResourceType,
+        blocked_uri: &str,
+        policies: Vec<csp::PolicyViolation>,
+        disposition: &str,
+        source: Option<&CspSourceLocation>,
+    ) {
+        self.enqueue_policy_violation_events_with_source(
             (document_id, None),
             resource_type,
             blocked_uri,
             policies,
             disposition,
             "",
+            source,
         );
     }
 
@@ -721,6 +841,27 @@ impl HostState {
         disposition: &str,
         sample: &str,
     ) {
+        self.enqueue_policy_violation_events_with_source(
+            target,
+            resource_type,
+            blocked_uri,
+            policies,
+            disposition,
+            sample,
+            None,
+        );
+    }
+
+    fn enqueue_policy_violation_events_with_source(
+        &mut self,
+        target: (usize, Option<usize>),
+        resource_type: ResourceType,
+        blocked_uri: &str,
+        policies: Vec<csp::PolicyViolation>,
+        disposition: &str,
+        sample: &str,
+        source: Option<&CspSourceLocation>,
+    ) {
         let (document_id, element_id) = target;
         let response_status = self
             .document_reporting
@@ -741,6 +882,9 @@ impl HostState {
             ResourceType::Style => "style-src-elem",
             _ => resource_type.directive(),
         };
+        let source_file = source.map(|source| strip_url_for_report(&source.source_file));
+        let line_number = source.map(|source| source.line_number);
+        let column_number = source.map(|source| source.column_number);
         for policy in policies {
             // CSP 5.5 creates a Reporting API report only for report-to;
             // violation events and legacy delivery remain independent.
@@ -756,9 +900,9 @@ impl HostState {
                 "disposition": disposition,
                 "referrer": "",
                 "sample": if policy.report_sample { sample } else { "" },
-                "sourceFile": null,
-                "lineNumber": null,
-                "columnNumber": null,
+                "sourceFile": source_file.as_deref(),
+                "lineNumber": line_number,
+                "columnNumber": column_number,
                 "statusCode": response_status,
                 "bubbles": true,
                 "composed": true,
@@ -1775,6 +1919,68 @@ mod tests {
     }
 
     #[test]
+    fn legacy_reports_include_complete_source_fields_only_when_captured() {
+        struct Transport(Arc<Mutex<Vec<serde_json::Value>>>);
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(request.body().unwrap()).unwrap());
+                crate::http::HttpResponse::parse(
+                    &mut &b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"[..],
+                )
+            }
+        }
+        let document = crate::html::TreeBuilder::parse("<body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_csp_policy(&["connect-src 'none'; report-uri /reports".into()]);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport(Arc::clone(&sent)))));
+        let policy = "connect-src 'none'; report-uri /reports";
+        let mut event = serde_json::json!({
+            "documentURI": "https://example.test/document",
+            "referrer": "",
+            "blockedURI": "https://blocked.test/resource",
+            "effectiveDirective": "connect-src",
+            "violatedDirective": "connect-src",
+            "originalPolicy": policy,
+            "disposition": "enforce",
+            "statusCode": 200,
+            "sample": "",
+            "sourceFile": "https://example.test/requested.js",
+            "lineNumber": 41,
+            "columnNumber": 17,
+        });
+        let document_id = runtime.document().identity();
+        runtime.deliver_csp_report(document_id, &event.to_string());
+        event["sourceFile"] = serde_json::Value::Null;
+        runtime.deliver_csp_report(document_id, &event.to_string());
+
+        let sent = sent.lock().unwrap();
+        let with_source = &sent[0]["csp-report"];
+        assert_eq!(
+            with_source["source-file"],
+            "https://example.test/requested.js"
+        );
+        assert_eq!(with_source["line-number"], 41);
+        assert_eq!(with_source["column-number"], 17);
+        let without_source = sent[1]["csp-report"].as_object().unwrap();
+        assert!(!without_source.contains_key("source-file"));
+        assert!(!without_source.contains_key("line-number"));
+        assert!(!without_source.contains_key("column-number"));
+    }
+
+    #[test]
     fn report_to_suppresses_legacy_endpoints_and_duplicate_directives_use_first() {
         assert!(
             legacy_report_endpoints(
@@ -1902,6 +2108,199 @@ mod tests {
         assert_eq!(
             runtime.eval("replayed.length").unwrap().as_number(),
             Some(2.0)
+        );
+    }
+
+    #[test]
+    fn connect_api_reports_keep_author_call_sites_and_requested_script_url() {
+        let document = crate::html::TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_csp_policy(&["connect-src 'none'; report-to observations".into()]);
+        runtime
+            .eval(
+                "globalThis.sourceEvents=[];globalThis.sourceReports=[];\
+                 document.addEventListener('securitypolicyviolation',event=>sourceEvents.push({\
+                   sourceFile:event.sourceFile,lineNumber:event.lineNumber,columnNumber:event.columnNumber\
+                 }));\
+                 new ReportingObserver(batch=>sourceReports.push(...batch),{types:['csp-violation']}).observe();",
+            )
+            .unwrap();
+        let (evaluated, _, _, _) = runtime.eval_safe_timed_source(
+            concat!(
+                "fetch('https://blocked.test/fetch').catch(()=>{});\n",
+                "const xhr = new XMLHttpRequest();\n",
+                "xhr.open('GET','https://blocked.test/xhr');\n",
+                "  xhr.send();\n",
+                "    new WebSocket('wss://blocked.test/socket');\n",
+                "      new EventSource('https://blocked.test/events').close();",
+            ),
+            Some("https://private.test/final.js?secret"),
+            Some("https://user:password@example.test/requested.js?visible#hidden"),
+            (41, 9),
+            false,
+        );
+        evaluated.unwrap();
+        runtime.run_until_idle().unwrap();
+        let observed = runtime
+            .eval(
+                "JSON.stringify({\
+                   events:sourceEvents.slice().sort((a,b)=>a.lineNumber-b.lineNumber),\
+                   reports:sourceReports.map(report=>({\
+                     sourceFile:report.body.sourceFile,lineNumber:report.body.lineNumber,\
+                     columnNumber:report.body.columnNumber\
+                   })).sort((a,b)=>a.lineNumber-b.lineNumber)\
+                 })",
+            )
+            .unwrap();
+        let observed: serde_json::Value =
+            serde_json::from_str(&observed.as_string().unwrap().to_std_string_escaped()).unwrap();
+        let events = observed["events"].as_array().unwrap();
+        let reports = observed["reports"].as_array().unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(reports.len(), 4);
+        for (index, (line, column)) in [(41, 9), (44, 7), (45, 5), (46, 7)].into_iter().enumerate()
+        {
+            let event = &events[index];
+            let report = &reports[index];
+            assert_eq!(
+                event["sourceFile"],
+                "https://example.test/requested.js?visible"
+            );
+            assert_eq!(report["sourceFile"], event["sourceFile"]);
+            assert_eq!(report["lineNumber"], event["lineNumber"]);
+            assert_eq!(report["columnNumber"], event["columnNumber"]);
+            assert_eq!(event["lineNumber"], line);
+            assert_eq!(event["columnNumber"], column);
+        }
+        assert!(!observed.to_string().contains("private.test"));
+        assert!(!observed.to_string().contains("password"));
+        assert!(!observed.to_string().contains("hidden"));
+    }
+
+    #[test]
+    fn unmarked_author_frames_stop_source_attribution() {
+        let document = crate::html::TreeBuilder::parse("<body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_csp_policy(&["connect-src 'none'; report-to observations".into()]);
+        runtime
+            .eval(
+                "globalThis.unmarkedSourceEvent=null;globalThis.unmarkedSourceReport=null;\
+                 globalThis.unmarkedFetch=()=>fetch('https://blocked.test/unmarked');\
+                 document.addEventListener('securitypolicyviolation',event=>unmarkedSourceEvent=event);\
+                 new ReportingObserver(batch=>unmarkedSourceReport=batch[0],{types:['csp-violation']}).observe();",
+            )
+            .unwrap();
+        let (evaluated, _, _, _) = runtime.eval_safe_timed_source(
+            "unmarkedFetch().catch(()=>{});",
+            Some("https://example.test/outer-effective.js"),
+            Some("https://example.test/outer-requested.js"),
+            (12, 3),
+            false,
+        );
+        evaluated.unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(
+            runtime
+                .eval(
+                    "unmarkedSourceEvent.sourceFile==='' && \
+                     unmarkedSourceEvent.lineNumber===0 && unmarkedSourceEvent.columnNumber===0 && \
+                     unmarkedSourceReport.body.sourceFile===null && \
+                     unmarkedSourceReport.body.lineNumber===null && \
+                     unmarkedSourceReport.body.columnNumber===null",
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn generated_code_frames_stop_source_attribution() {
+        let document = crate::html::TreeBuilder::parse("<body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_csp_policy(&["connect-src 'none'; report-to observations".into()]);
+        runtime
+            .eval(
+                "globalThis.generatedSourceReports=[];\
+                 new ReportingObserver(batch=>generatedSourceReports.push(...batch),{\
+                   types:['csp-violation']\
+                 }).observe();",
+            )
+            .unwrap();
+        let (evaluated, _, _, _) = runtime.eval_safe_timed_source(
+            "eval(\"fetch('https://blocked.test/eval').catch(()=>{})\");\
+             new Function(\"fetch('https://blocked.test/function').catch(()=>{})\")();",
+            Some("https://example.test/outer-effective.js"),
+            Some("https://example.test/outer-requested.js"),
+            (17, 7),
+            false,
+        );
+        evaluated.unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(
+            runtime
+                .eval(
+                    "generatedSourceReports.length===2 && \
+                     generatedSourceReports.every(report=>\
+                       report.body.sourceFile===null && report.body.lineNumber===null && \
+                       report.body.columnNumber===null)",
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn event_source_keeps_captured_source_out_of_page_properties() {
+        let document = crate::html::TreeBuilder::parse("<body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_csp_policy(&["connect-src 'none'; report-to observations".into()]);
+        runtime
+            .eval(
+                "globalThis.eventSourceReport=null;\
+                 globalThis.cspHooksHidden=\
+                   !('__omoikane_capture_csp_source' in globalThis) && \
+                   !('__omoikane_event_source_fetch' in globalThis);\
+                 globalThis.cspHookCalls=0;\
+                 globalThis.__omoikane_capture_csp_source=()=>{cspHookCalls++;return JSON.stringify({\
+                   source_file:'https://forged.test/global.js',line_number:3,column_number:4\
+                 })};\
+                 globalThis.__omoikane_event_source_fetch=()=>{cspHookCalls++;return ''};\
+                 Object.defineProperty(EventSource.prototype,'__cspSource',{\
+                   configurable:true,get(){return JSON.stringify({\
+                     source_file:'https://forged.test/source.js',line_number:1,column_number:2\
+                   })},set(_){}\
+                 });\
+                 new ReportingObserver(batch=>eventSourceReport=batch[0],{\
+                   types:['csp-violation']\
+                 }).observe();",
+            )
+            .unwrap();
+        let (evaluated, _, _, _) = runtime.eval_safe_timed_source(
+            "const source=new EventSource('https://blocked.test/events');source.close();",
+            Some("https://example.test/effective.js"),
+            Some("https://example.test/requested.js"),
+            (23, 5),
+            false,
+        );
+        evaluated.unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(
+            runtime
+                .eval(
+                    "eventSourceReport.body.sourceFile==='https://example.test/requested.js' && \
+                     eventSourceReport.body.lineNumber>=23 && \
+                     !eventSourceReport.body.sourceFile.includes('forged.test') && \
+                     cspHooksHidden && cspHookCalls===0",
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
         );
     }
 

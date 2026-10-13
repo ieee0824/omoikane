@@ -141,14 +141,17 @@ fn reporting_source(resource: &str) -> String {
         addEventListener('securitypolicyviolation', event => {{
             if (!active) return;
             active.events.push([event.target === self, event.currentTarget === self,
-                event.isTrusted, event.originalPolicy, event.disposition]);
+                event.isTrusted, event.originalPolicy, event.disposition,
+                event.sourceFile, event.lineNumber > 0, event.columnNumber > 0]);
             publish();
         }});
         new ReportingObserver(batch => {{
             if (!active) return;
             active.reports.push(...batch.map(report => [report.url,
                 report.body.originalPolicy, report.body.disposition,
-                report.body.blockedURL, report.body.statusCode]));
+                report.body.blockedURL, report.body.statusCode,
+                report.body.sourceFile, report.body.lineNumber > 0,
+                report.body.columnNumber > 0]));
             publish();
         }}).observe();
         function fetchResource(port, connection) {{
@@ -209,8 +212,12 @@ fn assert_shared_observation(observed: Value, report_only: bool, connection: u32
         observed,
         json!({
             "connection": connection, "outcome": outcome,
-            "events": vec![json!([true, true, true, POLICY, disposition]); count],
-            "reports": vec![json!(["data", POLICY, disposition, resource, 200]); count],
+            "events": vec![json!([
+                true, true, true, POLICY, disposition, "data", true, true
+            ]); count],
+            "reports": vec![json!([
+                "data", POLICY, disposition, resource, 200, "data", true, true
+            ]); count],
         })
     );
 }

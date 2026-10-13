@@ -33,7 +33,15 @@
   const nativeImportScripts = globalThis.__omoikane_import_scripts;
   const nativeReportError = globalThis.__omoikane_report_error;
   const nativeRunMicrotaskCallback = globalThis.__omoikane_run_microtask_callback;
+  const nativeCaptureCspSource = globalThis.__omoikane_capture_csp_source;
+  const nativeFetch = globalThis.__omoikane_fetch;
+  const nativeWebSocketConnect = globalThis.__omoikane_websocket_connect;
+  const nativeEventSourceFetch = globalThis.__omoikane_event_source_fetch;
   delete globalThis.__omoikane_import_scripts;
+  delete globalThis.__omoikane_capture_csp_source;
+  delete globalThis.__omoikane_fetch;
+  delete globalThis.__omoikane_websocket_connect;
+  delete globalThis.__omoikane_event_source_fetch;
   const nativeCurrentWindowEvent = globalThis.__omoikane_current_window_event;
   delete globalThis.__omoikane_current_window_event;
   const nativeRegisterWindowProxy = globalThis.__omoikane_register_window_proxy;
@@ -20470,6 +20478,7 @@
     }
     send(body = null) {
       if (this.readyState !== 1 || this._sendFlag) throw new Error("InvalidStateError");
+      const cspSource = nativeCaptureCspSource();
       this._sendFlag = true;
       this._terminal = false;
       const requestId = this._requestId;
@@ -20520,7 +20529,7 @@
             };
           })
         : Promise.resolve().then(() =>
-            __omoikane_fetch(
+            nativeFetch(
               this._url,
               this._method,
               JSON.stringify(Object.entries(this._headers)),
@@ -20529,6 +20538,7 @@
               this.withCredentials ? "include" : "same-origin",
               "follow",
               this._timeout,
+              cspSource,
             )
           ).then(raw => JSON.parse(String(raw)));
       payload.then(data => {
@@ -25710,6 +25720,7 @@
   class WebSocket extends EventTarget {
     constructor(url, protocols = []) {
       super();
+      const cspSource = nativeCaptureCspSource();
       this.url = String(url);
       const list = protocols === undefined ? [] : (Array.isArray(protocols) ? protocols.map(String) : [String(protocols)]);
       if (new Set(list).size !== list.length) throw new DOMException("Duplicate subprotocol", "SyntaxError");
@@ -25721,7 +25732,7 @@
       this.binaryType = "blob";
       this.onopen = this.onmessage = this.onerror = this.onclose = null;
       try {
-        const result = JSON.parse(__omoikane_websocket_connect(this.url, JSON.stringify(list)));
+        const result = JSON.parse(nativeWebSocketConnect(this.url, JSON.stringify(list), cspSource));
         this.__id = result.id;
         this.protocol = result.protocol;
         __omoikane_queue_networking_task(() => {
@@ -25799,9 +25810,11 @@
   WebSocket.CLOSING = WebSocket.prototype.CLOSING = 2;
   WebSocket.CLOSED = WebSocket.prototype.CLOSED = 3;
 
+  const eventSourceCspSources = new WeakMap();
   class EventSource extends EventTarget {
     constructor(url, init = {}) {
       super();
+      const cspSource = nativeCaptureCspSource();
       if (typeof url === "symbol") throw new IntrinsicTypeError("Cannot convert a Symbol to a string");
       const input = String(url);
       const base = typeof document === "undefined" ? nativeDocumentBaseURL(__omoikane_document_id) : document.baseURI;
@@ -25816,13 +25829,16 @@
       this.__closed = false;
       this.__lastEventId = "";
       this.__retry = 3000;
+      safeWeakMapSet(eventSourceCspSources, this, cspSource);
       this.__connect();
     }
     close() { this.__closed = true; this.readyState = EventSource.CLOSED; }
     __connect() {
       if (this.__closed) return;
       try {
-        const text = __omoikane_event_source_fetch(this.url, this.__lastEventId, this.withCredentials);
+        const cspSource = safeWeakMapGet(eventSourceCspSources, this) ?? "null";
+        safeWeakMapDelete(eventSourceCspSources, this);
+        const text = nativeEventSourceFetch(this.url, this.__lastEventId, this.withCredentials, cspSource);
         __omoikane_queue_networking_task(() => {
           if (this.__closed) return;
           this.readyState = EventSource.OPEN;
@@ -26294,6 +26310,7 @@
   }
 
   globalThis.fetch = function(input, init = {}) {
+    const cspSource = nativeCaptureCspSource();
     const source = input instanceof Request ? input : null;
     const request = new Request(input, init);
     if (source && init.body === undefined && !bodyIsEmpty(source.__body)) disturbBody(source);
@@ -26319,7 +26336,7 @@
     }
     return Promise.resolve().then(() => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
-      return __omoikane_fetch(
+      return nativeFetch(
         request.url,
         request.method,
         JSON.stringify([...request.headers]),
@@ -26327,6 +26344,8 @@
         request.mode,
         request.credentials,
         request.redirect,
+        undefined,
+        cspSource,
       );
     }).then(raw => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;

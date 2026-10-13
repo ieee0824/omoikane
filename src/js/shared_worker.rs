@@ -539,6 +539,7 @@ fn evaluate_shared_worker_initial_source(
             context,
             &loaded.source,
             &loaded.effective_url,
+            &loaded.initial_url,
         )? {
             WorkerScriptOutcome::Completed => Ok(Some(())),
             WorkerScriptOutcome::ParseFailure => Ok(None),
