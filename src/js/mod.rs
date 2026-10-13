@@ -69,6 +69,7 @@ mod computed_pseudo_tests;
 mod computed_style_layout_tests;
 #[cfg(test)]
 mod computed_text_shadow_tests;
+mod cookie_store;
 mod document_write;
 mod dom_string;
 #[cfg(test)]
@@ -11041,6 +11042,16 @@ fn register_host_bindings(
             js_string!("__omoikane_document_cookie_set"),
             2,
             NativeFunction::from_copy_closure(document_cookie_set_native),
+        ),
+        (
+            js_string!("__omoikane_cookie_store_available"),
+            1,
+            NativeFunction::from_copy_closure(cookie_store::available_native),
+        ),
+        (
+            js_string!("__omoikane_cookie_store_query"),
+            2,
+            NativeFunction::from_copy_closure(cookie_store::query_native),
         ),
         (
             js_string!("__omoikane_document_visibility_state"),

@@ -437,6 +437,21 @@ impl CookieJar {
             .unwrap_or_default()
     }
 
+    /// Returns ordered name/value pairs visible to non-HTTP cookie APIs.
+    ///
+    /// The same URL, site, expiry, and HttpOnly checks as `document.cookie`
+    /// apply.
+    pub(crate) fn script_visible_cookie_pairs(
+        &self,
+        url: &Url,
+        site_for_cookies: &Url,
+    ) -> Vec<(String, String)> {
+        self.matching_cookies(url, site_for_cookies, false, Method::Get, true)
+            .into_iter()
+            .map(|cookie| (cookie.name.clone(), cookie.value.clone()))
+            .collect()
+    }
+
     fn cookie_string(
         &self,
         url: &Url,
@@ -445,6 +460,33 @@ impl CookieJar {
         method: Method,
         non_http: bool,
     ) -> Option<String> {
+        let pairs: Vec<String> = self
+            .matching_cookies(
+                url,
+                site_for_cookies,
+                top_level_navigation,
+                method,
+                non_http,
+            )
+            .into_iter()
+            .map(|cookie| format!("{}={}", cookie.name, cookie.value))
+            .collect();
+
+        if pairs.is_empty() {
+            None
+        } else {
+            Some(pairs.join("; "))
+        }
+    }
+
+    fn matching_cookies(
+        &self,
+        url: &Url,
+        site_for_cookies: &Url,
+        top_level_navigation: bool,
+        method: Method,
+        non_http: bool,
+    ) -> Vec<&Cookie> {
         let now = SystemTime::now();
         let same_site = same_site(url, site_for_cookies);
         let safe_navigation =
@@ -470,16 +512,7 @@ impl CookieJar {
                 .cmp(&a.path.as_deref().unwrap_or("/").len())
                 .then_with(|| a.created_at.cmp(&b.created_at))
         });
-        let pairs: Vec<String> = cookies
-            .iter()
-            .map(|c| format!("{}={}", c.name, c.value))
-            .collect();
-
-        if pairs.is_empty() {
-            None
-        } else {
-            Some(pairs.join("; "))
-        }
+        cookies
     }
 
     /// Returns the number of stored cookies (including expired ones).
