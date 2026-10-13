@@ -3,6 +3,7 @@
 //! Provides [`Cookie`] for individual cookies parsed from `Set-Cookie` headers,
 //! and [`CookieJar`] for storing and retrieving cookies across requests.
 
+use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
@@ -220,8 +221,8 @@ impl Cookie {
             return false;
         }
 
-        // Secure flag: only send over HTTPS
-        if self.secure && url.scheme() != "https" {
+        // Secure cookies are available on HTTPS and trustworthy loopback HTTP.
+        if self.secure && !secure_cookie_transport(url) {
             return false;
         }
 
@@ -246,6 +247,38 @@ impl Cookie {
 #[derive(Debug, Clone)]
 pub struct CookieJar {
     cookies: Vec<(Cookie, String)>, // (cookie, origin_domain)
+    changes: VecDeque<RecordedCookieChange>,
+    change_sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+struct RecordedCookieChange {
+    sequence: u64,
+    cookie: Cookie,
+    deleted: bool,
+    individual_event: bool,
+}
+
+/// One script-visible cookie change after URL and HttpOnly filtering.
+#[derive(Debug, Clone)]
+pub(crate) struct CookieStoreChange {
+    pub name: String,
+    pub value: Option<String>,
+    pub deleted: bool,
+    pub individual_event: bool,
+}
+
+/// Values accepted by the Cookie Store API's set and delete operations.
+#[derive(Debug, Clone)]
+pub(crate) struct CookieStoreWrite {
+    pub name: String,
+    pub value: String,
+    pub domain: Option<String>,
+    pub path: String,
+    pub expires: Option<SystemTime>,
+    pub max_age: Option<i64>,
+    pub same_site: SameSite,
+    pub partitioned: bool,
 }
 
 impl CookieJar {
@@ -253,6 +286,8 @@ impl CookieJar {
     pub fn new() -> Self {
         Self {
             cookies: Vec::new(),
+            changes: VecDeque::new(),
+            change_sequence: 0,
         }
     }
 
@@ -302,113 +337,320 @@ impl CookieJar {
         top_level_navigation: bool,
         from_http: bool,
     ) {
-        if let Some(mut cookie) = Cookie::parse(header_value) {
-            let origin_domain = origin_url.host().to_ascii_lowercase();
+        if let Some(cookie) = Cookie::parse(header_value) {
+            let explicit_root_path = header_value.split(';').skip(1).any(|attribute| {
+                attribute
+                    .trim()
+                    .split_once('=')
+                    .is_some_and(|(name, value)| {
+                        name.trim().eq_ignore_ascii_case("path") && value.trim() == "/"
+                    })
+            });
+            self.store_cookie(
+                cookie,
+                origin_url,
+                site_for_cookies,
+                top_level_navigation,
+                from_http,
+                explicit_root_path,
+                !from_http,
+            );
+        }
+    }
 
-            if let Some(domain) = &cookie.domain {
-                if domain.is_empty() || !domain_matches(&origin_domain, domain) {
-                    return;
-                }
-                if is_public_suffix(domain) {
-                    if domain != &origin_domain {
-                        return;
-                    }
-                    cookie.host_only = true;
-                } else {
-                    cookie.host_only = false;
-                }
-            } else {
-                cookie.host_only = true;
-            }
-            if cookie.host_only {
-                cookie.domain = Some(origin_domain.clone());
-            }
-
-            if cookie
-                .path
-                .as_deref()
-                .is_none_or(|path| !path.starts_with('/'))
-            {
-                cookie.path = Some(default_path(origin_url.path()));
-            }
-
-            let secure_origin = origin_url.scheme() == "https";
-            if cookie.secure && !secure_origin {
-                return;
-            }
-            if !from_http && cookie.http_only {
-                return;
-            }
-            if cookie.same_site == SameSite::None && !cookie.secure {
-                return;
-            }
-            if !same_site(origin_url, site_for_cookies)
-                && cookie.same_site != SameSite::None
-                && (!from_http || !top_level_navigation)
-            {
-                return;
-            }
-            let lower_name = cookie.name.to_ascii_lowercase();
-            if lower_name.starts_with("__secure-") && !cookie.secure {
-                return;
-            }
-            if lower_name.starts_with("__host-")
-                && (!cookie.secure
-                    || !cookie.host_only
-                    || cookie.path.as_deref() != Some("/")
-                    || !header_value.split(';').skip(1).any(|attribute| {
-                        attribute
-                            .trim()
-                            .split_once('=')
-                            .is_some_and(|(name, value)| {
-                                name.trim().eq_ignore_ascii_case("path") && value.trim() == "/"
-                            })
-                    }))
-            {
-                return;
-            }
-
-            if !secure_origin
-                && !cookie.secure
-                && self.cookies.iter().any(|(old, _)| {
-                    old.secure
-                        && old.name == cookie.name
-                        && old
-                            .domain
-                            .as_deref()
-                            .zip(cookie.domain.as_deref())
-                            .is_some_and(|(a, b)| domain_matches(a, b) || domain_matches(b, a))
-                        && old
-                            .path
-                            .as_deref()
-                            .zip(cookie.path.as_deref())
-                            .is_some_and(|(old, new)| path_matches(new, old))
-                })
-            {
-                return;
-            }
-
-            // Remove existing cookie with same name+domain+path
-            let name = cookie.name.clone();
-            let domain = cookie.domain.clone();
-            let path = cookie.path.clone();
-            if let Some((old, _)) = self
-                .cookies
+    /// Writes a Cookie Store cookie through the same jar as HTTP and
+    /// `document.cookie`. Invalid API inputs fail; cookie policy rejections
+    /// (including an HttpOnly collision) follow the HTTP storage model and
+    /// leave the jar unchanged.
+    pub(crate) fn set_from_cookie_store(
+        &mut self,
+        mut options: CookieStoreWrite,
+        url: &Url,
+        site_for_cookies: &Url,
+    ) -> Result<(), &'static str> {
+        options.name = options.name.trim_matches([' ', '\t']).to_string();
+        options.value = options.value.trim_matches([' ', '\t']).to_string();
+        options.domain = options.domain.map(|domain| domain.to_ascii_lowercase());
+        if options.partitioned {
+            return Err("Partitioned cookies are not supported");
+        }
+        if options.expires.is_some() && options.max_age.is_some() {
+            return Err("expires and maxAge cannot both be set");
+        }
+        if options.name.contains('=')
+            || options.name.len() + options.value.len() > 4096
+            || [options.name.as_str(), options.value.as_str()]
                 .iter()
-                .find(|(old, _)| old.name == name && old.domain == domain && old.path == path)
+                .any(|text| {
+                    text.chars()
+                        .any(|c| c == ';' || (c <= '\u{1f}' && c != '\t') || c == '\u{7f}')
+                })
+            || (options.name.is_empty()
+                && (options.value.is_empty() || options.value.contains('=')))
+        {
+            return Err("Invalid cookie name or value");
+        }
+        let lower_name = options.name.to_ascii_lowercase();
+        let lower_value = options.value.to_ascii_lowercase();
+        if lower_name.starts_with("__http-")
+            || lower_name.starts_with("__host-http-")
+            || (options.name.is_empty()
+                && ["__host-", "__host-http-", "__http-", "__secure-"]
+                    .iter()
+                    .any(|prefix| lower_value.starts_with(prefix)))
+        {
+            return Err("Cookie name requires HTTP-only privileges");
+        }
+        if let Some(domain) = &options.domain {
+            if domain.starts_with('.')
+                || domain.is_empty()
+                || domain.len() > 1024
+                || !domain_matches(url.host(), domain)
+                || (is_public_suffix(domain) && !domain.eq_ignore_ascii_case(url.host()))
+                || lower_name.starts_with("__host-")
             {
-                if !from_http && old.http_only {
-                    return;
-                }
-                cookie.created_at = old.created_at;
-            }
-            self.cookies
-                .retain(|(c, _)| !(c.name == name && c.domain == domain && c.path == path));
-
-            if !cookie.is_expired(SystemTime::now()) {
-                self.cookies.push((cookie, origin_domain));
+                return Err("Invalid cookie domain");
             }
         }
+        if options.path.is_empty() {
+            options.path = default_path(url.path());
+        }
+        if !options.path.starts_with('/')
+            || options.path.len() > 1024
+            || (lower_name.starts_with("__host-") && options.path != "/")
+            || options.path.contains(';')
+            || options
+                .path
+                .chars()
+                .any(|c| (c <= '\u{1f}' && c != '\t') || c == '\u{7f}')
+        {
+            return Err("Invalid cookie path");
+        }
+        let now = SystemTime::now();
+        let cookie = Cookie {
+            name: options.name,
+            value: options.value,
+            domain: options.domain,
+            host_only: true,
+            path: Some(options.path),
+            created_at: now,
+            received_at: now,
+            expires: options.expires,
+            max_age: options.max_age,
+            secure: true,
+            http_only: false,
+            same_site: options.same_site,
+        };
+        let explicit_root_path = cookie.path.as_deref() == Some("/");
+        self.store_cookie(
+            cookie,
+            url,
+            site_for_cookies,
+            false,
+            false,
+            explicit_root_path,
+            true,
+        );
+        Ok(())
+    }
+
+    fn store_cookie(
+        &mut self,
+        mut cookie: Cookie,
+        origin_url: &Url,
+        site_for_cookies: &Url,
+        top_level_navigation: bool,
+        from_http: bool,
+        explicit_root_path: bool,
+        individual_event: bool,
+    ) {
+        let origin_domain = origin_url.host().to_ascii_lowercase();
+
+        if let Some(domain) = &cookie.domain {
+            if domain.is_empty() || !domain_matches(&origin_domain, domain) {
+                return;
+            }
+            if is_public_suffix(domain) {
+                if domain != &origin_domain {
+                    return;
+                }
+                cookie.host_only = true;
+            } else {
+                cookie.host_only = false;
+            }
+        } else {
+            cookie.host_only = true;
+        }
+        if cookie.host_only {
+            cookie.domain = Some(origin_domain.clone());
+        }
+
+        if cookie
+            .path
+            .as_deref()
+            .is_none_or(|path| !path.starts_with('/'))
+        {
+            cookie.path = Some(default_path(origin_url.path()));
+        }
+
+        let secure_origin = secure_cookie_transport(origin_url);
+        if cookie.secure && !secure_origin {
+            return;
+        }
+        if !from_http && cookie.http_only {
+            return;
+        }
+        if cookie.same_site == SameSite::None && !cookie.secure {
+            return;
+        }
+        if !same_site(origin_url, site_for_cookies)
+            && cookie.same_site != SameSite::None
+            && (!from_http || !top_level_navigation)
+        {
+            return;
+        }
+        let lower_name = cookie.name.to_ascii_lowercase();
+        if lower_name.starts_with("__secure-") && !cookie.secure {
+            return;
+        }
+        if lower_name.starts_with("__host-")
+            && (!cookie.secure
+                || !cookie.host_only
+                || cookie.path.as_deref() != Some("/")
+                || !explicit_root_path)
+        {
+            return;
+        }
+
+        if !secure_origin
+            && !cookie.secure
+            && self.cookies.iter().any(|(old, _)| {
+                old.secure
+                    && old.name == cookie.name
+                    && old
+                        .domain
+                        .as_deref()
+                        .zip(cookie.domain.as_deref())
+                        .is_some_and(|(a, b)| domain_matches(a, b) || domain_matches(b, a))
+                    && old
+                        .path
+                        .as_deref()
+                        .zip(cookie.path.as_deref())
+                        .is_some_and(|(old, new)| path_matches(new, old))
+            })
+        {
+            return;
+        }
+
+        // The host-only flag distinguishes an omitted Domain from an explicit
+        // Domain equal to the origin host for Cookie Store reads.
+        let name = cookie.name.clone();
+        let domain = cookie.domain.clone();
+        let path = cookie.path.clone();
+        let host_only = cookie.host_only;
+        if !from_http
+            && self.cookies.iter().any(|(old, _)| {
+                old.http_only && old.name == name && old.domain == domain && old.path == path
+            })
+        {
+            return;
+        }
+        let replaced = self
+            .cookies
+            .iter()
+            .find(|(old, _)| {
+                old.name == name
+                    && old.domain == domain
+                    && old.path == path
+                    && old.host_only == host_only
+            })
+            .map(|(old, _)| old.clone());
+        if let Some(old) = &replaced {
+            if !from_http && old.http_only {
+                return;
+            }
+            cookie.created_at = old.created_at;
+        }
+        self.cookies.retain(|(c, _)| {
+            !(c.name == name && c.domain == domain && c.path == path && c.host_only == host_only)
+        });
+
+        let now = SystemTime::now();
+        if cookie.is_expired(now) {
+            if let Some(old) = replaced.filter(|old| !old.is_expired(now)) {
+                self.record_change(old, true, individual_event);
+            }
+        } else {
+            let unchanged = replaced.as_ref().is_some_and(|old| {
+                !old.is_expired(now)
+                    && old.value == cookie.value
+                    && old.secure == cookie.secure
+                    && old.http_only == cookie.http_only
+                    && old.same_site == cookie.same_site
+                    && old.expires == cookie.expires
+                    && old.max_age == cookie.max_age
+            });
+            if cookie.http_only
+                && let Some(old) = replaced.filter(|old| !old.is_expired(now))
+            {
+                self.record_change(old, true, individual_event);
+            }
+            if !unchanged {
+                self.record_change(cookie.clone(), false, individual_event);
+            }
+            self.cookies.push((cookie, origin_domain));
+        }
+    }
+
+    fn record_change(&mut self, cookie: Cookie, deleted: bool, individual_event: bool) {
+        if cookie.http_only {
+            return;
+        }
+        self.change_sequence = self.change_sequence.saturating_add(1);
+        self.changes.push_back(RecordedCookieChange {
+            sequence: self.change_sequence,
+            cookie,
+            deleted,
+            individual_event,
+        });
+        if self.changes.len() > 4096 {
+            self.changes.pop_front();
+        }
+    }
+
+    /// Returns the latest change sequence and changes visible at a script URL.
+    /// A new browsing context starts from `change_sequence()` so old writes
+    /// are not replayed as events.
+    pub(crate) fn script_visible_changes_since(
+        &self,
+        sequence: u64,
+        url: &Url,
+        site_for_cookies: &Url,
+    ) -> (u64, Vec<CookieStoreChange>) {
+        let same_site = same_site(url, site_for_cookies);
+        let changes = self
+            .changes
+            .iter()
+            .filter(|change| change.sequence > sequence)
+            .filter(|change| {
+                let cookie = &change.cookie;
+                !cookie.http_only
+                    && cookie.matches_url(url)
+                    && (same_site || cookie.same_site == SameSite::None)
+            })
+            .map(|change| CookieStoreChange {
+                name: change.cookie.name.clone(),
+                value: (!change.deleted).then(|| change.cookie.value.clone()),
+                deleted: change.deleted,
+                individual_event: change.individual_event,
+            })
+            .collect();
+        (self.change_sequence, changes)
+    }
+
+    /// Returns the latest change cursor for a newly created CookieStore.
+    pub(crate) fn change_sequence(&self) -> u64 {
+        self.change_sequence
     }
 
     /// Builds the `Cookie` header value for a request to `url`.
@@ -555,6 +797,19 @@ fn is_public_suffix(domain: &str) -> bool {
 
 fn same_site(a: &Url, b: &Url) -> bool {
     SchemefulSite::from_url(a) == SchemefulSite::from_url(b)
+}
+
+fn secure_cookie_transport(url: &Url) -> bool {
+    if url.scheme() == "https" {
+        return true;
+    }
+    url.scheme() == "http"
+        && (url.host().eq_ignore_ascii_case("localhost")
+            || url
+                .host()
+                .trim_matches(['[', ']'])
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback()))
 }
 
 /// Returns `true` if `request_path` path-matches `cookie_path` per RFC 6265 §5.1.4.
@@ -905,6 +1160,16 @@ mod tests {
     }
 
     #[test]
+    fn secure_cookie_is_available_on_trustworthy_loopback_http() {
+        let mut jar = CookieJar::new();
+        let local: Url = "http://localhost/".parse().unwrap();
+        jar.add_from_header_for_url("local=1; Secure; Path=/", &local);
+        assert_eq!(jar.document_cookie(&local, &local), "local=1");
+        let unrelated: Url = "http://example.test/".parse().unwrap();
+        assert!(jar.document_cookie(&unrelated, &unrelated).is_empty());
+    }
+
+    #[test]
     fn jar_path_scoping() {
         let mut jar = CookieJar::new();
         jar.add_from_header("a=1; Path=/api; Domain=example.com", "example.com");
@@ -1057,6 +1322,35 @@ mod tests {
             jar.cookie_header(&document),
             Some("theme=dark; session=server".to_string())
         );
+    }
+
+    #[test]
+    fn replacing_script_cookie_with_httponly_reports_only_deletion() {
+        let mut jar = CookieJar::new();
+        let url: Url = "https://example.com/".parse().unwrap();
+        jar.add_from_header_for_url("visible=one; Path=/", &url);
+        let cursor = jar.change_sequence();
+        jar.add_from_header_for_url("visible=hidden; HttpOnly; Path=/", &url);
+        let (_, changes) = jar.script_visible_changes_since(cursor, &url, &url);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].name, "visible");
+        assert_eq!(changes[0].value, None);
+        assert!(changes[0].deleted);
+        assert!(jar.script_visible_cookie_pairs(&url, &url).is_empty());
+    }
+
+    #[test]
+    fn identical_cookie_replacement_does_not_report_a_change() {
+        let mut jar = CookieJar::new();
+        let url: Url = "https://example.com/".parse().unwrap();
+        jar.add_from_document("same=one; Path=/", &url, &url);
+        let cursor = jar.change_sequence();
+        jar.add_from_document("same=one; Path=/", &url, &url);
+        assert_eq!(jar.change_sequence(), cursor);
+        jar.add_from_document("same=two; Path=/", &url, &url);
+        let (_, changes) = jar.script_visible_changes_since(cursor, &url, &url);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].value.as_deref(), Some("two"));
     }
 
     #[test]
