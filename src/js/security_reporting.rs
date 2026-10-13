@@ -132,6 +132,9 @@ pub(super) fn loaded_document_referrer(
 /// Converts the runtime's inline markers and relative request references into
 /// the standard resource serialization, before the asynchronous task is queued.
 fn blocked_url_for_report(reference: &str, base_url: &str) -> String {
+    if matches!(reference, "trusted-types-sink" | "trusted-types-policy") {
+        return reference.to_owned();
+    }
     if csp::is_inline_reference(reference) {
         return "inline".to_owned();
     }
@@ -1072,6 +1075,56 @@ impl HostState {
         sample: &str,
         source: Option<&CspSourceLocation>,
     ) {
+        let directive = match resource_type {
+            ResourceType::Script => "script-src-elem",
+            ResourceType::Style if blocked_uri.starts_with("style-attribute:") => "style-src-attr",
+            ResourceType::Style => "style-src-elem",
+            _ => resource_type.directive(),
+        };
+        self.enqueue_policy_violation_events_with_directive(
+            target,
+            directive,
+            blocked_uri,
+            policies,
+            disposition,
+            sample,
+            source,
+        );
+    }
+
+    /// Queues Trusted Types violations through the ordinary CSP event and
+    /// reporting delivery path, retaining the directive's distinct URI.
+    pub(super) fn queue_trusted_types_violation(
+        &mut self,
+        document_id: usize,
+        directive: &str,
+        blocked_uri: &str,
+        policies: Vec<csp::PolicyViolation>,
+        disposition: &str,
+        sample: &str,
+        source: Option<&CspSourceLocation>,
+    ) {
+        self.enqueue_policy_violation_events_with_directive(
+            (document_id, None),
+            directive,
+            blocked_uri,
+            policies,
+            disposition,
+            sample,
+            source,
+        );
+    }
+
+    fn enqueue_policy_violation_events_with_directive(
+        &mut self,
+        target: (usize, Option<usize>),
+        directive: &str,
+        blocked_uri: &str,
+        policies: Vec<csp::PolicyViolation>,
+        disposition: &str,
+        sample: &str,
+        source: Option<&CspSourceLocation>,
+    ) {
         let (document_id, element_id) = target;
         let response_status = self
             .document_reporting
@@ -1086,12 +1139,6 @@ impl HostState {
         let request_base = self
             .base_url_for_document(document_id)
             .map_or_else(|| document_url.clone(), |url| url.to_string());
-        let directive = match resource_type {
-            ResourceType::Script => "script-src-elem",
-            ResourceType::Style if blocked_uri.starts_with("style-attribute:") => "style-src-attr",
-            ResourceType::Style => "style-src-elem",
-            _ => resource_type.directive(),
-        };
         let source_file = source.map(|source| strip_url_for_report(&source.source_file));
         let line_number = source.map(|source| source.line_number);
         let column_number = source.map(|source| source.column_number);

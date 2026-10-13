@@ -90,7 +90,23 @@ enum SourceExpression {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ParsedPolicy {
     directives: BTreeMap<String, Vec<SourceExpression>>,
+    trusted_types: Option<TrustedTypesDirective>,
+    require_trusted_types_for_script: bool,
     serialized: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TrustedTypesDirective {
+    names: Vec<String>,
+    wildcard: bool,
+    allow_duplicates: bool,
+}
+
+impl TrustedTypesDirective {
+    fn allows_policy(&self, name: &str, already_created: bool) -> bool {
+        (!already_created || self.allow_duplicates)
+            && (self.wildcard || self.names.iter().any(|allowed| allowed == name))
+    }
 }
 
 /// The policies attached to one Document.
@@ -107,6 +123,47 @@ pub(crate) struct CspPolicy {
 }
 
 impl CspPolicy {
+    /// Returns enforced and report-only policies rejecting a policy name.
+    pub(crate) fn trusted_type_policy_creation_violations(
+        &self,
+        name: &str,
+        already_created: bool,
+    ) -> (Vec<PolicyViolation>, Vec<PolicyViolation>) {
+        let violations = |policies: &[ParsedPolicy]| {
+            policies
+                .iter()
+                .filter(|policy| {
+                    policy
+                        .trusted_types
+                        .as_ref()
+                        .is_some_and(|directive| !directive.allows_policy(name, already_created))
+                })
+                .map(|policy| PolicyViolation {
+                    serialized: policy.serialized.clone(),
+                    report_sample: true,
+                })
+                .collect()
+        };
+        (violations(&self.policies), violations(&self.report_only))
+    }
+
+    /// Returns enforced and report-only policies requiring trusted script sinks.
+    pub(crate) fn trusted_type_sink_violations(
+        &self,
+    ) -> (Vec<PolicyViolation>, Vec<PolicyViolation>) {
+        let violations = |policies: &[ParsedPolicy]| {
+            policies
+                .iter()
+                .filter(|policy| policy.require_trusted_types_for_script)
+                .map(|policy| PolicyViolation {
+                    serialized: policy.serialized.clone(),
+                    report_sample: true,
+                })
+                .collect()
+        };
+        (violations(&self.policies), violations(&self.report_only))
+    }
+
     /// Compares the rules that affect resource checks and violation reports.
     /// Endpoint availability changes independently after report delivery.
     pub(crate) fn has_same_policy_rules(&self, other: &Self) -> bool {
@@ -541,12 +598,40 @@ fn parse_policy(input: &str) -> Option<ParsedPolicy> {
             // Duplicate directives are ignored after the first occurrence.
             continue;
         }
-        let sources = tokens
+        let values = tokens.collect::<Vec<_>>();
+        if name == "trusted-types" {
+            policy.trusted_types = Some(parse_trusted_types_directive(&values));
+        } else if name == "require-trusted-types-for" {
+            policy.require_trusted_types_for_script = values.contains(&"'script'");
+        }
+        let sources = values
+            .into_iter()
             .filter_map(parse_source_expression)
-            .collect::<Vec<_>>();
+            .collect();
         policy.directives.insert(name, sources);
     }
     (!policy.directives.is_empty()).then_some(policy)
+}
+
+fn parse_trusted_types_directive(values: &[&str]) -> TrustedTypesDirective {
+    let mut directive = TrustedTypesDirective::default();
+    for value in values {
+        match *value {
+            "*" => directive.wildcard = true,
+            "'allow-duplicates'" => directive.allow_duplicates = true,
+            "'none'" => {}
+            name if !name.is_empty()
+                && name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'-' | b'#' | b'=' | b'_' | b'/' | b'@' | b'.' | b'%')
+                }) =>
+            {
+                directive.names.push(name.to_owned())
+            }
+            _ => {}
+        }
+    }
+    directive
 }
 
 fn parse_source_expression(token: &str) -> Option<SourceExpression> {
@@ -666,6 +751,66 @@ mod tests {
             report_only: Vec::new(),
             reporting_endpoints: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn trusted_types_directives_keep_names_and_dispositions_separate() {
+        let policy = policy(
+            "trusted-types App default; require-trusted-types-for 'script'; script-src 'self'",
+            "https://example.test/",
+        )
+        .with_report_only_headers(&[
+            "trusted-types Monitor; require-trusted-types-for 'script'".into(),
+        ]);
+        let (blocked, reported) = policy.trusted_type_policy_creation_violations("App", false);
+        assert!(blocked.is_empty());
+        assert_eq!(reported.len(), 1);
+        let (blocked, reported) = policy.trusted_type_policy_creation_violations("app", false);
+        assert_eq!((blocked.len(), reported.len()), (1, 1));
+        let (blocked, reported) = policy.trusted_type_policy_creation_violations("App", true);
+        assert_eq!((blocked.len(), reported.len()), (1, 1));
+        let (blocked, reported) = policy.trusted_type_sink_violations();
+        assert_eq!((blocked.len(), reported.len()), (1, 1));
+    }
+
+    #[test]
+    fn trusted_types_wildcard_and_duplicates_follow_their_own_grammar() {
+        let policy = policy(
+            "trusted-types * 'allow-duplicates'",
+            "https://example.test/",
+        );
+        assert!(
+            policy
+                .trusted_type_policy_creation_violations("any-name", true)
+                .0
+                .is_empty()
+        );
+        let policy = policy("trusted-types 'none'", "https://example.test/");
+        assert_eq!(
+            policy
+                .trusted_type_policy_creation_violations("default", false)
+                .0
+                .len(),
+            1
+        );
+        let policy = policy(
+            "require-trusted-types-for 'invalid'; trusted-types Good@name bad!name",
+            "https://example.test/",
+        );
+        assert!(policy.trusted_type_sink_violations().0.is_empty());
+        assert!(
+            policy
+                .trusted_type_policy_creation_violations("Good@name", false)
+                .0
+                .is_empty()
+        );
+        assert_eq!(
+            policy
+                .trusted_type_policy_creation_violations("bad!name", false)
+                .0
+                .len(),
+            1
+        );
     }
 
     #[test]

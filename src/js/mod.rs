@@ -75,6 +75,9 @@ mod dom_string;
 #[cfg(test)]
 mod dom_string_tests;
 mod errors;
+mod trusted_types;
+#[cfg(test)]
+mod trusted_types_tests;
 use errors::JsHostError;
 pub use errors::{FindInPageError, JsEvaluationError, NotificationPermissionError};
 #[cfg(test)]
@@ -1656,6 +1659,9 @@ struct HostState {
     canonical_node_identity_resolver: Option<JsValue>,
     /// Bootstrap-private ReportingObserver dispatchers, one per Document Realm.
     report_observer_dispatchers: HashMap<usize, JsValue>,
+    /// The default policy callback belongs to the target Document's realm,
+    /// including when an element is adopted or used through another realm.
+    trusted_type_default_html_callbacks: HashMap<usize, JsValue>,
     /// Legacy Window.event slots, isolated by the callback's Document realm.
     current_window_events: HashMap<usize, JsValue>,
     window_proxy_registry: Option<window_event::ProxyRegistry>,
@@ -1944,6 +1950,9 @@ unsafe impl Trace for HostState {
         }
         for dispatcher in self.report_observer_dispatchers.values() {
             unsafe { dispatcher.trace(tracer) };
+        }
+        for callback in self.trusted_type_default_html_callbacks.values() {
+            unsafe { callback.trace(tracer) };
         }
         for bindings in self.bootstrap_bindings.values() {
             unsafe { bindings.trace(tracer) };
@@ -2266,6 +2275,7 @@ impl HostState {
             form_validation: form_validation::State::default(),
             canonical_node_identity_resolver: None,
             report_observer_dispatchers: HashMap::new(),
+            trusted_type_default_html_callbacks: HashMap::new(),
             current_window_events: HashMap::new(),
             window_proxy_registry: None,
             bootstrap_bindings: HashMap::new(),
@@ -3563,6 +3573,8 @@ impl HostState {
                 .insert(document_id, origin);
         }
         self.document_csp.remove(&document_id);
+        self.trusted_type_default_html_callbacks
+            .remove(&document_id);
         self.document_sandbox.remove(&document_id);
         #[cfg(test)]
         self.document_script_executions.remove(&document_id);
@@ -3671,6 +3683,8 @@ impl HostState {
                 .insert(document_id, origin);
         }
         self.document_csp.remove(&document_id);
+        self.trusted_type_default_html_callbacks
+            .remove(&document_id);
         self.document_sandbox.remove(&document_id);
         #[cfg(test)]
         self.document_script_executions.remove(&document_id);
@@ -10730,6 +10744,7 @@ impl Drop for JsRuntime {
         state.iframe_context_ids.clear();
         state.node_lifetimes = node_lifetime::NodeLifetimes::default();
         state.event_loop = EventLoop::default();
+        state.trusted_type_default_html_callbacks.clear();
         state.pending_resource_loads.clear();
         state.pending_forced_iframe_navigations.clear();
         state.worker_owner_realm = None;
@@ -12200,6 +12215,46 @@ fn register_host_bindings(
             js_string!("__omoikane_set_inner_html"),
             2,
             NativeFunction::from_copy_closure(set_inner_html_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_create"),
+            3,
+            NativeFunction::from_copy_closure(trusted_types::create_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_is"),
+            2,
+            NativeFunction::from_copy_closure(trusted_types::is_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_value"),
+            2,
+            NativeFunction::from_copy_closure(trusted_types::value_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_policy_check"),
+            2,
+            NativeFunction::from_copy_closure(trusted_types::policy_check_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_register_default_html"),
+            1,
+            NativeFunction::from_copy_closure(trusted_types::register_default_html_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_default_html_for_node"),
+            1,
+            NativeFunction::from_copy_closure(trusted_types::default_html_for_node_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_sink_requires"),
+            1,
+            NativeFunction::from_copy_closure(trusted_types::sink_requires_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_sink_violation"),
+            2,
+            NativeFunction::from_copy_closure(trusted_types::sink_violation_native),
         ),
         (
             js_string!("__omoikane_parse_contextual_fragment"),

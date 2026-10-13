@@ -25,6 +25,13 @@ collect_pattern \
 collect_pattern "/css/css-logical/"
 collect_pattern "/reporting/" "/content-security-policy/securitypolicyviolation/constructor-required-fields.html"
 collect_pattern \
+  "/trusted-types/support/" \
+  "/trusted-types/Window-TrustedTypes.html" \
+  "/trusted-types/TrustedTypePolicyFactory-createPolicy-unenforced.html" \
+  "/trusted-types/TrustedTypePolicyFactory-isXXX.html" \
+  "/trusted-types/TrustedTypePolicyFactory-createPolicy-cspTests.html" \
+  "/trusted-types/trusted-types-reporting-for-Element-innerHTML.html"
+collect_pattern \
   "/dom/events/AddEventListenerOptions-once.any.js" \
   "/dom/events/AddEventListenerOptions-passive.any.js" \
   "/dom/events/AddEventListenerOptions-signal.any.js"

@@ -41,11 +41,27 @@ export let __omoikane_cookie_change_reset;
   const nativeFetch = globalThis.__omoikane_fetch;
   const nativeWebSocketConnect = globalThis.__omoikane_websocket_connect;
   const nativeEventSourceFetch = globalThis.__omoikane_event_source_fetch;
+  const nativeTrustedTypeCreate = globalThis.__omoikane_trusted_type_create;
+  const nativeTrustedTypeIs = globalThis.__omoikane_trusted_type_is;
+  const nativeTrustedTypeValue = globalThis.__omoikane_trusted_type_value;
+  const nativeTrustedTypePolicyCheck = globalThis.__omoikane_trusted_type_policy_check;
+  const nativeTrustedTypeRegisterDefaultHTML = globalThis.__omoikane_trusted_type_register_default_html;
+  const nativeTrustedTypeDefaultHTMLForNode = globalThis.__omoikane_trusted_type_default_html_for_node;
+  const nativeTrustedTypeSinkRequires = globalThis.__omoikane_trusted_type_sink_requires;
+  const nativeTrustedTypeSinkViolation = globalThis.__omoikane_trusted_type_sink_violation;
   delete globalThis.__omoikane_import_scripts;
   delete globalThis.__omoikane_capture_csp_source;
   delete globalThis.__omoikane_fetch;
   delete globalThis.__omoikane_websocket_connect;
   delete globalThis.__omoikane_event_source_fetch;
+  delete globalThis.__omoikane_trusted_type_create;
+  delete globalThis.__omoikane_trusted_type_is;
+  delete globalThis.__omoikane_trusted_type_value;
+  delete globalThis.__omoikane_trusted_type_policy_check;
+  delete globalThis.__omoikane_trusted_type_register_default_html;
+  delete globalThis.__omoikane_trusted_type_default_html_for_node;
+  delete globalThis.__omoikane_trusted_type_sink_requires;
+  delete globalThis.__omoikane_trusted_type_sink_violation;
   const nativeCurrentWindowEvent = globalThis.__omoikane_current_window_event;
   delete globalThis.__omoikane_current_window_event;
   const nativeRegisterWindowProxy = globalThis.__omoikane_register_window_proxy;
@@ -458,6 +474,152 @@ export let __omoikane_cookie_change_reset;
   const stringFromCharCode = String.fromCharCode;
   const hasOwnProperty = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
   const IntrinsicTypeError = globalThis.TypeError;
+
+  const trustedPolicyStates = new WeakMap();
+  const trustedPolicyNames = new Set();
+  const trustedPolicyConstruction = {};
+  const trustedFactoryConstruction = {};
+  let defaultTrustedPolicy = null;
+
+  function trustedTypePrototype(kind) {
+    return kind === 0 ? TrustedHTML.prototype :
+      kind === 1 ? TrustedScript.prototype : TrustedScriptURL.prototype;
+  }
+
+  function createTrustedType(kind, value) {
+    return nativeTrustedTypeCreate(kind, intrinsicString(value), trustedTypePrototype(kind));
+  }
+
+  function policyState(policy) {
+    if (!safeWeakMapHas(trustedPolicyStates, policy)) {
+      throw new IntrinsicTypeError("Illegal TrustedTypePolicy receiver");
+    }
+    return safeWeakMapGet(trustedPolicyStates, policy);
+  }
+
+  function policyCreate(policy, kind, input, extra) {
+    const options = policyState(policy);
+    const callback = kind === 0 ? options.createHTML :
+      kind === 1 ? options.createScript : options.createScriptURL;
+    if (callback === undefined) {
+      throw new IntrinsicTypeError("TrustedTypePolicy callback is missing");
+    }
+    const output = safeApply(callback, undefined, [intrinsicString(input), ...extra]);
+    return createTrustedType(kind, output == null ? "" : output);
+  }
+
+  class TrustedHTML {
+    constructor() { throw new IntrinsicTypeError("Illegal constructor"); }
+    toString() { return nativeTrustedTypeValue(this, 0); }
+    toJSON() { return nativeTrustedTypeValue(this, 0); }
+  }
+
+  class TrustedScript {
+    constructor() { throw new IntrinsicTypeError("Illegal constructor"); }
+    toString() { return nativeTrustedTypeValue(this, 1); }
+    toJSON() { return nativeTrustedTypeValue(this, 1); }
+  }
+
+  class TrustedScriptURL {
+    constructor() { throw new IntrinsicTypeError("Illegal constructor"); }
+    toString() { return nativeTrustedTypeValue(this, 2); }
+    toJSON() { return nativeTrustedTypeValue(this, 2); }
+  }
+
+  class TrustedTypePolicy {
+    constructor(token, name, options) {
+      if (token !== trustedPolicyConstruction) throw new IntrinsicTypeError("Illegal constructor");
+      safeWeakMapSet(trustedPolicyStates, this, { name, ...options });
+    }
+    get name() { return policyState(this).name; }
+    createHTML(input, ...args) { return policyCreate(this, 0, input, args); }
+    createScript(input, ...args) { return policyCreate(this, 1, input, args); }
+    createScriptURL(input, ...args) { return policyCreate(this, 2, input, args); }
+  }
+
+  class TrustedTypePolicyFactory {
+    constructor(token) {
+      if (token !== trustedFactoryConstruction) throw new IntrinsicTypeError("Illegal constructor");
+    }
+    createPolicy(name, options) {
+      if (this !== trustedTypes) throw new IntrinsicTypeError("Illegal TrustedTypePolicyFactory receiver");
+      if (arguments.length === 0) throw new IntrinsicTypeError("Policy name is required");
+      name = intrinsicString(name);
+      const dictionary = options == null ? {} : Object(options);
+      const callbacks = {
+        createHTML: dictionary.createHTML,
+        createScript: dictionary.createScript,
+        createScriptURL: dictionary.createScriptURL,
+      };
+      for (const callback of [callbacks.createHTML, callbacks.createScript, callbacks.createScriptURL]) {
+        if (callback !== undefined && typeof callback !== "function") {
+          throw new IntrinsicTypeError("TrustedTypePolicy callback must be callable");
+        }
+      }
+      if (!nativeTrustedTypePolicyCheck(name, hasSetValue(trustedPolicyNames, name))) {
+        throw new IntrinsicTypeError("Trusted Types policy disallowed by CSP");
+      }
+      if (name === "default" && defaultTrustedPolicy !== null) {
+        throw new IntrinsicTypeError("The default Trusted Types policy already exists");
+      }
+      const policy = new TrustedTypePolicy(trustedPolicyConstruction, name, callbacks);
+      if (name === "default") {
+        nativeTrustedTypeRegisterDefaultHTML(callbacks.createHTML || null);
+        defaultTrustedPolicy = policy;
+      }
+      addSetValue(trustedPolicyNames, name);
+      return policy;
+    }
+    get defaultPolicy() {
+      if (this !== trustedTypes) throw new IntrinsicTypeError("Illegal TrustedTypePolicyFactory receiver");
+      return defaultTrustedPolicy;
+    }
+    get emptyHTML() {
+      if (this !== trustedTypes) throw new IntrinsicTypeError("Illegal TrustedTypePolicyFactory receiver");
+      return emptyTrustedHTML;
+    }
+    get emptyScript() {
+      if (this !== trustedTypes) throw new IntrinsicTypeError("Illegal TrustedTypePolicyFactory receiver");
+      return emptyTrustedScript;
+    }
+    isHTML(value) {
+      if (this !== trustedTypes) throw new IntrinsicTypeError("Illegal TrustedTypePolicyFactory receiver");
+      return nativeTrustedTypeIs(value, 0);
+    }
+    isScript(value) {
+      if (this !== trustedTypes) throw new IntrinsicTypeError("Illegal TrustedTypePolicyFactory receiver");
+      return nativeTrustedTypeIs(value, 1);
+    }
+    isScriptURL(value) {
+      if (this !== trustedTypes) throw new IntrinsicTypeError("Illegal TrustedTypePolicyFactory receiver");
+      return nativeTrustedTypeIs(value, 2);
+    }
+  }
+
+  const trustedTypes = new TrustedTypePolicyFactory(trustedFactoryConstruction);
+  const emptyTrustedHTML = createTrustedType(0, "");
+  const emptyTrustedScript = createTrustedType(1, "");
+  globalThis.TrustedHTML = TrustedHTML;
+  globalThis.TrustedScript = TrustedScript;
+  globalThis.TrustedScriptURL = TrustedScriptURL;
+  globalThis.TrustedTypePolicy = TrustedTypePolicy;
+  globalThis.TrustedTypePolicyFactory = TrustedTypePolicyFactory;
+  Object.defineProperty(globalThis, "trustedTypes", { value: trustedTypes, configurable: true });
+
+  function trustedHTMLForSink(value, nodeId) {
+    if (nativeTrustedTypeIs(value, 0)) return nativeTrustedTypeValue(value, 0);
+    const input = value == null ? "" : intrinsicString(value);
+    if (!nativeTrustedTypeSinkRequires(nodeId)) return input;
+    const callback = nativeTrustedTypeDefaultHTMLForNode(nodeId);
+    if (typeof callback === "function") {
+      const converted = safeApply(callback, undefined, [input, "TrustedHTML", "Element innerHTML"]);
+      if (converted != null) return intrinsicString(converted);
+    }
+    if (!nativeTrustedTypeSinkViolation(nodeId, input)) {
+      throw new IntrinsicTypeError("TrustedHTML is required for Element innerHTML");
+    }
+    return input;
+  }
 
   function canonicalWrapperId(node) {
     if ((typeof node !== "object" && typeof node !== "function") || node === null) {
@@ -3638,7 +3800,7 @@ export let __omoikane_cookie_change_reset;
     }
 
     set innerHTML(value) {
-      const html = value == null ? "" : String(value);
+      const html = trustedHTMLForSink(value, this.__id);
       if (this instanceof HTMLHtmlElement && this.ownerDocument &&
           this.ownerDocument.contentType === "text/html" && /<(?:head|body)(?:\s|>)/i.test(html)) {
         const headMatch = /<head(?:\s[^>]*)?>([\s\S]*?)<\/head\s*>/i.exec(html);
@@ -3646,8 +3808,8 @@ export let __omoikane_cookie_change_reset;
         while (this.firstChild) this.removeChild(this.firstChild);
         const head = this.ownerDocument.createElement("head");
         const body = this.ownerDocument.createElement("body");
-        if (headMatch) head.innerHTML = headMatch[1];
-        if (bodyMatch) body.innerHTML = bodyMatch[1];
+        if (headMatch) head.innerHTML = createTrustedType(0, headMatch[1]);
+        if (bodyMatch) body.innerHTML = createTrustedType(0, bodyMatch[1]);
         this.appendChild(head);
         this.appendChild(body);
         return;
@@ -5826,8 +5988,9 @@ export let __omoikane_cookie_change_reset;
         .get.call(this.content);
     }
     set innerHTML(value) {
+      const html = trustedHTMLForSink(value, this.__id);
       Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")
-        .set.call(this.content, value);
+        .set.call(this.content, createTrustedType(0, html));
     }
   }
   class HTMLSlotElement extends HTMLElement {
