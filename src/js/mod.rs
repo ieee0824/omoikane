@@ -96,6 +96,9 @@ pub(crate) mod render_demand;
 mod script_errors;
 mod window_event;
 mod worker_imports;
+mod worker_loading;
+#[cfg(test)]
+mod worker_reporting_tests;
 pub use form_state::{FormStateRestoreMode, FormStateSnapshot};
 #[cfg(test)]
 mod layout_metrics_tests;
@@ -139,6 +142,7 @@ mod event_loop;
 mod html_parsing;
 mod html_sanitizer;
 mod html_serialization;
+mod security_reporting;
 mod storage;
 mod stylesheet;
 use csp::{CspPolicy, CspViolation, ResourceType};
@@ -519,6 +523,8 @@ const DOM_BOOTSTRAP: &str = concat!(
     "\n",
     include_str!("event_interfaces.js"),
     "\n",
+    include_str!("security_reporting.js"),
+    "\n",
     include_str!("touch_events.js"),
     "\n",
     include_str!("device_events.js"),
@@ -777,7 +783,7 @@ struct HttpModuleLoader {
     /// policies, so a single global policy would be incorrect for nested
     /// module graphs.
     csp_contexts: RefCell<HashMap<(usize, String), CspPolicy>>,
-    csp_violations: RefCell<Vec<(usize, String, String)>>,
+    csp_violations: RefCell<Vec<security_reporting::ModuleCspViolation>>,
     csp_violation_keys: RefCell<HashSet<(usize, String)>>,
 }
 
@@ -860,10 +866,24 @@ impl ModuleLoader for HttpModuleLoader {
                         .map(|policy| (module_document_id, policy))
                 });
 
+            if let Some((document_id, policy)) = csp_context.as_ref() {
+                self.observe_module_policy(
+                    *document_id,
+                    policy,
+                    &resolved_string,
+                    0,
+                    &resolved_string,
+                );
+            }
             if let Some((document_id, policy)) = csp_context.as_ref()
                 && !policy.allows_url(ResourceType::Script, &resolved)
             {
-                self.record_csp_violation(*document_id, resolved_string.clone());
+                self.record_csp_violation(
+                    *document_id,
+                    resolved_string.clone(),
+                    0,
+                    &resolved_string,
+                );
                 self.report_import_load_failure();
                 return Err(JsNativeError::error()
                     .with_message(format!("CSP blocked module import: {resolved_string}"))
@@ -954,17 +974,24 @@ impl ModuleLoader for HttpModuleLoader {
             }
             if let Some(effective_url) = response.effective_url()
                 && let Some((document_id, policy)) = csp_context.as_ref()
-                && !policy.allows_url_after_redirects(
-                    ResourceType::Script,
+                && !self.module_csp_allows_response(
+                    *document_id,
+                    policy,
                     effective_url,
                     response.redirect_count(),
+                    &resolved_string,
                 )
             {
                 let blocked_uri = effective_url.to_string();
-                self.record_csp_violation(*document_id, blocked_uri.clone());
+                self.record_csp_violation(
+                    *document_id,
+                    blocked_uri.clone(),
+                    response.redirect_count(),
+                    &resolved_string,
+                );
                 self.report_import_load_failure();
                 return Err(JsNativeError::error()
-                    .with_message(format!("CSP blocked module redirect: {blocked_uri}"))
+                    .with_message(format!("CSP blocked module redirect: {resolved_string}"))
                     .into());
             }
             // Other waiters may already have parsed this shared response.
@@ -1090,25 +1117,36 @@ impl HttpModuleLoader {
             .retain(|(module_document_id, _), _| *module_document_id != document_id);
         self.csp_violations
             .borrow_mut()
-            .retain(|(violation_document_id, _, _)| *violation_document_id != document_id);
+            .retain(|violation| violation.document_id != document_id);
         self.csp_violation_keys
             .borrow_mut()
             .retain(|(violation_document_id, _)| *violation_document_id != document_id);
     }
 
-    fn record_csp_violation(&self, document_id: usize, blocked_uri: String) {
+    fn record_csp_violation(
+        &self,
+        document_id: usize,
+        reference: String,
+        redirects: usize,
+        report_reference: &str,
+    ) {
         let mut violations = self.csp_violations.borrow_mut();
         if violations.len() >= MAX_CSP_VIOLATIONS {
             return;
         }
         let mut keys = self.csp_violation_keys.borrow_mut();
-        if !keys.insert((document_id, blocked_uri.clone())) {
+        if !keys.insert((document_id, report_reference.to_owned())) {
             return;
         }
-        violations.push((document_id, "script-src".to_string(), blocked_uri));
+        violations.push(security_reporting::ModuleCspViolation {
+            document_id,
+            reference,
+            redirects,
+            report_reference: report_reference.to_owned(),
+        });
     }
 
-    fn take_csp_violations(&self) -> Vec<(usize, String, String)> {
+    fn take_csp_violations(&self) -> Vec<security_reporting::ModuleCspViolation> {
         let violations = std::mem::take(&mut *self.csp_violations.borrow_mut());
         self.csp_violation_keys.borrow_mut().clear();
         violations
@@ -1773,6 +1811,8 @@ struct HostState {
     /// Committed URL per live Document. Nested Window/Document access must not
     /// accidentally expose the top-level Location after iframe navigation.
     document_urls: HashMap<usize, String>,
+    /// Creation URL and response status, retained across same-document changes.
+    document_reporting: HashMap<usize, security_reporting::DocumentReportingMetadata>,
     /// The fragment-selected element for each live Document. Weak references
     /// avoid retaining nodes removed from the document tree.
     document_targets: HashMap<usize, WeakNodeHandle>,
@@ -2172,7 +2212,7 @@ impl HostState {
             suppressed_task_errors: 0,
             base_url,
             secure_context_override: None,
-            location_href,
+            location_href: location_href.clone(),
             navigator_user_agent: default_user_agent(),
             clipboard: host_clipboard(),
             clipboard_permission_granted: true,
@@ -2271,6 +2311,13 @@ impl HostState {
             image_timeline: Arc::new(Mutex::new(HashMap::new())),
             visible_image_playbacks: Vec::new(),
             document_urls,
+            document_reporting: HashMap::from([(
+                document.identity(),
+                security_reporting::DocumentReportingMetadata {
+                    creation_url: location_href,
+                    response_status: 0,
+                },
+            )]),
             document_targets: HashMap::new(),
             document_base_urls,
             document_security_origins,
@@ -2677,7 +2724,8 @@ impl HostState {
             || matches_about_blank_url(&navigation_url);
         let LoadedChildDocument {
             document,
-            csp_headers,
+            security_headers,
+            response_status,
             url: child_url,
         } = if let Some(request) = submission {
             self.load_iframe_form_submission(request)?
@@ -2740,6 +2788,7 @@ impl HostState {
             .unwrap_or_else(|| "about:blank".to_string());
         self.document_urls
             .insert(document.identity(), committed_url.clone());
+        self.register_document_reporting(document.identity(), &committed_url, response_status);
         self.update_document_target(&document, &committed_url);
         if let Some(child_base_url) = child_base_url.clone() {
             self.document_base_urls
@@ -2767,7 +2816,7 @@ impl HostState {
         let policy = if inherits_owner_csp {
             self.document_csp
                 .get(&owner_document.identity())
-                .cloned()
+                .map(CspPolicy::inherited_for_new_global)
                 .unwrap_or_default()
                 .with_document_meta(
                     &document,
@@ -2777,7 +2826,11 @@ impl HostState {
                         .unwrap_or_default(),
                 )
         } else {
-            CspPolicy::from_headers_and_document(&csp_headers, &document, &policy_base)
+            CspPolicy::from_response_headers_and_document(
+                &security_headers,
+                &document,
+                &policy_base,
+            )
         };
         self.document_csp.insert(document.identity(), policy);
         // Seed a dirty style cache entry for the freshly loaded sub-document so
@@ -2878,7 +2931,7 @@ impl HostState {
         let csp = self
             .document_csp
             .get(&opener_document_id)
-            .cloned()
+            .map(CspPolicy::inherited_for_new_global)
             .unwrap_or_default();
         self.register_tree(&document);
         self.document_origins.insert(document_id, origin);
@@ -2886,6 +2939,7 @@ impl HostState {
             .insert(document_id, security_origin);
         self.document_urls
             .insert(document_id, "about:blank".to_owned());
+        self.register_document_reporting(document_id, "about:blank", 200);
         if let Some(base) = base {
             self.document_base_urls.insert(document_id, base);
         }
@@ -2944,7 +2998,8 @@ impl HostState {
             .or_else(|| self.base_url_for_document(opener_document_id));
         let LoadedChildDocument {
             document,
-            csp_headers: headers,
+            security_headers: headers,
+            response_status,
             url: effective_url,
         } = self.load_iframe_document(requested, base.as_ref());
         let document_id = document.identity();
@@ -2977,10 +3032,10 @@ impl HostState {
         let csp = if inherits_opener {
             self.document_csp
                 .get(&opener_document_id)
-                .cloned()
+                .map(CspPolicy::inherited_for_new_global)
                 .unwrap_or_default()
         } else {
-            CspPolicy::from_headers_and_document(&headers, &document, &document_url)
+            CspPolicy::from_response_headers_and_document(&headers, &document, &document_url)
         };
 
         self.register_tree(&document);
@@ -2996,6 +3051,7 @@ impl HostState {
         self.document_origins.insert(document_id, storage_origin);
         self.document_security_origins
             .insert(document_id, security_origin);
+        self.register_document_reporting(document_id, &document_url, response_status);
         self.document_urls.insert(document_id, document_url);
         if let Some(base) = new_base {
             self.document_base_urls.insert(document_id, base);
@@ -3071,7 +3127,8 @@ impl HostState {
                 return Some(FetchedChildResource {
                     mime_type,
                     body: data,
-                    csp_headers: Vec::new(),
+                    response_status: 200,
+                    security_headers: Vec::new(),
                     effective_url: src.to_owned(),
                 });
             }
@@ -3092,10 +3149,11 @@ impl HostState {
             effective_url.push_str(fragment);
         }
         let mime_type = response.header("Content-Type").unwrap_or("").to_owned();
-        let csp_headers = child_document::response_csp_headers(&response);
+        let security_headers = child_document::response_security_headers(&response);
         Some(FetchedChildResource {
             mime_type,
-            csp_headers,
+            security_headers,
+            response_status: response.status_code(),
             body: response.into_body(),
             effective_url,
         })
@@ -3224,6 +3282,7 @@ impl HostState {
         }
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
+        self.document_reporting.remove(&document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
@@ -3326,6 +3385,7 @@ impl HostState {
         }
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
+        self.document_reporting.remove(&document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
@@ -3663,6 +3723,21 @@ impl HostState {
         blocked_uri: impl Into<String>,
     ) {
         let blocked_uri = blocked_uri.into();
+        self.record_csp_violation_for_request(
+            document,
+            resource_type,
+            &blocked_uri,
+            0,
+            &blocked_uri,
+        );
+    }
+
+    fn record_csp_violation_history(
+        &mut self,
+        document: &NodeHandle,
+        resource_type: ResourceType,
+        blocked_uri: String,
+    ) {
         let document_id = document.identity();
         let directive = resource_type.directive().to_string();
         let key = (document_id, directive.clone(), blocked_uri.clone());
@@ -3688,7 +3763,18 @@ impl HostState {
         blocked_uri: impl Into<String>,
     ) {
         if let Some(document) = document_root_for_node(node) {
-            self.record_csp_violation(&document, resource_type, blocked_uri);
+            let blocked_uri = blocked_uri.into();
+            let policies = self
+                .csp_policy_for_document(&document)
+                .blocking_policy_texts_after_redirects(resource_type, &blocked_uri, 0);
+            self.queue_policy_violation_events_for_node(
+                node,
+                resource_type,
+                &blocked_uri,
+                policies,
+                "enforce",
+            );
+            self.record_csp_violation_history(&document, resource_type, blocked_uri);
         }
     }
 
@@ -3703,7 +3789,7 @@ impl HostState {
         };
         let blocked = !self
             .csp_policy_for_document(&document)
-            .allows_inline(ResourceType::Style)
+            .allows_inline_attribute(ResourceType::Style)
             && node.get_attribute("style").is_some();
         if blocked {
             self.record_csp_violation(
@@ -4097,20 +4183,19 @@ impl HostState {
             .map(|entry| std::mem::take(&mut entry.resources))
             .unwrap_or_default();
         resources.set_error_reporter(self.error_reporter.clone());
+        resources.retain_live_sources();
         let mut web_fonts = crate::font::WebFontRegistry::new();
         let site_for_cookies = self.location_href.parse::<crate::http::Url>().ok();
         let (stylesheet_nodes, font_scope_parents) = collect_stylesheet_nodes(document);
         for (style_node, scope, implicit_scope_root) in stylesheet_nodes {
-            let (css, blocked) = resources.load_node(
+            let (css, checks) = resources.load_node(
                 &style_node,
                 base.as_ref(),
                 &policy,
                 site_for_cookies.as_ref(),
                 Arc::clone(&self.cookie_store),
             );
-            for blocked_uri in blocked {
-                self.record_csp_violation(document, ResourceType::Style, blocked_uri);
-            }
+            self.observe_stylesheet_policy_checks(document, &style_node, checks);
             let (sheet, parse_failed) =
                 crate::paint::stylesheet::parse_stylesheet_forgiving_with_status(&css);
             if parse_failed {
@@ -4174,7 +4259,7 @@ impl HostState {
         }
         let web_fonts = Arc::new(web_fonts);
         resolver.set_web_fonts(web_fonts.clone());
-        let blocked_inline_styles = if policy.allows_inline(ResourceType::Style) {
+        let blocked_inline_styles = if policy.allows_inline_attribute(ResourceType::Style) {
             HashSet::new()
         } else {
             let mut blocked = HashSet::new();
@@ -6390,14 +6475,20 @@ impl JsRuntime {
             return;
         }
         let mut state = self.host_state.borrow_mut();
-        for (document_id, _directive, blocked_uri) in violations {
+        for violation in violations {
             // Module loading is the one CSP path that runs inside Boa's
             // ModuleLoader callback, so retain its blocked target here while
             // sharing the same per-document deduplication as native paths.
-            if state.document_is_active(document_id)
-                && let Some(document) = state.get_node(document_id)
+            if state.document_is_active(violation.document_id)
+                && let Some(document) = state.get_node(violation.document_id)
             {
-                state.record_csp_violation(&document, ResourceType::Script, blocked_uri);
+                state.record_csp_violation_for_request(
+                    &document,
+                    ResourceType::Script,
+                    &violation.reference,
+                    violation.redirects,
+                    &violation.report_reference,
+                );
             }
         }
     }
@@ -7652,9 +7743,12 @@ impl JsRuntime {
                 if !is_executable_classic_script_type(attributes.get("type").map(String::as_str)) {
                     continue;
                 }
-                let policy = self.host_state.borrow().csp_policy_for_node(&script);
                 let source = if let Some(src) = attributes.get("src") {
-                    if !policy.allows_reference(ResourceType::Script, src) {
+                    if !self
+                        .host_state
+                        .borrow_mut()
+                        .csp_allows_script_for_node(&script, src)
+                    {
                         self.host_state.borrow_mut().record_csp_violation_for_node(
                             &script,
                             ResourceType::Script,
@@ -7675,21 +7769,22 @@ impl JsRuntime {
                         self.record_task_error(format!("[popup script: {src}] failed to fetch"));
                         continue;
                     };
-                    if !policy.allows_reference_after_redirects(
+                    if !self.host_state.borrow_mut().csp_allows_response_for_node(
+                        &script,
                         ResourceType::Script,
                         &effective_url,
                         redirect_count,
+                        &resource_reference_timing_name(src, base.as_ref()),
                     ) {
-                        self.host_state.borrow_mut().record_csp_violation_for_node(
-                            &script,
-                            ResourceType::Script,
-                            effective_url,
-                        );
                         continue;
                     }
                     source
                 } else {
-                    if !policy.allows_inline(ResourceType::Script) {
+                    if !self
+                        .host_state
+                        .borrow_mut()
+                        .csp_allows_script_for_node(&script, "inline")
+                    {
                         self.host_state.borrow_mut().record_csp_violation_for_node(
                             &script,
                             ResourceType::Script,
@@ -7811,9 +7906,8 @@ impl JsRuntime {
         }
         if !self
             .host_state
-            .borrow()
-            .csp_policy_for_node(&script_node)
-            .allows_reference(ResourceType::Script, &src)
+            .borrow_mut()
+            .csp_allows_script_for_node(&script_node, &src)
         {
             self.host_state.borrow_mut().record_csp_violation_for_node(
                 &script_node,
@@ -7854,17 +7948,13 @@ impl JsRuntime {
             return Ok(());
         };
         let redirected = resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
-        if !self
-            .host_state
-            .borrow()
-            .csp_policy_for_node(&script_node)
-            .allows_reference_after_redirects(ResourceType::Script, &effective_url, redirect_count)
-        {
-            self.host_state.borrow_mut().record_csp_violation_for_node(
-                &script_node,
-                ResourceType::Script,
-                effective_url.clone(),
-            );
+        if !self.host_state.borrow_mut().csp_allows_response_for_node(
+            &script_node,
+            ResourceType::Script,
+            &effective_url,
+            redirect_count,
+            &resource_reference_timing_name(&src, base_url.as_ref()),
+        ) {
             let dispatch = dispatch_resource_timing_script(
                 "error",
                 node_id,
@@ -8506,6 +8596,11 @@ impl JsRuntime {
         while advanced < max_virtual_ms && tasks_processed < max_tasks {
             if !self.has_pending_timers()
                 && !self.has_pending_geolocation_tasks()
+                && !self
+                    .host_state
+                    .borrow()
+                    .event_loop
+                    .has_pending_security_reporting_tasks()
                 && !self.has_pending_css_transition_work()
             {
                 break;
@@ -8532,6 +8627,7 @@ impl JsRuntime {
                         owner_document_id, ..
                     } => *owner_document_id,
                     Task::WebLock { document_id, .. } => Some(*document_id),
+                    Task::SecurityPolicyViolation { document_id, .. } => Some(*document_id),
                     Task::WindowPostedMessage {
                         target_document_id, ..
                     } => Some(*target_document_id),
@@ -8545,6 +8641,7 @@ impl JsRuntime {
                         Task::Timer { payload, .. } => payload.kind(),
                         Task::Geolocation { .. } => "geolocation",
                         Task::WebLock { .. } => "web-lock",
+                        Task::SecurityPolicyViolation { .. } => "security-policy-violation",
                         Task::Navigation { .. } => "navigation",
                         Task::AuxiliaryNavigate { .. } => "auxiliary-navigation",
                         Task::PostedMessage { .. } => "posted-message",
@@ -8620,6 +8717,11 @@ impl JsRuntime {
                 self.run_timer_payload(payload)
             }
             Task::Geolocation { request_id } => self.run_geolocation_delivery(request_id, false),
+            Task::SecurityPolicyViolation {
+                document_id,
+                element_id,
+                payload,
+            } => self.dispatch_csp_violation_task(document_id, element_id, &payload),
             Task::WebLock {
                 document_id,
                 request_id,
@@ -9222,9 +9324,8 @@ impl JsRuntime {
                 }
                 (
                     state.sandbox_allows_scripts_for_node(&script),
-                    state
-                        .csp_policy_for_node(&script)
-                        .allows_inline(ResourceType::Script),
+                    script.get_attribute("src").is_some()
+                        || state.csp_allows_script_for_node(&script, "inline"),
                 )
             };
             if !sandbox_allowed {
@@ -9319,9 +9420,8 @@ impl JsRuntime {
             dispatch_load = false;
         } else if !self
             .host_state
-            .borrow()
-            .csp_policy_for_node(&script_node)
-            .allows_reference(ResourceType::Script, &src)
+            .borrow_mut()
+            .csp_allows_script_for_node(&script_node, &src)
         {
             self.host_state.borrow_mut().record_csp_violation_for_node(
                 &script_node,
@@ -9384,23 +9484,16 @@ impl JsRuntime {
                     self.record_error_from(&src, dispatched);
                 }
                 Some((effective_url, _source, redirect_count, _muted_errors))
-                    if !self
-                        .host_state
-                        .borrow()
-                        .csp_policy_for_node(&script_node)
-                        .allows_reference_after_redirects(
-                            ResourceType::Script,
-                            &effective_url,
-                            redirect_count,
-                        ) =>
+                    if !self.host_state.borrow_mut().csp_allows_response_for_node(
+                        &script_node,
+                        ResourceType::Script,
+                        &effective_url,
+                        redirect_count,
+                        &resource_reference_timing_name(&src, base_url.as_ref()),
+                    ) =>
                 {
                     let redirected =
                         resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
-                    self.host_state.borrow_mut().record_csp_violation_for_node(
-                        &script_node,
-                        ResourceType::Script,
-                        effective_url.clone(),
-                    );
                     dispatch_load = false;
                     let dispatched = self.eval_in_document_realm(
                         dispatch_document_id,
@@ -9777,9 +9870,12 @@ impl JsRuntime {
         // HTML spec: defer only applies to external (src) scripts.
         let is_defer = is_module || (attrs.contains_key("defer") && src.is_some());
 
-        let policy = self.host_state.borrow().csp_policy_for_node(script);
         if let Some(src_url) = src.as_deref() {
-            if !policy.allows_reference(ResourceType::Script, src_url) {
+            if !self
+                .host_state
+                .borrow_mut()
+                .csp_allows_script_for_node(script, src_url)
+            {
                 self.host_state.borrow_mut().record_csp_violation_for_node(
                     script,
                     ResourceType::Script,
@@ -9787,7 +9883,11 @@ impl JsRuntime {
                 );
                 return None;
             }
-        } else if !policy.allows_inline(ResourceType::Script) {
+        } else if !self
+            .host_state
+            .borrow_mut()
+            .csp_allows_script_for_node(script, "inline")
+        {
             self.host_state.borrow_mut().record_csp_violation_for_node(
                 script,
                 ResourceType::Script,
@@ -9820,16 +9920,13 @@ impl JsRuntime {
             };
             match fetched {
                 Some((effective_url, code, redirect_count, muted)) => {
-                    if !policy.allows_reference_after_redirects(
+                    if !self.host_state.borrow_mut().csp_allows_response_for_node(
+                        script,
                         ResourceType::Script,
                         &effective_url,
                         redirect_count,
+                        &resource_reference_timing_name(&src_url, base_url),
                     ) {
-                        self.host_state.borrow_mut().record_csp_violation_for_node(
-                            script,
-                            ResourceType::Script,
-                            effective_url,
-                        );
                         return None;
                     }
                     let redirected =
@@ -10304,7 +10401,15 @@ fn resolve_worker_url(
             .with_message("Dedicated Worker must be same-origin")
             .into());
     }
-    Ok(resolved.to_string())
+    let mut worker_url = resolved.to_string();
+    if let Some((_, fragment)) = requested.split_once('#') {
+        let mut parsed = url::Url::parse(&worker_url).map_err(|_| {
+            JsError::from(JsNativeError::syntax().with_message("Invalid Worker URL"))
+        })?;
+        parsed.set_fragment(Some(fragment));
+        worker_url = parsed.to_string();
+    }
+    Ok(worker_url)
 }
 
 fn requires_public_fetch(url: &crate::http::Url, base_url: Option<&crate::http::Url>) -> bool {
@@ -17550,8 +17655,11 @@ fn close_auxiliary_window_native(
 
 fn create_worker_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let url = string_argument(args.first(), "", context)?;
+    let document_id = caller_document_id(context).ok_or_else(|| {
+        JsNativeError::error().with_message("Worker owner document is unavailable")
+    })?;
     with_host_state(|state| {
-        create_worker_for_owner_state(Rc::clone(state), &url)
+        create_worker_for_owner_state(Rc::clone(state), &url, document_id)
             .map(|id| JsValue::from(js_string!(id.to_string())))
     })
 }
@@ -17645,93 +17753,136 @@ struct PreparedDedicatedWorker {
     runtime: JsRuntime,
 }
 
+/// An owned creator snapshot; constructing a Worker never retains a host borrow.
+struct DedicatedWorkerCreator {
+    origin_url: String,
+    base_url: Option<crate::http::Url>,
+    storage: StorageManager,
+    session_id: u64,
+    user_agent: String,
+    worker_id: u64,
+    origin: Option<StorageOrigin>,
+    security_origin: Option<DocumentSecurityOrigin>,
+    secure_context: bool,
+    policy: CspPolicy,
+}
+
+fn dedicated_worker_creator(
+    state: &mut HostState,
+    active_document: Option<usize>,
+) -> DedicatedWorkerCreator {
+    let document_id = active_document.unwrap_or_else(|| state.document.identity());
+    let worker_id = state.next_worker_id;
+    state.next_worker_id = state.next_worker_id.saturating_add(1);
+    DedicatedWorkerCreator {
+        origin_url: script_errors::document_fetch_origin(state, document_id).serialize(),
+        base_url: state.base_url_for_document(document_id),
+        storage: state.storage_manager.clone(),
+        session_id: state.storage_session_id,
+        user_agent: state.navigator_user_agent.clone(),
+        worker_id,
+        origin: state.document_origins.get(&document_id).cloned().flatten(),
+        security_origin: state.document_security_origins.get(&document_id).cloned(),
+        secure_context: document_is_secure_context(state, document_id),
+        policy: state
+            .document_csp
+            .get(&document_id)
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
 /// Fetches the source and initializes the private global before author code runs.
 fn prepare_dedicated_worker(
     owner_state: &Rc<RefCell<HostState>>,
     requested_url: &str,
     active_owner_document_id: Option<usize>,
 ) -> JsResult<PreparedDedicatedWorker> {
-    let (
-        owner_url,
-        base_url,
-        storage,
-        session_id,
-        user_agent,
-        worker_id,
-        owner_origin,
-        owner_security_origin,
-        owner_secure_context,
-    ) = {
-        let mut state = owner_state.borrow_mut();
-        let owner_document_id =
-            active_owner_document_id.unwrap_or_else(|| state.document.identity());
-        let id = state.next_worker_id;
-        state.next_worker_id = state.next_worker_id.saturating_add(1);
-        (
-            state
-                .base_url
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| state.location_href.clone()),
-            state.base_url.clone(),
-            state.storage_manager.clone(),
-            state.storage_session_id,
-            state.navigator_user_agent.clone(),
-            id,
-            state
-                .document_origins
-                .get(&owner_document_id)
-                .cloned()
-                .flatten(),
-            state
-                .document_security_origins
-                .get(&owner_document_id)
-                .cloned(),
-            document_is_secure_context(&state, owner_document_id),
-        )
-    };
-    let worker_url = resolve_worker_url(requested_url, &owner_url, base_url.as_ref())?;
-    let source = {
-        let mut state = owner_state.borrow_mut();
-        fetch_script_resource_with_client(requested_url, base_url.as_ref(), &mut state.http_client)
-            .map(|(_, source, _)| source)
+    let creator = dedicated_worker_creator(&mut owner_state.borrow_mut(), active_owner_document_id);
+    let initial_url = resolve_worker_url(
+        requested_url,
+        &creator.origin_url,
+        creator.base_url.as_ref(),
+    )?;
+    let loaded = worker_loading::load_worker_script(
+        &initial_url,
+        creator.base_url.as_ref(),
+        &mut owner_state.borrow_mut().http_client,
+    );
+    let worker_url = loaded
+        .as_ref()
+        .map_or(initial_url.as_str(), |script| script.effective_url.as_str());
+    let is_data_worker = worker_url
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"));
+    // Preserve existing tuple-origin capabilities during data bootstrap. An
+    // opaque origin serializes to "null", which is not a usable URL; bootstrap
+    // those workers from their actual data URL instead.
+    let bootstrap_url = if is_data_worker
+        && matches!(
+            creator.security_origin.as_ref(),
+            Some(DocumentSecurityOrigin::Tuple(_))
+        ) {
+        creator.origin_url.as_str()
+    } else {
+        worker_url
     };
     let mut worker_runtime = JsRuntime::with_document_url_and_storage(
         blank_html_document(),
-        &owner_url,
-        storage,
-        session_id,
+        bootstrap_url,
+        creator.storage,
+        creator.session_id,
     )?;
-    worker_runtime.set_user_agent(user_agent);
-    let worker_state = Rc::clone(&worker_runtime.host_state);
+    worker_runtime.set_user_agent(creator.user_agent);
     {
-        let mut state = worker_state.borrow_mut();
+        let mut state = worker_runtime.host_state.borrow_mut();
         let document_id = state.document.identity();
-        state.location_href = worker_url.clone();
-        state.base_url = worker_url.parse::<crate::http::Url>().ok();
-        state.document_urls.insert(document_id, worker_url.clone());
-        if let Some(base_url) = state.base_url.clone() {
-            state.document_base_urls.insert(document_id, base_url);
-        } else {
-            state.document_base_urls.remove(&document_id);
-        }
-        state.document_origins.insert(document_id, owner_origin);
-        if let Some(origin) = owner_security_origin {
+        state.document_origins.insert(document_id, creator.origin);
+        if let Some(origin) = creator.security_origin {
             state.document_security_origins.insert(document_id, origin);
         }
-        state.secure_context_override = Some(owner_secure_context);
+        if is_data_worker {
+            state.location_href = worker_url.to_owned();
+            state.base_url = None;
+            state
+                .document_urls
+                .insert(document_id, worker_url.to_owned());
+            state.document_base_urls.remove(&document_id);
+            state.register_document_reporting(document_id, worker_url, 0);
+        }
+        state.secure_context_override = Some(creator.secure_context);
         state.worker_owner = Some(Rc::clone(owner_state));
-        state.worker_id = Some(worker_id);
+        state.worker_id = Some(creator.worker_id);
         state.worker_terminated = false;
         state.worker_owner_bound = false;
     }
+    if is_data_worker {
+        let document_id = worker_runtime.document().identity();
+        worker_runtime
+            .context
+            .realm()
+            .host_defined_mut()
+            .insert(realm_origin_snapshot(
+                &worker_runtime.host_state,
+                document_id,
+            )?);
+        // The bootstrap's non-configurable Location accessor retains its
+        // private URL snapshot even when worker installation replaces globals.
+        worker_runtime.eval(&format!("__omoikane_set_location({worker_url:?})"))?;
+    }
+    if let Some(loaded) = loaded.as_ref() {
+        worker_runtime.install_worker_security_metadata(loaded, &creator.policy);
+    }
     worker_runtime.eval(&format!(
-        "__omoikane_install_worker_global({worker_url:?}, {worker_id:?})"
+        "__omoikane_install_worker_global({worker_url:?}, {:?})",
+        creator.worker_id,
     ))?;
+    let source_url = worker_url.to_owned();
     Ok(PreparedDedicatedWorker {
-        id: worker_id,
-        url: worker_url,
-        source,
+        id: creator.worker_id,
+        // Boa uses the script path to resolve dynamic imports as well.
+        url: source_url,
+        source: loaded.map(|script| script.source),
         runtime: worker_runtime,
     })
 }
@@ -17739,13 +17890,14 @@ fn prepare_dedicated_worker(
 fn create_worker_for_owner_state(
     owner_state: Rc<RefCell<HostState>>,
     requested_url: &str,
+    document_id: usize,
 ) -> JsResult<u64> {
     let PreparedDedicatedWorker {
         id: worker_id,
         url: worker_url,
         source,
         runtime: worker_runtime,
-    } = prepare_dedicated_worker(&owner_state, requested_url, active_document_id())?;
+    } = prepare_dedicated_worker(&owner_state, requested_url, Some(document_id))?;
     let entry = Rc::new(RefCell::new(WorkerRuntime {
         runtime: worker_runtime,
         owner_state: Rc::clone(&owner_state),
@@ -18155,10 +18307,7 @@ fn websocket_connect_native(
     let payload = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let document = state.csp_document_for_context(context)?;
-        if !state
-            .csp_policy_for_document(&document)
-            .allows_reference(ResourceType::Connect, &url)
-        {
+        if !state.csp_allows_connect(&document, &url) {
             state.record_csp_violation(&document, ResourceType::Connect, &url);
             return Err(JsNativeError::error()
                 .with_message("WebSocket connection blocked by CSP connect-src")
@@ -18310,10 +18459,7 @@ fn event_source_fetch_native(
             .parse::<crate::http::Url>()
             .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
         let document = state.csp_document_for_context(context)?;
-        if !state
-            .csp_policy_for_document(&document)
-            .allows_reference(ResourceType::Connect, &url)
-        {
+        if !state.csp_allows_connect(&document, &url) {
             state.record_csp_violation(&document, ResourceType::Connect, &url);
             return Err(JsNativeError::error()
                 .with_message("EventSource connection blocked by CSP connect-src")
@@ -18352,16 +18498,14 @@ fn event_source_fetch_native(
         )
         .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
         if let Some(effective_url) = fetched.response.effective_url()
-            && !state
-                .csp_policy_for_document(&document)
-                .allows_url_after_redirects(
-                    ResourceType::Connect,
-                    effective_url,
-                    fetched.response.redirect_count(),
-                )
+            && !state.csp_allows_response_for_document(
+                &document,
+                ResourceType::Connect,
+                &effective_url.to_string(),
+                fetched.response.redirect_count(),
+                &url,
+            )
         {
-            let blocked_uri = effective_url.to_string();
-            state.record_csp_violation(&document, ResourceType::Connect, &blocked_uri);
             return Err(JsNativeError::error()
                 .with_message("EventSource redirect blocked by CSP connect-src")
                 .into());
@@ -18488,12 +18632,9 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
         let normalized_url = parsed_url.to_string();
         let document = state.csp_document_for_context(context)?;
-        if !state
-            .csp_policy_for_document(&document)
-            .allows_reference(ResourceType::Connect, &normalized_url)
-        {
+        if !state.csp_allows_connect(&document, &normalized_url) {
             state.record_csp_violation(&document, ResourceType::Connect, &normalized_url);
-            return Err(JsNativeError::error()
+            return Err(JsNativeError::typ()
                 .with_message("fetch blocked by CSP connect-src")
                 .into());
         }
@@ -18547,17 +18688,15 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             }
         };
         if let Some(effective_url) = fetched.response.effective_url()
-            && !state
-                .csp_policy_for_document(&document)
-                .allows_url_after_redirects(
-                    ResourceType::Connect,
-                    effective_url,
-                    fetched.response.redirect_count(),
-                )
+            && !state.csp_allows_response_for_document(
+                &document,
+                ResourceType::Connect,
+                &effective_url.to_string(),
+                fetched.response.redirect_count(),
+                &normalized_url,
+            )
         {
-            let blocked_uri = effective_url.to_string();
-            state.record_csp_violation(&document, ResourceType::Connect, &blocked_uri);
-            return Err(JsNativeError::error()
+            return Err(JsNativeError::typ()
                 .with_message("fetch redirect blocked by CSP connect-src")
                 .into());
         }
@@ -19054,10 +19193,7 @@ fn prepare_inserted_inline_script_native(
         if !state.sandbox_allows_scripts_for_node(&node) {
             return Ok(JsValue::null());
         }
-        if !state
-            .csp_policy_for_node(&node)
-            .allows_inline(ResourceType::Script)
-        {
+        if !state.csp_allows_script_for_node(&node, "inline") {
             state.record_csp_violation_for_node(&node, ResourceType::Script, "inline");
             return Ok(JsValue::null());
         }

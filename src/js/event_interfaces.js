@@ -88,6 +88,23 @@
       ContentVisibilityAutoStateChangeEvent: payloadEvent(Event, "ContentVisibilityAutoStateChangeEvent", [["skipped", Boolean, false]]),
     };
   }
+  function securityEvents(Event) {
+    const usvString = value => string(value).toWellFormed();
+    return {
+      SecurityPolicyViolationEvent: payloadEvent(Event, "SecurityPolicyViolationEvent", [
+        ["blockedURI", usvString, ""], ["columnNumber", value => (+value) >>> 0, 0],
+        ["disposition", value => {
+          const converted = string(value);
+          if (converted !== "enforce" && converted !== "report") throw new TypeErrorIntrinsic("Invalid disposition");
+          return converted;
+        }, "enforce"],
+        ["documentURI", usvString, ""], ["effectiveDirective", string, ""],
+        ["lineNumber", value => (+value) >>> 0, 0], ["originalPolicy", string, ""],
+        ["referrer", usvString, ""], ["sample", string, ""], ["sourceFile", usvString, ""],
+        ["statusCode", value => ((+value) >>> 0) & 0xffff, 0], ["violatedDirective", string, ""],
+      ]),
+    };
+  }
   function beforeUnloadInterface(Event) {
     const state = new WeakMap(), token = {};
     class BeforeUnloadEvent extends Event {
@@ -143,5 +160,6 @@
   }
   const install = globalThis.__omoikane_install_event_interfaces;
   delete globalThis.__omoikane_install_event_interfaces;
-  install(context => ({ ...navigationEvents(context), ...beforeUnloadInterface(context.Event), ...touchInterfaces(context) }));
+  install(context => ({ ...navigationEvents(context), ...securityEvents(context.Event),
+    ...beforeUnloadInterface(context.Event), ...touchInterfaces(context) }));
 })();

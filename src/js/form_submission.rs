@@ -280,7 +280,8 @@ impl HostState {
             .map_or_else(|| submission.url.clone(), ToString::to_string);
         Ok(LoadedChildDocument {
             document,
-            csp_headers: child_document::response_csp_headers(&response),
+            response_status: response.status_code(),
+            security_headers: child_document::response_security_headers(&response),
             url: Some(url),
         })
     }

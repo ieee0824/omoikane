@@ -1,5 +1,13 @@
 // Testdriver requests are executed by the host runner between page jobs.
 globalThis.__wpt_window_commands = [];
+globalThis.__wpt_reporting_commands = [];
+test_driver_internal.generate_test_report = (message, context = null) => new Promise((resolve, reject) => {
+  if (context !== null && context !== globalThis) {
+    reject(new Error('Reports in another browsing context are unsupported'));
+    return;
+  }
+  __wpt_reporting_commands.push({message: String(message), resolve, reject});
+});
 test_driver_internal.minimize_window = () => new Promise(resolve => {
   __wpt_window_commands.push({hidden: true, resolve});
 });

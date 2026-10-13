@@ -16046,6 +16046,19 @@
       changedDocument.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
     }
   };
+  const dispatchCspEvent = Node.prototype.dispatchEvent;
+  globalThis.__omoikane_dispatch_csp_violation = function(targetId, init, workerGlobal) {
+    const target = workerGlobal ? globalThis : wrapNode(targetId);
+    if (!target) return;
+    const event = new platformEventInterfaces.SecurityPolicyViolationEvent("securitypolicyviolation", {
+      ...init, sourceFile: init.sourceFile ?? "",
+    });
+    event.isTrusted = true;
+    safeApply(workerGlobal ? dispatchCspGlobalEvent : dispatchCspEvent, target, [event]);
+    if (init.reportToPresent && platformEventInterfaces.queueCspReport) {
+      platformEventInterfaces.queueCspReport(init);
+    }
+  };
   globalThis.__omoikane_close_auxiliary_document = function() {
     if (browsingInput.visibilityHiddenDocumentIds.has(__omoikane_document_id)) return;
     browsingInput.visibilityHiddenDocumentIds.add(__omoikane_document_id);
@@ -17552,7 +17565,9 @@
     }
   };
   globalThis.__omoikane_set_location = function(href) {
-    __applyLocationUrl(href, false);
+    const url = new URL(String(href), __locationHref);
+    __locationHref = url.href;
+    __locationHash = url.hash;
   };
   globalThis.history = {
     scrollRestoration: "auto",
@@ -22434,6 +22449,7 @@
     if (visualScroll) visualViewport.dispatchEvent(new Event("scroll"));
   };
   globalThis.EventTarget = EventTarget;
+  const dispatchCspGlobalEvent = EventTarget.prototype.dispatchEvent;
   // DOM nodes and the Window inherit the EventTarget interface. Their own
   // listener operations retain the document-backed event dispatch state.
   Object.setPrototypeOf(Node.prototype, EventTarget.prototype);
@@ -25786,7 +25802,14 @@
   class EventSource extends EventTarget {
     constructor(url, init = {}) {
       super();
-      this.url = String(url);
+      if (typeof url === "symbol") throw new IntrinsicTypeError("Cannot convert a Symbol to a string");
+      const input = String(url);
+      const base = typeof document === "undefined" ? nativeDocumentBaseURL(__omoikane_document_id) : document.baseURI;
+      try {
+        this.url = new URL(input, base || globalThis.location.href).href;
+      } catch (_) {
+        throw new DOMException("Invalid EventSource URL", "SyntaxError");
+      }
       this.withCredentials = !!(init && init.withCredentials);
       this.readyState = EventSource.CONNECTING;
       this.onopen = this.onmessage = this.onerror = null;
@@ -27658,6 +27681,12 @@
       }
       return false;
     });
+  };
+  globalThis.__omoikane_install_security_reporting = factory => {
+    Object.assign(platformEventInterfaces, factory({ queueTask: __omoikane_queue_networking_task }));
+  };
+  globalThis.__omoikane_generate_test_report = (message, reportURL) => {
+    platformEventInterfaces.queueTestReport(message, reportURL);
   };
   globalThis.__omoikane_install_touch_events = factory => {
     Object.assign(platformEventInterfaces, factory({ UIEvent, isTouch: platformEventInterfaces.isTouch }));

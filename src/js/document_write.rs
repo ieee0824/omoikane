@@ -567,9 +567,8 @@ fn script_source(
     if !host.sandbox_allows_scripts_for_node(document) {
         return None;
     }
-    let policy = host.csp_policy_for_document(document);
     if let Some(src) = prepared.src.as_ref() {
-        if !policy.allows_reference(ResourceType::Script, &src) {
+        if !host.csp_allows_script_for_node(document, &src) {
             host.record_csp_violation_for_node(document, ResourceType::Script, src);
             return None;
         }
@@ -579,15 +578,19 @@ fn script_source(
         else {
             return None;
         };
-        if !policy.allows_reference_after_redirects(ResourceType::Script, &url, redirects) {
-            host.record_csp_violation_for_node(document, ResourceType::Script, url);
+        if !host.csp_allows_response_for_document(
+            document,
+            ResourceType::Script,
+            &url,
+            redirects,
+            &resource_reference_timing_name(src, base.as_ref()),
+        ) {
             return None;
         }
         Some((source, Some(url)))
-    } else if policy.allows_inline(ResourceType::Script) {
+    } else if host.check_inline_script_source(document, &prepared.node, &prepared.inline_source) {
         Some((prepared.inline_source.clone(), None))
     } else {
-        host.record_csp_violation_for_node(document, ResourceType::Script, "inline");
         None
     }
 }

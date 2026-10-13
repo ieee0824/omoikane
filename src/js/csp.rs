@@ -21,6 +21,19 @@ pub(crate) enum ResourceType {
     Font,
 }
 
+/// Runtime references representing inline code rather than a fetch request.
+pub(crate) fn is_inline_reference(reference: &str) -> bool {
+    matches!(reference, "inline" | "adopted-stylesheets")
+        || reference.starts_with("style-element:")
+        || reference.starts_with("style-attribute:")
+}
+
+/// Snapshots an inline report sample without trimming its source text.
+/// This implementation counts up to 40 Unicode scalar values.
+pub(crate) fn inline_report_sample(source: &str) -> String {
+    source.chars().take(40).collect()
+}
+
 impl ResourceType {
     pub(crate) fn directive(self) -> &'static str {
         match self {
@@ -51,11 +64,19 @@ pub(crate) struct CspViolation {
     pub(crate) source: String,
 }
 
+/// An owned violation descriptor for one policy and its selected source list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PolicyViolation {
+    pub(crate) serialized: String,
+    pub(crate) report_sample: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SourceExpression {
     None,
     SelfKeyword,
     UnsafeInline,
+    ReportSample,
     Any,
     Scheme(String),
     Host {
@@ -69,6 +90,7 @@ enum SourceExpression {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ParsedPolicy {
     directives: BTreeMap<String, Vec<SourceExpression>>,
+    serialized: String,
 }
 
 /// The policies attached to one Document.
@@ -79,10 +101,128 @@ struct ParsedPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CspPolicy {
     policies: Vec<ParsedPolicy>,
+    report_only: Vec<ParsedPolicy>,
+    reporting_endpoints: BTreeMap<String, String>,
     base_url: Option<Url>,
 }
 
 impl CspPolicy {
+    /// Compares the rules that affect resource checks and violation reports.
+    /// Endpoint availability changes independently after report delivery.
+    pub(crate) fn has_same_policy_rules(&self, other: &Self) -> bool {
+        self.policies == other.policies
+            && self.report_only == other.report_only
+            && self.base_url == other.base_url
+    }
+
+    pub(crate) fn from_response_headers_and_document(
+        headers: &[(String, String)],
+        document: &NodeHandle,
+        base_url: &str,
+    ) -> Self {
+        let values = |name: &str| {
+            headers
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut policy =
+            Self::from_headers_and_document(&values("content-security-policy"), document, base_url)
+                .with_report_only_headers(&values("content-security-policy-report-only"));
+        policy.reporting_endpoints = super::security_reporting::parse_reporting_endpoints(
+            &values("reporting-endpoints").join(", "),
+            base_url,
+        );
+        policy
+    }
+    pub(crate) fn reporting_endpoint(&self, name: &str) -> Option<String> {
+        self.reporting_endpoints.get(name).cloned()
+    }
+    pub(crate) fn remove_reporting_endpoint(&mut self, name: &str) {
+        self.reporting_endpoints.remove(name);
+    }
+
+    /// Copies CSP into a new global without inheriting its reporting endpoints.
+    /// Reporting endpoint lists belong to each Window or Worker global and
+    /// are initialized from that global's response headers.
+    pub(crate) fn inherited_for_new_global(&self) -> Self {
+        let mut inherited = self.clone();
+        inherited.reporting_endpoints.clear();
+        inherited
+    }
+
+    /// Adds response report-only policies without affecting enforcement.
+    pub(crate) fn with_report_only_headers(mut self, headers: &[String]) -> Self {
+        self.report_only
+            .extend(headers.iter().filter_map(|header| parse_policy(header)));
+        self
+    }
+
+    /// Reports violations of monitoring policies without authorizing a block.
+    pub(crate) fn report_only_policy_texts(
+        &self,
+        resource_type: ResourceType,
+        reference: &str,
+    ) -> Vec<PolicyViolation> {
+        self.report_only_policy_texts_after_redirects(resource_type, reference, 0)
+    }
+
+    /// Reports monitoring-policy violations after applying redirect matching.
+    pub(crate) fn report_only_policy_texts_after_redirects(
+        &self,
+        resource_type: ResourceType,
+        reference: &str,
+        redirects: usize,
+    ) -> Vec<PolicyViolation> {
+        self.violating_policy_texts(&self.report_only, resource_type, reference, redirects)
+    }
+
+    /// Describes each policy blocking this resource, including sample opt-in.
+    /// Evaluation only depends on this snapshot and the explicit resource.
+    pub(crate) fn blocking_policy_texts_after_redirects(
+        &self,
+        resource_type: ResourceType,
+        reference: &str,
+        redirects: usize,
+    ) -> Vec<PolicyViolation> {
+        self.violating_policy_texts(&self.policies, resource_type, reference, redirects)
+    }
+
+    fn violating_policy_texts(
+        &self,
+        policies: &[ParsedPolicy],
+        resource_type: ResourceType,
+        reference: &str,
+        redirects: usize,
+    ) -> Vec<PolicyViolation> {
+        let inline = is_inline_reference(reference);
+        let attribute =
+            resource_type == ResourceType::Style && reference.starts_with("style-attribute:");
+        let url = ResourceUrl::parse(reference, self.base_url.as_ref());
+        policies
+            .iter()
+            .filter_map(|policy| {
+                let violated = if inline {
+                    !policy.allows_inline(resource_type, attribute)
+                } else {
+                    url.as_ref().is_none_or(|url| {
+                        !policy.allows_url(resource_type, &self.base_url, url, redirects)
+                    })
+                };
+                violated.then(|| PolicyViolation {
+                    serialized: policy.serialized.clone(),
+                    report_sample: inline
+                        && policy
+                            .sources_for(resource_type, attribute)
+                            .is_some_and(|sources| {
+                                sources.contains(&SourceExpression::ReportSample)
+                            }),
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn from_headers_and_document(
         headers: &[String],
         document: &NodeHandle,
@@ -106,6 +246,8 @@ impl CspPolicy {
 
         Self {
             policies,
+            report_only: Vec::new(),
+            reporting_endpoints: BTreeMap::new(),
             base_url: base_url.parse::<Url>().ok(),
         }
     }
@@ -125,7 +267,14 @@ impl CspPolicy {
     pub(crate) fn allows_inline(&self, resource_type: ResourceType) -> bool {
         self.policies
             .iter()
-            .all(|policy| policy.allows_inline(resource_type))
+            .all(|policy| policy.allows_inline(resource_type, false))
+    }
+
+    /// Checks inline attributes using attribute-specific directive fallbacks.
+    pub(crate) fn allows_inline_attribute(&self, resource_type: ResourceType) -> bool {
+        self.policies
+            .iter()
+            .all(|policy| policy.allows_inline(resource_type, true))
     }
 
     pub(crate) fn allows_url(&self, resource_type: ResourceType, url: &Url) -> bool {
@@ -175,15 +324,27 @@ impl CspPolicy {
 }
 
 impl ParsedPolicy {
-    fn sources_for(&self, resource_type: ResourceType) -> Option<&[SourceExpression]> {
-        self.directives
-            .get(resource_type.directive())
+    fn sources_for(
+        &self,
+        resource_type: ResourceType,
+        attribute: bool,
+    ) -> Option<&[SourceExpression]> {
+        let specific_directive = match (resource_type, attribute) {
+            (ResourceType::Script, false) => Some("script-src-elem"),
+            (ResourceType::Script, true) => Some("script-src-attr"),
+            (ResourceType::Style, false) => Some("style-src-elem"),
+            (ResourceType::Style, true) => Some("style-src-attr"),
+            _ => None,
+        };
+        specific_directive
+            .and_then(|name| self.directives.get(name))
+            .or_else(|| self.directives.get(resource_type.directive()))
             .or_else(|| self.directives.get("default-src"))
             .map(Vec::as_slice)
     }
 
-    fn allows_inline(&self, resource_type: ResourceType) -> bool {
-        let Some(sources) = self.sources_for(resource_type) else {
+    fn allows_inline(&self, resource_type: ResourceType, attribute: bool) -> bool {
+        let Some(sources) = self.sources_for(resource_type, attribute) else {
             return true;
         };
         sources
@@ -198,7 +359,7 @@ impl ParsedPolicy {
         url: &ResourceUrl,
         redirects: usize,
     ) -> bool {
-        let Some(sources) = self.sources_for(resource_type) else {
+        let Some(sources) = self.sources_for(resource_type, false) else {
             return true;
         };
 
@@ -213,7 +374,7 @@ impl ParsedPolicy {
 
         sources.iter().any(|source| match source {
             SourceExpression::None => false,
-            SourceExpression::UnsafeInline => false,
+            SourceExpression::UnsafeInline | SourceExpression::ReportSample => false,
             SourceExpression::Any => matches!(url.scheme.as_str(), "http" | "https" | "ws" | "wss"),
             SourceExpression::SelfKeyword => base_url
                 .as_ref()
@@ -366,7 +527,10 @@ fn host_matches(expected: &str, actual: &str) -> bool {
 }
 
 fn parse_policy(input: &str) -> Option<ParsedPolicy> {
-    let mut policy = ParsedPolicy::default();
+    let mut policy = ParsedPolicy {
+        serialized: input.trim().to_owned(),
+        ..ParsedPolicy::default()
+    };
     for directive in input.split(';') {
         let mut tokens = directive.split_ascii_whitespace();
         let Some(name) = tokens.next() else {
@@ -391,6 +555,11 @@ fn parse_source_expression(token: &str) -> Option<SourceExpression> {
         "'none'" => return Some(SourceExpression::None),
         "'self'" => return Some(SourceExpression::SelfKeyword),
         "'unsafe-inline'" => return Some(SourceExpression::UnsafeInline),
+        "'report-sample'" => {
+            // CSP's sample opt-in uses exact source-list membership, unlike
+            // the explicitly case-insensitive unsafe-inline matching.
+            return (token == "'report-sample'").then_some(SourceExpression::ReportSample);
+        }
         "*" => return Some(SourceExpression::Any),
         _ => {}
     }
@@ -494,6 +663,8 @@ mod tests {
         CspPolicy {
             policies: vec![parse_policy(text).unwrap()],
             base_url: base.parse().ok(),
+            report_only: Vec::new(),
+            reporting_endpoints: BTreeMap::new(),
         }
     }
 
@@ -523,6 +694,258 @@ mod tests {
         assert!(
             policy("script-src 'unsafe-inline'", "https://example.test/")
                 .allows_inline(ResourceType::Script)
+        );
+    }
+
+    #[test]
+    fn report_sample_does_not_authorize_inline_or_external_resources() {
+        for sources in [
+            "'report-sample'",
+            "'none' 'report-sample'",
+            "'REPORT-SAMPLE'",
+        ] {
+            let policy = policy(&format!("script-src {sources}"), "https://example.test/");
+            assert!(!policy.allows_inline(ResourceType::Script), "{sources}");
+            assert!(
+                !policy.allows_inline_attribute(ResourceType::Script),
+                "{sources}"
+            );
+            assert!(
+                !policy.allows_reference(ResourceType::Script, "https://example.test/app.js"),
+                "{sources}"
+            );
+        }
+        let policy = policy(
+            "script-src 'unsafe-inline' 'report-sample'",
+            "https://example.test/",
+        );
+        assert!(policy.allows_inline(ResourceType::Script));
+        assert!(!policy.allows_reference(ResourceType::Script, "https://example.test/app.js"));
+    }
+
+    #[test]
+    fn element_and_attribute_directives_use_separate_fallbacks() {
+        for (resource, directive) in [
+            (ResourceType::Script, "script-src"),
+            (ResourceType::Style, "style-src"),
+        ] {
+            let elements_blocked = policy(
+                &format!("{directive} 'unsafe-inline'; {directive}-elem 'none'"),
+                "https://example.test/",
+            );
+            assert!(!elements_blocked.allows_inline(resource), "{directive}");
+            assert!(
+                elements_blocked.allows_inline_attribute(resource),
+                "{directive}"
+            );
+
+            let attributes_blocked = policy(
+                &format!("{directive} 'unsafe-inline'; {directive}-attr 'none'"),
+                "https://example.test/",
+            );
+            assert!(attributes_blocked.allows_inline(resource), "{directive}");
+            assert!(
+                !attributes_blocked.allows_inline_attribute(resource),
+                "{directive}"
+            );
+
+            let element_source = policy(
+                &format!("{directive} 'none'; {directive}-elem https://example.test/allowed/"),
+                "https://example.test/",
+            );
+            assert!(element_source.allows_reference(resource, "/allowed/resource"));
+            assert!(!element_source.allows_reference(resource, "/other/resource"));
+            assert!(element_source.allows_reference_after_redirects(
+                resource,
+                "/other/resource",
+                1
+            ));
+            assert!(!element_source.allows_reference_after_redirects(
+                resource,
+                "https://other.test/allowed/resource",
+                1
+            ));
+        }
+    }
+
+    #[test]
+    fn inline_samples_use_only_the_selected_element_source_list() {
+        for (resource, directive, reference) in [
+            (ResourceType::Script, "script-src", "inline"),
+            (ResourceType::Style, "style-src", "style-element:7"),
+        ] {
+            for (text, expected_sample) in [
+                (format!("{directive} 'report-sample'"), true),
+                ("default-src 'report-sample'".to_string(), true),
+                (
+                    format!("default-src 'report-sample'; {directive} 'none'"),
+                    false,
+                ),
+                (
+                    format!("{directive} 'report-sample'; {directive}-elem 'none'"),
+                    false,
+                ),
+                (
+                    format!("{directive} 'none'; {directive}-elem 'report-sample'"),
+                    true,
+                ),
+                (
+                    format!("{directive} 'report-sample'; {directive}-elem"),
+                    false,
+                ),
+                (
+                    format!("{directive} 'none'; {directive}-attr 'report-sample'"),
+                    false,
+                ),
+            ] {
+                let policy = policy(&text, "https://example.test/");
+                assert_eq!(
+                    policy.blocking_policy_texts_after_redirects(resource, reference, 0),
+                    vec![PolicyViolation {
+                        serialized: text.clone(),
+                        report_sample: expected_sample,
+                    }],
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn style_attribute_samples_use_the_attribute_source_list() {
+        for (text, expected_sample) in [
+            ("style-src 'none'; style-src-attr 'report-sample'", true),
+            ("style-src 'report-sample'; style-src-elem 'none'", true),
+            ("default-src 'report-sample'", true),
+            ("style-src 'report-sample'; style-src-attr 'none'", false),
+            ("style-src 'report-sample'; style-src-attr", false),
+            ("style-src 'none'; style-src-elem 'report-sample'", false),
+        ] {
+            let policy = policy(text, "https://example.test/");
+            assert!(
+                !policy.allows_inline_attribute(ResourceType::Style),
+                "{text}"
+            );
+            assert_eq!(
+                policy.blocking_policy_texts_after_redirects(
+                    ResourceType::Style,
+                    "style-attribute:7",
+                    0
+                ),
+                vec![PolicyViolation {
+                    serialized: text.to_string(),
+                    report_sample: expected_sample,
+                }],
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_violating_policy_keeps_its_own_sample_opt_in() {
+        let document = TreeBuilder::parse("<html><head></head><body></body></html>").document();
+        let policy = CspPolicy::from_headers_and_document(
+            &[
+                "script-src 'report-sample'".to_string(),
+                "script-src 'none'".to_string(),
+                "script-src 'unsafe-inline' 'report-sample'".to_string(),
+            ],
+            &document,
+            "https://example.test/",
+        )
+        .with_report_only_headers(&[
+            "script-src 'none'; report-to plain".to_string(),
+            "script-src 'report-sample'; report-to sampled".to_string(),
+            "script-src 'unsafe-inline'; report-to allowed".to_string(),
+        ]);
+        assert_eq!(
+            policy.blocking_policy_texts_after_redirects(ResourceType::Script, "inline", 0),
+            vec![
+                PolicyViolation {
+                    serialized: "script-src 'report-sample'".to_string(),
+                    report_sample: true,
+                },
+                PolicyViolation {
+                    serialized: "script-src 'none'".to_string(),
+                    report_sample: false,
+                },
+            ]
+        );
+        assert_eq!(
+            policy.report_only_policy_texts(ResourceType::Script, "inline"),
+            vec![
+                PolicyViolation {
+                    serialized: "script-src 'none'; report-to plain".to_string(),
+                    report_sample: false,
+                },
+                PolicyViolation {
+                    serialized: "script-src 'report-sample'; report-to sampled".to_string(),
+                    report_sample: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn report_sample_opt_in_requires_the_exact_token() {
+        // The parser lowercases directive names, while CSP's inline sample
+        // check uses exact membership in the original directive value.
+        for (token, expected_sample) in [
+            ("'report-sample'", true),
+            ("'REPORT-SAMPLE'", false),
+            ("'Report-Sample'", false),
+            ("report-sample", false),
+        ] {
+            let text = format!("SCRIPT-SRC {token}");
+            let policy = policy(&text, "https://example.test/");
+            assert_eq!(
+                policy.blocking_policy_texts_after_redirects(ResourceType::Script, "inline", 0),
+                vec![PolicyViolation {
+                    serialized: text,
+                    report_sample: expected_sample,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn external_violations_never_opt_in_to_inline_samples() {
+        let text = "default-src 'report-sample'";
+        let policy =
+            policy(text, "https://example.test/").with_report_only_headers(&[text.to_string()]);
+        for resource in [ResourceType::Script, ResourceType::Style] {
+            for (reference, redirects) in [
+                ("https://example.test/resource", 0),
+                ("/resource", 0),
+                ("https://other.test/resource", 1),
+            ] {
+                let expected = vec![PolicyViolation {
+                    serialized: text.to_string(),
+                    report_sample: false,
+                }];
+                assert_eq!(
+                    policy.blocking_policy_texts_after_redirects(resource, reference, redirects),
+                    expected
+                );
+                assert_eq!(
+                    policy.report_only_policy_texts_after_redirects(resource, reference, redirects),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inline_report_samples_preserve_whitespace_and_unicode_boundaries() {
+        assert_eq!(inline_report_sample(""), "");
+        assert_eq!(inline_report_sample(" \n\t source \n"), " \n\t source \n");
+        assert_eq!(inline_report_sample(&"a".repeat(39)), "a".repeat(39));
+        assert_eq!(inline_report_sample(&"a".repeat(40)), "a".repeat(40));
+        assert_eq!(inline_report_sample(&"a".repeat(41)), "a".repeat(40));
+        let prefix = format!(" \n{}", "あ".repeat(37));
+        assert_eq!(
+            inline_report_sample(&format!("{prefix}😀z")),
+            format!("{prefix}😀")
         );
     }
 

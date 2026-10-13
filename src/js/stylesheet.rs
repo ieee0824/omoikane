@@ -1,12 +1,12 @@
 //! Document-owned stylesheet resources shared by CSSOM geometry and painting.
 
 use super::csp::{CspPolicy, ResourceType};
-use crate::dom::NodeHandle;
+use crate::dom::{Node, NodeHandle, WeakNodeHandle};
 use crate::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
 };
 use crate::http::{Client, CookieJar, HttpRequest, Url};
-use crate::paint::{DataUri, image::parse_data_uri, stylesheet as css};
+use crate::paint::stylesheet as css;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -18,12 +18,74 @@ struct Resource {
     text: String,
     url: Option<Url>,
     redirects: usize,
+    requests: Vec<(String, usize)>,
+}
+
+/// One CSP request, response, or inline check belonging to a stylesheet load.
+/// The caller delivers notifications after the loader releases its borrows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StylePolicyCheck {
+    /// Current URL used for source-list matching, or `inline`.
+    pub(super) reference: String,
+    /// Redirect count controlling whether source-list paths are significant.
+    pub(super) redirects: usize,
+    /// Initial request URL, retained to avoid reporting redirect destinations.
+    pub(super) report_reference: String,
+    /// Clipped original inline text; empty for request/response checks.
+    pub(super) sample: String,
+    /// Whether enforced policy prevented this stage from proceeding.
+    pub(super) blocked: bool,
+}
+
+struct NodeSource {
+    text: String,
+    text_nodes: Vec<usize>,
+    href: Option<String>,
+    rel: Option<String>,
+    base: Option<Url>,
+    policy: CspPolicy,
+}
+
+impl NodeSource {
+    fn matches(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.text_nodes == other.text_nodes
+            && self.href == other.href
+            && self.rel == other.rel
+            && self.base == other.base
+            // Endpoint removal after a 410 response changes delivery state,
+            // not the policies that caused the original load notifications.
+            && self.policy.has_same_policy_rules(&other.policy)
+    }
+
+    fn new(node: &NodeHandle, base: Option<&Url>, policy: &CspPolicy) -> Self {
+        fn text_nodes(node: &NodeHandle, ids: &mut Vec<usize>) {
+            for child in node.child_nodes() {
+                ids.push(child.identity());
+                text_nodes(&child, ids);
+            }
+        }
+        let mut ids = Vec::new();
+        text_nodes(node, &mut ids);
+        Self {
+            text: css::collect_text_contents(node),
+            text_nodes: ids,
+            href: node.get_attribute("href"),
+            rel: node.get_attribute("rel"),
+            base: base.cloned(),
+            policy: policy.clone(),
+        }
+    }
 }
 
 /// Retains each document's resource responses across DOM/style invalidations.
 #[derive(Default)]
 pub(super) struct StylesheetLoader {
     resources: HashMap<String, Option<Resource>>,
+    /// Distinguishes actual source changes from resolver/viewport rebuilds.
+    /// Text-node IDs detect textContent replacement even with unchanged text.
+    /// Same-value CharacterData writes require a future DOM mutation revision.
+    node_sources: HashMap<usize, (WeakNodeHandle, NodeSource)>,
     client: Client,
     site_for_cookies: Option<Url>,
     reporter: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
@@ -38,6 +100,12 @@ impl std::fmt::Debug for StylesheetLoader {
 }
 
 impl StylesheetLoader {
+    /// Drops source snapshots whose nodes have been released. Call once before
+    /// a resolver rebuild rather than scanning the map for every stylesheet.
+    pub(super) fn retain_live_sources(&mut self) {
+        self.node_sources.retain(|_, (node, _)| node.is_alive());
+    }
+
     pub(super) fn set_error_reporter(
         &mut self,
         reporter: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
@@ -92,21 +160,38 @@ impl StylesheetLoader {
         policy: &CspPolicy,
         site_for_cookies: Option<&Url>,
         cookies: Arc<Mutex<CookieJar>>,
-    ) -> (String, Vec<String>) {
+    ) -> (String, Vec<StylePolicyCheck>) {
         self.client.set_shared_cookie_store(cookies);
         self.site_for_cookies = site_for_cookies.cloned();
-        let mut blocked = Vec::new();
+        let mut checks = Vec::new();
         if node.get_attribute("disabled").is_some() {
-            return (String::new(), blocked);
+            self.node_sources.remove(&node.identity());
+            return (String::new(), checks);
         }
+        let source = NodeSource::new(node, base, policy);
+        let unchanged = self
+            .node_sources
+            .get(&node.identity())
+            .is_some_and(|(previous, input)| {
+                previous.upgrade().as_ref() == Some(node) && input.matches(&source)
+            });
         let mut output = Vec::new();
         let mut active = HashSet::new();
         if node.tag_name().as_deref() == Some("style") {
-            if policy.allows_inline(ResourceType::Style) {
+            let blocked = !policy.allows_inline(ResourceType::Style);
+            checks.push(StylePolicyCheck {
+                reference: "inline".into(),
+                redirects: 0,
+                report_reference: "inline".into(),
+                sample: super::csp::inline_report_sample(&source.text),
+                blocked,
+            });
+            if !blocked {
                 let resource = Resource {
                     text: css::collect_text_contents(node),
                     url: base.cloned(),
                     redirects: 0,
+                    requests: Vec::new(),
                 };
                 self.expand(
                     resource,
@@ -115,17 +200,15 @@ impl StylesheetLoader {
                     0,
                     &mut active,
                     &mut output,
-                    &mut blocked,
+                    &mut checks,
                 );
-            } else {
-                blocked.push(format!("style-element:{}", node.identity()));
             }
         } else if node.get_attribute("rel").is_some_and(|rel| {
             rel.split_whitespace()
                 .any(|word| word.eq_ignore_ascii_case("stylesheet"))
         }) {
             if let Some(href) = node.get_attribute("href") {
-                if let Some(resource) = self.fetch(href.trim(), base, base, policy, &mut blocked) {
+                if let Some(resource) = self.fetch(href.trim(), base, base, policy, &mut checks) {
                     self.expand(
                         resource,
                         base,
@@ -133,19 +216,27 @@ impl StylesheetLoader {
                         0,
                         &mut active,
                         &mut output,
-                        &mut blocked,
+                        &mut checks,
                     );
                 }
             }
         }
         let mut text = output.join("\n");
-        if let Some(media) = node
-            .get_attribute("media")
-            .filter(|media| !media.trim().is_empty())
+        if !text.is_empty()
+            && let Some(media) = node
+                .get_attribute("media")
+                .filter(|media| !media.trim().is_empty())
         {
             text = format!("@media {media} {{\n{text}\n}}");
         }
-        (text, blocked)
+        self.node_sources
+            .insert(node.identity(), (node.downgrade(), source));
+        // Enforcement and cached-response validation have still run above.
+        // Only notifications are suppressed for a resolver-only rebuild.
+        if unchanged {
+            checks.clear();
+        }
+        (text, checks)
     }
 
     fn fetch(
@@ -154,12 +245,15 @@ impl StylesheetLoader {
         base: Option<&Url>,
         document_base: Option<&Url>,
         policy: &CspPolicy,
-        blocked: &mut Vec<String>,
+        checks: &mut Vec<StylePolicyCheck>,
     ) -> Option<Resource> {
         if href.is_empty() {
             return None;
         }
-        let url = if href.starts_with("data:") {
+        let is_data = href
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"));
+        let url = if is_data {
             None
         } else {
             let Some(url) = base
@@ -172,91 +266,114 @@ impl StylesheetLoader {
         };
         let key = url
             .as_ref()
-            .map_or_else(|| href.to_string(), ToString::to_string);
-        if !policy.allows_reference(ResourceType::Style, &key) {
-            blocked.push(key);
+            .map_or_else(|| href.to_owned(), ToString::to_string);
+        if !check_reference(policy, &key, 0, &key, checks) {
             return None;
         }
         if let Some(cached) = self.resources.get(&key) {
-            if let Some(resource) = cached {
-                if let Some(url) = &resource.url {
-                    if !policy.allows_url_after_redirects(
-                        ResourceType::Style,
-                        url,
-                        resource.redirects,
-                    ) {
-                        blocked.push(url.to_string());
-                        return None;
-                    }
-                }
-            }
-            return cached.clone();
+            return cached
+                .as_ref()
+                .filter(|resource| check_cached_resource(resource, policy, &key, checks))
+                .cloned();
         }
-        let blocked_before = blocked.len();
+        let check_start = checks.len();
         let resource = if let Some(url) = url {
-            let same_origin = document_base.is_some_and(|base| {
-                base.scheme() == url.scheme()
-                    && base.host() == url.host()
-                    && base.port() == url.port()
-            });
-            let response = HttpRequest::get(&key).ok().and_then(|mut request| {
-                if !same_origin {
-                    request.require_public_ip();
-                }
-                if let Some(site) = self.site_for_cookies.as_ref().or(document_base) {
-                    request.set_cookie_context(site.clone(), false);
-                }
-                self.client.send(request).ok()
-            });
-            response.and_then(|response| {
-                let effective = response.effective_url().cloned().unwrap_or(url);
-                if !policy.allows_url_after_redirects(
-                    ResourceType::Style,
-                    &effective,
-                    response.redirect_count(),
-                ) {
-                    blocked.push(effective.to_string());
-                    return None;
-                }
-                let mime = response
-                    .header("content-type")
-                    .unwrap_or("")
-                    .split(';')
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                if response.status_code() != 200
-                    || !mime.eq_ignore_ascii_case("text/css")
-                    || response.body().len() > MAX_BYTES
-                {
-                    return None;
-                }
-                Some(Resource {
-                    text: std::str::from_utf8(response.body()).ok()?.to_string(),
-                    url: Some(effective),
-                    redirects: response.redirect_count(),
-                })
-            })
-        } else if href.starts_with("data:text/css") {
-            parse_data_uri(href).ok().and_then(|data| {
-                let text = match data {
-                    DataUri::Text { data, .. } => data,
-                    DataUri::Binary { data, .. } => String::from_utf8(data).ok()?,
-                };
-                (text.len() <= MAX_BYTES).then_some(Resource {
-                    text,
-                    url: None,
-                    redirects: 0,
-                })
-            })
+            self.fetch_network(url, document_base, policy, &key, checks)
         } else {
-            None
+            self.decode_data(href, policy, &key, checks)
         };
-        if resource.is_none() && blocked.len() == blocked_before {
-            self.report_fetch_failure();
+        let policy_blocked = checks[check_start..].iter().any(|check| check.blocked);
+        if !policy_blocked {
+            if resource.is_none() {
+                self.report_fetch_failure();
+            }
+            self.resources.insert(key, resource.clone());
         }
-        self.resources.insert(key, resource.clone());
         resource
+    }
+
+    fn fetch_network(
+        &mut self,
+        mut url: Url,
+        document_base: Option<&Url>,
+        policy: &CspPolicy,
+        original: &str,
+        checks: &mut Vec<StylePolicyCheck>,
+    ) -> Option<Resource> {
+        let mut requests = vec![(original.to_owned(), 0)];
+        let mut redirects = 0;
+        let public_only = !document_base.is_some_and(|base| same_origin(base, &url));
+        loop {
+            let mut request = HttpRequest::get(&url.to_string()).ok()?;
+            if public_only || !document_base.is_some_and(|base| same_origin(base, &url)) {
+                request.require_public_ip();
+            }
+            if let Some(site) = self.site_for_cookies.as_ref().or(document_base) {
+                request.set_cookie_context(site.clone(), false);
+            }
+            let response = self
+                .client
+                .send_once_with_timeout(request, true, None)
+                .ok()?;
+            if matches!(response.status_code(), 301 | 302 | 303 | 307 | 308) {
+                if redirects == 10 {
+                    return None;
+                }
+                url = crate::http::url::resolve_url(&url, response.header("location")?).ok()?;
+                redirects += 1;
+                let reference = url.to_string();
+                if !check_reference(policy, &reference, redirects, original, checks) {
+                    return None;
+                }
+                requests.push((reference, redirects));
+                continue;
+            }
+            let effective = response.effective_url().cloned().unwrap_or(url);
+            if !check_reference(policy, &effective.to_string(), redirects, original, checks) {
+                return None;
+            }
+            let mime = response
+                .header("content-type")
+                .unwrap_or("")
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim();
+            if response.status_code() != 200
+                || !mime.eq_ignore_ascii_case("text/css")
+                || response.body().len() > MAX_BYTES
+            {
+                return None;
+            }
+            return Some(Resource {
+                text: std::str::from_utf8(response.body()).ok()?.to_owned(),
+                url: Some(effective),
+                redirects,
+                requests,
+            });
+        }
+    }
+
+    fn decode_data(
+        &self,
+        href: &str,
+        policy: &CspPolicy,
+        original: &str,
+        checks: &mut Vec<StylePolicyCheck>,
+    ) -> Option<Resource> {
+        let data = crate::http::parse_data_uri(href)?;
+        if !check_reference(policy, href, 0, original, checks) {
+            return None;
+        }
+        if !data.mime_type.eq_ignore_ascii_case("text/css") || data.data.len() > MAX_BYTES {
+            return None;
+        }
+        Some(Resource {
+            text: String::from_utf8(data.data).ok()?,
+            url: None,
+            redirects: 0,
+            requests: vec![(original.to_owned(), 0)],
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -268,7 +385,7 @@ impl StylesheetLoader {
         depth: usize,
         active: &mut HashSet<String>,
         output: &mut Vec<String>,
-        blocked: &mut Vec<String>,
+        checks: &mut Vec<StylePolicyCheck>,
     ) {
         if depth < MAX_IMPORT_DEPTH {
             let directives = css::extract_import_directives(&resource.text);
@@ -296,7 +413,7 @@ impl StylesheetLoader {
                             resource.url.as_ref().or(document_base),
                             document_base,
                             policy,
-                            blocked,
+                            checks,
                         )
                     {
                         let key = import
@@ -311,7 +428,7 @@ impl StylesheetLoader {
                                 depth + 1,
                                 active,
                                 &mut imported,
-                                blocked,
+                                checks,
                             );
                             active.remove(&key);
                         }
@@ -341,6 +458,49 @@ impl StylesheetLoader {
     }
 }
 
+fn same_origin(a: &Url, b: &Url) -> bool {
+    a.scheme() == b.scheme() && a.host() == b.host() && a.port() == b.port()
+}
+
+fn check_reference(
+    policy: &CspPolicy,
+    reference: &str,
+    redirects: usize,
+    report_reference: &str,
+    checks: &mut Vec<StylePolicyCheck>,
+) -> bool {
+    let blocked =
+        !policy.allows_reference_after_redirects(ResourceType::Style, reference, redirects);
+    checks.push(StylePolicyCheck {
+        reference: reference.to_owned(),
+        redirects,
+        report_reference: report_reference.to_owned(),
+        sample: String::new(),
+        blocked,
+    });
+    !blocked
+}
+
+fn check_cached_resource(
+    resource: &Resource,
+    policy: &CspPolicy,
+    original: &str,
+    checks: &mut Vec<StylePolicyCheck>,
+) -> bool {
+    // The caller already checked the first request. Retain intermediate hops
+    // so a policy change cannot allow a cached response through a denied host.
+    for (reference, redirects) in resource.requests.iter().skip(1) {
+        if !check_reference(policy, reference, *redirects, original, checks) {
+            return false;
+        }
+    }
+    let reference = resource
+        .url
+        .as_ref()
+        .map_or_else(|| original.to_owned(), ToString::to_string);
+    check_reference(policy, &reference, resource.redirects, original, checks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +510,249 @@ mod tests {
         read_request_headers,
     };
     use std::io::Write;
+
+    fn load(
+        loader: &mut StylesheetLoader,
+        node: &NodeHandle,
+        policy: &CspPolicy,
+    ) -> (String, Vec<StylePolicyCheck>) {
+        let base = "https://example.test/document".parse().unwrap();
+        loader.load_node(node, Some(&base), policy, Some(&base), Arc::default())
+    }
+
+    fn policy_with_reporting_endpoint(
+        document: &NodeHandle,
+        enforced: &str,
+        report_only: &str,
+    ) -> CspPolicy {
+        CspPolicy::from_response_headers_and_document(
+            &[
+                ("Content-Security-Policy".into(), enforced.into()),
+                (
+                    "Content-Security-Policy-Report-Only".into(),
+                    report_only.into(),
+                ),
+                (
+                    "Reporting-Endpoints".into(),
+                    "csp=\"https://example.test/reports\"".into(),
+                ),
+            ],
+            document,
+            "https://example.test/document",
+        )
+    }
+
+    #[test]
+    fn removing_a_reporting_endpoint_does_not_repeat_stylesheet_notifications() {
+        let document = TreeBuilder::parse(
+            "<style>body { color: red }</style>\
+             <link rel=stylesheet href='data:text/css,body%7Bcolor:red%7D'>",
+        )
+        .document();
+        let nodes = [
+            document.query_selector("style").unwrap(),
+            document.query_selector("link").unwrap(),
+        ];
+        let mut policy = policy_with_reporting_endpoint(
+            &document,
+            "style-src 'unsafe-inline' data:",
+            "style-src 'none'; report-to csp",
+        );
+        let mut loader = StylesheetLoader::default();
+        let first_loads: Vec<_> = nodes
+            .iter()
+            .map(|node| load(&mut loader, node, &policy))
+            .collect();
+        assert_eq!(first_loads[0].1.len(), 1);
+        assert_eq!(first_loads[1].1.len(), 2);
+        assert!(
+            first_loads.iter().all(|(css, checks)| {
+                !css.is_empty() && checks.iter().all(|check| !check.blocked)
+            })
+        );
+        assert!(policy.reporting_endpoint("csp").is_some());
+        let original_policy = policy.clone();
+        // This is the delivery-state update made when the endpoint returns 410.
+        policy.remove_reporting_endpoint("csp");
+        assert!(policy.reporting_endpoint("csp").is_none());
+        assert_ne!(policy, original_policy);
+        for (node, (first_css, _)) in nodes.iter().zip(first_loads) {
+            let (css, checks) = load(&mut loader, node, &policy);
+            assert_eq!(css, first_css);
+            assert!(checks.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy_rule_changes_notify_and_enforce_against_a_cached_stylesheet() {
+        let document =
+            TreeBuilder::parse("<link rel=stylesheet href='data:text/css,body%7Bcolor:red%7D'>")
+                .document();
+        let link = document.query_selector("link").unwrap();
+        let reference = link.get_attribute("href").unwrap();
+        let allowed = policy_with_reporting_endpoint(
+            &document,
+            "style-src data:",
+            "style-src data:; report-to csp",
+        );
+        let mut loader = StylesheetLoader::default();
+        let (first_css, first_checks) = load(&mut loader, &link, &allowed);
+        assert!(!first_css.is_empty());
+        assert_eq!(first_checks.len(), 2);
+        assert!(
+            allowed
+                .report_only_policy_texts(ResourceType::Style, &reference)
+                .is_empty()
+        );
+        let monitored = policy_with_reporting_endpoint(
+            &document,
+            "style-src data:",
+            "style-src 'none'; report-to csp",
+        );
+        assert_eq!(
+            monitored
+                .report_only_policy_texts(ResourceType::Style, &reference)
+                .len(),
+            1
+        );
+        let (css, checks) = load(&mut loader, &link, &monitored);
+        assert_eq!(css, first_css);
+        assert_eq!(checks.len(), 2);
+        assert!(checks.iter().all(|check| !check.blocked));
+
+        let mut denied = policy_with_reporting_endpoint(
+            &document,
+            "style-src 'none'",
+            "style-src 'none'; report-to csp",
+        );
+        let (css, checks) = load(&mut loader, &link, &denied);
+        assert!(css.is_empty());
+        assert_eq!(checks.len(), 1);
+        assert!(checks[0].blocked);
+        denied.remove_reporting_endpoint("csp");
+        let (css, checks) = load(&mut loader, &link, &denied);
+        assert!(css.is_empty());
+        assert!(checks.is_empty());
+        let (css, checks) = load(&mut loader, &link, &allowed);
+        assert_eq!(css, first_css);
+        assert_eq!(checks.len(), 2);
+        assert!(checks.iter().all(|check| !check.blocked));
+    }
+
+    #[test]
+    fn inline_checks_follow_source_replacement_without_repeating_for_style_rebuilds() {
+        let document = TreeBuilder::parse("<style>body { color: red }</style>").document();
+        let style = document.query_selector("style").unwrap();
+        let mut loader = StylesheetLoader::default();
+        let policy = CspPolicy::default();
+        let (css, checks) = load(&mut loader, &style, &policy);
+        assert!(css.contains("color: red"));
+        assert_eq!(
+            checks,
+            vec![StylePolicyCheck {
+                reference: "inline".into(),
+                redirects: 0,
+                report_reference: "inline".into(),
+                sample: "body { color: red }".into(),
+                blocked: false,
+            }]
+        );
+        style.set_attribute("media", "all");
+        let (css, checks) = load(&mut loader, &style, &policy);
+        assert!(css.starts_with("@media all"));
+        assert!(checks.is_empty());
+        let old = style.child_nodes()[0].clone();
+        style.remove_child(&old).unwrap();
+        style.append_child(NodeHandle::text("body { color: red }"));
+        assert_eq!(load(&mut loader, &style, &policy).1.len(), 1);
+        let denied = CspPolicy::from_headers_and_document(
+            &["style-src 'none'".into()],
+            &document,
+            "https://example.test/document",
+        );
+        let (css, checks) = load(&mut loader, &style, &denied);
+        assert!(css.is_empty());
+        assert!(checks[0].blocked);
+        let (css, checks) = load(&mut loader, &style, &denied);
+        assert!(css.is_empty());
+        assert!(checks.is_empty());
+    }
+
+    #[test]
+    fn each_new_link_checks_cached_data_responses_while_rebuilds_remain_silent() {
+        let document = TreeBuilder::parse(
+            "<link id=a rel=stylesheet href='data:text/css,body%7Bcolor:red%7D'>\
+             <link id=b rel=stylesheet href='data:text/css,body%7Bcolor:red%7D'>",
+        )
+        .document();
+        let first = document.query_selector("#a").unwrap();
+        let second = document.query_selector("#b").unwrap();
+        let mut loader = StylesheetLoader::default();
+        let policy = CspPolicy::default();
+        for node in [&first, &second] {
+            let (css, checks) = load(&mut loader, node, &policy);
+            assert!(css.contains("color:red"));
+            assert_eq!(checks.len(), 2);
+            assert!(
+                checks
+                    .iter()
+                    .all(|check| !check.blocked && check.redirects == 0)
+            );
+            assert!(load(&mut loader, node, &policy).1.is_empty());
+        }
+    }
+
+    #[test]
+    fn cached_stylesheet_checks_keep_redirect_hosts_and_the_original_reporting_url() {
+        let original = "https://example.test/allowed/start.css";
+        let resource = Resource {
+            text: "body { color: red }".into(),
+            url: Some("https://example.test/final.css".parse().unwrap()),
+            redirects: 2,
+            requests: vec![
+                (original.into(), 0),
+                ("https://other.test/middle.css".into(), 1),
+                ("https://example.test/final.css".into(), 2),
+            ],
+        };
+        let document = TreeBuilder::parse("<body>").document();
+        let policy = CspPolicy::from_headers_and_document(
+            &["style-src https://example.test/allowed/".into()],
+            &document,
+            "https://example.test/document",
+        );
+        let mut checks = Vec::new();
+        assert!(!check_cached_resource(
+            &resource,
+            &policy,
+            original,
+            &mut checks
+        ));
+        assert_eq!(
+            checks,
+            vec![StylePolicyCheck {
+                reference: "https://other.test/middle.css".into(),
+                redirects: 1,
+                report_reference: original.into(),
+                sample: String::new(),
+                blocked: true,
+            }]
+        );
+        let resource = Resource {
+            requests: vec![(original.into(), 0)],
+            ..resource
+        };
+        checks.clear();
+        assert!(check_cached_resource(
+            &resource,
+            &policy,
+            original,
+            &mut checks
+        ));
+        assert_eq!(checks[0].reference, "https://example.test/final.css");
+        assert_eq!(checks[0].redirects, 2);
+        assert!(!checks[0].blocked);
+    }
 
     #[test]
     fn stylesheet_uses_top_level_site_for_samesite_cookies() {
@@ -390,14 +793,14 @@ mod tests {
         let other: Url = "http://localhost/".parse().unwrap();
         for site in [&other, &target] {
             let mut loader = StylesheetLoader::default();
-            let (css, blocked) = loader.load_node(
+            let (css, checks) = loader.load_node(
                 &link,
                 Some(&target),
                 &CspPolicy::default(),
                 Some(site),
                 Arc::clone(&store),
             );
-            assert!(blocked.is_empty());
+            assert!(checks.iter().all(|check| !check.blocked));
             assert_eq!(css, "body { color: red }");
         }
         assert_eq!(server.join(), [None, Some("strict=1; lax=2".to_string())]);

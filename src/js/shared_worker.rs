@@ -109,11 +109,11 @@ fn next_shared_worker_connection_id() -> u64 {
     })
 }
 
-fn shared_worker_origin(state: &HostState) -> Option<StorageOrigin> {
-    state
-        .base_url
-        .as_ref()
-        .and_then(|url| StorageOrigin::from_url(&url.to_string()))
+fn shared_worker_origin(state: &HostState, document_id: usize) -> Option<StorageOrigin> {
+    match state.document_security_origins.get(&document_id) {
+        Some(DocumentSecurityOrigin::Tuple(origin)) => Some(origin.clone()),
+        _ => None,
+    }
 }
 
 fn prune_shared_worker_registry(registry: &mut Vec<Rc<RefCell<SharedWorkerRuntime>>>) {
@@ -178,13 +178,16 @@ fn shared_worker_connect_native(
 ) -> JsResult<JsValue> {
     let requested_url = string_argument(args.first(), "", context)?;
     let name = string_argument(args.get(1), "", context)?;
+    let document_id = caller_document_id(context).ok_or_else(|| {
+        JsNativeError::error().with_message("SharedWorker owner document is unavailable")
+    })?;
     with_host_state(|state| {
         if state.borrow().shared_worker.id.is_some() {
             return Err(JsNativeError::error()
                 .with_message("SharedWorker construction from a SharedWorker is unsupported")
                 .into());
         }
-        create_shared_worker_for_owner_state(Rc::clone(state), &requested_url, &name)
+        create_shared_worker_for_owner_state(Rc::clone(state), &requested_url, &name, document_id)
             .map(|id| JsValue::from(js_string!(id.to_string())))
     })
 }
@@ -387,24 +390,24 @@ fn create_shared_worker_for_owner_state(
     owner_state: Rc<RefCell<HostState>>,
     requested_url: &str,
     name: &str,
+    document_id: usize,
 ) -> JsResult<u64> {
-    let (owner_url, base_url, storage, session_id, user_agent, origin, origin_text) = {
+    let (owner_url, base_url, origin, origin_text, creator_policy) = {
         let state = owner_state.borrow();
-        let origin = shared_worker_origin(&state).ok_or_else(|| {
+        let origin = shared_worker_origin(&state, document_id).ok_or_else(|| {
             JsNativeError::error().with_message("SharedWorker requires an eligible origin")
         })?;
+        let origin_text = script_errors::document_fetch_origin(&state, document_id).serialize();
         (
-            state
-                .base_url
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| state.location_href.clone()),
-            state.base_url.clone(),
-            state.storage_manager.clone(),
-            state.storage_session_id,
-            state.navigator_user_agent.clone(),
+            origin_text.clone(),
+            state.base_url_for_document(document_id),
             origin,
-            host_state_origin(&state),
+            origin_text,
+            state
+                .document_csp
+                .get(&document_id)
+                .cloned()
+                .unwrap_or_default(),
         )
     };
     let worker_url = resolve_worker_url(requested_url, &owner_url, base_url.as_ref())?;
@@ -416,89 +419,20 @@ fn create_shared_worker_for_owner_state(
     let entry = if let Some(existing) = shared_worker_entry_for_key(&key) {
         existing
     } else {
-        let source = {
+        let loaded = {
             let mut state = owner_state.borrow_mut();
-            fetch_script_resource_with_client(
-                requested_url,
+            worker_loading::load_worker_script(
+                &worker_url,
                 base_url.as_ref(),
                 &mut state.http_client,
             )
-            .map(|(_, source, _)| source)
         };
-        let shared_id = next_shared_worker_id();
-        let mut runtime = JsRuntime::with_document_url_and_storage(
-            blank_html_document(),
-            &worker_url,
-            storage,
-            session_id,
-        )?;
-        runtime.set_user_agent(user_agent);
-        runtime.host_state.borrow_mut().shared_worker.id = Some(shared_id);
-        runtime
-            .host_state
-            .borrow_mut()
-            .shared_worker
-            .error_destination = owner_state.borrow().error_reporter.clone();
-        runtime.eval(&format!(
-            "__omoikane_install_shared_worker_global({worker_url:?}, {shared_id:?})"
-        ))?;
-        let source_loaded = source.is_some();
-        let startup_error = match source {
-            Some(source) => {
-                let result = runtime.with_active_host(|context| {
-                    use script_errors::WorkerScriptOutcome;
-                    match script_errors::evaluate_worker_initial_script(
-                        context,
-                        &source,
-                        &worker_url,
-                    )? {
-                        WorkerScriptOutcome::Completed => Ok(Some(())),
-                        WorkerScriptOutcome::ParseFailure => Ok(None),
-                        WorkerScriptOutcome::Exception(error) => {
-                            script_errors::report_worker_startup_exception(context, &error)
-                                .map(|()| Some(()))
-                        }
-                    }
-                });
-                match result {
-                    Ok(Some(())) => {
-                        // SharedWorker runtime exceptions are reported at its
-                        // global, and do not stop subsequent connect tasks.
-                        None
-                    }
-                    Ok(None) => Some(script_errors::WorkerErrorNotification::LoadFailure),
-                    Err(_) => {
-                        runtime
-                            .host_state
-                            .borrow()
-                            .shared_worker
-                            .record_failure(true);
-                        runtime.host_state.borrow_mut().worker_terminated = true;
-                        None
-                    }
-                }
-            }
-            None => Some(script_errors::WorkerErrorNotification::LoadFailure),
-        };
-        if startup_error.is_some() {
-            report_safe_worker_or_module_failure(
-                owner_state.borrow().error_reporter.clone(),
-                ErrorCategory::Worker,
-                if source_loaded {
-                    "SHARED_WORKER_STARTUP_FAILED"
-                } else {
-                    "SHARED_WORKER_FETCH_FAILED"
-                },
-                if source_loaded { "execute" } else { "fetch" },
-            );
-            runtime.host_state.borrow_mut().worker_terminated = true;
-        }
-        let entry = Rc::new(RefCell::new(SharedWorkerRuntime {
+        let entry = Rc::new(RefCell::new(create_shared_worker_runtime(
+            &owner_state,
             key,
-            runtime: Rc::new(RefCell::new(runtime)),
-            startup_error,
-            connections: HashMap::new(),
-        }));
+            loaded,
+            creator_policy,
+        )?));
         SHARED_WORKER_REGISTRY.with(|registry| registry.borrow_mut().push(Rc::clone(&entry)));
         entry
     };
@@ -528,6 +462,106 @@ fn create_shared_worker_for_owner_state(
         ));
     }
     Ok(connection_id)
+}
+
+/// Prepares a new shared global from its own response while retaining the
+/// requested URL in the registry key. The effective script path also supplies
+/// the base for dynamic imports from the initial classic script.
+fn create_shared_worker_runtime(
+    owner_state: &Rc<RefCell<HostState>>,
+    key: SharedWorkerKey,
+    loaded: Option<worker_loading::LoadedWorkerScript>,
+    creator_policy: CspPolicy,
+) -> JsResult<SharedWorkerRuntime> {
+    let (storage, session_id, user_agent, error_destination) = {
+        let state = owner_state.borrow();
+        (
+            state.storage_manager.clone(),
+            state.storage_session_id,
+            state.navigator_user_agent.clone(),
+            state.error_reporter.clone(),
+        )
+    };
+    let worker_url = loaded
+        .as_ref()
+        .map_or(key.url.as_str(), |loaded| loaded.effective_url.as_str());
+    let shared_id = next_shared_worker_id();
+    let mut runtime = JsRuntime::with_document_url_and_storage(
+        blank_html_document(),
+        worker_url,
+        storage,
+        session_id,
+    )?;
+    runtime.set_user_agent(user_agent);
+    if let Some(loaded) = loaded.as_ref() {
+        runtime.install_worker_security_metadata(loaded, &creator_policy);
+    }
+    {
+        let mut state = runtime.host_state.borrow_mut();
+        state.shared_worker.id = Some(shared_id);
+        state.shared_worker.error_destination = error_destination.clone();
+    }
+    runtime.eval(&format!(
+        "__omoikane_install_shared_worker_global({worker_url:?}, {shared_id:?})"
+    ))?;
+    let startup_error = evaluate_shared_worker_initial_source(&mut runtime, loaded.as_ref());
+    if startup_error.is_some() {
+        report_safe_worker_or_module_failure(
+            error_destination,
+            ErrorCategory::Worker,
+            if loaded.is_some() {
+                "SHARED_WORKER_STARTUP_FAILED"
+            } else {
+                "SHARED_WORKER_FETCH_FAILED"
+            },
+            if loaded.is_some() { "execute" } else { "fetch" },
+        );
+        runtime.host_state.borrow_mut().worker_terminated = true;
+    }
+    Ok(SharedWorkerRuntime {
+        key,
+        runtime: Rc::new(RefCell::new(runtime)),
+        startup_error,
+        connections: HashMap::new(),
+    })
+}
+
+fn evaluate_shared_worker_initial_source(
+    runtime: &mut JsRuntime,
+    loaded: Option<&worker_loading::LoadedWorkerScript>,
+) -> Option<script_errors::WorkerErrorNotification> {
+    let Some(loaded) = loaded else {
+        return Some(script_errors::WorkerErrorNotification::LoadFailure);
+    };
+    let result = runtime.with_active_host(|context| {
+        use script_errors::WorkerScriptOutcome;
+        match script_errors::evaluate_worker_initial_script(
+            context,
+            &loaded.source,
+            &loaded.effective_url,
+        )? {
+            WorkerScriptOutcome::Completed => Ok(Some(())),
+            WorkerScriptOutcome::ParseFailure => Ok(None),
+            WorkerScriptOutcome::Exception(error) => {
+                script_errors::report_worker_startup_exception(context, &error).map(|()| Some(()))
+            }
+        }
+    });
+    match result {
+        // Runtime exceptions are reported at the shared global and do not
+        // stop subsequent connect tasks.
+        Ok(Some(())) => None,
+        Ok(None) => Some(script_errors::WorkerErrorNotification::LoadFailure),
+        Err(_) => {
+            runtime
+                .host_state
+                .borrow()
+                .shared_worker
+                .record_failure(true);
+            runtime.host_state.borrow_mut().worker_terminated = true;
+            None
+        }
+    }
 }
 
 /// Registers the private SharedWorker hooks used by the DOM bootstrap.

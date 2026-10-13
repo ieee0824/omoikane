@@ -240,6 +240,143 @@ fn execute(runtime: &mut JsRuntime, origin: &str) -> Vec<String> {
     runtime.execute_document_scripts(Some(&format!("{origin}/index.html").parse().unwrap()))
 }
 
+fn observe_report_only_modules(runtime: &mut JsRuntime, policy: &str) {
+    runtime.install_response_security_headers(&[(
+        "Content-Security-Policy-Report-Only".into(),
+        policy.into(),
+    )]);
+    runtime
+        .eval(
+            "globalThis.moduleReports = []; new ReportingObserver(batch => moduleReports.push(...batch), {types: ['csp-violation']}).observe();",
+        )
+        .unwrap();
+}
+
+fn module_report_snapshot(runtime: &mut JsRuntime) -> serde_json::Value {
+    let serialized = runtime
+        .eval("JSON.stringify([dependencyValue, document.cspViolations.length, moduleReports.map(report => [report.type, report.body.disposition, report.body.blockedURL])])")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    serde_json::from_str(&serialized).unwrap()
+}
+
+#[test]
+fn report_only_module_dependency_runs_and_reports_request_and_response() {
+    let server = ModuleServer::new(HashMap::from([(
+        "/dependency.js".into(),
+        route("export const value = 42;"),
+    )]));
+    let mut runtime = runtime_with_module(
+        &server.origin,
+        "import { value } from './dependency.js'; globalThis.dependencyValue = value;",
+    );
+    observe_report_only_modules(
+        &mut runtime,
+        "script-src 'unsafe-inline'; report-to modules",
+    );
+
+    let errors = execute(&mut runtime, &server.origin);
+    assert!(errors.is_empty(), "{errors:?}");
+    runtime.run_until_idle().unwrap();
+
+    let dependency_url = format!("{}/dependency.js", server.origin);
+    assert_eq!(
+        module_report_snapshot(&mut runtime),
+        serde_json::json!([
+            42,
+            0,
+            [
+                ["csp-violation", "report", dependency_url],
+                ["csp-violation", "report", dependency_url]
+            ]
+        ])
+    );
+    assert_eq!(server.paths(), ["/dependency.js"]);
+}
+
+#[test]
+fn report_only_module_redirect_reports_disallowed_origin_without_blocking_execution() {
+    let target = ModuleServer::new(HashMap::from([(
+        "/dependency.js".into(),
+        route("export const value = 73;"),
+    )]));
+    let server = ModuleServer::new(HashMap::from([(
+        "/redirect.js".into(),
+        Route {
+            status: 302,
+            headers: format!("Location: {}/dependency.js\r\n", target.origin),
+            ..route("")
+        },
+    )]));
+    let mut runtime = runtime_with_module(
+        &server.origin,
+        "import { value } from './redirect.js'; globalThis.dependencyValue = value;",
+    );
+    let policy = format!(
+        "script-src 'unsafe-inline' {}/redirect.js; report-to modules",
+        server.origin
+    );
+    observe_report_only_modules(&mut runtime, &policy);
+
+    let errors = execute(&mut runtime, &server.origin);
+    assert!(errors.is_empty(), "{errors:?}");
+    runtime.run_until_idle().unwrap();
+
+    // CSP reports the original request URL, so redirects cannot expose a
+    // destination path that the requesting document was not allowed to know.
+    // https://w3c.github.io/webappsec-csp/#create-violation-for-request
+    assert_eq!(
+        module_report_snapshot(&mut runtime),
+        serde_json::json!([
+            73,
+            0,
+            [[
+                "csp-violation",
+                "report",
+                format!("{}/redirect.js", server.origin)
+            ]]
+        ])
+    );
+    assert_eq!(server.paths(), ["/redirect.js"]);
+    assert_eq!(target.paths(), ["/dependency.js"]);
+}
+
+#[test]
+fn report_only_module_redirect_ignores_source_path_on_allowed_origin() {
+    let server = ModuleServer::new(HashMap::from([
+        (
+            "/allowed.js".into(),
+            Route {
+                status: 302,
+                headers: "Location: /other.js\r\n".into(),
+                ..route("")
+            },
+        ),
+        ("/other.js".into(), route("export const value = 19;")),
+    ]));
+    let mut runtime = runtime_with_module(
+        &server.origin,
+        "import { value } from './allowed.js'; globalThis.dependencyValue = value;",
+    );
+    let policy = format!(
+        "script-src 'unsafe-inline' {}/allowed.js; report-to modules",
+        server.origin
+    );
+    observe_report_only_modules(&mut runtime, &policy);
+
+    let errors = execute(&mut runtime, &server.origin);
+    assert!(errors.is_empty(), "{errors:?}");
+    runtime.run_until_idle().unwrap();
+
+    assert_eq!(
+        module_report_snapshot(&mut runtime),
+        serde_json::json!([19, 0, []])
+    );
+    assert_eq!(server.paths(), ["/allowed.js", "/other.js"]);
+}
+
 #[test]
 fn csp_blocks_dependency_before_fetch_and_redirect_before_execution() {
     let target = ModuleServer::new(HashMap::from([(

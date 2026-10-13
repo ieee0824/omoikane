@@ -487,8 +487,12 @@ fn shared_worker_startup_failure_is_observable_without_stopping_page() {
 
 #[test]
 fn shared_worker_requires_an_eligible_origin() {
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.host_state.borrow_mut().base_url = None;
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "data:text/html,<body>").unwrap();
+    assert!(matches!(
+        runtime.host_state.borrow().document_security_origins[&runtime.document().identity()],
+        DocumentSecurityOrigin::Opaque(_)
+    ));
     let result = runtime
         .eval(
             r#"try {
@@ -1417,23 +1421,77 @@ fn dedicated_worker_ids_round_trip_as_exact_strings() {
 
 #[test]
 fn dedicated_worker_message_origins_use_the_owner_origin() {
-    let mut runtime = JsRuntime::new().unwrap();
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://worker-origin.test/owner")
+            .unwrap();
     runtime
         .eval(
             r#"globalThis.workerValues = [];
-                   const source = encodeURIComponent('onmessage = event => postMessage({ workerEventOrigin: event.origin, workerLocationOrigin: location.origin });');
-                   const worker = new Worker('data:text/javascript,' + source);
+                   const source = encodeURIComponent('onmessage = event => postMessage({ workerEventOrigin: event.origin, workerLocationOrigin: location.origin, workerLocation: location.href, secure: isSecureContext, locksAvailable: typeof navigator.locks?.request === "function", storageAvailable: typeof navigator.storage?.estimate === "function" });');
+                   const workerUrl = 'data:text/javascript,' + source;
+                   const worker = new Worker(workerUrl);
                    worker.onmessage = event => workerValues.push({ ownerEventOrigin: event.origin, data: event.data });
                    const expectedOrigin = location.origin; location.origin = "spoofed";
                    worker.postMessage("origin");"#,
         )
         .unwrap();
     runtime.run_until_idle().unwrap();
-    assert!(runtime
-        .eval("workerValues[0].ownerEventOrigin === expectedOrigin && workerValues[0].data.workerEventOrigin === expectedOrigin")
-        .unwrap()
-        .as_boolean()
-        .unwrap_or(false));
+    let observed: serde_json::Value = serde_json::from_str(&eval_str(
+        &mut runtime,
+        "JSON.stringify({workerValues, expectedOrigin, workerUrl, ownerSecure: isSecureContext, ownerLocks: typeof navigator.locks?.request === 'function', ownerStorage: typeof navigator.storage?.estimate === 'function'})",
+    ))
+    .unwrap();
+    for property in ["ownerSecure", "ownerLocks", "ownerStorage"] {
+        assert_eq!(observed[property], true, "{property}: {observed}");
+    }
+    assert_eq!(
+        observed["expectedOrigin"], "https://worker-origin.test",
+        "{observed}"
+    );
+    assert_eq!(
+        observed["workerValues"].as_array().unwrap().len(),
+        1,
+        "{observed}"
+    );
+    let message = &observed["workerValues"][0];
+    let data = &message["data"];
+    assert_eq!(
+        message["ownerEventOrigin"], observed["expectedOrigin"],
+        "{observed}"
+    );
+    assert_eq!(
+        data["workerEventOrigin"], observed["expectedOrigin"],
+        "{observed}"
+    );
+    assert_eq!(data["workerLocation"], observed["workerUrl"], "{observed}");
+    assert_eq!(data["workerLocationOrigin"], "null", "{observed}");
+    for property in ["secure", "locksAvailable", "storageAvailable"] {
+        assert_eq!(data[property], true, "{property}: {observed}");
+    }
+    let owner = runtime.host_state.borrow();
+    let worker = owner.workers.values().next().unwrap().borrow();
+    let worker_state = worker.runtime.host_state.borrow();
+    let document_id = worker_state.document.identity();
+    assert_eq!(
+        worker_state.document_reporting[&document_id].creation_url,
+        worker_state.location_href
+    );
+    assert_eq!(
+        worker_state.document_reporting[&document_id].response_status,
+        200
+    );
+    assert!(worker_state.base_url.is_none());
+    assert_eq!(
+        worker
+            .runtime
+            .context
+            .realm()
+            .host_defined()
+            .get::<ModuleDocumentOrigin>()
+            .unwrap()
+            .0,
+        worker_state.document_security_origins[&document_id]
+    );
 }
 
 #[test]
