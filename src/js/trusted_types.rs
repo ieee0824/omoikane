@@ -51,6 +51,125 @@ pub(super) fn script_value(value: &JsValue) -> Option<JsString> {
         .map(|data| data.value.clone())
 }
 
+/// Runs the Trusted Types pre-navigation check on a serialized javascript:
+/// URL. A default policy receives the *encoded* source and may replace it.
+/// Callback failures are navigation failures, never setter exceptions.
+pub(super) fn prepare_javascript_navigation(
+    url: &str,
+    document_id: usize,
+    client_policy: Option<&CspPolicy>,
+    context: &mut Context,
+) -> Option<String> {
+    let encoded = url.get("javascript:".len()..)?;
+    let (blocking, reporting, callback) = with_host_state(|host| {
+        let state = host.borrow();
+        let document = state.get_node(document_id).ok_or_else(|| {
+            JsNativeError::reference().with_message("navigation client Document is gone")
+        })?;
+        let policy = client_policy
+            .cloned()
+            .unwrap_or_else(|| state.csp_policy_for_document(&document));
+        let (blocking, reporting) = policy.trusted_type_sink_violations();
+        let callback = state
+            .trusted_type_default_callbacks
+            .get(&document_id)
+            .map(|callbacks| callbacks[1].clone());
+        Ok((blocking, reporting, callback))
+    })
+    .ok()?;
+    if blocking.is_empty() && reporting.is_empty() {
+        return Some(encoded.to_owned());
+    }
+
+    let converted = callback
+        .and_then(|value| value.as_callable())
+        .and_then(|callback| {
+            callback
+                .call(
+                    &JsValue::undefined(),
+                    &[
+                        js_string!(encoded).into(),
+                        js_string!("TrustedScript").into(),
+                        js_string!("Location href").into(),
+                    ],
+                    context,
+                )
+                .ok()
+        })
+        .filter(|value| !value.is_null_or_undefined())
+        .and_then(|value| value.to_string(context).ok())
+        .map(|value| value.to_std_string_escaped())
+        .and_then(|source| {
+            let candidate = format!("javascript:{source}");
+            url::Url::parse(&candidate)
+                .ok()
+                .filter(|url| url.scheme() == "javascript")
+                .map(|url| url.as_str()["javascript:".len()..].to_owned())
+        });
+    if let Some(converted) = converted {
+        return Some(converted);
+    }
+
+    let sample = format!("Location href|{}", csp::inline_report_sample(encoded));
+    let _ = with_host_state(|host| {
+        let mut state = host.borrow_mut();
+        state.queue_trusted_types_violation(
+            document_id,
+            "require-trusted-types-for",
+            "trusted-types-sink",
+            blocking.clone(),
+            "enforce",
+            &sample,
+            None,
+        );
+        state.queue_trusted_types_violation(
+            document_id,
+            "require-trusted-types-for",
+            "trusted-types-sink",
+            reporting,
+            "report",
+            &sample,
+            None,
+        );
+        Ok(())
+    });
+    blocking.is_empty().then(|| encoded.to_owned())
+}
+
+/// Applies the subsequent inline CSP check to the approved script text.
+pub(super) fn allow_javascript_navigation(source: &str, document_id: usize) -> bool {
+    with_host_state(|host| {
+        let mut state = host.borrow_mut();
+        let document = state.get_node(document_id).ok_or_else(|| {
+            JsNativeError::reference().with_message("navigation target Document is gone")
+        })?;
+        let (blocking, reporting) = state
+            .csp_policy_for_document(&document)
+            .javascript_navigation_violations();
+        let sample = csp::inline_report_sample(source);
+        state.queue_trusted_types_violation(
+            document_id,
+            "script-src-elem",
+            "inline",
+            blocking.clone(),
+            "enforce",
+            &sample,
+            None,
+        );
+        state.queue_trusted_types_violation(
+            document_id,
+            "script-src-elem",
+            "inline",
+            reporting,
+            "report",
+            &sample,
+            None,
+        );
+        Ok(blocking.is_empty())
+    })
+    .unwrap_or(false)
+}
+
 /// Checks a dynamic script sink against the calling realm's CSP. The returned
 /// source is the trusted value or the default policy's synchronous conversion.
 pub(super) fn compliant_script_for_context(

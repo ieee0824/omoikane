@@ -10450,13 +10450,14 @@ export let __omoikane_cookie_change_reset;
             access = "closed";
             return;
           }
-          const [nextAccess, context, generation, pendingResource] = raw.split(":");
+          const [nextAccess, context, generation, pendingResource, javascriptReplacement] = raw.split(":");
           if (expectedContext === null) expectedContext = context;
           if (context !== expectedContext) {
             access = "closed";
             return;
           }
           if (generation !== activeGeneration) {
+            if (javascriptReplacement === "true") pendingHistoryAction = "replace";
             commitHistoryEntry(generation, nextAccess);
             activeGeneration = generation;
             activeWindow = { __listeners: new Map() };
@@ -13124,7 +13125,14 @@ export let __omoikane_cookie_change_reset;
       const target = submitter?.getAttribute("formtarget") ?? this.getAttribute("target") ??
         this.ownerDocument.querySelector("base[target]")?.getAttribute("target") ?? "";
       const data = formDataEntries(new FormData(this, submitter));
-      let url = nativeResolveFormAction(internalNodeId(this), this.action);
+      let url = nativeResolveFormAction(
+        internalNodeId(this), submitter?.getAttribute("formaction") ?? this.action
+      );
+      if (/^\s*javascript:/i.test(url)) {
+        // The action is script source, not a network URL to append controls to.
+        submit(url, "GET", null, null, target, internalNodeId(this));
+        return;
+      }
       if (this.method === "get") {
         const hashIndex = url.indexOf("#");
         const hash = hashIndex < 0 ? "" : url.slice(hashIndex);
@@ -13843,6 +13851,14 @@ export let __omoikane_cookie_change_reset;
   }
 
   for (const prototype of [HTMLInputElement.prototype, HTMLButtonElement.prototype]) {
+    Object.defineProperty(prototype, "formAction", {
+      configurable: true, enumerable: true,
+      get() {
+        const action = this.getAttribute("formaction") ?? this.form?.action ?? this.ownerDocument.URL;
+        return nativeResolveFormAction(internalNodeId(this), action);
+      },
+      set(value) { this.setAttribute("formaction", String(value)); },
+    });
     Object.defineProperty(prototype, "formTarget", {
       configurable: true, enumerable: true,
       get() { return this.getAttribute("formtarget") || ""; },
@@ -18084,8 +18100,9 @@ export let __omoikane_cookie_change_reset;
     set(url) { (isChildWindow ? childLocation : __loc).assign(url); },
   });
   function __parseLocationUrl(url, requireSameOrigin) {
-    if (url == null || String(url) === "") return;
+    if (url == null) return;
     const raw = String(url);
+    if (raw === "") return;
     const href = String(__omoikane_resolve_url(raw));
     const match = href.match(/^(.*?):\/\/([^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/);
     if (!match || (requireSameOrigin && (match[1] + "://" + match[2]) !== __loc.origin)) {
@@ -18094,7 +18111,18 @@ export let __omoikane_cookie_change_reset;
     return { href, match };
   }
   function __requestLocationNavigation(url, kind) {
-    const parsed = __parseLocationUrl(url, false);
+    // A javascript: URL is a navigation request, not a replacement Location
+    // value. Leave its policy check and execution to the navigation task.
+    if (url == null) return;
+    const raw = String(url);
+    if (raw === "") return;
+    let candidate;
+    try { candidate = new URL(raw, __locationHref); } catch (_) {}
+    if (candidate?.protocol === "javascript:") {
+      scheduleWindowNavigation(kind, candidate.href);
+      return;
+    }
+    const parsed = __parseLocationUrl(raw, false);
     if (parsed !== undefined) scheduleWindowNavigation(kind, parsed.href);
   }
   function __applyLocationUrl(url, requireSameOrigin) {

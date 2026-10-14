@@ -62,6 +62,44 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 .is_some_and(|kind| {
                     matches!(kind.to_std_string_escaped().as_str(), "assign" | "replace")
                 });
+            if navigates {
+                let destination = args
+                    .get(2)
+                    .cloned()
+                    .unwrap_or_default()
+                    .to_string(context)?
+                    .to_std_string_escaped();
+                if url::Url::parse(&destination).is_ok_and(|url| url.scheme() == "javascript") {
+                    // The active child Document supplies the request client,
+                    // policy, and execution Realm. No resource load or iframe
+                    // attribute mutation occurs for a non-string completion.
+                    let completion = evaluate_javascript_url_in_context(
+                        &destination,
+                        document,
+                        document,
+                        None,
+                        context,
+                    );
+                    if let Some(markup) = completion {
+                        with_host_state(|host| {
+                            let frame_id = host.borrow().iframe_documents.iter().find_map(
+                                |(frame_id, entry)| {
+                                    (entry.document.identity() == document).then_some(*frame_id)
+                                },
+                            );
+                            if let Some(frame_id) = frame_id {
+                                host.borrow_mut()
+                                    .commit_javascript_iframe_document(frame_id, document, &markup)
+                                    .map_err(|error| {
+                                        JsNativeError::error().with_message(error.to_string())
+                                    })?;
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    return Ok(JsValue::undefined());
+                }
+            }
             with_host_state(|host| {
                 let (frame, callback, document_url, event_state) = {
                     let mut state = host.borrow_mut();
