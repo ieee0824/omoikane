@@ -16,6 +16,7 @@ use crate::http::Url;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResourceType {
     Script,
+    Worker,
     Style,
     Connect,
     Font,
@@ -38,6 +39,7 @@ impl ResourceType {
     pub(crate) fn directive(self) -> &'static str {
         match self {
             Self::Script => "script-src",
+            Self::Worker => "worker-src",
             Self::Style => "style-src",
             Self::Connect => "connect-src",
             Self::Font => "font-src",
@@ -47,6 +49,7 @@ impl ResourceType {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Script => "script",
+            Self::Worker => "worker",
             Self::Style => "style",
             Self::Connect => "connect",
             Self::Font => "font",
@@ -483,17 +486,18 @@ impl ParsedPolicy {
         resource_type: ResourceType,
         attribute: bool,
     ) -> Option<&[SourceExpression]> {
-        let specific_directive = match (resource_type, attribute) {
-            (ResourceType::Script, false) => Some("script-src-elem"),
-            (ResourceType::Script, true) => Some("script-src-attr"),
-            (ResourceType::Style, false) => Some("style-src-elem"),
-            (ResourceType::Style, true) => Some("style-src-attr"),
-            _ => None,
+        let fallbacks: &[&str] = match (resource_type, attribute) {
+            (ResourceType::Script, false) => &["script-src-elem", "script-src", "default-src"],
+            (ResourceType::Script, true) => &["script-src-attr", "script-src", "default-src"],
+            (ResourceType::Worker, _) => &["worker-src", "child-src", "script-src", "default-src"],
+            (ResourceType::Style, false) => &["style-src-elem", "style-src", "default-src"],
+            (ResourceType::Style, true) => &["style-src-attr", "style-src", "default-src"],
+            (ResourceType::Connect, _) => &["connect-src", "default-src"],
+            (ResourceType::Font, _) => &["font-src", "default-src"],
         };
-        specific_directive
-            .and_then(|name| self.directives.get(name))
-            .or_else(|| self.directives.get(resource_type.directive()))
-            .or_else(|| self.directives.get("default-src"))
+        fallbacks
+            .iter()
+            .find_map(|name| self.directives.get(*name))
             .map(Vec::as_slice)
     }
 
@@ -1041,6 +1045,35 @@ mod tests {
             ResourceType::Connect,
             &"https://EXAMPLE.TEST/api".parse().unwrap()
         ));
+    }
+
+    #[test]
+    fn worker_src_uses_its_own_fallback_chain_not_script_src_elem() {
+        let base = "https://example.test/page";
+        let allowed = "https://example.test/worker.js";
+        for text in [
+            "worker-src 'none'; child-src 'self'; script-src 'self'",
+            "child-src 'none'; script-src 'self'",
+            "script-src 'none'; script-src-elem 'self'",
+            "default-src 'none'; script-src-elem 'self'",
+        ] {
+            assert!(
+                !make_policy(text, base).allows_reference(ResourceType::Worker, allowed),
+                "{text}"
+            );
+        }
+        for text in [
+            "worker-src 'self'; child-src 'none'",
+            "child-src 'self'; script-src 'none'",
+            "script-src 'self'; default-src 'none'",
+            "script-src 'self'; script-src-elem 'none'",
+            "default-src 'self'",
+        ] {
+            assert!(
+                make_policy(text, base).allows_reference(ResourceType::Worker, allowed),
+                "{text}"
+            );
+        }
     }
 
     #[test]

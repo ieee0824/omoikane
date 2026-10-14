@@ -18,6 +18,20 @@ pub(super) struct LoadedWorkerScript {
     pub(super) security_headers: Vec<(String, String)>,
 }
 
+/// One redirect request or final response checked against the creator's CSP.
+#[derive(Debug)]
+pub(super) struct WorkerPolicyCheck {
+    pub(super) reference: String,
+    pub(super) redirects: usize,
+    pub(super) report_reference: String,
+}
+
+/// A worker fetch and the checks to report after releasing the HTTP client.
+pub(super) struct WorkerLoadResult {
+    pub(super) loaded: Option<LoadedWorkerScript>,
+    pub(super) checks: Vec<WorkerPolicyCheck>,
+}
+
 /// Loads a classic worker source and preserves its final response metadata.
 ///
 /// The caller checks the initial URL against the creator's origin. HTTP I/O
@@ -30,18 +44,38 @@ pub(super) fn load_worker_script(
     base: Option<&crate::http::Url>,
     client: &mut Client,
 ) -> Option<LoadedWorkerScript> {
-    load_worker_script_in_context(requested, base, None, client)
+    load_worker_script_with_policy(requested, base, None, client, &CspPolicy::default()).loaded
 }
 
-/// Loads each network hop with the initiating Document's owned cookie policy.
-pub(super) fn load_worker_script_in_context(
+/// Loads a worker after the caller's initial pre-request check. Redirects and
+/// the final response are checked before proceeding, while their notification
+/// data remains owned so the caller can queue reports after releasing I/O.
+pub(super) fn load_worker_script_with_policy(
     requested: &str,
     base: Option<&crate::http::Url>,
     cookie_context: Option<&crate::http::CookieRequestContext>,
     client: &mut Client,
+    policy: &CspPolicy,
+) -> WorkerLoadResult {
+    let mut checks = Vec::new();
+    let loaded =
+        load_worker_script_checked(requested, base, cookie_context, client, policy, &mut checks);
+    WorkerLoadResult { loaded, checks }
+}
+
+fn load_worker_script_checked(
+    requested: &str,
+    base: Option<&crate::http::Url>,
+    cookie_context: Option<&crate::http::CookieRequestContext>,
+    client: &mut Client,
+    policy: &CspPolicy,
+    checks: &mut Vec<WorkerPolicyCheck>,
 ) -> Option<LoadedWorkerScript> {
     match resolve_resource_ref(requested, base)? {
         ResolvedResource::Data { mime_type, data } => {
+            if !check_worker_policy(policy, checks, requested, 0, requested) {
+                return None;
+            }
             if !is_javascript_mime_type(&mime_type) {
                 return None;
             }
@@ -54,9 +88,24 @@ pub(super) fn load_worker_script_in_context(
             })
         }
         ResolvedResource::Url(_) => {
-            load_http_worker_script(requested, base, cookie_context, client)
+            load_http_worker_script(requested, base, cookie_context, client, policy, checks)
         }
     }
+}
+
+fn check_worker_policy(
+    policy: &CspPolicy,
+    checks: &mut Vec<WorkerPolicyCheck>,
+    reference: &str,
+    redirects: usize,
+    report_reference: &str,
+) -> bool {
+    checks.push(WorkerPolicyCheck {
+        reference: reference.to_owned(),
+        redirects,
+        report_reference: report_reference.to_owned(),
+    });
+    policy.allows_reference_after_redirects(ResourceType::Worker, reference, redirects)
 }
 
 fn load_http_worker_script(
@@ -64,6 +113,8 @@ fn load_http_worker_script(
     base: Option<&crate::http::Url>,
     cookie_context: Option<&crate::http::CookieRequestContext>,
     client: &mut Client,
+    policy: &CspPolicy,
+    checks: &mut Vec<WorkerPolicyCheck>,
 ) -> Option<LoadedWorkerScript> {
     // The transport URL omits fragments; retain a standard URL alongside it
     // for WorkerLocation and the environment's creation URL.
@@ -74,6 +125,17 @@ fn load_http_worker_script(
     .ok()?;
     let mut current = initial.clone();
     for redirects in 0..=MAX_WORKER_REDIRECTS {
+        if redirects > 0
+            && !check_worker_policy(
+                policy,
+                checks,
+                current.as_str(),
+                redirects,
+                initial.as_str(),
+            )
+        {
+            return None;
+        }
         let transport_url = current.as_str().parse::<crate::http::Url>().ok()?;
         let mut request = HttpRequest::new(Method::Get, transport_url.clone());
         if requires_public_fetch(&transport_url, base) {
@@ -97,6 +159,15 @@ fn load_http_worker_script(
                 continue;
             }
             client.report_resource_failure();
+            return None;
+        }
+        if !check_worker_policy(
+            policy,
+            checks,
+            current.as_str(),
+            redirects,
+            initial.as_str(),
+        ) {
             return None;
         }
         if response.status_code() != 200 {

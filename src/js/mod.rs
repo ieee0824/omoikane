@@ -18591,11 +18591,12 @@ fn close_auxiliary_window_native(
 
 fn create_worker_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let url = string_argument(args.first(), "", context)?;
+    let source = security_reporting::capture_csp_source(context);
     let document_id = caller_document_id(context).ok_or_else(|| {
         JsNativeError::error().with_message("Worker owner document is unavailable")
     })?;
     with_host_state(|state| {
-        create_worker_for_owner_state(Rc::clone(state), &url, document_id)
+        create_worker_for_owner_state(Rc::clone(state), &url, document_id, source.as_ref())
             .map(|id| JsValue::from(js_string!(id.to_string())))
     })
 }
@@ -18698,6 +18699,7 @@ struct PreparedDedicatedWorker {
 
 /// An owned creator snapshot; constructing a Worker never retains a host borrow.
 struct DedicatedWorkerCreator {
+    document_id: usize,
     origin_url: String,
     base_url: Option<crate::http::Url>,
     storage: StorageManager,
@@ -18718,6 +18720,7 @@ fn dedicated_worker_creator(
     let worker_id = state.next_worker_id;
     state.next_worker_id = state.next_worker_id.saturating_add(1);
     DedicatedWorkerCreator {
+        document_id,
         origin_url: script_errors::document_fetch_origin(state, document_id).serialize(),
         base_url: state.base_url_for_document(document_id),
         storage: state.storage_manager.clone(),
@@ -18735,11 +18738,54 @@ fn dedicated_worker_creator(
     }
 }
 
+fn load_dedicated_worker_for_creator(
+    owner_state: &Rc<RefCell<HostState>>,
+    creator: &DedicatedWorkerCreator,
+    initial_url: &str,
+    source: Option<&security_reporting::CspSourceLocation>,
+) -> JsResult<Option<worker_loading::LoadedWorkerScript>> {
+    let allowed = {
+        let mut state = owner_state.borrow_mut();
+        let document = state.get_node(creator.document_id).ok_or_else(|| {
+            JsNativeError::error().with_message("Worker owner document was discarded")
+        })?;
+        state.csp_allows_response_for_document_with_source(
+            &document,
+            ResourceType::Worker,
+            initial_url,
+            0,
+            initial_url,
+            source,
+        )
+    };
+    if !allowed {
+        return Ok(None);
+    }
+    let result = {
+        let mut state = owner_state.borrow_mut();
+        let cookie_context = state.document_cookie_request_context(creator.document_id);
+        worker_loading::load_worker_script_with_policy(
+            initial_url,
+            creator.base_url.as_ref(),
+            Some(&cookie_context),
+            &mut state.http_client,
+            &creator.policy,
+        )
+    };
+    owner_state.borrow_mut().observe_worker_policy_checks(
+        creator.document_id,
+        result.checks,
+        source,
+    );
+    Ok(result.loaded)
+}
+
 /// Fetches the source and initializes the private global before author code runs.
 fn prepare_dedicated_worker(
     owner_state: &Rc<RefCell<HostState>>,
     requested_url: &str,
     owner_document_id: usize,
+    source: Option<&security_reporting::CspSourceLocation>,
 ) -> JsResult<PreparedDedicatedWorker> {
     let creator = dedicated_worker_creator(&mut owner_state.borrow_mut(), Some(owner_document_id));
     let initial_url = resolve_worker_url(
@@ -18747,16 +18793,7 @@ fn prepare_dedicated_worker(
         &creator.origin_url,
         creator.base_url.as_ref(),
     )?;
-    let loaded = {
-        let mut state = owner_state.borrow_mut();
-        let cookie_context = state.document_cookie_request_context(owner_document_id);
-        worker_loading::load_worker_script_in_context(
-            &initial_url,
-            creator.base_url.as_ref(),
-            Some(&cookie_context),
-            &mut state.http_client,
-        )
-    };
+    let loaded = load_dedicated_worker_for_creator(owner_state, &creator, &initial_url, source)?;
     let worker_url = loaded
         .as_ref()
         .map_or(initial_url.as_str(), |script| script.effective_url.as_str());
@@ -18840,6 +18877,7 @@ fn create_worker_for_owner_state(
     owner_state: Rc<RefCell<HostState>>,
     requested_url: &str,
     owner_document_id: usize,
+    csp_source: Option<&security_reporting::CspSourceLocation>,
 ) -> JsResult<u64> {
     let PreparedDedicatedWorker {
         id: worker_id,
@@ -18847,7 +18885,7 @@ fn create_worker_for_owner_state(
         csp_requested_url,
         source,
         runtime: worker_runtime,
-    } = prepare_dedicated_worker(&owner_state, requested_url, owner_document_id)?;
+    } = prepare_dedicated_worker(&owner_state, requested_url, owner_document_id, csp_source)?;
     let entry = Rc::new(RefCell::new(WorkerRuntime {
         runtime: worker_runtime,
         owner_state: Rc::clone(&owner_state),

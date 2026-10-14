@@ -25617,6 +25617,7 @@ export let __omoikane_cookie_change_reset;
     });
     globalThis.self = globalThis;
     globalThis.WorkerGlobalScope = Object;
+    globalThis.DedicatedWorkerGlobalScope = Object;
     const WorkerDOMException = DOMException;
     globalThis.importScripts = function(...urls) {
       // Both Array.prototype.map and @@iterator are writable by worker code.
@@ -25692,6 +25693,7 @@ export let __omoikane_cookie_change_reset;
     try { delete globalThis.Worker; } catch (_) { globalThis.Worker = undefined; }
     try { delete globalThis.SharedWorker; } catch (_) { globalThis.SharedWorker = undefined; }
     try { delete globalThis.SharedWorkerPort; } catch (_) { globalThis.SharedWorkerPort = undefined; }
+    try { delete globalThis.DedicatedWorkerGlobalScope; } catch (_) { globalThis.DedicatedWorkerGlobalScope = undefined; }
     globalThis.SharedWorkerGlobalScope = Object;
     const ports = new Map();
     globalThis.__omoikane_get_shared_worker_port = function(connectionId) {
@@ -25835,6 +25837,7 @@ export let __omoikane_cookie_change_reset;
     try { delete globalThis.Worker; } catch (_) { globalThis.Worker = undefined; }
     try { delete globalThis.SharedWorker; } catch (_) { globalThis.SharedWorker = undefined; }
     try { delete globalThis.SharedWorkerGlobalScope; } catch (_) {}
+    try { delete globalThis.DedicatedWorkerGlobalScope; } catch (_) {}
     try { delete globalThis.Worklet; } catch (_) { globalThis.Worklet = undefined; }
     try { delete globalThis.WorkletGlobalScope; } catch (_) {}
     try { delete globalThis.CSS; } catch (_) { globalThis.CSS = undefined; }

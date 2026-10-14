@@ -62,6 +62,17 @@ collect_pattern \
   "/trusted-types/trusted-types-reporting-for-ShadowRoot-innerHTML.html" \
   "/trusted-types/Element-setAttribute-setAttributeNS-sinks.tentative.html"
 collect_pattern \
+  "/content-security-policy/script-src/worker-importscripts.sub.html" \
+  "/content-security-policy/script-src/support/worker-with-script-src-none-importscripts.js" \
+  "/content-security-policy/script-src/support/worker-with-script-src-none-importscripts.js.sub.headers" \
+  "/content-security-policy/worker-src/dedicated-worker-src-script-fallback.sub.html" \
+  "/content-security-policy/worker-src/shared-worker-src-script-fallback.sub.html" \
+  "/content-security-policy/support/testharness-helper.js" \
+  "/content-security-policy/support/dedicated-worker-helper.js" \
+  "/content-security-policy/support/shared-worker-helper.js" \
+  "/content-security-policy/support/ping.js" \
+  "/content-security-policy/support/post-message.js"
+collect_pattern \
   "/dom/events/AddEventListenerOptions-once.any.js" \
   "/dom/events/AddEventListenerOptions-passive.any.js" \
   "/dom/events/AddEventListenerOptions-signal.any.js"
