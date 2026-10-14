@@ -5,7 +5,7 @@ use crate::dom::{Node, NodeHandle, WeakNodeHandle};
 use crate::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
 };
-use crate::http::{Client, CookieJar, HttpRequest, Url};
+use crate::http::{Client, CookieJar, CookieRequestContext, HttpRequest, Url};
 use crate::paint::stylesheet as css;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -87,7 +87,7 @@ pub(super) struct StylesheetLoader {
     /// Same-value CharacterData writes require a future DOM mutation revision.
     node_sources: HashMap<usize, (WeakNodeHandle, NodeSource)>,
     client: Client,
-    site_for_cookies: Option<Url>,
+    cookie_context: Option<CookieRequestContext>,
     reporter: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
 }
 
@@ -158,11 +158,15 @@ impl StylesheetLoader {
         node: &NodeHandle,
         base: Option<&Url>,
         policy: &CspPolicy,
-        site_for_cookies: Option<&Url>,
+        cookie_context: CookieRequestContext,
         cookies: Arc<Mutex<CookieJar>>,
     ) -> (String, Vec<StylePolicyCheck>) {
         self.client.set_shared_cookie_store(cookies);
-        self.site_for_cookies = site_for_cookies.cloned();
+        if self.cookie_context.as_ref() != Some(&cookie_context) {
+            self.resources.clear();
+            self.node_sources.clear();
+        }
+        self.cookie_context = Some(cookie_context);
         let mut checks = Vec::new();
         if node.get_attribute("disabled").is_some() {
             self.node_sources.remove(&node.identity());
@@ -303,13 +307,17 @@ impl StylesheetLoader {
         let mut requests = vec![(original.to_owned(), 0)];
         let mut redirects = 0;
         let public_only = !document_base.is_some_and(|base| same_origin(base, &url));
+        let mut crossed_origin = false;
         loop {
             let mut request = HttpRequest::get(&url.to_string()).ok()?;
             if public_only || !document_base.is_some_and(|base| same_origin(base, &url)) {
                 request.require_public_ip();
             }
-            if let Some(site) = self.site_for_cookies.as_ref().or(document_base) {
-                request.set_cookie_context(site.clone(), false);
+            if let Some(cookie_context) = self.cookie_context.as_ref() {
+                cookie_context.apply(&mut request);
+                if crossed_origin {
+                    request.set_storage_access_eligible(false);
+                }
             }
             let response = self
                 .client
@@ -319,7 +327,10 @@ impl StylesheetLoader {
                 if redirects == 10 {
                     return None;
                 }
-                url = crate::http::url::resolve_url(&url, response.header("location")?).ok()?;
+                let next =
+                    crate::http::url::resolve_url(&url, response.header("location")?).ok()?;
+                crossed_origin |= !same_origin(&url, &next);
+                url = next;
                 redirects += 1;
                 let reference = url.to_string();
                 if !check_reference(policy, &reference, redirects, original, checks) {
@@ -517,7 +528,13 @@ mod tests {
         policy: &CspPolicy,
     ) -> (String, Vec<StylePolicyCheck>) {
         let base = "https://example.test/document".parse().unwrap();
-        loader.load_node(node, Some(&base), policy, Some(&base), Arc::default())
+        loader.load_node(
+            node,
+            Some(&base),
+            policy,
+            CookieRequestContext::new(Some(base.clone()), None, false),
+            Arc::default(),
+        )
     }
 
     fn policy_with_reporting_endpoint(
@@ -797,12 +814,85 @@ mod tests {
                 &link,
                 Some(&target),
                 &CspPolicy::default(),
-                Some(site),
+                CookieRequestContext::new(Some(site.clone()), None, false),
                 Arc::clone(&store),
             );
             assert!(checks.iter().all(|check| !check.blocked));
             assert_eq!(css, "body { color: red }");
         }
         assert_eq!(server.join(), [None, Some("strict=1; lax=2".to_string())]);
+    }
+
+    #[test]
+    fn third_party_stylesheet_sends_and_stores_cookies_only_with_document_access() {
+        let listener = bind_loopback().unwrap();
+        let address = listener.local_addr().unwrap();
+        let target: Url = format!("http://{address}/style.css").parse().unwrap();
+        let server = FixtureWorker::spawn(move || {
+            let mut cookies = Vec::new();
+            for phase in ["pre", "post"] {
+                for (resource, body) in [
+                    ("style.css", "@import url(import.css);"),
+                    ("import.css", "body { color: red }"),
+                ] {
+                    let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                    let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                    assert!(request.starts_with(&format!("GET /{resource} HTTP/1.1")));
+                    cookies.push(
+                        request
+                            .lines()
+                            .find_map(|line| line.strip_prefix("Cookie: "))
+                            .map(str::trim)
+                            .map(str::to_owned),
+                    );
+                    let cookie_name = resource.split('.').next().unwrap();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/css\r\nContent-Length: {}\r\nSet-Cookie: {phase}_{cookie_name}=1; Path=/; Secure; SameSite=None\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    )
+                    .unwrap();
+                }
+            }
+            cookies
+        });
+        let store = Arc::new(Mutex::new(CookieJar::new()));
+        store
+            .lock()
+            .unwrap()
+            .add_from_header_for_url("session=pre; Path=/; Secure; SameSite=None", &target);
+        let top: Url = format!("http://localhost:{}/", address.port())
+            .parse()
+            .unwrap();
+        let mut loader = StylesheetLoader::default();
+        for phase in ["pre", "post"] {
+            let document = TreeBuilder::parse(&format!(
+                "<html><head><link rel='stylesheet' href='http://{address}/style.css'></head></html>"
+            ))
+            .document();
+            let link = document.query_selector("link").unwrap();
+            let granted = (phase == "post").then(|| target.clone());
+            let (css, checks) = loader.load_node(
+                &link,
+                Some(&target),
+                &CspPolicy::default(),
+                CookieRequestContext::new(Some(top.clone()), granted, false),
+                Arc::clone(&store),
+            );
+            assert!(checks.iter().all(|check| !check.blocked));
+            assert!(css.contains("body { color: red }"));
+        }
+        let requests = server.join();
+        assert_eq!(requests[0], None);
+        assert_eq!(requests[1], None);
+        assert_eq!(requests[2], Some("session=pre".to_string()));
+        assert!(requests[3].as_deref().is_some_and(
+            |cookie| cookie.contains("session=pre") && cookie.contains("post_style=1")
+        ));
+        let cookies = store.lock().unwrap().document_cookie(&target, &target);
+        assert!(!cookies.contains("pre_style=1"));
+        assert!(!cookies.contains("pre_import=1"));
+        assert!(cookies.contains("post_style=1"));
+        assert!(cookies.contains("post_import=1"));
     }
 }

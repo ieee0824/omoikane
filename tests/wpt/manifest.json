@@ -530,6 +530,8 @@
     { "path": "cookiestore/cookieStore_getAll_multiple.https.any.js" },
     { "path": "cookiestore/cookieStore_get_set_ordering.https.any.js" },
     { "path": "cookiestore/cookieStore_event_overwrite.https.window.js" },
-    { "path": "cookiestore/cookieStore_getAll_set_creation_url.https.any.js" }
+    { "path": "cookiestore/cookieStore_getAll_set_creation_url.https.any.js" },
+    { "path": "storage-access-api/idlharness.window.js" },
+    { "path": "storage-access-api/requestStorageAccess-non-fully-active.sub.https.window.js" }
   ]
 }

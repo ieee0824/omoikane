@@ -510,6 +510,7 @@ fn fetch_font_bytes(
     // original reporting URL while their destination is checked without its
     // path, as required by CSP's URL matching algorithm.
     let mut redirects = 0;
+    let mut crossed_origin = false;
     let response = loop {
         if !state.csp_allows_response_for_document(
             document,
@@ -520,9 +521,14 @@ fn fetch_font_bytes(
         ) {
             return Err(error("font request blocked by font-src"));
         }
+        let mut request = HttpRequest::new(Method::Get, url.clone());
+        state.set_document_cookie_request_context(document.identity(), &mut request);
+        if crossed_origin {
+            request.set_storage_access_eligible(false);
+        }
         let fetched = crate::http::cors::fetch(
             &mut state.http_client,
-            HttpRequest::new(Method::Get, url.clone()),
+            request,
             &origin,
             RequestMode::Cors,
             CredentialsMode::SameOrigin,
@@ -537,13 +543,15 @@ fn fetch_font_bytes(
         if redirects == 20 {
             return Err(error("too many font redirects"));
         }
-        url = crate::http::url::resolve_url(
+        let next = crate::http::url::resolve_url(
             &url,
             response
                 .header("location")
                 .ok_or_else(|| error("font redirect has no location"))?,
         )
         .map_err(error)?;
+        crossed_origin |= !same_origin_url(&url, &next);
+        url = next;
         redirects += 1;
     };
     let response_url = response.effective_url().unwrap_or(&url).to_string();

@@ -32,6 +32,10 @@ impl StorageOrigin {
     pub(crate) fn serialize(&self) -> String {
         format!("{}://{}:{}", self.scheme, self.host, self.port)
     }
+
+    pub(crate) fn schemeful_site(&self) -> SchemefulSite {
+        SchemefulSite::from_parts(&self.scheme, &self.host)
+    }
 }
 
 /// The browser-owned lookup key for link coloring. Neither the key nor the

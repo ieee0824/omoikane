@@ -598,9 +598,15 @@ fn script_source(
             return None;
         }
         let base = host.base_url_for_document(document.identity());
+        let cookie_context = host.document_cookie_request_context(document.identity());
         let fetched = if prepared.kind == ScriptKind::Module {
-            fetch_script_resource_with_client(src, base.as_ref(), &mut host.http_client)
-                .map(|(url, source, redirects)| (url, source, redirects, false))
+            fetch_script_resource_with_client_in_context(
+                src,
+                base.as_ref(),
+                Some(&cookie_context),
+                &mut host.http_client,
+            )
+            .map(|(url, source, redirects)| (url, source, redirects, false))
         } else {
             let origin = script_errors::document_fetch_origin(&host, document.identity());
             script_errors::fetch_classic_source(
@@ -608,6 +614,7 @@ fn script_source(
                 base.as_ref(),
                 &origin,
                 prepared.node.get_attribute("crossorigin").as_deref(),
+                Some(&cookie_context),
                 &mut host.http_client,
             )
         };

@@ -105,6 +105,8 @@ export let __omoikane_cookie_change_reset;
   const nativeCookieStoreQuery = globalThis.__omoikane_cookie_store_query;
   const nativeCookieStoreMutate = globalThis.__omoikane_cookie_store_mutate;
   const nativeCookieStoreChanges = globalThis.__omoikane_cookie_store_changes;
+  const nativeStorageAccessState = globalThis.__omoikane_storage_access_state;
+  const nativeStorageAccessRequest = globalThis.__omoikane_storage_access_request;
   const nativeWebLocks = globalThis.__omoikane_web_locks;
   // Worklet lifecycle bindings are private implementation hooks. Keep them in
   // this closure so page code can only reach the standard Worklet methods.
@@ -290,6 +292,8 @@ export let __omoikane_cookie_change_reset;
   delete globalThis.__omoikane_cookie_store_query;
   delete globalThis.__omoikane_cookie_store_mutate;
   delete globalThis.__omoikane_cookie_store_changes;
+  delete globalThis.__omoikane_storage_access_state;
+  delete globalThis.__omoikane_storage_access_request;
   delete globalThis.__omoikane_web_locks;
   delete globalThis.__omoikane_create_worklet;
   delete globalThis.__omoikane_worklet_add_module;
@@ -17467,6 +17471,42 @@ export let __omoikane_cookie_change_reset;
     enumerable: true,
     get() { return __omoikane_document_cookie_get(this.__id); },
     set(serialized) { __omoikane_document_cookie_set(this.__id, String(serialized)); },
+  });
+
+  function storageAccessDocumentId(receiver) {
+    requireNodeReceiver(receiver);
+    if (internalNodeType(receiver) !== 9) {
+      throw new IntrinsicTypeError("Storage Access requires a Document");
+    }
+    return canonicalNodeId(receiver);
+  }
+  function storageAccessRejection(status) {
+    return new DOMException(
+      status === "inactive" ? "The Document is not active." : "Storage access is not allowed.",
+      status === "inactive" ? "InvalidStateError" : "NotAllowedError",
+    );
+  }
+  Object.defineProperty(Document.prototype, "hasStorageAccess", {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: async function hasStorageAccess() {
+      const status = nativeStorageAccessState(storageAccessDocumentId(this));
+      return status === "inactive" ? Promise.reject(storageAccessRejection(status)) :
+        Promise.resolve(status === "granted");
+    },
+  });
+  Object.defineProperty(Document.prototype, "requestStorageAccess", {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: async function requestStorageAccess() {
+      const status = nativeStorageAccessRequest(
+        storageAccessDocumentId(this), fullscreenTransientActivation,
+      );
+      return status === "granted" ? Promise.resolve(undefined) :
+        Promise.reject(storageAccessRejection(status));
+    },
   });
 
   const navigationDocumentId = __omoikane_document_id;
