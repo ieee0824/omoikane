@@ -1,7 +1,7 @@
 //! Bounded HTTP workers for module graphs. Only HTTP data crosses threads;
 //! Boa module records, parsing, and evaluation stay on the owning JS thread.
 
-use crate::http::{Client, CookieJar, HttpRequest, HttpResponse, Url};
+use crate::http::{Client, CookieJar, CookieRequestContext, HttpRequest, HttpResponse};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -80,7 +80,7 @@ impl Future for ModuleFetch {
 struct Request {
     url: String,
     public_only: bool,
-    site_for_cookies: Option<Url>,
+    cookie_context: Option<CookieRequestContext>,
     fetch: ModuleFetch,
 }
 
@@ -124,8 +124,8 @@ impl ModuleFetchPool {
                             if request.public_only {
                                 http.require_public_ip();
                             }
-                            if let Some(site) = request.site_for_cookies.as_ref() {
-                                http.set_cookie_context(site.clone(), false);
+                            if let Some(context) = request.cookie_context.as_ref() {
+                                context.apply(&mut http);
                             }
                             let response = client
                                 .send_with_shared_cookies(http, &cookies)
@@ -146,7 +146,7 @@ impl ModuleFetchPool {
         &self,
         url: String,
         public_only: bool,
-        site_for_cookies: Option<Url>,
+        cookie_context: Option<CookieRequestContext>,
     ) -> ModuleFetch {
         let fetch = ModuleFetch::default();
         if self
@@ -154,7 +154,7 @@ impl ModuleFetchPool {
             .send(Request {
                 url,
                 public_only,
-                site_for_cookies,
+                cookie_context,
                 fetch: fetch.clone(),
             })
             .is_err()
@@ -177,6 +177,7 @@ impl Drop for ModuleFetchPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::Url;
     use crate::test_support::http_fixture::{
         ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
         read_request_headers,
@@ -225,7 +226,11 @@ mod tests {
         let pool = ModuleFetchPool::new(store).unwrap();
         let other: Url = "http://localhost/".parse().unwrap();
         for site in [other, target] {
-            let mut fetch = pool.fetch(url.clone(), false, Some(site));
+            let mut fetch = pool.fetch(
+                url.clone(),
+                false,
+                Some(CookieRequestContext::new(Some(site), None, false)),
+            );
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 let mut context = Context::from_waker(Waker::noop());
@@ -238,6 +243,68 @@ mod tests {
             }
         }
         assert_eq!(server.join(), [None, Some("strict=1; lax=2".to_string())]);
+    }
+
+    #[test]
+    fn module_downloads_send_and_store_cookies_only_with_document_access() {
+        let listener = bind_loopback().unwrap();
+        let address = listener.local_addr().unwrap();
+        let target: Url = format!("http://{address}/post.js").parse().unwrap();
+        let server = FixtureWorker::spawn(move || {
+            let mut cookies = Vec::new();
+            for phase in ["pre", "post"] {
+                let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                assert!(request.starts_with(&format!("GET /{phase}.js HTTP/1.1")));
+                cookies.push(
+                    request
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Cookie: "))
+                        .map(str::trim)
+                        .map(str::to_owned),
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: 0\r\nSet-Cookie: {phase}=1; Path=/; Secure; SameSite=None\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+            cookies
+        });
+        let store = Arc::new(Mutex::new(CookieJar::new()));
+        store
+            .lock()
+            .unwrap()
+            .add_from_header_for_url("session=pre; Path=/; Secure; SameSite=None", &target);
+        let pool = ModuleFetchPool::new(Arc::clone(&store)).unwrap();
+        let top: Url = format!("http://localhost:{}/", address.port())
+            .parse()
+            .unwrap();
+        for phase in ["pre", "post"] {
+            let mut fetch = pool.fetch(
+                format!("http://{address}/{phase}.js"),
+                false,
+                Some(CookieRequestContext::new(
+                    Some(top.clone()),
+                    (phase == "post").then(|| target.clone()),
+                    false,
+                )),
+            );
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let mut context = Context::from_waker(Waker::noop());
+                if let Poll::Ready(result) = Pin::new(&mut fetch).poll(&mut context) {
+                    assert!(result.is_ok(), "{result:?}");
+                    break;
+                }
+                assert!(Instant::now() < deadline, "module fetch timed out");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        assert_eq!(server.join(), [None, Some("session=pre".to_string())]);
+        let cookies = store.lock().unwrap().document_cookie(&target, &target);
+        assert!(!cookies.contains("pre=1"));
+        assert!(cookies.contains("post=1"));
     }
 
     #[test]

@@ -24,9 +24,20 @@ pub(super) struct LoadedWorkerScript {
 /// retains the existing public-IP and cookie-context checks and accepts only
 /// status 200. Each redirect is checked against the initial origin before its
 /// request is sent, with the Fetch limit of 20 followed redirects.
+#[cfg(test)]
 pub(super) fn load_worker_script(
     requested: &str,
     base: Option<&crate::http::Url>,
+    client: &mut Client,
+) -> Option<LoadedWorkerScript> {
+    load_worker_script_in_context(requested, base, None, client)
+}
+
+/// Loads each network hop with the initiating Document's owned cookie policy.
+pub(super) fn load_worker_script_in_context(
+    requested: &str,
+    base: Option<&crate::http::Url>,
+    cookie_context: Option<&crate::http::CookieRequestContext>,
     client: &mut Client,
 ) -> Option<LoadedWorkerScript> {
     match resolve_resource_ref(requested, base)? {
@@ -42,13 +53,16 @@ pub(super) fn load_worker_script(
                 security_headers: Vec::new(),
             })
         }
-        ResolvedResource::Url(_) => load_http_worker_script(requested, base, client),
+        ResolvedResource::Url(_) => {
+            load_http_worker_script(requested, base, cookie_context, client)
+        }
     }
 }
 
 fn load_http_worker_script(
     requested: &str,
     base: Option<&crate::http::Url>,
+    cookie_context: Option<&crate::http::CookieRequestContext>,
     client: &mut Client,
 ) -> Option<LoadedWorkerScript> {
     // The transport URL omits fragments; retain a standard URL alongside it
@@ -65,7 +79,9 @@ fn load_http_worker_script(
         if requires_public_fetch(&transport_url, base) {
             request.require_public_ip();
         }
-        if let Some(site) = base {
+        if let Some(cookie_context) = cookie_context {
+            cookie_context.apply(&mut request);
+        } else if let Some(site) = base {
             request.set_cookie_context(site.clone(), false);
         }
         let response = client.send_once_with_timeout(request, true, None).ok()?;

@@ -147,11 +147,12 @@ pub(super) fn fetch_classic_source(
     base: Option<&crate::http::Url>,
     origin: &CorsOrigin,
     crossorigin: Option<&str>,
+    cookie_context: Option<&crate::http::CookieRequestContext>,
     client: &mut Client,
 ) -> Option<(String, String, usize, bool)> {
     let resource = resolve_resource_ref(src, base)?;
     let ResolvedResource::Url(url) = resource else {
-        return fetch_script_resource_with_client(src, base, client)
+        return fetch_script_resource_with_client_in_context(src, base, cookie_context, client)
             .map(|(url, source, redirects)| (url, source, redirects, false));
     };
     let url = url.parse::<crate::http::Url>().ok()?;
@@ -159,7 +160,9 @@ pub(super) fn fetch_classic_source(
     if requires_public_fetch(&url, base) {
         request.require_public_ip();
     }
-    if let Some(site) = base {
+    if let Some(cookie_context) = cookie_context {
+        cookie_context.apply(&mut request);
+    } else if let Some(site) = base {
         request.set_cookie_context(site.clone(), false);
     }
     let mode = if crossorigin.is_some() {

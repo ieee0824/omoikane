@@ -182,9 +182,13 @@ fn iframe_get_loads_handle_blank_data_and_unreachable_references() {
         method: "POST".to_owned(),
         body: Some(b"q=1".to_vec()),
         content_type: Some("application/x-www-form-urlencoded".to_owned()),
+        source_document_id: None,
     };
+    let source_document_id = state.document.identity();
     assert!(
-        state.load_iframe_form_submission(&submission).is_err(),
+        state
+            .load_iframe_form_submission(&submission, source_document_id)
+            .is_err(),
         "POST failures propagate instead of committing a blank document"
     );
 }
@@ -260,8 +264,12 @@ fn http_child_loads_keep_error_bodies_fragments_and_post_metadata() {
         method: "POST".to_owned(),
         body: Some(b"q=1".to_vec()),
         content_type: Some("application/x-www-form-urlencoded".to_owned()),
+        source_document_id: None,
     };
-    let posted = state.load_iframe_form_submission(&submission).unwrap();
+    let source_document_id = state.document.identity();
+    let posted = state
+        .load_iframe_form_submission(&submission, source_document_id)
+        .unwrap();
     assert!(is_blank(&posted.document));
     assert_eq!(
         posted.security_headers,
@@ -272,10 +280,13 @@ fn http_child_loads_keep_error_bodies_fragments_and_post_metadata() {
     assert_eq!(posted.response_status, 200);
 
     let posted_error = state
-        .load_iframe_form_submission(&Submission {
-            url: format!("{origin}/error"),
-            ..submission
-        })
+        .load_iframe_form_submission(
+            &Submission {
+                url: format!("{origin}/error"),
+                ..submission
+            },
+            source_document_id,
+        )
         .unwrap();
     assert_eq!(posted_error.response_status, 404);
     assert_eq!(

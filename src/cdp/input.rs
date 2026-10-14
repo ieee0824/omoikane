@@ -69,9 +69,12 @@ impl CdpSession {
             "metaKey": modifiers & 4 != 0,
             "shiftKey": modifiers & 8 != 0,
         });
-        let not_canceled = self.eval_input_bool(&format!(
-            "__omoikane_dispatch_keyboard_input({dom_type:?}, {init})"
-        ))?;
+        let trusted_activation = dom_type == "keydown"
+            && !matches!(key, "Escape" | "Shift" | "Control" | "Alt" | "Meta");
+        let not_canceled = self.eval_input_bool_with_activation(
+            &format!("__omoikane_dispatch_keyboard_input({dom_type:?}, {init})"),
+            trusted_activation,
+        )?;
         Ok(json!({ "defaultPrevented": !not_canceled }))
     }
 
@@ -167,10 +170,13 @@ impl CdpSession {
                 "hostOverscrollY": outcome & 4 != 0,
             }));
         }
-        let not_canceled = self.eval_input_bool(&format!(
-            "__omoikane_dispatch_mouse_input({target_id}, {dom_type:?}, {init}, {})",
-            dom_type == "mousedown"
-        ))?;
+        let not_canceled = self.eval_input_bool_with_activation(
+            &format!(
+                "__omoikane_dispatch_mouse_input({target_id}, {dom_type:?}, {init}, {})",
+                dom_type == "mousedown"
+            ),
+            button == 0 && matches!(dom_type, "mousedown" | "click"),
+        )?;
         if locked {
             self.drag_active = false;
             self.drag_candidate = false;
@@ -224,9 +230,12 @@ impl CdpSession {
                 && pressed.is_some()
                 && pressed == target.as_ref().map(NodeHandle::identity)
             {
-                let click_not_canceled = self.eval_input_bool(&format!(
-                    "__omoikane_dispatch_mouse_input({target_id}, \"click\", {init}, false)"
-                ))?;
+                let click_not_canceled = self.eval_input_bool_with_activation(
+                    &format!(
+                        "__omoikane_dispatch_mouse_input({target_id}, \"click\", {init}, false)"
+                    ),
+                    button == 0,
+                )?;
                 click_default_prevented = !click_not_canceled;
             }
             let _ = self.eval_input_bool(&format!(
@@ -375,14 +384,25 @@ impl CdpSession {
     }
 
     fn eval_input_bool(&mut self, script: &str) -> Result<bool, JsonRpcError> {
-        let not_canceled = self
-            .runtime
-            .eval(script)
-            .and_then(|value| {
-                self.runtime.run_jobs()?;
-                Ok(value.as_boolean().unwrap_or(true))
-            })
-            .map_err(js_error)?;
+        self.eval_input_bool_with_activation(script, false)
+    }
+
+    fn eval_input_bool_with_activation(
+        &mut self,
+        script: &str,
+        trusted_activation: bool,
+    ) -> Result<bool, JsonRpcError> {
+        let evaluate = |runtime: &mut JsRuntime| {
+            let value = runtime.eval(script)?;
+            runtime.run_jobs()?;
+            Ok(value.as_boolean().unwrap_or(true))
+        };
+        let not_canceled = if trusted_activation {
+            self.runtime.with_trusted_storage_access_input(evaluate)
+        } else {
+            evaluate(&mut self.runtime)
+        }
+        .map_err(js_error)?;
         self.drive_navigation_requests()?;
         Ok(not_canceled)
     }

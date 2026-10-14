@@ -149,6 +149,9 @@ mod html_sanitizer;
 mod html_serialization;
 mod security_reporting;
 mod storage;
+mod storage_access;
+#[cfg(test)]
+mod storage_access_tests;
 mod stylesheet;
 use csp::{CspPolicy, CspViolation, ResourceType};
 use event_loop::{EventLoop, Task};
@@ -962,12 +965,10 @@ impl ModuleLoader for HttpModuleLoader {
                     let fetch = pool.as_ref().unwrap().fetch(
                         resolved_string.clone(),
                         public_only,
-                        self.owner.upgrade().and_then(|owner| {
+                        self.owner.upgrade().map(|owner| {
                             owner
                                 .borrow()
-                                .location_href
-                                .parse::<crate::http::Url>()
-                                .ok()
+                                .document_cookie_request_context(module_document_id)
                         }),
                     );
                     pending.insert(key.clone(), fetch.clone());
@@ -1203,6 +1204,7 @@ enum TimerPayload {
     FormSubmission {
         node_id: usize,
         request: form_submission::Submission,
+        source_document_id: usize,
         visit_source: Option<VisitSource>,
         referrer_source: NavigationReferrerSource,
     },
@@ -1861,6 +1863,12 @@ struct HostState {
     /// when several same-origin Window realms share this runtime.
     web_lock_clients: HashMap<usize, u64>,
     document_origins: HashMap<usize, Option<StorageOrigin>>,
+    /// Permission is scoped to the top-level and embedded sites for this session.
+    storage_access_grants: HashSet<(crate::http::SchemefulSite, crate::http::SchemefulSite)>,
+    /// Activation is document-local even when another frame has the same permission key.
+    storage_access_active_documents: HashSet<usize>,
+    /// Set only by the embedder while it dispatches a real activation input.
+    trusted_storage_access_input: bool,
     /// Visibility of this top-level traversable, shared by its iframe Documents.
     page_hidden: bool,
     live_css_animations: bool,
@@ -2091,6 +2099,7 @@ struct IframeSandboxPolicy {
     active: bool,
     allow_scripts: bool,
     allow_same_origin: bool,
+    allow_storage_access_by_user_activation: bool,
     allow_pointer_lock: bool,
     allow_forms: bool,
     allow_top_navigation: bool,
@@ -2102,6 +2111,7 @@ impl Default for IframeSandboxPolicy {
             active: false,
             allow_scripts: true,
             allow_same_origin: true,
+            allow_storage_access_by_user_activation: true,
             allow_pointer_lock: true,
             allow_forms: true,
             allow_top_navigation: true,
@@ -2122,6 +2132,8 @@ impl IframeSandboxPolicy {
             active: true,
             allow_scripts: tokens.contains("allow-scripts"),
             allow_same_origin: tokens.contains("allow-same-origin"),
+            allow_storage_access_by_user_activation: tokens
+                .contains("allow-storage-access-by-user-activation"),
             allow_pointer_lock: tokens.contains("allow-pointer-lock"),
             allow_forms: tokens.contains("allow-forms"),
             allow_top_navigation: tokens.contains("allow-top-navigation"),
@@ -2386,6 +2398,9 @@ impl HostState {
             storage_session_id,
             web_lock_clients,
             document_origins,
+            storage_access_grants: HashSet::new(),
+            storage_access_active_documents: HashSet::new(),
+            trusted_storage_access_input: false,
             page_hidden: false,
             live_css_animations: false,
             image_timeline: Arc::new(Mutex::new(HashMap::new())),
@@ -2822,13 +2837,14 @@ impl HostState {
     /// parsed as HTML or XML (including SVG) according to their content type;
     /// unsupported content types and load failures yield the empty skeleton.
     fn iframe_content_document(&mut self, iframe: &NodeHandle) -> Result<NodeHandle, JsHostError> {
-        self.iframe_document_with_submission(iframe, None)
+        self.iframe_document_with_submission(iframe, None, None)
     }
 
     fn iframe_document_with_submission(
         &mut self,
         iframe: &NodeHandle,
         submission: Option<&form_submission::Submission>,
+        submission_source_document_id: Option<usize>,
     ) -> Result<NodeHandle, JsHostError> {
         if !self.node_is_in_active_document(iframe) {
             return Err(JsHostError::InactiveIframeOwner);
@@ -2920,13 +2936,23 @@ impl HostState {
             final_request_referrer,
             url: child_url,
         } = if let Some(request) = submission {
-            self.load_iframe_form_submission_with_referrer(request, &source_url, request_policy)?
+            self.load_iframe_form_submission_with_referrer(
+                request,
+                submission_source_document_id
+                    .or(request.source_document_id)
+                    .filter(|document_id| self.document_is_active(*document_id))
+                    .unwrap_or(owner_document_id),
+                &source_url,
+                request_policy,
+            )?
         } else if resource_attribute == "srcdoc" {
             LoadedChildDocument::srcdoc(&resource)
         } else {
-            self.load_iframe_document_with_referrer(
+            self.load_iframe_document_for_initiator(
                 &resource,
                 resource_base.as_ref(),
+                Some(owner_document_id),
+                false,
                 &source_url,
                 request_policy,
             )
@@ -3236,9 +3262,11 @@ impl HostState {
             response_status,
             final_request_referrer,
             url: effective_url,
-        } = self.load_iframe_document_with_referrer(
+        } = self.load_iframe_document_for_initiator(
             requested,
             base.as_ref(),
+            None,
+            true,
             source_url,
             source_policy,
         );
@@ -3349,23 +3377,28 @@ impl HostState {
     /// fetch failure, or an unsupported content type. HTML resources are parsed
     /// as HTML; XML MIME types, including SVG, are parsed as XML. See
     /// [`LoadedChildDocument`] for the committed URL and CSP header contract.
+    #[cfg(test)]
     fn load_iframe_document(
         &mut self,
         src: &str,
         base_url: Option<&crate::http::Url>,
     ) -> LoadedChildDocument {
-        self.load_iframe_document_with_referrer(
+        self.load_iframe_document_for_initiator(
             src,
             base_url,
+            None,
+            false,
             "",
             security_reporting::ReferrerPolicy::default(),
         )
     }
 
-    fn load_iframe_document_with_referrer(
+    fn load_iframe_document_for_initiator(
         &mut self,
         src: &str,
         base_url: Option<&crate::http::Url>,
+        initiator_document_id: Option<usize>,
+        top_level_navigation: bool,
         source_url: &str,
         policy: security_reporting::ReferrerPolicy,
     ) -> LoadedChildDocument {
@@ -3373,10 +3406,17 @@ impl HostState {
             let url = if src.is_empty() { "about:blank" } else { src };
             return LoadedChildDocument::about_blank(url.to_owned());
         }
-        self.fetch_child_resource(src, base_url, source_url, policy)
-            .map_or_else(LoadedChildDocument::fetch_failed, |resource| {
-                resource.into_get_document()
-            })
+        self.fetch_child_resource(
+            src,
+            base_url,
+            initiator_document_id,
+            top_level_navigation,
+            source_url,
+            policy,
+        )
+        .map_or_else(LoadedChildDocument::fetch_failed, |resource| {
+            resource.into_get_document()
+        })
     }
 
     /// Resolves `src` to inline `data:` bytes or fetches it with a GET.
@@ -3392,6 +3432,8 @@ impl HostState {
         &mut self,
         src: &str,
         base_url: Option<&crate::http::Url>,
+        initiator_document_id: Option<usize>,
+        top_level_navigation: bool,
         source_url: &str,
         policy: security_reporting::ReferrerPolicy,
     ) -> Option<FetchedChildResource> {
@@ -3412,8 +3454,10 @@ impl HostState {
         if !source_url.is_empty() {
             request.set_referrer_source(source_url.to_owned(), policy);
         }
-        if let Ok(site) = self.location_href.parse::<crate::http::Url>() {
-            request.set_cookie_context(site, false);
+        if let Some(document_id) = initiator_document_id {
+            self.set_document_cookie_request_context(document_id, &mut request);
+        } else if let Ok(site) = self.location_href.parse::<crate::http::Url>() {
+            request.set_cookie_context(site, top_level_navigation);
         }
         let response = self.http_client.send(request).ok()?;
         let mut effective_url = response
@@ -3563,6 +3607,7 @@ impl HostState {
             unregister_web_lock_client(&self.storage_manager, client_id);
         }
         self.document_origins.remove(&document_id);
+        self.storage_access_active_documents.remove(&document_id);
         self.document_urls.remove(&document_id);
         self.document_reporting.remove(&document_id);
         self.report_observer_dispatchers.remove(&document_id);
@@ -3673,6 +3718,7 @@ impl HostState {
             unregister_web_lock_client(&self.storage_manager, client_id);
         }
         self.document_origins.remove(&document_id);
+        self.storage_access_active_documents.remove(&document_id);
         self.document_urls.remove(&document_id);
         self.document_reporting.remove(&document_id);
         self.report_observer_dispatchers.remove(&document_id);
@@ -3788,6 +3834,24 @@ impl HostState {
         // about:blank/srcdoc keep their inherited HTTP base in this registry.
         // Their visible document URL cannot be parsed as an HTTP URL.
         self.document_base_urls.get(&document_id).cloned()
+    }
+
+    fn cors_origin_for_document(&self, document_id: usize) -> CorsOrigin {
+        // Standalone runtimes can set the main Document's URL through
+        // `set_base_url` without navigating it. Preserve that request origin
+        // while child Documents use their own committed origins.
+        if document_id == self.document.identity() {
+            if let Some(url) = self.base_url.as_ref() {
+                return CorsOrigin::from_url(url);
+            }
+        }
+        self.document_origins
+            .get(&document_id)
+            .and_then(Option::as_ref)
+            .and_then(|origin| origin.serialize().parse::<crate::http::Url>().ok())
+            .as_ref()
+            .map(CorsOrigin::from_url)
+            .unwrap_or_else(CorsOrigin::opaque)
     }
 
     /// Network CSP belongs to the calling Window Realm, including srcdoc.
@@ -4500,14 +4564,14 @@ impl HostState {
         resources.set_error_reporter(self.error_reporter.clone());
         resources.retain_live_sources();
         let mut web_fonts = crate::font::WebFontRegistry::new();
-        let site_for_cookies = self.location_href.parse::<crate::http::Url>().ok();
+        let cookie_context = self.document_cookie_request_context(document_id);
         let (stylesheet_nodes, font_scope_parents) = collect_stylesheet_nodes(document);
         for (style_node, scope, implicit_scope_root) in stylesheet_nodes {
             let (css, checks) = resources.load_node(
                 &style_node,
                 base.as_ref(),
                 &policy,
-                site_for_cookies.as_ref(),
+                cookie_context.clone(),
                 Arc::clone(&self.cookie_store),
             );
             self.observe_stylesheet_policy_checks(document, &style_node, checks);
@@ -4790,7 +4854,7 @@ impl HostState {
             &document,
             self.base_url_for_document(document_id).as_ref(),
         );
-        let image_site = self.location_href.parse::<crate::http::Url>().ok();
+        let image_context = self.document_cookie_request_context(document_id);
         let image_cookies = Arc::clone(&self.cookie_store);
         let animation_time = self.event_loop.rendering_time_ms() as u64;
         let layout_reporter = self.error_reporter.clone();
@@ -4824,7 +4888,7 @@ impl HostState {
                     || {
                         crate::layout::with_image_cookie_store(
                             image_cookies,
-                            image_site,
+                            image_context,
                             document_id,
                             || {
                                 crate::layout::with_image_base_url(base, || {
@@ -6459,7 +6523,7 @@ impl JsRuntime {
             &state.document,
             state.base_url_for_document(document_id).as_ref(),
         );
-        let image_site = state.location_href.parse::<crate::http::Url>().ok();
+        let image_context = state.document_cookie_request_context(document_id);
         let image_cookies = Arc::clone(&state.cookie_store);
         let animation_time = state.event_loop.rendering_time_ms() as u64;
         let state = &mut *state;
@@ -6479,8 +6543,11 @@ impl JsRuntime {
             .as_mut()
             .ok_or(crate::paint::PaintError::InvalidImageBuffer)?;
         let start = Instant::now();
-        let canvas =
-            crate::layout::with_image_cookie_store(image_cookies, image_site, document_id, || {
+        let canvas = crate::layout::with_image_cookie_store(
+            image_cookies,
+            image_context,
+            document_id,
+            || {
                 crate::layout::with_image_base_url(base, || {
                     crate::layout::with_image_animation_time(animation_time, || {
                         crate::paint::paint_layout_with_document_snapshots(
@@ -6494,7 +6561,8 @@ impl JsRuntime {
                         )
                     })
                 })
-            });
+            },
+        );
         crate::paint::record_render_timings(&crate::paint::RenderTimings {
             layout: layout_time,
             paint: start.elapsed(),
@@ -8256,11 +8324,13 @@ impl JsRuntime {
                 let fetched = {
                     let mut state = self.host_state.borrow_mut();
                     let origin = script_errors::document_fetch_origin(&state, document_id);
+                    let cookie_context = state.document_cookie_request_context(document_id);
                     script_errors::fetch_classic_source(
                         src,
                         base.as_ref(),
                         &origin,
                         attributes.get("crossorigin").map(String::as_str),
+                        Some(&cookie_context),
                         &mut state.http_client,
                     )
                 };
@@ -8420,15 +8490,22 @@ impl JsRuntime {
         let fetched = {
             let mut state = self.host_state.borrow_mut();
             let origin = script_errors::document_fetch_origin(&state, document_id);
+            let cookie_context = state.document_cookie_request_context(document_id);
             if kind == ScriptKind::Module {
-                fetch_script_resource_with_client(&src, base_url.as_ref(), &mut state.http_client)
-                    .map(|(url, source, redirects)| (url, source, redirects, false))
+                fetch_script_resource_with_client_in_context(
+                    &src,
+                    base_url.as_ref(),
+                    Some(&cookie_context),
+                    &mut state.http_client,
+                )
+                .map(|(url, source, redirects)| (url, source, redirects, false))
             } else {
                 script_errors::fetch_classic_source(
                     &src,
                     base_url.as_ref(),
                     &origin,
                     script_node.get_attribute("crossorigin").as_deref(),
+                    Some(&cookie_context),
                     &mut state.http_client,
                 )
             }
@@ -9593,6 +9670,7 @@ impl JsRuntime {
             TimerPayload::FormSubmission {
                 node_id,
                 request,
+                source_document_id,
                 visit_source,
                 referrer_source,
             } => {
@@ -9628,7 +9706,11 @@ impl JsRuntime {
                 let loaded = self
                     .host_state
                     .borrow_mut()
-                    .iframe_document_with_submission(&frame, Some(&request));
+                    .iframe_document_with_submission(
+                        &frame,
+                        Some(&request),
+                        Some(source_document_id),
+                    );
                 if let Err(error) = loaded {
                     let mut state = self.host_state.borrow_mut();
                     state.pending_iframe_visits.remove(&node_id);
@@ -9951,10 +10033,12 @@ impl JsRuntime {
             let fetched = {
                 let mut state = self.host_state.borrow_mut();
                 let origin = script_errors::document_fetch_origin(&state, dispatch_document_id);
+                let cookie_context = state.document_cookie_request_context(dispatch_document_id);
                 if kind == ScriptKind::Module {
-                    fetch_script_resource_with_client(
+                    fetch_script_resource_with_client_in_context(
                         &src,
                         base_url.as_ref(),
+                        Some(&cookie_context),
                         &mut state.http_client,
                     )
                     .map(|(url, source, redirects)| (url, source, redirects, false))
@@ -9964,6 +10048,7 @@ impl JsRuntime {
                         base_url.as_ref(),
                         &origin,
                         script_node.get_attribute("crossorigin").as_deref(),
+                        Some(&cookie_context),
                         &mut state.http_client,
                     )
                 }
@@ -10449,15 +10534,22 @@ impl JsRuntime {
                     .map(|doc| doc.identity())
                     .unwrap_or_else(|| state.document.identity());
                 let origin = script_errors::document_fetch_origin(&state, owner);
+                let cookie_context = state.document_cookie_request_context(owner);
                 if is_module {
-                    fetch_script_resource_with_client(&src_url, base_url, &mut state.http_client)
-                        .map(|(url, code, redirects)| (url, code, redirects, false))
+                    fetch_script_resource_with_client_in_context(
+                        &src_url,
+                        base_url,
+                        Some(&cookie_context),
+                        &mut state.http_client,
+                    )
+                    .map(|(url, code, redirects)| (url, code, redirects, false))
                 } else {
                     script_errors::fetch_classic_source(
                         &src_url,
                         base_url,
                         &origin,
                         attrs.get("crossorigin").map(String::as_str),
+                        Some(&cookie_context),
                         &mut state.http_client,
                     )
                 }
@@ -10996,9 +11088,19 @@ fn fetch_script_source(src: &str, base_url: Option<&crate::http::Url>) -> Option
 /// The effective URL matters for CSP: an initially permitted script may follow
 /// a redirect into a source that the policy does not permit, in which case its
 /// bytes must never reach the evaluator.
+#[cfg(test)]
 fn fetch_script_resource_with_client(
     src: &str,
     base_url: Option<&crate::http::Url>,
+    client: &mut Client,
+) -> Option<(String, String, usize)> {
+    fetch_script_resource_with_client_in_context(src, base_url, None, client)
+}
+
+fn fetch_script_resource_with_client_in_context(
+    src: &str,
+    base_url: Option<&crate::http::Url>,
+    cookie_context: Option<&crate::http::CookieRequestContext>,
     client: &mut Client,
 ) -> Option<(String, String, usize)> {
     match resolve_resource_ref(src, base_url)? {
@@ -11019,7 +11121,9 @@ fn fetch_script_resource_with_client(
             if public_only {
                 request.require_public_ip();
             }
-            if let Some(site) = base_url {
+            if let Some(cookie_context) = cookie_context {
+                cookie_context.apply(&mut request);
+            } else if let Some(site) = base_url {
                 request.set_cookie_context(site.clone(), false);
             }
             let response = client.send(request).ok()?;
@@ -11725,6 +11829,16 @@ fn register_host_bindings(
             js_string!("__omoikane_cookie_store_changes"),
             3,
             NativeFunction::from_copy_closure(cookie_store::changes_native),
+        ),
+        (
+            js_string!("__omoikane_storage_access_state"),
+            1,
+            NativeFunction::from_copy_closure(storage_access::storage_access_state_native),
+        ),
+        (
+            js_string!("__omoikane_storage_access_request"),
+            2,
+            NativeFunction::from_copy_closure(storage_access::storage_access_request_native),
         ),
         (
             js_string!("__omoikane_document_visibility_state"),
@@ -13387,10 +13501,7 @@ fn document_cookie_get_native(
     ensure_same_origin_document(context, document_id)?;
     with_host_state(|state| {
         let state = state.borrow();
-        let visible = state
-            .document_origins
-            .get(&document_id)
-            .is_some_and(Option::is_some);
+        let visible = state.storage_access_allows_document_cookies(document_id);
         let document_url = state
             .document_urls
             .get(&document_id)
@@ -13398,10 +13509,7 @@ fn document_cookie_get_native(
         let text = if visible {
             document_url
                 .map(|url| {
-                    let site = state
-                        .location_href
-                        .parse::<crate::http::Url>()
-                        .unwrap_or_else(|_| url.clone());
+                    let site = state.storage_access_cookie_site_for_document(document_id, &url);
                     state
                         .cookie_store
                         .lock()
@@ -13431,11 +13539,7 @@ fn document_cookie_set_native(
         .to_std_string_escaped();
     with_host_state(|state| {
         let state = state.borrow();
-        if !state
-            .document_origins
-            .get(&document_id)
-            .is_some_and(Option::is_some)
-        {
+        if !state.storage_access_allows_document_cookies(document_id) {
             return Ok(JsValue::undefined());
         }
         if let Some(url) = state
@@ -13443,10 +13547,7 @@ fn document_cookie_set_native(
             .get(&document_id)
             .and_then(|url| url.parse::<crate::http::Url>().ok())
         {
-            let site = state
-                .location_href
-                .parse::<crate::http::Url>()
-                .unwrap_or_else(|_| url.clone());
+            let site = state.storage_access_cookie_site_for_document(document_id, &url);
             state
                 .cookie_store
                 .lock()
@@ -14417,7 +14518,7 @@ fn resolved_layout_size(
         document,
         state.base_url_for_document(document_id).as_ref(),
     );
-    let image_site = state.location_href.parse::<crate::http::Url>().ok();
+    let image_context = state.document_cookie_request_context(document_id);
     let image_cookies = Arc::clone(&state.cookie_store);
     let animation_time = state.event_loop.rendering_time_ms() as u64;
     let layout = state
@@ -14431,7 +14532,7 @@ fn resolved_layout_size(
                 || {
                     crate::layout::with_image_cookie_store(
                         image_cookies,
-                        image_site,
+                        image_context,
                         document_id,
                         || {
                             crate::layout::with_image_base_url(base, || {
@@ -15049,7 +15150,7 @@ fn build_child_document_layout(
         document,
         state.base_url_for_document(document_id).as_ref(),
     );
-    let image_site = state.location_href.parse::<crate::http::Url>().ok();
+    let image_context = state.document_cookie_request_context(document_id);
     let image_cookies = Arc::clone(&state.cookie_store);
     let animation_time = state.event_loop.rendering_time_ms() as u64;
     let entry = state.document_styles.get_mut(&document_id)?;
@@ -15058,13 +15159,18 @@ fn build_child_document_layout(
         crate::paint::text::load_text_fonts(),
         Some(entry.web_fonts.clone()),
         || {
-            crate::layout::with_image_cookie_store(image_cookies, image_site, document_id, || {
-                crate::layout::with_image_base_url(base, || {
-                    crate::layout::with_image_animation_time(animation_time, || {
-                        crate::layout::layout_tree(document, resolver, viewport)
+            crate::layout::with_image_cookie_store(
+                image_cookies,
+                image_context,
+                document_id,
+                || {
+                    crate::layout::with_image_base_url(base, || {
+                        crate::layout::with_image_animation_time(animation_time, || {
+                            crate::layout::layout_tree(document, resolver, viewport)
+                        })
                     })
-                })
-            })
+                },
+            )
         },
     )
 }
@@ -18490,19 +18596,24 @@ fn dedicated_worker_creator(
 fn prepare_dedicated_worker(
     owner_state: &Rc<RefCell<HostState>>,
     requested_url: &str,
-    active_owner_document_id: Option<usize>,
+    owner_document_id: usize,
 ) -> JsResult<PreparedDedicatedWorker> {
-    let creator = dedicated_worker_creator(&mut owner_state.borrow_mut(), active_owner_document_id);
+    let creator = dedicated_worker_creator(&mut owner_state.borrow_mut(), Some(owner_document_id));
     let initial_url = resolve_worker_url(
         requested_url,
         &creator.origin_url,
         creator.base_url.as_ref(),
     )?;
-    let loaded = worker_loading::load_worker_script(
-        &initial_url,
-        creator.base_url.as_ref(),
-        &mut owner_state.borrow_mut().http_client,
-    );
+    let loaded = {
+        let mut state = owner_state.borrow_mut();
+        let cookie_context = state.document_cookie_request_context(owner_document_id);
+        worker_loading::load_worker_script_in_context(
+            &initial_url,
+            creator.base_url.as_ref(),
+            Some(&cookie_context),
+            &mut state.http_client,
+        )
+    };
     let worker_url = loaded
         .as_ref()
         .map_or(initial_url.as_str(), |script| script.effective_url.as_str());
@@ -18585,7 +18696,7 @@ fn prepare_dedicated_worker(
 fn create_worker_for_owner_state(
     owner_state: Rc<RefCell<HostState>>,
     requested_url: &str,
-    document_id: usize,
+    owner_document_id: usize,
 ) -> JsResult<u64> {
     let PreparedDedicatedWorker {
         id: worker_id,
@@ -18593,7 +18704,7 @@ fn create_worker_for_owner_state(
         csp_requested_url,
         source,
         runtime: worker_runtime,
-    } = prepare_dedicated_worker(&owner_state, requested_url, Some(document_id))?;
+    } = prepare_dedicated_worker(&owner_state, requested_url, owner_document_id)?;
     let entry = Rc::new(RefCell::new(WorkerRuntime {
         runtime: worker_runtime,
         owner_state: Rc::clone(&owner_state),
@@ -19206,15 +19317,9 @@ fn event_source_fetch_native(
                 .with_message("EventSource connection blocked by CSP connect-src")
                 .into());
         }
-        let origin = state
-            .base_url
-            .as_ref()
-            .map(CorsOrigin::from_url)
-            .unwrap_or_else(CorsOrigin::opaque);
+        let origin = state.cors_origin_for_document(document.identity());
         let mut request = HttpRequest::new(Method::Get, parsed);
-        if let Ok(site) = state.location_href.parse::<crate::http::Url>() {
-            request.set_cookie_context(site, false);
-        }
+        state.set_document_cookie_request_context(document.identity(), &mut request);
         request.set_header("Accept", "text/event-stream");
         if !last_event_id.is_empty() {
             request.set_header("Last-Event-ID", last_event_id);
@@ -19386,15 +19491,9 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
                 .with_message("fetch blocked by CSP connect-src")
                 .into());
         }
-        let origin = state
-            .base_url
-            .as_ref()
-            .map(CorsOrigin::from_url)
-            .unwrap_or_else(CorsOrigin::opaque);
+        let origin = state.cors_origin_for_document(document.identity());
         let mut request = HttpRequest::new(method, parsed_url);
-        if let Ok(site) = state.location_href.parse::<crate::http::Url>() {
-            request.set_cookie_context(site, false);
-        }
+        state.set_document_cookie_request_context(document.identity(), &mut request);
         for (name, value) in headers {
             if !crate::http::is_valid_header(&name, &value) {
                 return Err(JsNativeError::typ()
@@ -21642,6 +21741,7 @@ fn submit_form_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
         method,
         body,
         content_type,
+        source_document_id: None,
     };
     let frame = with_host_state(|state| {
         let mut state = state.borrow_mut();

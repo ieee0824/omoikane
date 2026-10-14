@@ -81,6 +81,52 @@ pub struct HttpRequest {
     site_for_cookies: Option<Url>,
     top_level_navigation: bool,
     referrer_source: Option<(String, ReferrerPolicy)>,
+    storage_access_eligible: bool,
+    cross_site_ancestry: bool,
+}
+
+/// Owned cookie policy captured from the Document that initiated a resource load.
+///
+/// Resource loaders may outlive a DOM borrow or run on another thread. Keeping
+/// the site, activated origin, and ancestor flag together prevents a loader
+/// from accidentally treating an embedded request as a top-level navigation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CookieRequestContext {
+    site_for_cookies: Option<Url>,
+    granted_origin: Option<Url>,
+    cross_site_ancestry: bool,
+}
+
+impl CookieRequestContext {
+    /// Stores the initiating site, the permitted origin, and ancestry for later requests.
+    pub(crate) fn new(
+        site_for_cookies: Option<Url>,
+        granted_origin: Option<Url>,
+        cross_site_ancestry: bool,
+    ) -> Self {
+        Self {
+            site_for_cookies,
+            granted_origin,
+            cross_site_ancestry,
+        }
+    }
+
+    /// Applies the initiating Document's policy to one concrete request URL.
+    pub(crate) fn apply(&self, request: &mut HttpRequest) {
+        let eligible = self.granted_origin.as_ref().is_some_and(|origin| {
+            origin.scheme() == request.url().scheme()
+                && origin.host() == request.url().host()
+                && origin.port() == request.url().port()
+        });
+        request.set_cookie_context(
+            self.site_for_cookies
+                .clone()
+                .unwrap_or_else(|| request.url().clone()),
+            false,
+        );
+        request.set_storage_access_eligible(eligible);
+        request.set_cross_site_ancestry(self.cross_site_ancestry);
+    }
 }
 
 impl HttpRequest {
@@ -99,6 +145,8 @@ impl HttpRequest {
             site_for_cookies: None,
             top_level_navigation: true,
             referrer_source: None,
+            storage_access_eligible: false,
+            cross_site_ancestry: false,
         };
         req.headers.push(("Host".to_string(), host));
         req.headers
@@ -166,6 +214,26 @@ impl HttpRequest {
     /// Returns whether this request navigates the top-level browsing context.
     pub fn is_top_level_navigation(&self) -> bool {
         self.top_level_navigation
+    }
+
+    /// Marks a same-origin request from a Document that activated Storage Access.
+    pub(crate) fn set_storage_access_eligible(&mut self, eligible: bool) {
+        self.storage_access_eligible = eligible;
+    }
+
+    /// Returns whether this request may use its Document's Storage Access grant.
+    pub(crate) fn storage_access_eligible(&self) -> bool {
+        self.storage_access_eligible
+    }
+
+    /// Marks an embedded request whose Document has a cross-site ancestor.
+    pub(crate) fn set_cross_site_ancestry(&mut self, cross_site: bool) {
+        self.cross_site_ancestry = cross_site;
+    }
+
+    /// Reports whether the initiating Document has a cross-site ancestor.
+    pub(crate) fn has_cross_site_ancestry(&self) -> bool {
+        self.cross_site_ancestry
     }
 
     /// Returns the first header value matching `name`, ignoring ASCII case.
