@@ -4717,19 +4717,17 @@ impl HostState {
         }
     }
 
-    /// Refreshes the resolver's CSP-filtered inline-style set after a `style`
-    /// attribute mutation without reparsing the document's stylesheets.  A
-    /// normal inline-style edit is intentionally only a computed-style cache
-    /// invalidation; this keeps the existing resolver-generation contract while
-    /// still making a newly added/removed blocked attribute take effect.
+    /// Rechecks CSP after each explicit `style` attribute mutation, even when
+    /// the new text equals the old text. Resolver rebuilds retain the snapshot
+    /// to avoid duplicate reports from unrelated style recalculation.
     fn refresh_csp_inline_style_nodes(&mut self, node: &NodeHandle) {
+        self.observed_style_attributes.remove(&node.identity());
         let Some(document) = document_root_for_node(node) else {
             return;
         };
         let blocked = if let Some(source) = node.get_attribute("style") {
             !self.csp_allows_inline_style_attribute(&document, node, &source)
         } else {
-            self.observed_style_attributes.remove(&node.identity());
             false
         };
         if let Some(resolver) = self

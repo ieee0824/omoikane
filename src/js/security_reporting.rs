@@ -724,8 +724,8 @@ impl HostState {
         }
     }
 
-    /// Checks an inline style attribute once per source and policy generation.
-    /// Viewport and cascade rebuilds reuse the result without duplicate reports.
+    /// Checks an inline style attribute after each mutation. Viewport and
+    /// cascade rebuilds reuse the result without duplicate reports.
     pub(super) fn csp_allows_inline_style_attribute(
         &mut self,
         document: &NodeHandle,
@@ -3101,7 +3101,7 @@ mod tests {
     }
 
     #[test]
-    fn style_attribute_hash_reports_per_policy_once_per_source_generation() {
+    fn style_attribute_hash_reports_each_mutation_without_resolver_duplicates() {
         use base64::Engine as _;
         use sha2::Digest as _;
 
@@ -3141,6 +3141,22 @@ mod tests {
         runtime.eval("document.getElementById('target').setAttribute('style', 'color: blue;'); globalThis.blockedColor=getComputedStyle(document.getElementById('target')).color;").unwrap();
         runtime.run_timers(10, 1, 30);
         assert!(runtime.eval("blockedColor !== 'rgb(0, 0, 255)' && events.length === 3 && events.slice(1).map(e => e[1]).sort().join(',') === 'enforce,report' && reports.length === 3 && document.cspViolations.length === 1").unwrap().as_boolean().unwrap());
+
+        runtime
+            .eval("document.getElementById('target').setAttribute('style', 'color: blue;');")
+            .unwrap();
+        runtime.run_timers(10, 1, 30);
+        assert!(runtime.eval("events.length === 5 && events.slice(3).map(e => e[1]).sort().join(',') === 'enforce,report' && events.slice(3).every(e => e[2] === 'color: blue;') && reports.length === 5 && document.cspViolations.length === 1").unwrap().as_boolean().unwrap());
+
+        runtime.set_viewport(421.0, 321.0);
+        runtime
+            .eval("getComputedStyle(document.getElementById('target')).color")
+            .unwrap();
+        runtime.run_timers(10, 1, 30);
+        assert_eq!(
+            runtime.eval("events.length").unwrap().as_number(),
+            Some(5.0)
+        );
     }
 
     #[test]

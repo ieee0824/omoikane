@@ -230,6 +230,13 @@ fn javascript_navigation_hashes_the_full_url_and_requires_unsafe_hashes() {
     let body_only = sha256_source("globalThis.hashRan=true;");
     for (source_list, expected_run) in [
         (format!("'unsafe-hashes' 'sha256-{matching}'"), true),
+        (
+            format!(
+                "'unsafe-hashes' 'sha256-{}'",
+                matching.trim_end_matches('=')
+            ),
+            false,
+        ),
         (format!("'unsafe-hashes' 'sha256-{body_only}'"), false),
         (format!("'sha256-{matching}'"), false),
         ("'nonce-any'".to_string(), false),

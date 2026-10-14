@@ -84,7 +84,7 @@ enum SourceExpression {
     UnsafeHashes,
     StrictDynamic,
     Nonce(String),
-    Hash(HashAlgorithm, Vec<u8>),
+    Hash(HashAlgorithm, String),
     UnsafeEval,
     TrustedTypesEval,
     ReportSample,
@@ -111,14 +111,6 @@ impl HashAlgorithm {
             Self::Sha256 => Sha256::digest(source.as_bytes()).to_vec(),
             Self::Sha384 => Sha384::digest(source.as_bytes()).to_vec(),
             Self::Sha512 => Sha512::digest(source.as_bytes()).to_vec(),
-        }
-    }
-
-    fn digest_len(self) -> usize {
-        match self {
-            Self::Sha256 => 32,
-            Self::Sha384 => 48,
-            Self::Sha512 => 64,
         }
     }
 }
@@ -663,7 +655,10 @@ impl ParsedPolicy {
             return false;
         }
         sources.iter().any(|expression| match expression {
-            SourceExpression::Hash(algorithm, expected) => algorithm.digest(source) == *expected,
+            SourceExpression::Hash(algorithm, expected) => {
+                base64::engine::general_purpose::STANDARD.encode(algorithm.digest(source))
+                    == *expected
+            }
             _ => false,
         })
     }
@@ -1016,20 +1011,21 @@ fn parse_hash_source(token: &str) -> Option<SourceExpression> {
         _ => return None,
     };
     let unpadded = value.trim_end_matches('=');
-    if unpadded.is_empty() || value.len() - unpadded.len() > 2 {
+    if unpadded.is_empty()
+        || value.len() - unpadded.len() > 2
+        || !unpadded
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'-' | b'_'))
+    {
         return None;
     }
-    let normalized = value.replace('-', "+").replace('_', "/");
-    let bytes = if value.contains('=') {
-        base64::engine::general_purpose::STANDARD
-            .decode(normalized)
-            .ok()?
-    } else {
-        base64::engine::general_purpose::STANDARD_NO_PAD
-            .decode(normalized)
-            .ok()?
-    };
-    (bytes.len() == algorithm.digest_len()).then_some(SourceExpression::Hash(algorithm, bytes))
+    // CSP3 compares the canonical padded Base64 digest with this spelling
+    // after only alphabet normalization. Valid grammar, including omitted
+    // padding or an undecodable value, still suppresses 'unsafe-inline'.
+    Some(SourceExpression::Hash(
+        algorithm,
+        value.replace('-', "+").replace('_', "/"),
+    ))
 }
 
 fn csp_meta_content(node: &NodeHandle) -> Option<String> {
@@ -1318,8 +1314,8 @@ mod tests {
     }
 
     #[test]
-    fn inline_hash_sources_match_exact_utf8_and_base64url_bytes() {
-        use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    fn inline_hash_sources_match_exact_utf8_and_canonical_base64_spelling() {
+        use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 
         let source = "π();";
         for (name, digest) in [
@@ -1327,7 +1323,7 @@ mod tests {
             ("sha384", HashAlgorithm::Sha384.digest(source)),
             ("sha512", HashAlgorithm::Sha512.digest(source)),
         ] {
-            for encoded in [STANDARD.encode(&digest), URL_SAFE_NO_PAD.encode(&digest)] {
+            for encoded in [STANDARD.encode(&digest), URL_SAFE.encode(&digest)] {
                 let policy = make_policy(
                     &format!("script-src '{name}-{encoded}'"),
                     "https://example.test/",
@@ -1336,6 +1332,17 @@ mod tests {
                 assert!(!policy.allows_inline_source(InlineType::Script, "π(); "));
                 assert!(!policy.allows_inline_source(InlineType::Script, "λ();"));
             }
+            let unpadded = URL_SAFE_NO_PAD.encode(&digest);
+            let policy = make_policy(
+                &format!("script-src 'unsafe-inline' '{name}-{unpadded}'"),
+                "https://example.test/",
+            );
+            assert_eq!(
+                policy.allows_inline_source(InlineType::Script, source),
+                name == "sha384",
+                "{name}: the canonical SHA-384 spelling needs no padding"
+            );
+            assert!(!policy.allows_inline_source(InlineType::Script, "other()"));
         }
     }
 
@@ -1343,7 +1350,7 @@ mod tests {
     fn malformed_hashes_cannot_suppress_or_authorize_unsafe_inline() {
         for invalid in [
             "'sha256-%%%'",
-            "'sha256-Zg=='",
+            "'sha256-abc=def'",
             "'sha384-'",
             "'sha512-AAAA==='",
             "'sha1-AAAA'",
@@ -1355,6 +1362,20 @@ mod tests {
             assert!(
                 policy.allows_inline_source(InlineType::Script, "anything"),
                 "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn syntactically_valid_nonmatching_hashes_still_suppress_unsafe_inline() {
+        for hash in ["'sha256-Zg=='", "'sha256-A'", "'sha256-AA'"] {
+            let policy = make_policy(
+                &format!("script-src 'unsafe-inline' {hash}"),
+                "https://example.test/",
+            );
+            assert!(
+                !policy.allows_inline_source(InlineType::Script, "anything"),
+                "{hash}"
             );
         }
     }
