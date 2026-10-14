@@ -272,7 +272,7 @@ fn execute_classic(
         return Ok(());
     };
     let previous_realm = context.enter_realm(realm);
-    let Some((source, url)) = fetched else {
+    let Some((source, url, muted_errors)) = fetched else {
         let result = if let Some(src) = prepared.src.as_ref() {
             dispatch_script_event(context, script, "error", &src, false, elapsed)
         } else {
@@ -284,15 +284,39 @@ fn execute_classic(
     let old_current = context.eval(Source::from_bytes(
         "document.currentScript && document.currentScript.__id",
     ));
+    let (document_url, requested_url) = {
+        let host = state.borrow();
+        let document_url = host.document_urls.get(&document.identity()).cloned();
+        let requested_url = prepared
+            .src
+            .as_ref()
+            .map(|src| {
+                let base = host.base_url_for_document(document.identity());
+                resource_reference_timing_name(src, base.as_ref())
+            })
+            .or_else(|| document_url.clone());
+        (document_url, requested_url)
+    };
+    let filename = url.as_deref().or(document_url.as_deref());
+    let start_position = if prepared.src.is_some() {
+        (1, 1)
+    } else {
+        script.script_source_position().unwrap_or((1, 1))
+    };
     let result = (|| {
         context.eval(Source::from_bytes(&format!(
             "__omoikane_set_current_script({})",
             script.identity()
         )))?;
-        context.eval(Source::from_reader(
-            source.as_bytes(),
-            url.as_deref().map(Path::new),
-        ))
+        let metadata = script_errors::classic_script_metadata(muted_errors, requested_url);
+        Script::parse_with_host_defined(
+            Source::from_reader(source.as_bytes(), filename.map(Path::new))
+                .with_start_position(start_position.0, start_position.1),
+            None,
+            metadata,
+            context,
+        )?
+        .evaluate(context)
     })();
     state.borrow_mut().pending_javascript_dialog = None;
     let restore = old_current
@@ -396,7 +420,7 @@ impl JsRuntime {
         let fetched = script_source(&state, prepared);
         let elapsed = started.elapsed().as_secs_f64() * 1_000.0;
         let previous = self.context.enter_realm(realm);
-        let result = if let Some((source, fetched_url)) = fetched {
+        let result = if let Some((source, fetched_url, _)) = fetched {
             let base = state.borrow().base_url_for_document(document_id);
             let url = fetched_url.unwrap_or_else(|| {
                 module_script_url(
@@ -562,7 +586,7 @@ pub(super) fn document_realm(
 fn script_source(
     state: &Rc<RefCell<HostState>>,
     prepared: &WrittenScript,
-) -> Option<(String, Option<String>)> {
+) -> Option<(String, Option<String>, bool)> {
     let document = &prepared.document;
     let mut host = state.borrow_mut();
     if !host.sandbox_allows_scripts_for_node(document) {
@@ -574,9 +598,20 @@ fn script_source(
             return None;
         }
         let base = host.base_url_for_document(document.identity());
-        let Some((url, source, redirects)) =
-            fetch_script_resource_with_client(&src, base.as_ref(), &mut host.http_client)
-        else {
+        let fetched = if prepared.kind == ScriptKind::Module {
+            fetch_script_resource_with_client(src, base.as_ref(), &mut host.http_client)
+                .map(|(url, source, redirects)| (url, source, redirects, false))
+        } else {
+            let origin = script_errors::document_fetch_origin(&host, document.identity());
+            script_errors::fetch_classic_source(
+                src,
+                base.as_ref(),
+                &origin,
+                prepared.node.get_attribute("crossorigin").as_deref(),
+                &mut host.http_client,
+            )
+        };
+        let Some((url, source, redirects, muted_errors)) = fetched else {
             return None;
         };
         if !host.csp_allows_response_for_document(
@@ -588,9 +623,9 @@ fn script_source(
         ) {
             return None;
         }
-        Some((source, Some(url)))
+        Some((source, Some(url), muted_errors))
     } else if host.check_inline_script_source(document, &prepared.node, &prepared.inline_source) {
-        Some((prepared.inline_source.clone(), None))
+        Some((prepared.inline_source.clone(), None, false))
     } else {
         None
     }

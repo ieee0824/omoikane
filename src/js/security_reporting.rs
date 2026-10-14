@@ -1948,6 +1948,250 @@ mod tests {
     }
 
     #[test]
+    fn popup_classic_script_connect_violation_keeps_its_source_position() {
+        struct Transport;
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                assert_eq!(request.url().to_string(), "https://example.test/popup");
+                let body = "<html>\n<body>\n<script>\nwindow.events=[];\ndocument.addEventListener('securitypolicyviolation', e => events.push([e.sourceFile,e.lineNumber,e.columnNumber]));\nfetch('/blocked').catch(()=>{});\n</script>\n</body>\n</html>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Security-Policy: script-src 'unsafe-inline'; connect-src 'none'\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                crate::http::HttpResponse::parse(&mut response.as_bytes())
+            }
+        }
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/opener").unwrap();
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport)));
+        runtime
+            .eval("globalThis.child=window.open('/popup', 'view')")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        let observed = runtime
+            .eval("JSON.stringify(child.events)")
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&observed).unwrap(),
+            serde_json::json!([["https://example.test/popup", 6, 1]])
+        );
+    }
+
+    #[test]
+    fn document_write_classic_script_connect_violation_keeps_its_source_position() {
+        let document = crate::html::TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_response_security_headers(&[(
+            "Content-Security-Policy".into(),
+            "script-src 'unsafe-inline'; connect-src 'none'".into(),
+        )]);
+        runtime.eval(r#"globalThis.events=[];
+            document.addEventListener('securitypolicyviolation', e => events.push([e.sourceFile,e.lineNumber,e.columnNumber]));
+            document.write('<script>\nfetch("/blocked").catch(()=>{});\n</script>');"#).unwrap();
+        runtime.run_until_idle().unwrap();
+        let observed = runtime
+            .eval("JSON.stringify(events)")
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&observed).unwrap(),
+            serde_json::json!([["https://example.test/document", 2, 1]])
+        );
+    }
+
+    #[test]
+    fn inserted_inline_classic_script_connect_violation_keeps_its_source_position() {
+        let document = crate::html::TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_response_security_headers(&[(
+            "Content-Security-Policy".into(),
+            "script-src 'unsafe-inline'; connect-src 'none'".into(),
+        )]);
+        runtime
+            .eval(
+                r#"globalThis.events=[];
+                document.addEventListener('securitypolicyviolation', e => events.push([e.sourceFile,e.lineNumber,e.columnNumber]));
+                const inserted=document.createElement('script');
+                inserted.textContent='\nfetch("/blocked").catch(()=>{});';
+                document.body.appendChild(inserted);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        let observed = runtime
+            .eval("JSON.stringify(events)")
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&observed).unwrap(),
+            serde_json::json!([["https://example.test/document", 2, 1]])
+        );
+    }
+
+    #[test]
+    fn inserted_inline_script_evaluator_is_private_to_bootstrap() {
+        let document = crate::html::TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        let result = runtime
+            .eval(
+                "JSON.stringify([typeof globalThis.__omoikane_eval_inserted_inline_script, \
+                 typeof __omoikane_eval_inserted_inline_script])",
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "[\"undefined\",\"undefined\"]");
+    }
+
+    #[test]
+    fn inserted_inline_script_uses_its_iframe_realm_and_document_url() {
+        struct Transport;
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                assert_eq!(request.url().to_string(), "https://example.test/child");
+                let body = "<body><script>globalThis.events=[];document.addEventListener('securitypolicyviolation',e=>events.push([e.sourceFile,e.lineNumber,e.columnNumber]));</script></body>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Security-Policy: script-src 'unsafe-inline'; connect-src 'none'\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                crate::http::HttpResponse::parse(&mut response.as_bytes())
+            }
+        }
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/parent").unwrap();
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport)));
+        runtime
+            .eval("globalThis.frame=document.createElement('iframe');frame.src='/child';document.body.appendChild(frame)")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime
+            .eval(
+                r#"const childDoc=frame.contentDocument;
+                const inserted=childDoc.createElement('script');
+                inserted.textContent='\nfetch("/blocked").catch(()=>{});';
+                childDoc.body.appendChild(inserted);"#,
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        let observed = runtime
+            .eval("JSON.stringify(frame.contentWindow.events)")
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&observed).unwrap(),
+            serde_json::json!([["https://example.test/child", 2, 1]])
+        );
+    }
+
+    #[test]
+    fn inserted_inline_script_cannot_run_in_a_different_csp_document() {
+        struct Transport;
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                assert_eq!(request.url().to_string(), "https://example.test/child");
+                let body = "<html><body></body></html>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Security-Policy: script-src 'none'\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                crate::http::HttpResponse::parse(&mut response.as_bytes())
+            }
+        }
+        let document = crate::html::TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/parent").unwrap();
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport)));
+        runtime
+            .eval("globalThis.frame=document.createElement('iframe');frame.src='/child';document.body.appendChild(frame)")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime
+            .eval(
+                r#"const script=document.createElement('script');
+                   script.textContent='globalThis.cspBypassRan=true';
+                   window.__omoikane_set_current_script=()=>{
+                     frame.contentDocument.body.appendChild(script);
+                   };
+                   document.body.appendChild(script);"#,
+            )
+            .unwrap();
+        let result = runtime
+            .eval("typeof frame.contentWindow.cspBypassRan")
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "undefined");
+    }
+
+    #[test]
+    fn interrupted_inserted_inline_script_does_not_retain_its_source() {
+        let document = crate::html::TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/parent").unwrap();
+        runtime
+            .eval(
+                r#"const script=document.createElement('script');
+                   script.textContent='globalThis.interruptedScriptRan=true';
+                   window.__omoikane_set_current_script=()=>{throw new Error('interrupted')};
+                   document.body.appendChild(script);"#,
+            )
+            .unwrap();
+        assert!(
+            runtime
+                .host_state
+                .borrow()
+                .prepared_inserted_inline_scripts
+                .is_empty()
+        );
+        let result = runtime
+            .eval("typeof globalThis.interruptedScriptRan")
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(result, "undefined");
+    }
+
+    #[test]
     fn child_csp_reports_the_navigation_referrer_after_parent_history_changes() {
         type Sent = (String, Option<String>, Option<serde_json::Value>);
         struct Transport(Arc<Mutex<Vec<Sent>>>);

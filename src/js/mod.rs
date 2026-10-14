@@ -1613,6 +1613,13 @@ struct NavigationReferrerSource {
     policy: security_reporting::ReferrerPolicy,
 }
 
+/// Source and security context fixed when a dynamic inline script is prepared.
+struct PreparedInsertedInlineScript {
+    document_id: usize,
+    source: String,
+    policy: CspPolicy,
+}
+
 struct HostState {
     runtime_identity: Rc<()>,
     /// Monotonic clock origin used by `performance.now()` for this global.
@@ -1771,6 +1778,8 @@ struct HostState {
     /// step. Node identities keep this stable across wrapper recreation and
     /// same-document moves.
     started_inserted_scripts: HashSet<usize>,
+    /// One-shot source and policy between synchronous preparation and evaluation.
+    prepared_inserted_inline_scripts: HashMap<usize, PreparedInsertedInlineScript>,
     /// Explicit Realm root used when a child writes into the top Document.
     main_realm: Option<Realm>,
     /// Base URL of the top-level document, used to resolve relative resource
@@ -2317,6 +2326,7 @@ impl HostState {
             parser_inserted_scripts: HashSet::new(),
             runnable_inserted_scripts: HashSet::new(),
             started_inserted_scripts: HashSet::new(),
+            prepared_inserted_inline_scripts: HashMap::new(),
             main_realm: None,
             iframe_documents: HashMap::new(),
             auxiliary_contexts: HashMap::new(),
@@ -5912,6 +5922,7 @@ impl JsRuntime {
         filename: &str,
         csp_requested_url: &str,
         muted_errors: bool,
+        start_position: (u32, u32),
     ) -> JsResult<()> {
         let realm = self.realm_for_document(document_id)?;
         if document_id != self.document().identity() && realm.is_none() {
@@ -5930,7 +5941,8 @@ impl JsRuntime {
                     Some(csp_requested_url.to_owned()),
                 );
                 Script::parse_with_host_defined(
-                    Source::from_reader(source.as_bytes(), Some(Path::new(filename))),
+                    Source::from_reader(source.as_bytes(), Some(Path::new(filename)))
+                        .with_start_position(start_position.0, start_position.1),
                     None,
                     metadata,
                     context,
@@ -8046,64 +8058,7 @@ impl JsRuntime {
         };
         let previous = self.context.enter_realm(realm);
         let result = (|| -> JsResult<()> {
-            for script in scripts {
-                let attributes = script.attributes().unwrap_or_default();
-                if !is_executable_classic_script_type(attributes.get("type").map(String::as_str)) {
-                    continue;
-                }
-                let source = if let Some(src) = attributes.get("src") {
-                    if !self
-                        .host_state
-                        .borrow_mut()
-                        .csp_allows_script_for_node(&script, src)
-                    {
-                        self.host_state.borrow_mut().record_csp_violation_for_node(
-                            &script,
-                            ResourceType::Script,
-                            src,
-                        );
-                        continue;
-                    }
-                    let base = self.host_state.borrow().base_url_for_document(document_id);
-                    let fetched = {
-                        let mut state = self.host_state.borrow_mut();
-                        fetch_script_resource_with_client(
-                            src,
-                            base.as_ref(),
-                            &mut state.http_client,
-                        )
-                    };
-                    let Some((effective_url, source, redirect_count)) = fetched else {
-                        self.record_task_error(format!("[popup script: {src}] failed to fetch"));
-                        continue;
-                    };
-                    if !self.host_state.borrow_mut().csp_allows_response_for_node(
-                        &script,
-                        ResourceType::Script,
-                        &effective_url,
-                        redirect_count,
-                        &resource_reference_timing_name(src, base.as_ref()),
-                    ) {
-                        continue;
-                    }
-                    source
-                } else {
-                    if !self
-                        .host_state
-                        .borrow_mut()
-                        .csp_allows_script_for_node(&script, "inline")
-                    {
-                        self.host_state.borrow_mut().record_csp_violation_for_node(
-                            &script,
-                            ResourceType::Script,
-                            "inline",
-                        );
-                        continue;
-                    }
-                    collect_text_content(&script)
-                };
-                self.eval(&source)?;
-            }
+            self.run_auxiliary_classic_scripts(document_id, scripts)?;
             self.eval(
                 "document.__readyState = 'complete'; document.dispatchEvent(new Event('DOMContentLoaded')); window.dispatchEvent(new Event('load'));",
             )?;
@@ -8121,6 +8076,100 @@ impl JsRuntime {
         }
         self.context.enter_realm(previous);
         result
+    }
+
+    /// Runs popup classic scripts with their owning document and source positions.
+    fn run_auxiliary_classic_scripts(
+        &mut self,
+        document_id: usize,
+        scripts: Vec<NodeHandle>,
+    ) -> JsResult<()> {
+        let document_url = self
+            .host_state
+            .borrow()
+            .document_urls
+            .get(&document_id)
+            .cloned()
+            .unwrap_or_default();
+        for script in scripts {
+            let attributes = script.attributes().unwrap_or_default();
+            if !is_executable_classic_script_type(attributes.get("type").map(String::as_str)) {
+                continue;
+            }
+            let (source, filename, requested_url, muted_errors, start_position) = if let Some(src) =
+                attributes.get("src")
+            {
+                if !self
+                    .host_state
+                    .borrow_mut()
+                    .csp_allows_script_for_node(&script, src)
+                {
+                    self.host_state.borrow_mut().record_csp_violation_for_node(
+                        &script,
+                        ResourceType::Script,
+                        src,
+                    );
+                    continue;
+                }
+                let base = self.host_state.borrow().base_url_for_document(document_id);
+                let requested_url = resource_reference_timing_name(src, base.as_ref());
+                let fetched = {
+                    let mut state = self.host_state.borrow_mut();
+                    let origin = script_errors::document_fetch_origin(&state, document_id);
+                    script_errors::fetch_classic_source(
+                        src,
+                        base.as_ref(),
+                        &origin,
+                        attributes.get("crossorigin").map(String::as_str),
+                        &mut state.http_client,
+                    )
+                };
+                let Some((effective_url, source, redirect_count, muted_errors)) = fetched else {
+                    self.record_task_error(format!("[popup script: {src}] failed to fetch"));
+                    continue;
+                };
+                if !self.host_state.borrow_mut().csp_allows_response_for_node(
+                    &script,
+                    ResourceType::Script,
+                    &effective_url,
+                    redirect_count,
+                    &requested_url,
+                ) {
+                    continue;
+                }
+                (source, effective_url, requested_url, muted_errors, (1, 1))
+            } else {
+                if !self
+                    .host_state
+                    .borrow_mut()
+                    .csp_allows_script_for_node(&script, "inline")
+                {
+                    self.host_state.borrow_mut().record_csp_violation_for_node(
+                        &script,
+                        ResourceType::Script,
+                        "inline",
+                    );
+                    continue;
+                }
+                (
+                    collect_text_content(&script),
+                    document_url.clone(),
+                    document_url.clone(),
+                    false,
+                    script.script_source_position().unwrap_or((1, 1)),
+                )
+            };
+            self.eval_script_in_document_realm(
+                document_id,
+                script.identity(),
+                &source,
+                &filename,
+                &requested_url,
+                muted_errors,
+                start_position,
+            )?;
+        }
+        Ok(())
     }
 
     fn install_posted_message_values(&mut self, port: JsValue, data: JsValue) -> JsResult<()> {
@@ -9849,6 +9898,7 @@ impl JsRuntime {
                                 &effective_url,
                                 &timing_name,
                                 muted_errors,
+                                (1, 1),
                             )
                             .map(|_| JsValue::undefined())
                             .map_err(JsEvaluationError::JavaScript),
@@ -12020,6 +12070,16 @@ fn register_host_bindings(
             js_string!("__omoikane_prepare_inserted_inline_script"),
             1,
             NativeFunction::from_copy_closure(prepare_inserted_inline_script_native),
+        ),
+        (
+            js_string!("__omoikane_eval_inserted_inline_script"),
+            1,
+            NativeFunction::from_copy_closure(eval_inserted_inline_script_native),
+        ),
+        (
+            js_string!("__omoikane_discard_prepared_inline_script"),
+            1,
+            NativeFunction::from_copy_closure(discard_prepared_inline_script_native),
         ),
         (
             js_string!("__omoikane_record_inserted_script_error"),
@@ -19650,8 +19710,8 @@ fn collect_inserted_scripts_native(
 ///
 /// `undefined` means the node has not reached an active document and may be
 /// retried. `null` means preparation completed without classic inline source
-/// (external/non-classic/blocked/already-started). A string is source that the
-/// bootstrap evaluates synchronously in the owning Document's Window.
+/// (external/non-classic/blocked/already-started). `true` means the source and
+/// its security context are saved for synchronous, one-shot evaluation.
 fn prepare_inserted_inline_script_native(
     _: &JsValue,
     args: &[JsValue],
@@ -19689,7 +19749,118 @@ fn prepare_inserted_inline_script_native(
             state.record_csp_violation_for_node(&node, ResourceType::Script, "inline");
             return Ok(JsValue::null());
         }
-        Ok(JsValue::from(js_string!(collect_text_content(&node))))
+        let Some(document) = document_root_for_node(&node) else {
+            return Ok(JsValue::null());
+        };
+        let prepared = PreparedInsertedInlineScript {
+            document_id: document.identity(),
+            source: collect_text_content(&node),
+            policy: state.csp_policy_for_document(&document),
+        };
+        state.prepared_inserted_inline_scripts.insert(id, prepared);
+        Ok(JsValue::from(true))
+    })
+}
+
+/// Evaluates prepared inline source in the owning Document's Realm with its
+/// document URL and parser position available to CSP source attribution.
+fn eval_inserted_inline_script_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    let prepared = with_host_state(|state| {
+        state
+            .borrow_mut()
+            .prepared_inserted_inline_scripts
+            .remove(&id)
+            .ok_or_else(|| {
+                JsNativeError::reference()
+                    .with_message("inline script was not prepared for evaluation")
+                    .into()
+            })
+    })?;
+    ensure_same_origin_node(context, id)?;
+    let (document_url, start_position, realm) = with_host_state(|state| {
+        let state = state.borrow();
+        let node = state.get_node(id).ok_or_else(|| {
+            JsNativeError::reference().with_message("script node no longer exists")
+        })?;
+        let document_id = document_root_for_node(&node)
+            .ok_or_else(|| {
+                JsNativeError::reference().with_message("script document no longer exists")
+            })?
+            .identity();
+        if document_id != prepared.document_id
+            || !state.document_is_active(document_id)
+            || !state.sandbox_allows_scripts_for_node(&node)
+            || !is_inline_classic_script(&node)
+            || !state
+                .csp_policy_for_node(&node)
+                .has_same_policy_rules(&prepared.policy)
+        {
+            return Err(JsNativeError::typ()
+                .with_message("prepared inline script changed document or policy")
+                .into());
+        }
+        let realm = if document_id == state.document.identity() {
+            state.main_realm.clone()
+        } else {
+            state
+                .iframe_documents
+                .values()
+                .find(|entry| entry.document.identity() == document_id)
+                .and_then(|entry| entry.realm.clone())
+                .or_else(|| {
+                    state
+                        .auxiliary_contexts
+                        .values()
+                        .find(|entry| entry.document.identity() == document_id)
+                        .and_then(|entry| entry.realm.clone())
+                })
+        }
+        .ok_or_else(|| {
+            JsNativeError::reference().with_message("script document Realm is no longer live")
+        })?;
+        Ok::<_, JsError>((
+            state.document_urls.get(&document_id).cloned(),
+            node.script_source_position().unwrap_or((1, 1)),
+            realm,
+        ))
+    })?;
+    let previous_realm = context.enter_realm(realm);
+    let result = (|| {
+        let metadata = script_errors::classic_script_metadata(false, document_url.clone());
+        Script::parse_with_host_defined(
+            Source::from_reader(
+                prepared.source.as_bytes(),
+                document_url.as_deref().map(Path::new),
+            )
+            .with_start_position(start_position.0, start_position.1),
+            None,
+            metadata,
+            context,
+        )?
+        .evaluate(context)
+    })();
+    context.enter_realm(previous_realm);
+    result
+}
+
+/// Releases a prepared inline source if an intervening page hook aborts evaluation.
+fn discard_prepared_inline_script_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        state
+            .borrow_mut()
+            .prepared_inserted_inline_scripts
+            .remove(&id);
+        Ok(JsValue::undefined())
     })
 }
 

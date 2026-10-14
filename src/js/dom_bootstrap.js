@@ -6499,20 +6499,24 @@ export let __omoikane_queue_reporting_api_report;
       if (scripts === null) continue;
       for (const id of scripts) {
         const node = wrapNode(id);
-        const source = __omoikane_prepare_inserted_inline_script(node.__id);
-        if (typeof source === "string") {
-          const doc = node.ownerDocument;
-          const view = doc && doc.defaultView;
-          if (view) {
-            const previousScript = doc.__currentScript || null;
-            try {
-              view.__omoikane_set_current_script(node.__id);
-              view.eval(source);
-            } catch (error) {
-              __omoikane_record_inserted_script_error(node.__id, String(error));
-            } finally {
-              doc.__currentScript = previousScript;
+        const prepared = __omoikane_prepare_inserted_inline_script(node.__id);
+        if (prepared === true) {
+          try {
+            const doc = node.ownerDocument;
+            const view = doc && doc.defaultView;
+            if (view) {
+              const previousScript = doc.__currentScript || null;
+              try {
+                view.__omoikane_set_current_script(id);
+                __omoikane_eval_inserted_inline_script(id);
+              } catch (error) {
+                __omoikane_record_inserted_script_error(id, String(error));
+              } finally {
+                doc.__currentScript = previousScript;
+              }
             }
+          } finally {
+            __omoikane_discard_prepared_inline_script(id);
           }
         }
       }
