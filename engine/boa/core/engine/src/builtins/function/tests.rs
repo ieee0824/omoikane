@@ -24,10 +24,11 @@ fn eval_and_function_constructor_pass_native_trusted_source_to_host_hook() {
 
     impl HostHooks for Hooks {
         fn trusted_script_value(&self, value: &JsValue) -> Option<JsString> {
-            value
-                .as_object()
-                .and_then(JsObject::downcast_ref::<HostTrustedScript>)
-                .map(|trusted| trusted.0.clone())
+            value.as_object().and_then(|object| {
+                object
+                    .downcast_ref::<HostTrustedScript>()
+                    .map(|trusted| trusted.0.clone())
+            })
         }
 
         fn ensure_can_compile_strings(
