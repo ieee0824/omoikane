@@ -271,6 +271,12 @@ fn actual_status_with_allowed_exceptions(
     // allow page exceptions. Driver, loader, job and execution-limit failures
     // retain their existing ERROR classification, and all logs remain intact.
     let unallowed_error = errors.iter().any(|error| {
+        // A failed <script src> fetch fires an element error event. It is not
+        // an uncaught page exception; the completed harness decides whether
+        // that missing resource mattered to its assertions.
+        if complete && passed && error.starts_with("failed to fetch script: ") {
+            return false;
+        }
         let page_exception = error.starts_with("[script: ")
             || error.starts_with("[timer] ")
             || error.starts_with("[timer callback] ");
@@ -486,6 +492,20 @@ mod tests {
         assert_eq!(actual_status(&[], true, true), ActualStatus::Pass);
         assert_eq!(actual_status(&[], true, false), ActualStatus::Fail);
         assert_eq!(actual_status(&[], false, false), ActualStatus::Timeout);
+    }
+
+    #[test]
+    fn failed_script_fetch_uses_completed_harness_result() {
+        let failed_fetch = ["failed to fetch script: x".to_owned()];
+        assert_eq!(actual_status(&failed_fetch, true, true), ActualStatus::Pass);
+        assert_eq!(
+            actual_status(&failed_fetch, true, false),
+            ActualStatus::Error
+        );
+        assert_eq!(
+            actual_status(&failed_fetch, false, false),
+            ActualStatus::Error
+        );
     }
 
     #[test]

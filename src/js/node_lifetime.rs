@@ -407,6 +407,12 @@ impl HostState {
                 .get(id)
                 .is_some_and(|document| document.strong_count() != 0)
         });
+        self.retired_document_csp.retain(|id, _| {
+            self.node_lifetimes
+                .documents
+                .get(id)
+                .is_some_and(|document| document.strong_count() != 0)
+        });
         self.node_lifetimes
             .event_states
             .retain(|_, state| state.strong_count() != 0);
@@ -501,6 +507,12 @@ pub(super) fn set_owner_native(
             .get_node(owner_id)
             .filter(|node| node.node_type() == NodeType::Document)
             .ok_or_else(|| JsNativeError::typ().with_message("owner must be a document"))?;
+        if state
+            .node_lifetime_owner(id)
+            .is_some_and(|previous| previous.identity() != owner_id)
+        {
+            state.trusted_script_text_approvals.remove(&id);
+        }
         state.set_node_lifetime_owner(&node, &document);
         Ok(JsValue::undefined())
     })

@@ -41,11 +41,32 @@ export let __omoikane_cookie_change_reset;
   const nativeFetch = globalThis.__omoikane_fetch;
   const nativeWebSocketConnect = globalThis.__omoikane_websocket_connect;
   const nativeEventSourceFetch = globalThis.__omoikane_event_source_fetch;
+  const nativeTrustedTypeCreate = globalThis.__omoikane_trusted_type_create;
+  const nativeTrustedTypeIs = globalThis.__omoikane_trusted_type_is;
+  const nativeTrustedTypeValue = globalThis.__omoikane_trusted_type_value;
+  const nativeTrustedTypePolicyCheck = globalThis.__omoikane_trusted_type_policy_check;
+  const nativeTrustedTypeRegisterDefault = globalThis.__omoikane_trusted_type_register_default;
+  const nativeTrustedTypeDefaultForNode = globalThis.__omoikane_trusted_type_default_for_node;
+  const nativeTrustedTypeSinkRequires = globalThis.__omoikane_trusted_type_sink_requires;
+  const nativeTrustedTypeSinkViolation = globalThis.__omoikane_trusted_type_sink_violation;
+  const nativeTrustedRememberScriptText = globalThis.__omoikane_trusted_remember_script_text;
+  const nativeTrustedTakeScriptTextApproval = globalThis.__omoikane_trusted_take_script_text_approval;
+  const nativeScriptOwnerDocument = globalThis.__omoikane_owner_document;
   delete globalThis.__omoikane_import_scripts;
   delete globalThis.__omoikane_capture_csp_source;
   delete globalThis.__omoikane_fetch;
   delete globalThis.__omoikane_websocket_connect;
   delete globalThis.__omoikane_event_source_fetch;
+  delete globalThis.__omoikane_trusted_type_create;
+  delete globalThis.__omoikane_trusted_type_is;
+  delete globalThis.__omoikane_trusted_type_value;
+  delete globalThis.__omoikane_trusted_type_policy_check;
+  delete globalThis.__omoikane_trusted_type_register_default;
+  delete globalThis.__omoikane_trusted_type_default_for_node;
+  delete globalThis.__omoikane_trusted_type_sink_requires;
+  delete globalThis.__omoikane_trusted_type_sink_violation;
+  delete globalThis.__omoikane_trusted_remember_script_text;
+  delete globalThis.__omoikane_trusted_take_script_text_approval;
   const nativeCurrentWindowEvent = globalThis.__omoikane_current_window_event;
   delete globalThis.__omoikane_current_window_event;
   const nativeRegisterWindowProxy = globalThis.__omoikane_register_window_proxy;
@@ -347,6 +368,7 @@ export let __omoikane_cookie_change_reset;
   // must continue to retire stale native identities even under prototype
   // poisoning.
   const safeApply = Reflect.apply;
+  const safeRegExpExec = RegExp.prototype.exec;
   const safeGetPrototypeOf = Reflect.getPrototypeOf;
   const safeGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
   const safeArrayPush = Function.prototype.call.bind(Array.prototype.push);
@@ -458,10 +480,367 @@ export let __omoikane_cookie_change_reset;
   const intrinsicString = globalThis.String;
   const intrinsicStringToLowerCase = String.prototype.toLowerCase;
   const stringCharCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
-  const stringCharCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
   const stringFromCharCode = String.fromCharCode;
   const hasOwnProperty = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
   const IntrinsicTypeError = globalThis.TypeError;
+
+  const trustedPolicyStates = browsingInput.trustedPolicyStates ||
+    (browsingInput.trustedPolicyStates = new WeakMap());
+  const trustedFactoryStates = browsingInput.trustedFactoryStates ||
+    (browsingInput.trustedFactoryStates = new WeakMap());
+  const trustedPolicyNames = new Set();
+  const trustedPolicyConstruction = {};
+  const trustedFactoryConstruction = {};
+  let defaultTrustedPolicy = null;
+
+  function trustedTypePrototype(kind) {
+    return kind === 0 ? TrustedHTML.prototype :
+      kind === 1 ? TrustedScript.prototype : TrustedScriptURL.prototype;
+  }
+
+  function createTrustedType(kind, value) {
+    return nativeTrustedTypeCreate(kind, intrinsicString(value), trustedTypePrototype(kind));
+  }
+
+  function policyState(policy) {
+    if (!safeWeakMapHas(trustedPolicyStates, policy)) {
+      throw new IntrinsicTypeError("Illegal TrustedTypePolicy receiver");
+    }
+    return safeWeakMapGet(trustedPolicyStates, policy);
+  }
+
+  function policyCreate(policy, kind, input, extra) {
+    const options = policyState(policy);
+    const callback = kind === 0 ? options.createHTML :
+      kind === 1 ? options.createScript : options.createScriptURL;
+    if (callback === undefined) {
+      throw new IntrinsicTypeError("TrustedTypePolicy callback is missing");
+    }
+    const output = safeApply(callback, undefined, [toDOMString(input), ...extra]);
+    return options.createTrustedType(kind, output == null ? "" : output);
+  }
+
+  function factoryState(factory) {
+    if (!safeWeakMapHas(trustedFactoryStates, factory)) {
+      throw new IntrinsicTypeError("Illegal TrustedTypePolicyFactory receiver");
+    }
+    return safeWeakMapGet(trustedFactoryStates, factory);
+  }
+
+  class TrustedHTML {
+    constructor() { throw new IntrinsicTypeError("Illegal constructor"); }
+    toString() { return nativeTrustedTypeValue(this, 0); }
+    toJSON() { return nativeTrustedTypeValue(this, 0); }
+  }
+
+  class TrustedScript {
+    constructor() { throw new IntrinsicTypeError("Illegal constructor"); }
+    toString() { return nativeTrustedTypeValue(this, 1); }
+    toJSON() { return nativeTrustedTypeValue(this, 1); }
+  }
+
+  class TrustedScriptURL {
+    constructor() { throw new IntrinsicTypeError("Illegal constructor"); }
+    toString() { return nativeTrustedTypeValue(this, 2); }
+    toJSON() { return nativeTrustedTypeValue(this, 2); }
+  }
+
+  class TrustedTypePolicy {
+    constructor(token, name, options) {
+      if (token !== trustedPolicyConstruction) throw new IntrinsicTypeError("Illegal constructor");
+      safeWeakMapSet(trustedPolicyStates, this, { name, ...options });
+    }
+    get name() { return policyState(this).name; }
+    createHTML(input, ...args) {
+      if (arguments.length === 0) throw new IntrinsicTypeError("createHTML requires 1 argument");
+      return policyCreate(this, 0, input, args);
+    }
+    createScript(input, ...args) {
+      if (arguments.length === 0) throw new IntrinsicTypeError("createScript requires 1 argument");
+      return policyCreate(this, 1, input, args);
+    }
+    createScriptURL(input, ...args) {
+      if (arguments.length === 0) throw new IntrinsicTypeError("createScriptURL requires 1 argument");
+      return policyCreate(this, 2, input, args);
+    }
+  }
+
+  class TrustedTypePolicyFactory {
+    constructor(token) {
+      if (token !== trustedFactoryConstruction) throw new IntrinsicTypeError("Illegal constructor");
+    }
+    createPolicy(name, options) {
+      const factory = factoryState(this);
+      if (arguments.length === 0) throw new IntrinsicTypeError("Policy name is required");
+      // Receiver-owned operations retain the receiver's Document and output
+      // Realm; argument conversion and TypeErrors belong to this method Realm.
+      name = toDOMString(name);
+      const dictionary = options == null ? {} : Object(options);
+      const callbacks = {
+        createHTML: dictionary.createHTML,
+        createScript: dictionary.createScript,
+        createScriptURL: dictionary.createScriptURL,
+      };
+      for (const callback of [callbacks.createHTML, callbacks.createScript, callbacks.createScriptURL]) {
+        if (callback !== undefined && typeof callback !== "function") {
+          throw new IntrinsicTypeError("TrustedTypePolicy callback must be callable");
+        }
+      }
+      if (!safeApply(factory.checkPolicy, undefined, [name, hasSetValue(factory.names, name)])) {
+        throw new IntrinsicTypeError("Trusted Types policy disallowed by CSP");
+      }
+      if (name === "default" && factory.defaultPolicy() !== null) {
+        throw new IntrinsicTypeError("The default Trusted Types policy already exists");
+      }
+      const policy = factory.makePolicy(name, callbacks);
+      if (name === "default") {
+        safeApply(factory.registerDefault, undefined, [
+          callbacks.createHTML || null,
+          callbacks.createScript || null,
+          callbacks.createScriptURL || null,
+        ]);
+        factory.setDefault(policy);
+      }
+      addSetValue(factory.names, name);
+      return policy;
+    }
+    get defaultPolicy() {
+      return factoryState(this).defaultPolicy();
+    }
+    get emptyHTML() {
+      return factoryState(this).emptyHTML;
+    }
+    get emptyScript() {
+      return factoryState(this).emptyScript;
+    }
+    isHTML(value) {
+      factoryState(this);
+      return nativeTrustedTypeIs(value, 0);
+    }
+    isScript(value) {
+      factoryState(this);
+      return nativeTrustedTypeIs(value, 1);
+    }
+    isScriptURL(value) {
+      factoryState(this);
+      return nativeTrustedTypeIs(value, 2);
+    }
+    getPropertyType(tagName, property, elementNs = "http://www.w3.org/1999/xhtml") {
+      factoryState(this);
+      if (arguments.length < 2) throw new IntrinsicTypeError("getPropertyType requires 2 arguments");
+      return trustedPropertyType(toDOMString(tagName), toDOMString(property), elementNs);
+    }
+    getAttributeType(tagName, attribute, elementNs = "http://www.w3.org/1999/xhtml", attrNs = null) {
+      factoryState(this);
+      if (arguments.length < 2) throw new IntrinsicTypeError("getAttributeType requires 2 arguments");
+      return trustedAttributeType(toDOMString(tagName), toDOMString(attribute), elementNs, attrNs);
+    }
+  }
+
+  const trustedTypes = new TrustedTypePolicyFactory(trustedFactoryConstruction);
+  const emptyTrustedHTML = createTrustedType(0, "");
+  const emptyTrustedScript = createTrustedType(1, "");
+  safeWeakMapSet(trustedFactoryStates, trustedTypes, {
+    names: trustedPolicyNames,
+    checkPolicy: nativeTrustedTypePolicyCheck,
+    makePolicy: (name, callbacks) => new TrustedTypePolicy(
+      trustedPolicyConstruction, name, { ...callbacks, createTrustedType }),
+    registerDefault: nativeTrustedTypeRegisterDefault,
+    setDefault: policy => { defaultTrustedPolicy = policy; },
+    defaultPolicy: () => defaultTrustedPolicy,
+    emptyHTML: emptyTrustedHTML,
+    emptyScript: emptyTrustedScript,
+  });
+  globalThis.TrustedHTML = TrustedHTML;
+  globalThis.TrustedScript = TrustedScript;
+  globalThis.TrustedScriptURL = TrustedScriptURL;
+  globalThis.TrustedTypePolicy = TrustedTypePolicy;
+  globalThis.TrustedTypePolicyFactory = TrustedTypePolicyFactory;
+  Object.defineProperty(globalThis, "trustedTypes", { value: trustedTypes, configurable: true });
+
+  function trustedPropertyType(tagName, property, elementNs) {
+    const ns = elementNs == null || elementNs === "" ? "http://www.w3.org/1999/xhtml" : toDOMString(elementNs);
+    const tag = asciiLowercase(tagName);
+    if (property === "innerHTML" || property === "outerHTML") return "TrustedHTML";
+    if (ns === "http://www.w3.org/1999/xhtml" && tag === "iframe" && property === "srcdoc") return "TrustedHTML";
+    if (ns === "http://www.w3.org/1999/xhtml" && tag === "script") {
+      if (property === "src") return "TrustedScriptURL";
+      if (property === "text" || property === "textContent" || property === "innerText") return "TrustedScript";
+    }
+    return null;
+  }
+
+  function trustedAttributeType(tagName, attribute, elementNs, attrNs) {
+    const ns = elementNs == null || elementNs === "" ? "http://www.w3.org/1999/xhtml" : toDOMString(elementNs);
+    const attrNamespace = attrNs == null || attrNs === "" ? null : toDOMString(attrNs);
+    const tag = asciiLowercase(tagName);
+    const name = asciiLowercase(attribute);
+    if (attrNamespace === null &&
+        (ns === "http://www.w3.org/1999/xhtml" || ns === "http://www.w3.org/2000/svg" ||
+         ns === "http://www.w3.org/1998/Math/MathML") &&
+        name.startsWith("on") && platformHandlerTypes &&
+        hasSetValue(platformHandlerTypes, name.slice(2))) return "TrustedScript";
+    if (ns === "http://www.w3.org/1999/xhtml") {
+      if (tag === "iframe" && attrNamespace === null && name === "srcdoc") return "TrustedHTML";
+      if (tag === "script" && attrNamespace === null && name === "src") return "TrustedScriptURL";
+    }
+    if (ns === "http://www.w3.org/2000/svg" && tag === "script" && name === "href" &&
+        (attrNamespace === null || attrNamespace === "http://www.w3.org/1999/xlink")) {
+      return "TrustedScriptURL";
+    }
+    return null;
+  }
+
+  function trustedAttributeValue(element, name, namespace, value, caseSensitive = false) {
+    const nodeId = internalNodeId(element);
+    const tag = internalNodeLocalName(element);
+    const ns = nativeNodeNamespaceURI(nodeId);
+    // The factory query is ASCII-case-insensitive, whereas names passed to
+    // setAttributeNS (and non-HTML setAttribute) are matched as DOM local names.
+    if (caseSensitive && (name !== asciiLowercase(name) || tag !== asciiLowercase(tag))) {
+      return toDOMString(value);
+    }
+    const kind = trustedAttributeType(tag, name, ns, namespace);
+    if (kind === null) return toDOMString(value);
+    const typeId = kind === "TrustedHTML" ? 0 : kind === "TrustedScript" ? 1 : 2;
+    const sink = kind === "TrustedScript" ? `Element ${asciiLowercase(name)}` :
+      ns === "http://www.w3.org/2000/svg" ? "SVGScriptElement href" :
+      tag === "iframe" ? "HTMLIFrameElement srcdoc" : "HTMLScriptElement src";
+    const converted = nativeTrustedTypeIs(value, typeId) ? "" : toDOMString(value);
+    return trustedValueForSink(value, nodeId, typeId, sink, converted);
+  }
+
+  function trustedValueForSink(value, nodeId, kind, sinkName, convertedString, approval, onRejection) {
+    if (nativeTrustedTypeIs(value, kind)) {
+      if (approval) approval.value = true;
+      return nativeTrustedTypeValue(value, kind);
+    }
+    // DOMParser converts its first Web IDL argument before validating MIME;
+    // reuse that string rather than invoking an author-defined coercion twice.
+    const input = arguments.length >= 5 ? convertedString :
+      value == null && (sinkName === "Element innerHTML" || sinkName === "ShadowRoot innerHTML")
+        ? "" : toDOMString(value);
+    if (!nativeTrustedTypeSinkRequires(nodeId)) return input;
+    const targetDocumentId = nativeScriptOwnerDocument(nodeId);
+    const callback = nativeTrustedTypeDefaultForNode(nodeId, kind);
+    if (typeof callback === "function") {
+      const typeName = kind === 0 ? "TrustedHTML" : kind === 1 ? "TrustedScript" : "TrustedScriptURL";
+      const converted = safeApply(callback, undefined, [input, typeName, sinkName]);
+      if (nativeScriptOwnerDocument(nodeId) !== targetDocumentId) {
+        throw new IntrinsicTypeError("Trusted Types sink moved to another Document");
+      }
+      if (converted != null) {
+        const result = toDOMString(converted);
+        // Stringifying a policy result can itself run author code. Do not
+        // apply an approval obtained for the former owner after that code
+        // adopts the sink into another Document.
+        if (nativeScriptOwnerDocument(nodeId) !== targetDocumentId) {
+          throw new IntrinsicTypeError("Trusted Types sink moved to another Document");
+        }
+        if (approval) approval.value = true;
+        return result;
+      }
+    }
+    if (nativeScriptOwnerDocument(nodeId) !== targetDocumentId) {
+      throw new IntrinsicTypeError("Trusted Types sink moved to another Document");
+    }
+    if (!nativeTrustedTypeSinkViolation(nodeId, input, sinkName)) {
+      // Script preparation reports the violation and aborts the script. The
+      // insertion operation itself does not raise an uncaught page exception.
+      if (arguments.length >= 7) return onRejection;
+      throw new IntrinsicTypeError(`Trusted Type is required for ${sinkName}`);
+    }
+    return input;
+  }
+
+  function trustedHTMLForSink(value, nodeId, sinkName = "Element innerHTML", convertedString) {
+    return arguments.length >= 4
+      ? trustedValueForSink(value, nodeId, 0, sinkName, convertedString)
+      : trustedValueForSink(value, nodeId, 0, sinkName);
+  }
+
+  // An author callback reached while parsing or replacing markup can adopt
+  // the receiver into another Document after its Trusted Types check. Keep the
+  // authorization bound to the original receiver and its owning Document.
+  function trustedSinkDocumentGuard(node) {
+    const nodeId = internalNodeId(node);
+    const documentId = nativeScriptOwnerDocument(nodeId);
+    return () => {
+      if (internalNodeId(node) !== nodeId ||
+          nativeScriptOwnerDocument(nodeId) !== documentId) {
+        throw new IntrinsicTypeError("Trusted Types sink moved to another Document");
+      }
+    };
+  }
+
+  function setAttributeWithApprovedString(element, name, value, approvedValue, guard = null) {
+    let attr = String(name);
+    if (!isValidAttributeLocalName(attr)) {
+      throw new DOMException(
+        "The attribute name provided ('" + attr + "') is not a valid name.",
+        "InvalidCharacterError"
+      );
+    }
+    const htmlElement = isHtmlElementInHtmlDocument(element);
+    if (htmlElement) attr = asciiLowercase(attr);
+    const newValue = approvedValue === undefined
+      ? trustedAttributeValue(element, attr, null, value, !htmlElement) : approvedValue;
+    let oldValue;
+    let callbackName;
+    let callbackNamespace;
+    if (htmlElement) {
+      oldValue = __omoikane_get_attribute(element.__id, attr);
+      if (guard) guard();
+      __omoikane_set_attribute(element.__id, attr, newValue);
+      refreshMaterializedAttribute(element, [attr, null, attr, newValue]);
+      callbackName = attr;
+      callbackNamespace = null;
+    } else {
+      const previous = attributeRecordByName(element, attr);
+      oldValue = previous ? previous[3] : null;
+      if (guard) guard();
+      nativeSetAttributeNS(
+        element.__id,
+        previous ? previous[1] : null,
+        previous ? previous[0] : attr,
+        previous ? previous[2] : attr,
+        newValue,
+        false
+      );
+      const current = previous
+        ? [previous[0], previous[1], previous[2], newValue]
+        : [attr, null, attr, newValue];
+      refreshMaterializedAttribute(element, current);
+      callbackName = current[2];
+      callbackNamespace = current[1];
+    }
+    queueMutation(element, "attributes", {
+      attributeName: callbackName,
+      attributeNamespace: callbackNamespace,
+      oldValue,
+    });
+    notifyCustomElementAttributeChanged(
+      element, callbackName, oldValue, newValue, callbackNamespace
+    );
+    if (callbackName === "popover") popoverAttributeChanged(element, oldValue, newValue);
+    if (callbackName === "popovertarget") clearPopoverTargetOverride(element);
+    if (callbackName === "slot" ||
+        (callbackName === "name" && element instanceof HTMLSlotElement)) {
+      refreshSlotAssignments();
+    }
+    if (safeApply(safeRegExpExec, /^on./i, [attr]) !== null) applyInlineHandlerAttribute(element, attr);
+  }
+
+  function trustedScriptTextForSink(value, nodeId, sinkName) {
+    const approval = { value: false };
+    const converted = nativeTrustedTypeIs(value, 1) ? "" :
+      value == null && sinkName === "HTMLScriptElement textContent" ? "" : toDOMString(value);
+    const text = trustedValueForSink(value, nodeId, 1, sinkName, converted, approval);
+    return [text, {
+      approved: approval.value,
+      ownerDocumentId: nativeScriptOwnerDocument(nodeId),
+    }];
+  }
 
   function canonicalWrapperId(node) {
     if ((typeof node !== "object" && typeof node !== "function") || node === null) {
@@ -789,6 +1168,10 @@ export let __omoikane_cookie_change_reset;
       throw new TypeError("Illegal constructor");
     }
   }
+  Object.defineProperty(Window.prototype, windowProxyToStringTag, {
+    configurable: true,
+    value: "Window",
+  });
   Object.defineProperty(Window, Symbol.hasInstance, {
     value(candidate) {
       return (typeof candidate === "object" || typeof candidate === "function") &&
@@ -2766,7 +3149,7 @@ export let __omoikane_cookie_change_reset;
   // The DOM insertion algorithm is an internal operation. Resolve tree state
   // from native ids so changing a genuine wrapper's JavaScript prototype does
   // not make insertAdjacentElement/Text lose its platform-object identity.
-  function insertNodeBeforeInternal(parent, newNode, refNode, suppressObservers = false, reactions = null, validityChecked = false) {
+  function insertNodeBeforeInternal(parent, newNode, refNode, suppressObservers = false, reactions = null, validityChecked = false, trustedHTMLGuard = null) {
     const parentId = internalNodeId(parent);
     const newId = internalNodeId(newNode);
     if (parentId === undefined || newId === undefined) {
@@ -2816,6 +3199,7 @@ export let __omoikane_cookie_change_reset;
       }
       for (const child of children) {
         notifyImplicitRemoval(child, true);
+        if (trustedHTMLGuard) trustedHTMLGuard();
         __omoikane_insert_before(parentId, internalNodeId(child), refId);
       }
       if (children.length) {
@@ -2847,6 +3231,7 @@ export let __omoikane_cookie_change_reset;
 
     const connectedBeforeMove = internalIsConnected(newNode);
     notifyImplicitRemoval(newNode);
+    if (trustedHTMLGuard) trustedHTMLGuard();
     __omoikane_insert_before(parentId, newId, refId);
     stampInsertedOwnerDocument(parent, [newNode]);
     if (connectedBeforeMove) {
@@ -3018,6 +3403,104 @@ export let __omoikane_cookie_change_reset;
     get [Symbol.toStringTag]() { return "DOMTokenList"; }
   }
   globalThis.DOMTokenList = DOMTokenList;
+
+  function replaceNodeTextContent(node, text, scriptApproval = null) {
+    const wasConnected = node.isConnected;
+    const removedNodes = node.childNodes.slice();
+    // Native replaces all children at once. Notify from the end so boundary
+    // offsets for later siblings are decremented by preceding removals.
+    for (const child of node.childNodes.slice().reverse()) preRemove(node, child);
+    if (scriptApproval !== null &&
+        nativeScriptOwnerDocument(internalNodeId(node)) !== scriptApproval.ownerDocumentId) {
+      throw new IntrinsicTypeError("Trusted Types sink moved to another Document");
+    }
+    __omoikane_set_text_content(node.__id, text);
+    if (scriptApproval !== null) {
+      // preRemove can invoke author callbacks; a script adopted by another
+      // Document after sink validation must not carry its old approval there.
+      nativeTrustedRememberScriptText(node.__id, text,
+        scriptApproval.approved &&
+        nativeScriptOwnerDocument(internalNodeId(node)) === scriptApproval.ownerDocumentId);
+    }
+    const canonicalId = canonicalNodeId(node);
+    const canonicalType = canonicalId === undefined ? undefined : nativeNodeType(canonicalId);
+    if (canonicalType === 3 || canonicalType === 4 || canonicalType === 7 || canonicalType === 8) {
+      safeWeakMapSet(canonicalCharacterDataOverrides, node, text);
+    }
+    if (wasConnected) {
+      for (const child of removedNodes) retireIframeWindowProxies(child);
+    }
+    forgetDiscardedNodeWrappers();
+    const addedNodes = node.childNodes.slice();
+    stampInsertedOwnerDocument(node, addedNodes);
+    if (wasConnected) {
+      for (const child of removedNodes) disconnectCustomElementTree(child);
+    }
+    if (removedNodes.length || addedNodes.length) {
+      queueMutation(node, "childList", { addedNodes, removedNodes });
+    }
+    refreshSlotAssignments();
+    signalFallbackSlotChanges(node);
+  }
+
+  function setInnerHTMLWithApprovedString(receiver, html, guard) {
+    const id = internalNodeId(receiver);
+    const owner = internalOwnerDocument(receiver);
+    const hasDocumentParts = nativeNodeLocalName(id) === "html" &&
+      nativeNodeIsHtmlElement(id) && owner?.contentType === "text/html" &&
+      safeApply(safeRegExpExec, /<(?:head|body)(?:\s|>)/i, [html]) !== null;
+    guard();
+    if (hasDocumentParts) {
+      const headMatch = safeApply(safeRegExpExec,
+        /<head(?:\s[^>]*)?>([\s\S]*?)<\/head\s*>/i, [html]);
+      const bodyMatch = safeApply(safeRegExpExec,
+        /<body(?:\s[^>]*)?>([\s\S]*?)<\/body\s*>/i, [html]);
+      guard();
+      for (const child of internalChildNodes(receiver)) {
+        removeChildInternal(receiver, child);
+      }
+      guard();
+      const head = owner.createElement("head");
+      const body = owner.createElement("body");
+      const ownerId = internalNodeId(owner);
+      if (nativeScriptOwnerDocument(internalNodeId(head)) !== ownerId ||
+          nativeScriptOwnerDocument(internalNodeId(body)) !== ownerId ||
+          internalNodeLocalName(head) !== "head" || internalNodeLocalName(body) !== "body") {
+        throw new IntrinsicTypeError("HTML document part belongs to another Document");
+      }
+      guard();
+      if (headMatch) setInnerHTMLWithApprovedString(head, headMatch[1], guard);
+      if (bodyMatch) setInnerHTMLWithApprovedString(body, bodyMatch[1], guard);
+      insertNodeBeforeInternal(receiver, head, null, false, null, false, guard);
+      insertNodeBeforeInternal(receiver, body, null, false, null, false, guard);
+      return;
+    }
+    const wasConnected = internalIsConnected(receiver);
+    const removedNodes = internalChildNodes(receiver);
+    for (let index = removedNodes.length - 1; index >= 0; index--) {
+      preRemove(receiver, removedNodes[index]);
+    }
+    guard();
+    __omoikane_set_inner_html(id, html);
+    if (wasConnected) {
+      for (const child of removedNodes) retireIframeWindowProxies(child);
+    }
+    forgetDiscardedNodeWrappers();
+    const addedNodes = internalChildNodes(receiver);
+    stampInsertedOwnerDocument(receiver, addedNodes);
+    if (wasConnected) {
+      for (const child of removedNodes) disconnectCustomElementTree(child);
+    }
+    const registry = owner && safeWeakMapGet(customElementRegistryByDocument, owner);
+    if (registry) {
+      for (const node of addedNodes) upgradeCustomElementTree(registry, node);
+    }
+    if (removedNodes.length || addedNodes.length) {
+      queueMutation(receiver, "childList", { addedNodes, removedNodes });
+    }
+    refreshSlotAssignments();
+    signalFallbackSlotChanges(receiver);
+  }
 
   class Node {
     constructor(id) {
@@ -3215,60 +3698,7 @@ export let __omoikane_cookie_change_reset;
     }
 
     setAttribute(name, value) {
-      let attr = String(name);
-      if (!isValidAttributeLocalName(attr)) {
-        throw new DOMException(
-          "The attribute name provided ('" + attr + "') is not a valid name.",
-          "InvalidCharacterError"
-        );
-      }
-      const htmlElement = isHtmlElementInHtmlDocument(this);
-      if (htmlElement) attr = asciiLowercase(attr);
-      const newValue = String(value);
-      let oldValue;
-      let callbackName;
-      let callbackNamespace;
-      if (htmlElement) {
-        oldValue = __omoikane_get_attribute(this.__id, attr);
-        __omoikane_set_attribute(this.__id, attr, newValue);
-        refreshMaterializedAttribute(this, [attr, null, attr, newValue]);
-        callbackName = attr;
-        callbackNamespace = null;
-      } else {
-        const previous = attributeRecordByName(this, attr);
-        oldValue = previous ? previous[3] : null;
-        nativeSetAttributeNS(
-          this.__id,
-          previous ? previous[1] : null,
-          previous ? previous[0] : attr,
-          previous ? previous[2] : attr,
-          newValue,
-          false
-        );
-        const current = previous
-          ? [previous[0], previous[1], previous[2], newValue]
-          : [attr, null, attr, newValue];
-        refreshMaterializedAttribute(this, current);
-        callbackName = current[2];
-        callbackNamespace = current[1];
-      }
-      queueMutation(this, "attributes", {
-        attributeName: callbackName,
-        attributeNamespace: callbackNamespace,
-        oldValue,
-      });
-      notifyCustomElementAttributeChanged(
-        this, callbackName, oldValue, newValue, callbackNamespace
-      );
-      if (callbackName === "popover") popoverAttributeChanged(this, oldValue, newValue);
-      if (callbackName === "popovertarget") clearPopoverTargetOverride(this);
-      if (callbackName === "slot" ||
-          (callbackName === "name" && this instanceof HTMLSlotElement)) {
-        refreshSlotAssignments();
-      }
-      // A dynamically set `on*` content attribute is wired to a listener here
-      // (parse-time attributes go through the initial wireInlineHandlers pass).
-      if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
+      setAttributeWithApprovedString(this, name, value);
     }
 
     get className() {
@@ -3605,35 +4035,15 @@ export let __omoikane_cookie_change_reset;
     set textContent(value) {
       const type = this.nodeType;
       if (type === 9 || type === 10) return;
-      const text = value == null ? "" : String(value);
-      const wasConnected = this.isConnected;
-      const removedNodes = this.childNodes.slice();
-      // Native replaces all children at once. Notify from the end so boundary
-      // offsets for later siblings are subsequently decremented by removals of
-      // their preceding siblings, matching sequential pre-remove semantics.
-      for (const child of this.childNodes.slice().reverse()) preRemove(this, child);
-      __omoikane_set_text_content(this.__id, text);
-      const canonicalId = canonicalNodeId(this);
-      const canonicalType = canonicalId === undefined ? undefined : nativeNodeType(canonicalId);
-      if (canonicalType === 3 || canonicalType === 4 || canonicalType === 7 || canonicalType === 8) {
-        // Keep the private WTF-16 override coherent even when callers invoke
-        // this base-class descriptor setter directly on CharacterData.
-        safeWeakMapSet(canonicalCharacterDataOverrides, this, text);
+      const scriptElement = type === 1 && internalNodeLocalName(this) === "script" &&
+        nativeNodeNamespaceURI(internalNodeId(this)) === "http://www.w3.org/1999/xhtml";
+      if (scriptElement) {
+        const [text, approved] = trustedScriptTextForSink(
+          value, internalNodeId(this), "HTMLScriptElement textContent");
+        replaceNodeTextContent(this, text, approved);
+      } else {
+        replaceNodeTextContent(this, value == null ? "" : String(value));
       }
-      if (wasConnected) {
-        for (const child of removedNodes) retireIframeWindowProxies(child);
-      }
-      forgetDiscardedNodeWrappers();
-      const addedNodes = this.childNodes.slice();
-      stampInsertedOwnerDocument(this, addedNodes);
-      if (wasConnected) {
-        for (const child of removedNodes) disconnectCustomElementTree(child);
-      }
-      if (removedNodes.length || addedNodes.length) {
-        queueMutation(this, "childList", { addedNodes, removedNodes });
-      }
-      refreshSlotAssignments();
-      signalFallbackSlotChanges(this);
     }
 
     get innerHTML() {
@@ -3642,43 +4052,8 @@ export let __omoikane_cookie_change_reset;
     }
 
     set innerHTML(value) {
-      const html = value == null ? "" : String(value);
-      if (this instanceof HTMLHtmlElement && this.ownerDocument &&
-          this.ownerDocument.contentType === "text/html" && /<(?:head|body)(?:\s|>)/i.test(html)) {
-        const headMatch = /<head(?:\s[^>]*)?>([\s\S]*?)<\/head\s*>/i.exec(html);
-        const bodyMatch = /<body(?:\s[^>]*)?>([\s\S]*?)<\/body\s*>/i.exec(html);
-        while (this.firstChild) this.removeChild(this.firstChild);
-        const head = this.ownerDocument.createElement("head");
-        const body = this.ownerDocument.createElement("body");
-        if (headMatch) head.innerHTML = headMatch[1];
-        if (bodyMatch) body.innerHTML = bodyMatch[1];
-        this.appendChild(head);
-        this.appendChild(body);
-        return;
-      }
-      const wasConnected = this.isConnected;
-      const removedNodes = this.childNodes.slice();
-      for (const child of removedNodes.slice().reverse()) preRemove(this, child);
-      __omoikane_set_inner_html(this.__id, html);
-      if (wasConnected) {
-        for (const child of removedNodes) retireIframeWindowProxies(child);
-      }
-      forgetDiscardedNodeWrappers();
-      const addedNodes = this.childNodes.slice();
-      stampInsertedOwnerDocument(this, addedNodes);
-      if (wasConnected) {
-        for (const child of removedNodes) disconnectCustomElementTree(child);
-      }
-      const owner = this.nodeType === 9 ? this : this.ownerDocument;
-      const registry = owner && safeWeakMapGet(customElementRegistryByDocument, owner);
-      if (registry) {
-        for (const node of addedNodes) upgradeCustomElementTree(registry, node);
-      }
-      if (removedNodes.length || addedNodes.length) {
-        queueMutation(this, "childList", { addedNodes, removedNodes });
-      }
-      refreshSlotAssignments();
-      signalFallbackSlotChanges(this);
+      const html = trustedHTMLForSink(value, internalNodeId(this));
+      setInnerHTMLWithApprovedString(this, html, trustedSinkDocumentGuard(this));
     }
 
     get childNodes() {
@@ -3940,7 +4315,8 @@ export let __omoikane_cookie_change_reset;
       const ns = namespace == null || namespace === "" ? null : String(namespace);
       const name = String(qualifiedName);
       const { localName } = validateAndExtractAttributeNS(ns, name);
-      setAttributeValueNS(this, ns, name, localName, String(value), false);
+      setAttributeValueNS(this, ns, name, localName,
+        trustedAttributeValue(this, localName, ns, value, true), false);
     }
 
     getAttributeNS(namespace, localName) {
@@ -3987,11 +4363,30 @@ export let __omoikane_cookie_change_reset;
     }
 
     get innerText() {
-      return __omoikane_content_visibility_skips_inner_text(this.__id) ? "" : this.textContent;
+      if (__omoikane_content_visibility_skips_inner_text(this.__id)) return "";
+      const text = this.textContent;
+      const whiteSpace = platformGetComputedStyleForInnerText(this).whiteSpace;
+      if (whiteSpace === "pre" || whiteSpace === "pre-wrap" || whiteSpace === "break-spaces") {
+        return text;
+      }
+      // Rendered text drops trailing collapsible whitespace. document.writeln
+      // keeps its newline in the DOM, where textContent must still expose it.
+      let end = text.length;
+      while (end > 0 && (text[end - 1] === " " || text[end - 1] === "\t" ||
+             text[end - 1] === "\n" || text[end - 1] === "\r" ||
+             text[end - 1] === "\f")) end -= 1;
+      return text.slice(0, end);
     }
 
     set innerText(value) {
-      this.textContent = value;
+      if (internalNodeLocalName(this) === "script" &&
+          nativeNodeNamespaceURI(internalNodeId(this)) === "http://www.w3.org/1999/xhtml") {
+        const [text, approved] = trustedScriptTextForSink(
+          value, internalNodeId(this), "HTMLScriptElement innerText");
+        replaceNodeTextContent(this, text, approved);
+      } else {
+        this.textContent = value;
+      }
     }
 
     get outerHTML() {
@@ -3999,6 +4394,20 @@ export let __omoikane_cookie_change_reset;
       const id = internalNodeId(this);
       return internalOwnerDocument(this)?.contentType === "text/html"
         ? nativeGetHTML(id, false, "[]", true) : nativeSerializeXml(id);
+    }
+
+    set outerHTML(value) {
+      requireNodeReceiver(this);
+      // outerHTML has [LegacyNullToEmptyString] conversion before its
+      // Trusted Types check, including when a default policy is installed.
+      const html = value === null
+        ? trustedHTMLForSink(value, internalNodeId(this), "Element outerHTML", "")
+        : trustedHTMLForSink(value, internalNodeId(this), "Element outerHTML");
+      if (!internalParentNode(this)) return;
+      const guard = trustedSinkDocumentGuard(this);
+      insertAdjacentHTMLWithApprovedString(this, "beforebegin", html, guard);
+      guard();
+      removeChildNode.call(this);
     }
 
     get isConnected() {
@@ -4848,21 +5257,27 @@ export let __omoikane_cookie_change_reset;
     return internalNodeType(node) === 11 ? internalChildNodes(node) : [node];
   }
 
-  function replaceChildren(...values) {
-    requireParentNode(this);
-    const node = mutationArgumentsNode(convertMutationArguments(values), this);
-    const removedNodes = internalChildNodes(this);
-    ensureAppendValidity(this, node, null, removedNodes);
+  function replaceChildrenInternal(receiver, values, trustedHTMLGuard = null) {
+    requireParentNode(receiver);
+    const node = mutationArgumentsNode(convertMutationArguments(values), receiver);
+    const removedNodes = internalChildNodes(receiver);
+    ensureAppendValidity(receiver, node, null, removedNodes);
     const addedNodes = insertedMutationNodes(node);
     const reactions = [];
-    for (const child of removedNodes) removeChildInternal(this, child, true, reactions);
-    insertNodeBeforeInternal(this, node, null, true, reactions);
+    if (trustedHTMLGuard) trustedHTMLGuard();
+    for (const child of removedNodes) removeChildInternal(receiver, child, true, reactions);
+    if (trustedHTMLGuard) trustedHTMLGuard();
+    insertNodeBeforeInternal(receiver, node, null, true, reactions, false, trustedHTMLGuard);
     if (removedNodes.length || addedNodes.length) {
-      queueMutation(this, "childList", {removedNodes, addedNodes});
+      queueMutation(receiver, "childList", {removedNodes, addedNodes});
     }
-    upgradeInsertedCustomElements(this, [this], reactions);
-    try { executeRunnableInsertedScripts([this]); }
+    upgradeInsertedCustomElements(receiver, [receiver], reactions);
+    try { executeRunnableInsertedScripts([receiver]); }
     finally { for (const reaction of reactions) reaction(); }
+  }
+
+  function replaceChildren(...values) {
+    return replaceChildrenInternal(this, values);
   }
 
   function mutateSibling(receiver, values, operation) {
@@ -4929,31 +5344,59 @@ export let __omoikane_cookie_change_reset;
     }
   }
 
-  function insertAdjacent(element, where, node) {
+  function insertAdjacent(element, where, node, trustedHTMLGuard = null) {
     const position = asciiLowercase(where);
     switch (position) {
       case "beforebegin": {
         const parent = internalParentNode(element);
         if (parent === null) return null;
         ensureInsertAdjacentDocumentValidity(parent, node);
-        return insertNodeBeforeInternal(parent, node, element);
+        return insertNodeBeforeInternal(parent, node, element, false, null, false, trustedHTMLGuard);
       }
       case "afterbegin": {
         const childIds = nativeChildNodeIds(internalNodeId(element)) || [];
         const firstChild = childIds.length > 0 ? wrapNode(childIds[0]) : null;
-        return insertNodeBeforeInternal(element, node, firstChild);
+        return insertNodeBeforeInternal(element, node, firstChild, false, null, false, trustedHTMLGuard);
       }
       case "beforeend":
-        return insertNodeBeforeInternal(element, node, null);
+        return insertNodeBeforeInternal(element, node, null, false, null, false, trustedHTMLGuard);
       case "afterend": {
         const parent = internalParentNode(element);
         if (parent === null) return null;
         ensureInsertAdjacentDocumentValidity(parent, node);
-        return insertNodeBeforeInternal(parent, node, internalNextSibling(element));
+        return insertNodeBeforeInternal(parent, node, internalNextSibling(element), false, null, false, trustedHTMLGuard);
       }
       default:
         throw new DOMException("The provided position is not valid.", "SyntaxError");
     }
+  }
+
+  function insertAdjacentHTMLWithApprovedString(element, where, markup, guard) {
+    if (where !== "beforebegin" && where !== "afterbegin" &&
+        where !== "beforeend" && where !== "afterend") {
+      throw new DOMException("The provided position is not valid", "SyntaxError");
+    }
+    guard();
+    let context = element;
+    if (where === "beforebegin" || where === "afterend") {
+      context = internalParentNode(element);
+      if (!context || internalNodeType(context) === 9) {
+        throw new DOMException("The parent cannot contain this insertion", "NoModificationAllowedError");
+      }
+    }
+    const owner = elementNodeDocument(element);
+    const html = owner.contentType === "text/html";
+    if (internalNodeType(context) !== 1 ||
+        (html && internalNodeLocalName(context) === "html")) {
+      context = owner.createElement("body");
+    }
+    guard();
+    const fragment = wrapNode(__omoikane_parse_contextual_fragment(
+      internalNodeId(context), markup, !html,
+    ));
+    stampOwnerDoc(fragment, owner);
+    guard();
+    insertAdjacent(element, where, fragment, guard);
   }
 
   class Element extends Node {
@@ -4979,28 +5422,8 @@ export let __omoikane_cookie_change_reset;
       requireCanonicalElement(this, "insertAdjacentHTML called on an incompatible receiver");
       if (arguments.length < 2) throw new TypeError("insertAdjacentHTML requires 2 arguments");
       where = asciiLowercase(toDOMString(where));
-      markup = toDOMString(markup);
-      if (!["beforebegin", "afterbegin", "beforeend", "afterend"].includes(where)) {
-        throw new DOMException("The provided position is not valid", "SyntaxError");
-      }
-      let context = this;
-      if (where === "beforebegin" || where === "afterend") {
-        context = internalParentNode(this);
-        if (!context || internalNodeType(context) === 9) {
-          throw new DOMException("The parent cannot contain this insertion", "NoModificationAllowedError");
-        }
-      }
-      const owner = elementNodeDocument(this);
-      const html = owner.contentType === "text/html";
-      if (internalNodeType(context) !== 1 ||
-          (html && internalNodeLocalName(context) === "html")) {
-        context = owner.createElement("body");
-      }
-      const fragment = wrapNode(__omoikane_parse_contextual_fragment(
-        internalNodeId(context), markup, !html,
-      ));
-      stampOwnerDoc(fragment, owner);
-      insertAdjacent(this, where, fragment);
+      markup = trustedHTMLForSink(markup, internalNodeId(this), "Element insertAdjacentHTML");
+      insertAdjacentHTMLWithApprovedString(this, where, markup, trustedSinkDocumentGuard(this));
     }
 
     insertAdjacentText(where, data) {
@@ -5526,6 +5949,8 @@ export let __omoikane_cookie_change_reset;
       return raw === null ? "" : __omoikane_resolve_url(raw);
     }
     set href(value) { this.setAttribute("href", String(value)); }
+    get rel() { return this.getAttribute("rel") ?? ""; }
+    set rel(value) { this.setAttribute("rel", String(value)); }
   }
   class HTMLAreaElement extends HTMLElement {
     get href() {
@@ -5830,8 +6255,15 @@ export let __omoikane_cookie_change_reset;
         .get.call(this.content);
     }
     set innerHTML(value) {
-      Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")
-        .set.call(this.content, value);
+      const html = trustedHTMLForSink(value, internalNodeId(this));
+      const guard = trustedSinkDocumentGuard(this);
+      const content = wrapNode(__omoikane_template_content(internalNodeId(this)));
+      const owner = internalOwnerDocument(this);
+      if (content && owner && getOwnerDocumentId(ownerDocumentIds, content) === undefined) {
+        stampOwnerDoc(content, templateContentsOwnerDocument(owner));
+      }
+      guard();
+      setInnerHTMLWithApprovedString(content, html, guard);
     }
   }
   class HTMLSlotElement extends HTMLElement {
@@ -5995,9 +6427,22 @@ export let __omoikane_cookie_change_reset;
     }
     set value(value) {
       const state = safeWeakMapGet(attributeNodeStates, this);
-      state.value = String(value);
-      if (!state.ownerElement) return;
-      state.ownerElement.setAttributeNS(state.namespace, state.name, state.value);
+      const owner = state.ownerElement;
+      // Attr.value is DOMString in Web IDL. Its input loses a Trusted Type
+      // brand before the attribute sink checks it.
+      const stringValue = toDOMString(value);
+      const converted = owner
+        ? trustedAttributeValue(owner, state.localName, state.namespace, stringValue,
+            !isHtmlElementInHtmlDocument(owner))
+        : stringValue;
+      if (state.ownerElement !== owner) {
+        throw new IntrinsicTypeError("Attribute owner changed during value conversion");
+      }
+      if (!owner) {
+        state.value = converted;
+        return;
+      }
+      setAttributeValueNS(owner, state.namespace, state.name, state.localName, converted, false);
     }
     get nodeValue() { return this.value; }
     set nodeValue(value) { this.value = value == null ? "" : value; }
@@ -6068,18 +6513,28 @@ export let __omoikane_cookie_change_reset;
     const oldAttr = oldRecord ? materializeAttribute(element, oldRecord) : null;
     if (oldAttr === attr) return attr;
 
+    const sourceOwner = state.ownerElement;
+    const sourceValue = sourceOwner
+      ? (nativeAttributeValueNS(internalNodeId(sourceOwner), state.namespace, state.localName) ?? state.value)
+      : state.value;
+    // Attr.value is a DOMString. Validate the stored string for the target
+    // element before changing either the attribute map or the Attr owner.
+    const prepared = trustedAttributeValue(element, state.localName, state.namespace,
+      sourceValue, !isHtmlElementInHtmlDocument(element));
+    if (state.ownerElement !== sourceOwner) {
+      throw new IntrinsicTypeError("Attribute owner changed during value conversion");
+    }
     const oldState = oldAttr ? safeWeakMapGet(attributeNodeStates, oldAttr) : null;
-    const oldSnapshot = oldState ? { ...oldState, value: oldAttr.value } : null;
-    const value = attr.value;
+    const oldSnapshot = oldState ? { ...oldState, value: oldRecord[3] } : null;
     setAttributeValueNS(
-      element, state.namespace, state.name, state.localName, value, true
+      element, state.namespace, state.name, state.localName, prepared, true
     );
 
     if (oldState) {
       Object.assign(oldState, oldSnapshot);
       oldState.ownerElement = null;
     }
-    state.value = value;
+    state.value = prepared;
     state.ownerDocument = element.ownerDocument;
     state.ownerElement = element;
     safeMapSet(attributeCacheFor(element, state.namespace), state.localName, attr);
@@ -6504,6 +6959,8 @@ export let __omoikane_cookie_change_reset;
   // Script preparation is intentionally separate from parsing. Range and
   // createElement scripts become runnable only after connection; innerHTML and
   // parser-created scripts are never marked and therefore remain inert.
+  const rejectedInsertedScript = Symbol("rejected inserted script");
+
   function executeRunnableInsertedScripts(roots) {
     for (const root of roots) {
       // Parser-created on* attributes need the same initialization as initial
@@ -6513,18 +6970,30 @@ export let __omoikane_cookie_change_reset;
       if (scripts === null) continue;
       for (const id of scripts) {
         const node = wrapNode(id);
-        const prepared = __omoikane_prepare_inserted_inline_script(node.__id);
-        if (prepared === true) {
+        const nodeId = internalNodeId(node);
+        const source = __omoikane_prepare_inserted_inline_script(nodeId);
+        if (typeof source === "string") {
           try {
-            const doc = node.ownerDocument;
+            const preparedDocumentId = nativeScriptOwnerDocument(nodeId);
+            const doc = preparedDocumentId == null ? null : wrapNode(preparedDocumentId);
             const view = doc && doc.defaultView;
             if (view) {
               const previousScript = doc.__currentScript || null;
               try {
-                view.__omoikane_set_current_script(id);
-                __omoikane_eval_inserted_inline_script(id);
+                const scriptValue = nativeTrustedTakeScriptTextApproval(nodeId, source)
+                  ? createTrustedType(1, source) : source;
+                const checkedSource = trustedValueForSink(
+                  scriptValue, nodeId, 1, "HTMLScriptElement text", source,
+                  undefined, rejectedInsertedScript);
+                if (checkedSource === rejectedInsertedScript) continue;
+                view.__omoikane_set_current_script(nodeId);
+                if (!nativeNodeIsConnected(nodeId) ||
+                    nativeScriptOwnerDocument(nodeId) !== preparedDocumentId) {
+                  throw new IntrinsicTypeError("script moved after security checks");
+                }
+                __omoikane_eval_inserted_inline_script(nodeId, checkedSource);
               } catch (error) {
-                __omoikane_record_inserted_script_error(id, String(error));
+                __omoikane_record_inserted_script_error(nodeId, String(error));
               } finally {
                 doc.__currentScript = previousScript;
               }
@@ -6699,7 +7168,7 @@ export let __omoikane_cookie_change_reset;
       }
       const fragment = wrapNode(__omoikane_parse_contextual_fragment(
         context.__id,
-        String(markup),
+        trustedHTMLForSink(markup, context.__id, "Range createContextualFragment"),
         !htmlDocument,
       ));
       stampOwnerDoc(fragment, doc);
@@ -7304,6 +7773,23 @@ export let __omoikane_cookie_change_reset;
     return wrapNode(nativeGetElementById(root.__id, String(id)));
   }
 
+  function writeTrustedDocumentStream(document, args, sink, newline) {
+    let text = "";
+    let allTrusted = true;
+    for (const value of args) {
+      if (nativeTrustedTypeIs(value, 0)) {
+        text += nativeTrustedTypeValue(value, 0);
+      } else {
+        allTrusted = false;
+        text += toDOMString(value);
+      }
+    }
+    // The variadic arguments form one HTML source. In particular, a default
+    // policy can transform text across their boundaries before parsing.
+    const checked = allTrusted ? text : trustedHTMLForSink(text, internalNodeId(document), sink);
+    __omoikane_document_write(internalNodeId(document), newline ? checked + "\n" : checked);
+  }
+
   class Document extends Node {
     constructor(id, construction) {
       if (construction === DOCUMENT_CONSTRUCTION) {
@@ -7843,18 +8329,12 @@ export let __omoikane_cookie_change_reset;
 
     // Continue this document's input stream, pausing at each script end tag.
     write(...args) {
-      let text = "";
-      for (let i = 0; i < args.length; i += 1) text += String(args[i]);
-      __omoikane_document_write(this.__id, text);
+      writeTrustedDocumentStream(this, args, "Document write", false);
     }
 
     // Like write(), but appends a newline after the concatenated arguments.
     writeln(...args) {
-      let text = "";
-      for (let i = 0; i < args.length; i += 1) {
-        text += String(args[i]);
-      }
-      return this.write(text + "\n");
+      writeTrustedDocumentStream(this, args, "Document writeln", true);
     }
 
     // Start an empty input stream for this Document. A reentrant open of
@@ -7925,8 +8405,8 @@ export let __omoikane_cookie_change_reset;
         .get.call(this);
     }
     set innerHTML(value) {
-      Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")
-        .set.call(this, value);
+      const html = trustedHTMLForSink(value, internalNodeId(this), "ShadowRoot innerHTML");
+      setInnerHTMLWithApprovedString(this, html, trustedSinkDocumentGuard(this));
     }
     cloneNode() {
       throw new DOMException("ShadowRoot cannot be cloned", "NotSupportedError");
@@ -7989,10 +8469,11 @@ export let __omoikane_cookie_change_reset;
     }, enumerable: true, configurable: true,
   });
 
-  function setParsedHTML(receiver, html, options, safe) {
+  function setParsedHTML(receiver, html, options, safe, trustedHTMLGuard = null) {
     const id = internalNodeId(receiver);
     html = toDOMString(html);
     const parsedOptions = sanitizerBridge.readOptions(options, safe);
+    if (trustedHTMLGuard) trustedHTMLGuard();
     const fragmentId = nativeParseUnsafeFragment(id, html, parsedOptions.runScripts,
       parsedOptions.configuration, safe);
     if (fragmentId === null) return;
@@ -8003,7 +8484,8 @@ export let __omoikane_cookie_change_reset;
     if (root != null) stampOwnerDoc(wrapNode(root), owner);
     const target = nativeNodeLocalName(id) === "template" && nativeNodeIsHtmlElement(id)
       ? receiver.content : receiver;
-    replaceChildren.call(target, fragment);
+    if (trustedHTMLGuard) trustedHTMLGuard();
+    replaceChildrenInternal(target, [fragment], trustedHTMLGuard);
   }
 
   function requireHTMLSetterReceiver(receiver) {
@@ -8016,7 +8498,10 @@ export let __omoikane_cookie_change_reset;
   function setHTMLUnsafe(html, options = {}) {
     requireHTMLSetterReceiver(this);
     if (arguments.length === 0) throw new IntrinsicTypeError("HTML is required");
-    setParsedHTML(this, html, options, false);
+    const sink = nativeShadowHost(internalNodeId(this)) == null
+      ? "Element setHTMLUnsafe" : "ShadowRoot setHTMLUnsafe";
+    const checked = trustedHTMLForSink(html, internalNodeId(this), sink);
+    setParsedHTML(this, checked, options, false, trustedSinkDocumentGuard(this));
   }
   function setHTML(html, options = {}) {
     requireHTMLSetterReceiver(this);
@@ -8036,7 +8521,8 @@ export let __omoikane_cookie_change_reset;
   }
   function parseHTMLUnsafe(html, options = {}) {
     if (arguments.length === 0) throw new IntrinsicTypeError("HTML is required");
-    return parseHTMLDocument(html, options, false);
+    return parseHTMLDocument(trustedHTMLForSink(
+      html, __omoikane_document_id, "Document parseHTMLUnsafe"), options, false);
   }
   function parseHTML(html, options = {}) {
     if (arguments.length === 0) throw new IntrinsicTypeError("HTML is required");
@@ -10530,12 +11016,16 @@ export let __omoikane_cookie_change_reset;
     }
 
     set srcdoc(value) {
-      this.setAttribute("srcdoc", String(value));
+      this.setAttribute("srcdoc", value);
     }
 
     setAttribute(name, value) {
-      const attribute = String(name).toLowerCase();
-      const normalized = String(value);
+      const guard = trustedSinkDocumentGuard(this);
+      const attrName = toDOMString(name);
+      const attribute = asciiLowercase(attrName);
+      const prepared = trustedAttributeValue(this, attribute, null, value,
+        nativeNodeNamespaceURI(internalNodeId(this)) !== HTML_NAMESPACE);
+      const normalized = prepared;
       let changesResource = false;
       if (attribute === "src" || (attribute === "srcdoc" && internalNodeLocalName(this) === "iframe")) {
         this.__prepareResourceNavigation();
@@ -10548,7 +11038,7 @@ export let __omoikane_cookie_change_reset;
           dispatchIframeNavigationDeparture(this);
         }
       }
-      super.setAttribute(name, normalized);
+      setAttributeWithApprovedString(this, attrName, prepared, prepared, guard);
       if (changesResource && this.isConnected) {
         this.__prepareResourceNavigation("resource-changed");
       }
@@ -13403,14 +13893,27 @@ export let __omoikane_cookie_change_reset;
 
   class HTMLScriptElement extends HTMLElement {
     setAttribute(name, value) {
-      if (String(name).toLowerCase() === "src") noteElementResourceStart(this);
-      super.setAttribute(name, value);
+      const guard = trustedSinkDocumentGuard(this);
+      const attrName = toDOMString(name);
+      const attribute = asciiLowercase(attrName);
+      const prepared = trustedAttributeValue(this, attribute, null, value,
+        nativeNodeNamespaceURI(internalNodeId(this)) !== HTML_NAMESPACE);
+      if (attribute === "src") noteElementResourceStart(this);
+      setAttributeWithApprovedString(this, attrName, prepared, prepared, guard);
     }
     get src() {
       return this.getAttribute("src") || "";
     }
     set src(value) {
-      this.setAttribute("src", String(value));
+      this.setAttribute("src", value);
+    }
+    get text() {
+      return this.textContent;
+    }
+    set text(value) {
+      const [text, approved] = trustedScriptTextForSink(
+        value, internalNodeId(this), "HTMLScriptElement text");
+      replaceNodeTextContent(this, text, approved);
     }
     // Reflected, because how the element is evaluated is decided from the
     // attribute. Scripts that opt into modules by assigning the property
@@ -16854,9 +17357,9 @@ export let __omoikane_cookie_change_reset;
     "error", "hashchange", "popstate", "pageshow", "pagehide", "online",
     "offline", "languagechange", "message", "storage",
   ]);
-  function compileInlineHandler(source) {
+  function compileInlineHandler(node, name, source) {
     try {
-      return new Function("event", source);
+      return __omoikane_compile_inline_handler(internalNodeId(node), name, source);
     } catch (e) {
       return null;
     }
@@ -16923,7 +17426,7 @@ export let __omoikane_cookie_change_reset;
     // Repeated initialization must not undo a subsequent IDL assignment.
     // Explicit setAttribute calls still reinstall even an unchanged value.
     if (initial && previous?.source === source && previous.target === target) return;
-    const handler = compileInlineHandler(source);
+    const handler = compileInlineHandler(node, name, source);
     if (!handler) return;
     target["on" + type] = handler;
     store[type] = { handler, target, source };
@@ -17848,6 +18351,7 @@ export let __omoikane_cookie_change_reset;
     }
     return __makeComputedStyle({});
   };
+  const platformGetComputedStyleForInnerText = globalThis.getComputedStyle;
   const navigatorConstructionToken = {};
   class PluginArray {
     constructor(token) {
@@ -18033,6 +18537,8 @@ export let __omoikane_cookie_change_reset;
   // -------------------------------------------------------------------------
   const serviceWorkerConstructionToken = {};
   const serviceWorkerContainerConstructionToken = {};
+  const serviceWorkerContainerOwnerDocuments = browsingInput.serviceWorkerContainerOwnerDocuments ||
+    (browsingInput.serviceWorkerContainerOwnerDocuments = new WeakMap());
 
   // EventTarget is declared later in this bootstrap (after Navigator is
   // constructed).  This bridge keeps construction safe during that initial
@@ -18131,6 +18637,7 @@ export let __omoikane_cookie_change_reset;
     constructor(token) {
       if (token !== serviceWorkerContainerConstructionToken) throw new TypeError("Illegal constructor");
       super();
+      safeWeakMapSet(serviceWorkerContainerOwnerDocuments, this, __omoikane_document_id);
       this._records = new Map();
       this.controller = null;
       this._readyResolved = false;
@@ -18151,11 +18658,25 @@ export let __omoikane_cookie_change_reset;
       return { script: script.href, scope: scope.href };
     }
     register(scriptURL, options = undefined) {
+      const ownerDocumentId = safeWeakMapGet(serviceWorkerContainerOwnerDocuments, this);
+      if (ownerDocumentId === undefined) {
+        return Promise.reject(new IntrinsicTypeError("Illegal ServiceWorkerContainer receiver"));
+      }
+      if (arguments.length === 0) {
+        return Promise.reject(new IntrinsicTypeError("Service worker script URL is required"));
+      }
+      let checkedURL;
+      try {
+        checkedURL = trustedValueForSink(
+          scriptURL, ownerDocumentId, 2, "ServiceWorkerContainer register");
+      } catch (error) {
+        return Promise.reject(error);
+      }
       return Promise.resolve().then(() => {
         if (typeof nativeIsSecureContext !== "function" || !nativeIsSecureContext()) {
           throw new DOMException("Service workers require a secure context.", "SecurityError");
         }
-        const validated = this.__validateRegistration(scriptURL, options || {});
+        const validated = this.__validateRegistration(checkedURL, options || {});
         let record = this._records.get(validated.scope);
         if (record) {
           if (record.scriptURL !== validated.script) {
@@ -20252,16 +20773,35 @@ export let __omoikane_cookie_change_reset;
     }, Boolean(error));
   };
 
+  const domParserOwnerDocuments = browsingInput.domParserOwnerDocuments ||
+    (browsingInput.domParserOwnerDocuments = new WeakMap());
   globalThis.DOMParser = class DOMParser {
+    constructor() {
+      safeWeakMapSet(domParserOwnerDocuments, this, __omoikane_document_id);
+    }
     parseFromString(source, type) {
+      const ownerDocumentId = safeWeakMapGet(domParserOwnerDocuments, this);
+      if (ownerDocumentId === undefined) throw new TypeError("Illegal DOMParser receiver");
       if (arguments.length < 2) throw new TypeError("parseFromString requires 2 arguments");
-      const input = String(source);
-      const mime = String(type).toLowerCase();
+      const trustedHTML = nativeTrustedTypeIs(source, 0);
+      const input = trustedHTML ? nativeTrustedTypeValue(source, 0) : toDOMString(source);
+      const mime = toDOMString(type).toLowerCase();
       const supported = ["text/html", "text/xml", "application/xml", "application/xhtml+xml", "image/svg+xml"];
       if (!supported.includes(mime)) throw new TypeError("Unsupported DOMParser MIME type: " + mime);
       if (mime === "text/html") {
-        const parsed = document.implementation.createHTMLDocument("");
-        parsed.body.innerHTML = input;
+        const html = trustedHTMLForSink(source, ownerDocumentId, "DOMParser parseFromString", input);
+        const parsed = wrapNode(ownerDocumentId).implementation.createHTMLDocument("");
+        const body = parsed.body;
+        const bodyId = internalNodeId(body);
+        if (bodyId === undefined || internalNodeType(body) !== 1) {
+          throw new IntrinsicTypeError("DOMParser requires an HTML body");
+        }
+        // A page may replace createHTMLDocument or the returned body's getter.
+        // Recheck against the actual target if it belongs to an enforcing
+        // Document; the caller Document's approval cannot authorize that sink.
+        const targetHtml = nativeTrustedTypeSinkRequires(bodyId)
+          ? trustedHTMLForSink(source, bodyId, "Element innerHTML", input) : html;
+        setInnerHTMLWithApprovedString(body, targetHtml, trustedSinkDocumentGuard(body));
         return parsed;
       }
       const parsedId = __omoikane_parse_xml(input);
@@ -20271,7 +20811,7 @@ export let __omoikane_cookie_change_reset;
         nativeSetDocumentContentType(parsedId, mime);
         return parsed;
       }
-      const error = document.implementation.createDocument("", "parsererror", null);
+      const error = wrapNode(ownerDocumentId).implementation.createDocument("", "parsererror", null);
       error.__documentURL = "about:blank";
       error.documentElement.textContent = "XML parse error";
       return error;
@@ -24886,7 +25426,7 @@ export let __omoikane_cookie_change_reset;
     constructor(url, options = undefined) {
       super();
       if (arguments.length < 1) throw new TypeError("SharedWorker requires a script URL");
-      const requested = String(url);
+      const requested = trustedValueForSink(url, __omoikane_document_id, 2, "SharedWorker constructor");
       let name = "";
       if (typeof options === "string") name = options;
       else if (options && options.name !== undefined) name = String(options.name);
@@ -24971,10 +25511,11 @@ export let __omoikane_cookie_change_reset;
   class Worker extends EventTarget {
     constructor(url, options = undefined) {
       super();
+      if (arguments.length < 1) throw new TypeError("Worker requires a script URL");
+      const requested = trustedValueForSink(url, __omoikane_document_id, 2, "Worker constructor");
       if (options && options.type !== undefined && String(options.type) !== "classic") {
         throw new TypeError("Only classic Dedicated Workers are supported");
       }
-      const requested = String(url);
       this.url = requested;
       this.onmessage = null;
       this.onerror = null;
@@ -25078,7 +25619,15 @@ export let __omoikane_cookie_change_reset;
     globalThis.WorkerGlobalScope = Object;
     const WorkerDOMException = DOMException;
     globalThis.importScripts = function(...urls) {
-      if (!nativeImportScripts(...urls)) {
+      // Both Array.prototype.map and @@iterator are writable by worker code.
+      // The security check must cover each original argument before the
+      // private host fetch receives it.
+      const checked = [];
+      for (let index = 0; index < urls.length; index++) {
+        checked[index] = trustedValueForSink(
+          urls[index], __omoikane_document_id, 2, "WorkerGlobalScope importScripts");
+      }
+      if (!safeApply(nativeImportScripts, undefined, checked)) {
         throw new WorkerDOMException("Failed to fetch imported script", "NetworkError");
       }
     };

@@ -76,6 +76,9 @@ enum SourceExpression {
     None,
     SelfKeyword,
     UnsafeInline,
+    Nonce(String),
+    UnsafeEval,
+    TrustedTypesEval,
     ReportSample,
     Any,
     Scheme(String),
@@ -90,7 +93,23 @@ enum SourceExpression {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ParsedPolicy {
     directives: BTreeMap<String, Vec<SourceExpression>>,
+    trusted_types: Option<TrustedTypesDirective>,
+    require_trusted_types_for_script: bool,
     serialized: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TrustedTypesDirective {
+    names: Vec<String>,
+    wildcard: bool,
+    allow_duplicates: bool,
+}
+
+impl TrustedTypesDirective {
+    fn allows_policy(&self, name: &str, already_created: bool) -> bool {
+        (!already_created || self.allow_duplicates)
+            && (self.wildcard || self.names.iter().any(|allowed| allowed == name))
+    }
 }
 
 /// The policies attached to one Document.
@@ -107,6 +126,98 @@ pub(crate) struct CspPolicy {
 }
 
 impl CspPolicy {
+    /// Returns enforced and report-only policies rejecting a policy name.
+    pub(crate) fn trusted_type_policy_creation_violations(
+        &self,
+        name: &str,
+        already_created: bool,
+    ) -> (Vec<PolicyViolation>, Vec<PolicyViolation>) {
+        let violations = |policies: &[ParsedPolicy]| {
+            policies
+                .iter()
+                .filter(|policy| {
+                    policy
+                        .trusted_types
+                        .as_ref()
+                        .is_some_and(|directive| !directive.allows_policy(name, already_created))
+                })
+                .map(|policy| PolicyViolation {
+                    serialized: policy.serialized.clone(),
+                    report_sample: true,
+                })
+                .collect()
+        };
+        (violations(&self.policies), violations(&self.report_only))
+    }
+
+    /// Returns enforced and report-only policies requiring trusted script sinks.
+    pub(crate) fn trusted_type_sink_violations(
+        &self,
+    ) -> (Vec<PolicyViolation>, Vec<PolicyViolation>) {
+        let violations = |policies: &[ParsedPolicy]| {
+            policies
+                .iter()
+                .filter(|policy| policy.require_trusted_types_for_script)
+                .map(|policy| PolicyViolation {
+                    serialized: policy.serialized.clone(),
+                    report_sample: true,
+                })
+                .collect()
+        };
+        (violations(&self.policies), violations(&self.report_only))
+    }
+
+    /// Returns policies that disallow compiling strings as JavaScript.
+    pub(crate) fn script_compilation_violations(
+        &self,
+    ) -> (Vec<PolicyViolation>, Vec<PolicyViolation>) {
+        // CSP's dynamic-code check asks whether this global requires Trusted
+        // Types once, outside the loop over individual source-list policies.
+        let trusted_types_required = self
+            .policies
+            .iter()
+            .any(|policy| policy.require_trusted_types_for_script);
+        let violations = |policies: &[ParsedPolicy]| {
+            policies
+                .iter()
+                .filter_map(|policy| {
+                    let sources = policy
+                        .directives
+                        .get("script-src")
+                        .or_else(|| policy.directives.get("default-src"))?;
+                    let allowed = sources.contains(&SourceExpression::UnsafeEval)
+                        || (trusted_types_required
+                            && sources.contains(&SourceExpression::TrustedTypesEval));
+                    (!allowed).then(|| PolicyViolation {
+                        serialized: policy.serialized.clone(),
+                        report_sample: sources.contains(&SourceExpression::ReportSample),
+                    })
+                })
+                .collect()
+        };
+        (violations(&self.policies), violations(&self.report_only))
+    }
+
+    /// Returns CSP policies rejecting an inline event-handler attribute.
+    /// These attributes use `script-src-attr` fallback, not `unsafe-eval`.
+    pub(crate) fn script_attribute_violations(
+        &self,
+    ) -> (Vec<PolicyViolation>, Vec<PolicyViolation>) {
+        let violations = |policies: &[ParsedPolicy]| {
+            policies
+                .iter()
+                .filter(|policy| !policy.allows_inline(ResourceType::Script, true))
+                .map(|policy| PolicyViolation {
+                    serialized: policy.serialized.clone(),
+                    report_sample: policy
+                        .sources_for(ResourceType::Script, true)
+                        .is_some_and(|sources| sources.contains(&SourceExpression::ReportSample)),
+                })
+                .collect()
+        };
+        (violations(&self.policies), violations(&self.report_only))
+    }
+
     /// Compares the rules that affect resource checks and violation reports.
     /// Endpoint availability changes independently after report delivery.
     pub(crate) fn has_same_policy_rules(&self, other: &Self) -> bool {
@@ -175,7 +286,7 @@ impl CspPolicy {
         reference: &str,
         redirects: usize,
     ) -> Vec<PolicyViolation> {
-        self.violating_policy_texts(&self.report_only, resource_type, reference, redirects)
+        self.violating_policy_texts(&self.report_only, resource_type, reference, redirects, None)
     }
 
     /// Describes each policy blocking this resource, including sample opt-in.
@@ -186,7 +297,24 @@ impl CspPolicy {
         reference: &str,
         redirects: usize,
     ) -> Vec<PolicyViolation> {
-        self.violating_policy_texts(&self.policies, resource_type, reference, redirects)
+        self.violating_policy_texts(&self.policies, resource_type, reference, redirects, None)
+    }
+
+    /// Reports only script policies that reject both the URL/inline source
+    /// and the script element's nonce.
+    pub(crate) fn script_policy_violations_with_nonce(
+        &self,
+        reference: &str,
+        redirects: usize,
+        nonce: Option<&str>,
+        report_only: bool,
+    ) -> Vec<PolicyViolation> {
+        let policies = if report_only {
+            &self.report_only
+        } else {
+            &self.policies
+        };
+        self.violating_policy_texts(policies, ResourceType::Script, reference, redirects, nonce)
     }
 
     fn violating_policy_texts(
@@ -195,6 +323,7 @@ impl CspPolicy {
         resource_type: ResourceType,
         reference: &str,
         redirects: usize,
+        nonce: Option<&str>,
     ) -> Vec<PolicyViolation> {
         let inline = is_inline_reference(reference);
         let attribute =
@@ -203,7 +332,12 @@ impl CspPolicy {
         policies
             .iter()
             .filter_map(|policy| {
-                let violated = if inline {
+                let violated = if policy.sources_for(resource_type, attribute).is_none() {
+                    false
+                } else if resource_type == ResourceType::Script && policy.allows_script_nonce(nonce)
+                {
+                    false
+                } else if inline {
                     !policy.allows_inline(resource_type, attribute)
                 } else {
                     url.as_ref().is_none_or(|url| {
@@ -250,6 +384,26 @@ impl CspPolicy {
             reporting_endpoints: BTreeMap::new(),
             base_url: base_url.parse::<Url>().ok(),
         }
+    }
+
+    /// Limits parser-time enforcement to meta policies before this script.
+    /// Response policies and inherited policies occupy the prefix; this
+    /// Document's parsed meta policies occupy the suffix in document order.
+    pub(crate) fn for_parser_script(&self, document: &NodeHandle, script: &NodeHandle) -> Self {
+        let mut counts = ParserMetaCounts::default();
+        count_parser_meta_policies(document, script.identity(), &mut counts);
+        let mut policy = self.clone();
+        if counts.found_script && counts.total <= policy.policies.len() {
+            policy
+                .policies
+                .truncate(policy.policies.len() - counts.total + counts.before_script);
+        }
+        policy
+    }
+
+    /// Changes only parser-time enforcement, preserving live endpoint state.
+    pub(crate) fn use_parser_policies_from(&mut self, policy: &Self) {
+        self.policies.clone_from(&policy.policies);
     }
 
     /// Adds this srcdoc Document's policies to an inherited snapshot. The
@@ -347,9 +501,29 @@ impl ParsedPolicy {
         let Some(sources) = self.sources_for(resource_type, attribute) else {
             return true;
         };
+        // CSP3 ignores 'unsafe-inline' when a nonce source is present.
+        if resource_type == ResourceType::Script
+            && sources
+                .iter()
+                .any(|source| matches!(source, SourceExpression::Nonce(_)))
+        {
+            return false;
+        }
         sources
             .iter()
             .any(|source| matches!(source, SourceExpression::UnsafeInline))
+    }
+
+    fn allows_script_nonce(&self, nonce: Option<&str>) -> bool {
+        let Some(nonce) = nonce.filter(|nonce| !nonce.is_empty()) else {
+            return false;
+        };
+        self.sources_for(ResourceType::Script, false)
+            .is_some_and(|sources| {
+                sources.iter().any(|source| {
+                    matches!(source, SourceExpression::Nonce(expected) if expected == nonce)
+                })
+            })
     }
 
     fn allows_url(
@@ -374,7 +548,11 @@ impl ParsedPolicy {
 
         sources.iter().any(|source| match source {
             SourceExpression::None => false,
-            SourceExpression::UnsafeInline | SourceExpression::ReportSample => false,
+            SourceExpression::UnsafeInline
+            | SourceExpression::Nonce(_)
+            | SourceExpression::UnsafeEval
+            | SourceExpression::TrustedTypesEval
+            | SourceExpression::ReportSample => false,
             SourceExpression::Any => matches!(url.scheme.as_str(), "http" | "https" | "ws" | "wss"),
             SourceExpression::SelfKeyword => base_url
                 .as_ref()
@@ -541,20 +719,62 @@ fn parse_policy(input: &str) -> Option<ParsedPolicy> {
             // Duplicate directives are ignored after the first occurrence.
             continue;
         }
-        let sources = tokens
+        let values = tokens.collect::<Vec<_>>();
+        if name == "trusted-types" {
+            policy.trusted_types = Some(parse_trusted_types_directive(&values));
+        } else if name == "require-trusted-types-for" {
+            policy.require_trusted_types_for_script = values.contains(&"'script'");
+        }
+        let sources = values
+            .into_iter()
             .filter_map(parse_source_expression)
-            .collect::<Vec<_>>();
+            .collect();
         policy.directives.insert(name, sources);
     }
     (!policy.directives.is_empty()).then_some(policy)
 }
 
+fn parse_trusted_types_directive(values: &[&str]) -> TrustedTypesDirective {
+    let mut directive = TrustedTypesDirective::default();
+    for value in values {
+        match *value {
+            "*" => directive.wildcard = true,
+            "'allow-duplicates'" => directive.allow_duplicates = true,
+            "'none'" => {}
+            name if !name.is_empty()
+                && name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'-' | b'#' | b'=' | b'_' | b'/' | b'@' | b'.' | b'%')
+                }) =>
+            {
+                directive.names.push(name.to_owned())
+            }
+            _ => {}
+        }
+    }
+    directive
+}
+
 fn parse_source_expression(token: &str) -> Option<SourceExpression> {
+    if let Some(nonce) = token
+        .strip_prefix("'nonce-")
+        .and_then(|value| value.strip_suffix('\''))
+        && let core = nonce.trim_end_matches('=')
+        && !core.is_empty()
+        && nonce.len() - core.len() <= 2
+        && core
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'-' | b'_'))
+    {
+        return Some(SourceExpression::Nonce(nonce.to_owned()));
+    }
     let lower = token.to_ascii_lowercase();
     match lower.as_str() {
         "'none'" => return Some(SourceExpression::None),
         "'self'" => return Some(SourceExpression::SelfKeyword),
         "'unsafe-inline'" => return Some(SourceExpression::UnsafeInline),
+        "'unsafe-eval'" => return Some(SourceExpression::UnsafeEval),
+        "'trusted-types-eval'" => return Some(SourceExpression::TrustedTypesEval),
         "'report-sample'" => {
             // CSP's sample opt-in uses exact source-list membership, unlike
             // the explicitly case-insensitive unsafe-inline matching.
@@ -622,7 +842,7 @@ fn parse_source_expression(token: &str) -> Option<SourceExpression> {
     })
 }
 
-fn collect_csp_meta_contents(node: &NodeHandle, out: &mut Vec<String>) {
+fn csp_meta_content(node: &NodeHandle) -> Option<String> {
     if node.node_type() == NodeType::Element
         && node
             .tag_name()
@@ -631,12 +851,41 @@ fn collect_csp_meta_contents(node: &NodeHandle, out: &mut Vec<String>) {
         && node
             .get_attribute("http-equiv")
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("content-security-policy"))
-        && let Some(content) = node.get_attribute("content")
     {
+        node.get_attribute("content")
+    } else {
+        None
+    }
+}
+
+fn collect_csp_meta_contents(node: &NodeHandle, out: &mut Vec<String>) {
+    if let Some(content) = csp_meta_content(node) {
         out.push(content);
     }
     for child in node.child_nodes() {
         collect_csp_meta_contents(&child, out);
+    }
+}
+
+#[derive(Default)]
+struct ParserMetaCounts {
+    total: usize,
+    before_script: usize,
+    found_script: bool,
+}
+
+fn count_parser_meta_policies(node: &NodeHandle, script_id: usize, counts: &mut ParserMetaCounts) {
+    if node.identity() == script_id {
+        counts.found_script = true;
+    }
+    if csp_meta_content(node).is_some_and(|content| parse_policy(&content).is_some()) {
+        counts.total += 1;
+        if !counts.found_script {
+            counts.before_script += 1;
+        }
+    }
+    for child in node.child_nodes() {
+        count_parser_meta_policies(&child, script_id, counts);
     }
 }
 
@@ -659,7 +908,7 @@ mod tests {
     use super::*;
     use crate::html::TreeBuilder;
 
-    fn policy(text: &str, base: &str) -> CspPolicy {
+    fn make_policy(text: &str, base: &str) -> CspPolicy {
         CspPolicy {
             policies: vec![parse_policy(text).unwrap()],
             base_url: base.parse().ok(),
@@ -669,8 +918,117 @@ mod tests {
     }
 
     #[test]
+    fn trusted_types_directives_keep_names_and_dispositions_separate() {
+        let policy = make_policy(
+            "trusted-types App default; require-trusted-types-for 'script'; script-src 'self'",
+            "https://example.test/",
+        )
+        .with_report_only_headers(&[
+            "trusted-types Monitor; require-trusted-types-for 'script'".into(),
+        ]);
+        let (blocked, reported) = policy.trusted_type_policy_creation_violations("App", false);
+        assert!(blocked.is_empty());
+        assert_eq!(reported.len(), 1);
+        let (blocked, reported) = policy.trusted_type_policy_creation_violations("app", false);
+        assert_eq!((blocked.len(), reported.len()), (1, 1));
+        let (blocked, reported) = policy.trusted_type_policy_creation_violations("App", true);
+        assert_eq!((blocked.len(), reported.len()), (1, 1));
+        let (blocked, reported) = policy.trusted_type_sink_violations();
+        assert_eq!((blocked.len(), reported.len()), (1, 1));
+    }
+
+    #[test]
+    fn trusted_types_wildcard_and_duplicates_follow_their_own_grammar() {
+        let policy = make_policy(
+            "trusted-types * 'allow-duplicates'",
+            "https://example.test/",
+        );
+        assert!(
+            policy
+                .trusted_type_policy_creation_violations("any-name", true)
+                .0
+                .is_empty()
+        );
+        let policy = make_policy("trusted-types 'none'", "https://example.test/");
+        assert_eq!(
+            policy
+                .trusted_type_policy_creation_violations("default", false)
+                .0
+                .len(),
+            1
+        );
+        let policy = make_policy(
+            "require-trusted-types-for 'invalid'; trusted-types Good@name bad!name",
+            "https://example.test/",
+        );
+        assert!(policy.trusted_type_sink_violations().0.is_empty());
+        assert!(
+            policy
+                .trusted_type_policy_creation_violations("Good@name", false)
+                .0
+                .is_empty()
+        );
+        assert_eq!(
+            policy
+                .trusted_type_policy_creation_violations("bad!name", false)
+                .0
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn dynamic_compilation_uses_script_src_and_trusted_types_eval_only_with_requirement() {
+        let base = "https://example.test/";
+        let policy = make_policy(
+            "default-src 'self'; script-src 'trusted-types-eval' 'report-sample'",
+            base,
+        );
+        let (blocked, reported) = policy.script_compilation_violations();
+        assert_eq!((blocked.len(), reported.len()), (1, 0));
+        assert!(blocked[0].report_sample);
+
+        let policy = make_policy(
+            "default-src 'self'; script-src 'trusted-types-eval'; require-trusted-types-for 'script'",
+            base,
+        );
+        assert!(policy.script_compilation_violations().0.is_empty());
+
+        let mut policy = make_policy("require-trusted-types-for 'script'", base);
+        policy
+            .policies
+            .push(parse_policy("script-src 'trusted-types-eval'").unwrap());
+        assert!(policy.script_compilation_violations().0.is_empty());
+        let policy = policy.with_report_only_headers(&["script-src 'trusted-types-eval'".into()]);
+        assert!(policy.script_compilation_violations().1.is_empty());
+
+        let policy = make_policy("default-src 'unsafe-eval'", base)
+            .with_report_only_headers(&["script-src 'self' 'report-sample'".into()]);
+        let (blocked, reported) = policy.script_compilation_violations();
+        assert!(blocked.is_empty());
+        assert_eq!(reported.len(), 1);
+        assert!(reported[0].report_sample);
+    }
+
+    #[test]
+    fn inline_handler_uses_script_src_attr_instead_of_dynamic_code_permission() {
+        let policy = make_policy(
+            "script-src 'unsafe-eval'; script-src-attr 'none' 'report-sample'",
+            "https://example.test/",
+        );
+        let (blocked, reported) = policy.script_attribute_violations();
+        assert_eq!((blocked.len(), reported.len()), (1, 0));
+        assert!(blocked[0].report_sample);
+        assert!(policy.script_compilation_violations().0.is_empty());
+
+        let policy = make_policy("script-src 'unsafe-inline'", "https://example.test/");
+        assert!(policy.script_attribute_violations().0.is_empty());
+        assert_eq!(policy.script_compilation_violations().0.len(), 1);
+    }
+
+    #[test]
     fn default_src_falls_back_and_self_matches_case_insensitively() {
-        let policy = policy("default-src 'self'", "https://Example.test/index.html");
+        let policy = make_policy("default-src 'self'", "https://Example.test/index.html");
         assert!(policy.allows_url(
             ResourceType::Script,
             &"https://example.test/a.js".parse().unwrap()
@@ -688,13 +1046,51 @@ mod tests {
     #[test]
     fn inline_requires_unsafe_inline() {
         assert!(
-            !policy("script-src 'self'", "https://example.test/")
+            !make_policy("script-src 'self'", "https://example.test/")
                 .allows_inline(ResourceType::Script)
         );
         assert!(
-            policy("script-src 'unsafe-inline'", "https://example.test/")
+            make_policy("script-src 'unsafe-inline'", "https://example.test/")
                 .allows_inline(ResourceType::Script)
         );
+    }
+
+    #[test]
+    fn script_nonce_allows_matching_elements_and_rejects_unsafe_inline_fallback() {
+        let policy = make_policy(
+            "script-src 'nonce-AbC+_=' 'unsafe-inline'",
+            "https://example.test/",
+        );
+        for reference in ["inline", "https://other.test/script.js"] {
+            assert!(
+                policy
+                    .script_policy_violations_with_nonce(reference, 0, Some("AbC+_="), false)
+                    .is_empty()
+            );
+            assert_eq!(
+                policy
+                    .script_policy_violations_with_nonce(reference, 0, Some("abc+_="), false)
+                    .len(),
+                1
+            );
+            assert_eq!(
+                policy
+                    .script_policy_violations_with_nonce(reference, 0, None, false)
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_nonce_sources_do_not_disable_unsafe_inline() {
+        for malformed in ["a=b", "a===", "=", "a b"] {
+            let policy = make_policy(
+                &format!("script-src 'nonce-{malformed}' 'unsafe-inline'"),
+                "https://example.test/",
+            );
+            assert!(policy.allows_inline(ResourceType::Script), "{malformed}");
+        }
     }
 
     #[test]
@@ -704,7 +1100,7 @@ mod tests {
             "'none' 'report-sample'",
             "'REPORT-SAMPLE'",
         ] {
-            let policy = policy(&format!("script-src {sources}"), "https://example.test/");
+            let policy = make_policy(&format!("script-src {sources}"), "https://example.test/");
             assert!(!policy.allows_inline(ResourceType::Script), "{sources}");
             assert!(
                 !policy.allows_inline_attribute(ResourceType::Script),
@@ -715,7 +1111,7 @@ mod tests {
                 "{sources}"
             );
         }
-        let policy = policy(
+        let policy = make_policy(
             "script-src 'unsafe-inline' 'report-sample'",
             "https://example.test/",
         );
@@ -729,7 +1125,7 @@ mod tests {
             (ResourceType::Script, "script-src"),
             (ResourceType::Style, "style-src"),
         ] {
-            let elements_blocked = policy(
+            let elements_blocked = make_policy(
                 &format!("{directive} 'unsafe-inline'; {directive}-elem 'none'"),
                 "https://example.test/",
             );
@@ -739,7 +1135,7 @@ mod tests {
                 "{directive}"
             );
 
-            let attributes_blocked = policy(
+            let attributes_blocked = make_policy(
                 &format!("{directive} 'unsafe-inline'; {directive}-attr 'none'"),
                 "https://example.test/",
             );
@@ -749,7 +1145,7 @@ mod tests {
                 "{directive}"
             );
 
-            let element_source = policy(
+            let element_source = make_policy(
                 &format!("{directive} 'none'; {directive}-elem https://example.test/allowed/"),
                 "https://example.test/",
             );
@@ -798,7 +1194,7 @@ mod tests {
                     false,
                 ),
             ] {
-                let policy = policy(&text, "https://example.test/");
+                let policy = make_policy(&text, "https://example.test/");
                 assert_eq!(
                     policy.blocking_policy_texts_after_redirects(resource, reference, 0),
                     vec![PolicyViolation {
@@ -821,7 +1217,7 @@ mod tests {
             ("style-src 'report-sample'; style-src-attr", false),
             ("style-src 'none'; style-src-elem 'report-sample'", false),
         ] {
-            let policy = policy(text, "https://example.test/");
+            let policy = make_policy(text, "https://example.test/");
             assert!(
                 !policy.allows_inline_attribute(ResourceType::Style),
                 "{text}"
@@ -897,7 +1293,7 @@ mod tests {
             ("report-sample", false),
         ] {
             let text = format!("SCRIPT-SRC {token}");
-            let policy = policy(&text, "https://example.test/");
+            let policy = make_policy(&text, "https://example.test/");
             assert_eq!(
                 policy.blocking_policy_texts_after_redirects(ResourceType::Script, "inline", 0),
                 vec![PolicyViolation {
@@ -911,8 +1307,8 @@ mod tests {
     #[test]
     fn external_violations_never_opt_in_to_inline_samples() {
         let text = "default-src 'report-sample'";
-        let policy =
-            policy(text, "https://example.test/").with_report_only_headers(&[text.to_string()]);
+        let policy = make_policy(text, "https://example.test/")
+            .with_report_only_headers(&[text.to_string()]);
         for resource in [ResourceType::Script, ResourceType::Style] {
             for (reference, redirects) in [
                 ("https://example.test/resource", 0),
@@ -951,7 +1347,7 @@ mod tests {
 
     #[test]
     fn host_scheme_and_none_sources_match() {
-        let parsed = policy(
+        let parsed = make_policy(
             "connect-src https://api.example.test:8443 https:",
             "https://example.test/",
         );
@@ -964,7 +1360,7 @@ mod tests {
             &"https://other.test/v1".parse().unwrap()
         ));
         assert!(
-            !policy("connect-src 'none'", "https://example.test/").allows_url(
+            !make_policy("connect-src 'none'", "https://example.test/").allows_url(
                 ResourceType::Connect,
                 &"https://example.test/api".parse().unwrap()
             )
@@ -991,14 +1387,35 @@ mod tests {
 
     #[test]
     fn websocket_scheme_is_checked_against_its_transport_source() {
-        let policy = policy("connect-src wss:", "https://example.test/");
+        let policy = make_policy("connect-src wss:", "https://example.test/");
         assert!(policy.allows_reference(ResourceType::Connect, "wss://socket.example.test/stream"));
         assert!(!policy.allows_reference(ResourceType::Connect, "ws://socket.example.test/stream"));
     }
 
     #[test]
+    fn unrelated_policy_does_not_report_an_unparsed_connect_reference() {
+        let document = TreeBuilder::parse("<html><head></head><body></body></html>").document();
+        let policy = CspPolicy::from_headers_and_document(
+            &["trusted-types Allowed".into(), "connect-src 'none'".into()],
+            &document,
+            "https://example.test/",
+        );
+        assert_eq!(
+            policy.blocking_policy_texts_after_redirects(
+                ResourceType::Connect,
+                "ws:/common/blank.html",
+                0,
+            ),
+            vec![PolicyViolation {
+                serialized: "connect-src 'none'".into(),
+                report_sample: false,
+            }],
+        );
+    }
+
+    #[test]
     fn host_sources_without_scheme_use_the_document_scheme() {
-        let policy = policy("connect-src api.example.test", "https://example.test/");
+        let policy = make_policy("connect-src api.example.test", "https://example.test/");
         assert!(policy.allows_reference(ResourceType::Connect, "https://api.example.test/v1"));
         assert!(!policy.allows_reference(ResourceType::Connect, "http://api.example.test/v1"));
     }
@@ -1032,7 +1449,7 @@ mod tests {
 
     #[test]
     fn host_source_paths_keep_case_sensitive_matching() {
-        let policy = policy(
+        let policy = make_policy(
             "script-src https://example.test/CasePath/",
             "https://example.test/",
         );
@@ -1057,7 +1474,7 @@ mod tests {
             ("/allowed.js", "/allowed.js/child", false),
             ("/", "/any/path", true),
         ] {
-            let policy = policy(
+            let policy = make_policy(
                 &format!("script-src https://example.test{source}"),
                 "https://example.test/",
             );
@@ -1084,7 +1501,7 @@ mod tests {
             ("/literal%xx", "/literal%xx", true),
             ("/%FF", "/%FE", false),
         ] {
-            let policy = policy(
+            let policy = make_policy(
                 &format!("script-src https://example.test{source}"),
                 "https://example.test/",
             );
@@ -1099,7 +1516,7 @@ mod tests {
 
     #[test]
     fn redirects_skip_paths_but_still_check_scheme_host_and_port() {
-        let policy = policy(
+        let policy = make_policy(
             "script-src https://example.test:8443/entry.js",
             "https://example.test/",
         );
@@ -1125,7 +1542,7 @@ mod tests {
 
     #[test]
     fn opaque_documents_reject_unresolvable_relative_references() {
-        let policy = policy("script-src 'self'", "");
+        let policy = make_policy("script-src 'self'", "");
         assert!(!policy.allows_reference(ResourceType::Script, "app.js"));
         assert!(CspPolicy::default().allows_reference(ResourceType::Script, "app.js"));
     }

@@ -416,7 +416,7 @@ fn iframe_script_onload_replaces_the_body_load_handler() {
     let server = FixtureWorker::spawn(move || {
         let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
-        let body = "<body onload='parent.childBodyLoaded = true'><script>onload = () => { parent.childLoaded = true; }</script></body>";
+        let body = "<body onload='parent.childBodyLoaded = true'><script>parent.childScriptRan = true; onload = () => { parent.childLoaded = true; }</script></body>";
         write!(
             stream,
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -432,13 +432,13 @@ fn iframe_script_onload_replaces_the_body_load_handler() {
     .document();
     let mut runtime = JsRuntime::with_document_and_url(document, &url).unwrap();
     runtime
-        .eval("globalThis.childLoaded = false; globalThis.childBodyLoaded = false")
+        .eval("globalThis.childLoaded = false; globalThis.childBodyLoaded = false; globalThis.childScriptRan = false")
         .unwrap();
     let base = url.parse().unwrap();
     assert!(runtime.execute_document_scripts(Some(&base)).is_empty());
     runtime.tick(0).unwrap();
     let diagnostic = runtime
-        .eval("JSON.stringify({childLoaded, childBodyLoaded, childOnload: typeof document.querySelector('iframe').contentWindow.onload})")
+        .eval("JSON.stringify({childLoaded, childBodyLoaded, childScriptRan, childOnload: String(document.querySelector('iframe').contentWindow.onload), childBodyOnload: String(document.querySelector('iframe').contentDocument.body.onload)})")
         .unwrap()
         .as_string()
         .unwrap()
@@ -446,7 +446,7 @@ fn iframe_script_onload_replaces_the_body_load_handler() {
     let errors = runtime.take_task_errors();
     assert!(
         runtime
-            .eval("childLoaded === true && childBodyLoaded === false")
+            .eval("childScriptRan === true && childLoaded === true && childBodyLoaded === false")
             .unwrap()
             .to_boolean(),
         "{diagnostic}, errors={errors:?}"

@@ -25,6 +25,43 @@ collect_pattern \
 collect_pattern "/css/css-logical/"
 collect_pattern "/reporting/" "/content-security-policy/securitypolicyviolation/constructor-required-fields.html"
 collect_pattern \
+  "/trusted-types/support/" \
+  "/trusted-types/Window-TrustedTypes.html" \
+  "/trusted-types/TrustedTypePolicyFactory-createPolicy-unenforced.html" \
+  "/trusted-types/TrustedTypePolicyFactory-isXXX.html" \
+  "/trusted-types/TrustedTypePolicyFactory-createPolicy-cspTests.html" \
+  "/trusted-types/trusted-types-reporting-for-Element-innerHTML.html" \
+  "/trusted-types/trusted-types-reporting-for-DOMParser-parseFromString.html" \
+  "/trusted-types/Window-block-eval-function-constructor.html" \
+  "/trusted-types/eval-with-permissive-csp.html" \
+  "/trusted-types/eval-csp-tt-default-policy.html" \
+  "/trusted-types/eval-csp-tt-default-policy-mutate.html" \
+  "/trusted-types/block-string-assignment-to-Window-setTimeout-setInterval.html" \
+  "/trusted-types/block-string-assignment-to-Element-insertAdjacentHTML.html" \
+  "/trusted-types/trusted-types-reporting-for-Window-eval.html" \
+  "/trusted-types/trusted-types-reporting-for-Window-function-constructor.html" \
+  "/trusted-types/trusted-types-reporting-for-Window-DedicatedWorker-constructor.html" \
+  "/trusted-types/TrustedTypePolicyFactory-getPropertyType.tentative.html" \
+  "/trusted-types/TrustedTypePolicyFactory-getAttributeType.html" \
+  "/trusted-types/Window-setTimeout-setInterval.html" \
+  "/trusted-types/block-string-assignment-to-Document-write.html" \
+  "/trusted-types/block-string-assignment-to-Element-outerHTML.html" \
+  "/trusted-types/block-string-assignment-to-Element-setAttribute.html" \
+  "/trusted-types/block-string-assignment-to-Element-setAttributeNS.html" \
+  "/trusted-types/block-string-assignment-to-HTMLIFrameElement-srcdoc.html" \
+  "/trusted-types/block-string-assignment-to-Range-createContextualFragment.html" \
+  "/trusted-types/trusted-types-reporting-for-HTMLScriptElement.html" \
+  "/trusted-types/trusted-types-reporting-for-HTMLScriptElement-children-change.html" \
+  "/trusted-types/block-string-assignment-to-Document-parseHTMLUnsafe.html" \
+  "/trusted-types/block-string-assignment-to-Element-setHTMLUnsafe.html" \
+  "/trusted-types/block-string-assignment-to-ShadowRoot-setHTMLUnsafe.html" \
+  "/trusted-types/ServiceWorkerContainer-register.https.html" \
+  "/trusted-types/TrustedType-AttributeNodes.html" \
+  "/trusted-types/block-string-assignment-to-attribute-via-attribute-node.html" \
+  "/trusted-types/block-string-assignment-to-ShadowRoot-innerHTML.html" \
+  "/trusted-types/trusted-types-reporting-for-ShadowRoot-innerHTML.html" \
+  "/trusted-types/Element-setAttribute-setAttributeNS-sinks.tentative.html"
+collect_pattern \
   "/dom/events/AddEventListenerOptions-once.any.js" \
   "/dom/events/AddEventListenerOptions-passive.any.js" \
   "/dom/events/AddEventListenerOptions-signal.any.js"

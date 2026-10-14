@@ -490,11 +490,26 @@ fn adopted_node_keeps_its_creation_realm_until_references_are_released() {
         runtime.host_state.borrow().node_lifetimes.document_count(),
         3
     );
+    let old_document_id = runtime.eval("oldDocumentId").unwrap().as_number().unwrap() as usize;
+    assert!(
+        runtime
+            .host_state
+            .borrow()
+            .retired_document_csp
+            .contains_key(&old_document_id)
+    );
     runtime.eval("held.remove(); held = null").unwrap();
     // Pending Promise reactions are real Realm roots until the checkpoint.
     runtime.run_jobs().unwrap();
     collect(&mut runtime);
     assert!(runtime.host_state.borrow().node_lifetimes.document_count() <= 2);
+    assert!(
+        !runtime
+            .host_state
+            .borrow()
+            .retired_document_csp
+            .contains_key(&old_document_id)
+    );
 }
 
 #[test]

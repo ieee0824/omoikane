@@ -75,6 +75,9 @@ mod dom_string;
 #[cfg(test)]
 mod dom_string_tests;
 mod errors;
+mod trusted_types;
+#[cfg(test)]
+mod trusted_types_tests;
 use errors::JsHostError;
 pub use errors::{FindInPageError, JsEvaluationError, NotificationPermissionError};
 #[cfg(test)]
@@ -292,6 +295,9 @@ thread_local! {
     static TEST_FETCH_RESPONSE_OVERRIDE: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
     static ACTIVE_HOST_STATE: RefCell<Option<Rc<RefCell<HostState>>>> = const { RefCell::new(None) };
     static ACTIVE_MODULE_DOCUMENT: Cell<Option<ActiveModuleDocument>> = const { Cell::new(None) };
+    // Only the browser's private inline-attribute compiler may skip the
+    // dynamic-code hook. The matching Function compilation consumes the grant.
+    static INLINE_HANDLER_COMPILE_CODE: RefCell<Option<JsString>> = const { RefCell::new(None) };
 }
 
 /// Host clipboard storage shared by all page runtimes in this process.
@@ -547,6 +553,43 @@ const DOM_BOOTSTRAP: &str = concat!(
 struct BrowserHostHooks;
 
 impl HostHooks for BrowserHostHooks {
+    fn trusted_script_value(&self, value: &JsValue) -> Option<JsString> {
+        trusted_types::script_value(value)
+    }
+
+    fn ensure_can_compile_strings(
+        &self,
+        realm: Realm,
+        _parameters: &[JsString],
+        _body: &JsString,
+        code: &JsString,
+        _direct: bool,
+        trusted_script: bool,
+        function_constructor: bool,
+        context: &mut Context,
+    ) -> JsResult<()> {
+        if function_constructor
+            && INLINE_HANDLER_COMPILE_CODE.with(|slot| {
+                let mut expected = slot.borrow_mut();
+                if expected.as_ref() == Some(code) {
+                    expected.take();
+                    true
+                } else {
+                    false
+                }
+            })
+        {
+            return Ok(());
+        }
+        trusted_types::ensure_script_compilation(
+            &realm,
+            code,
+            trusted_script,
+            function_constructor,
+            context,
+        )
+    }
+
     fn promise_rejection_tracker(
         &self,
         promise: &JsObject,
@@ -1658,6 +1701,14 @@ struct HostState {
     canonical_node_identity_resolver: Option<JsValue>,
     /// Bootstrap-private ReportingObserver dispatchers, one per Document Realm.
     report_observer_dispatchers: HashMap<usize, JsValue>,
+    /// Default policy callbacks belong to the target Document's realm,
+    /// including when an element is adopted or used through another realm.
+    /// Slots are TrustedHTML, TrustedScript, and TrustedScriptURL.
+    trusted_type_default_callbacks: HashMap<usize, [JsValue; 3]>,
+    /// Bounded one-use approvals for script text set through a trusted sink.
+    /// The digest includes descendant mutation revisions, so restoring the
+    /// same bytes after a child mutation cannot reuse an old approval.
+    trusted_script_text_approvals: HashMap<usize, trusted_types::ScriptTextApproval>,
     /// Legacy Window.event slots, isolated by the callback's Document realm.
     current_window_events: HashMap<usize, JsValue>,
     window_proxy_registry: Option<window_event::ProxyRegistry>,
@@ -1889,6 +1940,9 @@ struct HostState {
     /// fresh runtime starts with an empty (allow-all) policy and navigation
     /// replaces the entry before any page script executes.
     document_csp: HashMap<usize, CspPolicy>,
+    /// CSP snapshots for retained Realm constructors after their Document has
+    /// navigated away. Network APIs still require an active Document.
+    retired_document_csp: HashMap<usize, CspPolicy>,
     /// Iframe sandbox flags captured per active nested Document.
     document_sandbox: HashMap<usize, IframeSandboxPolicy>,
     csp_violations: Vec<CspViolation>,
@@ -1952,6 +2006,11 @@ unsafe impl Trace for HostState {
         }
         for dispatcher in self.report_observer_dispatchers.values() {
             unsafe { dispatcher.trace(tracer) };
+        }
+        for callbacks in self.trusted_type_default_callbacks.values() {
+            for callback in callbacks {
+                unsafe { callback.trace(tracer) };
+            }
         }
         for bindings in self.bootstrap_bindings.values() {
             unsafe { bindings.trace(tracer) };
@@ -2258,6 +2317,10 @@ impl HostState {
         let cookie_store = Arc::new(Mutex::new(crate::http::CookieJar::new()));
         let mut http_client = Client::new();
         http_client.set_shared_cookie_store(Arc::clone(&cookie_store));
+        // The parsed main Document already contains its meta CSP. Response
+        // headers can replace this snapshot before page scripts run, but a
+        // runtime without response headers must still enforce the meta policy.
+        let initial_csp = CspPolicy::from_headers_and_document(&[], &document, &location_href);
         let mut state = Self {
             runtime_identity: Rc::new(()),
             performance_start,
@@ -2278,6 +2341,8 @@ impl HostState {
             form_validation: form_validation::State::default(),
             canonical_node_identity_resolver: None,
             report_observer_dispatchers: HashMap::new(),
+            trusted_type_default_callbacks: HashMap::new(),
+            trusted_script_text_approvals: HashMap::new(),
             current_window_events: HashMap::new(),
             window_proxy_registry: None,
             bootstrap_bindings: HashMap::new(),
@@ -2411,7 +2476,8 @@ impl HostState {
             document_security_origins,
             retired_document_security_origins: HashMap::new(),
             next_opaque_origin_id: 2,
-            document_csp: HashMap::from([(document.identity(), CspPolicy::default())]),
+            document_csp: HashMap::from([(document.identity(), initial_csp)]),
+            retired_document_csp: HashMap::new(),
             document_sandbox: HashMap::new(),
             csp_violations: Vec::new(),
             csp_violation_keys: HashSet::new(),
@@ -3607,7 +3673,13 @@ impl HostState {
             self.retired_document_security_origins
                 .insert(document_id, origin);
         }
-        self.document_csp.remove(&document_id);
+        self.retired_document_csp.insert(
+            document_id,
+            self.document_csp.remove(&document_id).unwrap_or_default(),
+        );
+        self.trusted_type_default_callbacks.remove(&document_id);
+        self.trusted_script_text_approvals
+            .retain(|_, approval| approval.owner_document_id != document_id);
         self.document_sandbox.remove(&document_id);
         #[cfg(test)]
         self.document_script_executions.remove(&document_id);
@@ -3716,7 +3788,13 @@ impl HostState {
             self.retired_document_security_origins
                 .insert(document_id, origin);
         }
-        self.document_csp.remove(&document_id);
+        self.retired_document_csp.insert(
+            document_id,
+            self.document_csp.remove(&document_id).unwrap_or_default(),
+        );
+        self.trusted_type_default_callbacks.remove(&document_id);
+        self.trusted_script_text_approvals
+            .retain(|_, approval| approval.owner_document_id != document_id);
         self.document_sandbox.remove(&document_id);
         #[cfg(test)]
         self.document_script_executions.remove(&document_id);
@@ -3843,8 +3921,12 @@ impl HostState {
     /// Network CSP belongs to the calling Window Realm, including srcdoc.
     /// JavaScript expandos cannot select another Document's policy.
     fn csp_document_for_context(&self, context: &Context) -> JsResult<NodeHandle> {
-        let document_id = context
-            .realm()
+        self.csp_document_for_realm(context.realm())
+    }
+
+    /// Resolves CSP for a chosen Realm, including cross-Realm constructors.
+    fn csp_document_for_realm(&self, realm: &Realm) -> JsResult<NodeHandle> {
+        let document_id = realm
             .host_defined()
             .get::<ModuleDocumentId>()
             .map(|owner| owner.0)
@@ -3870,6 +3952,30 @@ impl HostState {
                     .with_message("network document is no longer live")
                     .into()
             })
+    }
+
+    /// Resolves the source Realm's policy for dynamic code. A retained Realm
+    /// keeps its original CSP even after navigation; it cannot borrow the new
+    /// Document's policy or regain access to network APIs.
+    fn dynamic_code_policy_for_realm(&self, realm: &Realm) -> JsResult<(usize, CspPolicy)> {
+        let document_id = realm
+            .host_defined()
+            .get::<ModuleDocumentId>()
+            .map_or_else(|| self.document.identity(), |owner| owner.0);
+        if self.document_is_active(document_id) {
+            let document = self.csp_document_for_realm(realm)?;
+            return Ok((document_id, self.csp_policy_for_document(&document)));
+        }
+        if self
+            .get_node(document_id)
+            .is_some_and(|document| document.node_type() == NodeType::Document)
+            && let Some(policy) = self.retired_document_csp.get(&document_id)
+        {
+            return Ok((document_id, policy.clone()));
+        }
+        Err(JsNativeError::eval()
+            .with_message("Script Document is no longer retained")
+            .into())
     }
 
     fn csp_policy_for_document(&self, document: &NodeHandle) -> CspPolicy {
@@ -10344,11 +10450,27 @@ impl JsRuntime {
 
         let document = self.document();
         let scripts = collect_script_elements(&document);
+        // This runtime starts from an already parsed tree. Reconstruct the
+        // parser's policy snapshots so a later meta CSP cannot block earlier
+        // scripts or their synchronous work.
+        let full_parser_policy = self.host_state.borrow().csp_policy_for_document(&document);
+        let parser_policies = scripts
+            .iter()
+            .map(|script| full_parser_policy.for_parser_script(&document, script))
+            .collect::<Vec<_>>();
         let mut errors = Vec::new();
         let mut deferred = Vec::new();
         let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
 
         for (script_index, script) in scripts.iter().enumerate() {
+            if let Some(policy) = self
+                .host_state
+                .borrow_mut()
+                .document_csp
+                .get_mut(&document.identity())
+            {
+                policy.use_parser_policies_from(&parser_policies[script_index]);
+            }
             let Some((
                 is_module,
                 is_defer,
@@ -10406,6 +10528,15 @@ impl JsRuntime {
                 log_scripts,
                 &mut errors,
             );
+        }
+
+        if let Some(policy) = self
+            .host_state
+            .borrow_mut()
+            .document_csp
+            .get_mut(&document.identity())
+        {
+            policy.use_parser_policies_from(&full_parser_policy);
         }
 
         // Execute deferred scripts. Each runs with its own insertion point set
@@ -10822,6 +10953,8 @@ impl Drop for JsRuntime {
         state.iframe_context_ids.clear();
         state.node_lifetimes = node_lifetime::NodeLifetimes::default();
         state.event_loop = EventLoop::default();
+        state.trusted_type_default_callbacks.clear();
+        state.trusted_script_text_approvals.clear();
         state.pending_resource_loads.clear();
         state.pending_forced_iframe_navigations.clear();
         state.worker_owner_realm = None;
@@ -12316,6 +12449,56 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_inner_html_native),
         ),
         (
+            js_string!("__omoikane_trusted_type_create"),
+            3,
+            NativeFunction::from_copy_closure(trusted_types::create_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_is"),
+            2,
+            NativeFunction::from_copy_closure(trusted_types::is_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_value"),
+            2,
+            NativeFunction::from_copy_closure(trusted_types::value_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_policy_check"),
+            2,
+            NativeFunction::from_copy_closure(trusted_types::policy_check_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_register_default"),
+            3,
+            NativeFunction::from_copy_closure(trusted_types::register_default_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_default_for_node"),
+            2,
+            NativeFunction::from_copy_closure(trusted_types::default_for_node_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_sink_requires"),
+            1,
+            NativeFunction::from_copy_closure(trusted_types::sink_requires_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_type_sink_violation"),
+            3,
+            NativeFunction::from_copy_closure(trusted_types::sink_violation_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_remember_script_text"),
+            3,
+            NativeFunction::from_copy_closure(trusted_types::remember_script_text_native),
+        ),
+        (
+            js_string!("__omoikane_trusted_take_script_text_approval"),
+            2,
+            NativeFunction::from_copy_closure(trusted_types::take_script_text_approval_native),
+        ),
+        (
             js_string!("__omoikane_parse_contextual_fragment"),
             3,
             NativeFunction::from_copy_closure(parse_contextual_fragment_native),
@@ -12337,13 +12520,18 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_eval_inserted_inline_script"),
-            1,
+            2,
             NativeFunction::from_copy_closure(eval_inserted_inline_script_native),
         ),
         (
             js_string!("__omoikane_discard_prepared_inline_script"),
             1,
             NativeFunction::from_copy_closure(discard_prepared_inline_script_native),
+        ),
+        (
+            js_string!("__omoikane_compile_inline_handler"),
+            3,
+            NativeFunction::from_copy_closure(compile_inline_handler_native),
         ),
         (
             js_string!("__omoikane_record_inserted_script_error"),
@@ -15668,7 +15856,14 @@ fn schedule_timer_from_js(
             args: extra_args,
         }
     } else {
-        TimerPayload::Source(handler.to_string(context)?.to_std_string_escaped())
+        let sink = if repeat {
+            "Window setInterval"
+        } else {
+            "Window setTimeout"
+        };
+        let source = trusted_types::compliant_script_for_context(&handler, sink, context)?;
+        trusted_types::enforce_script_source_policy(&context.realm().clone(), &source, context)?;
+        TimerPayload::Source(source.to_std_string_escaped())
     };
     let payload = bind_timer_payload_to_current_realm(context, payload);
 
@@ -16181,6 +16376,9 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         parent.append_child(child.clone());
         {
             let mut state = state.borrow_mut();
+            if target_document.is_none() && parent.node_type() == NodeType::Element {
+                trusted_types::invalidate_approvals_for_detached_element(&mut state, &child);
+            }
             state.register_tree(&child);
             if let Some(document) = &source_document {
                 state.mark_document_style_dirty(document);
@@ -19959,8 +20157,9 @@ fn collect_inserted_scripts_native(
 ///
 /// `undefined` means the node has not reached an active document and may be
 /// retried. `null` means preparation completed without classic inline source
-/// (external/non-classic/blocked/already-started). `true` means the source and
-/// its security context are saved for synchronous, one-shot evaluation.
+/// (external/non-classic/blocked/already-started). A string is the saved source
+/// snapshot; the private bootstrap applies Trusted Types conversion before
+/// one-shot evaluation, which revalidates the saved Document and CSP policy.
 fn prepare_inserted_inline_script_native(
     _: &JsValue,
     args: &[JsValue],
@@ -19994,10 +20193,6 @@ fn prepare_inserted_inline_script_native(
         if !state.sandbox_allows_scripts_for_node(&node) {
             return Ok(JsValue::null());
         }
-        if !state.csp_allows_script_for_node(&node, "inline") {
-            state.record_csp_violation_for_node(&node, ResourceType::Script, "inline");
-            return Ok(JsValue::null());
-        }
         let Some(document) = document_root_for_node(&node) else {
             return Ok(JsValue::null());
         };
@@ -20006,8 +20201,9 @@ fn prepare_inserted_inline_script_native(
             source: collect_text_content(&node),
             policy: state.csp_policy_for_document(&document),
         };
+        let source = JsValue::from(js_string!(prepared.source.as_str()));
         state.prepared_inserted_inline_scripts.insert(id, prepared);
-        Ok(JsValue::from(true))
+        Ok(source)
     })
 }
 
@@ -20031,16 +20227,22 @@ fn eval_inserted_inline_script_native(
             })
     })?;
     ensure_same_origin_node(context, id)?;
-    let (document_url, start_position, realm) = with_host_state(|state| {
-        let state = state.borrow();
+    // Only the bootstrap's private binding supplies this string, after Trusted
+    // Types approval or default-policy conversion of the prepared snapshot.
+    let source = args
+        .get(1)
+        .and_then(JsValue::as_string)
+        .ok_or_else(|| JsNativeError::typ().with_message("inline script source must be a string"))?
+        .to_std_string_escaped();
+    let (document_url, start_position, realm, allowed) = with_host_state(|state| {
+        let mut state = state.borrow_mut();
         let node = state.get_node(id).ok_or_else(|| {
             JsNativeError::reference().with_message("script node no longer exists")
         })?;
-        let document_id = document_root_for_node(&node)
-            .ok_or_else(|| {
-                JsNativeError::reference().with_message("script document no longer exists")
-            })?
-            .identity();
+        let document = document_root_for_node(&node).ok_or_else(|| {
+            JsNativeError::reference().with_message("script document no longer exists")
+        })?;
+        let document_id = document.identity();
         if document_id != prepared.document_id
             || !state.document_is_active(document_id)
             || !state.sandbox_allows_scripts_for_node(&node)
@@ -20072,21 +20274,24 @@ fn eval_inserted_inline_script_native(
         .ok_or_else(|| {
             JsNativeError::reference().with_message("script document Realm is no longer live")
         })?;
+        let document_url = state.document_urls.get(&document_id).cloned();
+        let allowed = state.check_inline_script_source(&document, &node, &source);
         Ok::<_, JsError>((
-            state.document_urls.get(&document_id).cloned(),
+            document_url,
             node.script_source_position().unwrap_or((1, 1)),
             realm,
+            allowed,
         ))
     })?;
+    if !allowed {
+        return Ok(JsValue::undefined());
+    }
     let previous_realm = context.enter_realm(realm);
     let result = (|| {
         let metadata = script_errors::classic_script_metadata(false, document_url.clone());
         Script::parse_with_host_defined(
-            Source::from_reader(
-                prepared.source.as_bytes(),
-                document_url.as_deref().map(Path::new),
-            )
-            .with_start_position(start_position.0, start_position.1),
+            Source::from_reader(source.as_bytes(), document_url.as_deref().map(Path::new))
+                .with_start_position(start_position.0, start_position.1),
             None,
             metadata,
             context,
@@ -20111,6 +20316,155 @@ fn discard_prepared_inline_script_native(
             .remove(&id);
         Ok(JsValue::undefined())
     })
+}
+
+struct InlineHandlerCompileGrant;
+
+impl Drop for InlineHandlerCompileGrant {
+    fn drop(&mut self) {
+        INLINE_HANDLER_COMPILE_CODE.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+/// Compiles an inline event-handler attribute in its owning Document Realm.
+/// Its CSP check is for an inline attribute, not for dynamic string
+/// compilation. The private Function constructor grant is consumed by exactly
+/// one matching host hook; author callbacks cannot run before that hook.
+fn inline_handler_security_context(
+    id: usize,
+    name: &str,
+    source: &str,
+    current_realm: &Realm,
+) -> JsResult<(
+    usize,
+    Realm,
+    Vec<csp::PolicyViolation>,
+    Vec<csp::PolicyViolation>,
+)> {
+    with_host_state(|host| {
+        let state = host.borrow();
+        let node = state.get_node(id).ok_or_else(|| {
+            JsNativeError::reference().with_message("handler element no longer exists")
+        })?;
+        if node.node_type() != NodeType::Element
+            || !name.to_ascii_lowercase().starts_with("on")
+            || node.get_attribute(name).as_deref() != Some(source)
+        {
+            return Err(JsNativeError::typ()
+                .with_message("handler attribute changed before compilation")
+                .into());
+        }
+        let document = document_root_for_node(&node)
+            .or_else(|| state.node_lifetime_owner(id))
+            .ok_or_else(|| JsNativeError::reference().with_message("handler Document is gone"))?;
+        let document_id = document.identity();
+        // Bootstrap runs inside a new child Realm before its browsing-context
+        // entry stores that Realm. The caller can already compile handlers for
+        // its own Document, including parser-authored body handlers that must
+        // be installed before the first page script executes.
+        let realm = current_realm
+            .host_defined()
+            .get::<ModuleDocumentId>()
+            .filter(|owner| owner.0 == document_id && state.document_is_active(document_id))
+            .map(|_| current_realm.clone())
+            .or_else(|| {
+                if document_id == state.document.identity() {
+                    state.main_realm.clone()
+                } else {
+                    state
+                        .iframe_documents
+                        .values()
+                        .find(|entry| entry.document.identity() == document_id)
+                        .and_then(|entry| entry.realm.clone())
+                        .or_else(|| {
+                            state
+                                .auxiliary_contexts
+                                .values()
+                                .find(|entry| entry.document.identity() == document_id)
+                                .and_then(|entry| entry.realm.clone())
+                        })
+                }
+            })
+            .ok_or_else(|| JsNativeError::reference().with_message("handler Realm is gone"))?;
+        let policy = state.csp_policy_for_document(&document);
+        let (blocked, reported) = policy.script_attribute_violations();
+        Ok((document_id, realm, blocked, reported))
+    })
+}
+
+fn compile_inline_handler_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
+    let name = args
+        .get(1)
+        .and_then(JsValue::as_string)
+        .ok_or_else(|| JsNativeError::typ().with_message("handler name must be a string"))?
+        .to_std_string_escaped();
+    let source = args
+        .get(2)
+        .and_then(JsValue::as_string)
+        .ok_or_else(|| JsNativeError::typ().with_message("handler source must be a string"))?
+        .to_std_string_escaped();
+    let (document_id, realm, blocked, reported) =
+        inline_handler_security_context(id, &name, &source, context.realm())?;
+    if !blocked.is_empty() || !reported.is_empty() {
+        with_host_state(|host| {
+            let mut state = host.borrow_mut();
+            state.queue_inline_handler_violation(
+                document_id,
+                id,
+                blocked.clone(),
+                "enforce",
+                &source,
+            );
+            state.queue_inline_handler_violation(document_id, id, reported, "report", &source);
+            Ok(())
+        })?;
+    }
+    if !blocked.is_empty() {
+        return Ok(JsValue::null());
+    }
+    let previous_realm = context.enter_realm(realm);
+    let result = (|| {
+        let constructor = context.intrinsics().constructors().function().constructor();
+        let realm = context.realm().clone();
+        let new_target: JsObject = FunctionObjectBuilder::new(
+            &realm,
+            NativeFunction::from_copy_closure(|_, _, _| Ok(JsValue::undefined())),
+        )
+        .constructor(true)
+        .build()
+        .into();
+        new_target.define_property_or_throw(
+            js_string!("prototype"),
+            boa_engine::property::PropertyDescriptor::builder()
+                .value(context.intrinsics().constructors().function().prototype())
+                .writable(false)
+                .configurable(false),
+            context,
+        )?;
+        let code = JsString::from(format!("function anonymous(event\n) {{\n{source}\n}}").as_str());
+        INLINE_HANDLER_COMPILE_CODE.with(|slot| *slot.borrow_mut() = Some(code));
+        let _grant = InlineHandlerCompileGrant;
+        constructor
+            .construct(
+                &[
+                    JsValue::from(js_string!("event")),
+                    JsValue::from(js_string!(source.as_str())),
+                ],
+                Some(&new_target),
+                context,
+            )
+            .map(Into::into)
+    })();
+    context.enter_realm(previous_realm);
+    result
 }
 
 /// Records a page exception from synchronous dynamic inline script execution.
@@ -20346,6 +20700,9 @@ fn insert_before_native_impl(
         }
         {
             let mut state = state.borrow_mut();
+            if target_document.is_none() && parent.node_type() == NodeType::Element {
+                trusted_types::invalidate_approvals_for_detached_element(&mut state, &new_node);
+            }
             if let Some(document) = &source_document {
                 state.mark_document_style_dirty(document);
             }

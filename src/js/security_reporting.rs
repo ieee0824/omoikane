@@ -132,6 +132,12 @@ pub(super) fn loaded_document_referrer(
 /// Converts the runtime's inline markers and relative request references into
 /// the standard resource serialization, before the asynchronous task is queued.
 fn blocked_url_for_report(reference: &str, base_url: &str) -> String {
+    if matches!(
+        reference,
+        "trusted-types-sink" | "trusted-types-policy" | "eval"
+    ) {
+        return reference.to_owned();
+    }
     if csp::is_inline_reference(reference) {
         return "inline".to_owned();
     }
@@ -776,8 +782,24 @@ impl HostState {
             return true;
         };
         let policy = self.csp_policy_for_document(&document);
-        let monitored =
-            policy.report_only_policy_texts_after_redirects(resource_type, reference, redirects);
+        let nonce = node.get_attribute("nonce");
+        let violations = |report_only| {
+            if resource_type == ResourceType::Script
+                && node.local_name().as_deref() == Some("script")
+            {
+                policy.script_policy_violations_with_nonce(
+                    reference,
+                    redirects,
+                    nonce.as_deref(),
+                    report_only,
+                )
+            } else if report_only {
+                policy.report_only_policy_texts_after_redirects(resource_type, reference, redirects)
+            } else {
+                policy.blocking_policy_texts_after_redirects(resource_type, reference, redirects)
+            }
+        };
+        let monitored = violations(true);
         self.queue_policy_violation_events_for_node(
             node,
             resource_type,
@@ -785,11 +807,10 @@ impl HostState {
             monitored,
             "report",
         );
-        if policy.allows_reference_after_redirects(resource_type, reference, redirects) {
+        let enforced = violations(false);
+        if enforced.is_empty() {
             return true;
         }
-        let enforced =
-            policy.blocking_policy_texts_after_redirects(resource_type, reference, redirects);
         self.queue_policy_violation_events_for_node(
             node,
             resource_type,
@@ -807,18 +828,19 @@ impl HostState {
         reference: &str,
     ) -> bool {
         let policy = self.csp_policy_for_node(node);
+        let nonce = (node.local_name().as_deref() == Some("script"))
+            .then(|| node.get_attribute("nonce"))
+            .flatten();
         self.queue_policy_violation_events_for_node(
             node,
             ResourceType::Script,
             reference,
-            policy.report_only_policy_texts(ResourceType::Script, reference),
+            policy.script_policy_violations_with_nonce(reference, 0, nonce.as_deref(), true),
             "report",
         );
-        if reference == "inline" {
-            policy.allows_inline(ResourceType::Script)
-        } else {
-            policy.allows_reference(ResourceType::Script, reference)
-        }
+        policy
+            .script_policy_violations_with_nonce(reference, 0, nonce.as_deref(), false)
+            .is_empty()
     }
 
     /// Checks an already captured inline source, including both monitoring and
@@ -835,22 +857,25 @@ impl HostState {
         let policy = self.csp_policy_for_document(document);
         let sample = csp::inline_report_sample(source);
         let target = (document.identity(), Some(node.identity()));
+        let nonce = node.get_attribute("nonce");
         self.enqueue_policy_violation_events(
             target,
             ResourceType::Script,
             "inline",
-            policy.report_only_policy_texts(ResourceType::Script, "inline"),
+            policy.script_policy_violations_with_nonce("inline", 0, nonce.as_deref(), true),
             "report",
             &sample,
         );
-        if policy.allows_inline(ResourceType::Script) {
+        let enforced =
+            policy.script_policy_violations_with_nonce("inline", 0, nonce.as_deref(), false);
+        if enforced.is_empty() {
             return true;
         }
         self.enqueue_policy_violation_events(
             target,
             ResourceType::Script,
             "inline",
-            policy.blocking_policy_texts_after_redirects(ResourceType::Script, "inline", 0),
+            enforced,
             "enforce",
             &sample,
         );
@@ -1068,6 +1093,76 @@ impl HostState {
         sample: &str,
         source: Option<&CspSourceLocation>,
     ) {
+        let directive = match resource_type {
+            ResourceType::Script => "script-src-elem",
+            ResourceType::Style if blocked_uri.starts_with("style-attribute:") => "style-src-attr",
+            ResourceType::Style => "style-src-elem",
+            _ => resource_type.directive(),
+        };
+        self.enqueue_policy_violation_events_with_directive(
+            target,
+            directive,
+            blocked_uri,
+            policies,
+            disposition,
+            sample,
+            source,
+        );
+    }
+
+    /// Queues Trusted Types violations through the ordinary CSP event and
+    /// reporting delivery path, retaining the directive's distinct URI.
+    pub(super) fn queue_trusted_types_violation(
+        &mut self,
+        document_id: usize,
+        directive: &str,
+        blocked_uri: &str,
+        policies: Vec<csp::PolicyViolation>,
+        disposition: &str,
+        sample: &str,
+        source: Option<&CspSourceLocation>,
+    ) {
+        self.enqueue_policy_violation_events_with_directive(
+            (document_id, None),
+            directive,
+            blocked_uri,
+            policies,
+            disposition,
+            sample,
+            source,
+        );
+    }
+
+    /// Queues an inline handler violation with the attribute as event target.
+    pub(super) fn queue_inline_handler_violation(
+        &mut self,
+        document_id: usize,
+        element_id: usize,
+        policies: Vec<csp::PolicyViolation>,
+        disposition: &str,
+        source: &str,
+    ) {
+        self.enqueue_policy_violation_events_with_directive(
+            (document_id, Some(element_id)),
+            "script-src-attr",
+            "inline",
+            policies,
+            disposition,
+            &csp::inline_report_sample(source),
+            None,
+        );
+    }
+
+    fn enqueue_policy_violation_events_with_directive(
+        &mut self,
+        target: (usize, Option<usize>),
+        directive: &str,
+        blocked_uri: &str,
+        policies: Vec<csp::PolicyViolation>,
+        disposition: &str,
+        sample: &str,
+        source: Option<&CspSourceLocation>,
+    ) {
         let (document_id, element_id) = target;
         let response_status = self
             .document_reporting
@@ -1082,12 +1177,6 @@ impl HostState {
         let request_base = self
             .base_url_for_document(document_id)
             .map_or_else(|| document_url.clone(), |url| url.to_string());
-        let directive = match resource_type {
-            ResourceType::Script => "script-src-elem",
-            ResourceType::Style if blocked_uri.starts_with("style-attribute:") => "style-src-attr",
-            ResourceType::Style => "style-src-elem",
-            _ => resource_type.directive(),
-        };
         let source_file = source.map(|source| strip_url_for_report(&source.source_file));
         let line_number = source.map(|source| source.line_number);
         let column_number = source.map(|source| source.column_number);
