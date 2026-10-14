@@ -17490,7 +17490,7 @@ export let __omoikane_cookie_change_reset;
     configurable: true,
     enumerable: true,
     writable: true,
-    value: function hasStorageAccess() {
+    value: async function hasStorageAccess() {
       const status = nativeStorageAccessState(storageAccessDocumentId(this));
       return status === "inactive" ? Promise.reject(storageAccessRejection(status)) :
         Promise.resolve(status === "granted");
@@ -17500,7 +17500,7 @@ export let __omoikane_cookie_change_reset;
     configurable: true,
     enumerable: true,
     writable: true,
-    value: function requestStorageAccess() {
+    value: async function requestStorageAccess() {
       const status = nativeStorageAccessRequest(
         storageAccessDocumentId(this), fullscreenTransientActivation,
       );

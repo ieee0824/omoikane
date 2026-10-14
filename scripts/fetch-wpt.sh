@@ -194,6 +194,7 @@ collect_pattern "/visual-viewport/"
 collect_pattern "/page-visibility/"
 collect_pattern "/web-locks/"
 collect_pattern "/cookiestore/"
+collect_pattern "/storage-access-api/"
 collect_pattern "/css/css-multicol/parsing/" "/css/support/shorthand-testcommon.js"
 collect_pattern \
   "/css/css-overscroll-behavior/parsing/overscroll-behavior-valid.html" \

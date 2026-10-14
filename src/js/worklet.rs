@@ -9,6 +9,9 @@ pub(super) struct State {
     /// browsing context (including `CSS.paintWorklet`). The runtime is lazily
     /// constructed on the first `addModule()` call.
     runtime: Option<WorkletRuntimeHandle>,
+    /// Origin of the single runtime. A different-origin Document must not
+    /// evaluate into or inspect an existing WorkletGlobalScope.
+    runtime_origin: Option<StorageOrigin>,
     next_id: u64,
     /// Worklet globals point back to their owning page only through this
     /// control-plane handle. It is cleared during teardown so the cycle does
@@ -33,6 +36,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             runtime: None,
+            runtime_origin: None,
             next_id: 1,
             owner: None,
             id: None,
@@ -52,7 +56,11 @@ type WorkletRuntimeHandle = Rc<RefCell<JsRuntime>>;
 /// handle before borrowing the child realm breaks the owner/child cycle even
 /// when navigation drops the page while a module task is pending.
 pub(super) fn terminate_worklet_runtime(state: &Rc<RefCell<HostState>>) {
-    let runtime = state.borrow_mut().worklet.runtime.take();
+    let runtime = {
+        let mut state = state.borrow_mut();
+        state.worklet.runtime_origin = None;
+        state.worklet.runtime.take()
+    };
     let Some(runtime) = runtime else {
         return;
     };
@@ -120,19 +128,28 @@ fn worklet_add_module_native(
     let id = worker_id_argument(args, context)?;
     let requested_url = string_argument(args.get(1), "", context)?;
     with_host_state(|owner_state| {
-        let (owner_url, base_url, storage, session_id, user_agent, secure) = {
+        let (owner_url, base_url, storage, session_id, user_agent, secure, cookie_context) = {
             let state = owner_state.borrow();
-            (
+            let document_id = state.csp_document_for_context(context)?.identity();
+            let base_url = state.base_url_for_document(document_id);
+            let owner_url = if document_id == state.document.identity() {
+                base_url.as_ref().map(ToString::to_string)
+            } else {
                 state
-                    .base_url
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| state.location_href.clone()),
-                state.base_url.clone(),
+                    .document_origins
+                    .get(&document_id)
+                    .and_then(Option::as_ref)
+                    .map(StorageOrigin::serialize)
+            }
+            .unwrap_or_default();
+            (
+                owner_url,
+                base_url,
                 state.storage_manager.clone(),
                 state.storage_session_id,
                 state.navigator_user_agent.clone(),
-                host_is_secure_context(&state),
+                document_is_secure_context(&state, document_id),
+                state.document_cookie_request_context(document_id),
             )
         };
         if !secure {
@@ -140,6 +157,17 @@ fn worklet_add_module_native(
                 false,
                 "NotAllowedError",
                 "Worklet modules require a secure context",
+                false,
+            ));
+        }
+        let owner_origin = StorageOrigin::from_url(&owner_url);
+        if owner_state.borrow().worklet.runtime.is_some()
+            && owner_state.borrow().worklet.runtime_origin != owner_origin
+        {
+            return Ok(worklet_status(
+                false,
+                "SecurityError",
+                "Worklet modules require the existing runtime's origin",
                 false,
             ));
         }
@@ -177,9 +205,10 @@ fn worklet_add_module_native(
         // addModule() calls side-effect free and makes retries deterministic.
         let fetched = {
             let mut state = owner_state.borrow_mut();
-            fetch_script_resource_with_client(
+            fetch_script_resource_with_client_in_context(
                 &requested_url,
                 base_url.as_ref(),
+                Some(&cookie_context),
                 &mut state.http_client,
             )
         };
@@ -268,7 +297,11 @@ fn worklet_add_module_native(
                 ));
             }
             let runtime = Rc::new(RefCell::new(runtime));
-            owner_state.borrow_mut().worklet.runtime = Some(Rc::clone(&runtime));
+            {
+                let mut state = owner_state.borrow_mut();
+                state.worklet.runtime_origin = owner_origin;
+                state.worklet.runtime = Some(Rc::clone(&runtime));
+            }
             runtime
         };
 

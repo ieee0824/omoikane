@@ -63,6 +63,7 @@ struct SharedWorkerKey {
     /// Shared workers are only constructible for an eligible tuple origin;
     /// opaque/no-origin callers are rejected before a key is created.
     origin: StorageOrigin,
+    top_level_site: crate::http::SchemefulSite,
     url: String,
     name: String,
 }
@@ -392,12 +393,17 @@ fn create_shared_worker_for_owner_state(
     name: &str,
     document_id: usize,
 ) -> JsResult<u64> {
-    let (owner_url, base_url, origin, origin_text, creator_policy) = {
+    let (owner_url, base_url, origin, origin_text, creator_policy, top_level_site) = {
         let state = owner_state.borrow();
         let origin = shared_worker_origin(&state, document_id).ok_or_else(|| {
             JsNativeError::error().with_message("SharedWorker requires an eligible origin")
         })?;
         let origin_text = script_errors::document_fetch_origin(&state, document_id).serialize();
+        let top_level_site = state
+            .storage_access_top_level_site(document_id)
+            .ok_or_else(|| {
+                JsNativeError::error().with_message("SharedWorker owner has no top-level site")
+            })?;
         (
             origin_text.clone(),
             state.base_url_for_document(document_id),
@@ -408,11 +414,13 @@ fn create_shared_worker_for_owner_state(
                 .get(&document_id)
                 .cloned()
                 .unwrap_or_default(),
+            top_level_site,
         )
     };
     let worker_url = resolve_worker_url(requested_url, &owner_url, base_url.as_ref())?;
     let key = SharedWorkerKey {
         origin,
+        top_level_site,
         url: worker_url.clone(),
         name: name.to_string(),
     };
@@ -421,9 +429,11 @@ fn create_shared_worker_for_owner_state(
     } else {
         let loaded = {
             let mut state = owner_state.borrow_mut();
-            worker_loading::load_worker_script(
+            let cookie_context = state.document_cookie_request_context(document_id);
+            worker_loading::load_worker_script_in_context(
                 &worker_url,
                 base_url.as_ref(),
+                Some(&cookie_context),
                 &mut state.http_client,
             )
         };

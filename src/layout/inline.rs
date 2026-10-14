@@ -1934,11 +1934,9 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
     // Use shared HTTP client for connection reuse and cookie sharing
     let mut request = HttpRequest::get(url).ok()?;
     let context = IMAGE_COOKIE_CONTEXT.with(|cell| cell.borrow().clone());
-    let site = context
-        .as_ref()
-        .and_then(|(_, site, _)| site.clone())
-        .or_else(|| IMAGE_BASE_URL.with(|cell| cell.borrow().clone()));
-    if let Some(site) = site {
+    if let Some((_, cookie_context, _)) = context.as_ref() {
+        cookie_context.apply(&mut request);
+    } else if let Some(site) = IMAGE_BASE_URL.with(|cell| cell.borrow().clone()) {
         request.set_cookie_context(site, false);
     }
     request.set_header(
@@ -3809,6 +3807,13 @@ fn measure_text_width_with_fallback(
 #[cfg(test)]
 mod image_url_tests {
     use super::*;
+    use crate::http::{CookieJar, CookieRequestContext};
+    use crate::test_support::http_fixture::{
+        ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+        read_request_headers,
+    };
+    use std::io::Write;
+    use std::sync::Mutex;
 
     #[test]
     fn canonical_reference_uses_only_the_explicit_base() {
@@ -3869,5 +3874,69 @@ mod image_url_tests {
             canonical_image_asset_reference("BLOB:https://example.test/image-id", None),
             Some("blob:https://example.test/image-id".to_string())
         );
+    }
+
+    #[test]
+    fn third_party_image_sends_and_stores_cookies_only_with_document_access() {
+        let listener = bind_loopback().unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[255, 0, 0, 255])
+                .unwrap();
+        }
+        let server = FixtureWorker::spawn(move || {
+            let mut cookies = Vec::new();
+            for phase in ["pre", "post"] {
+                let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                assert!(request.starts_with("GET /image.png HTTP/1.1"));
+                cookies.push(
+                    request
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Cookie: "))
+                        .map(str::trim)
+                        .map(str::to_owned),
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nSet-Cookie: {phase}=1; Path=/; Secure; SameSite=None\r\nConnection: close\r\n\r\n",
+                    png.len(),
+                )
+                .unwrap();
+                stream.write_all(&png).unwrap();
+            }
+            cookies
+        });
+        let target: Url = format!("http://{address}/image.png").parse().unwrap();
+        let top: Url = format!("http://localhost:{}/", address.port())
+            .parse()
+            .unwrap();
+        let store = Arc::new(Mutex::new(CookieJar::new()));
+        store
+            .lock()
+            .unwrap()
+            .add_from_header_for_url("session=pre; Path=/; Secure; SameSite=None", &target);
+        for phase in ["pre", "post"] {
+            let context = CookieRequestContext::new(
+                Some(top.clone()),
+                (phase == "post").then(|| target.clone()),
+                false,
+            );
+            let url = format!("http://{address}/image.png");
+            super::super::with_image_cookie_store(Arc::clone(&store), context, 867, || {
+                assert!(fetch_image(&url).is_some());
+            });
+        }
+        assert_eq!(server.join(), [None, Some("session=pre".to_string())]);
+        let cookies = store.lock().unwrap().document_cookie(&target, &target);
+        assert!(!cookies.contains("pre=1"));
+        assert!(cookies.contains("post=1"));
     }
 }

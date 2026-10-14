@@ -32,6 +32,7 @@ fn import_scripts(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
                 base.as_ref(),
                 &origin,
                 None,
+                None,
                 &mut state.http_client,
             ) else {
                 return Ok(None);

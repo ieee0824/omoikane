@@ -5,6 +5,7 @@ use super::cookie::CookieJar;
 use super::referrer::response_referrer_policy;
 use super::request::{HttpRequest, Method, copy_header_on_redirect, default_user_agent};
 use super::response::{HttpParseError, HttpResponse};
+use super::site::SchemefulSite;
 use super::url::{Url, resolve_url};
 use crate::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
@@ -15,6 +16,16 @@ use std::time::Duration;
 
 /// Maximum number of redirects to follow before aborting.
 const DEFAULT_MAX_REDIRECTS: u32 = 10;
+
+fn unpartitioned_cookie_access_allowed(request: &HttpRequest) -> bool {
+    if request.is_top_level_navigation() {
+        return true;
+    }
+    let same_site = request
+        .site_for_cookies()
+        .is_none_or(|site| SchemefulSite::from_url(site) == SchemefulSite::from_url(request.url()));
+    (!request.has_cross_site_ancestry() && same_site) || request.storage_access_eligible()
+}
 
 /// An explicitly supplied transport for one HTTP exchange.
 ///
@@ -260,20 +271,28 @@ impl Client {
             }
 
             // Attach cookies
+            let cookie_access = unpartitioned_cookie_access_allowed(&request);
+            if !cookie_access {
+                request.remove_header("cookie");
+            }
             let site_for_cookies = request.site_for_cookies().unwrap_or(request.url());
-            let cookie_header = match shared_cookies {
-                Some(cookies) => cookies.lock().unwrap().cookie_header_for_request(
-                    request.url(),
-                    site_for_cookies,
-                    request.is_top_level_navigation(),
-                    request.method(),
-                ),
-                None => self.cookie_jar.cookie_header_for_request(
-                    request.url(),
-                    site_for_cookies,
-                    request.is_top_level_navigation(),
-                    request.method(),
-                ),
+            let cookie_header = if cookie_access {
+                match shared_cookies {
+                    Some(cookies) => cookies.lock().unwrap().cookie_header_for_request(
+                        request.url(),
+                        site_for_cookies,
+                        request.is_top_level_navigation(),
+                        request.method(),
+                    ),
+                    None => self.cookie_jar.cookie_header_for_request(
+                        request.url(),
+                        site_for_cookies,
+                        request.is_top_level_navigation(),
+                        request.method(),
+                    ),
+                }
+            } else {
+                None
             };
             if let Some(cookie_header) = cookie_header {
                 request.add_header("Cookie", cookie_header);
@@ -290,7 +309,7 @@ impl Client {
                 let mut shared = shared_cookies.map(|cookies| cookies.lock().unwrap());
                 let cookies = shared.as_deref_mut().unwrap_or(&mut self.cookie_jar);
                 for (name, value) in response.headers() {
-                    if name.eq_ignore_ascii_case("set-cookie") {
+                    if cookie_access && name.eq_ignore_ascii_case("set-cookie") {
                         cookies.add_from_header_for_request(
                             value,
                             &origin,
@@ -342,6 +361,9 @@ impl Client {
             if let Some(site) = request.site_for_cookies() {
                 new_request.set_cookie_context(site.clone(), request.is_top_level_navigation());
             }
+            new_request
+                .set_storage_access_eligible(same_origin && request.storage_access_eligible());
+            new_request.set_cross_site_ancestry(request.has_cross_site_ancestry());
 
             for (name, value) in request.headers() {
                 if redirect_referrer_source.is_some() && name.eq_ignore_ascii_case("Referer") {
@@ -388,7 +410,8 @@ impl Client {
         }
         request.remove_header("cookie");
         let shared = self.shared_cookie_store.clone();
-        let cookie_header = if credentials {
+        let cookie_access = credentials && unpartitioned_cookie_access_allowed(&request);
+        let cookie_header = if cookie_access {
             match shared.as_ref() {
                 Some(store) => store.lock().unwrap().cookie_header_for_request(
                     request.url(),
@@ -417,7 +440,7 @@ impl Client {
                 .send_with_timeout(&request, self.insecure, timeout),
         }
         .inspect_err(|error| self.report_failure(error))?;
-        if credentials {
+        if cookie_access {
             let origin = request.url().clone();
             let mut shared_jar = shared.as_ref().map(|store| store.lock().unwrap());
             let cookies = shared_jar.as_deref_mut().unwrap_or(&mut self.cookie_jar);
@@ -577,6 +600,105 @@ mod tests {
                 .iter()
                 .all(|(request, _)| request.requires_public_ip())
         );
+    }
+
+    #[test]
+    fn third_party_cookie_access_requires_a_document_grant_and_stops_at_redirect() {
+        let first: Url = "https://third.test/start".parse().unwrap();
+        let other: Url = "https://other.test/final".parse().unwrap();
+        let top: Url = "https://top.test/".parse().unwrap();
+        let transport = RecordingTransport::new(vec![
+            HttpResponse::new(
+                200,
+                "OK",
+                vec![(
+                    "Set-Cookie".into(),
+                    "blocked=1; Secure; SameSite=None".into(),
+                )],
+                vec![],
+            ),
+            HttpResponse::new(
+                302,
+                "Found",
+                vec![("Location".into(), other.to_string())],
+                vec![],
+            ),
+            HttpResponse::new(
+                200,
+                "OK",
+                vec![(
+                    "Set-Cookie".into(),
+                    "redirected=1; Secure; SameSite=None".into(),
+                )],
+                vec![],
+            ),
+        ]);
+        let mut client = Client::new();
+        client.set_transport(Some(transport.clone()));
+        client
+            .cookie_jar_mut()
+            .add_from_header_for_url("first=1; Secure; SameSite=None", &first);
+        client
+            .cookie_jar_mut()
+            .add_from_header_for_url("other=1; Secure; SameSite=None", &other);
+
+        let mut blocked = HttpRequest::new(Method::Get, first.clone());
+        blocked.set_cookie_context(top.clone(), false);
+        client.send(blocked).unwrap();
+
+        let mut granted = HttpRequest::new(Method::Get, first);
+        granted.set_cookie_context(top, false);
+        granted.set_storage_access_eligible(true);
+        client.send(granted).unwrap();
+
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].0.header("cookie"), None);
+        assert_eq!(requests[1].0.header("cookie"), Some("first=1"));
+        assert_eq!(requests[2].0.header("cookie"), None);
+        assert_eq!(client.cookie_jar().len(), 2);
+    }
+
+    #[test]
+    fn document_grant_survives_same_origin_redirect_and_accepts_response_cookies() {
+        let url: Url = "https://third.test/start".parse().unwrap();
+        let top: Url = "https://top.test/".parse().unwrap();
+        let transport = RecordingTransport::new(vec![
+            HttpResponse::new(
+                302,
+                "Found",
+                vec![
+                    ("Location".into(), "/final".into()),
+                    (
+                        "Set-Cookie".into(),
+                        "middle=1; Secure; SameSite=None".into(),
+                    ),
+                ],
+                vec![],
+            ),
+            HttpResponse::new(
+                200,
+                "OK",
+                vec![("Set-Cookie".into(), "final=1; Secure; SameSite=None".into())],
+                vec![],
+            ),
+        ]);
+        let mut client = Client::new();
+        client.set_transport(Some(transport.clone()));
+        client
+            .cookie_jar_mut()
+            .add_from_header_for_url("first=1; Secure; SameSite=None", &url);
+
+        let mut request = HttpRequest::new(Method::Get, url);
+        request.set_cookie_context(top, false);
+        request.set_storage_access_eligible(true);
+        client.send(request).unwrap();
+
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0.header("cookie"), Some("first=1"));
+        assert_eq!(requests[1].0.header("cookie"), Some("first=1; middle=1"));
+        assert_eq!(client.cookie_jar().len(), 3);
     }
 
     #[test]

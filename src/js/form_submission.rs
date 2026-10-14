@@ -8,6 +8,8 @@ pub(super) struct Submission {
     pub method: String,
     pub body: Option<Vec<u8>>,
     pub content_type: Option<String>,
+    /// Original form owner's Document; replay reevaluates its current access.
+    pub source_document_id: Option<usize>,
 }
 
 pub(super) enum NamedLinkTarget {
@@ -210,9 +212,10 @@ impl HostState {
         &mut self,
         source: &NodeHandle,
         target: FormTarget,
-        request: Submission,
+        mut request: Submission,
     ) -> Option<usize> {
         if let FormTarget::Frame(frame) = target {
+            request.source_document_id = Some(source.identity());
             // A planned navigation supersedes an initial about:blank load or
             // an earlier submission that has not started yet.
             self.event_loop
@@ -227,6 +230,7 @@ impl HostState {
                 TimerPayload::FormSubmission {
                     node_id: frame.identity(),
                     request,
+                    source_document_id: source.identity(),
                     visit_source,
                     referrer_source,
                 },
@@ -258,9 +262,11 @@ impl HostState {
     pub(super) fn load_iframe_form_submission(
         &mut self,
         submission: &Submission,
+        source_document_id: usize,
     ) -> Result<LoadedChildDocument, JsHostError> {
         self.load_iframe_form_submission_with_referrer(
             submission,
+            source_document_id,
             "",
             security_reporting::ReferrerPolicy::default(),
         )
@@ -269,14 +275,17 @@ impl HostState {
     pub(super) fn load_iframe_form_submission_with_referrer(
         &mut self,
         submission: &Submission,
+        source_document_id: usize,
         source_url: &str,
         policy: security_reporting::ReferrerPolicy,
     ) -> Result<LoadedChildDocument, JsHostError> {
         if submission.method.eq_ignore_ascii_case("GET") {
             let site = self.location_href.parse::<crate::http::Url>().ok();
-            return Ok(self.load_iframe_document_with_referrer(
+            return Ok(self.load_iframe_document_for_initiator(
                 &submission.url,
                 site.as_ref(),
+                Some(source_document_id),
+                false,
                 source_url,
                 policy,
             ));
@@ -286,9 +295,7 @@ impl HostState {
         if !source_url.is_empty() {
             request.set_referrer_source(source_url.to_owned(), policy);
         }
-        if let Ok(site) = self.location_href.parse::<crate::http::Url>() {
-            request.set_cookie_context(site, false);
-        }
+        self.set_document_cookie_request_context(source_document_id, &mut request);
         if let Some(body) = &submission.body {
             request.set_body(body.clone());
         }
@@ -451,7 +458,11 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 state.pending_resource_loads.remove(&id);
                 state.capture_iframe_referrer_source(id, source_document);
                 state
-                    .iframe_document_with_submission(&frame, Some(&request))
+                    .iframe_document_with_submission(
+                        &frame,
+                        Some(&request),
+                        request.source_document_id,
+                    )
                     .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
                 state.schedule_connected_resource_loads(&frame, true);
                 Ok(JsValue::undefined())

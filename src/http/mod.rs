@@ -32,8 +32,10 @@ pub use data_uri::{DataUri, parse_data_uri};
 pub(crate) use referrer::{
     ReferrerPolicy, navigation_referrer_with_policy, response_referrer_policy,
 };
+pub(crate) use request::{
+    CookieRequestContext, is_forbidden_request_header, is_http_token, is_valid_header,
+};
 pub use request::{HttpRequest, Method, default_user_agent};
-pub(crate) use request::{is_forbidden_request_header, is_http_token, is_valid_header};
 pub use response::{HttpParseError, HttpResponse};
 pub(crate) use site::SchemefulSite;
 pub use url::Url;

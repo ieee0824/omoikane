@@ -89,10 +89,10 @@ pub(super) fn query_native(
                 .with_message("Cookie Store document origin changed")
                 .into());
         }
-        let site = state
-            .location_href
-            .parse::<crate::http::Url>()
-            .unwrap_or_else(|_| url.clone());
+        if !state.storage_access_allows_document_cookies(document_id) {
+            return Ok(JsValue::from(js_string!("[]")));
+        }
+        let site = state.storage_access_cookie_site_for_document(document_id, &url);
         let pairs = state
             .cookie_store
             .lock()
@@ -176,10 +176,10 @@ pub(super) fn mutate_native(
                 .with_message("Cookie Store document origin changed")
                 .into());
         }
-        let site = state
-            .location_href
-            .parse::<crate::http::Url>()
-            .unwrap_or_else(|_| url.clone());
+        if !state.storage_access_allows_document_cookies(document_id) {
+            return Ok(JsValue::undefined());
+        }
+        let site = state.storage_access_cookie_site_for_document(document_id, &url);
         let options = crate::http::CookieStoreWrite {
             name: mutation.name,
             value: mutation.value,
@@ -245,10 +245,13 @@ pub(super) fn changes_native(
                 .with_message("Cookie Store document origin changed")
                 .into());
         }
-        let site = state
-            .location_href
-            .parse::<crate::http::Url>()
-            .unwrap_or_else(|_| url.clone());
+        if !state.storage_access_allows_document_cookies(document_id) {
+            let next = state.cookie_store.lock().unwrap().change_sequence();
+            return Ok(JsValue::from(js_string!(format!(
+                "{{\"cursor\":{next},\"events\":[]}}"
+            ))));
+        }
+        let site = state.storage_access_cookie_site_for_document(document_id, &url);
         let jar = state.cookie_store.lock().unwrap();
         let (next, changes) = if let Some(cursor) = cursor {
             jar.script_visible_changes_since(cursor, &url, &site)

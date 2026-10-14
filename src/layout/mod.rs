@@ -74,8 +74,8 @@ thread_local! {
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
     static LAYOUT_FONTS: RefCell<Option<LayoutFontContext>> = const { RefCell::new(None) };
     static IMAGE_BASE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
-    static IMAGE_COOKIE_CONTEXT: RefCell<Option<(Arc<Mutex<CookieJar>>, Option<Url>, usize)>> = const { RefCell::new(None) };
-    static IMAGE_CACHE_OWNER: RefCell<Option<(Arc<Mutex<CookieJar>>, usize)>> = const { RefCell::new(None) };
+    static IMAGE_COOKIE_CONTEXT: RefCell<Option<(Arc<Mutex<CookieJar>>, crate::http::CookieRequestContext, usize)>> = const { RefCell::new(None) };
+    static IMAGE_CACHE_OWNER: RefCell<Option<(Arc<Mutex<CookieJar>>, crate::http::CookieRequestContext, usize)>> = const { RefCell::new(None) };
     static HTML_TAG_SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
     static CONTENT_VISIBILITY_LAYOUT: RefCell<Option<ContentVisibilityLayoutSession>> = const { RefCell::new(None) };
     static LAYOUT_ERROR_REPORTER: RefCell<Option<(Arc<ErrorReporter>, ExecutionSurface)>> = const { RefCell::new(None) };
@@ -481,11 +481,17 @@ pub(crate) fn current_image_base_url() -> Option<Url> {
 /// Cached responses are scoped to the Document that selected those cookies.
 pub(crate) fn with_image_cookie_store<T>(
     store: Arc<Mutex<CookieJar>>,
-    site: Option<Url>,
+    cookie_context: crate::http::CookieRequestContext,
     document_id: usize,
     f: impl FnOnce() -> T,
 ) -> T {
-    struct ImageCookieContextGuard(Option<(Arc<Mutex<CookieJar>>, Option<Url>, usize)>);
+    struct ImageCookieContextGuard(
+        Option<(
+            Arc<Mutex<CookieJar>>,
+            crate::http::CookieRequestContext,
+            usize,
+        )>,
+    );
 
     impl Drop for ImageCookieContextGuard {
         fn drop(&mut self) {
@@ -496,7 +502,7 @@ pub(crate) fn with_image_cookie_store<T>(
     }
 
     IMAGE_COOKIE_CONTEXT.with(|cell| {
-        let previous = cell.replace(Some((store, site, document_id)));
+        let previous = cell.replace(Some((store, cookie_context, document_id)));
         let _guard = ImageCookieContextGuard(previous);
         f()
     })
@@ -506,13 +512,18 @@ fn ensure_image_cache_context() {
     let current = IMAGE_COOKIE_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
-            .map(|(store, _, document_id)| (Arc::clone(store), *document_id))
+            .map(|(store, context, document_id)| (Arc::clone(store), context.clone(), *document_id))
     });
     IMAGE_CACHE_OWNER.with(|owner| {
         let mut owner = owner.borrow_mut();
         let same = match (owner.as_ref(), current.as_ref()) {
-            (Some((left_store, left_document)), Some((right_store, right_document))) => {
-                Arc::ptr_eq(left_store, right_store) && left_document == right_document
+            (
+                Some((left_store, left_context, left_document)),
+                Some((right_store, right_context, right_document)),
+            ) => {
+                Arc::ptr_eq(left_store, right_store)
+                    && left_context == right_context
+                    && left_document == right_document
             }
             (None, None) => true,
             _ => false,
