@@ -143,6 +143,7 @@ pub(super) fn response_security_headers(
                 name.to_ascii_lowercase().as_str(),
                 "content-security-policy"
                     | "content-security-policy-report-only"
+                    | "permissions-policy"
                     | "reporting-endpoints"
                     | "referrer-policy"
             )

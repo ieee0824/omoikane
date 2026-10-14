@@ -312,7 +312,8 @@ impl JsRuntime {
         result
     }
 
-    /// Installs CSP response policies before the first document script runs.
+    /// Installs CSP and supported Permissions-Policy response directives before
+    /// the first document script runs.
     pub(crate) fn install_response_security_headers(&mut self, headers: &[(String, String)]) {
         let document = self.document();
         let mut state = self.host_state.borrow_mut();
@@ -326,6 +327,10 @@ impl JsRuntime {
             metadata.referrer_policy = policy;
         }
         state.apply_connected_referrer_metas(&document);
+        state.document_permissions.insert(
+            document.identity(),
+            DocumentPolicy::from_response_headers(headers),
+        );
     }
 
     /// Sets the actual document response status before its first script runs.

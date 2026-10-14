@@ -113,6 +113,8 @@ mod node_lifetime;
 mod pointer_lock;
 mod report_delivery;
 pub use pointer_lock::PointerLockTransition;
+mod permissions_policy;
+use permissions_policy::{DocumentPolicy, PolicyFeature};
 #[cfg(test)]
 mod attribute_normalization_tests;
 #[cfg(test)]
@@ -121,6 +123,8 @@ mod document_body_tests;
 mod node_copy_tests;
 #[cfg(test)]
 mod node_lifetime_tests;
+#[cfg(test)]
+mod permissions_policy_tests;
 #[cfg(test)]
 mod popover_tests;
 #[cfg(test)]
@@ -1900,9 +1904,10 @@ struct HostState {
     /// move within one connected document from producing duplicate events.
     pending_resource_loads: HashSet<usize>,
     /// Iframes whose next resource load must replace the active Document even
-    /// when the effective `src`/`srcdoc` did not change (reload/history travel).
-    /// Keeping this separate lets the old Document remain active until commit.
-    pending_forced_iframe_navigations: HashSet<usize>,
+    /// when the effective `src`/`srcdoc` did not change. Location navigation
+    /// preserves the element's declared `src` origin despite our internal
+    /// attribute write; reload and history travel recompute it at commit.
+    pending_forced_iframe_navigations: HashMap<usize, ForcedIframeNavigation>,
     /// Source captured before an iframe navigation's asynchronous load.
     pending_iframe_visits: HashMap<usize, VisitSource>,
     pending_iframe_referrers: HashMap<usize, NavigationReferrerSource>,
@@ -1966,6 +1971,11 @@ struct HostState {
     /// CSP snapshots for retained Realm constructors after their Document has
     /// navigated away. Network APIs still require an active Document.
     retired_document_csp: HashMap<usize, CspPolicy>,
+    /// Response policy for implemented policy-controlled features.
+    document_permissions: HashMap<usize, DocumentPolicy>,
+    /// Feature inheritance fixed when an iframe or creator-origin popup
+    /// Document commits. Later container attribute changes need a navigation.
+    document_inherited_permissions: HashMap<usize, HashSet<PolicyFeature>>,
     /// Iframe sandbox flags captured per active nested Document.
     document_sandbox: HashMap<usize, IframeSandboxPolicy>,
     csp_violations: Vec<CspViolation>,
@@ -2136,6 +2146,9 @@ struct IframeDocument {
     loaded_attribute: &'static str,
     /// The resource attribute value used by the committed navigation.
     loaded_resource: String,
+    /// Origin represented by the embedding element's `src` policy. Location
+    /// navigation retains it even when it commits a different Document origin.
+    declared_src_origin: Option<DocumentSecurityOrigin>,
     /// Request retained by the active document for history replay.
     submission: Option<form_submission::Submission>,
     /// Parser-created initial scripts, consumed once by the load task.
@@ -2145,6 +2158,13 @@ struct IframeDocument {
     generation: u64,
     /// This Document replaced the current entry through javascript: completion.
     javascript_replacement: bool,
+}
+
+#[derive(Clone)]
+enum ForcedIframeNavigation {
+    Location,
+    Refresh,
+    RestoreDeclaredOrigin(Option<DocumentSecurityOrigin>),
 }
 
 /// A popup's active Document and Realm. The numeric context id survives
@@ -2472,7 +2492,7 @@ impl HostState {
             browsing_context_names: HashMap::new(),
             discarded_node_ids: Vec::new(),
             pending_resource_loads: HashSet::new(),
-            pending_forced_iframe_navigations: HashSet::new(),
+            pending_forced_iframe_navigations: HashMap::new(),
             pending_iframe_visits: HashMap::new(),
             pending_iframe_referrers: HashMap::new(),
             pending_iframe_clients: HashMap::new(),
@@ -2514,6 +2534,8 @@ impl HostState {
             next_opaque_origin_id: 2,
             document_csp: HashMap::from([(document.identity(), initial_csp)]),
             retired_document_csp: HashMap::new(),
+            document_permissions: HashMap::new(),
+            document_inherited_permissions: HashMap::new(),
             document_sandbox: HashMap::new(),
             csp_violations: Vec::new(),
             csp_violation_keys: HashSet::new(),
@@ -3005,7 +3027,7 @@ impl HostState {
         }
 
         if submission.is_none()
-            && !force_navigation
+            && force_navigation.is_none()
             && let Some(entry) = self.iframe_documents.get(&iframe_id)
             && entry.loaded_attribute == resource_attribute
             && entry.loaded_resource == resource
@@ -3134,6 +3156,32 @@ impl HostState {
                 None => (None, self.new_opaque_security_origin()?),
             }
         };
+        let declared_src_origin = if submission.is_some()
+            || matches!(&force_navigation, Some(ForcedIframeNavigation::Location))
+        {
+            self.iframe_documents
+                .get(&iframe_id)
+                .and_then(|entry| entry.declared_src_origin.clone())
+                .or_else(|| {
+                    self.declared_iframe_origin(
+                        iframe,
+                        owner_document_id,
+                        &security_origin,
+                        sandbox,
+                    )
+                })
+        } else if let Some(ForcedIframeNavigation::RestoreDeclaredOrigin(origin)) = force_navigation
+        {
+            origin
+        } else {
+            self.declared_iframe_origin(iframe, owner_document_id, &security_origin, sandbox)
+        };
+        let inherited_features = self.inherited_permissions_for_iframe(
+            iframe,
+            owner_document_id,
+            &security_origin,
+            declared_src_origin.as_ref(),
+        );
 
         // Prepare every fallible component before committing the navigation.
         // This keeps an exhausted monotonic-id space fail-closed without a
@@ -3170,6 +3218,8 @@ impl HostState {
         }
         self.document_security_origins
             .insert(document.identity(), security_origin);
+        self.document_inherited_permissions
+            .insert(document.identity(), inherited_features);
         self.document_sandbox.insert(document.identity(), sandbox);
         let inherits_owner_csp = inherits_creator_origin;
         // `data:` documents have an opaque origin.  They must not inherit the
@@ -3207,6 +3257,10 @@ impl HostState {
             )
         };
         self.document_csp.insert(document.identity(), policy);
+        self.document_permissions.insert(
+            document.identity(),
+            DocumentPolicy::from_response_headers(&security_headers),
+        );
         // Seed a dirty style cache entry for the freshly loaded sub-document so
         // its resolver is built from its own `<style>` rules on first query.
         self.document_styles.insert(
@@ -3239,6 +3293,7 @@ impl HostState {
                 realm: None,
                 loaded_attribute: resource_attribute,
                 loaded_resource: resource,
+                declared_src_origin,
                 submission: submission.cloned(),
                 initial_scripts: collect_script_elements(&document)
                     .into_iter()
@@ -3322,6 +3377,7 @@ impl HostState {
             .map(|metadata| (metadata.referrer.clone(), metadata.referrer_policy));
         let loaded_attribute = old.loaded_attribute;
         let loaded_resource = old.loaded_resource.clone();
+        let declared_src_origin = old.declared_src_origin.clone();
         let generation = take_monotonic_id(
             &mut self.next_iframe_generation,
             "iframe document generation",
@@ -3380,6 +3436,7 @@ impl HostState {
                 realm: None,
                 loaded_attribute,
                 loaded_resource,
+                declared_src_origin,
                 submission: None,
                 initial_scripts,
                 generation,
@@ -3438,6 +3495,15 @@ impl HostState {
             .get(&opener_document_id)
             .map(CspPolicy::inherited_for_new_global)
             .unwrap_or_default();
+        let policy = self
+            .document_permissions
+            .get(&opener_document_id)
+            .cloned()
+            .unwrap_or_default();
+        let inherited_features = PolicyFeature::ALL
+            .into_iter()
+            .filter(|feature| self.feature_enabled_in_document(opener_document_id, *feature))
+            .collect();
         self.register_tree(&document);
         self.document_origins.insert(document_id, origin);
         self.document_security_origins
@@ -3459,6 +3525,9 @@ impl HostState {
             self.document_base_urls.insert(document_id, base);
         }
         self.document_csp.insert(document_id, csp);
+        self.document_permissions.insert(document_id, policy);
+        self.document_inherited_permissions
+            .insert(document_id, inherited_features);
         self.document_sandbox
             .insert(document_id, IframeSandboxPolicy::default());
         self.document_styles.insert(
@@ -3570,6 +3639,11 @@ impl HostState {
         } else {
             CspPolicy::from_response_headers_and_document(&headers, &document, &document_url)
         };
+        let (policy, inherited_features) = self.permissions_for_auxiliary_navigation(
+            opener_document_id,
+            inherits_opener,
+            &headers,
+        );
 
         self.register_tree(&document);
         self.update_document_target(&document, &document_url);
@@ -3599,6 +3673,9 @@ impl HostState {
             self.document_base_urls.insert(document_id, base);
         }
         self.document_csp.insert(document_id, csp);
+        self.document_permissions.insert(document_id, policy);
+        self.document_inherited_permissions
+            .insert(document_id, inherited_features);
         self.document_sandbox
             .insert(document_id, IframeSandboxPolicy::default());
         self.document_styles.insert(
@@ -3966,6 +4043,8 @@ impl HostState {
         self.trusted_type_default_callbacks.remove(&document_id);
         self.trusted_script_text_approvals
             .retain(|_, approval| approval.owner_document_id != document_id);
+        self.document_permissions.remove(&document_id);
+        self.document_inherited_permissions.remove(&document_id);
         self.document_sandbox.remove(&document_id);
         #[cfg(test)]
         self.document_script_executions.remove(&document_id);
@@ -3979,7 +4058,7 @@ impl HostState {
         self.pending_resource_loads
             .retain(|id| !tree_ids.contains(id));
         self.pending_forced_iframe_navigations
-            .retain(|id| !tree_ids.contains(id));
+            .retain(|id, _| !tree_ids.contains(id));
         self.pending_iframe_referrers
             .retain(|id, _| !tree_ids.contains(id));
         self.pending_iframe_clients
@@ -4083,6 +4162,8 @@ impl HostState {
         self.trusted_type_default_callbacks.remove(&document_id);
         self.trusted_script_text_approvals
             .retain(|_, approval| approval.owner_document_id != document_id);
+        self.document_permissions.remove(&document_id);
+        self.document_inherited_permissions.remove(&document_id);
         self.document_sandbox.remove(&document_id);
         #[cfg(test)]
         self.document_script_executions.remove(&document_id);
@@ -4135,7 +4216,7 @@ impl HostState {
         self.pending_resource_loads
             .retain(|node_id| !subtree_ids.contains(node_id));
         self.pending_forced_iframe_navigations
-            .retain(|node_id| !subtree_ids.contains(node_id));
+            .retain(|node_id, _| !subtree_ids.contains(node_id));
         self.pending_iframe_visits
             .retain(|node_id, _| !subtree_ids.contains(node_id));
         self.pending_iframe_referrers
@@ -4168,6 +4249,10 @@ impl HostState {
     fn prune_document_sandbox(&mut self) {
         let nodes = &self.nodes;
         self.document_sandbox
+            .retain(|document_id, _| nodes.contains_key(document_id));
+        self.document_permissions
+            .retain(|document_id, _| nodes.contains_key(document_id));
+        self.document_inherited_permissions
             .retain(|document_id, _| nodes.contains_key(document_id));
         #[cfg(test)]
         self.document_script_executions
@@ -4297,75 +4382,166 @@ impl HostState {
             .unwrap_or(true)
     }
 
-    fn iframe_allows_fullscreen(&self, iframe: &NodeHandle, child_document: usize) -> bool {
-        let owner_document = owner_document_for_node(iframe);
-        let same_origin = owner_document.as_ref().is_some_and(|owner| {
-            match (
-                self.document_security_origins.get(&owner.identity()),
-                self.document_security_origins.get(&child_document),
-            ) {
-                (Some(owner), Some(child)) => owner == child,
-                _ => false,
-            }
-        });
-        let allow = iframe.get_attribute("allow");
-        if let Some(policy) = allow {
-            if let Some(directive) = policy.split(';').find(|directive| {
-                directive
-                    .split_ascii_whitespace()
-                    .next()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("fullscreen"))
-            }) {
-                let tokens = directive
-                    .split_ascii_whitespace()
-                    .skip(1)
-                    .collect::<Vec<_>>();
-                if tokens
-                    .iter()
-                    .any(|token| token.eq_ignore_ascii_case("'none'"))
-                {
-                    return false;
-                }
-                return tokens.is_empty()
-                    || tokens.iter().any(|token| {
-                        *token == "*"
-                            || token.eq_ignore_ascii_case("'src'")
-                            || (same_origin && token.eq_ignore_ascii_case("'self'"))
-                    });
-            }
+    fn declared_iframe_origin(
+        &self,
+        iframe: &NodeHandle,
+        owner_document: usize,
+        child_origin: &DocumentSecurityOrigin,
+        sandbox: IframeSandboxPolicy,
+    ) -> Option<DocumentSecurityOrigin> {
+        let owner_origin = self.document_security_origins.get(&owner_document)?;
+        if sandbox.active && !sandbox.allow_same_origin {
+            // The committed sandboxed Document has the opaque origin used by
+            // its container policy; URL-derived tuple origins cannot match it.
+            return Some(child_origin.clone());
         }
-        same_origin || iframe.get_attribute("allowfullscreen").is_some()
+        if iframe.get_attribute("srcdoc").is_some() {
+            return Some(owner_origin.clone());
+        }
+        let Some(src) = iframe.get_attribute("src") else {
+            return Some(owner_origin.clone());
+        };
+        if src.is_empty() || matches_about_blank_url(&src) {
+            return Some(owner_origin.clone());
+        }
+        let url = resolve_url_reference(&src, self.base_url_for_document(owner_document).as_ref());
+        if url.starts_with("data:") {
+            // The committed data document's unique opaque origin represents
+            // the declared URL origin for its container policy.
+            return Some(child_origin.clone());
+        }
+        StorageOrigin::from_url(&url).map(DocumentSecurityOrigin::Tuple)
+    }
+
+    fn inherited_permissions_for_iframe(
+        &self,
+        iframe: &NodeHandle,
+        owner_document: usize,
+        child_origin: &DocumentSecurityOrigin,
+        declared_src: Option<&DocumentSecurityOrigin>,
+    ) -> HashSet<PolicyFeature> {
+        let (container_allow, legacy_fullscreen) = if iframe.has_tag_name("iframe") {
+            (
+                iframe.get_attribute("allow"),
+                iframe.get_attribute("allowfullscreen").is_some(),
+            )
+        } else {
+            (None, false)
+        };
+        PolicyFeature::ALL
+            .into_iter()
+            .filter(|feature| {
+                self.feature_enabled_in_document(owner_document, *feature)
+                    && self.feature_header_allows(owner_document, *feature, child_origin)
+                    && self
+                        .document_security_origins
+                        .get(&owner_document)
+                        .is_some_and(|owner_origin| {
+                            permissions_policy::container_allows(
+                                *feature,
+                                container_allow.as_deref(),
+                                legacy_fullscreen,
+                                child_origin,
+                                owner_origin,
+                                declared_src,
+                            )
+                        })
+            })
+            .collect()
+    }
+
+    fn permissions_for_auxiliary_navigation(
+        &self,
+        opener_document: usize,
+        inherits_opener: bool,
+        headers: &[(String, String)],
+    ) -> (DocumentPolicy, HashSet<PolicyFeature>) {
+        if inherits_opener {
+            let policy = self
+                .document_permissions
+                .get(&opener_document)
+                .cloned()
+                .unwrap_or_default();
+            let features = PolicyFeature::ALL
+                .into_iter()
+                .filter(|feature| self.feature_enabled_in_document(opener_document, *feature))
+                .collect();
+            (policy, features)
+        } else {
+            (
+                DocumentPolicy::from_response_headers(headers),
+                PolicyFeature::ALL.into_iter().collect(),
+            )
+        }
+    }
+
+    fn feature_header_allows(
+        &self,
+        owner_document: usize,
+        feature: PolicyFeature,
+        target: &DocumentSecurityOrigin,
+    ) -> bool {
+        let Some(owner) = self.document_security_origins.get(&owner_document) else {
+            return false;
+        };
+        self.document_permissions
+            .get(&owner_document)
+            .is_none_or(|policy| policy.permits_delegation(feature, target, owner))
+    }
+
+    fn feature_inherited_in_document(&self, document_id: usize, feature: PolicyFeature) -> bool {
+        if !self.document_is_active(document_id) {
+            return false;
+        }
+        document_id == self.document.identity()
+            || self
+                .document_inherited_permissions
+                .get(&document_id)
+                .is_some_and(|features| features.contains(&feature))
+    }
+
+    fn feature_enabled_in_document(&self, document_id: usize, feature: PolicyFeature) -> bool {
+        self.feature_inherited_in_document(document_id, feature)
+            && self
+                .document_security_origins
+                .get(&document_id)
+                .is_some_and(|origin| self.feature_header_allows(document_id, feature, origin))
+    }
+
+    fn feature_allows_origin(
+        &self,
+        document_id: usize,
+        feature: PolicyFeature,
+        target: &DocumentSecurityOrigin,
+    ) -> bool {
+        let Some(owner) = self.document_security_origins.get(&document_id) else {
+            return false;
+        };
+        self.feature_inherited_in_document(document_id, feature)
+            && self
+                .document_permissions
+                .get(&document_id)
+                .map_or(target == owner, |policy| {
+                    policy.allows(feature, target, owner)
+                })
+    }
+
+    fn feature_allowlist(&self, document_id: usize, feature: PolicyFeature) -> Vec<String> {
+        if !self.feature_enabled_in_document(document_id, feature) {
+            return Vec::new();
+        }
+        let Some(origin) = self.document_security_origins.get(&document_id) else {
+            return Vec::new();
+        };
+        self.document_permissions.get(&document_id).map_or_else(
+            || DocumentPolicy::default().allowlist(feature, origin),
+            |policy| policy.allowlist(feature, origin),
+        )
     }
 
     fn fullscreen_allowed_for_document(&self, document_id: usize) -> bool {
-        if !self.fullscreen_supported || !self.document_is_active(document_id) {
-            return false;
-        }
-        let mut current = document_id;
-        let mut seen = HashSet::new();
-        while current != self.document.identity() {
-            if !seen.insert(current) {
-                return false;
-            }
-            let Some((&iframe_id, _)) = self
-                .iframe_documents
-                .iter()
-                .find(|(_, entry)| entry.document.identity() == current)
-            else {
-                return false;
-            };
-            let Some(iframe) = self.get_node(iframe_id) else {
-                return false;
-            };
-            if !self.iframe_allows_fullscreen(&iframe, current) {
-                return false;
-            }
-            let Some(owner) = owner_document_for_node(&iframe) else {
-                return false;
-            };
-            current = owner.identity();
-        }
-        true
+        self.fullscreen_supported
+            && self.feature_enabled_in_document(document_id, PolicyFeature::Fullscreen)
     }
 
     fn fullscreen_element(&self, document_id: usize) -> Option<NodeHandle> {
@@ -12342,6 +12518,7 @@ fn register_host_bindings(
     form_validation::register(context, &mut bindings)?;
     form_submission::register(context, &mut bindings)?;
     geolocation::register(context, &mut bindings)?;
+    permissions_policy::register(context, &mut bindings)?;
     broadcast_channel::register(context, &mut bindings)?;
     web_locks::register(context, &mut bindings)?;
     cache_storage::register(context, &mut bindings)?;
@@ -13556,8 +13733,13 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_iframe_force_navigation"),
-            1,
+            3,
             NativeFunction::from_copy_closure(iframe_force_navigation_native),
+        ),
+        (
+            js_string!("__omoikane_iframe_declared_origin"),
+            1,
+            NativeFunction::from_copy_closure(iframe_declared_origin_native),
         ),
         (
             js_string!("__omoikane_take_discarded_node_ids"),
@@ -23090,7 +23272,9 @@ fn iframe_context_state_native(
 /// `src`/`srcdoc` is unchanged. The active Document stays available until the
 /// resource task (or an explicit `contentDocument` read) commits its replacement.
 /// The browsing-context id is preserved, so existing WindowProxy objects are
-/// retargeted rather than retired. Used by Location reload and history travel.
+/// retargeted rather than retired. Location navigation keeps the embedding
+/// element's declared origin; reload and history traversal use the selected
+/// history entry's declaration when it came from a Location navigation.
 fn iframe_force_navigation_native(
     _: &JsValue,
     args: &[JsValue],
@@ -23099,6 +23283,16 @@ fn iframe_force_navigation_native(
     let iframe_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, iframe_id)?;
     let client_document_id = navigation_client_document_id(context);
+    let navigation = if args.get(1).is_some_and(JsValue::to_boolean) {
+        if let Some(snapshot) = args.get(2) {
+            let snapshot = snapshot.to_string(context)?.to_std_string_escaped();
+            ForcedIframeNavigation::RestoreDeclaredOrigin(parse_iframe_declared_origin(&snapshot))
+        } else {
+            ForcedIframeNavigation::Location
+        }
+    } else {
+        ForcedIframeNavigation::Refresh
+    };
     with_host_state(|state| {
         let iframe = state.borrow().get_node(iframe_id);
         let Some(iframe) = iframe else {
@@ -23120,9 +23314,49 @@ fn iframe_force_navigation_native(
                 state.pending_iframe_visits.insert(iframe_id, source);
             }
         }
-        state.pending_forced_iframe_navigations.insert(iframe_id);
+        state
+            .pending_forced_iframe_navigations
+            .insert(iframe_id, navigation);
         state.schedule_connected_resource_loads(&iframe, true);
         Ok(JsValue::from(true))
+    })
+}
+
+fn parse_iframe_declared_origin(snapshot: &str) -> Option<DocumentSecurityOrigin> {
+    snapshot
+        .strip_prefix("tuple:")
+        .and_then(StorageOrigin::from_url)
+        .map(DocumentSecurityOrigin::Tuple)
+        .or_else(|| {
+            snapshot
+                .strip_prefix("opaque:")
+                .and_then(|id| id.parse().ok())
+                .map(DocumentSecurityOrigin::Opaque)
+        })
+}
+
+/// Captures the active iframe's policy declaration for its session-history
+/// entry. The snapshot is internal to the owner Realm and may contain an
+/// opaque-origin identity that cannot be recovered from a URL.
+fn iframe_declared_origin_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let iframe_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, iframe_id)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        let snapshot = match state
+            .iframe_documents
+            .get(&iframe_id)
+            .and_then(|entry| entry.declared_src_origin.as_ref())
+        {
+            Some(DocumentSecurityOrigin::Tuple(origin)) => format!("tuple:{}", origin.serialize()),
+            Some(DocumentSecurityOrigin::Opaque(id)) => format!("opaque:{id}"),
+            None => "none".to_owned(),
+        };
+        Ok(js_string!(snapshot).into())
     })
 }
 

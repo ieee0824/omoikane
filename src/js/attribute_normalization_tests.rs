@@ -313,3 +313,28 @@ fn native_document_content_type_is_not_an_author_expando() {
         Some(true)
     );
 }
+
+#[test]
+fn iframe_sandbox_assignment_forwards_to_the_same_dom_token_list() {
+    let mut runtime = runtime();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+                    const frame = document.getElementById('f');
+                    const tokens = frame.sandbox;
+                    if (frame.hasAttribute('sandbox')) return false;
+                    frame.sandbox = { toString() { return 'allow-scripts allow-same-origin'; } };
+                    if (frame.sandbox !== tokens ||
+                        frame.getAttribute('sandbox') !== 'allow-scripts allow-same-origin' ||
+                        !tokens.contains('allow-scripts')) return false;
+                    frame.sandbox = '';
+                    return frame.hasAttribute('sandbox') && frame.getAttribute('sandbox') === '' &&
+                        frame.sandbox === tokens && tokens.length === 0;
+                })()"#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}

@@ -25,6 +25,12 @@ collect_pattern \
 collect_pattern "/css/css-logical/"
 collect_pattern "/reporting/" "/content-security-policy/securitypolicyviolation/constructor-required-fields.html"
 collect_pattern \
+  "/permissions-policy/policy-extends-to-sandbox.html" \
+  "/permissions-policy/resources/sandbox-self.html" \
+  "/permissions-policy/resources/sandbox-self.html.headers" \
+  "/permissions-policy/resources/nested-sandbox.html" \
+  "/html/semantics/embedded-content/the-iframe-element/iframe-allow.html"
+collect_pattern \
   "/trusted-types/support/" \
   "/trusted-types/navigate-to-javascript-url-001.html" \
   "/trusted-types/navigate-to-javascript-url-002.html" \

@@ -644,6 +644,7 @@ impl CdpSession {
                     name.to_ascii_lowercase().as_str(),
                     "content-security-policy"
                         | "content-security-policy-report-only"
+                        | "permissions-policy"
                         | "reporting-endpoints"
                         | "referrer-policy"
                 )

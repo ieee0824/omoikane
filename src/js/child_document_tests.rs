@@ -9,6 +9,23 @@ use std::time::Duration;
 
 const CSP: &str = "default-src 'none'";
 
+#[test]
+fn child_response_keeps_permissions_policy_header() {
+    let response = crate::http::HttpResponse::new(
+        200,
+        "OK",
+        vec![
+            ("Permissions-Policy".into(), "fullscreen=()".into()),
+            ("X-Unrelated".into(), "ignored".into()),
+        ],
+        Vec::new(),
+    );
+    assert_eq!(
+        super::child_document::response_security_headers(&response),
+        vec![("Permissions-Policy".into(), "fullscreen=()".into())]
+    );
+}
+
 fn text_of(document: &NodeHandle, selector: &str) -> Option<String> {
     document.query_selector(selector).map(|node| {
         node.child_nodes()
