@@ -119,6 +119,16 @@ where
 }
 
 impl<H, E, R> CallFrame<H, E, R, ActiveRunnable> {
+    /// Returns the Realm of this frame's active script or module, if present.
+    /// This differs from the saved caller Realm on a cross-Realm function call.
+    #[must_use]
+    pub fn script_or_module_realm(&self) -> Option<Realm> {
+        match self.active_runnable.as_ref()? {
+            ActiveRunnable::Script(script) => Some(script.realm()),
+            ActiveRunnable::Module(module) => Some(module.realm()),
+        }
+    }
+
     /// Returns the `[[HostDefined]]` data for this frame's script or module.
     ///
     /// The data belongs to the runnable stored on this frame, allowing hosts to
