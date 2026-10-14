@@ -7,7 +7,9 @@
 
 use std::collections::BTreeMap;
 
+use base64::Engine as _;
 use serde::Serialize;
+use sha2::{Digest, Sha256, Sha384, Sha512};
 
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::http::Url;
@@ -79,7 +81,10 @@ enum SourceExpression {
     None,
     SelfKeyword,
     UnsafeInline,
+    UnsafeHashes,
+    StrictDynamic,
     Nonce(String),
+    Hash(HashAlgorithm, Vec<u8>),
     UnsafeEval,
     TrustedTypesEval,
     ReportSample,
@@ -91,6 +96,75 @@ enum SourceExpression {
         port: Option<u16>,
         path: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HashAlgorithm {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl HashAlgorithm {
+    fn digest(self, source: &str) -> Vec<u8> {
+        match self {
+            Self::Sha256 => Sha256::digest(source.as_bytes()).to_vec(),
+            Self::Sha384 => Sha384::digest(source.as_bytes()).to_vec(),
+            Self::Sha512 => Sha512::digest(source.as_bytes()).to_vec(),
+        }
+    }
+
+    fn digest_len(self) -> usize {
+        match self {
+            Self::Sha256 => 32,
+            Self::Sha384 => 48,
+            Self::Sha512 => 64,
+        }
+    }
+}
+
+/// The inline sink selects both its directive fallback and hash/nonce rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InlineType {
+    Script,
+    DynamicScript,
+    ScriptAttribute,
+    Style,
+    StyleAttribute,
+    Navigation,
+}
+
+impl InlineType {
+    fn resource_type(self) -> ResourceType {
+        match self {
+            Self::Script | Self::DynamicScript | Self::ScriptAttribute | Self::Navigation => {
+                ResourceType::Script
+            }
+            Self::Style | Self::StyleAttribute => ResourceType::Style,
+        }
+    }
+
+    fn is_attribute(self) -> bool {
+        matches!(self, Self::ScriptAttribute | Self::StyleAttribute)
+    }
+
+    fn permits_nonce(self) -> bool {
+        matches!(self, Self::Script | Self::DynamicScript | Self::Style)
+    }
+
+    fn requires_unsafe_hashes(self) -> bool {
+        matches!(
+            self,
+            Self::ScriptAttribute | Self::StyleAttribute | Self::Navigation
+        )
+    }
+
+    fn is_script(self) -> bool {
+        matches!(
+            self,
+            Self::Script | Self::DynamicScript | Self::ScriptAttribute | Self::Navigation
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -205,20 +279,9 @@ impl CspPolicy {
     /// These attributes use `script-src-attr` fallback, not `unsafe-eval`.
     pub(crate) fn script_attribute_violations(
         &self,
+        source: &str,
     ) -> (Vec<PolicyViolation>, Vec<PolicyViolation>) {
-        let violations = |policies: &[ParsedPolicy]| {
-            policies
-                .iter()
-                .filter(|policy| !policy.allows_inline(ResourceType::Script, true))
-                .map(|policy| PolicyViolation {
-                    serialized: policy.serialized.clone(),
-                    report_sample: policy
-                        .sources_for(ResourceType::Script, true)
-                        .is_some_and(|sources| sources.contains(&SourceExpression::ReportSample)),
-                })
-                .collect()
-        };
-        (violations(&self.policies), violations(&self.report_only))
+        self.inline_policy_violations(InlineType::ScriptAttribute, source, None)
     }
 
     /// Returns policies whose inline script check rejects a javascript: URL.
@@ -226,15 +289,28 @@ impl CspPolicy {
     /// script element directive (and its ordinary fallback chain).
     pub(crate) fn javascript_navigation_violations(
         &self,
+        full_url: &str,
+    ) -> (Vec<PolicyViolation>, Vec<PolicyViolation>) {
+        self.inline_policy_violations(InlineType::Navigation, full_url, None)
+    }
+
+    /// Returns the policies rejecting this exact UTF-8 inline source.
+    /// Navigation hashes use the serialized full javascript: URL, while
+    /// attribute hashes require an explicit unsafe-hashes keyword.
+    pub(crate) fn inline_policy_violations(
+        &self,
+        kind: InlineType,
+        source: &str,
+        nonce: Option<&str>,
     ) -> (Vec<PolicyViolation>, Vec<PolicyViolation>) {
         let violations = |policies: &[ParsedPolicy]| {
             policies
                 .iter()
-                .filter(|policy| !policy.allows_inline(ResourceType::Script, false))
+                .filter(|policy| !policy.allows_inline_source(kind, Some(source), nonce))
                 .map(|policy| PolicyViolation {
                     serialized: policy.serialized.clone(),
                     report_sample: policy
-                        .sources_for(ResourceType::Script, false)
+                        .sources_for(kind.resource_type(), kind.is_attribute())
                         .is_some_and(|sources| sources.contains(&SourceExpression::ReportSample)),
                 })
                 .collect()
@@ -448,6 +524,23 @@ impl CspPolicy {
             .all(|policy| policy.allows_inline(resource_type, false))
     }
 
+    /// Checks the complete inline text against every enforcing policy.
+    pub(crate) fn allows_inline_source(&self, kind: InlineType, source: &str) -> bool {
+        self.allows_inline_source_with_nonce(kind, source, None)
+    }
+
+    /// Only inline script and style elements can use an element nonce.
+    pub(crate) fn allows_inline_source_with_nonce(
+        &self,
+        kind: InlineType,
+        source: &str,
+        nonce: Option<&str>,
+    ) -> bool {
+        self.policies
+            .iter()
+            .all(|policy| policy.allows_inline_source(kind, Some(source), nonce))
+    }
+
     /// Checks inline attributes using attribute-specific directive fallbacks.
     pub(crate) fn allows_inline_attribute(&self, resource_type: ResourceType) -> bool {
         self.policies
@@ -523,20 +616,56 @@ impl ParsedPolicy {
     }
 
     fn allows_inline(&self, resource_type: ResourceType, attribute: bool) -> bool {
-        let Some(sources) = self.sources_for(resource_type, attribute) else {
+        let kind = match (resource_type, attribute) {
+            (ResourceType::Script, false) => InlineType::Script,
+            (ResourceType::Script, true) => InlineType::ScriptAttribute,
+            (ResourceType::Style, false) => InlineType::Style,
+            (ResourceType::Style, true) => InlineType::StyleAttribute,
+            _ => return false,
+        };
+        self.allows_inline_source(kind, None, None)
+    }
+
+    fn allows_inline_source(
+        &self,
+        kind: InlineType,
+        source: Option<&str>,
+        nonce: Option<&str>,
+    ) -> bool {
+        let Some(sources) = self.sources_for(kind.resource_type(), kind.is_attribute()) else {
             return true;
         };
-        // CSP3 ignores 'unsafe-inline' when a nonce source is present.
-        if resource_type == ResourceType::Script
-            && sources
-                .iter()
-                .any(|source| matches!(source, SourceExpression::Nonce(_)))
+        let overrides_unsafe_inline = sources.iter().any(|expression| {
+            matches!(
+                expression,
+                SourceExpression::Nonce(_) | SourceExpression::Hash(..)
+            ) || (kind.is_script() && matches!(expression, SourceExpression::StrictDynamic))
+        });
+        if !overrides_unsafe_inline && sources.contains(&SourceExpression::UnsafeInline) {
+            return true;
+        }
+        if kind.permits_nonce()
+            && nonce.is_some_and(|nonce| {
+                sources.iter().any(|expression| {
+                    matches!(expression, SourceExpression::Nonce(expected) if expected == nonce)
+                })
+            })
         {
+            return true;
+        }
+        if kind == InlineType::DynamicScript && sources.contains(&SourceExpression::StrictDynamic) {
+            return true;
+        }
+        let Some(source) = source else {
+            return false;
+        };
+        if kind.requires_unsafe_hashes() && !sources.contains(&SourceExpression::UnsafeHashes) {
             return false;
         }
-        sources
-            .iter()
-            .any(|source| matches!(source, SourceExpression::UnsafeInline))
+        sources.iter().any(|expression| match expression {
+            SourceExpression::Hash(algorithm, expected) => algorithm.digest(source) == *expected,
+            _ => false,
+        })
     }
 
     fn allows_script_nonce(&self, nonce: Option<&str>) -> bool {
@@ -574,7 +703,10 @@ impl ParsedPolicy {
         sources.iter().any(|source| match source {
             SourceExpression::None => false,
             SourceExpression::UnsafeInline
+            | SourceExpression::UnsafeHashes
+            | SourceExpression::StrictDynamic
             | SourceExpression::Nonce(_)
+            | SourceExpression::Hash(..)
             | SourceExpression::UnsafeEval
             | SourceExpression::TrustedTypesEval
             | SourceExpression::ReportSample => false,
@@ -793,11 +925,16 @@ fn parse_source_expression(token: &str) -> Option<SourceExpression> {
     {
         return Some(SourceExpression::Nonce(nonce.to_owned()));
     }
+    if let Some(hash) = parse_hash_source(token) {
+        return Some(hash);
+    }
     let lower = token.to_ascii_lowercase();
     match lower.as_str() {
         "'none'" => return Some(SourceExpression::None),
         "'self'" => return Some(SourceExpression::SelfKeyword),
         "'unsafe-inline'" => return Some(SourceExpression::UnsafeInline),
+        "'unsafe-hashes'" => return Some(SourceExpression::UnsafeHashes),
+        "'strict-dynamic'" => return Some(SourceExpression::StrictDynamic),
         "'unsafe-eval'" => return Some(SourceExpression::UnsafeEval),
         "'trusted-types-eval'" => return Some(SourceExpression::TrustedTypesEval),
         "'report-sample'" => {
@@ -865,6 +1002,34 @@ fn parse_source_expression(token: &str) -> Option<SourceExpression> {
         port,
         path,
     })
+}
+
+fn parse_hash_source(token: &str) -> Option<SourceExpression> {
+    let (algorithm, value) = token
+        .strip_prefix('\'')?
+        .strip_suffix('\'')?
+        .split_once('-')?;
+    let algorithm = match algorithm.to_ascii_lowercase().as_str() {
+        "sha256" => HashAlgorithm::Sha256,
+        "sha384" => HashAlgorithm::Sha384,
+        "sha512" => HashAlgorithm::Sha512,
+        _ => return None,
+    };
+    let unpadded = value.trim_end_matches('=');
+    if unpadded.is_empty() || value.len() - unpadded.len() > 2 {
+        return None;
+    }
+    let normalized = value.replace('-', "+").replace('_', "/");
+    let bytes = if value.contains('=') {
+        base64::engine::general_purpose::STANDARD
+            .decode(normalized)
+            .ok()?
+    } else {
+        base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(normalized)
+            .ok()?
+    };
+    (bytes.len() == algorithm.digest_len()).then_some(SourceExpression::Hash(algorithm, bytes))
 }
 
 fn csp_meta_content(node: &NodeHandle) -> Option<String> {
@@ -1041,13 +1206,18 @@ mod tests {
             "script-src 'unsafe-eval'; script-src-attr 'none' 'report-sample'",
             "https://example.test/",
         );
-        let (blocked, reported) = policy.script_attribute_violations();
+        let (blocked, reported) = policy.script_attribute_violations("doSubmit()");
         assert_eq!((blocked.len(), reported.len()), (1, 0));
         assert!(blocked[0].report_sample);
         assert!(policy.script_compilation_violations().0.is_empty());
 
         let policy = make_policy("script-src 'unsafe-inline'", "https://example.test/");
-        assert!(policy.script_attribute_violations().0.is_empty());
+        assert!(
+            policy
+                .script_attribute_violations("doSubmit()")
+                .0
+                .is_empty()
+        );
         assert_eq!(policy.script_compilation_violations().0.len(), 1);
     }
 
@@ -1145,6 +1315,159 @@ mod tests {
             );
             assert!(policy.allows_inline(ResourceType::Script), "{malformed}");
         }
+    }
+
+    #[test]
+    fn inline_hash_sources_match_exact_utf8_and_base64url_bytes() {
+        use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+
+        let source = "π();";
+        for (name, digest) in [
+            ("sha256", HashAlgorithm::Sha256.digest(source)),
+            ("sha384", HashAlgorithm::Sha384.digest(source)),
+            ("sha512", HashAlgorithm::Sha512.digest(source)),
+        ] {
+            for encoded in [STANDARD.encode(&digest), URL_SAFE_NO_PAD.encode(&digest)] {
+                let policy = make_policy(
+                    &format!("script-src '{name}-{encoded}'"),
+                    "https://example.test/",
+                );
+                assert!(policy.allows_inline_source(InlineType::Script, source));
+                assert!(!policy.allows_inline_source(InlineType::Script, "π(); "));
+                assert!(!policy.allows_inline_source(InlineType::Script, "λ();"));
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_hashes_cannot_suppress_or_authorize_unsafe_inline() {
+        for invalid in [
+            "'sha256-%%%'",
+            "'sha256-Zg=='",
+            "'sha384-'",
+            "'sha512-AAAA==='",
+            "'sha1-AAAA'",
+        ] {
+            let policy = make_policy(
+                &format!("script-src 'unsafe-inline' {invalid}"),
+                "https://example.test/",
+            );
+            assert!(
+                policy.allows_inline_source(InlineType::Script, "anything"),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsafe_hashes_only_unlocks_matching_attribute_and_navigation_sources() {
+        let source = "doSubmit()";
+        let digest =
+            base64::engine::general_purpose::STANDARD.encode(HashAlgorithm::Sha256.digest(source));
+        let source_list = format!("'sha256-{digest}'");
+        let policy = make_policy(
+            &format!("script-src {source_list}"),
+            "https://example.test/",
+        );
+        assert!(policy.allows_inline_source(InlineType::Script, source));
+        assert_eq!(policy.script_attribute_violations(source).0.len(), 1);
+        assert_eq!(policy.javascript_navigation_violations(source).0.len(), 1);
+
+        let policy = make_policy(
+            &format!("script-src 'unsafe-hashes' {source_list}"),
+            "https://example.test/",
+        );
+        assert!(policy.script_attribute_violations(source).0.is_empty());
+        assert_eq!(policy.script_attribute_violations("doSubmit();").0.len(), 1);
+        assert!(policy.javascript_navigation_violations(source).0.is_empty());
+
+        let style_policy = make_policy(
+            &format!("style-src-attr 'unsafe-hashes' {source_list}"),
+            "https://example.test/",
+        );
+        assert!(style_policy.allows_inline_source(InlineType::StyleAttribute, source));
+        assert!(!style_policy.allows_inline_source(InlineType::StyleAttribute, "doSubmit();"));
+    }
+
+    #[test]
+    fn navigation_hash_uses_full_url_and_selected_directive_per_policy() {
+        let url = "javascript:navigated();";
+        let digest =
+            base64::engine::general_purpose::STANDARD.encode(HashAlgorithm::Sha256.digest(url));
+        let source = format!("'unsafe-hashes' 'sha256-{digest}'");
+        let policy = make_policy(
+            &format!("script-src {source}; script-src-elem 'none'"),
+            "https://example.test/",
+        );
+        assert_eq!(policy.javascript_navigation_violations(url).0.len(), 1);
+        let policy = make_policy(&format!("default-src {source}"), "https://example.test/")
+            .with_report_only_headers(&["script-src-elem 'none' 'report-sample'".into()]);
+        let (enforced, reported) = policy.javascript_navigation_violations(url);
+        assert!(enforced.is_empty());
+        assert_eq!(reported.len(), 1);
+        assert!(reported[0].report_sample);
+        assert_eq!(
+            policy
+                .javascript_navigation_violations("navigated();")
+                .0
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn hashes_nonces_and_strict_dynamic_override_unsafe_inline() {
+        let source = "run()";
+        let digest =
+            base64::engine::general_purpose::STANDARD.encode(HashAlgorithm::Sha256.digest(source));
+        for keyword in [
+            format!("'sha256-{digest}'"),
+            "'nonce-abc'".into(),
+            "'strict-dynamic'".into(),
+        ] {
+            let policy = make_policy(
+                &format!("script-src 'unsafe-inline' {keyword}"),
+                "https://example.test/",
+            );
+            assert!(
+                !policy.allows_inline_source(InlineType::Script, "other()"),
+                "{keyword}"
+            );
+        }
+        let policy = make_policy(
+            "script-src 'unsafe-inline' 'nonce-abc'",
+            "https://example.test/",
+        );
+        assert_eq!(
+            policy
+                .javascript_navigation_violations("javascript:run()")
+                .0
+                .len(),
+            1
+        );
+        let policy = make_policy("script-src 'strict-dynamic'", "https://example.test/");
+        assert!(!policy.allows_inline_source(InlineType::Script, source));
+        assert!(policy.allows_inline_source(InlineType::DynamicScript, source));
+        assert!(!policy.allows_inline_source(InlineType::ScriptAttribute, source));
+    }
+
+    #[test]
+    fn style_element_nonce_does_not_authorize_style_attribute() {
+        let policy = make_policy(
+            "style-src-elem 'nonce-abc' 'unsafe-inline'; style-src-attr 'nonce-abc' 'unsafe-inline'",
+            "https://example.test/",
+        );
+        assert!(policy.allows_inline_source_with_nonce(
+            InlineType::Style,
+            "#target { color: red; }",
+            Some("abc")
+        ));
+        assert!(!policy.allows_inline_source(InlineType::Style, "#target { color: red; }"));
+        assert!(!policy.allows_inline_source_with_nonce(
+            InlineType::StyleAttribute,
+            "color: red;",
+            Some("abc")
+        ));
     }
 
     #[test]

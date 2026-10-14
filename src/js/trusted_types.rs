@@ -137,7 +137,11 @@ pub(super) fn prepare_javascript_navigation(
 }
 
 /// Applies the subsequent inline CSP check to the approved script text.
-pub(super) fn allow_javascript_navigation(source: &str, document_id: usize) -> bool {
+pub(super) fn allow_javascript_navigation(
+    source: &str,
+    full_url: &str,
+    document_id: usize,
+) -> bool {
     with_host_state(|host| {
         let mut state = host.borrow_mut();
         let document = state.get_node(document_id).ok_or_else(|| {
@@ -145,7 +149,7 @@ pub(super) fn allow_javascript_navigation(source: &str, document_id: usize) -> b
         })?;
         let (blocking, reporting) = state
             .csp_policy_for_document(&document)
-            .javascript_navigation_violations();
+            .javascript_navigation_violations(full_url);
         let sample = csp::inline_report_sample(source);
         state.queue_trusted_types_violation(
             document_id,

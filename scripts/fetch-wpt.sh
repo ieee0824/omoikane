@@ -87,6 +87,12 @@ collect_pattern \
   "/content-security-policy/support/ping.js" \
   "/content-security-policy/support/post-message.js"
 collect_pattern \
+  "/content-security-policy/unsafe-hashes/javascript_src_allowed-href.html" \
+  "/content-security-policy/unsafe-hashes/javascript_src_denied_missing_unsafe_hashes-href.html" \
+  "/content-security-policy/unsafe-hashes/javascript_src_denied_wrong_hash-href.html" \
+  "/content-security-policy/unsafe-hashes/javascript_src_allowed-href_blank-script-src-elem.html" \
+  "/content-security-policy/unsafe-hashes/support/helper.js"
+collect_pattern \
   "/dom/events/AddEventListenerOptions-once.any.js" \
   "/dom/events/AddEventListenerOptions-passive.any.js" \
   "/dom/events/AddEventListenerOptions-signal.any.js"

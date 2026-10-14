@@ -1,6 +1,6 @@
 //! Document-owned stylesheet resources shared by CSSOM geometry and painting.
 
-use super::csp::{CspPolicy, ResourceType};
+use super::csp::{CspPolicy, InlineType, ResourceType};
 use crate::dom::{Node, NodeHandle, WeakNodeHandle};
 use crate::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
@@ -33,6 +33,8 @@ pub(super) struct StylePolicyCheck {
     pub(super) report_reference: String,
     /// Clipped original inline text; empty for request/response checks.
     pub(super) sample: String,
+    /// Complete source used for inline hash matching; absent for fetched CSS.
+    pub(super) inline_source: Option<String>,
     /// Whether enforced policy prevented this stage from proceeding.
     pub(super) blocked: bool,
 }
@@ -40,6 +42,7 @@ pub(super) struct StylePolicyCheck {
 struct NodeSource {
     text: String,
     text_nodes: Vec<usize>,
+    nonce: Option<String>,
     href: Option<String>,
     rel: Option<String>,
     base: Option<Url>,
@@ -50,6 +53,7 @@ impl NodeSource {
     fn matches(&self, other: &Self) -> bool {
         self.text == other.text
             && self.text_nodes == other.text_nodes
+            && self.nonce == other.nonce
             && self.href == other.href
             && self.rel == other.rel
             && self.base == other.base
@@ -70,6 +74,7 @@ impl NodeSource {
         Self {
             text: css::collect_text_contents(node),
             text_nodes: ids,
+            nonce: node.get_attribute("nonce"),
             href: node.get_attribute("href"),
             rel: node.get_attribute("rel"),
             base: base.cloned(),
@@ -182,12 +187,18 @@ impl StylesheetLoader {
         let mut output = Vec::new();
         let mut active = HashSet::new();
         if node.tag_name().as_deref() == Some("style") {
-            let blocked = !policy.allows_inline(ResourceType::Style);
+            let nonce = node.get_attribute("nonce");
+            let blocked = !policy.allows_inline_source_with_nonce(
+                InlineType::Style,
+                &source.text,
+                nonce.as_deref(),
+            );
             checks.push(StylePolicyCheck {
                 reference: "inline".into(),
                 redirects: 0,
                 report_reference: "inline".into(),
                 sample: super::csp::inline_report_sample(&source.text),
+                inline_source: Some(source.text.clone()),
                 blocked,
             });
             if !blocked {
@@ -487,6 +498,7 @@ fn check_reference(
         redirects,
         report_reference: report_reference.to_owned(),
         sample: String::new(),
+        inline_source: None,
         blocked,
     });
     !blocked
@@ -671,6 +683,7 @@ mod tests {
                 redirects: 0,
                 report_reference: "inline".into(),
                 sample: "body { color: red }".into(),
+                inline_source: Some("body { color: red }".into()),
                 blocked: false,
             }]
         );
@@ -752,6 +765,7 @@ mod tests {
                 redirects: 1,
                 report_reference: original.into(),
                 sample: String::new(),
+                inline_source: None,
                 blocked: true,
             }]
         );

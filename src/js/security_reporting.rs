@@ -680,11 +680,23 @@ impl HostState {
     ) {
         let policy = self.csp_policy_for_document(document);
         for check in checks {
-            let monitored = policy.report_only_policy_texts_after_redirects(
-                ResourceType::Style,
-                &check.reference,
-                check.redirects,
-            );
+            let (enforced, monitored) = if let Some(source) = &check.inline_source {
+                let nonce = node.get_attribute("nonce");
+                policy.inline_policy_violations(csp::InlineType::Style, source, nonce.as_deref())
+            } else {
+                (
+                    policy.blocking_policy_texts_after_redirects(
+                        ResourceType::Style,
+                        &check.reference,
+                        check.redirects,
+                    ),
+                    policy.report_only_policy_texts_after_redirects(
+                        ResourceType::Style,
+                        &check.reference,
+                        check.redirects,
+                    ),
+                )
+            };
             self.queue_policy_violation_events_for_node_with_sample(
                 node,
                 ResourceType::Style,
@@ -694,11 +706,6 @@ impl HostState {
                 &check.sample,
             );
             if check.blocked {
-                let enforced = policy.blocking_policy_texts_after_redirects(
-                    ResourceType::Style,
-                    &check.reference,
-                    check.redirects,
-                );
                 self.queue_policy_violation_events_for_node_with_sample(
                     node,
                     ResourceType::Style,
@@ -715,6 +722,63 @@ impl HostState {
                 self.record_csp_violation_history(document, ResourceType::Style, legacy_reference);
             }
         }
+    }
+
+    /// Checks an inline style attribute once per source and policy generation.
+    /// Viewport and cascade rebuilds reuse the result without duplicate reports.
+    pub(super) fn csp_allows_inline_style_attribute(
+        &mut self,
+        document: &NodeHandle,
+        node: &NodeHandle,
+        source: &str,
+    ) -> bool {
+        let policy = self.csp_policy_for_document(document);
+        let (enforced, reported) =
+            policy.inline_policy_violations(csp::InlineType::StyleAttribute, source, None);
+        let allowed = enforced.is_empty();
+        let unchanged = self
+            .observed_style_attributes
+            .get(&node.identity())
+            .is_some_and(|previous| {
+                previous.node.upgrade().as_ref() == Some(node)
+                    && previous.document_id == document.identity()
+                    && previous.source == source
+                    && previous.policy.has_same_policy_rules(&policy)
+            });
+        if unchanged {
+            return allowed;
+        }
+        self.observed_style_attributes.insert(
+            node.identity(),
+            super::InlineStyleCspSnapshot {
+                node: node.downgrade(),
+                document_id: document.identity(),
+                source: source.to_owned(),
+                policy,
+            },
+        );
+        let reference = format!("style-attribute:{}", node.identity());
+        let sample = csp::inline_report_sample(source);
+        self.queue_policy_violation_events_for_node_with_sample(
+            node,
+            ResourceType::Style,
+            &reference,
+            reported,
+            "report",
+            &sample,
+        );
+        if !allowed {
+            self.queue_policy_violation_events_for_node_with_sample(
+                node,
+                ResourceType::Style,
+                &reference,
+                enforced,
+                "enforce",
+                &sample,
+            );
+            self.record_csp_violation_history(document, ResourceType::Style, reference);
+        }
+        allowed
     }
 
     /// Delivers the creator Document's checks collected during worker I/O.
@@ -872,6 +936,44 @@ impl HostState {
             .is_empty()
     }
 
+    /// Checks parser-owned inline script text before evaluation. The source
+    /// bytes, rather than the `inline` report URL, determine hash matching.
+    pub(super) fn csp_allows_inline_script_for_node(
+        &mut self,
+        node: &NodeHandle,
+        source: &str,
+    ) -> bool {
+        let Some(document) = document_root_for_node(node) else {
+            return false;
+        };
+        let policy = self.csp_policy_for_document(&document);
+        let nonce = node.get_attribute("nonce");
+        let (enforced, reported) =
+            policy.inline_policy_violations(csp::InlineType::Script, source, nonce.as_deref());
+        let sample = csp::inline_report_sample(source);
+        self.queue_policy_violation_events_for_node_with_sample(
+            node,
+            ResourceType::Script,
+            "inline",
+            reported,
+            "report",
+            &sample,
+        );
+        if enforced.is_empty() {
+            return true;
+        }
+        self.queue_policy_violation_events_for_node_with_sample(
+            node,
+            ResourceType::Script,
+            "inline",
+            enforced,
+            "enforce",
+            &sample,
+        );
+        self.record_csp_violation_history(&document, ResourceType::Script, "inline".into());
+        false
+    }
+
     /// Checks an already captured inline source, including both monitoring and
     /// enforcement notifications. Written scripts can retain their source even
     /// when their element's text or owning tree changes before execution. The
@@ -887,16 +989,20 @@ impl HostState {
         let sample = csp::inline_report_sample(source);
         let target = (document.identity(), Some(node.identity()));
         let nonce = node.get_attribute("nonce");
+        let kind = if self.parser_inserted_scripts.contains(&node.identity()) {
+            csp::InlineType::Script
+        } else {
+            csp::InlineType::DynamicScript
+        };
+        let (enforced, reported) = policy.inline_policy_violations(kind, source, nonce.as_deref());
         self.enqueue_policy_violation_events(
             target,
             ResourceType::Script,
             "inline",
-            policy.script_policy_violations_with_nonce("inline", 0, nonce.as_deref(), true),
+            reported,
             "report",
             &sample,
         );
-        let enforced =
-            policy.script_policy_violations_with_nonce("inline", 0, nonce.as_deref(), false);
         if enforced.is_empty() {
             return true;
         }
@@ -2918,6 +3024,156 @@ mod tests {
             .unwrap();
         runtime.run_timers(10, 1, 30);
         assert!(runtime.eval("inlineColor !== 'rgb(0, 0, 255)' && events.length === 2 && events.every(event => event.target === 'inlineStyle' && event.directive === 'style-src-elem' && event.blockedURI === 'inline') && events.map(event => event.disposition).sort().join(',') === 'enforce,report' && reports.length === 2 && reports.every(report => report.body.blockedURL === 'inline') && document.cspViolations.length === 1").unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn inline_style_hash_allows_matching_css_and_reports_other_policy() {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+
+        let css = "#target { color: red; }";
+        let digest =
+            base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(css.as_bytes()));
+        let document = crate::html::TreeBuilder::parse(&format!(
+            "<style id=sheet>{css}</style><body><p id=target>x</p></body>"
+        ))
+        .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_response_security_headers(&[
+            (
+                "Content-Security-Policy".into(),
+                format!("style-src-elem 'sha256-{digest}'"),
+            ),
+            (
+                "Content-Security-Policy-Report-Only".into(),
+                "style-src-elem 'none' 'report-sample'; report-to reports".into(),
+            ),
+        ]);
+        runtime.eval("globalThis.events=[]; globalThis.reports=[]; document.addEventListener('securitypolicyviolation', e => events.push([e.disposition,e.sample])); new ReportingObserver(batch => reports.push(...batch)).observe(); globalThis.color=getComputedStyle(document.getElementById('target')).color;").unwrap();
+        runtime.run_timers(10, 1, 30);
+        assert!(runtime.eval("color === 'rgb(255, 0, 0)' && events.length === 1 && events[0][0] === 'report' && events[0][1] === '#target { color: red; }' && reports.length === 1 && document.cspViolations.length === 0").unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn parser_inline_script_hash_allows_matching_source_and_reports_other_policy() {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+
+        let source = "globalThis.hashRan = true;";
+        let digest = base64::engine::general_purpose::STANDARD
+            .encode(sha2::Sha256::digest(source.as_bytes()));
+        for matches_hash in [true, false] {
+            let document = crate::html::TreeBuilder::parse(&format!(
+                "<script id=source>{source}</script><body></body>"
+            ))
+            .document();
+            let mut runtime =
+                JsRuntime::with_document_and_url(document, "https://example.test/document")
+                    .unwrap();
+            let allowed_hash = if matches_hash {
+                digest.clone()
+            } else {
+                base64::engine::general_purpose::STANDARD
+                    .encode(sha2::Sha256::digest(b"different script"))
+            };
+            runtime.install_response_security_headers(&[
+                (
+                    "Content-Security-Policy".into(),
+                    format!(
+                        "script-src-elem 'sha256-{allowed_hash}' 'report-sample'; report-to reports"
+                    ),
+                ),
+                (
+                    "Content-Security-Policy-Report-Only".into(),
+                    "script-src-elem 'none' 'report-sample'; report-to reports".into(),
+                ),
+            ]);
+            runtime.eval("globalThis.hashRan=false; globalThis.events=[]; globalThis.reports=[]; document.addEventListener('securitypolicyviolation', e => events.push([e.disposition,e.sample])); new ReportingObserver(batch => reports.push(...batch)).observe();").unwrap();
+            assert!(runtime.execute_document_scripts(None).is_empty());
+            runtime.run_timers(10, 1, 30);
+            assert!(runtime.eval(if matches_hash {
+                "hashRan && events.length === 1 && events[0].join('|') === 'report|globalThis.hashRan = true;' && reports.length === 1 && document.cspViolations.length === 0"
+            } else {
+                "!hashRan && events.length === 2 && events.map(e => e[0]).sort().join(',') === 'enforce,report' && events.every(e => e[1] === 'globalThis.hashRan = true;') && reports.length === 2 && document.cspViolations.length === 1"
+            }).unwrap().as_boolean().unwrap());
+        }
+    }
+
+    #[test]
+    fn style_attribute_hash_reports_per_policy_once_per_source_generation() {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+
+        let source = "color: red;";
+        let digest = base64::engine::general_purpose::STANDARD
+            .encode(sha2::Sha256::digest(source.as_bytes()));
+        let document = crate::html::TreeBuilder::parse(
+            "<body><p id=target style=\"color: red;\">x</p></body>",
+        )
+        .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_response_security_headers(&[
+            (
+                "Content-Security-Policy".into(),
+                format!("style-src-attr 'unsafe-hashes' 'sha256-{digest}' 'report-sample'; report-to reports"),
+            ),
+            (
+                "Content-Security-Policy-Report-Only".into(),
+                "style-src-attr 'none' 'report-sample'; report-to reports".into(),
+            ),
+        ]);
+        runtime.eval("globalThis.events=[]; globalThis.reports=[]; document.addEventListener('securitypolicyviolation', e => events.push([e.target.id,e.disposition,e.sample])); new ReportingObserver(batch => reports.push(...batch)).observe(); globalThis.color=getComputedStyle(document.getElementById('target')).color;").unwrap();
+        runtime.run_timers(10, 1, 30);
+        assert!(runtime.eval("color === 'rgb(255, 0, 0)' && events.length === 1 && events[0].join('|') === 'target|report|color: red;' && reports.length === 1 && document.cspViolations.length === 0").unwrap().as_boolean().unwrap());
+
+        runtime.set_viewport(420.0, 320.0);
+        runtime
+            .eval("getComputedStyle(document.getElementById('target')).color")
+            .unwrap();
+        runtime.run_timers(10, 1, 30);
+        assert_eq!(
+            runtime.eval("events.length").unwrap().as_number(),
+            Some(1.0)
+        );
+
+        runtime.eval("document.getElementById('target').setAttribute('style', 'color: blue;'); globalThis.blockedColor=getComputedStyle(document.getElementById('target')).color;").unwrap();
+        runtime.run_timers(10, 1, 30);
+        assert!(runtime.eval("blockedColor !== 'rgb(0, 0, 255)' && events.length === 3 && events.slice(1).map(e => e[1]).sort().join(',') === 'enforce,report' && reports.length === 3 && document.cspViolations.length === 1").unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
+    fn moving_style_attribute_to_another_document_rechecks_same_policy() {
+        let first = crate::html::TreeBuilder::parse(
+            "<body><p id=target style=\"color: red;\">x</p></body>",
+        )
+        .document();
+        let second = crate::html::TreeBuilder::parse("<body></body>").document();
+        let element = first.query_selector("#target").unwrap();
+        let second_body = second.query_selector("body").unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(first.clone(), "https://example.test/first").unwrap();
+        runtime.install_csp_policy(&["style-src-attr 'none'".into()]);
+        let mut state = runtime.host_state.borrow_mut();
+        let policy = state.csp_policy_for_document(&first);
+        state.document_csp.insert(second.identity(), policy);
+
+        assert!(!state.csp_allows_inline_style_attribute(&first, &element, "color: red;"));
+        while state.event_loop.pop_task().is_some() {}
+
+        second_body.append_child(element.clone());
+        assert!(!state.csp_allows_inline_style_attribute(&second, &element, "color: red;"));
+        let second_violation_document = std::iter::from_fn(|| state.event_loop.pop_task())
+            .find_map(|(_, task)| match task {
+                Task::SecurityPolicyViolation { document_id, .. } => Some(document_id),
+                _ => None,
+            });
+        assert_eq!(
+            second_violation_document,
+            Some(second.identity()),
+            "moving an unchanged style attribute must report against the new Document"
+        );
     }
 
     #[test]
