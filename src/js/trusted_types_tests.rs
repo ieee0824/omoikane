@@ -29,6 +29,12 @@ fn queued_javascript_url(runtime: &mut JsRuntime, assignment: &str) -> String {
     url.clone()
 }
 
+fn sha256_source(source: &str) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(source.as_bytes()))
+}
+
 #[test]
 fn javascript_location_navigation_uses_default_policy_and_preserves_document() {
     let mut runtime = make_runtime("<body>");
@@ -215,6 +221,138 @@ fn javascript_location_navigation_obeys_inline_csp_and_string_completion() {
         &mut runtime,
         "location.href === 'https://example.test/page'",
     );
+}
+
+#[test]
+fn javascript_navigation_hashes_the_full_url_and_requires_unsafe_hashes() {
+    let url = "javascript:globalThis.hashRan=true;";
+    let matching = sha256_source(url);
+    let body_only = sha256_source("globalThis.hashRan=true;");
+    for (source_list, expected_run) in [
+        (format!("'unsafe-hashes' 'sha256-{matching}'"), true),
+        (
+            format!(
+                "'unsafe-hashes' 'sha256-{}'",
+                matching.trim_end_matches('=')
+            ),
+            false,
+        ),
+        (format!("'unsafe-hashes' 'sha256-{body_only}'"), false),
+        (format!("'sha256-{matching}'"), false),
+        ("'nonce-any'".to_string(), false),
+    ] {
+        let mut runtime = make_runtime("<body>");
+        runtime.install_response_security_headers(&[(
+            "Content-Security-Policy".into(),
+            format!("script-src-elem {source_list} 'report-sample'; script-src 'unsafe-inline'"),
+        )]);
+        runtime.eval("globalThis.hashRan=false; globalThis.violations=[]; document.addEventListener('securitypolicyviolation', e => violations.push(e));").unwrap();
+        let queued = queued_javascript_url(&mut runtime, &format!("location.href = '{url}';"));
+        assert_eq!(queued, url);
+        assert_eq!(
+            runtime.evaluate_javascript_navigation(&queued).unwrap(),
+            None
+        );
+        runtime.run_until_idle().unwrap();
+        assert_js_true(
+            &mut runtime,
+            if expected_run {
+                "hashRan && violations.length === 0"
+            } else {
+                "!hashRan && violations.length === 1 && violations[0].effectiveDirective === 'script-src-elem' && violations[0].blockedURI === 'inline' && violations[0].sample === 'globalThis.hashRan=true;'"
+            },
+        );
+    }
+}
+
+#[test]
+fn javascript_navigation_hash_reports_other_policy_without_blocking() {
+    let url = "javascript:globalThis.reportedNavigationRan=true;";
+    let hash = sha256_source(url);
+    let mut runtime = make_runtime("<body>");
+    runtime.install_response_security_headers(&[
+        (
+            "Content-Security-Policy".into(),
+            format!("script-src-elem 'unsafe-hashes' 'sha256-{hash}'"),
+        ),
+        (
+            "Content-Security-Policy-Report-Only".into(),
+            "script-src-elem 'none' 'report-sample'; report-to reports".into(),
+        ),
+    ]);
+    runtime.eval("globalThis.reportedNavigationRan=false; globalThis.events=[]; globalThis.reports=[]; document.addEventListener('securitypolicyviolation', e => events.push(e)); new ReportingObserver(batch => reports.push(...batch)).observe();").unwrap();
+    let queued = queued_javascript_url(&mut runtime, &format!("location.href = '{url}';"));
+    assert_eq!(queued, url);
+    assert_eq!(
+        runtime.evaluate_javascript_navigation(&queued).unwrap(),
+        None
+    );
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "reportedNavigationRan && events.length === 1 && events[0].disposition === 'report' && events[0].effectiveDirective === 'script-src-elem' && events[0].blockedURI === 'inline' && events[0].sample === 'globalThis.reportedNavigationRan=true;' && reports.length === 1 && document.cspViolations.length === 0",
+    );
+}
+
+#[test]
+fn javascript_navigation_hash_matches_trusted_types_rewritten_url() {
+    let converted = "javascript:globalThis.convertedRan=true;";
+    let hash = sha256_source(converted);
+    let mut runtime = make_runtime("<body>");
+    runtime.install_response_security_headers(&[(
+        "Content-Security-Policy".into(),
+        format!(
+            "require-trusted-types-for 'script'; script-src-elem 'unsafe-hashes' 'sha256-{hash}'"
+        ),
+    )]);
+    runtime.eval("globalThis.originalRan=false; globalThis.convertedRan=false; trustedTypes.createPolicy('default', {createScript: source => source.replace('originalRan', 'convertedRan')});").unwrap();
+    let url = queued_javascript_url(
+        &mut runtime,
+        "location.href = 'javascript:globalThis.originalRan=true;';",
+    );
+    assert_eq!(runtime.evaluate_javascript_navigation(&url).unwrap(), None);
+    assert_js_true(&mut runtime, "!originalRan && convertedRan");
+}
+
+#[test]
+fn javascript_anchor_click_uses_full_url_hash_and_reports_rejection() {
+    let url = "javascript:globalThis.linkRan=true;";
+    let hash = sha256_source(url);
+    for unsafe_hashes in [false, true] {
+        let mut runtime = make_runtime(&format!("<body><a id=link href=\"{url}\">go</a></body>"));
+        let keyword = if unsafe_hashes {
+            "'unsafe-hashes' "
+        } else {
+            ""
+        };
+        runtime.install_response_security_headers(&[(
+            "Content-Security-Policy".into(),
+            format!("script-src {keyword}'sha256-{hash}'"),
+        )]);
+        runtime.eval("globalThis.linkRan=false; globalThis.events=[]; document.addEventListener('securitypolicyviolation', e => events.push(e));").unwrap();
+        let queued =
+            queued_javascript_url(&mut runtime, "document.getElementById('link').click();");
+        assert_eq!(queued, url);
+        assert_eq!(
+            runtime.evaluate_javascript_navigation(&queued).unwrap(),
+            None
+        );
+        runtime.run_until_idle().unwrap();
+        let expected = if unsafe_hashes {
+            "linkRan && events.length === 0"
+        } else {
+            "!linkRan && events.length === 1 && events[0].effectiveDirective === 'script-src-elem' && events[0].blockedURI === 'inline'"
+        };
+        let actual = runtime.eval(expected).unwrap().as_boolean();
+        assert_eq!(
+            actual,
+            Some(true),
+            "anchor navigation state: {:?}",
+            runtime
+                .eval("JSON.stringify({linkRan, href: document.getElementById('link').href, events: events.map(e => [e.effectiveDirective, e.blockedURI, e.disposition, e.sample]), history: document.cspViolations})")
+                .unwrap()
+        );
+    }
 }
 
 #[test]
@@ -2019,6 +2157,60 @@ fn inline_event_handler_report_only_delivers_violation_and_still_runs() {
         &mut runtime,
         "violations.length === 1 && violations[0].effectiveDirective === 'script-src-attr' && violations[0].disposition === 'report'",
     );
+}
+
+#[test]
+fn inline_event_handler_hash_requires_unsafe_hashes_and_reports_per_policy() {
+    let source = "globalThis.handlerRan = true";
+    let hash = sha256_source(source);
+    for unsafe_hashes in [false, true] {
+        let mut runtime = make_runtime("<body><button id=target>run</button>");
+        let keyword = if unsafe_hashes {
+            "'unsafe-hashes' "
+        } else {
+            ""
+        };
+        runtime.install_response_security_headers(&[
+            (
+                "Content-Security-Policy".into(),
+                format!("script-src-attr {keyword}'sha256-{hash}' 'report-sample'"),
+            ),
+            (
+                "Content-Security-Policy-Report-Only".into(),
+                "script-src-attr 'none' 'report-sample'".into(),
+            ),
+        ]);
+        runtime.eval(&format!("globalThis.handlerRan = false; globalThis.events = []; document.addEventListener('securitypolicyviolation', e => events.push([e.disposition, e.sample])); const target = document.getElementById('target'); target.setAttribute('onclick', {source:?}); target.click();")).unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_js_true(
+            &mut runtime,
+            if unsafe_hashes {
+                "handlerRan && events.length === 1 && events[0][0] === 'report' && events[0][1] === 'globalThis.handlerRan = true'"
+            } else {
+                "!handlerRan && events.length === 2 && events.map(event => event[0]).sort().join(',') === 'enforce,report' && events.every(event => event[1] === 'globalThis.handlerRan = true')"
+            },
+        );
+    }
+}
+
+#[test]
+fn strict_dynamic_allows_non_parser_inserted_inline_script() {
+    let mut runtime = make_runtime("<script>globalThis.parserRan = true</script><body>");
+    runtime.install_response_security_headers(&[(
+        "Content-Security-Policy".into(),
+        "script-src-elem 'strict-dynamic'; script-src 'none'".into(),
+    )]);
+    runtime
+        .eval("globalThis.parserRan = false; globalThis.events = []; document.addEventListener('securitypolicyviolation', e => events.push(e));")
+        .unwrap();
+    assert!(runtime.execute_document_scripts(None).is_empty());
+    runtime.run_until_idle().unwrap();
+    assert_js_true(&mut runtime, "!parserRan && events.length === 1");
+    runtime
+        .eval("const script = document.createElement('script'); script.textContent = 'globalThis.dynamicRan = true'; document.body.appendChild(script);")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(&mut runtime, "dynamicRan === true && events.length === 1");
 }
 
 #[test]

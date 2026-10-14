@@ -1807,6 +1807,9 @@ struct HostState {
     /// the document that node actually lives in — the main document's rules
     /// never leak into a sub-document and vice versa (issue 016-15).
     document_styles: HashMap<usize, DocumentStyleEntry>,
+    /// Last inline-style CSP check per live element, so a resolver rebuild
+    /// does not repeat reports for unchanged attribute text and policy.
+    observed_style_attributes: HashMap<usize, InlineStyleCspSnapshot>,
     /// Registrations created by `CSS.registerProperty()`, isolated by the
     /// currently executing Document and retained across stylesheet rebuilds.
     registered_custom_properties:
@@ -2276,6 +2279,13 @@ struct DocumentStyleEntry {
     needs_full_sample: bool,
 }
 
+struct InlineStyleCspSnapshot {
+    node: WeakNodeHandle,
+    document_id: usize,
+    source: String,
+    policy: CspPolicy,
+}
+
 impl std::fmt::Debug for HostState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HostState")
@@ -2450,6 +2460,7 @@ impl HostState {
             smooth_scrolls: Vec::new(),
             scroll_offsets_before_layout: HashMap::new(),
             document_styles,
+            observed_style_attributes: HashMap::new(),
             registered_custom_properties: HashMap::new(),
             font_loading: Default::default(),
             layout_root: None,
@@ -4022,6 +4033,8 @@ impl HostState {
             .retain(|script| script.document.identity() != document_id);
         self.parser_inserted_scripts
             .retain(|id| !tree_ids.contains(id));
+        self.observed_style_attributes
+            .retain(|id, _| !tree_ids.contains(id));
         if let Some(client_id) = self.web_lock_clients.remove(&document_id) {
             unregister_web_lock_client(&self.storage_manager, client_id);
         }
@@ -4141,6 +4154,8 @@ impl HostState {
             .retain(|script| script.document.identity() != document_id);
         self.parser_inserted_scripts
             .retain(|id| !tree_ids.contains(id));
+        self.observed_style_attributes
+            .retain(|id, _| !tree_ids.contains(id));
         if let Some(client_id) = self.web_lock_clients.remove(&document_id) {
             unregister_web_lock_client(&self.storage_manager, client_id);
         }
@@ -4638,22 +4653,6 @@ impl HostState {
         contains_fullscreen && self.fully_exit_fullscreen(false)
     }
 
-    fn record_csp_violation(
-        &mut self,
-        document: &NodeHandle,
-        resource_type: ResourceType,
-        blocked_uri: impl Into<String>,
-    ) {
-        let blocked_uri = blocked_uri.into();
-        self.record_csp_violation_for_request(
-            document,
-            resource_type,
-            &blocked_uri,
-            0,
-            &blocked_uri,
-        );
-    }
-
     fn record_csp_violation_with_source(
         &mut self,
         document: &NodeHandle,
@@ -4718,26 +4717,19 @@ impl HostState {
         }
     }
 
-    /// Refreshes the resolver's CSP-filtered inline-style set after a `style`
-    /// attribute mutation without reparsing the document's stylesheets.  A
-    /// normal inline-style edit is intentionally only a computed-style cache
-    /// invalidation; this keeps the existing resolver-generation contract while
-    /// still making a newly added/removed blocked attribute take effect.
+    /// Rechecks CSP after each explicit `style` attribute mutation, even when
+    /// the new text equals the old text. Resolver rebuilds retain the snapshot
+    /// to avoid duplicate reports from unrelated style recalculation.
     fn refresh_csp_inline_style_nodes(&mut self, node: &NodeHandle) {
+        self.observed_style_attributes.remove(&node.identity());
         let Some(document) = document_root_for_node(node) else {
             return;
         };
-        let blocked = !self
-            .csp_policy_for_document(&document)
-            .allows_inline_attribute(ResourceType::Style)
-            && node.get_attribute("style").is_some();
-        if blocked {
-            self.record_csp_violation(
-                &document,
-                ResourceType::Style,
-                format!("style-attribute:{}", node.identity()),
-            );
-        }
+        let blocked = if let Some(source) = node.get_attribute("style") {
+            !self.csp_allows_inline_style_attribute(&document, node, &source)
+        } else {
+            false
+        };
         if let Some(resolver) = self
             .document_styles
             .get_mut(&document.identity())
@@ -5190,22 +5182,18 @@ impl HostState {
         }
         let web_fonts = Arc::new(web_fonts);
         resolver.set_web_fonts(web_fonts.clone());
-        let blocked_inline_styles = if policy.allows_inline_attribute(ResourceType::Style) {
-            HashSet::new()
-        } else {
-            let mut blocked = HashSet::new();
-            for element in collect_element_nodes(document) {
-                if element.get_attribute("style").is_some() {
-                    self.record_csp_violation(
-                        document,
-                        ResourceType::Style,
-                        format!("style-attribute:{}", element.identity()),
-                    );
-                    blocked.insert(element.identity());
+        self.observed_style_attributes
+            .retain(|_, snapshot| snapshot.node.is_alive());
+        let mut blocked_inline_styles = HashSet::new();
+        for element in collect_element_nodes(document) {
+            if let Some(source) = element.get_attribute("style") {
+                if !self.csp_allows_inline_style_attribute(document, &element, &source) {
+                    blocked_inline_styles.insert(element.identity());
                 }
+            } else {
+                self.observed_style_attributes.remove(&element.identity());
             }
-            blocked
-        };
+        }
         resolver.set_blocked_inline_style_nodes(blocked_inline_styles);
         self.document_styles.insert(
             document_id,
@@ -9029,20 +9017,16 @@ impl JsRuntime {
                 }
                 (source, effective_url, requested_url, muted_errors, (1, 1))
             } else {
+                let source = collect_text_content(&script);
                 if !self
                     .host_state
                     .borrow_mut()
-                    .csp_allows_script_for_node(&script, "inline")
+                    .csp_allows_inline_script_for_node(&script, &source)
                 {
-                    self.host_state.borrow_mut().record_csp_violation_for_node(
-                        &script,
-                        ResourceType::Script,
-                        "inline",
-                    );
                     continue;
                 }
                 (
-                    collect_text_content(&script),
+                    source,
                     document_url.clone(),
                     document_url.clone(),
                     false,
@@ -10762,6 +10746,10 @@ impl JsRuntime {
             // Like top-level document scripts, one failing initial
             // script must not prevent later scripts or the iframe load
             // event from running.
+            let inline_source = script
+                .get_attribute("src")
+                .is_none()
+                .then(|| collect_text_content(&script));
             let (sandbox_allowed, csp_allowed) = {
                 let mut state = self.host_state.borrow_mut();
                 // Earlier scripts can remove the frame or replace its
@@ -10773,8 +10761,9 @@ impl JsRuntime {
                 }
                 (
                     state.sandbox_allows_scripts_for_node(&script),
-                    script.get_attribute("src").is_some()
-                        || state.csp_allows_script_for_node(&script, "inline"),
+                    inline_source.as_deref().is_none_or(|source| {
+                        state.csp_allows_inline_script_for_node(&script, source)
+                    }),
                 )
             };
             if !sandbox_allowed {
@@ -10785,11 +10774,6 @@ impl JsRuntime {
                 continue;
             }
             if !csp_allowed {
-                self.host_state.borrow_mut().record_csp_violation_for_node(
-                    &script,
-                    ResourceType::Script,
-                    "inline",
-                );
                 continue;
             }
             #[cfg(test)]
@@ -10801,7 +10785,7 @@ impl JsRuntime {
                     .entry(document.identity())
                     .or_default() += 1;
             }
-            let source = collect_text_content(&script);
+            let source = inline_source.expect("inline script has source text");
             let result = if let Some((iframe_id, document_id)) = iframe_context {
                 self.eval_iframe_script(iframe_id, document_id, script.identity(), &source)
             } else {
@@ -11394,17 +11378,15 @@ impl JsRuntime {
                 );
                 return None;
             }
-        } else if !self
-            .host_state
-            .borrow_mut()
-            .csp_allows_script_for_node(script, "inline")
-        {
-            self.host_state.borrow_mut().record_csp_violation_for_node(
-                script,
-                ResourceType::Script,
-                "inline",
-            );
-            return None;
+        } else {
+            let source = collect_text_content(script);
+            if !self
+                .host_state
+                .borrow_mut()
+                .csp_allows_inline_script_for_node(script, &source)
+            {
+                return None;
+            }
         }
 
         let (source_code, script_label, muted_errors) = if let Some(src_url) = src {
@@ -21256,7 +21238,7 @@ fn inline_handler_security_context(
             })
             .ok_or_else(|| JsNativeError::reference().with_message("handler Realm is gone"))?;
         let policy = state.csp_policy_for_document(&document);
-        let (blocked, reported) = policy.script_attribute_violations();
+        let (blocked, reported) = policy.script_attribute_violations(source);
         Ok((document_id, realm, blocked, reported))
     })
 }
@@ -22845,7 +22827,13 @@ fn evaluate_javascript_url_in_context(
     let source = String::from_utf8_lossy(&crate::http::percent_decode_bytes(&encoded)).into_owned();
     let active = with_host_state(|host| Ok(host.borrow().document_is_active(target_document_id)))
         .unwrap_or(false);
-    if !active || !trusted_types::allow_javascript_navigation(&source, target_document_id) {
+    if !active
+        || !trusted_types::allow_javascript_navigation(
+            &source,
+            &format!("javascript:{encoded}"),
+            target_document_id,
+        )
+    {
         return None;
     }
     let value = match context.eval(Source::from_bytes(&source)) {
