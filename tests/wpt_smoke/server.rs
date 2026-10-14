@@ -181,17 +181,101 @@ add_completion_callback((tests,status) => { globalThis.__wpt_harness_status=Numb
     }
     let file = root.join(relative);
     match fs::read(&file) {
-        Ok(body) => respond(&mut stream, 200, content_type(&file), &body),
+        Ok(body) => respond_with_headers(
+            &mut stream,
+            200,
+            content_type(&file),
+            &body,
+            &fixture_headers(&file, target),
+        ),
         Err(_) => respond(&mut stream, 404, "text/plain", b"not found"),
     }
 }
 
+/// Reads CSP fields from pinned wptserve `.headers`/`.sub.headers` sidecars and
+/// `pipe=header(...)` stages. Each field remains separate so repeated policies
+/// retain their original enforcement and report-only behavior.
+fn fixture_headers(file: &Path, target: &str) -> Vec<(String, String)> {
+    let mut headers = [".headers", ".sub.headers"]
+        .iter()
+        .find_map(|suffix| {
+            let mut sidecar_name = file.as_os_str().to_os_string();
+            sidecar_name.push(*suffix);
+            fs::read_to_string(PathBuf::from(sidecar_name)).ok()
+        })
+        .into_iter()
+        .flat_map(|text| {
+            text.lines()
+                .filter_map(parse_fixture_header)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    if let Some((_, query)) = target.split_once('?') {
+        for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
+            if name != "pipe" {
+                continue;
+            }
+            for stage in value.split('|') {
+                let Some(argument) = stage
+                    .trim()
+                    .strip_prefix("header(")
+                    .and_then(|stage| stage.strip_suffix(')'))
+                else {
+                    continue;
+                };
+                let Some((name, value)) = argument.split_once(',') else {
+                    continue;
+                };
+                let value = value
+                    .strip_suffix(",True")
+                    .or_else(|| value.strip_suffix(",False"))
+                    .unwrap_or(value);
+                if let Some(header) = parse_fixture_header(&format!("{name}: {value}")) {
+                    headers.push(header);
+                }
+            }
+        }
+    }
+    headers
+}
+
+fn parse_fixture_header(line: &str) -> Option<(String, String)> {
+    let (name, value) = line.split_once(':')?;
+    let name = name.trim();
+    let value = value.trim();
+    let csp_header = name.eq_ignore_ascii_case("Content-Security-Policy")
+        || name.eq_ignore_ascii_case("Content-Security-Policy-Report-Only");
+    if !csp_header
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || value.bytes().any(|byte| byte == b'\r' || byte == b'\n')
+    {
+        return None;
+    }
+    Some((name.to_owned(), value.to_owned()))
+}
+
 pub(super) fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) {
+    respond_with_headers(stream, status, content_type, body, &[]);
+}
+
+fn respond_with_headers(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    headers: &[(String, String)],
+) {
     let reason = if status == 200 { "OK" } else { "Error" };
-    let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+    let mut header = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n",
         body.len()
     );
+    for (name, value) in headers {
+        header.push_str(&format!("{name}: {value}\r\n"));
+    }
+    header.push_str("Connection: close\r\n\r\n");
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(body);
 }
@@ -286,6 +370,47 @@ mod tests {
             assert_eq!(header, expected_header, "{path}");
             assert_eq!(body, expected_body, "{path}");
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn serves_sidecar_and_pipe_csp_headers_as_separate_fields() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "omoikane-wpt-smoke-csp-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("page.html"), b"<body>page</body>").unwrap();
+        fs::write(
+            root.join("page.html.headers"),
+            "Content-Security-Policy-Report-Only: require-trusted-types-for 'script'\n",
+        )
+        .unwrap();
+        fs::write(root.join("worker.js"), b"postMessage('loaded');").unwrap();
+        fs::write(
+            root.join("worker.js.sub.headers"),
+            "Content-Security-Policy: script-src 'none'\n",
+        )
+        .unwrap();
+        let server = StaticServer::start(root.clone());
+        let (header, body) = get(
+            &server,
+            "/page.html?pipe=header(Content-Security-Policy,connect-src%20%27none%27)%7Cheader(Content-Security-Policy,require-trusted-types-for%20%27script%27,True)",
+        );
+        assert_eq!(body, b"<body>page</body>");
+        assert!(header.contains(
+            "Content-Security-Policy-Report-Only: require-trusted-types-for 'script'\r\n"
+        ));
+        assert!(header.contains("Content-Security-Policy: connect-src 'none'\r\n"));
+        assert!(header.contains("Content-Security-Policy: require-trusted-types-for 'script'\r\n"));
+        assert_eq!(header.matches("Content-Security-Policy: ").count(), 2);
+        let (header, body) = get(&server, "/worker.js");
+        assert_eq!(body, b"postMessage('loaded');");
+        assert!(header.contains("Content-Security-Policy: script-src 'none'\r\n"));
         fs::remove_dir_all(root).unwrap();
     }
 

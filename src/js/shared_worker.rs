@@ -153,7 +153,14 @@ fn shared_worker_entry_for_key(key: &SharedWorkerKey) -> Option<Rc<RefCell<Share
         registry
             .borrow()
             .iter()
-            .find(|entry| entry.borrow().key == *key)
+            .find(|entry| {
+                let shared = entry.borrow();
+                shared.key == *key
+                    && shared
+                        .connections
+                        .values()
+                        .any(|connection| !connection.closed)
+            })
             .cloned()
     })
 }
@@ -179,6 +186,7 @@ fn shared_worker_connect_native(
 ) -> JsResult<JsValue> {
     let requested_url = string_argument(args.first(), "", context)?;
     let name = string_argument(args.get(1), "", context)?;
+    let source = security_reporting::capture_csp_source(context);
     let document_id = caller_document_id(context).ok_or_else(|| {
         JsNativeError::error().with_message("SharedWorker owner document is unavailable")
     })?;
@@ -188,8 +196,14 @@ fn shared_worker_connect_native(
                 .with_message("SharedWorker construction from a SharedWorker is unsupported")
                 .into());
         }
-        create_shared_worker_for_owner_state(Rc::clone(state), &requested_url, &name, document_id)
-            .map(|id| JsValue::from(js_string!(id.to_string())))
+        create_shared_worker_for_owner_state(
+            Rc::clone(state),
+            &requested_url,
+            &name,
+            document_id,
+            source.as_ref(),
+        )
+        .map(|id| JsValue::from(js_string!(id.to_string())))
     })
 }
 
@@ -387,11 +401,50 @@ fn shared_worker_port_close_native(
     })
 }
 
+fn create_new_shared_worker_entry(
+    owner_state: &Rc<RefCell<HostState>>,
+    key: SharedWorkerKey,
+    base_url: Option<&crate::http::Url>,
+    creator_policy: CspPolicy,
+    allowed: bool,
+    document_id: usize,
+    source: Option<&security_reporting::CspSourceLocation>,
+) -> JsResult<Rc<RefCell<SharedWorkerRuntime>>> {
+    let result = if allowed {
+        let mut state = owner_state.borrow_mut();
+        let cookie_context = state.document_cookie_request_context(document_id);
+        worker_loading::load_worker_script_with_policy(
+            &key.url,
+            base_url,
+            Some(&cookie_context),
+            &mut state.http_client,
+            &creator_policy,
+        )
+    } else {
+        worker_loading::WorkerLoadResult {
+            loaded: None,
+            checks: Vec::new(),
+        }
+    };
+    owner_state
+        .borrow_mut()
+        .observe_worker_policy_checks(document_id, result.checks, source);
+    let entry = Rc::new(RefCell::new(create_shared_worker_runtime(
+        owner_state,
+        key,
+        result.loaded,
+        creator_policy,
+    )?));
+    SHARED_WORKER_REGISTRY.with(|registry| registry.borrow_mut().push(Rc::clone(&entry)));
+    Ok(entry)
+}
+
 fn create_shared_worker_for_owner_state(
     owner_state: Rc<RefCell<HostState>>,
     requested_url: &str,
     name: &str,
     document_id: usize,
+    source: Option<&security_reporting::CspSourceLocation>,
 ) -> JsResult<u64> {
     let (owner_url, base_url, origin, origin_text, creator_policy, top_level_site) = {
         let state = owner_state.borrow();
@@ -418,6 +471,20 @@ fn create_shared_worker_for_owner_state(
         )
     };
     let worker_url = resolve_worker_url(requested_url, &owner_url, base_url.as_ref())?;
+    let allowed = {
+        let mut state = owner_state.borrow_mut();
+        let document = state.get_node(document_id).ok_or_else(|| {
+            JsNativeError::error().with_message("SharedWorker owner document was discarded")
+        })?;
+        state.csp_allows_response_for_document_with_source(
+            &document,
+            ResourceType::Worker,
+            &worker_url,
+            0,
+            &worker_url,
+            source,
+        )
+    };
     let key = SharedWorkerKey {
         origin,
         top_level_site,
@@ -427,28 +494,23 @@ fn create_shared_worker_for_owner_state(
     let entry = if let Some(existing) = shared_worker_entry_for_key(&key) {
         existing
     } else {
-        let loaded = {
-            let mut state = owner_state.borrow_mut();
-            let cookie_context = state.document_cookie_request_context(document_id);
-            worker_loading::load_worker_script_in_context(
-                &worker_url,
-                base_url.as_ref(),
-                Some(&cookie_context),
-                &mut state.http_client,
-            )
-        };
-        let entry = Rc::new(RefCell::new(create_shared_worker_runtime(
+        create_new_shared_worker_entry(
             &owner_state,
             key,
-            loaded,
+            base_url.as_ref(),
             creator_policy,
-        )?));
-        SHARED_WORKER_REGISTRY.with(|registry| registry.borrow_mut().push(Rc::clone(&entry)));
-        entry
+            allowed,
+            document_id,
+            source,
+        )?
     };
 
     let connection_id = next_shared_worker_connection_id();
-    let startup_error = entry.borrow().startup_error.clone();
+    let startup_error = if allowed {
+        entry.borrow().startup_error.clone()
+    } else {
+        Some(script_errors::WorkerErrorNotification::LoadFailure)
+    };
     entry.borrow_mut().connections.insert(
         connection_id,
         SharedWorkerConnection {
@@ -457,14 +519,15 @@ fn create_shared_worker_for_owner_state(
             owner_origin: origin_text,
             pending_to_owner: VecDeque::new(),
             startup_error,
-            closed: false,
+            closed: !allowed,
         },
     );
     let runtime = Rc::clone(&entry.borrow().runtime);
     // The runtime is borrowed independently from the registry entry so
     // `postMessage` calls made synchronously by an onconnect handler can
     // safely look the connection up again.
-    if entry.borrow().startup_error.is_none()
+    if allowed
+        && entry.borrow().startup_error.is_none()
         && !runtime.borrow().host_state.borrow().worker_terminated
     {
         let _ = runtime.borrow_mut().eval(&format!(

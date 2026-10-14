@@ -75,7 +75,7 @@ pub(super) struct ModuleCspViolation {
 }
 
 #[cfg(test)]
-fn wait_for_report_delivery(runtime: &mut JsRuntime) {
+pub(super) fn wait_for_report_delivery(runtime: &mut JsRuntime) {
     let mut state = runtime.host_state.borrow_mut();
     let completions = state
         .report_delivery
@@ -709,6 +709,30 @@ impl HostState {
                 };
                 self.record_csp_violation_history(document, ResourceType::Style, legacy_reference);
             }
+        }
+    }
+
+    /// Delivers the creator Document's checks collected during worker I/O.
+    /// The policy was evaluated before each request and after its response;
+    /// notifications are queued only after the HTTP client borrow ends.
+    pub(super) fn observe_worker_policy_checks(
+        &mut self,
+        document_id: usize,
+        checks: Vec<worker_loading::WorkerPolicyCheck>,
+        source: Option<&CspSourceLocation>,
+    ) {
+        let Some(document) = self.get_node(document_id) else {
+            return;
+        };
+        for check in checks {
+            self.csp_allows_response_for_document_with_source(
+                &document,
+                ResourceType::Worker,
+                &check.reference,
+                check.redirects,
+                &check.report_reference,
+                source,
+            );
         }
     }
 

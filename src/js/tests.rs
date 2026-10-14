@@ -258,7 +258,7 @@ fn worklet_add_module_is_isolated_and_drains_microtasks() {
         .eval(
             r#"globalThis.workletProbe = { result: 'pending' };
                    const source = encodeURIComponent(
-                     "registerWorklet('sync'); queueMicrotask(() => registerPaint('checker', class {}, ['--tone']));"
+                     "registerWorklet('sync'); registerWorklet('worker-scope-' + typeof DedicatedWorkerGlobalScope); queueMicrotask(() => registerPaint('checker', class {}, ['--tone']));"
                    );
                    CSS.paintWorklet.addModule('data:text/javascript,' + source).then(
                      () => workletProbe.result = [CSS.paintWorklet.moduleCount,
@@ -270,7 +270,7 @@ fn worklet_add_module_is_isolated_and_drains_microtasks() {
     runtime.run_until_idle().unwrap();
     assert_eq!(
         eval_str(&mut runtime, "workletProbe.result"),
-        "1|checker,sync|object"
+        "1|checker,sync,worker-scope-undefined|object"
     );
     assert_eq!(
         eval_str(&mut runtime, "typeof WorkletGlobalScope"),
