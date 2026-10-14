@@ -230,6 +230,16 @@ fn fixture_headers(file: &Path, target: &str) -> Vec<(String, String)> {
                     .strip_suffix(",True")
                     .or_else(|| value.strip_suffix(",False"))
                     .unwrap_or(value);
+                // wptserve permits encoded ASCII whitespace in a CSP header
+                // stage. Fold controls to spaces before writing HTTP headers
+                // so they separate directive tokens without injecting fields.
+                let value = value
+                    .chars()
+                    .map(|ch| match ch {
+                        '\t' | '\n' | '\x0c' | '\r' => ' ',
+                        _ => ch,
+                    })
+                    .collect::<String>();
                 if let Some(header) = parse_fixture_header(&format!("{name}: {value}")) {
                     headers.push(header);
                 }
@@ -411,6 +421,12 @@ mod tests {
         let (header, body) = get(&server, "/worker.js");
         assert_eq!(body, b"postMessage('loaded');");
         assert!(header.contains("Content-Security-Policy: script-src 'none'\r\n"));
+        let (header, _) = get(
+            &server,
+            "/page.html?pipe=header(Content-Security-Policy,require-trusted-types-for%20%27script%27%09%27script%27%0A%27script%27%0C%27script%27%0D%27script%27%20%27script%27,True)",
+        );
+        assert!(header.contains("Content-Security-Policy: require-trusted-types-for 'script' 'script' 'script' 'script' 'script' 'script'\r\n"));
+        assert_eq!(header.matches("Content-Security-Policy: ").count(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 
