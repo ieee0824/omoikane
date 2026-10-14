@@ -289,6 +289,138 @@ fn fullscreen_iframe_permission_boundary_and_reflection() {
 }
 
 #[test]
+fn permissions_policy_fullscreen_header_denies_activated_request() {
+    for header in ["fullscreen=()", "fullscreen=*, fullscreen=()"] {
+        let mut runtime = JsRuntime::with_document_and_url(
+            TreeBuilder::parse("<body><button id=target>enter</button></body>").document(),
+            "https://owner.test/page",
+        )
+        .unwrap();
+        runtime.install_response_security_headers(&[("Permissions-Policy".into(), header.into())]);
+        runtime
+            .eval("globalThis.target=document.getElementById('target');globalThis.result=''")
+            .unwrap();
+        activate_with_key(
+            &mut runtime,
+            "target.requestFullscreen().then(()=>result='allowed',error=>result=error.name)",
+        );
+        assert!(
+            bool_result(
+                &mut runtime,
+                "!document.fullscreenEnabled && result === 'TypeError' && document.fullscreenElement === null"
+            ),
+            "{header}"
+        );
+        assert_eq!(runtime.take_fullscreen_transition(), None, "{header}");
+    }
+}
+
+#[test]
+fn permissions_policy_parent_header_limits_iframe_allow_delegation() {
+    for (header, expected_allowed) in [("fullscreen=(self)", false), ("fullscreen=*", true)] {
+        let document = TreeBuilder::parse(
+            "<body><iframe sandbox='allow-scripts' allow='fullscreen' srcdoc='<button>go</button>'></iframe></body>",
+        )
+        .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://owner.test/page").unwrap();
+        runtime.install_response_security_headers(&[("Permissions-Policy".into(), header.into())]);
+        let frame = runtime.document().query_selector("iframe").unwrap();
+        let child = runtime
+            .host_state
+            .borrow_mut()
+            .iframe_content_document(&frame)
+            .unwrap();
+        assert_eq!(
+            runtime
+                .host_state
+                .borrow()
+                .fullscreen_allowed_for_document(child.identity()),
+            expected_allowed,
+            "{header}"
+        );
+    }
+}
+
+#[test]
+fn iframe_allow_property_reflects_origin_list_used_by_fullscreen_gate() {
+    let document =
+        TreeBuilder::parse("<body><iframe srcdoc='<button>go</button>'></iframe></body>")
+            .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://owner.test/page").unwrap();
+    runtime
+        .eval(
+            r#"globalThis.frame=document.querySelector('iframe');frame.allow="fullscreen 'none'""#,
+        )
+        .unwrap();
+    let frame = runtime.document().query_selector("iframe").unwrap();
+    let child = runtime
+        .host_state
+        .borrow_mut()
+        .iframe_content_document(&frame)
+        .unwrap();
+    assert!(
+        !runtime
+            .host_state
+            .borrow()
+            .fullscreen_allowed_for_document(child.identity())
+    );
+
+    runtime
+        .eval("frame.allow='fullscreen https://owner.test'")
+        .unwrap();
+    assert!(bool_result(
+        &mut runtime,
+        "frame.allow === 'fullscreen https://owner.test' && frame.getAttribute('allow') === frame.allow"
+    ));
+    assert!(
+        !runtime
+            .host_state
+            .borrow()
+            .fullscreen_allowed_for_document(child.identity())
+    );
+    runtime
+        .eval("frame.srcdoc='<button>next</button>'")
+        .unwrap();
+    let allowed_child = runtime
+        .host_state
+        .borrow_mut()
+        .iframe_content_document(&frame)
+        .unwrap();
+    assert!(
+        runtime
+            .host_state
+            .borrow()
+            .fullscreen_allowed_for_document(allowed_child.identity())
+    );
+
+    runtime
+        .eval("frame.allow='fullscreen https://other.test'")
+        .unwrap();
+    assert!(
+        runtime
+            .host_state
+            .borrow()
+            .fullscreen_allowed_for_document(allowed_child.identity())
+    );
+    runtime
+        .eval("frame.srcdoc='<button>final</button>'")
+        .unwrap();
+    let denied_child = runtime
+        .host_state
+        .borrow_mut()
+        .iframe_content_document(&frame)
+        .unwrap();
+    assert!(
+        !runtime
+            .host_state
+            .borrow()
+            .fullscreen_allowed_for_document(denied_child.identity())
+    );
+}
+
+#[test]
 fn fullscreen_element_is_scoped_to_its_shadow_root() {
     let mut runtime = JsRuntime::new().unwrap();
     runtime

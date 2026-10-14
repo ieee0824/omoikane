@@ -24215,10 +24215,11 @@ fn iframe_sandbox_dom_token_list_is_live_and_reflected() {
                         frame.getAttribute('sandbox') === 'allow-same-origin';
                     const absent = document.createElement('iframe');
                     absent.sandbox.remove('allow-scripts');
-                    const assignmentRejected = (() => {
+                    const assignmentForwarded = (() => {
                         "use strict";
-                        try { frame.sandbox = ''; return false; }
-                        catch (error) { return error instanceof TypeError; }
+                        frame.sandbox = 'allow-scripts';
+                        return tokens === frame.sandbox &&
+                            tokens.value === 'allow-scripts';
                     })();
                     return [
                         tokens === frame.sandbox,
@@ -24230,8 +24231,8 @@ fn iframe_sandbox_dom_token_list_is_live_and_reflected() {
                         undefinedForcesFalse,
                         duplicateToggle,
                         !absent.hasAttribute('sandbox'),
-                        assignmentRejected,
-                        frame.getAttribute('sandbox') === 'allow-same-origin'
+                        assignmentForwarded,
+                        frame.getAttribute('sandbox') === 'allow-scripts'
                     ].join('|');
                 })()"#,
         ),

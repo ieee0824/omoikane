@@ -79,6 +79,8 @@ impl State {
 struct GeolocationRequest {
     success: JsValue,
     error: Option<JsValue>,
+    /// Policy denial is fixed when this Document queues the request.
+    policy_denied: bool,
     /// `Some(id)` for `watchPosition`; `None` for one-shot requests.
     watch_id: Option<u32>,
     /// `None` represents the default infinite timeout.
@@ -125,10 +127,18 @@ fn geolocation_position_json(position: &GeolocationPositionData) -> String {
 
 fn geolocation_permission_native(
     _this: &JsValue,
-    _args: &[JsValue],
-    _context: &mut Context,
+    args: &[JsValue],
+    context: &mut Context,
 ) -> JsResult<JsValue> {
-    with_host_state(|state| Ok(JsValue::from(state.borrow().geolocation.permission_granted)))
+    let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        Ok(JsValue::from(
+            state.geolocation.permission_granted
+                && state.feature_enabled_in_document(document_id, PolicyFeature::Geolocation),
+        ))
+    })
 }
 
 fn geolocation_duration_argument(
@@ -180,11 +190,15 @@ fn wake_geolocation_request(state: &mut HostState, request_id: u64) {
 }
 
 fn schedule_geolocation_request(state: &mut HostState, request_id: u64) {
-    let Some((pending, maximum_age_ms, timeout_ms)) = state
-        .geolocation
-        .requests
-        .get(&request_id)
-        .map(|request| (request.pending, request.maximum_age_ms, request.timeout_ms))
+    let Some((pending, maximum_age_ms, timeout_ms, policy_denied)) =
+        state.geolocation.requests.get(&request_id).map(|request| {
+            (
+                request.pending,
+                request.maximum_age_ms,
+                request.timeout_ms,
+                request.policy_denied,
+            )
+        })
     else {
         return;
     };
@@ -194,7 +208,8 @@ fn schedule_geolocation_request(state: &mut HostState, request_id: u64) {
 
     let fresh_position = geolocation_position_age_ms(state)
         .is_some_and(|age| maximum_age_ms.is_none_or(|maximum_age| age <= maximum_age));
-    let immediate = !state.geolocation.permission_granted
+    let immediate = policy_denied
+        || !state.geolocation.permission_granted
         || fresh_position
         || timeout_ms.is_none()
         || timeout_ms == Some(0);
@@ -226,15 +241,17 @@ fn geolocation_request_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let success = args.first().cloned().unwrap_or_default();
+    let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
+    let success = args.get(1).cloned().unwrap_or_default();
     if !success.is_callable() {
         return Err(JsNativeError::typ()
             .with_message("Geolocation success callback must be callable")
             .into());
     }
-    let error = args.get(1).cloned().filter(|value| value.is_callable());
+    let error = args.get(2).cloned().filter(|value| value.is_callable());
     let watch_id = args
-        .get(2)
+        .get(3)
         .cloned()
         .unwrap_or_else(|| JsValue::from(-1))
         .to_number(context)?;
@@ -245,11 +262,13 @@ fn geolocation_request_native(
     };
     // JavaScript normalizes the options, but parse again at the native boundary
     // so embedders cannot bypass range validation by calling the private hook.
-    let timeout_ms = geolocation_duration_argument(args.get(3), None, context)?;
-    let maximum_age_ms = geolocation_duration_argument(args.get(4), Some(0), context)?;
+    let timeout_ms = geolocation_duration_argument(args.get(4), None, context)?;
+    let maximum_age_ms = geolocation_duration_argument(args.get(5), Some(0), context)?;
 
     with_host_state(|state| {
         let mut state = state.borrow_mut();
+        let policy_denied =
+            !state.feature_enabled_in_document(document_id, PolicyFeature::Geolocation);
         let request_id = state.geolocation.next_request_id;
         state.geolocation.next_request_id = state.geolocation.next_request_id.saturating_add(1);
         state.geolocation.requests.insert(
@@ -257,6 +276,7 @@ fn geolocation_request_native(
             GeolocationRequest {
                 success,
                 error,
+                policy_denied,
                 watch_id,
                 timeout_ms,
                 maximum_age_ms,
@@ -309,12 +329,12 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
     for (name, length, function) in [
         (
             js_string!("__omoikane_geolocation_permission"),
-            0,
+            1,
             NativeFunction::from_copy_closure(geolocation_permission_native),
         ),
         (
             js_string!("__omoikane_geolocation_request"),
-            5,
+            6,
             NativeFunction::from_copy_closure(geolocation_request_native),
         ),
         (
@@ -405,7 +425,7 @@ impl JsRuntime {
         request_id: u64,
         timed_out: bool,
     ) -> JsResult<()> {
-        let (success, error, watch_id, maximum_age_ms, timeout_ms, pending) = {
+        let (success, error, watch_id, maximum_age_ms, timeout_ms, pending, policy_denied) = {
             let state = self.host_state.borrow();
             let Some(request) = state.geolocation.requests.get(&request_id) else {
                 return Ok(());
@@ -417,6 +437,7 @@ impl JsRuntime {
                 request.maximum_age_ms,
                 request.timeout_ms,
                 request.pending,
+                request.policy_denied,
             )
         };
         if !pending {
@@ -426,7 +447,7 @@ impl JsRuntime {
             let mut state = self.host_state.borrow_mut();
             let fresh_position = geolocation_position_age_ms(&state)
                 .is_some_and(|age| maximum_age_ms.is_none_or(|maximum_age| age <= maximum_age));
-            let outcome = if !state.geolocation.permission_granted {
+            let outcome = if policy_denied || !state.geolocation.permission_granted {
                 GeolocationOutcome::Error {
                     code: 1,
                     message: "User denied Geolocation.".to_string(),

@@ -202,6 +202,7 @@ export let __omoikane_cookie_change_reset;
   const nativeRequestFullscreen = globalThis.__omoikane_request_fullscreen;
   const nativeExitFullscreen = globalThis.__omoikane_exit_fullscreen;
   const nativeFullscreenSubtreeRemoved = globalThis.__omoikane_fullscreen_subtree_removed;
+  const nativePermissionsPolicyQuery = globalThis.__omoikane_permissions_policy_query;
   const nativePointerLockTarget = globalThis.__omoikane_pointer_lock_target;
   const nativePointerLockActivation = globalThis.__omoikane_pointer_lock_activation;
   const nativeRequestPointerLock = globalThis.__omoikane_request_pointer_lock;
@@ -254,6 +255,7 @@ export let __omoikane_cookie_change_reset;
   delete globalThis.__omoikane_request_fullscreen;
   delete globalThis.__omoikane_exit_fullscreen;
   delete globalThis.__omoikane_fullscreen_subtree_removed;
+  delete globalThis.__omoikane_permissions_policy_query;
   const nativeGetTextContent = globalThis.__omoikane_get_text_content;
   const nativeAttributeRecords = globalThis.__omoikane_attribute_records;
   const nativeAttributeRecordCount = globalThis.__omoikane_attribute_record_count;
@@ -283,6 +285,7 @@ export let __omoikane_cookie_change_reset;
   const nativeWindowName = globalThis.__omoikane_window_name;
   delete globalThis.__omoikane_window_name;
   const nativeIframeForceNavigation = globalThis.__omoikane_iframe_force_navigation;
+  const nativeIframeDeclaredOrigin = globalThis.__omoikane_iframe_declared_origin;
   const nativeIframeSubmissionSnapshot = globalThis.__omoikane_iframe_submission_snapshot;
   const nativeIframeReplaySubmission = globalThis.__omoikane_iframe_replay_submission;
   const nativeTakeDiscardedNodeIds = globalThis.__omoikane_take_discarded_node_ids;
@@ -351,6 +354,7 @@ export let __omoikane_cookie_change_reset;
   delete globalThis.__omoikane_iframe_global;
   delete globalThis.__omoikane_iframe_context_state;
   delete globalThis.__omoikane_iframe_force_navigation;
+  delete globalThis.__omoikane_iframe_declared_origin;
   delete globalThis.__omoikane_iframe_submission_snapshot;
   delete globalThis.__omoikane_iframe_replay_submission;
   delete globalThis.__omoikane_take_discarded_node_ids;
@@ -7790,6 +7794,48 @@ export let __omoikane_cookie_change_reset;
     __omoikane_document_write(internalNodeId(document), newline ? checked + "\n" : checked);
   }
 
+  const policyConstructionToken = {};
+  const policyOwnerIds = new WeakMap();
+  const documentPolicyObjects = new WeakMap();
+  function policyOwnerId(policy) {
+    const documentId = safeWeakMapGet(policyOwnerIds, policy);
+    if (documentId === undefined) throw new TypeError("Illegal invocation");
+    return documentId;
+  }
+
+  class PermissionsPolicy {
+    constructor(token, documentId) {
+      if (token !== policyConstructionToken) throw new TypeError("Illegal constructor");
+      safeWeakMapSet(policyOwnerIds, this, documentId);
+    }
+
+    allowsFeature(feature, origin = undefined) {
+      const documentId = policyOwnerId(this);
+      if (arguments.length < 1) throw new TypeError("PermissionsPolicy.allowsFeature requires a feature");
+      return Boolean(nativePermissionsPolicyQuery(
+        documentId, "allowsFeature", String(feature), origin === undefined ? undefined : String(origin)
+      ));
+    }
+
+    features() {
+      return nativePermissionsPolicyQuery(policyOwnerId(this), "features");
+    }
+
+    allowedFeatures() {
+      return nativePermissionsPolicyQuery(policyOwnerId(this), "allowedFeatures");
+    }
+
+    getAllowlistForFeature(feature) {
+      const documentId = policyOwnerId(this);
+      if (arguments.length < 1) throw new TypeError("PermissionsPolicy.getAllowlistForFeature requires a feature");
+      return nativePermissionsPolicyQuery(documentId, "getAllowlistForFeature", String(feature));
+    }
+
+    get [Symbol.toStringTag]() { return "PermissionsPolicy"; }
+  }
+  globalThis.PermissionsPolicy = PermissionsPolicy;
+  globalThis.FeaturePolicy = PermissionsPolicy;
+
   class Document extends Node {
     constructor(id, construction) {
       if (construction === DOCUMENT_CONSTRUCTION) {
@@ -8049,6 +8095,18 @@ export let __omoikane_cookie_change_reset;
       const documentId = internalNodeId(this);
       return documentId !== undefined && Boolean(nativeFullscreenEnabled(documentId));
     }
+
+    get permissionsPolicy() {
+      if (internalNodeType(this) !== 9) throw new TypeError("Illegal invocation");
+      let policy = safeWeakMapGet(documentPolicyObjects, this);
+      if (!policy) {
+        policy = new PermissionsPolicy(policyConstructionToken, internalNodeId(this));
+        safeWeakMapSet(documentPolicyObjects, this, policy);
+      }
+      return policy;
+    }
+
+    get featurePolicy() { return this.permissionsPolicy; }
 
     exitFullscreen() {
       return exitFullscreenDocument(this);
@@ -10245,6 +10303,8 @@ export let __omoikane_cookie_change_reset;
     set width(value) { this.setAttribute("width", String(value)); }
     get height() { return this.getAttribute("height") ?? ""; }
     set height(value) { this.setAttribute("height", String(value)); }
+    get allow() { return this.getAttribute("allow") ?? ""; }
+    set allow(value) { this.setAttribute("allow", String(value)); }
 
     __prepareResourceNavigation(action = "capture") {
       if (!this.isConnected) return;
@@ -10286,10 +10346,10 @@ export let __omoikane_cookie_change_reset;
     }
 
     // Boa 5da9b8f miscompiles the large bootstrap when this accessor pair is
-    // reduced to a getter. Keep the setter shape, but reject assignment with
-    // TypeError so the reflected DOMTokenList remains readonly.
-    set sandbox(_value) {
-      throw new TypeError("HTMLIFrameElement.sandbox is readonly");
+    // reduced to a getter. HTML's [PutForwards=value] forwards assignment to
+    // the existing DOMTokenList, without replacing that object.
+    set sandbox(value) {
+      this.sandbox.value = value;
     }
 
     get allowFullscreen() { return this.hasAttribute("allowfullscreen"); }
@@ -10343,6 +10403,7 @@ export let __omoikane_cookie_change_reset;
         const historyEntries = [];
         let historyIndex = -1;
         let pendingHistoryAction = null;
+        let pendingHistoryPreservesDeclaredOrigin = false;
         let pendingLocationURL = null;
         let historyScrollRestoration = "auto";
         let childNavigationDocument = null;
@@ -10390,12 +10451,16 @@ export let __omoikane_cookie_change_reset;
             catch (_) { href = value; }
           }
           const submission = nativeIframeSubmissionSnapshot(iframe.__id);
-          return { attribute, value, href, state: null, generation, submission, persisted: null };
+          const declaredOriginSnapshot = nativeIframeDeclaredOrigin(iframe.__id);
+          return { attribute, value, href, state: null, generation, submission,
+            declaredOriginSnapshot,
+            preservesDeclaredOrigin: pendingHistoryPreservesDeclaredOrigin, persisted: null };
         };
         const commitHistoryEntry = (generation, nextAccess) => {
           const entry = captureHistoryEntry(generation, nextAccess);
           const action = pendingHistoryAction;
           pendingHistoryAction = null;
+          pendingHistoryPreservesDeclaredOrigin = false;
           pendingLocationURL = null;
           if (historyIndex < 0) {
             historyEntries.push(entry);
@@ -10409,6 +10474,7 @@ export let __omoikane_cookie_change_reset;
               attribute: entry.attribute,
               value: entry.value,
               submission: entry.submission,
+              declaredOriginSnapshot: entry.declaredOriginSnapshot,
               generation,
             };
             if (action === "traverse") {
@@ -10468,6 +10534,7 @@ export let __omoikane_cookie_change_reset;
             // returns to the active resource. No generation change will clear
             // the optimistic Location/history state in that case.
             pendingHistoryAction = null;
+            pendingHistoryPreservesDeclaredOrigin = false;
             pendingLocationURL = null;
           }
           access = nextAccess;
@@ -10531,8 +10598,12 @@ export let __omoikane_cookie_change_reset;
             forgetDiscardedNodeWrappers();
           }
         };
-        const forceNavigation = () => {
-          nativeIframeForceNavigation(iframe.__id);
+        const forceNavigation = (preserveDeclaredOrigin = false, declaredOriginSnapshot) => {
+          if (declaredOriginSnapshot === undefined) {
+            nativeIframeForceNavigation(iframe.__id, preserveDeclaredOrigin);
+          } else {
+            nativeIframeForceNavigation(iframe.__id, preserveDeclaredOrigin, declaredOriginSnapshot);
+          }
           forgetDiscardedNodeWrappers();
         };
         const notePendingResourceNavigation = () => {
@@ -10549,6 +10620,7 @@ export let __omoikane_cookie_change_reset;
           // A direct src/srcdoc mutation starts a normal navigation. Location,
           // reload, and traversal replace this after their attribute writes.
           pendingHistoryAction = "push";
+          pendingHistoryPreservesDeclaredOrigin = false;
         };
         const navigate = (value, disposition) => {
           refresh();
@@ -10591,7 +10663,8 @@ export let __omoikane_cookie_change_reset;
           iframe.src = destination;
           pendingLocationURL = destination;
           pendingHistoryAction = disposition;
-          forceNavigation();
+          pendingHistoryPreservesDeclaredOrigin = true;
+          forceNavigation(true);
         };
         const reloadBrowsingContext = expectedGeneration => {
           if (expectedGeneration === undefined) {
@@ -10620,7 +10693,9 @@ export let __omoikane_cookie_change_reset;
           }
           pendingLocationURL = entry.href;
           pendingHistoryAction = "reload";
-          forceNavigation();
+          pendingHistoryPreservesDeclaredOrigin = entry.preservesDeclaredOrigin;
+          forceNavigation(entry.preservesDeclaredOrigin,
+            entry.preservesDeclaredOrigin ? entry.declaredOriginSnapshot : undefined);
           restoreHistoryState(entry);
         };
         const requireHistoryAccess = expectedGeneration => {
@@ -10676,7 +10751,9 @@ export let __omoikane_cookie_change_reset;
           }
           pendingLocationURL = entry.href;
           pendingHistoryAction = "traverse";
-          forceNavigation();
+          pendingHistoryPreservesDeclaredOrigin = entry.preservesDeclaredOrigin;
+          forceNavigation(entry.preservesDeclaredOrigin,
+            entry.preservesDeclaredOrigin ? entry.declaredOriginSnapshot : undefined);
           restoreHistoryState(entry);
         };
         const sameDocumentHistoryURL = (value, expectedGeneration) => {
@@ -11071,7 +11148,7 @@ export let __omoikane_cookie_change_reset;
   // distinct interface or iframe-only sandbox/srcdoc attributes.
   class HTMLFrameElement extends HTMLElement {}
   for (const name of Object.getOwnPropertyNames(HTMLIFrameElement.prototype)) {
-    if (["constructor", "sandbox", "srcdoc", "allowFullscreen", "width", "height"].includes(name)) continue;
+    if (["constructor", "sandbox", "srcdoc", "allow", "allowFullscreen", "width", "height"].includes(name)) continue;
     Object.defineProperty(HTMLFrameElement.prototype, name,
       Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, name));
   }
@@ -18526,7 +18603,7 @@ export let __omoikane_cookie_change_reset;
       if (typeof success !== "function") throw new TypeError("success callback must be callable");
       if (error != null && typeof error !== "function") throw new TypeError("error callback must be callable");
       const normalized = normalizeGeolocationOptions(options);
-      nativeGeolocationRequest(success, error == null ? undefined : error, -1,
+      nativeGeolocationRequest(__omoikane_document_id, success, error == null ? undefined : error, -1,
         normalized.timeout, normalized.maximumAge);
     }
     watchPosition(success, error = undefined, options = undefined) {
@@ -18534,7 +18611,7 @@ export let __omoikane_cookie_change_reset;
       if (error != null && typeof error !== "function") throw new TypeError("error callback must be callable");
       const normalized = normalizeGeolocationOptions(options);
       const id = this.__nextWatchId++ >>> 0;
-      nativeGeolocationRequest(success, error == null ? undefined : error, id,
+      nativeGeolocationRequest(__omoikane_document_id, success, error == null ? undefined : error, id,
         normalized.timeout, normalized.maximumAge);
       return id;
     }
@@ -22612,7 +22689,7 @@ export let __omoikane_cookie_change_reset;
     }
     if (name === "geolocation") {
       try {
-        return nativeGeolocationPermission() ? "granted" : "denied";
+        return nativeGeolocationPermission(__omoikane_document_id) ? "granted" : "denied";
       } catch (_) {
         return "denied";
       }

@@ -1,6 +1,6 @@
 //! Local HTTP fixture server for WPT smoke cases.
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -181,35 +181,37 @@ add_completion_callback((tests,status) => { globalThis.__wpt_harness_status=Numb
     }
     let file = root.join(relative);
     match fs::read(&file) {
-        Ok(body) => respond_with_headers(
-            &mut stream,
-            200,
-            content_type(&file),
-            &body,
-            &fixture_headers(&file, target),
-        ),
+        Ok(body) => match fixture_headers(&file, target) {
+            Ok(headers) => {
+                respond_with_headers(&mut stream, 200, content_type(&file), &body, &headers)
+            }
+            Err(_) => respond(&mut stream, 500, "text/plain", b"invalid static headers"),
+        },
         Err(_) => respond(&mut stream, 404, "text/plain", b"not found"),
     }
 }
 
-/// Reads CSP fields from pinned wptserve `.headers`/`.sub.headers` sidecars and
-/// `pipe=header(...)` stages. Each field remains separate so repeated policies
-/// retain their original enforcement and report-only behavior.
-fn fixture_headers(file: &Path, target: &str) -> Vec<(String, String)> {
-    let mut headers = [".headers", ".sub.headers"]
-        .iter()
-        .find_map(|suffix| {
-            let mut sidecar_name = file.as_os_str().to_os_string();
-            sidecar_name.push(*suffix);
-            fs::read_to_string(PathBuf::from(sidecar_name)).ok()
-        })
-        .into_iter()
-        .flat_map(|text| {
-            text.lines()
-                .filter_map(parse_fixture_header)
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+/// Reads static `.headers`/`.sub.headers` sidecars and `pipe=header(...)`
+/// stages. Repeated fields retain their order and remain separate.
+fn fixture_headers(file: &Path, target: &str) -> io::Result<Vec<(String, String)>> {
+    let mut headers = Vec::new();
+    for suffix in [".headers", ".sub.headers"] {
+        let mut sidecar_name = file.as_os_str().to_os_string();
+        sidecar_name.push(suffix);
+        let source = match fs::read_to_string(PathBuf::from(sidecar_name)) {
+            Ok(source) => source,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for line in source
+            .lines()
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .filter(|line| !line.is_empty() && !line.trim_start().starts_with('#'))
+        {
+            headers.push(parse_fixture_header(line)?);
+        }
+        break;
+    }
     if let Some((_, query)) = target.split_once('?') {
         for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
             if name != "pipe" {
@@ -240,30 +242,36 @@ fn fixture_headers(file: &Path, target: &str) -> Vec<(String, String)> {
                         _ => ch,
                     })
                     .collect::<String>();
-                if let Some(header) = parse_fixture_header(&format!("{name}: {value}")) {
+                if let Ok(header) = parse_fixture_header(&format!("{name}: {value}")) {
                     headers.push(header);
                 }
             }
         }
     }
-    headers
+    Ok(headers)
 }
 
-fn parse_fixture_header(line: &str) -> Option<(String, String)> {
-    let (name, value) = line.split_once(':')?;
+fn parse_fixture_header(line: &str) -> io::Result<(String, String)> {
+    let (name, value) = line
+        .split_once(':')
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid static header"))?;
     let name = name.trim();
-    let value = value.trim();
-    let csp_header = name.eq_ignore_ascii_case("Content-Security-Policy")
-        || name.eq_ignore_ascii_case("Content-Security-Policy-Report-Only");
-    if !csp_header
+    if name.is_empty()
         || !name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         || value.bytes().any(|byte| byte == b'\r' || byte == b'\n')
+        || name.eq_ignore_ascii_case("content-length")
+        || name.eq_ignore_ascii_case("connection")
+        || name.eq_ignore_ascii_case("transfer-encoding")
+        || name.eq_ignore_ascii_case("trailer")
     {
-        return None;
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid static header",
+        ));
     }
-    Some((name.to_owned(), value.to_owned()))
+    Ok((name.to_owned(), value.trim().to_owned()))
 }
 
 pub(super) fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) {
@@ -278,14 +286,20 @@ fn respond_with_headers(
     headers: &[(String, String)],
 ) {
     let reason = if status == 200 { "OK" } else { "Error" };
-    let mut header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n",
-        body.len()
-    );
+    let mut header = format!("HTTP/1.1 {status} {reason}\r\n");
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        header.push_str(&format!("Content-Type: {content_type}\r\n"));
+    }
     for (name, value) in headers {
         header.push_str(&format!("{name}: {value}\r\n"));
     }
-    header.push_str("Connection: close\r\n\r\n");
+    header.push_str(&format!(
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    ));
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(body);
 }
@@ -344,6 +358,12 @@ mod tests {
         ));
         fs::create_dir(&root).unwrap();
         fs::write(root.join("hello.html"), b"hello").unwrap();
+        fs::write(root.join("policy.html"), b"<p>controlled</p>").unwrap();
+        fs::write(
+            root.join("policy.html.headers"),
+            b"Permissions-Policy: fullscreen=()\r\n",
+        )
+        .unwrap();
         fs::create_dir_all(root.join("resources/webidl2/lib")).unwrap();
         fs::write(
             root.join("resources/webidl2/lib/webidl2.js"),
@@ -359,10 +379,28 @@ mod tests {
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 5\r\nConnection: close"
         );
         assert_eq!(body, b"hello");
+        let (header, body) = get(&server, "/policy.html");
+        assert!(header.contains("Permissions-Policy: fullscreen=()\r\n"));
+        assert_eq!(body, b"<p>controlled</p>");
+        let (header, body) = get(&server, "/hello.html?pipe=header(Content-Length,0)");
+        assert_eq!(header.matches("Content-Length: ").count(), 1);
+        assert!(header.contains("Content-Length: 5\r\n"));
+        assert_eq!(body, b"hello");
         let (header, body) = get(&server, "/resources/WebIDLParser.js");
         assert!(header.starts_with("HTTP/1.1 200 OK"));
         assert!(header.contains("Content-Type: text/javascript"));
         assert_eq!(body, b"var WebIDL2 = {};");
+
+        for invalid in [
+            "Content-Length: 0\n",
+            "Transfer-Encoding: chunked\n",
+            "Trailer: X-Test\n",
+        ] {
+            fs::write(root.join("policy.html.headers"), invalid).unwrap();
+            let (header, body) = get(&server, "/policy.html");
+            assert!(header.starts_with("HTTP/1.1 500 Error\r\n"));
+            assert_eq!(body, b"invalid static headers");
+        }
 
         for (path, expected_header, expected_body) in [
             (
