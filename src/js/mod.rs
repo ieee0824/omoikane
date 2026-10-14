@@ -4691,27 +4691,18 @@ impl HostState {
             }
         }
         let adopted_stylesheets = collect_adopted_stylesheets(&self.adopted_stylesheets, document);
-        if !adopted_stylesheets.is_empty() && !policy.allows_inline(ResourceType::Style) {
-            // Constructable stylesheets are author-provided style text just
-            // like <style> elements, so style-src must gate them as well.
-            self.record_csp_violation(document, ResourceType::Style, "adopted-stylesheets");
-        } else {
-            for (scope, css) in adopted_stylesheets {
-                let (sheet, parse_failed) =
-                    crate::paint::stylesheet::parse_stylesheet_forgiving_with_status(&css);
-                if parse_failed {
-                    report_safe_stylesheet_parse_failure(self.error_reporter.clone());
-                }
-                if let Some((scope_root, order)) = scope {
-                    resolver.add_scoped_stylesheet_in_order(
-                        Origin::Author,
-                        sheet,
-                        scope_root,
-                        order,
-                    );
-                } else {
-                    resolver.add_stylesheet(Origin::Author, sheet);
-                }
+        // CSSOM applies constructed sheets without the inline <style> check
+        // used for the DOM-backed stylesheet nodes above.
+        for (scope, css) in adopted_stylesheets {
+            let (sheet, parse_failed) =
+                crate::paint::stylesheet::parse_stylesheet_forgiving_with_status(&css);
+            if parse_failed {
+                report_safe_stylesheet_parse_failure(self.error_reporter.clone());
+            }
+            if let Some((scope_root, order)) = scope {
+                resolver.add_scoped_stylesheet_in_order(Origin::Author, sheet, scope_root, order);
+            } else {
+                resolver.add_stylesheet(Origin::Author, sheet);
             }
         }
         resolver.set_script_registered_custom_properties(

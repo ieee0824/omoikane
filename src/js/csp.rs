@@ -24,7 +24,7 @@ pub(crate) enum ResourceType {
 
 /// Runtime references representing inline code rather than a fetch request.
 pub(crate) fn is_inline_reference(reference: &str) -> bool {
-    matches!(reference, "inline" | "adopted-stylesheets")
+    reference == "inline"
         || reference.starts_with("style-element:")
         || reference.starts_with("style-attribute:")
 }

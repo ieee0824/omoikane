@@ -20529,7 +20529,7 @@ fn constructable_stylesheets_apply_to_documents_and_shadow_roots() {
 }
 
 #[test]
-fn csp_blocks_constructable_stylesheets() {
+fn csp_does_not_block_constructed_stylesheets() {
     let mut runtime = runtime_from_html("<html><body><div id=target></div></body></html>");
     runtime.install_csp_policy(&["style-src 'none'".to_string()]);
     runtime
@@ -20544,14 +20544,14 @@ fn csp_blocks_constructable_stylesheets() {
             &mut runtime,
             "getComputedStyle(document.getElementById('target')).color",
         ),
-        "rgb(0, 0, 0)"
+        "rgb(255, 0, 0)"
     );
     assert_eq!(
         eval_str(
             &mut runtime,
             "document.cspViolations.map(v => v.effectiveDirective + ':' + v.resourceType).join(',')",
         ),
-        "style-src:style"
+        ""
     );
 }
 
