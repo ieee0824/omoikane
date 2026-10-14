@@ -2851,6 +2851,71 @@ mod tests {
     }
 
     #[test]
+    fn constructed_stylesheets_ignore_inline_style_policies_but_style_elements_do_not() {
+        let document = crate::html::TreeBuilder::parse(
+            "<body><p id=constructed>x</p><p id=inline>x</p><div id=host></div></body>",
+        )
+        .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_response_security_headers(&[
+            (
+                "Content-Security-Policy".into(),
+                "style-src 'none'; report-to observations".into(),
+            ),
+            (
+                "Content-Security-Policy-Report-Only".into(),
+                "style-src 'none'; report-to observations".into(),
+            ),
+        ]);
+        runtime
+            .eval(
+                r#"
+            globalThis.events = []; globalThis.reports = [];
+            document.addEventListener('securitypolicyviolation', event => events.push({
+              target: event.target.id,
+              directive: event.effectiveDirective,
+              blockedURI: event.blockedURI,
+              disposition: event.disposition
+            }));
+            new ReportingObserver(batch => reports.push(...batch)).observe();
+            globalThis.sheet = new CSSStyleSheet();
+            sheet.replaceSync('#constructed { color: red; } #shadow { color: blue; }');
+            document.adoptedStyleSheets = [sheet];
+            globalThis.shadow = document.getElementById('host').attachShadow({mode: 'open'});
+            shadow.innerHTML = '<p id=shadow>x</p>';
+            shadow.adoptedStyleSheets = [sheet];
+            globalThis.first = getComputedStyle(document.getElementById('constructed')).color;
+            globalThis.second = getComputedStyle(shadow.querySelector('#shadow')).color;
+        "#,
+            )
+            .unwrap();
+        runtime.run_timers(10, 1, 30);
+        assert!(runtime.eval("first === 'rgb(255, 0, 0)' && second === 'rgb(0, 0, 255)' && events.length === 0 && reports.length === 0 && document.cspViolations.length === 0").unwrap().as_boolean().unwrap());
+
+        runtime.set_viewport(420.0, 320.0);
+        runtime
+            .eval("sheet.replaceSync('#constructed { color: blue; } #shadow { color: red; }'); globalThis.updated = getComputedStyle(document.getElementById('constructed')).color; globalThis.shadowUpdated = getComputedStyle(shadow.querySelector('#shadow')).color")
+            .unwrap();
+        runtime.run_timers(10, 1, 30);
+        assert!(runtime.eval("updated === 'rgb(0, 0, 255)' && shadowUpdated === 'rgb(255, 0, 0)' && events.length === 0 && reports.length === 0 && document.cspViolations.length === 0").unwrap().as_boolean().unwrap());
+
+        runtime
+            .eval(
+                r#"
+            const blocked = document.createElement('style');
+            blocked.id = 'inlineStyle';
+            blocked.textContent = '#inline { color: blue; }';
+            document.body.appendChild(blocked);
+            globalThis.inlineColor = getComputedStyle(document.getElementById('inline')).color;
+        "#,
+            )
+            .unwrap();
+        runtime.run_timers(10, 1, 30);
+        assert!(runtime.eval("inlineColor !== 'rgb(0, 0, 255)' && events.length === 2 && events.every(event => event.target === 'inlineStyle' && event.directive === 'style-src-elem' && event.blockedURI === 'inline') && events.map(event => event.disposition).sort().join(',') === 'enforce,report' && reports.length === 2 && reports.every(report => report.body.blockedURL === 'inline') && document.cspViolations.length === 1").unwrap().as_boolean().unwrap());
+    }
+
+    #[test]
     fn csp_events_target_connected_elements_and_fall_back_after_tree_changes() {
         for (after, expected) in [
             ("", serde_json::json!(["element", "element"])),
