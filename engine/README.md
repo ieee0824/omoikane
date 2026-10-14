@@ -69,6 +69,16 @@ generated source string to that constructor call. The grant is private to the
 host call and consumed by its first matching hook, so `script-src 'unsafe-inline'`
 can authorize an event handler without authorizing page `eval` or `Function`.
 
+For `javascript:` navigation, the embedding marks its private bootstrap module
+through `Module::parse_with_host_defined` and reads a call frame's own script or
+module Realm through `CallFrame::script_or_module_realm`. The navigation client
+is the closest author script or module frame, so a child assigning
+`top.location.href` uses the child's Trusted Types policy, while a top-level
+author function called by the child uses the top-level policy. The browser's
+navigation regressions cover both directions, plus `eval` and Function calls;
+the fixed-revision Trusted Types navigation WPT subset checks the public
+behavior. These local Boa APIs leave the imported origin record unchanged.
+
 ## RegExp exact-position matching
 
 [`regress/`](regress/) preserves the published regress 0.10.5 package, including

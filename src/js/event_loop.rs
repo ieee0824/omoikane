@@ -12,7 +12,8 @@ use boa_gc::{Finalize, Trace, Tracer};
 
 use super::script_errors::WorkerErrorNotification;
 use super::{
-    DocumentSecurityOrigin, NavigationReferrerSource, NavigationRequest, TimerPayload, VisitSource,
+    DocumentSecurityOrigin, NavigationReferrerSource, NavigationRequest,
+    NavigationSecuritySnapshot, TimerPayload, VisitSource,
 };
 
 /// The HTML task source responsible for a queued task.
@@ -62,10 +63,13 @@ pub(crate) enum Task {
     Navigation {
         request: NavigationRequest,
         source: Option<VisitSource>,
+        security: Option<NavigationSecuritySnapshot>,
     },
     AuxiliaryNavigate {
         id: u64,
         url: String,
+        client_document_id: usize,
+        client_security: Option<NavigationSecuritySnapshot>,
         source: Option<VisitSource>,
         referrer_source: NavigationReferrerSource,
     },
@@ -213,6 +217,7 @@ unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tracer) {
         }
         TimerPayload::Source(_)
         | TimerPayload::ResourceLoad { .. }
+        | TimerPayload::JavascriptDocumentLoad { .. }
         | TimerPayload::FormSubmission { .. }
         | TimerPayload::GeolocationTimeout { .. } => {}
     }
@@ -305,9 +310,9 @@ impl EventLoop {
         owner_document_id: Option<usize>,
     ) {
         let source = match payload {
-            TimerPayload::ResourceLoad { .. } | TimerPayload::FormSubmission { .. } => {
-                TaskSource::Networking
-            }
+            TimerPayload::ResourceLoad { .. }
+            | TimerPayload::JavascriptDocumentLoad { .. }
+            | TimerPayload::FormSubmission { .. } => TaskSource::Networking,
             TimerPayload::GeolocationTimeout { .. } => TaskSource::Geolocation,
             _ => TaskSource::Timer,
         };
@@ -331,7 +336,9 @@ impl EventLoop {
                 let cancelled = matches!(
                     task,
                     Task::Timer {
-                        payload: TimerPayload::ResourceLoad { node_id } | TimerPayload::FormSubmission { node_id, .. },
+                        payload: TimerPayload::ResourceLoad { node_id }
+                            | TimerPayload::FormSubmission { node_id, .. }
+                            | TimerPayload::JavascriptDocumentLoad { iframe_id: node_id, .. },
                         ..
                     }
                         if node_ids.contains(node_id)
@@ -347,21 +354,31 @@ impl EventLoop {
     }
 
     pub(crate) fn enqueue_navigation(&mut self, request: NavigationRequest) {
-        self.enqueue_navigation_from_source(request, None);
+        self.enqueue_navigation_from_source(request, None, None);
     }
 
     pub(crate) fn enqueue_navigation_from_source(
         &mut self,
         request: NavigationRequest,
         source: Option<VisitSource>,
+        security: Option<NavigationSecuritySnapshot>,
     ) {
-        self.enqueue(TaskSource::Navigation, Task::Navigation { request, source });
+        self.enqueue(
+            TaskSource::Navigation,
+            Task::Navigation {
+                request,
+                source,
+                security,
+            },
+        );
     }
 
     pub(crate) fn enqueue_auxiliary_navigation(
         &mut self,
         id: u64,
         url: String,
+        client_document_id: usize,
+        client_security: Option<NavigationSecuritySnapshot>,
         source: Option<VisitSource>,
         referrer_source: NavigationReferrerSource,
     ) {
@@ -370,6 +387,8 @@ impl EventLoop {
             Task::AuxiliaryNavigate {
                 id,
                 url,
+                client_document_id,
+                client_security,
                 source,
                 referrer_source,
             },

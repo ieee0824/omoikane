@@ -221,6 +221,27 @@ impl CspPolicy {
         (violations(&self.policies), violations(&self.report_only))
     }
 
+    /// Returns policies whose inline script check rejects a javascript: URL.
+    /// The URL is executed as inline code, so its source is checked using the
+    /// script element directive (and its ordinary fallback chain).
+    pub(crate) fn javascript_navigation_violations(
+        &self,
+    ) -> (Vec<PolicyViolation>, Vec<PolicyViolation>) {
+        let violations = |policies: &[ParsedPolicy]| {
+            policies
+                .iter()
+                .filter(|policy| !policy.allows_inline(ResourceType::Script, false))
+                .map(|policy| PolicyViolation {
+                    serialized: policy.serialized.clone(),
+                    report_sample: policy
+                        .sources_for(ResourceType::Script, false)
+                        .is_some_and(|sources| sources.contains(&SourceExpression::ReportSample)),
+                })
+                .collect()
+        };
+        (violations(&self.policies), violations(&self.report_only))
+    }
+
     /// Compares the rules that affect resource checks and violation reports.
     /// Endpoint availability changes independently after report delivery.
     pub(crate) fn has_same_policy_rules(&self, other: &Self) -> bool {

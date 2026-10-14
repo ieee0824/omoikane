@@ -26,6 +26,14 @@ collect_pattern "/css/css-logical/"
 collect_pattern "/reporting/" "/content-security-policy/securitypolicyviolation/constructor-required-fields.html"
 collect_pattern \
   "/trusted-types/support/" \
+  "/trusted-types/navigate-to-javascript-url-001.html" \
+  "/trusted-types/navigate-to-javascript-url-002.html" \
+  "/trusted-types/navigate-to-javascript-url-003.html" \
+  "/trusted-types/navigate-to-javascript-url-004.html" \
+  "/trusted-types/navigate-to-javascript-url-005.html" \
+  "/trusted-types/navigate-to-javascript-url-008.html" \
+  "/trusted-types/navigate-to-javascript-url-008.html.headers" \
+  "/trusted-types/navigate-to-javascript-url-csp-headers.html" \
   "/trusted-types/Window-TrustedTypes.html" \
   "/trusted-types/TrustedTypePolicyFactory-createPolicy-unenforced.html" \
   "/trusted-types/TrustedTypePolicyFactory-isXXX.html" \

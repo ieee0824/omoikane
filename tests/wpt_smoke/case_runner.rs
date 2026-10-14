@@ -143,6 +143,24 @@ impl SameDocumentHistory {
                 return Ok(committed);
             };
             match request {
+                NavigationRequest::Navigate { url, .. }
+                    if url::Url::parse(&url).is_ok_and(|url| url.scheme() == "javascript") =>
+                {
+                    runtime
+                        .evaluate_javascript_navigation(&url)
+                        .map_err(|error| format!("evaluate WPT javascript: navigation: {error}"))?;
+                    committed = true;
+                }
+                NavigationRequest::FormSubmit { url, .. }
+                    if url::Url::parse(&url).is_ok_and(|url| url.scheme() == "javascript") =>
+                {
+                    runtime
+                        .evaluate_javascript_navigation(&url)
+                        .map_err(|error| {
+                            format!("evaluate WPT form javascript: navigation: {error}")
+                        })?;
+                    committed = true;
+                }
                 NavigationRequest::Navigate { url, replace }
                     if is_fragment_only_navigation(self.current(), &url) =>
                 {
@@ -334,6 +352,9 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
         &url,
     )
     .expect("create WPT runtime");
+    // Top-level fixture headers are part of the Document's policy, including
+    // header-only report-only CSP cases. Apply them before parser scripts run.
+    runtime.install_document_response_headers(response.headers());
     if path.ends_with("/allow-crossorigin.html") || path.ends_with("/disallow-crossorigin.html") {
         runtime.set_http_resource_transport(Some(super::cross_origin::transport(base_url)));
     }

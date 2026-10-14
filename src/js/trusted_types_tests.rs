@@ -18,6 +18,570 @@ fn assert_js_true(runtime: &mut JsRuntime, source: &str) {
     assert_eq!(observed, Some(true));
 }
 
+fn queued_javascript_url(runtime: &mut JsRuntime, assignment: &str) -> String {
+    runtime.eval(assignment).unwrap();
+    runtime.run_until_idle().unwrap();
+    let requests = runtime.take_navigation_requests();
+    let [NavigationRequest::Navigate { url, .. }] = requests.as_slice() else {
+        panic!("expected one javascript: navigation, got {requests:?}");
+    };
+    assert!(url.starts_with("javascript:"), "{url}");
+    url.clone()
+}
+
+#[test]
+fn javascript_location_navigation_uses_default_policy_and_preserves_document() {
+    let mut runtime = make_runtime("<body>");
+    runtime.install_response_security_headers(&[(
+        "Content-Security-Policy".into(),
+        "require-trusted-types-for 'script'".into(),
+    )]);
+    assert_js_true(
+        &mut runtime,
+        r#"
+        globalThis.originalRan = false;
+        globalThis.convertedRan = false;
+        globalThis.policyArguments = null;
+        trustedTypes.createPolicy('default', {createScript: (source, type, sink) => {
+          policyArguments = [source, type, sink];
+          return source.replace('originalRan', 'convertedRan');
+        }});
+        true
+        "#,
+    );
+    let url = queued_javascript_url(
+        &mut runtime,
+        "location.href = 'javascript:globalThis.originalRan%20%3D%20true;';",
+    );
+    assert_eq!(runtime.evaluate_javascript_navigation(&url).unwrap(), None);
+    assert_js_true(
+        &mut runtime,
+        "convertedRan && !originalRan && policyArguments[0] === 'globalThis.originalRan%20%3D%20true;' && policyArguments[1] === 'TrustedScript' && policyArguments[2] === 'Location href' && location.href === 'https://example.test/page'",
+    );
+}
+
+#[test]
+fn javascript_location_assignment_coerces_url_once() {
+    let mut runtime = make_runtime("<body>");
+    let url = queued_javascript_url(
+        &mut runtime,
+        r#"
+        globalThis.coercions = 0;
+        location.href = {toString() {
+          coercions++;
+          return 'javascript:globalThis.executed=true;';
+        }};
+        "#,
+    );
+    assert_js_true(&mut runtime, "coercions === 1");
+    assert_eq!(runtime.evaluate_javascript_navigation(&url).unwrap(), None);
+    assert_js_true(&mut runtime, "executed === true && coercions === 1");
+}
+
+#[test]
+fn location_navigation_rejects_unsupported_schemes_without_queuing() {
+    let mut runtime = make_runtime("<body>");
+    assert_js_true(
+        &mut runtime,
+        r#"
+        [
+          'data:text/html,hello',
+          'data://example.test/escape',
+          'vbscript:msgbox(1)',
+          'vbscript://example.test/escape',
+          'ftp://example.test/escape'
+        ].every(url => {
+          try { location.href = url; return false; }
+          catch (error) { return error.name === 'SecurityError'; }
+        })
+        "#,
+    );
+    runtime.run_until_idle().unwrap();
+    assert!(runtime.take_navigation_requests().is_empty());
+    assert_js_true(
+        &mut runtime,
+        "location.href === 'https://example.test/page'",
+    );
+}
+
+#[test]
+fn javascript_location_navigation_reports_enforce_and_report_only_failures() {
+    for report_only in [false, true] {
+        let mut runtime = make_runtime("<body>");
+        runtime.install_response_security_headers(&[(
+            if report_only {
+                "Content-Security-Policy-Report-Only"
+            } else {
+                "Content-Security-Policy"
+            }
+            .into(),
+            "require-trusted-types-for 'script'".into(),
+        )]);
+        runtime
+            .eval(
+                r#"
+                globalThis.scriptRan = false;
+                globalThis.violations = [];
+                document.addEventListener('securitypolicyviolation', e => violations.push(e));
+                trustedTypes.createPolicy('default', {createScript: () => { throw Error('no'); }});
+                "#,
+            )
+            .unwrap();
+        let url = queued_javascript_url(
+            &mut runtime,
+            "location.assign('javascript:globalThis.scriptRan=true;');",
+        );
+        assert_eq!(runtime.evaluate_javascript_navigation(&url).unwrap(), None);
+        runtime.run_until_idle().unwrap();
+        assert_js_true(
+            &mut runtime,
+            if report_only {
+                "scriptRan && violations.length === 1 && violations[0].disposition === 'report' && violations[0].sample === 'Location href|globalThis.scriptRan=true;'"
+            } else {
+                "!scriptRan && violations.length === 1 && violations[0].disposition === 'enforce' && violations[0].sample === 'Location href|globalThis.scriptRan=true;'"
+            },
+        );
+    }
+}
+
+#[test]
+fn javascript_location_navigation_rejects_missing_or_invalid_default_policy() {
+    for invalid_policy in [false, true] {
+        let mut runtime = make_runtime("<body>");
+        runtime.install_response_security_headers(&[(
+            "Content-Security-Policy".into(),
+            "require-trusted-types-for 'script'".into(),
+        )]);
+        runtime
+            .eval(
+                r#"
+                globalThis.executed = false;
+                globalThis.violations = [];
+                document.addEventListener('securitypolicyviolation', e => violations.push(e));
+                "#,
+            )
+            .unwrap();
+        if invalid_policy {
+            runtime
+                .eval(
+                    "trustedTypes.createPolicy('default', {createScript: () => '//make:invalid/'});",
+                )
+                .unwrap();
+        }
+        let url = queued_javascript_url(
+            &mut runtime,
+            "location.href = 'javascript:globalThis.executed=true;';",
+        );
+        assert_eq!(runtime.evaluate_javascript_navigation(&url).unwrap(), None);
+        runtime.run_until_idle().unwrap();
+        assert_js_true(
+            &mut runtime,
+            "!executed && violations.length === 1 && violations[0].sample === 'Location href|globalThis.executed=true;'",
+        );
+    }
+}
+
+#[test]
+fn javascript_location_navigation_obeys_inline_csp_and_string_completion() {
+    let mut runtime = make_runtime("<body>");
+    runtime.install_response_security_headers(&[(
+        "Content-Security-Policy".into(),
+        "script-src 'none' 'report-sample'".into(),
+    )]);
+    runtime
+        .eval("globalThis.scriptRan = false; globalThis.violations = []; document.addEventListener('securitypolicyviolation', event => violations.push(event));")
+        .unwrap();
+    let url = queued_javascript_url(
+        &mut runtime,
+        "location = 'javascript:globalThis.scriptRan%20%3D%20true;';",
+    );
+    assert_eq!(runtime.evaluate_javascript_navigation(&url).unwrap(), None);
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "!scriptRan && violations.length === 1 && violations[0].effectiveDirective === 'script-src-elem' && violations[0].sample === 'globalThis.scriptRan = true;'",
+    );
+
+    let mut runtime = make_runtime("<body>");
+    let url = queued_javascript_url(
+        &mut runtime,
+        "location.replace('javascript:%27%3Cmain%3Eok%3C%2Fmain%3E%27');",
+    );
+    assert_eq!(
+        runtime.evaluate_javascript_navigation(&url).unwrap(),
+        Some("<main>ok</main>".into()),
+    );
+    assert_js_true(
+        &mut runtime,
+        "location.href === 'https://example.test/page'",
+    );
+}
+
+#[test]
+fn javascript_child_self_navigation_uses_child_policy_and_realm() {
+    let mut runtime = make_runtime("<body><iframe id=frame></iframe>");
+    runtime
+        .eval(
+            r#"
+            const frame = document.getElementById('frame');
+            frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'"><script>
+              globalThis.executed = false;
+              globalThis.violations = [];
+              document.addEventListener('securitypolicyviolation', e => violations.push(e));
+              location.href = 'javascript:globalThis.executed=true;';
+            <\/script>`;
+            globalThis.child = frame.contentWindow;
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "child.executed === false && child.violations.length === 1 && child.violations[0].effectiveDirective === 'require-trusted-types-for'",
+    );
+}
+
+#[test]
+fn javascript_popup_navigation_uses_opener_policy_and_target_realm() {
+    let mut runtime = make_runtime("<body>");
+    runtime.install_response_security_headers(&[(
+        "Content-Security-Policy".into(),
+        "require-trusted-types-for 'script'".into(),
+    )]);
+    runtime
+        .eval(
+            r#"
+            globalThis.defaultCalls = [];
+            trustedTypes.createPolicy('default', {createScript: (source, type, sink) => {
+              defaultCalls.push([source, type, sink]);
+              return source.replace('untrustedMarker', 'approvedMarker');
+            }});
+            globalThis.popup = window.open('javascript:globalThis.untrustedMarker=17;', 'trustedPopup');
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "defaultCalls.length === 1 && defaultCalls[0][1] === 'TrustedScript' && defaultCalls[0][2] === 'Location href' && popup.approvedMarker === 17 && popup.untrustedMarker === undefined",
+    );
+}
+
+#[test]
+fn javascript_popup_string_completion_replaces_document_at_existing_url() {
+    let mut runtime = make_runtime("<body>");
+    runtime.eval(r#"
+        globalThis.popup = window.open(
+          "javascript:%27%3Cmain%20id%3Dnew%3Enew%3C%2Fmain%3E%3Cscript%3Eopener.popupScriptRan%3Dtrue%3C%2Fscript%3E%27",
+          "completionPopup");
+        globalThis.oldPopupDocument = popup.document;
+        globalThis.oldPopupHistoryLength = popup.history.length;
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "popup.document !== oldPopupDocument && popup.document.URL === 'about:blank' && popup.location.href === 'about:blank' && popup.history.length === oldPopupHistoryLength && popup.document.getElementById('new').textContent === 'new' && globalThis.popupScriptRan === true",
+    );
+}
+
+#[test]
+fn javascript_popup_string_completion_inherits_target_csp() {
+    let mut runtime = make_runtime("<body>");
+    runtime.install_response_security_headers(&[(
+        "Content-Security-Policy".into(),
+        "require-trusted-types-for 'script'".into(),
+    )]);
+    runtime
+        .eval(
+            r#"
+        trustedTypes.createPolicy('default', {createScript: source => source});
+        globalThis.popup = window.open(
+          "javascript:%27%3Cmain%20id%3Dnew%3Enew%3C%2Fmain%3E%27", "cspPopup");
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        r#"
+        globalThis.popupViolations = [];
+        popup.document.addEventListener('securitypolicyviolation', event => popupViolations.push(event));
+        popup.document.getElementById('new') !== null &&
+          (() => { try { popup.document.body.innerHTML = '<b>unsafe</b>'; return false; }
+            catch (error) { return error.name === 'TypeError'; } })()
+    "#,
+    );
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "popupViolations.length === 1 && popupViolations[0].effectiveDirective === 'require-trusted-types-for' && popupViolations[0].disposition === 'enforce'",
+    );
+}
+
+#[test]
+fn javascript_iframe_src_uses_owner_policy_and_keeps_existing_document() {
+    let mut runtime = make_runtime("<body><iframe id=frame></iframe>");
+    runtime
+        .eval(
+            r#"
+            globalThis.frame = document.getElementById('frame');
+            frame.srcdoc = '<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for \'script\'"><body></body>';
+            globalThis.child = frame.contentWindow;
+            child.executed = false;
+            frame.removeAttribute('srcdoc');
+            frame.src = 'javascript:globalThis.executed=true;';
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "child.executed === true && frame.contentWindow === child && frame.contentDocument.URL === 'about:srcdoc'",
+    );
+}
+
+#[test]
+fn javascript_iframe_string_completion_replaces_document_and_history_entry() {
+    let mut runtime = make_runtime("<body><iframe id=frame></iframe>");
+    runtime.eval(r#"
+        globalThis.frame = document.getElementById('frame');
+        frame.srcdoc = '<p id=old>old</p>';
+        globalThis.oldFrameDocument = frame.contentDocument;
+        globalThis.frameProxy = frame.contentWindow;
+        globalThis.oldFrameHistoryLength = frameProxy.history.length;
+        frame.removeAttribute('srcdoc');
+        frame.src = "javascript:%27%3Cmain%20id%3Dnew%3Enew%3C%2Fmain%3E%3Cscript%3Eparent.iframeScriptRan%3Dtrue%3C%2Fscript%3E%27";
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "frame.contentDocument !== oldFrameDocument && frame.contentWindow === frameProxy && frame.contentDocument.URL === 'about:srcdoc' && frameProxy.location.href === 'about:srcdoc' && frameProxy.history.length === oldFrameHistoryLength && frame.contentDocument.getElementById('new').textContent === 'new' && globalThis.iframeScriptRan === true",
+    );
+}
+
+#[test]
+fn javascript_iframe_string_completion_inherits_target_csp() {
+    let mut runtime = make_runtime("<body><iframe id=frame></iframe>");
+    runtime.eval(r#"
+        globalThis.frame = document.getElementById('frame');
+        frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'"><body></body>`;
+        void frame.contentDocument;
+        frame.removeAttribute('srcdoc');
+        frame.src = "javascript:%27%3Cmain%20id%3Dnew%3Enew%3C%2Fmain%3E%27";
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        r#"
+        globalThis.iframeViolations = [];
+        frame.contentDocument.addEventListener('securitypolicyviolation', event => iframeViolations.push(event));
+        frame.contentDocument.getElementById('new') !== null &&
+          (() => { try { frame.contentDocument.body.innerHTML = '<b>unsafe</b>'; return false; }
+            catch (error) { return error.name === 'TypeError'; } })()
+    "#,
+    );
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "iframeViolations.length === 1 && iframeViolations[0].effectiveDirective === 'require-trusted-types-for' && iframeViolations[0].disposition === 'enforce'",
+    );
+}
+
+#[test]
+fn javascript_child_self_string_completion_replaces_own_document() {
+    let mut runtime = make_runtime("<body><iframe id=frame></iframe>");
+    runtime.eval(r#"
+        globalThis.frame = document.getElementById('frame');
+        frame.srcdoc = `<script>location.href = "javascript:%27%3Cmain%20id%3Dnew%3Enew%3C%2Fmain%3E%27";<\/script>`;
+        globalThis.oldChildDocument = frame.contentDocument;
+        globalThis.childProxy = frame.contentWindow;
+        globalThis.oldChildHistoryLength = childProxy.history.length;
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "frame.contentDocument !== oldChildDocument && frame.contentWindow === childProxy && frame.contentDocument.URL === 'about:srcdoc' && childProxy.location.href === 'about:srcdoc' && childProxy.history.length === oldChildHistoryLength && frame.contentDocument.getElementById('new').textContent === 'new'",
+    );
+}
+
+#[test]
+fn javascript_iframe_removal_during_default_policy_does_not_execute() {
+    let mut runtime = make_runtime("<body><iframe id=frame></iframe>");
+    runtime.install_response_security_headers(&[(
+        "Content-Security-Policy".into(),
+        "require-trusted-types-for 'script'".into(),
+    )]);
+    runtime
+        .eval(
+            r#"
+            globalThis.frame = document.getElementById('frame');
+            globalThis.executed = false;
+            globalThis.policyCalls = 0;
+            trustedTypes.createPolicy('default', {createScript: source => {
+              policyCalls++;
+              frame.remove();
+              return source;
+            }});
+            frame.src = 'javascript:parent.executed=true;';
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "policyCalls === 1 && !frame.isConnected && !executed",
+    );
+}
+
+#[test]
+fn javascript_child_removal_during_own_default_policy_does_not_execute() {
+    // Mirrors navigate-to-javascript-url-007-crash.html, which has no testharness.
+    let mut runtime = make_runtime("<body><iframe id=frame></iframe>");
+    runtime
+        .eval(
+            r#"
+            globalThis.frame = document.getElementById('frame');
+            globalThis.executed = false;
+            globalThis.policyCalls = 0;
+            frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'"><script>
+              window.addEventListener('load', () => {
+                trustedTypes.createPolicy('default', {createScript: source => {
+                  parent.policyCalls++;
+                  window.frameElement.remove();
+                  return source;
+                }});
+                location.href = 'javascript:parent.executed=true;';
+              });
+            <\/script>`;
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "policyCalls === 1 && !frame.isConnected && !executed",
+    );
+}
+
+#[test]
+fn javascript_named_iframe_link_uses_link_document_as_request_client() {
+    let mut runtime =
+        make_runtime("<body><iframe id=source></iframe><iframe id=target name=target></iframe>");
+    runtime
+        .eval(
+            r#"
+            const sourceFrame = document.getElementById('source');
+            const targetFrame = document.getElementById('target');
+            sourceFrame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'">
+              <a id=link target=target href="javascript:globalThis.hit=true;">go</a>`;
+            targetFrame.srcdoc = '<body></body>';
+            globalThis.sourceWindow = sourceFrame.contentWindow;
+            globalThis.targetWindow = targetFrame.contentWindow;
+            targetWindow.hit = false;
+            sourceWindow.violations = [];
+            sourceWindow.document.addEventListener('securitypolicyviolation', e => sourceWindow.violations.push(e));
+            sourceWindow.document.getElementById('link').click();
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "!targetWindow.hit && sourceWindow.violations.length === 1 && sourceWindow.violations[0].sample === 'Location href|globalThis.hit=true;'",
+    );
+}
+
+#[test]
+fn javascript_named_iframe_link_obeys_target_inline_csp() {
+    let mut runtime =
+        make_runtime("<body><iframe id=source></iframe><iframe id=target name=target></iframe>");
+    runtime.eval(r#"
+        const source = document.getElementById('source');
+        const target = document.getElementById('target');
+        source.srcdoc = '<a id=link target=target href="javascript:globalThis.hit=true;">go</a>';
+        target.srcdoc = `<meta http-equiv="Content-Security-Policy" content="script-src 'none'"><body></body>`;
+        globalThis.targetWindow = target.contentWindow;
+        targetWindow.hit = false;
+        targetWindow.violations = [];
+        targetWindow.document.addEventListener('securitypolicyviolation', e => targetWindow.violations.push(e));
+        source.contentDocument.getElementById('link').click();
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "targetWindow.hit === false && targetWindow.violations.length === 1 && targetWindow.violations[0].effectiveDirective === 'script-src-elem'",
+    );
+}
+
+#[test]
+fn javascript_named_iframe_link_string_completion_replaces_target_document() {
+    let mut runtime =
+        make_runtime("<body><iframe id=source></iframe><iframe id=target name=target></iframe>");
+    runtime.eval(r#"
+        const source = document.getElementById('source');
+        globalThis.target = document.getElementById('target');
+        source.srcdoc = '<a id=link target=target href="javascript:%27%3Cmain%20id%3Dnew%3Enew%3C%2Fmain%3E%27">go</a>';
+        target.srcdoc = '<p id=old>old</p>';
+        globalThis.oldTargetDocument = target.contentDocument;
+        globalThis.targetProxy = target.contentWindow;
+        globalThis.oldTargetHistoryLength = targetProxy.history.length;
+        source.contentDocument.getElementById('link').click();
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "target.contentDocument !== oldTargetDocument && target.contentWindow === targetProxy && target.contentDocument.URL === 'about:srcdoc' && targetProxy.history.length === oldTargetHistoryLength && target.contentDocument.getElementById('new').textContent === 'new'",
+    );
+}
+
+#[test]
+fn javascript_form_target_string_completion_replaces_target_document() {
+    let mut runtime = make_runtime(
+        "<body><form id=form target=target action=\"javascript:%27%3Cmain%20id%3Dnew%3Enew%3C%2Fmain%3E%27\"><button id=submit type=submit>Go</button></form><iframe id=target name=target></iframe>",
+    );
+    runtime
+        .eval(
+            r#"
+        globalThis.target = document.getElementById('target');
+        target.srcdoc = '<p id=old>old</p>';
+        globalThis.oldTargetDocument = target.contentDocument;
+        globalThis.targetProxy = target.contentWindow;
+        globalThis.oldTargetHistoryLength = targetProxy.history.length;
+        document.getElementById('submit').click();
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_js_true(
+        &mut runtime,
+        "target.contentDocument !== oldTargetDocument && target.contentWindow === targetProxy && target.contentDocument.URL === 'about:srcdoc' && targetProxy.history.length === oldTargetHistoryLength && target.contentDocument.getElementById('new').textContent === 'new'",
+    );
+}
+
+#[test]
+fn javascript_formaction_override_queues_source_without_get_query() {
+    let mut runtime =
+        make_runtime("<body><form id=form><button id=submit type=submit>Go</button></form>");
+    runtime
+        .eval(
+            r#"
+            globalThis.formRan = false;
+            const submit = document.getElementById('submit');
+            submit.formAction = 'javascript:globalThis.formRan=true;';
+            submit.click();
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let requests = runtime.take_navigation_requests();
+    let [NavigationRequest::FormSubmit { url, .. }] = requests.as_slice() else {
+        panic!("expected one form navigation, got {requests:?}");
+    };
+    assert_eq!(url, "javascript:globalThis.formRan=true;");
+    assert_eq!(runtime.evaluate_javascript_navigation(url).unwrap(), None);
+    assert_js_true(&mut runtime, "formRan");
+}
+
 #[test]
 fn main_document_meta_csp_enforces_trusted_types_before_page_scripts() {
     let mut runtime = make_runtime(

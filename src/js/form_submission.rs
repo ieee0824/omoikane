@@ -224,13 +224,16 @@ impl HostState {
             let frame_id = frame.identity();
             self.pending_iframe_visits.remove(&frame_id);
             self.pending_iframe_referrers.remove(&frame_id);
+            self.pending_iframe_clients.remove(&frame_id);
             let visit_source = self.visit_source_for_document(source.identity());
             let referrer_source = self.navigation_referrer_source_for_document(source.identity());
+            let client_security = self.navigation_security_snapshot(source.identity());
             self.event_loop.enqueue_timer_for_document(
                 TimerPayload::FormSubmission {
                     node_id: frame.identity(),
                     request,
                     source_document_id: source.identity(),
+                    client_security,
                     visit_source,
                     referrer_source,
                 },
@@ -239,6 +242,7 @@ impl HostState {
             return Some(frame_id);
         } else if matches!(target, FormTarget::TopLevel) {
             let visit_source = self.visit_source_for_document(source.identity());
+            let security = self.navigation_security_snapshot(source.identity());
             self.event_loop.enqueue_navigation_from_source(
                 NavigationRequest::FormSubmit {
                     url: request.url,
@@ -247,6 +251,7 @@ impl HostState {
                     content_type: request.content_type,
                 },
                 visit_source,
+                security,
             );
         }
         None
