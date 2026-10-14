@@ -250,5 +250,83 @@ fn read_metadata(test: &Path) -> Result<MetaData> {
         .ok_or_eyre("invalid test metadata")?;
     let metadata = metadata.cow_replace('\r', "\n");
 
-    serde_yaml::from_str(&metadata).map_err(Into::into)
+    parse_metadata(&metadata)
+}
+
+/// Deserializes a Test262 metadata block after its source delimiters are removed.
+fn parse_metadata(metadata: &str) -> Result<MetaData> {
+    // Test262 has bare numeric identifiers such as `es6id: 19.4`.
+    // Preserve serde_yaml's typed-string treatment of those scalars.
+    let config = noyalib::ParserConfig::serde_yaml_compat().plain_scalar_strings(true);
+    noyalib::from_str_with_config(metadata, &config).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::{ErrorType, TestFlag, parse_metadata};
+
+    #[test]
+    fn parses_test262_flow_lists_block_text_and_negative_metadata() {
+        let metadata = parse_metadata(
+            r#"description: An ordinary Test262 test.
+esid: sec-example
+es6id: 19.4
+info: |
+  First line.
+  Second line.
+includes: [assert.js, compareArray.js]
+features: [Symbol, regexp-v-flag]
+flags: [onlyStrict, async]
+negative:
+  phase: parse
+  type: SyntaxError
+locale: [en-US, ja-JP]
+"#,
+        )
+        .expect("Test262 metadata");
+
+        assert_eq!(&*metadata.description, "An ordinary Test262 test.");
+        assert_eq!(metadata.esid.as_deref(), Some("sec-example"));
+        assert_eq!(metadata.es6id.as_deref(), Some("19.4"));
+        assert_eq!(&*metadata.info, "First line.\nSecond line.\n");
+        assert_eq!(
+            metadata
+                .includes
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            ["assert.js", "compareArray.js"]
+        );
+        assert_eq!(
+            metadata
+                .features
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            ["Symbol", "regexp-v-flag"]
+        );
+        assert_eq!(&*metadata.flags, &[TestFlag::OnlyStrict, TestFlag::Async]);
+        assert_eq!(
+            metadata
+                .negative
+                .as_ref()
+                .expect("negative metadata")
+                .error_type,
+            ErrorType::SyntaxError
+        );
+        assert_eq!(
+            metadata
+                .locale
+                .locale
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            ["en-US", "ja-JP"]
+        );
+    }
+
+    #[test]
+    fn rejects_missing_required_test262_description() {
+        assert!(parse_metadata("features: [Symbol]\n").is_err());
+    }
 }
