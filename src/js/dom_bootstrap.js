@@ -18116,11 +18116,23 @@ export let __omoikane_cookie_change_reset;
     if (url == null) return;
     const raw = String(url);
     if (raw === "") return;
+    // Classify the same resolved URL that __parseLocationUrl will navigate to.
+    const resolved = String(__omoikane_resolve_url(raw));
     let candidate;
-    try { candidate = new URL(raw, __locationHref); } catch (_) {}
-    if (candidate?.protocol === "javascript:") {
-      scheduleWindowNavigation(kind, candidate.href);
-      return;
+    try { candidate = new URL(resolved, __locationHref); }
+    catch (_) { throw new DOMException("Invalid navigation URL", "SecurityError"); }
+    // Resource navigation is HTTP(S); javascript: has its own policy path.
+    switch (candidate.protocol) {
+      case "javascript:":
+        scheduleWindowNavigation(kind, candidate.href);
+        return;
+      case "http:":
+      case "https:":
+        break;
+      case "data:":
+      case "vbscript:":
+      default:
+        throw new DOMException("Unsupported navigation URL scheme", "SecurityError");
     }
     const parsed = __parseLocationUrl(raw, false);
     if (parsed !== undefined) scheduleWindowNavigation(kind, parsed.href);

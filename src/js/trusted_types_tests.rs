@@ -79,6 +79,32 @@ fn javascript_location_assignment_coerces_url_once() {
 }
 
 #[test]
+fn location_navigation_rejects_unsupported_schemes_without_queuing() {
+    let mut runtime = make_runtime("<body>");
+    assert_js_true(
+        &mut runtime,
+        r#"
+        [
+          'data:text/html,hello',
+          'data://example.test/escape',
+          'vbscript:msgbox(1)',
+          'vbscript://example.test/escape',
+          'ftp://example.test/escape'
+        ].every(url => {
+          try { location.href = url; return false; }
+          catch (error) { return error.name === 'SecurityError'; }
+        })
+        "#,
+    );
+    runtime.run_until_idle().unwrap();
+    assert!(runtime.take_navigation_requests().is_empty());
+    assert_js_true(
+        &mut runtime,
+        "location.href === 'https://example.test/page'",
+    );
+}
+
+#[test]
 fn javascript_location_navigation_reports_enforce_and_report_only_failures() {
     for report_only in [false, true] {
         let mut runtime = make_runtime("<body>");
