@@ -347,6 +347,298 @@ fn same_site_iframe_has_storage_access_without_activation() {
 }
 
 #[test]
+fn storage_access_policy_header_blocks_request_but_not_first_party_access() {
+    let mut runtime = runtime_at("https://top.test/");
+    runtime.install_response_security_headers(&[(
+        "Permissions-Policy".into(),
+        "storage-access=()".into(),
+    )]);
+    runtime
+        .eval(
+            "Promise.all([document.hasStorageAccess(), \
+              document.requestStorageAccess().then(() => 'granted', e => e.name)]) \
+              .then(([has, requested]) => globalThis.policyResult = JSON.stringify([ \
+                document.permissionsPolicy.allowsFeature('storage-access'), \
+                document.permissionsPolicy.getAllowlistForFeature('storage-access'), \
+                has, requested]))",
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+    assert_eq!(
+        runtime
+            .eval("policyResult")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "[false,[],true,\"NotAllowedError\"]"
+    );
+}
+
+#[test]
+fn storage_access_policy_inheritance_controls_third_party_cookie_requests() {
+    for (name, header, allow, expected_policy, expected_result, expected_cookie_count) in [
+        (
+            "default wildcard",
+            None,
+            None,
+            "[true,true,[\"*\"]]",
+            "granted|session=preexisting|session=preexisting|false",
+            2,
+        ),
+        (
+            "container denial",
+            None,
+            Some("storage-access 'none'"),
+            "[false,false,[]]",
+            "NotAllowedError||none|true",
+            1,
+        ),
+        (
+            "parent denial cannot be overridden",
+            Some("storage-access=(self)"),
+            Some("storage-access *"),
+            "[false,false,[]]",
+            "NotAllowedError||none|true",
+            1,
+        ),
+        (
+            "explicit wildcard",
+            Some("storage-access=*"),
+            Some("storage-access *"),
+            "[true,true,[\"*\"]]",
+            "granted|session=preexisting|session=preexisting|false",
+            2,
+        ),
+    ] {
+        assert_storage_access_policy_case(
+            name,
+            header,
+            allow,
+            expected_policy,
+            expected_result,
+            expected_cookie_count,
+        );
+    }
+}
+
+fn assert_storage_access_policy_case(
+    name: &str,
+    header: Option<&str>,
+    allow: Option<&str>,
+    expected_policy: &str,
+    expected_result: &str,
+    expected_cookie_count: usize,
+) {
+    let mut runtime = runtime_at("https://top.test/");
+    runtime.set_http_resource_transport(Some(Arc::new(CookieEchoTransport::default())));
+    if let Some(header) = header {
+        runtime.install_response_security_headers(&[("Permissions-Policy".into(), header.into())]);
+    }
+    runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .add_from_header_for_url(
+            "session=preexisting; Path=/; Secure; SameSite=None",
+            &"https://third.test/".parse().unwrap(),
+        );
+    let set_allow = allow.map_or(String::new(), |allow| {
+        format!("f.setAttribute('allow', {allow:?});")
+    });
+    runtime
+        .eval(&format!(
+            "const f = document.createElement('iframe'); \
+             {set_allow} f.src = 'https://third.test/frame'; \
+             document.body.appendChild(f)"
+        ))
+        .unwrap();
+    runtime.tick(0).unwrap();
+    let child = child_document(&runtime);
+    runtime
+        .eval_in_document_realm(
+            child.identity(),
+            "document.documentElement.setAttribute('data-policy', JSON.stringify([ \
+              document.permissionsPolicy.allowsFeature('storage-access'), \
+              document.permissionsPolicy.allowsFeature('storage-access', 'https://other.test'), \
+              document.permissionsPolicy.getAllowlistForFeature('storage-access')]))",
+        )
+        .unwrap();
+    assert_eq!(
+        child_attribute(&child, "data-policy").as_deref(),
+        Some(expected_policy),
+        "{name}"
+    );
+    runtime
+        .with_trusted_storage_access_input(|runtime| {
+            runtime.eval_in_document_realm(
+                child.identity(),
+                "document.addEventListener('click', () => { \
+                   document.requestStorageAccess() \
+                     .then(() => 'granted', error => error.name) \
+                     .then(outcome => { \
+                       const visible = document.cookie; \
+                       return Promise.all([ \
+                         fetch('https://third.test/probe').then(response => response.text()), \
+                         cookieStore.get('session') \
+                       ]).then(([sent, cookie]) => \
+                         document.documentElement.setAttribute('data-result', \
+                           [outcome, visible, sent, cookie === null].join('|'))); \
+                     }); \
+                 }, {once: true}); \
+                 __omoikane_dispatch_mouse_input(document.body.__id, 'click', \
+                   {button: 0}, false)",
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        child_result(&child).as_deref(),
+        Some(expected_result),
+        "{name}"
+    );
+    assert_eq!(
+        runtime
+            .host_state
+            .borrow()
+            .cookie_store
+            .lock()
+            .unwrap()
+            .len(),
+        expected_cookie_count,
+        "{name}"
+    );
+}
+
+#[test]
+fn storage_access_site_grant_does_not_bypass_new_document_policy() {
+    let mut runtime = runtime_at("https://top.test/");
+    runtime.set_http_resource_transport(Some(Arc::new(CookieEchoTransport::default())));
+    runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .add_from_header_for_url(
+            "session=preexisting; Path=/; Secure; SameSite=None",
+            &"https://third.test/".parse().unwrap(),
+        );
+    runtime
+        .eval(
+            "const first = document.createElement('iframe'); \
+             first.id = 'first'; first.src = 'https://third.test/frame'; \
+             document.body.appendChild(first)",
+        )
+        .unwrap();
+    runtime.tick(0).unwrap();
+    let first = iframe_document_by_id(&runtime, "first");
+    activate_storage_access(&mut runtime, &first);
+    assert_eq!(runtime.host_state.borrow().storage_access_grants.len(), 1);
+
+    runtime
+        .eval(
+            "const blocked = document.createElement('iframe'); \
+             blocked.id = 'blocked'; \
+             blocked.setAttribute('allow', \"storage-access 'none'\"); \
+             blocked.src = 'https://third.test/frame'; \
+             document.body.appendChild(blocked)",
+        )
+        .unwrap();
+    runtime.tick(0).unwrap();
+    let blocked = iframe_document_by_id(&runtime, "blocked");
+    runtime
+        .eval_in_document_realm(
+            blocked.identity(),
+            "document.hasStorageAccess().then(value => \
+             document.documentElement.setAttribute('data-has-access', value))",
+        )
+        .unwrap();
+    assert_eq!(
+        child_attribute(&blocked, "data-has-access").as_deref(),
+        Some("false"),
+        "a new Document does not inherit an active flag from the site grant"
+    );
+    runtime
+        .with_trusted_storage_access_input(|runtime| {
+            runtime.eval_in_document_realm(
+                blocked.identity(),
+                "document.addEventListener('click', () => \
+                   document.requestStorageAccess().then( \
+                     () => document.documentElement.setAttribute('data-result', 'granted'), \
+                     error => document.documentElement.setAttribute('data-result', error.name)), \
+                   {once: true}); \
+                 __omoikane_dispatch_mouse_input(document.body.__id, 'click', \
+                   {button: 0}, false)",
+            )
+        })
+        .unwrap();
+    assert_eq!(child_result(&blocked).as_deref(), Some("NotAllowedError"));
+
+    // Model a restored active-document bit separately from the site grant.
+    // Even if status is granted, this Document's policy must block both sinks.
+    runtime
+        .host_state
+        .borrow_mut()
+        .storage_access_active_documents
+        .insert(blocked.identity());
+    runtime
+        .eval_in_document_realm(
+            blocked.identity(),
+            "document.hasStorageAccess().then(value => \
+             document.documentElement.setAttribute('data-has-access', value))",
+        )
+        .unwrap();
+    assert_eq!(
+        child_attribute(&blocked, "data-has-access").as_deref(),
+        Some("true")
+    );
+    runtime
+        .eval_in_document_realm(
+            blocked.identity(),
+            "document.documentElement.setAttribute('data-cookie', document.cookie)",
+        )
+        .unwrap();
+    assert_eq!(
+        child_attribute(&blocked, "data-cookie").as_deref(),
+        Some("")
+    );
+    runtime
+        .eval_in_document_realm(
+            blocked.identity(),
+            "cookieStore.get('session').then(cookie => \
+             document.documentElement.setAttribute('data-cookie-store', cookie === null))",
+        )
+        .unwrap();
+    assert_eq!(
+        child_attribute(&blocked, "data-cookie-store").as_deref(),
+        Some("true")
+    );
+    runtime
+        .eval_in_document_realm(
+            blocked.identity(),
+            "fetch('https://third.test/probe').then(response => response.text()).then(body => \
+             document.documentElement.setAttribute('data-echo', body))",
+        )
+        .unwrap();
+    assert_eq!(
+        child_attribute(&blocked, "data-echo").as_deref(),
+        Some("none")
+    );
+    assert_eq!(
+        runtime
+            .host_state
+            .borrow()
+            .cookie_store
+            .lock()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn trusted_input_marker_is_cleared_after_script_error() {
     let mut runtime = runtime_at("https://top.test/");
     let result = runtime.with_trusted_storage_access_input(|runtime| {

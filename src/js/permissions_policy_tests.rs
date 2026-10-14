@@ -38,8 +38,8 @@ fn document_policy_object_reports_the_same_header_rules_as_fullscreen() {
         ),
         json!({
             "same": true,
-            "features": ["fullscreen", "geolocation", "cross-origin-isolated"],
-            "allowed": ["fullscreen"],
+            "features": ["fullscreen", "geolocation", "cross-origin-isolated", "storage-access"],
+            "allowed": ["fullscreen", "storage-access"],
             "self": true,
             "child": true,
             "other": false,
@@ -75,7 +75,7 @@ fn document_policy_object_reports_the_same_header_rules_as_fullscreen() {
         json!([
             false,
             false,
-            ["geolocation", "cross-origin-isolated"],
+            ["geolocation", "cross-origin-isolated", "storage-access"],
             ["*"]
         ])
     );
@@ -92,7 +92,12 @@ fn document_policy_object_reports_the_same_header_rules_as_fullscreen() {
              document.permissionsPolicy.allowedFeatures(), \
              document.permissionsPolicy.getAllowlistForFeature('fullscreen')])"
         ),
-        json!([false, true, ["geolocation", "cross-origin-isolated"], []])
+        json!([
+            false,
+            true,
+            ["geolocation", "cross-origin-isolated", "storage-access"],
+            []
+        ])
     );
 
     runtime.install_response_security_headers(&[(

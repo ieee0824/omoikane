@@ -137,7 +137,9 @@ impl HostState {
         let Some(context) = self.storage_access_context(document_id) else {
             return false;
         };
-        context.same_site || self.storage_access_status(document_id) == StorageAccessStatus::Granted
+        context.same_site
+            || (self.feature_enabled_in_document(document_id, PolicyFeature::StorageAccess)
+                && self.storage_access_status(document_id) == StorageAccessStatus::Granted)
     }
 
     /// Chooses a cross-site ancestor as the cookie context when one exists.
@@ -185,8 +187,9 @@ impl HostState {
         };
         let cross_site_ancestry =
             !main_document && context.as_ref().is_none_or(|context| !context.same_site);
-        let granted_origin = (self.storage_access_status(document_id)
-            == StorageAccessStatus::Granted)
+        let granted_origin = ((!cross_site_ancestry
+            || self.feature_enabled_in_document(document_id, PolicyFeature::StorageAccess))
+            && self.storage_access_status(document_id) == StorageAccessStatus::Granted)
             .then(|| {
                 self.document_origins
                     .get(&document_id)
@@ -254,6 +257,9 @@ impl HostState {
             return StorageAccessStatus::Inactive;
         }
         if !document_is_secure_context(self, document_id) {
+            return StorageAccessStatus::Blocked;
+        }
+        if !self.feature_enabled_in_document(document_id, PolicyFeature::StorageAccess) {
             return StorageAccessStatus::Blocked;
         }
         let Some(context) = self.storage_access_context(document_id) else {
