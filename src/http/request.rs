@@ -85,7 +85,7 @@ pub struct HttpRequest {
     cross_site_ancestry: bool,
 }
 
-/// Owned cookie policy captured from the Document that initiated a resource load.
+/// Owned cookie policy captured from the context that initiated a resource load.
 ///
 /// Resource loaders may outlive a DOM borrow or run on another thread. Keeping
 /// the site, activated origin, and ancestor flag together prevents a loader
@@ -111,7 +111,27 @@ impl CookieRequestContext {
         }
     }
 
-    /// Applies the initiating Document's policy to one concrete request URL.
+    /// Keeps the creator's site and ancestry for a Worker while dropping its
+    /// Document-only Storage Access grant. An unknown creator site fails closed.
+    pub(crate) fn for_worker_internal(mut self) -> Self {
+        self.granted_origin = None;
+        self.cross_site_ancestry |= self.site_for_cookies.is_none();
+        self
+    }
+
+    /// Returns whether any ancestor of the owning Document is cross-site.
+    pub(crate) fn has_cross_site_ancestry(&self) -> bool {
+        self.cross_site_ancestry
+    }
+
+    /// Restricts an existing shared Worker after a cross-site owner connects.
+    pub(crate) fn with_cross_site_ancestry(mut self) -> Self {
+        self.granted_origin = None;
+        self.cross_site_ancestry = true;
+        self
+    }
+
+    /// Applies the initiating context's policy to one concrete request URL.
     pub(crate) fn apply(&self, request: &mut HttpRequest) {
         let eligible = self.granted_origin.as_ref().is_some_and(|origin| {
             origin.scheme() == request.url().scheme()

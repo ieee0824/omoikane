@@ -49,7 +49,30 @@ impl crate::http::HttpTransport for ResourceCookieTransport {
                 vec![],
             ));
         }
-        let (mime, body) = if path.ends_with(".js") {
+        let worker_source = if path.ends_with("-internal-worker.js")
+            || path.ends_with("-internal-shared.js")
+        {
+            let name = path.trim_start_matches('/').trim_end_matches(".js");
+            let origin = format!("{}://{}", request.url().scheme(), request.url().authority());
+            Some(format!(
+                "fetch('{origin}/{name}-fetch'); importScripts('{origin}/{name}-import.js'); \
+                 onmessage = () => fetch('{origin}/{name}-later-fetch')"
+            ))
+        } else if path == "/nested-owner.js" {
+            Some(
+                "globalThis.nested = new Worker('https://third.test/nested-internal-worker.js')"
+                    .to_owned(),
+            )
+        } else if path == "/nested-shared-owner.js" {
+            Some("onconnect = () => { globalThis.nested = new Worker('https://third.test/nested-internal-worker.js') }".to_owned())
+        } else if path == "/mixed-shared.js" {
+            Some("let count = 0; onconnect = () => { count++; fetch('https://top.test/mixed-' + count + '-fetch'); if (count === 1) globalThis.child = new Worker('https://top.test/mixed-internal-worker.js'); else child.postMessage('check') }".to_owned())
+        } else {
+            None
+        };
+        let (mime, body) = if let Some(source) = worker_source {
+            ("text/javascript", source.into_bytes())
+        } else if path.ends_with(".js") {
             (
                 "text/javascript",
                 b"globalThis.resourceLoaded = true".to_vec(),
@@ -66,7 +89,13 @@ impl crate::http::HttpTransport for ResourceCookieTransport {
             )
         };
         let mut headers = vec![("Content-Type".into(), mime.into())];
-        if path.starts_with("/pre-") || path.starts_with("/post-") || path == "/popup" {
+        if path.starts_with("/pre-")
+            || path.starts_with("/post-")
+            || path.starts_with("/first-")
+            || path.starts_with("/mixed-")
+            || path.starts_with("/nested-")
+            || path == "/popup"
+        {
             let name = path
                 .trim_start_matches('/')
                 .replace('-', "_")
@@ -858,9 +887,571 @@ fn third_party_worker_and_worklet_loads_follow_owner_document_access() {
 }
 
 #[test]
-fn shared_worker_registry_partitions_first_and_third_party_owners() {
+fn worker_internal_fetch_and_import_scripts_use_shared_jar_without_owner_grant() {
+    let mut runtime = runtime_at("https://top.test/");
+    let transport = Arc::new(ResourceCookieTransport::default());
+    runtime.set_http_resource_transport(Some(transport.clone()));
+    runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .add_from_header_for_url(
+            "session=pre; Path=/; Secure; SameSite=None",
+            &"https://third.test/".parse().unwrap(),
+        );
+    runtime
+        .eval(
+            "const frame = document.createElement('iframe'); \
+             frame.src = 'https://third.test/frame'; document.body.appendChild(frame)",
+        )
+        .unwrap();
+    runtime.tick(0).unwrap();
+    let child = child_document(&runtime);
+
+    for phase in ["pre", "post"] {
+        if phase == "post" {
+            activate_storage_access(&mut runtime, &child);
+            runtime
+                .eval_in_document_realm(child.identity(), "preWorker.postMessage('after grant')")
+                .unwrap();
+            runtime.run_until_idle().unwrap();
+        }
+        runtime
+            .eval_in_document_realm(
+                child.identity(),
+                &format!(
+                    "globalThis.{phase}Worker = new Worker('https://third.test/{phase}-internal-worker.js'); \
+                     globalThis.{phase}Shared = new SharedWorker('https://third.test/{phase}-internal-shared.js', '{phase}')"
+                ),
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+    }
+
+    let requests = transport.requests.lock().unwrap();
+    for kind in ["worker", "shared"] {
+        for phase in ["pre", "post"] {
+            let initial = format!("/{phase}-internal-{kind}.js");
+            let initial_cookie = requests
+                .iter()
+                .find(|(_, path, _)| path == &initial)
+                .map(|(_, _, cookie)| cookie.as_deref());
+            assert_eq!(
+                initial_cookie.is_some_and(|cookie| cookie.is_some()),
+                phase == "post",
+                "initial {kind} script follows its owner Document's grant: {requests:?}"
+            );
+            for suffix in ["fetch", "import.js"] {
+                let internal = format!("/{phase}-internal-{kind}-{suffix}");
+                assert_eq!(
+                    requests
+                        .iter()
+                        .find(|(_, path, _)| path == &internal)
+                        .map(|(_, _, cookie)| cookie.as_deref()),
+                    Some(None),
+                    "internal {kind} request must remain third-party after owner grant: {requests:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        requests
+            .iter()
+            .find(|(_, path, _)| path == "/pre-internal-worker-later-fetch")
+            .map(|(_, _, cookie)| cookie.as_deref()),
+        Some(None),
+        "an already-created Worker must not observe a later owner grant: {requests:?}"
+    );
+    drop(requests);
+    let cookies = runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .document_cookie(
+            &"https://third.test/".parse().unwrap(),
+            &"https://third.test/".parse().unwrap(),
+        );
+    for kind in ["worker", "shared"] {
+        assert!(cookies.contains(&format!("post_internal_{kind}_js=1")));
+        assert!(!cookies.contains(&format!("pre_internal_{kind}_js=")));
+        for phase in ["pre", "post"] {
+            assert!(!cookies.contains(&format!("{phase}_internal_{kind}_fetch=")));
+            assert!(!cookies.contains(&format!("{phase}_internal_{kind}_import_js=")));
+        }
+    }
+    assert!(!cookies.contains("pre_internal_worker_later_fetch="));
+}
+
+#[test]
+fn first_party_worker_internal_requests_share_owner_cookie_jar() {
     let transport = Arc::new(ResourceCookieTransport::default());
     let mut first_party = runtime_at("https://third.test/");
+    first_party.set_http_resource_transport(Some(transport.clone()));
+    first_party
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .add_from_header_for_url(
+            "session=first; Path=/; Secure; SameSite=Strict",
+            &"https://third.test/".parse().unwrap(),
+        );
+    first_party
+        .eval(
+            "globalThis.worker = new Worker('https://third.test/first-internal-worker.js'); \
+             globalThis.shared = new SharedWorker('https://third.test/first-internal-shared.js', 'first')",
+        )
+        .unwrap();
+    first_party.run_until_idle().unwrap();
+    let requests = transport.requests.lock().unwrap();
+    for kind in ["worker", "shared"] {
+        for suffix in ["fetch", "import.js"] {
+            let path = format!("/first-internal-{kind}-{suffix}");
+            assert!(
+                requests
+                    .iter()
+                    .find(|(_, observed, _)| observed == &path)
+                    .and_then(|(_, _, cookie)| cookie.as_deref())
+                    .is_some_and(|cookie| cookie.contains("session=first")),
+                "first-party internal {kind} request must use owner jar: {requests:?}"
+            );
+        }
+    }
+    drop(requests);
+    let cookies = first_party
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .document_cookie(
+            &"https://third.test/".parse().unwrap(),
+            &"https://third.test/".parse().unwrap(),
+        );
+    for kind in ["worker", "shared"] {
+        assert!(cookies.contains(&format!("first_internal_{kind}_fetch=1")));
+        assert!(cookies.contains(&format!("first_internal_{kind}_import_js=1")));
+    }
+}
+
+#[test]
+fn cross_site_ancestor_blocks_internal_worker_cookies_after_grant() {
+    let mut runtime = runtime_at("https://top.test/");
+    let transport = Arc::new(ResourceCookieTransport::default());
+    runtime.set_http_resource_transport(Some(transport.clone()));
+    runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .add_from_header_for_url(
+            "session=pre; Path=/; Secure; SameSite=None",
+            &"https://top.test/".parse().unwrap(),
+        );
+    runtime
+        .eval(
+            "const middle = document.createElement('iframe'); middle.id = 'middle'; \
+             middle.src = 'https://middle.test/frame'; document.body.appendChild(middle)",
+        )
+        .unwrap();
+    runtime.tick(0).unwrap();
+    let middle = iframe_document_by_id(&runtime, "middle");
+    runtime
+        .eval_in_document_realm(
+            middle.identity(),
+            "const inner = document.createElement('iframe'); inner.id = 'inner'; \
+             inner.src = 'https://top.test/frame'; document.body.appendChild(inner)",
+        )
+        .unwrap();
+    runtime.tick(0).unwrap();
+    let inner = iframe_document_by_id(&runtime, "inner");
+    activate_storage_access(&mut runtime, &inner);
+    runtime
+        .eval_in_document_realm(
+            inner.identity(),
+            "new Worker('https://top.test/post-internal-worker.js')",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let requests = transport.requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .find(|(_, path, _)| path == "/post-internal-worker.js")
+            .and_then(|(_, _, cookie)| cookie.as_deref())
+            .is_some_and(|cookie| cookie.contains("session=pre"))
+    );
+    for suffix in ["fetch", "import.js"] {
+        assert_eq!(
+            requests
+                .iter()
+                .find(|(_, path, _)| path == &format!("/post-internal-worker-{suffix}"))
+                .map(|(_, _, cookie)| cookie.as_deref()),
+            Some(None),
+            "an A→B→A worker remains third-party after its Document grant: {requests:?}"
+        );
+    }
+}
+
+#[test]
+fn shared_worker_connection_with_cross_site_ancestor_downgrades_internal_requests() {
+    // Both owners have top-level site top.test and origin top.test, so the
+    // registry key matches even though only the nested owner has a cross-site
+    // ancestor. Different top-level sites are covered by the partition test.
+    let mut runtime = runtime_at("https://top.test/");
+    let transport = Arc::new(ResourceCookieTransport::default());
+    runtime.set_http_resource_transport(Some(transport.clone()));
+    runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .add_from_header_for_url(
+            "session=first; Path=/; Secure; SameSite=Strict",
+            &"https://top.test/".parse().unwrap(),
+        );
+    runtime
+        .eval("globalThis.shared = new SharedWorker('https://top.test/mixed-shared.js', 'mixed')")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+
+    runtime
+        .eval(
+            "const middle = document.createElement('iframe'); middle.id = 'middle'; \
+             middle.src = 'https://middle.test/frame'; document.body.appendChild(middle)",
+        )
+        .unwrap();
+    runtime.tick(0).unwrap();
+    let middle = iframe_document_by_id(&runtime, "middle");
+    runtime
+        .eval_in_document_realm(
+            middle.identity(),
+            "const inner = document.createElement('iframe'); inner.id = 'inner'; \
+             inner.src = 'https://top.test/frame'; document.body.appendChild(inner)",
+        )
+        .unwrap();
+    runtime.tick(0).unwrap();
+    let inner = iframe_document_by_id(&runtime, "inner");
+    activate_storage_access(&mut runtime, &inner);
+    runtime
+        .eval_in_document_realm(
+            inner.identity(),
+            "globalThis.shared = new SharedWorker('https://top.test/mixed-shared.js', 'mixed')",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval("globalThis.third = new SharedWorker('https://top.test/mixed-shared.js', 'mixed')")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval("globalThis.independent = new SharedWorker('https://top.test/first-internal-shared.js', 'independent')")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(_, path, _)| path == "/mixed-shared.js")
+            .count(),
+        1,
+        "the second owner must reuse the existing SharedWorker"
+    );
+    assert!(
+        requests
+            .iter()
+            .find(|(_, path, _)| path == "/mixed-1-fetch")
+            .and_then(|(_, _, cookie)| cookie.as_deref())
+            .is_some_and(|cookie| cookie.contains("session=first")),
+        "first-party connection may use its cookies: {requests:?}"
+    );
+    assert!(
+        requests
+            .iter()
+            .find(|(_, path, _)| path == "/mixed-internal-worker-fetch")
+            .and_then(|(_, _, cookie)| cookie.as_deref())
+            .is_some_and(|cookie| cookie.contains("session=first")),
+        "a nested Worker initially inherits the first-party cookie session: {requests:?}"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .find(|(_, path, _)| path == "/mixed-2-fetch")
+            .map(|(_, _, cookie)| cookie.as_deref()),
+        Some(None),
+        "a granted third-party connection cannot borrow another owner's worker cookies: {requests:?}"
+    );
+    assert!(
+        requests
+            .iter()
+            .filter(|(_, path, _)| path == "/mixed-internal-worker-later-fetch")
+            .all(|(_, _, cookie)| cookie.is_none())
+            && requests
+                .iter()
+                .any(|(_, path, _)| path == "/mixed-internal-worker-later-fetch"),
+        "existing descendants also lose cookie access when a cross-site owner connects: {requests:?}"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .find(|(_, path, _)| path == "/mixed-3-fetch")
+            .map(|(_, _, cookie)| cookie.as_deref()),
+        Some(None),
+        "a SharedWorker stays restricted after a cross-site owner has connected: {requests:?}"
+    );
+    assert!(
+        requests
+            .iter()
+            .find(|(_, path, _)| path == "/first-internal-shared-fetch")
+            .and_then(|(_, _, cookie)| cookie.as_deref())
+            .is_some_and(|cookie| cookie.contains("session=first")),
+        "other first-party Workers in the same cookie session remain credentialed: {requests:?}"
+    );
+    drop(requests);
+    let cookies = runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .document_cookie(
+            &"https://top.test/".parse().unwrap(),
+            &"https://top.test/".parse().unwrap(),
+        );
+    assert!(cookies.contains("mixed_1_fetch=1"));
+    assert!(!cookies.contains("mixed_2_fetch="));
+    assert!(!cookies.contains("mixed_3_fetch="));
+    assert!(!cookies.contains("mixed_internal_worker_later_fetch="));
+}
+
+#[test]
+fn shared_worker_registry_separates_independent_cookie_sessions() {
+    let transport = Arc::new(ResourceCookieTransport::default());
+    let mut first = runtime_at("https://top.test/");
+    let mut second = runtime_at("https://top.test/");
+    for (runtime, session) in [(&mut first, "first"), (&mut second, "second")] {
+        runtime.set_http_resource_transport(Some(transport.clone()));
+        runtime
+            .host_state
+            .borrow()
+            .cookie_store
+            .lock()
+            .unwrap()
+            .add_from_header_for_url(
+                &format!("session={session}; Path=/; Secure; SameSite=Strict"),
+                &"https://top.test/".parse().unwrap(),
+            );
+        runtime
+            .eval("globalThis.shared = new SharedWorker('https://top.test/session-shared.js', 'session')")
+            .unwrap();
+    }
+
+    let requests = transport.requests.lock().unwrap();
+    let cookies: Vec<_> = requests
+        .iter()
+        .filter(|(_, path, _)| path == "/session-shared.js")
+        .map(|(_, _, cookie)| cookie.as_deref())
+        .collect();
+    assert_eq!(
+        cookies,
+        [Some("session=first"), Some("session=second")],
+        "independent browsing sessions cannot reuse the same SharedWorker"
+    );
+}
+
+#[test]
+fn nested_dedicated_worker_inherits_creator_cookie_session() {
+    let transport = Arc::new(ResourceCookieTransport::default());
+    let mut runtime = runtime_at("https://third.test/");
+    runtime.set_http_resource_transport(Some(transport.clone()));
+    runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .add_from_header_for_url(
+            "session=nested; Path=/; Secure; SameSite=Strict",
+            &"https://third.test/".parse().unwrap(),
+        );
+    runtime
+        .eval("globalThis.owner = new Worker('https://third.test/nested-owner.js')")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+
+    let requests = transport.requests.lock().unwrap();
+    for path in [
+        "/nested-internal-worker.js",
+        "/nested-internal-worker-fetch",
+        "/nested-internal-worker-import.js",
+    ] {
+        assert!(
+            requests
+                .iter()
+                .find(|(_, requested, _)| requested == path)
+                .and_then(|(_, _, cookie)| cookie.as_deref())
+                .is_some_and(|cookie| cookie.contains("session=nested")),
+            "nested Worker {path} must retain the first-party creator's jar and site: {requests:?}"
+        );
+    }
+    drop(requests);
+    let cookies = runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .document_cookie(
+            &"https://third.test/".parse().unwrap(),
+            &"https://third.test/".parse().unwrap(),
+        );
+    assert!(cookies.contains("nested_internal_worker_fetch=1"));
+    assert!(cookies.contains("nested_internal_worker_import_js=1"));
+}
+
+#[test]
+fn shared_worker_global_exposes_dedicated_worker_and_inherits_cookie_session() {
+    let transport = Arc::new(ResourceCookieTransport::default());
+    let mut runtime = runtime_at("https://third.test/");
+    runtime.set_http_resource_transport(Some(transport.clone()));
+    runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .add_from_header_for_url(
+            "session=nested; Path=/; Secure; SameSite=Strict",
+            &"https://third.test/".parse().unwrap(),
+        );
+    runtime
+        .eval(
+            "globalThis.shared = new SharedWorker('https://third.test/nested-shared-owner.js', 'nested')",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+
+    let requests = transport.requests.lock().unwrap();
+    for path in [
+        "/nested-internal-worker.js",
+        "/nested-internal-worker-fetch",
+        "/nested-internal-worker-import.js",
+    ] {
+        assert!(
+            requests
+                .iter()
+                .find(|(_, requested, _)| requested == path)
+                .and_then(|(_, _, cookie)| cookie.as_deref())
+                .is_some_and(|cookie| cookie.contains("session=nested")),
+            "a SharedWorker may construct a Dedicated Worker in the same cookie session: {requests:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_dedicated_worker_keeps_cross_site_ancestry() {
+    let transport = Arc::new(ResourceCookieTransport::default());
+    let mut runtime = runtime_at("https://top.test/");
+    runtime.set_http_resource_transport(Some(transport.clone()));
+    runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .add_from_header_for_url(
+            "session=third; Path=/; Secure; SameSite=None",
+            &"https://third.test/".parse().unwrap(),
+        );
+    runtime
+        .eval(
+            "const frame = document.createElement('iframe'); \
+             frame.src = 'https://third.test/frame'; document.body.appendChild(frame)",
+        )
+        .unwrap();
+    runtime.tick(0).unwrap();
+    let child = child_document(&runtime);
+    runtime
+        .eval_in_document_realm(
+            child.identity(),
+            "globalThis.owner = new Worker('https://third.test/nested-owner.js')",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+
+    let requests = transport.requests.lock().unwrap();
+    for path in [
+        "/nested-internal-worker.js",
+        "/nested-internal-worker-fetch",
+        "/nested-internal-worker-import.js",
+    ] {
+        assert_eq!(
+            requests
+                .iter()
+                .find(|(_, requested, _)| requested == path)
+                .map(|(_, _, cookie)| cookie.as_deref()),
+            Some(None),
+            "nested Worker {path} must remain third-party: {requests:?}"
+        );
+    }
+    drop(requests);
+    let cookies = runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .document_cookie(
+            &"https://third.test/".parse().unwrap(),
+            &"https://third.test/".parse().unwrap(),
+        );
+    assert!(!cookies.contains("nested_internal_worker_fetch="));
+    assert!(!cookies.contains("nested_internal_worker_import_js="));
+}
+
+#[test]
+fn dedicated_worker_global_does_not_expose_shared_worker_constructor() {
+    let mut runtime = runtime_at("https://top.test/");
+    runtime.set_http_resource_transport(Some(Arc::new(ResourceCookieTransport::default())));
+    runtime
+        .eval("globalThis.worker = new Worker('https://top.test/worker.js')")
+        .unwrap();
+    let worker = runtime
+        .host_state
+        .borrow()
+        .workers
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        worker
+            .borrow_mut()
+            .runtime
+            .eval("[typeof Worker, typeof SharedWorker].join(',')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "function,undefined"
+    );
+}
+
+#[test]
+fn shared_worker_registry_partitions_first_and_third_party_owners() {
+    let transport = Arc::new(ResourceCookieTransport::default());
+    // Keep the cookie session constant so this isolates the top-level-site key.
+    let cookies = Arc::new(Mutex::new(crate::http::CookieJar::new()));
+    let mut first_party = runtime_at("https://third.test/");
+    first_party.set_shared_cookie_store(Arc::clone(&cookies));
     first_party.set_http_resource_transport(Some(transport.clone()));
     first_party
         .host_state
@@ -880,17 +1471,8 @@ fn shared_worker_registry_partitions_first_and_third_party_owners() {
         .unwrap();
 
     let mut third_party = runtime_at("https://top.test/");
+    third_party.set_shared_cookie_store(Arc::clone(&cookies));
     third_party.set_http_resource_transport(Some(transport.clone()));
-    third_party
-        .host_state
-        .borrow()
-        .cookie_store
-        .lock()
-        .unwrap()
-        .add_from_header_for_url(
-            "session=pre; Path=/; Secure; SameSite=None",
-            &"https://third.test/".parse().unwrap(),
-        );
     third_party
         .eval(
             "const frame = document.createElement('iframe'); \

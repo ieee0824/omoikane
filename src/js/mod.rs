@@ -1957,6 +1957,8 @@ struct HostState {
     worker_owner_objects: HashMap<u64, JsValue>,
     next_worker_id: u64,
     worker_owner: Option<Rc<RefCell<HostState>>>,
+    /// Owned request policy inherited by a Worker's synthetic main Document.
+    worker_cookie_request_context: Option<crate::http::CookieRequestContext>,
     worker_id: Option<u64>,
     worker_terminated: bool,
     worker_owner_bound: bool,
@@ -2486,6 +2488,7 @@ impl HostState {
             worker_owner_objects: HashMap::new(),
             next_worker_id: 1,
             worker_owner: None,
+            worker_cookie_request_context: None,
             worker_id: None,
             worker_terminated: false,
             worker_owner_bound: false,
@@ -6896,11 +6899,12 @@ impl JsRuntime {
         }
     }
 
-    /// Sets an explicit transport for this runtime's script and module resources.
+    /// Sets an explicit transport for requests using this runtime's HTTP client.
     ///
     /// The transport owns connection policy; URL, cookie, redirect and CORS
-    /// processing still run normally. This does not configure independent fetch,
-    /// WebSocket or Worker runtimes. `None` restores the default transport.
+    /// processing still run normally. New Workers inherit this transport;
+    /// existing Workers, asynchronous module downloads, and WebSocket
+    /// connections use their own clients. `None` restores the default transport.
     pub fn set_http_resource_transport(
         &mut self,
         transport: Option<Arc<dyn crate::http::HttpTransport>>,
@@ -18820,7 +18824,9 @@ fn prepare_dedicated_worker(
     )?;
     worker_runtime.set_user_agent(creator.user_agent);
     {
+        let owner = owner_state.borrow();
         let mut state = worker_runtime.host_state.borrow_mut();
+        state.inherit_worker_cookie_session(&owner, owner_document_id);
         let document_id = state.document.identity();
         state.document_origins.insert(document_id, creator.origin);
         if let Some(origin) = creator.security_origin {

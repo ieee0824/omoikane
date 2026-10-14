@@ -166,6 +166,11 @@ impl HostState {
         &self,
         document_id: usize,
     ) -> crate::http::CookieRequestContext {
+        if document_id == self.document.identity() {
+            if let Some(context) = &self.worker_cookie_request_context {
+                return context.clone();
+            }
+        }
         let context = self.storage_access_context(document_id);
         // Standalone runtimes can install the main page URL through
         // `set_base_url` without navigating. Resource requests already use
@@ -190,6 +195,44 @@ impl HostState {
             .flatten()
             .and_then(|origin| origin.serialize().parse().ok());
         crate::http::CookieRequestContext::new(site, granted_origin, cross_site_ancestry)
+    }
+
+    /// Shares the creator's browsing session with a Worker, without inheriting
+    /// a Document-only Storage Access grant for later Worker requests.
+    pub(super) fn inherit_worker_cookie_session(
+        &mut self,
+        owner: &HostState,
+        owner_document_id: usize,
+    ) {
+        self.worker_cookie_request_context = Some(
+            owner
+                .document_cookie_request_context(owner_document_id)
+                .for_worker_internal(),
+        );
+        self.cookie_store = Arc::clone(&owner.cookie_store);
+        self.cookie_change_sequence = self.cookie_store.lock().unwrap().change_sequence();
+        self.http_client = owner.http_client.fork_for_worker();
+        self.http_client
+            .set_shared_cookie_store(Arc::clone(&self.cookie_store));
+    }
+
+    /// Downgrades a shared Worker and all existing Dedicated Worker descendants
+    /// when an owner with cross-site ancestry joins its session.
+    pub(super) fn restrict_worker_cookie_context(&mut self) {
+        let mut pending = self.restrict_one_worker_cookie_context();
+        while let Some(child) = pending.pop() {
+            pending.extend(child.borrow_mut().restrict_one_worker_cookie_context());
+        }
+    }
+
+    fn restrict_one_worker_cookie_context(&mut self) -> Vec<Rc<RefCell<HostState>>> {
+        if let Some(context) = self.worker_cookie_request_context.take() {
+            self.worker_cookie_request_context = Some(context.with_cross_site_ancestry());
+        }
+        self.workers
+            .values()
+            .map(|entry| Rc::clone(&entry.borrow().runtime.host_state))
+            .collect()
     }
 
     /// Applies a Document's cookie context to an outgoing subresource request.
