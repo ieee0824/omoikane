@@ -25598,6 +25598,7 @@ export let __omoikane_cookie_change_reset;
     // browsing-context objects before user script evaluates.
     try { delete globalThis.document; } catch (_) { globalThis.document = undefined; }
     try { delete globalThis.window; } catch (_) { globalThis.window = undefined; }
+    try { delete globalThis.SharedWorker; } catch (_) { globalThis.SharedWorker = undefined; }
     try { delete globalThis.cookieStore; } catch (_) { globalThis.cookieStore = undefined; }
     try { delete globalThis.CookieStore; } catch (_) { globalThis.CookieStore = undefined; }
     try { delete globalThis.CookieChangeEvent; } catch (_) { globalThis.CookieChangeEvent = undefined; }
@@ -25730,8 +25731,6 @@ export let __omoikane_cookie_change_reset;
     // Reuse the dedicated-worker global sanitisation and then install the
     // SharedWorkerGlobalScope-specific connect/port surface.
     globalThis.__omoikane_install_worker_global(url, sharedWorkerId);
-    try { delete globalThis.Worker; } catch (_) { globalThis.Worker = undefined; }
-    try { delete globalThis.SharedWorker; } catch (_) { globalThis.SharedWorker = undefined; }
     try { delete globalThis.SharedWorkerPort; } catch (_) { globalThis.SharedWorkerPort = undefined; }
     try { delete globalThis.DedicatedWorkerGlobalScope; } catch (_) { globalThis.DedicatedWorkerGlobalScope = undefined; }
     globalThis.SharedWorkerGlobalScope = Object;

@@ -246,13 +246,13 @@ mod tests {
     }
 
     #[test]
-    fn module_downloads_send_and_store_cookies_only_with_document_access() {
+    fn module_downloads_keep_document_grants_out_of_worker_internal_requests() {
         let listener = bind_loopback().unwrap();
         let address = listener.local_addr().unwrap();
         let target: Url = format!("http://{address}/post.js").parse().unwrap();
         let server = FixtureWorker::spawn(move || {
             let mut cookies = Vec::new();
-            for phase in ["pre", "post"] {
+            for phase in ["pre", "post", "worker", "nested"] {
                 let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
                 let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
                 assert!(request.starts_with(&format!("GET /{phase}.js HTTP/1.1")));
@@ -280,16 +280,22 @@ mod tests {
         let top: Url = format!("http://localhost:{}/", address.port())
             .parse()
             .unwrap();
-        for phase in ["pre", "post"] {
-            let mut fetch = pool.fetch(
-                format!("http://{address}/{phase}.js"),
-                false,
-                Some(CookieRequestContext::new(
-                    Some(top.clone()),
-                    (phase == "post").then(|| target.clone()),
-                    false,
-                )),
-            );
+        for phase in ["pre", "post", "worker", "nested"] {
+            let context = match phase {
+                "pre" => CookieRequestContext::new(Some(top.clone()), None, false),
+                "post" => CookieRequestContext::new(Some(top.clone()), Some(target.clone()), false),
+                "worker" => {
+                    CookieRequestContext::new(Some(top.clone()), Some(target.clone()), false)
+                        .for_worker_internal()
+                }
+                "nested" => {
+                    CookieRequestContext::new(Some(target.clone()), Some(target.clone()), true)
+                        .for_worker_internal()
+                }
+                _ => unreachable!(),
+            };
+            let mut fetch =
+                pool.fetch(format!("http://{address}/{phase}.js"), false, Some(context));
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 let mut context = Context::from_waker(Waker::noop());
@@ -301,10 +307,15 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
-        assert_eq!(server.join(), [None, Some("session=pre".to_string())]);
+        assert_eq!(
+            server.join(),
+            [None, Some("session=pre".to_string()), None, None]
+        );
         let cookies = store.lock().unwrap().document_cookie(&target, &target);
         assert!(!cookies.contains("pre=1"));
         assert!(cookies.contains("post=1"));
+        assert!(!cookies.contains("worker=1"));
+        assert!(!cookies.contains("nested=1"));
     }
 
     #[test]

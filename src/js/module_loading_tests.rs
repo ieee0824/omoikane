@@ -221,6 +221,82 @@ fn route(body: &str) -> Route {
     }
 }
 
+#[test]
+fn dedicated_worker_module_imports_share_owner_cookie_jar() {
+    let server = ModuleServer::new(HashMap::from([
+        (
+            "/worker.js".into(),
+            route(
+                "globalThis.load = () => import('./dep.js').then(() => globalThis.loaded = true)",
+            ),
+        ),
+        (
+            "/dep.js".into(),
+            Route {
+                headers: "Set-Cookie: module=stored; Path=/; SameSite=Lax\r\n".into(),
+                ..route("export const loaded = true")
+            },
+        ),
+    ]));
+    let document = TreeBuilder::parse("<html><body></body></html>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, &format!("{}/index.html", server.origin))
+            .unwrap();
+    let cookie_url: crate::http::Url = format!("{}/", server.origin).parse().unwrap();
+    runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .add_from_header_for_url("session=owner; Path=/; SameSite=Lax", &cookie_url);
+    runtime
+        .eval(&format!(
+            "new Worker({})",
+            serde_json::to_string(&format!("{}/worker.js", server.origin)).unwrap()
+        ))
+        .unwrap();
+    let worker = runtime
+        .host_state
+        .borrow()
+        .workers
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    {
+        let mut worker = worker.borrow_mut();
+        worker.runtime.eval("load()").unwrap();
+        worker.runtime.run_until_idle().unwrap();
+        assert_eq!(
+            worker.runtime.eval("loaded").unwrap().as_boolean(),
+            Some(true)
+        );
+    }
+    let requests = server.requests.lock().unwrap();
+    let module_request = &requests
+        .iter()
+        .find(|(path, _)| path == "/dep.js")
+        .expect("worker module was fetched")
+        .1;
+    assert_eq!(
+        module_request
+            .lines()
+            .find_map(|line| line.strip_prefix("Cookie: ")),
+        Some("session=owner"),
+        "worker module request must use the owner's cookie jar: {requests:?}"
+    );
+    drop(requests);
+    let cookies = runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .document_cookie(&cookie_url, &cookie_url);
+    assert!(cookies.contains("module=stored"));
+}
+
 fn runtime_with_module(origin: &str, source: &str) -> JsRuntime {
     runtime_with_policy(origin, source, "")
 }

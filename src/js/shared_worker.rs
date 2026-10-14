@@ -56,14 +56,16 @@ impl State {
     }
 }
 
-/// The key used by the same-thread `SharedWorker` registry.  A worker is
-/// shared only when its resolved script URL, name, and origin all match.
+/// The key used by the same-thread `SharedWorker` registry. A Worker cannot
+/// be shared between distinct top-level sites or cookie sessions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SharedWorkerKey {
     /// Shared workers are only constructible for an eligible tuple origin;
     /// opaque/no-origin callers are rejected before a key is created.
     origin: StorageOrigin,
     top_level_site: crate::http::SchemefulSite,
+    /// Pointer identity stays live because the runtime retains the same Arc.
+    cookie_store_identity: usize,
     url: String,
     name: String,
 }
@@ -126,13 +128,21 @@ fn prune_shared_worker_registry(registry: &mut Vec<Rc<RefCell<SharedWorkerRuntim
     }
     registry.retain(|entry| {
         let shared = entry.borrow();
-        !shared.connections.is_empty()
-            && !shared
-                .runtime
-                .borrow()
-                .host_state
-                .borrow()
-                .worker_terminated
+        // A running SharedWorker can create a child Worker while its runtime
+        // is mutably borrowed. Keep it until the outer task can prune again.
+        let active = shared
+            .runtime
+            .try_borrow()
+            .ok()
+            .and_then(|runtime| {
+                runtime
+                    .host_state
+                    .try_borrow()
+                    .ok()
+                    .map(|state| !state.worker_terminated)
+            })
+            .unwrap_or(true);
+        !shared.connections.is_empty() && active
     });
 }
 
@@ -432,6 +442,7 @@ fn create_new_shared_worker_entry(
     let entry = Rc::new(RefCell::new(create_shared_worker_runtime(
         owner_state,
         key,
+        document_id,
         result.loaded,
         creator_policy,
     )?));
@@ -446,7 +457,16 @@ fn create_shared_worker_for_owner_state(
     document_id: usize,
     source: Option<&security_reporting::CspSourceLocation>,
 ) -> JsResult<u64> {
-    let (owner_url, base_url, origin, origin_text, creator_policy, top_level_site) = {
+    let (
+        owner_url,
+        base_url,
+        origin,
+        origin_text,
+        creator_policy,
+        top_level_site,
+        cookie_store_identity,
+        cookie_context,
+    ) = {
         let state = owner_state.borrow();
         let origin = shared_worker_origin(&state, document_id).ok_or_else(|| {
             JsNativeError::error().with_message("SharedWorker requires an eligible origin")
@@ -468,6 +488,8 @@ fn create_shared_worker_for_owner_state(
                 .cloned()
                 .unwrap_or_default(),
             top_level_site,
+            Arc::as_ptr(&state.cookie_store) as usize,
+            state.document_cookie_request_context(document_id),
         )
     };
     let worker_url = resolve_worker_url(requested_url, &owner_url, base_url.as_ref())?;
@@ -488,10 +510,18 @@ fn create_shared_worker_for_owner_state(
     let key = SharedWorkerKey {
         origin,
         top_level_site,
+        cookie_store_identity,
         url: worker_url.clone(),
         name: name.to_string(),
     };
     let entry = if let Some(existing) = shared_worker_entry_for_key(&key) {
+        if allowed && cookie_context.has_cross_site_ancestry() {
+            // A later first-party connection must not re-enable cookies after
+            // any cross-site ancestor has reached this shared global.
+            let runtime = Rc::clone(&existing.borrow().runtime);
+            let host = Rc::clone(&runtime.borrow().host_state);
+            host.borrow_mut().restrict_worker_cookie_context();
+        }
         existing
     } else {
         create_new_shared_worker_entry(
@@ -543,6 +573,7 @@ fn create_shared_worker_for_owner_state(
 fn create_shared_worker_runtime(
     owner_state: &Rc<RefCell<HostState>>,
     key: SharedWorkerKey,
+    owner_document_id: usize,
     loaded: Option<worker_loading::LoadedWorkerScript>,
     creator_policy: CspPolicy,
 ) -> JsResult<SharedWorkerRuntime> {
@@ -570,7 +601,9 @@ fn create_shared_worker_runtime(
         runtime.install_worker_security_metadata(loaded, &creator_policy);
     }
     {
+        let owner = owner_state.borrow();
         let mut state = runtime.host_state.borrow_mut();
+        state.inherit_worker_cookie_session(&owner, owner_document_id);
         state.shared_worker.id = Some(shared_id);
         state.shared_worker.error_destination = error_destination.clone();
     }
@@ -719,7 +752,12 @@ impl JsRuntime {
         for entry in entries {
             let same_runtime = {
                 let shared = entry.borrow();
-                Rc::ptr_eq(&shared.runtime.borrow().host_state, &self.host_state)
+                // A nested Worker can reach this pump while its parent shared
+                // runtime is already evaluating. The outer pump owns that task.
+                let Ok(runtime) = shared.runtime.try_borrow() else {
+                    continue;
+                };
+                Rc::ptr_eq(&runtime.host_state, &self.host_state)
             };
             if same_runtime {
                 continue;
@@ -734,7 +772,9 @@ impl JsRuntime {
             // Shared-worker failures are isolated from the owner page just as
             // Dedicated Worker failures are.  The connection remains usable
             // for subsequent tasks unless the worker explicitly closes.
-            let mut runtime = runtime.borrow_mut();
+            let Ok(mut runtime) = runtime.try_borrow_mut() else {
+                continue;
+            };
             let result = runtime.run_until_idle();
             let errors = runtime.take_task_errors_filtered(true);
             for _ in 0..usize::from(result.is_err()) + errors.len() {

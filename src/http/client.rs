@@ -203,6 +203,12 @@ impl Client {
         }
     }
 
+    /// Gives a Worker this session's cookies and transport without sharing
+    /// its creator's live HTTP connections.
+    pub(crate) fn fork_for_worker(&self) -> Self {
+        self.fork_for_reporting()
+    }
+
     /// Sends a GET request to `url`, following redirects and managing cookies.
     pub fn get(&mut self, url: &str) -> Result<HttpResponse, HttpParseError> {
         let request = HttpRequest::get(url).map_err(|e| {
@@ -508,6 +514,7 @@ pub(crate) fn resolve_redirect_url(base: &Url, location: &str) -> Result<Url, Ht
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::CookieRequestContext;
 
     struct RecordingTransport {
         requests: Mutex<Vec<(HttpRequest, Option<Duration>)>>,
@@ -657,6 +664,37 @@ mod tests {
         assert_eq!(requests[1].0.header("cookie"), Some("first=1"));
         assert_eq!(requests[2].0.header("cookie"), None);
         assert_eq!(client.cookie_jar().len(), 2);
+    }
+
+    #[test]
+    fn worker_without_a_creator_site_cannot_send_or_store_unpartitioned_cookies() {
+        let url: Url = "https://third.test/worker-fetch".parse().unwrap();
+        let transport = RecordingTransport::new(vec![HttpResponse::new(
+            200,
+            "OK",
+            vec![(
+                "Set-Cookie".into(),
+                "blocked=1; Secure; SameSite=None".into(),
+            )],
+            vec![],
+        )]);
+        let mut client = Client::new();
+        client.set_transport(Some(transport.clone()));
+        client
+            .cookie_jar_mut()
+            .add_from_header_for_url("session=1; Secure; SameSite=None", &url);
+
+        let context =
+            CookieRequestContext::new(None, Some(url.clone()), false).for_worker_internal();
+        let mut request = HttpRequest::new(Method::Get, url);
+        context.apply(&mut request);
+        client.send(request).unwrap();
+
+        assert_eq!(
+            transport.requests.lock().unwrap()[0].0.header("cookie"),
+            None
+        );
+        assert_eq!(client.cookie_jar().len(), 1);
     }
 
     #[test]
