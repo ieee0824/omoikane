@@ -1,4 +1,6 @@
 export let __omoikane_queue_reporting_api_report;
+export let __omoikane_cookie_change_dispatch;
+export let __omoikane_cookie_change_reset;
 
 (() => {
   // Capture intrinsic identities before author code can replace global Symbol.
@@ -99,6 +101,10 @@ export let __omoikane_queue_reporting_api_report;
   const nativeGeolocationPermission = globalThis.__omoikane_geolocation_permission;
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
   const nativeStorageManager = globalThis.__omoikane_storage_manager;
+  const nativeCookieStoreAvailable = globalThis.__omoikane_cookie_store_available;
+  const nativeCookieStoreQuery = globalThis.__omoikane_cookie_store_query;
+  const nativeCookieStoreMutate = globalThis.__omoikane_cookie_store_mutate;
+  const nativeCookieStoreChanges = globalThis.__omoikane_cookie_store_changes;
   const nativeWebLocks = globalThis.__omoikane_web_locks;
   // Worklet lifecycle bindings are private implementation hooks. Keep them in
   // this closure so page code can only reach the standard Worklet methods.
@@ -280,6 +286,10 @@ export let __omoikane_queue_reporting_api_report;
   delete globalThis.__omoikane_geolocation_permission;
   delete globalThis.__omoikane_is_secure_context;
   delete globalThis.__omoikane_storage_manager;
+  delete globalThis.__omoikane_cookie_store_available;
+  delete globalThis.__omoikane_cookie_store_query;
+  delete globalThis.__omoikane_cookie_store_mutate;
+  delete globalThis.__omoikane_cookie_store_changes;
   delete globalThis.__omoikane_web_locks;
   delete globalThis.__omoikane_create_worklet;
   delete globalThis.__omoikane_worklet_add_module;
@@ -22500,6 +22510,152 @@ export let __omoikane_queue_reporting_api_report;
   globalThis.AbortSignal = AbortSignal;
   globalThis.AbortController = AbortController;
 
+  const cookieStoreOwners = new WeakMap();
+  const cookieStoreToken = {};
+  const cookieStoreCreationURL = document.URL;
+  const cookieStoreAvailable = (() => {
+    try { return nativeCookieStoreAvailable(__omoikane_document_id) === true; }
+    catch (_) { return false; }
+  })();
+  const cookieStoreQueryName = (options, requireOptions) => {
+    if (typeof options === "string") return options;
+    if (options == null) {
+      if (requireOptions) throw new TypeError("CookieStore.get requires a name or URL");
+      return null;
+    }
+    if (typeof options !== "object") throw new TypeError("CookieStore options must be a dictionary");
+    if (requireOptions && options.name === undefined && options.url === undefined) {
+      throw new TypeError("CookieStore.get requires a name or URL");
+    }
+    if (options.url !== undefined) {
+      const requested = new URL(String(options.url), document.baseURI);
+      const current = new URL(cookieStoreCreationURL);
+      if (requested.href.split("#")[0] !== current.href.split("#")[0]) {
+        throw new TypeError("CookieStore URL must match the document URL");
+      }
+    }
+    return options.name === undefined ? null : String(options.name);
+  };
+  const queryCookieStore = (store, options, requireOptions = false) => {
+    if (!cookieStoreOwners.has(store)) return Promise.reject(new TypeError("Illegal invocation"));
+    return Promise.resolve().then(() => {
+      const result = nativeCookieStoreQuery(cookieStoreOwners.get(store), cookieStoreCreationURL);
+      if (result === null) throw new DOMException("Opaque origins cannot access cookies", "SecurityError");
+      const name = cookieStoreQueryName(options, requireOptions);
+      const items = JSON.parse(String(result));
+      return name === null ? items : items.filter(cookie => cookie.name === name);
+    });
+  };
+  const mutateCookieStore = (store, options, value, deletion, argumentCount) => {
+    if (!cookieStoreOwners.has(store)) return Promise.reject(new TypeError("Illegal invocation"));
+    return Promise.resolve().then(() => {
+      let fields;
+      if (typeof options === "string") {
+        if (!deletion && argumentCount < 2) throw new TypeError("CookieStore.set requires a value");
+        fields = { name: options, value: deletion ? "" : String(value) };
+      } else if (options !== null && typeof options === "object") {
+        if (options.name === undefined || (!deletion && options.value === undefined)) {
+          throw new TypeError("CookieStore options require name and value");
+        }
+        fields = { name: String(options.name), value: deletion ? "" : String(options.value) };
+        if (options.domain !== undefined && options.domain !== null) fields.domain = String(options.domain);
+        if (options.path !== undefined) fields.path = String(options.path);
+        if (!deletion && options.expires !== undefined && options.expires !== null) {
+          fields.expires = Number(options.expires);
+          if (!Number.isFinite(fields.expires)) throw new TypeError("Invalid Cookie Store expires");
+        }
+        if (!deletion && options.maxAge !== undefined && options.maxAge !== null) {
+          fields.maxAge = Number(options.maxAge);
+          if (!Number.isSafeInteger(fields.maxAge)) throw new TypeError("Invalid Cookie Store maxAge");
+        }
+        if (!deletion && options.sameSite !== undefined) fields.sameSite = String(options.sameSite);
+        if (options.partitioned !== undefined) fields.partitioned = Boolean(options.partitioned);
+      } else {
+        throw new TypeError("CookieStore options must be a dictionary or name");
+      }
+      fields.path ??= "/";
+      fields.sameSite ??= "strict";
+      fields.partitioned ??= false;
+      if (!["strict", "lax", "none"].includes(fields.sameSite)) {
+        throw new TypeError("Invalid Cookie Store sameSite");
+      }
+      if (deletion && fields.name === "") fields.value = "deleted";
+      fields.maxAge = deletion ? 0 : (fields.maxAge ?? null);
+      fields.expires ??= null;
+      const result = nativeCookieStoreMutate(cookieStoreOwners.get(store), cookieStoreCreationURL, JSON.stringify(fields));
+      if (result === null) throw new DOMException("Opaque origins cannot access cookies", "SecurityError");
+      return undefined;
+    });
+  };
+  if (cookieStoreAvailable) {
+    const cookieChangeEventData = new WeakMap();
+    const cookieChangeItem = item => {
+      const result = {};
+      if (item.name !== undefined) result.name = String(item.name);
+      if (item.value !== undefined) result.value = String(item.value);
+      return result;
+    };
+    class CookieChangeEvent extends Event {
+      constructor(type, init = {}) {
+        super(type, init);
+        cookieChangeEventData.set(this, {
+          changed: Object.freeze(Array.from(init?.changed ?? [], cookieChangeItem)),
+          deleted: Object.freeze(Array.from(init?.deleted ?? [], cookieChangeItem)),
+        });
+      }
+      get changed() { return cookieChangeEventData.get(this)?.changed; }
+      get deleted() { return cookieChangeEventData.get(this)?.deleted; }
+      get [Symbol.toStringTag]() { return "CookieChangeEvent"; }
+    }
+    class CookieStore extends EventTarget {
+      constructor(token) {
+        if (token !== cookieStoreToken) throw new TypeError("Illegal constructor");
+        super();
+        cookieStoreOwners.set(this, __omoikane_document_id);
+      }
+      get(options) { return queryCookieStore(this, options, true).then(items => items[0] || null); }
+      getAll(options) { return queryCookieStore(this, options); }
+      set(options, value) { return mutateCookieStore(this, options, value, false, arguments.length); }
+      delete(options) { return mutateCookieStore(this, options, undefined, true, arguments.length); }
+      get onchange() { return this.__onchange || null; }
+      set onchange(callback) {
+        if (this.__onchange) this.removeEventListener("change", this.__onchange);
+        this.__onchange = typeof callback === "function" ? callback : null;
+        if (this.__onchange) this.addEventListener("change", this.__onchange);
+      }
+      get [Symbol.toStringTag]() { return "CookieStore"; }
+    }
+    globalThis.CookieChangeEvent = CookieChangeEvent;
+    globalThis.CookieStore = CookieStore;
+    const activeCookieStore = new CookieStore(cookieStoreToken);
+    Object.defineProperty(globalThis, "cookieStore", {
+      configurable: true,
+      enumerable: true,
+      value: activeCookieStore,
+      writable: false,
+    });
+    const parseCookieChanges = JSON.parse.bind(JSON);
+    const dispatchCookieChange = EventTarget.prototype.dispatchEvent;
+    let cookieChangeCursor = 0;
+    try {
+      const initial = nativeCookieStoreChanges(__omoikane_document_id, cookieStoreCreationURL, null);
+      if (initial !== null) cookieChangeCursor = parseCookieChanges(String(initial)).cursor;
+    } catch (_) {}
+    __omoikane_cookie_change_reset = () => {
+      const initial = nativeCookieStoreChanges(__omoikane_document_id, cookieStoreCreationURL, null);
+      if (initial !== null) cookieChangeCursor = parseCookieChanges(String(initial)).cursor;
+    };
+    __omoikane_cookie_change_dispatch = () => {
+      const encoded = nativeCookieStoreChanges(__omoikane_document_id, cookieStoreCreationURL, cookieChangeCursor);
+      if (encoded === null) return;
+      const changes = parseCookieChanges(String(encoded));
+      cookieChangeCursor = changes.cursor;
+      for (const event of changes.events) {
+        safeApply(dispatchCookieChange, activeCookieStore, [new CookieChangeEvent("change", event)]);
+      }
+    };
+  }
+
   function dataCloneError(message = "The value could not be cloned.") {
     return new DOMException(message, "DataCloneError");
   }
@@ -24821,6 +24977,9 @@ export let __omoikane_queue_reporting_api_report;
     // browsing-context objects before user script evaluates.
     try { delete globalThis.document; } catch (_) { globalThis.document = undefined; }
     try { delete globalThis.window; } catch (_) { globalThis.window = undefined; }
+    try { delete globalThis.cookieStore; } catch (_) { globalThis.cookieStore = undefined; }
+    try { delete globalThis.CookieStore; } catch (_) { globalThis.CookieStore = undefined; }
+    try { delete globalThis.CookieChangeEvent; } catch (_) { globalThis.CookieChangeEvent = undefined; }
     try { delete globalThis.length; } catch (_) {}
     try { delete globalThis.open; } catch (_) { globalThis.open = undefined; }
     try { delete globalThis.customElements; } catch (_) { globalThis.customElements = undefined; }

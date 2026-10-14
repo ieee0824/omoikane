@@ -26,6 +26,7 @@ pub use client::{Client, HttpTransport};
 pub(crate) use connection::is_public_ip;
 pub use connection::{send, send_with_options};
 pub use cookie::{Cookie, CookieJar, SameSite};
+pub(crate) use cookie::{CookieStoreChange, CookieStoreWrite};
 pub(crate) use data_uri::percent_decode_bytes;
 pub use data_uri::{DataUri, parse_data_uri};
 pub(crate) use referrer::{

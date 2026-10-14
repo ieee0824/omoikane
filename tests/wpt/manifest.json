@@ -183,6 +183,8 @@
     { "path": "css/selectors/focus-within-focus-move.html" },
     { "path": "css/selectors/focus-within-removal.html" },
     { "path": "css/css-conditional/js/CSS-supports-L3.html" },
+    { "path": "css/css-conditional/js/CSS-supports-L4.html" },
+    { "path": "css/css-conditional/js/CSS-supports-selector-detecting-invalid-in-logical-combinations.html" },
     { "path": "css/css-conditional/js/supports-conditionText.html" },
     { "path": "css/css-nesting/block-skipping.html" },
     { "path": "css/css-nesting/cssom.html" },
@@ -514,6 +516,20 @@
     {"path": "reporting/disconnect.html"},
     {"path": "reporting/nestedReport.html"},
     {"path": "reporting/order.html"},
-    {"path": "reporting/generateTestReport.html"}
+    {"path": "reporting/generateTestReport.html"},
+    { "path": "cookiestore/cookieStore_get_set_basic.https.any.js" },
+    { "path": "cookiestore/cookieStore_get_delete_basic.https.any.js" },
+    { "path": "cookiestore/cookieStore_getAll_set_basic.https.any.js" },
+    { "path": "cookiestore/cookieStore_delete_basic.https.any.js" },
+    { "path": "cookiestore/cookieStore_get_set_creation_url.https.any.js" },
+    { "path": "cookiestore/cookieStore_event_arguments.https.window.js" },
+    { "path": "cookiestore/cookieStore_event_basic.https.window.js" },
+    { "path": "cookiestore/cookieStore_event_delete.https.window.js" },
+    { "path": "cookiestore/cookieStore_set_limit.https.any.js" },
+    { "path": "cookiestore/cookieStore_special_names.https.any.js" },
+    { "path": "cookiestore/cookieStore_getAll_multiple.https.any.js" },
+    { "path": "cookiestore/cookieStore_get_set_ordering.https.any.js" },
+    { "path": "cookiestore/cookieStore_event_overwrite.https.window.js" },
+    { "path": "cookiestore/cookieStore_getAll_set_creation_url.https.any.js" }
   ]
 }

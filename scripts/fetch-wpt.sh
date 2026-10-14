@@ -78,6 +78,8 @@ collect_pattern \
   "/css/selectors/focus-within-focus-move.html" \
   "/css/selectors/focus-within-removal.html"
 collect_pattern "/css/css-conditional/js/CSS-supports-L3.html"
+collect_pattern "/css/css-conditional/js/CSS-supports-L4.html"
+collect_pattern "/css/css-conditional/js/CSS-supports-selector-detecting-invalid-in-logical-combinations.html"
 collect_pattern "/css/css-conditional/js/supports-conditionText.html"
 collect_pattern "/css/css-nesting/"
 collect_pattern "/css/css-cascade/scope-cssom.html"
@@ -191,6 +193,7 @@ collect_pattern "/domxpath/"
 collect_pattern "/visual-viewport/"
 collect_pattern "/page-visibility/"
 collect_pattern "/web-locks/"
+collect_pattern "/cookiestore/"
 collect_pattern "/css/css-multicol/parsing/" "/css/support/shorthand-testcommon.js"
 collect_pattern \
   "/css/css-overscroll-behavior/parsing/overscroll-behavior-valid.html" \

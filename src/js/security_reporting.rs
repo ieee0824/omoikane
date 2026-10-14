@@ -1990,6 +1990,43 @@ mod tests {
     }
 
     #[test]
+    fn popup_later_classic_scripts_run_after_page_overwrites_current_script_setter() {
+        struct Transport;
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                assert_eq!(request.url().to_string(), "https://example.test/popup");
+                let body = "<script>window.__omoikane_set_current_script=()=>{throw Error('page override')}</script><script>window.laterScriptRan=true</script>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                crate::http::HttpResponse::parse(&mut response.as_bytes())
+            }
+        }
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/opener").unwrap();
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(Arc::new(Transport)));
+        runtime
+            .eval("globalThis.child=window.open('/popup', 'view')")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        let observed = runtime
+            .eval("child.laterScriptRan === true")
+            .unwrap()
+            .to_boolean();
+        assert!(observed);
+    }
+
+    #[test]
     fn document_write_classic_script_connect_violation_keeps_its_source_position() {
         let document = crate::html::TreeBuilder::parse("<html><body></body></html>").document();
         let mut runtime =

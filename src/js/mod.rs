@@ -69,6 +69,7 @@ mod computed_pseudo_tests;
 mod computed_style_layout_tests;
 #[cfg(test)]
 mod computed_text_shadow_tests;
+mod cookie_store;
 mod document_write;
 mod dom_string;
 #[cfg(test)]
@@ -746,6 +747,15 @@ fn evaluate_dom_bootstrap(
         complete(module.load(context))?;
         module.link(context)?;
         complete(module.evaluate(context))?;
+        let namespace = module.namespace(context);
+        let dispatch = namespace.get(js_string!("__omoikane_cookie_change_dispatch"), context)?;
+        let reset = namespace.get(js_string!("__omoikane_cookie_change_reset"), context)?;
+        if dispatch.as_callable().is_some() && reset.as_callable().is_some() {
+            host_state
+                .borrow_mut()
+                .cookie_change_callbacks
+                .insert(document_id, CookieChangeCallbacks { dispatch, reset });
+        }
         // Keep the invariant checked at every realm creation, including future
         // bindings added by a subsystem that might accidentally use a global.
         for name in &bindings.names {
@@ -1680,6 +1690,8 @@ struct HostState {
     /// Lazily started HTTP worker for best-effort CSP/Reporting delivery.
     report_delivery: Option<report_delivery::ReportDelivery>,
     cookie_store: Arc<Mutex<crate::http::CookieJar>>,
+    cookie_change_sequence: u64,
+    cookie_change_callbacks: HashMap<usize, CookieChangeCallbacks>,
     websocket_clients: HashMap<u64, WebSocketConnection>,
     next_websocket_id: u64,
     /// Successful CORS preflight results for this environment settings object.
@@ -1903,6 +1915,11 @@ struct HostState {
 
 impl Finalize for HostState {}
 
+struct CookieChangeCallbacks {
+    dispatch: JsValue,
+    reset: JsValue,
+}
+
 // Values retained by the host event loop are not visible from Boa's VM root
 // provider. Keep them alive for as long as this runtime's host state owns them.
 unsafe impl Trace for HostState {
@@ -1933,6 +1950,10 @@ unsafe impl Trace for HostState {
         }
         for value in self.remote_objects.values() {
             unsafe { value.trace(tracer) };
+        }
+        for callbacks in self.cookie_change_callbacks.values() {
+            unsafe { callbacks.dispatch.trace(tracer) };
+            unsafe { callbacks.reset.trace(tracer) };
         }
         for event in self.current_window_events.values() {
             unsafe { event.trace(tracer) };
@@ -2266,6 +2287,8 @@ impl HostState {
             http_client,
             report_delivery: None,
             cookie_store,
+            cookie_change_sequence: 0,
+            cookie_change_callbacks: HashMap::new(),
             websocket_clients: HashMap::new(),
             next_websocket_id: 1,
             cors_preflight_cache: PreflightCache::default(),
@@ -3475,6 +3498,7 @@ impl HostState {
     /// contexts, or document-scoped native state alive after close/navigation.
     fn retire_document_tree(&mut self, document: &NodeHandle) {
         let document_id = document.identity();
+        self.cookie_change_callbacks.remove(&document_id);
         self.promise_reports.retire_document(document_id);
         self.pointer_lock.retire_document(document_id);
         self.input_bridge.retire_document(document_id);
@@ -3571,6 +3595,8 @@ impl HostState {
         let Some(previous) = self.iframe_documents.remove(&iframe_id) else {
             return;
         };
+        self.cookie_change_callbacks
+            .remove(&previous.document.identity());
         self.promise_reports
             .retire_document(previous.document.identity());
         self.pointer_lock
@@ -5923,6 +5949,7 @@ impl JsRuntime {
         csp_requested_url: &str,
         muted_errors: bool,
         start_position: (u32, u32),
+        set_current_script: bool,
     ) -> JsResult<()> {
         let realm = self.realm_for_document(document_id)?;
         if document_id != self.document().identity() && realm.is_none() {
@@ -5934,7 +5961,9 @@ impl JsRuntime {
         let script_node = self.host_state.borrow().get_node(script_id);
         self.host_state.borrow_mut().write_insertion_ref = script_node;
         let result = (|| {
-            self.eval(&format!("__omoikane_set_current_script({script_id})"))?;
+            if set_current_script {
+                self.eval(&format!("__omoikane_set_current_script({script_id})"))?;
+            }
             let evaluated = self.with_active_host(|context| {
                 let metadata = script_errors::classic_script_metadata(
                     muted_errors,
@@ -5962,7 +5991,9 @@ impl JsRuntime {
             evaluated?;
             self.run_jobs()
         })();
-        let _ = self.eval("__omoikane_set_current_script(null)");
+        if set_current_script {
+            let _ = self.eval("__omoikane_set_current_script(null)");
+        }
         self.host_state.borrow_mut().write_insertion_ref = None;
         if let Some(old_realm) = old_realm {
             self.context.enter_realm(old_realm);
@@ -6708,11 +6739,23 @@ impl JsRuntime {
 
     /// Uses the browsing session's Cookie store across this Document and its resources.
     pub(crate) fn set_shared_cookie_store(&mut self, store: Arc<Mutex<crate::http::CookieJar>>) {
+        let sequence = store.lock().unwrap().change_sequence();
         let mut state = self.host_state.borrow_mut();
         state
             .http_client
             .set_shared_cookie_store(Arc::clone(&store));
         state.cookie_store = store;
+        state.cookie_change_sequence = sequence;
+        let documents = state
+            .cookie_change_callbacks
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        drop(state);
+        for document_id in documents {
+            let result = self.call_cookie_change_callback(document_id, true);
+            self.record_error_from("Cookie Store reset", result);
+        }
     }
 
     /// Sets the initial visibility before a new Document runs any page script.
@@ -7639,6 +7682,7 @@ impl JsRuntime {
         // An embedder call may have completed a script task and left promise
         // jobs pending. Its checkpoint can itself enqueue host tasks.
         self.run_jobs()?;
+        self.dispatch_cookie_changes()?;
         self.run_worker_background_tasks();
         self.run_worklet_background_tasks();
         self.run_shared_worker_background_tasks();
@@ -7668,6 +7712,7 @@ impl JsRuntime {
             // HTML performs a microtask checkpoint after every task, including
             // host-only navigation tasks that do not directly invoke script.
             self.run_jobs_for_document(task_document_id)?;
+            self.dispatch_cookie_changes()?;
         }
         Ok(())
     }
@@ -7677,11 +7722,91 @@ impl JsRuntime {
         state.worker_id.is_some() && state.worker_terminated
     }
 
+    fn dispatch_cookie_changes(&mut self) -> JsResult<()> {
+        // Cookie writes can arrive from HTTP, document.cookie, or CookieStore.
+        // Deliver them at a task boundary after promise jobs have settled.
+        for _ in 0..64 {
+            let (sequence, child_documents) = {
+                let state = self.host_state.borrow();
+                let current = state.cookie_store.lock().unwrap().change_sequence();
+                if current == state.cookie_change_sequence {
+                    return Ok(());
+                }
+                let children = state
+                    .iframe_documents
+                    .values()
+                    .filter(|entry| entry.realm.is_some())
+                    .map(|entry| entry.document.identity())
+                    .chain(
+                        state
+                            .auxiliary_contexts
+                            .values()
+                            .filter(|entry| entry.realm.is_some())
+                            .map(|entry| entry.document.identity()),
+                    )
+                    .collect::<Vec<_>>();
+                (current, children)
+            };
+            self.host_state.borrow_mut().cookie_change_sequence = sequence;
+            self.call_cookie_change_callback(self.document().identity(), false)?;
+            self.run_jobs()?;
+            for document_id in child_documents {
+                self.call_cookie_change_callback(document_id, false)?;
+                self.run_jobs_for_document(Some(document_id))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn call_cookie_change_callback(&mut self, document_id: usize, reset: bool) -> JsResult<()> {
+        let callback = {
+            let state = self.host_state.borrow();
+            state
+                .cookie_change_callbacks
+                .get(&document_id)
+                .map(|entry| {
+                    if reset {
+                        entry.reset.clone()
+                    } else {
+                        entry.dispatch.clone()
+                    }
+                })
+        };
+        let Some(callback) = callback else {
+            return Ok(());
+        };
+        let is_main_document = document_id == self.document().identity();
+        let realm = if is_main_document {
+            self.host_state.borrow().main_realm.clone()
+        } else {
+            self.existing_realm_for_document(document_id)
+        };
+        let Some(realm) = realm else {
+            return Ok(());
+        };
+        if !is_main_document && !self.iframe_realm_is_live(document_id, &realm) {
+            return Ok(());
+        }
+        let old_realm = self.context.enter_realm(realm);
+        let _document = activate_module_document(&self.host_state, document_id);
+        let result = self
+            .with_active_host(|context| {
+                callback
+                    .as_callable()
+                    .expect("Cookie Store callback was validated at bootstrap")
+                    .call(&JsValue::undefined(), &[], context)
+            })
+            .map(|_| ());
+        self.context.enter_realm(old_realm);
+        result
+    }
+
     async fn run_until_idle_async(&mut self) -> JsResult<()> {
         if self.is_terminated_worker() {
             return Ok(());
         }
         self.run_jobs()?;
+        self.dispatch_cookie_changes()?;
         self.run_worklet_background_tasks();
         self.run_shared_worker_background_tasks();
         loop {
@@ -7786,6 +7911,7 @@ impl JsRuntime {
             self.run_shared_worker_background_tasks();
             self.run_worklet_background_tasks();
             self.run_jobs_for_document(task_document_id)?;
+            self.dispatch_cookie_changes()?;
         }
         Ok(())
     }
@@ -8167,6 +8293,9 @@ impl JsRuntime {
                 &requested_url,
                 muted_errors,
                 start_position,
+                // Popup navigation has never relied on the page-visible setter.
+                // Its replacement must not stop later parser scripts.
+                false,
             )?;
         }
         Ok(())
@@ -9899,6 +10028,7 @@ impl JsRuntime {
                                 &timing_name,
                                 muted_errors,
                                 (1, 1),
+                                true,
                             )
                             .map(|_| JsValue::undefined())
                             .map_err(JsEvaluationError::JavaScript),
@@ -11560,6 +11690,26 @@ fn register_host_bindings(
             js_string!("__omoikane_document_cookie_set"),
             2,
             NativeFunction::from_copy_closure(document_cookie_set_native),
+        ),
+        (
+            js_string!("__omoikane_cookie_store_available"),
+            1,
+            NativeFunction::from_copy_closure(cookie_store::available_native),
+        ),
+        (
+            js_string!("__omoikane_cookie_store_query"),
+            2,
+            NativeFunction::from_copy_closure(cookie_store::query_native),
+        ),
+        (
+            js_string!("__omoikane_cookie_store_mutate"),
+            3,
+            NativeFunction::from_copy_closure(cookie_store::mutate_native),
+        ),
+        (
+            js_string!("__omoikane_cookie_store_changes"),
+            3,
+            NativeFunction::from_copy_closure(cookie_store::changes_native),
         ),
         (
             js_string!("__omoikane_document_visibility_state"),
