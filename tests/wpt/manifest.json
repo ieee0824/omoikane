@@ -183,6 +183,8 @@
     { "path": "css/selectors/focus-within-focus-move.html" },
     { "path": "css/selectors/focus-within-removal.html" },
     { "path": "css/css-conditional/js/CSS-supports-L3.html" },
+    { "path": "css/css-conditional/js/CSS-supports-L4.html" },
+    { "path": "css/css-conditional/js/CSS-supports-selector-detecting-invalid-in-logical-combinations.html" },
     { "path": "css/css-conditional/js/supports-conditionText.html" },
     { "path": "css/css-nesting/block-skipping.html" },
     { "path": "css/css-nesting/cssom.html" },

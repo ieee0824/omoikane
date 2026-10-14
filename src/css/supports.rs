@@ -1,10 +1,10 @@
 //! CSS Conditional Rules `@supports` condition parsing and evaluation.
 
 use super::tokenizer::render_tokens;
-use super::{CssToken, parse_selector_list, skip_css_whitespace, supports_declaration, tokenize};
+use super::{CssToken, skip_css_whitespace, supports_declaration, tokenize};
 
-/// Evaluates a CSS supports condition using the same declaration and selector
-/// parsers as the cascade and DOM APIs.
+/// Evaluates a CSS supports condition using the stylesheet's declaration and
+/// selector grammar, including selectors that DOM query APIs cannot match.
 pub(crate) fn supports_condition_matches(input: &str) -> bool {
     supports_condition_result(input).unwrap_or(false)
 }
@@ -114,7 +114,7 @@ impl SupportsConditionParser {
         let argument = self.take_parenthesized()?;
         if function.eq_ignore_ascii_case("selector") {
             let selector = render_tokens(trim_tokens(&argument));
-            return Some(parse_selector_list(&selector).is_ok());
+            return Some(super::parser::supports_selector(&selector));
         }
         // Unknown functions are valid general-enclosed conditions and evaluate
         // false for forward compatibility.
@@ -197,6 +197,7 @@ fn trim_tokens(tokens: &[CssToken]) -> &[CssToken] {
 #[cfg(test)]
 mod tests {
     use super::{supports_condition_matches, supports_condition_result};
+    use crate::css::parse_stylesheet;
 
     #[test]
     fn evaluates_declarations_and_boolean_conditions() {
@@ -232,6 +233,56 @@ mod tests {
         assert!(supports_condition_matches("not future-feature(example)"));
         assert!(supports_condition_matches("selector(main > :has(span))"));
         assert!(!supports_condition_matches("selector(main >)"));
+    }
+
+    #[test]
+    fn selector_supports_accepts_stylesheet_pseudos_and_rejects_invalid_branches() {
+        for selector in [
+            "::marker",
+            "::first-letter",
+            "::first-line",
+            "::placeholder",
+            "::selection",
+            "::file-selector-button",
+            "x-card::part(label)",
+            "::slotted(.item)",
+            ":host",
+            ":host(.active)",
+        ] {
+            assert!(
+                supports_condition_matches(&format!("selector({selector})")),
+                "rejected stylesheet selector {selector}"
+            );
+            assert!(
+                parse_stylesheet(&format!("{selector} {{ color: red; }}")).is_ok(),
+                "stylesheet rejected {selector}"
+            );
+        }
+        for selector in [
+            "::unknown",
+            "::part()",
+            "::slotted(span > .item)",
+            ":host(> span)",
+            "div, span",
+            ":is(.known, :unknown)",
+            ":where(.known, :unknown)",
+            ":is(.known, ::before)",
+            ":not(::before)",
+            ":has(::before)",
+            ":has(:has(.item))",
+            ":has(:is(:has(.item), .other))",
+            ":host(:is(.known, :unknown))",
+            "::slotted(:is(.known, :unknown))",
+        ] {
+            assert!(
+                !supports_condition_matches(&format!("selector({selector})")),
+                "accepted unsupported selector {selector}"
+            );
+        }
+        assert!(supports_condition_matches("selector(:is(.first, .second))"));
+        assert!(supports_condition_matches(
+            "selector(:host(:is(.first, .second)))"
+        ));
     }
 
     #[test]
