@@ -117,7 +117,7 @@ impl CdpSession {
                 "type": "Document",
             }),
         );
-        let (html, status, document_url, csp_headers) = self
+        let (html, status, document_url, security_headers) = self
             .load_page_request(url, Method::Get, None, None)
             .map_err(|error| JsonRpcError {
                 code: -32000,
@@ -131,7 +131,8 @@ impl CdpSession {
                 &html,
                 history_length,
                 &history_state,
-                &csp_headers,
+                &security_headers,
+                status,
                 form_state.as_ref(),
             )
             .map_err(|error| JsonRpcError {
@@ -204,7 +205,7 @@ impl CdpSession {
             }),
         );
 
-        let (html, status, document_url, csp_headers) = self
+        let (html, status, document_url, security_headers) = self
             .load_page_request(url, method, body, content_type)
             .map_err(|error| JsonRpcError {
                 code: -32000,
@@ -218,7 +219,8 @@ impl CdpSession {
             &html,
             next_history_length,
             &next_history_state,
-            &csp_headers,
+            &security_headers,
+            status,
             form_state.as_ref(),
         )
         .map_err(|error| JsonRpcError {
@@ -524,7 +526,7 @@ impl CdpSession {
         method: Method,
         body: Option<Vec<u8>>,
         content_type: Option<String>,
-    ) -> Result<(DecodedHtml, u16, String, Vec<String>), CdpSessionError> {
+    ) -> Result<(DecodedHtml, u16, String, Vec<(String, String)>), CdpSessionError> {
         if method == Method::Get {
             if url == "about:blank" {
                 return Ok((
@@ -561,17 +563,25 @@ impl CdpSession {
             .effective_url()
             .map(ToString::to_string)
             .unwrap_or_else(|| url.to_string());
-        let csp_headers = response
+        let security_headers = response
             .headers()
             .iter()
-            .filter(|(name, _)| name.eq_ignore_ascii_case("content-security-policy"))
-            .map(|(_, value)| value.clone())
+            .filter(|(name, _)| {
+                matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "content-security-policy"
+                        | "content-security-policy-report-only"
+                        | "reporting-endpoints"
+                        | "referrer-policy"
+                )
+            })
+            .cloned()
             .collect();
         Ok((
             decode_html_response(&response),
             response.status_code(),
             effective_url,
-            csp_headers,
+            security_headers,
         ))
     }
 
@@ -589,6 +599,7 @@ impl CdpSession {
             history_length,
             history_state_json,
             &[],
+            0,
             None,
         )
     }
@@ -599,7 +610,8 @@ impl CdpSession {
         html: &DecodedHtml,
         history_length: usize,
         history_state_json: &str,
-        csp_headers: &[String],
+        security_headers: &[(String, String)],
+        response_status: u16,
         form_state: Option<&FormStateSnapshot>,
     ) -> Result<(), CdpSessionError> {
         let document = TreeBuilder::parse_decoded(html).document();
@@ -611,7 +623,8 @@ impl CdpSession {
         )
         .map_err(CdpSessionError::JavaScript)?;
         self.configure_replacement_runtime(&mut runtime)?;
-        runtime.install_csp_policy(csp_headers);
+        runtime.install_response_security_headers(security_headers);
+        runtime.set_document_response_status(response_status);
         if let Some(state) = form_state {
             runtime
                 .restore_form_state(state, FormStateRestoreMode::Restore)
@@ -669,7 +682,8 @@ impl CdpSession {
         html: &DecodedHtml,
         history_length: usize,
         history_state_json: &str,
-        csp_headers: &[String],
+        security_headers: &[(String, String)],
+        response_status: u16,
         form_state: Option<&FormStateSnapshot>,
     ) -> Result<(OwnedPageTask, PendingDocumentCommit), CdpSessionError> {
         let document = TreeBuilder::parse_decoded(html).document();
@@ -681,7 +695,8 @@ impl CdpSession {
         )
         .map_err(CdpSessionError::JavaScript)?;
         self.configure_replacement_runtime(&mut runtime)?;
-        runtime.install_csp_policy(csp_headers);
+        runtime.install_response_security_headers(security_headers);
+        runtime.set_document_response_status(response_status);
         if let Some(state) = form_state {
             runtime
                 .restore_form_state(state, FormStateRestoreMode::Restore)

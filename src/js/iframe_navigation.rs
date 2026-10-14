@@ -118,6 +118,7 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                     let mut state = host.borrow_mut();
                     let source = state.visit_source_for_document(document);
                     state.pending_iframe_visits.remove(&frame);
+                    state.capture_iframe_referrer_source(frame, document);
                     if let Some(source) = &source {
                         state.pending_iframe_visits.insert(frame, source.clone());
                     }
@@ -141,6 +142,7 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                         }
                     } else {
                         state.pending_iframe_visits.remove(&frame);
+                        state.pending_iframe_referrers.remove(&frame);
                     }
                 }
                 result

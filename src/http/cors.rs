@@ -174,7 +174,7 @@ pub fn fetch(
 /// the ordinary Fetch behavior should use [`fetch`] instead.
 pub fn fetch_with_timeout(
     client: &mut Client,
-    mut request: HttpRequest,
+    request: HttpRequest,
     origin: &Origin,
     mode: RequestMode,
     credentials: CredentialsMode,
@@ -182,6 +182,57 @@ pub fn fetch_with_timeout(
     cache: &mut PreflightCache,
     timeout: Option<Duration>,
 ) -> Result<FetchResponse, CorsError> {
+    fetch_with_address_policy(
+        client,
+        request,
+        origin,
+        mode,
+        credentials,
+        redirect_mode,
+        cache,
+        timeout,
+        false,
+    )
+}
+
+/// Fetches with public-IP checks after redirects leave the initial URL's
+/// origin. The initial request retains its caller-selected address policy;
+/// once public-IP checks are required, later redirects cannot relax them.
+pub(crate) fn fetch_with_timeout_restricting_redirects(
+    client: &mut Client,
+    request: HttpRequest,
+    origin: &Origin,
+    mode: RequestMode,
+    credentials: CredentialsMode,
+    redirect_mode: RedirectMode,
+    cache: &mut PreflightCache,
+    timeout: Option<Duration>,
+) -> Result<FetchResponse, CorsError> {
+    fetch_with_address_policy(
+        client,
+        request,
+        origin,
+        mode,
+        credentials,
+        redirect_mode,
+        cache,
+        timeout,
+        true,
+    )
+}
+
+fn fetch_with_address_policy(
+    client: &mut Client,
+    mut request: HttpRequest,
+    origin: &Origin,
+    mode: RequestMode,
+    credentials: CredentialsMode,
+    redirect_mode: RedirectMode,
+    cache: &mut PreflightCache,
+    timeout: Option<Duration>,
+    restrict_redirects: bool,
+) -> Result<FetchResponse, CorsError> {
+    let unrestricted_origin = restrict_redirects.then(|| Origin::from_url(request.url()));
     let mut redirected = false;
     let mut cross_origin_seen = false;
     for redirect_count in 0..=MAX_REDIRECTS {
@@ -246,26 +297,12 @@ pub fn fetch_with_timeout(
             let location = response.header("location").ok_or(CorsError::Redirect)?;
             let next_url = resolve_redirect_url(request.url(), location)
                 .map_err(|error| CorsError::Network(error.to_string()))?;
-            let previous_origin = Origin::from_url(request.url());
-            let next_origin = Origin::from_url(&next_url);
-            let method = redirect_method(response.status_code(), request.method());
-            let preserve_body = method == request.method();
-            let mut next = HttpRequest::new(method, next_url);
-            if request.requires_public_ip() {
-                next.require_public_ip();
-            }
-            if let Some(site) = request.site_for_cookies() {
-                next.set_cookie_context(site.clone(), request.is_top_level_navigation());
-            }
-            for (name, value) in request.headers() {
-                if copy_header_on_redirect(name, preserve_body, previous_origin == next_origin) {
-                    next.add_header(name.clone(), value.clone());
-                }
-            }
-            if preserve_body && let Some(body) = request.body() {
-                next.set_body(body.to_vec());
-            }
-            request = next;
+            request = redirected_request(
+                &request,
+                response.status_code(),
+                next_url,
+                unrestricted_origin.as_ref(),
+            );
             redirected = true;
             continue;
         }
@@ -289,6 +326,36 @@ pub fn fetch_with_timeout(
         });
     }
     Err(CorsError::TooManyRedirects)
+}
+
+fn redirected_request(
+    request: &HttpRequest,
+    status: u16,
+    next_url: Url,
+    unrestricted_origin: Option<&Origin>,
+) -> HttpRequest {
+    let previous_origin = Origin::from_url(request.url());
+    let next_origin = Origin::from_url(&next_url);
+    let method = redirect_method(status, request.method());
+    let preserve_body = method == request.method();
+    let mut next = HttpRequest::new(method, next_url);
+    if request.requires_public_ip()
+        || unrestricted_origin.is_some_and(|initial| *initial != next_origin)
+    {
+        next.require_public_ip();
+    }
+    if let Some(site) = request.site_for_cookies() {
+        next.set_cookie_context(site.clone(), request.is_top_level_navigation());
+    }
+    for (name, value) in request.headers() {
+        if copy_header_on_redirect(name, preserve_body, previous_origin == next_origin) {
+            next.add_header(name.clone(), value.clone());
+        }
+    }
+    if preserve_body && let Some(body) = request.body() {
+        next.set_body(body.to_vec());
+    }
+    next
 }
 
 fn ensure_preflight(
@@ -317,6 +384,9 @@ fn ensure_preflight(
     }
 
     let mut preflight = HttpRequest::new(Method::Options, request.url().clone());
+    if request.requires_public_ip() {
+        preflight.require_public_ip();
+    }
     preflight.set_header("Origin", origin.serialize());
     preflight.set_header("Access-Control-Request-Method", method);
     if !key.unsafe_header_names.is_empty() {
@@ -547,6 +617,10 @@ fn header_tokens(response: &HttpResponse, name: &str) -> Vec<String> {
         .map(ToOwned::to_owned)
         .collect()
 }
+
+#[cfg(test)]
+#[path = "cors/address_policy_tests.rs"]
+mod address_policy_tests;
 
 #[cfg(test)]
 mod tests {

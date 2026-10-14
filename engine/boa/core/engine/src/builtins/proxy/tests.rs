@@ -106,6 +106,36 @@ fn test_state() -> TrapResultState {
 }
 
 #[test]
+fn get_trap_object_result_survives_reentrant_collection() {
+    let mut context = Context::default();
+    let state = test_state();
+    install_result_factory(
+        &mut context,
+        TrapResultState {
+            finalized: Rc::clone(&state.finalized),
+            checked: Rc::clone(&state.checked),
+        },
+    );
+    let result = context
+        .eval(Source::from_bytes(
+            r#"
+                const target = new Proxy({}, {
+                    getOwnPropertyDescriptor() { assertLive(); return undefined; },
+                });
+                const proxy = new Proxy(target, {
+                    get() { return makeResult(); },
+                });
+                proxy.value;
+            "#,
+        ))
+        .unwrap();
+
+    assert!(state.checked.get());
+    assert!(!state.finalized.get());
+    assert!(result.as_object().unwrap().is::<TrapResult>());
+}
+
+#[test]
 fn get_prototype_of_trap_object_survives_reentrant_collection() {
     let mut context = Context::default();
     let state = test_state();

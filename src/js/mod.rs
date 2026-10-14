@@ -97,6 +97,9 @@ pub(crate) mod render_demand;
 mod script_errors;
 mod window_event;
 mod worker_imports;
+mod worker_loading;
+#[cfg(test)]
+mod worker_reporting_tests;
 pub use form_state::{FormStateRestoreMode, FormStateSnapshot};
 #[cfg(test)]
 mod layout_metrics_tests;
@@ -105,6 +108,7 @@ mod module_fetch;
 mod module_loading_tests;
 mod node_lifetime;
 mod pointer_lock;
+mod report_delivery;
 pub use pointer_lock::PointerLockTransition;
 #[cfg(test)]
 mod attribute_normalization_tests;
@@ -140,6 +144,7 @@ mod event_loop;
 mod html_parsing;
 mod html_sanitizer;
 mod html_serialization;
+mod security_reporting;
 mod storage;
 mod stylesheet;
 use csp::{CspPolicy, CspViolation, ResourceType};
@@ -520,6 +525,8 @@ const DOM_BOOTSTRAP: &str = concat!(
     "\n",
     include_str!("event_interfaces.js"),
     "\n",
+    include_str!("security_reporting.js"),
+    "\n",
     include_str!("touch_events.js"),
     "\n",
     include_str!("device_events.js"),
@@ -761,6 +768,20 @@ fn evaluate_dom_bootstrap(
                     .into());
             }
         }
+        // The module namespace is never exposed to page scripts. Capture the
+        // ReportingObserver dispatcher after bootstrap and root it in HostState.
+        let dispatcher = module
+            .namespace(context)
+            .get(js_string!("__omoikane_queue_reporting_api_report"), context)?;
+        if dispatcher.as_callable().is_none() {
+            return Err(JsNativeError::error()
+                .with_message("report observer dispatcher is unavailable")
+                .into());
+        }
+        host_state
+            .borrow_mut()
+            .report_observer_dispatchers
+            .insert(document_id, dispatcher);
         Ok(())
     })();
     loader.bootstrap_modules.borrow_mut().remove(&module);
@@ -787,7 +808,7 @@ struct HttpModuleLoader {
     /// policies, so a single global policy would be incorrect for nested
     /// module graphs.
     csp_contexts: RefCell<HashMap<(usize, String), CspPolicy>>,
-    csp_violations: RefCell<Vec<(usize, String, String)>>,
+    csp_violations: RefCell<Vec<security_reporting::ModuleCspViolation>>,
     csp_violation_keys: RefCell<HashSet<(usize, String)>>,
 }
 
@@ -870,10 +891,24 @@ impl ModuleLoader for HttpModuleLoader {
                         .map(|policy| (module_document_id, policy))
                 });
 
+            if let Some((document_id, policy)) = csp_context.as_ref() {
+                self.observe_module_policy(
+                    *document_id,
+                    policy,
+                    &resolved_string,
+                    0,
+                    &resolved_string,
+                );
+            }
             if let Some((document_id, policy)) = csp_context.as_ref()
                 && !policy.allows_url(ResourceType::Script, &resolved)
             {
-                self.record_csp_violation(*document_id, resolved_string.clone());
+                self.record_csp_violation(
+                    *document_id,
+                    resolved_string.clone(),
+                    0,
+                    &resolved_string,
+                );
                 self.report_import_load_failure();
                 return Err(JsNativeError::error()
                     .with_message(format!("CSP blocked module import: {resolved_string}"))
@@ -964,17 +999,24 @@ impl ModuleLoader for HttpModuleLoader {
             }
             if let Some(effective_url) = response.effective_url()
                 && let Some((document_id, policy)) = csp_context.as_ref()
-                && !policy.allows_url_after_redirects(
-                    ResourceType::Script,
+                && !self.module_csp_allows_response(
+                    *document_id,
+                    policy,
                     effective_url,
                     response.redirect_count(),
+                    &resolved_string,
                 )
             {
                 let blocked_uri = effective_url.to_string();
-                self.record_csp_violation(*document_id, blocked_uri.clone());
+                self.record_csp_violation(
+                    *document_id,
+                    blocked_uri.clone(),
+                    response.redirect_count(),
+                    &resolved_string,
+                );
                 self.report_import_load_failure();
                 return Err(JsNativeError::error()
-                    .with_message(format!("CSP blocked module redirect: {blocked_uri}"))
+                    .with_message(format!("CSP blocked module redirect: {resolved_string}"))
                     .into());
             }
             // Other waiters may already have parsed this shared response.
@@ -1100,25 +1142,36 @@ impl HttpModuleLoader {
             .retain(|(module_document_id, _), _| *module_document_id != document_id);
         self.csp_violations
             .borrow_mut()
-            .retain(|(violation_document_id, _, _)| *violation_document_id != document_id);
+            .retain(|violation| violation.document_id != document_id);
         self.csp_violation_keys
             .borrow_mut()
             .retain(|(violation_document_id, _)| *violation_document_id != document_id);
     }
 
-    fn record_csp_violation(&self, document_id: usize, blocked_uri: String) {
+    fn record_csp_violation(
+        &self,
+        document_id: usize,
+        reference: String,
+        redirects: usize,
+        report_reference: &str,
+    ) {
         let mut violations = self.csp_violations.borrow_mut();
         if violations.len() >= MAX_CSP_VIOLATIONS {
             return;
         }
         let mut keys = self.csp_violation_keys.borrow_mut();
-        if !keys.insert((document_id, blocked_uri.clone())) {
+        if !keys.insert((document_id, report_reference.to_owned())) {
             return;
         }
-        violations.push((document_id, "script-src".to_string(), blocked_uri));
+        violations.push(security_reporting::ModuleCspViolation {
+            document_id,
+            reference,
+            redirects,
+            report_reference: report_reference.to_owned(),
+        });
     }
 
-    fn take_csp_violations(&self) -> Vec<(usize, String, String)> {
+    fn take_csp_violations(&self) -> Vec<security_reporting::ModuleCspViolation> {
         let violations = std::mem::take(&mut *self.csp_violations.borrow_mut());
         self.csp_violation_keys.borrow_mut().clear();
         violations
@@ -1148,6 +1201,7 @@ enum TimerPayload {
         node_id: usize,
         request: form_submission::Submission,
         visit_source: Option<VisitSource>,
+        referrer_source: NavigationReferrerSource,
     },
     /// A geolocation request whose timeout has elapsed.
     GeolocationTimeout { request_id: u64 },
@@ -1283,6 +1337,7 @@ pub enum PageTaskSource {
 struct PreparedPageSource {
     source: PageTaskSource,
     filename: Option<String>,
+    csp_requested_url: Option<String>,
     start_position: (u32, u32),
     muted_errors: bool,
 }
@@ -1292,6 +1347,7 @@ impl From<PageTaskSource> for PreparedPageSource {
         Self {
             source,
             filename: None,
+            csp_requested_url: None,
             start_position: (1, 1),
             muted_errors: false,
         }
@@ -1559,6 +1615,21 @@ impl From<String> for TaskErrorRecord {
     }
 }
 
+/// The request initiator captured before an asynchronous iframe navigation.
+#[derive(Debug, Clone)]
+struct NavigationReferrerSource {
+    url: String,
+    document_policy: security_reporting::ReferrerPolicy,
+    policy: security_reporting::ReferrerPolicy,
+}
+
+/// Source and security context fixed when a dynamic inline script is prepared.
+struct PreparedInsertedInlineScript {
+    document_id: usize,
+    source: String,
+    policy: CspPolicy,
+}
+
 struct HostState {
     runtime_identity: Rc<()>,
     /// Monotonic clock origin used by `performance.now()` for this global.
@@ -1583,6 +1654,8 @@ struct HostState {
     /// Bootstrap-private resolver that accepts only canonical DOM wrappers and
     /// returns their native node identity.
     canonical_node_identity_resolver: Option<JsValue>,
+    /// Bootstrap-private ReportingObserver dispatchers, one per Document Realm.
+    report_observer_dispatchers: HashMap<usize, JsValue>,
     /// Legacy Window.event slots, isolated by the callback's Document realm.
     current_window_events: HashMap<usize, JsValue>,
     window_proxy_registry: Option<window_event::ProxyRegistry>,
@@ -1614,6 +1687,8 @@ struct HostState {
     geolocation: geolocation::State,
     compression_streams: compression_stream::Store,
     http_client: Client,
+    /// Lazily started HTTP worker for best-effort CSP/Reporting delivery.
+    report_delivery: Option<report_delivery::ReportDelivery>,
     cookie_store: Arc<Mutex<crate::http::CookieJar>>,
     cookie_change_sequence: u64,
     cookie_change_callbacks: HashMap<usize, CookieChangeCallbacks>,
@@ -1715,6 +1790,8 @@ struct HostState {
     /// step. Node identities keep this stable across wrapper recreation and
     /// same-document moves.
     started_inserted_scripts: HashSet<usize>,
+    /// One-shot source and policy between synchronous preparation and evaluation.
+    prepared_inserted_inline_scripts: HashMap<usize, PreparedInsertedInlineScript>,
     /// Explicit Realm root used when a child writes into the top Document.
     main_realm: Option<Realm>,
     /// Base URL of the top-level document, used to resolve relative resource
@@ -1758,6 +1835,7 @@ struct HostState {
     pending_forced_iframe_navigations: HashSet<usize>,
     /// Source captured before an iframe navigation's asynchronous load.
     pending_iframe_visits: HashMap<usize, VisitSource>,
+    pending_iframe_referrers: HashMap<usize, NavigationReferrerSource>,
     /// Preserves a child Window's initiator while its callback changes `src`.
     active_child_navigation_frame: Option<usize>,
     navigation_requests: VecDeque<(NavigationRequest, Option<VisitSource>)>,
@@ -1785,6 +1863,8 @@ struct HostState {
     /// Committed URL per live Document. Nested Window/Document access must not
     /// accidentally expose the top-level Location after iframe navigation.
     document_urls: HashMap<usize, String>,
+    /// Creation URL and response status, retained across same-document changes.
+    document_reporting: HashMap<usize, security_reporting::DocumentReportingMetadata>,
     /// The fragment-selected element for each live Document. Weak references
     /// avoid retaining nodes removed from the document tree.
     document_targets: HashMap<usize, WeakNodeHandle>,
@@ -1861,6 +1941,9 @@ unsafe impl Trace for HostState {
         // alive without a separate Trace traversal (Realm exposes no `trace`).
         if let Some(resolver) = &self.canonical_node_identity_resolver {
             unsafe { resolver.trace(tracer) };
+        }
+        for dispatcher in self.report_observer_dispatchers.values() {
+            unsafe { dispatcher.trace(tracer) };
         }
         for bindings in self.bootstrap_bindings.values() {
             unsafe { bindings.trace(tracer) };
@@ -2182,6 +2265,7 @@ impl HostState {
             iframe_navigation: iframe_navigation::State::default(),
             form_validation: form_validation::State::default(),
             canonical_node_identity_resolver: None,
+            report_observer_dispatchers: HashMap::new(),
             current_window_events: HashMap::new(),
             window_proxy_registry: None,
             bootstrap_bindings: HashMap::new(),
@@ -2193,7 +2277,7 @@ impl HostState {
             suppressed_task_errors: 0,
             base_url,
             secure_context_override: None,
-            location_href,
+            location_href: location_href.clone(),
             navigator_user_agent: default_user_agent(),
             clipboard: host_clipboard(),
             clipboard_permission_granted: true,
@@ -2201,6 +2285,7 @@ impl HostState {
             geolocation: geolocation::State::default(),
             compression_streams: compression_stream::Store::new(),
             http_client,
+            report_delivery: None,
             cookie_store,
             cookie_change_sequence: 0,
             cookie_change_callbacks: HashMap::new(),
@@ -2264,6 +2349,7 @@ impl HostState {
             parser_inserted_scripts: HashSet::new(),
             runnable_inserted_scripts: HashSet::new(),
             started_inserted_scripts: HashSet::new(),
+            prepared_inserted_inline_scripts: HashMap::new(),
             main_realm: None,
             iframe_documents: HashMap::new(),
             auxiliary_contexts: HashMap::new(),
@@ -2276,6 +2362,7 @@ impl HostState {
             pending_resource_loads: HashSet::new(),
             pending_forced_iframe_navigations: HashSet::new(),
             pending_iframe_visits: HashMap::new(),
+            pending_iframe_referrers: HashMap::new(),
             active_child_navigation_frame: None,
             navigation_requests: VecDeque::new(),
             fullscreen_elements: HashMap::new(),
@@ -2294,6 +2381,16 @@ impl HostState {
             image_timeline: Arc::new(Mutex::new(HashMap::new())),
             visible_image_playbacks: Vec::new(),
             document_urls,
+            document_reporting: HashMap::from([(
+                document.identity(),
+                security_reporting::DocumentReportingMetadata {
+                    creation_url: location_href,
+                    response_status: 0,
+                    referrer: String::new(),
+                    referrer_policy: security_reporting::ReferrerPolicy::default(),
+                    endpoint_revision: 0,
+                },
+            )]),
             document_targets: HashMap::new(),
             document_base_urls,
             document_security_origins,
@@ -2320,6 +2417,7 @@ impl HostState {
             adopted_stylesheets: HashMap::new(),
         };
         state.register_tree(&document);
+        state.apply_connected_referrer_metas(&document);
         let initial_url = state.location_href.clone();
         state.update_document_target(&document, &initial_url);
         state
@@ -2376,6 +2474,85 @@ impl HostState {
                 .as_str()
         };
         VisitSource::new(origin.clone(), top_url)
+    }
+
+    /// A srcdoc Document uses its container Document's URL as the source for
+    /// subsequent requests. Keep the initiating URL separate from its own URL.
+    fn referrer_source_url_for_document(&self, mut document_id: usize) -> String {
+        for _ in 0..=self.iframe_documents.len() {
+            let Some(url) = self.document_urls.get(&document_id) else {
+                break;
+            };
+            if url.split('#').next() != Some("about:srcdoc") {
+                return url.clone();
+            }
+            let Some(frame_id) = self.iframe_documents.iter().find_map(|(frame_id, entry)| {
+                (entry.document.identity() == document_id).then_some(*frame_id)
+            }) else {
+                break;
+            };
+            let Some(owner) = self
+                .get_node(frame_id)
+                .and_then(|frame| owner_document_for_node(&frame))
+            else {
+                break;
+            };
+            document_id = owner.identity();
+        }
+        String::new()
+    }
+
+    fn navigation_referrer_source_for_document(
+        &self,
+        document_id: usize,
+    ) -> NavigationReferrerSource {
+        let policy = self.referrer_policy_for_document(document_id);
+        let url = if matches!(
+            self.document_security_origins.get(&document_id),
+            Some(DocumentSecurityOrigin::Tuple(_))
+        ) {
+            self.referrer_source_url_for_document(document_id)
+        } else {
+            String::new()
+        };
+        NavigationReferrerSource {
+            url,
+            document_policy: policy,
+            policy,
+        }
+    }
+
+    /// Uses the captured initiator of a queued navigation, or derives one for
+    /// a synchronous iframe load. The iframe's attribute overrides only its
+    /// navigation request, not the created Document's inherited policy.
+    fn referrer_source_for_iframe_navigation(
+        &self,
+        iframe: &NodeHandle,
+        owner_document_id: usize,
+        has_submission: bool,
+    ) -> NavigationReferrerSource {
+        let iframe_id = iframe.identity();
+        if let Some(source) = self.pending_iframe_referrers.get(&iframe_id) {
+            return source.clone();
+        }
+        let child_navigation = self.active_child_navigation_frame == Some(iframe_id);
+        let source_document_id = if child_navigation {
+            self.iframe_documents
+                .get(&iframe_id)
+                .map_or(owner_document_id, |entry| entry.document.identity())
+        } else {
+            owner_document_id
+        };
+        let mut source = self.navigation_referrer_source_for_document(source_document_id);
+        if !child_navigation
+            && !has_submission
+            && let Some(policy) = iframe
+                .get_attribute("referrerpolicy")
+                .and_then(|value| security_reporting::ReferrerPolicy::parse(&value))
+        {
+            source.policy = policy;
+        }
+        source
     }
 
     /// Collects the current document's visited links for a private paint pass.
@@ -2448,6 +2625,18 @@ impl HostState {
         if self.active_child_navigation_frame == Some(iframe_id) {
             return;
         }
+        if let Some(owner) = owner_document_for_node(iframe) {
+            let mut source = self.navigation_referrer_source_for_document(owner.identity());
+            if let Some(policy) = iframe
+                .get_attribute("referrerpolicy")
+                .and_then(|value| security_reporting::ReferrerPolicy::parse(&value))
+            {
+                source.policy = policy;
+            }
+            self.pending_iframe_referrers.insert(iframe_id, source);
+        } else {
+            self.pending_iframe_referrers.remove(&iframe_id);
+        }
         let source = owner_document_for_node(iframe)
             .and_then(|owner| self.visit_source_for_document(owner.identity()));
         if let Some(source) = source {
@@ -2455,6 +2644,11 @@ impl HostState {
         } else {
             self.pending_iframe_visits.remove(&iframe_id);
         }
+    }
+
+    fn capture_iframe_referrer_source(&mut self, iframe_id: usize, document_id: usize) {
+        let source = self.navigation_referrer_source_for_document(document_id);
+        self.pending_iframe_referrers.insert(iframe_id, source);
     }
 
     fn clear_document_target(&mut self, document_id: usize) {
@@ -2695,20 +2889,52 @@ impl HostState {
         };
         let navigation_url =
             submission.map_or_else(|| resource.clone(), |request| request.url.clone());
+        let source = self.referrer_source_for_iframe_navigation(
+            iframe,
+            owner_document_id,
+            submission.is_some(),
+        );
+        let source_url = source.url;
+        let request_policy = source.policy;
+        let inherited_policy = source.document_policy;
+        let initial_about_blank = !self.iframe_documents.contains_key(&iframe_id)
+            && submission.is_none()
+            && navigation_url.is_empty();
         let inherits_creator_origin = submission.is_none() && resource_attribute == "srcdoc"
             || navigation_url.is_empty()
             || matches_about_blank_url(&navigation_url);
         let LoadedChildDocument {
             document,
-            csp_headers,
+            security_headers,
+            response_status,
+            final_request_referrer,
             url: child_url,
         } = if let Some(request) = submission {
-            self.load_iframe_form_submission(request)?
+            self.load_iframe_form_submission_with_referrer(request, &source_url, request_policy)?
         } else if resource_attribute == "srcdoc" {
             LoadedChildDocument::srcdoc(&resource)
         } else {
-            self.load_iframe_document(&resource, resource_base.as_ref())
+            self.load_iframe_document_with_referrer(
+                &resource,
+                resource_base.as_ref(),
+                &source_url,
+                request_policy,
+            )
         };
+        let creator_url = initial_about_blank
+            .then(|| {
+                self.document_urls
+                    .get(&owner_document_id)
+                    .map(String::as_str)
+            })
+            .flatten();
+        let referrer = security_reporting::loaded_document_referrer(
+            final_request_referrer.as_deref(),
+            child_url.as_deref(),
+            &source_url,
+            request_policy,
+            creator_url,
+        );
         let child_base_url = if inherits_creator_origin {
             resource_base.clone()
         } else {
@@ -2763,6 +2989,16 @@ impl HostState {
             .unwrap_or_else(|| "about:blank".to_string());
         self.document_urls
             .insert(document.identity(), committed_url.clone());
+        self.register_document_reporting(document.identity(), &committed_url, response_status);
+        if let Some(metadata) = self.document_reporting.get_mut(&document.identity()) {
+            metadata.referrer = referrer;
+            metadata.referrer_policy = if inherits_creator_origin {
+                inherited_policy
+            } else {
+                security_reporting::response_referrer_policy(&security_headers).unwrap_or_default()
+            };
+        }
+        self.apply_connected_referrer_metas(&document);
         self.update_document_target(&document, &committed_url);
         if let Some(child_base_url) = child_base_url.clone() {
             self.document_base_urls
@@ -2790,7 +3026,7 @@ impl HostState {
         let policy = if inherits_owner_csp {
             self.document_csp
                 .get(&owner_document.identity())
-                .cloned()
+                .map(CspPolicy::inherited_for_new_global)
                 .unwrap_or_default()
                 .with_document_meta(
                     &document,
@@ -2800,7 +3036,11 @@ impl HostState {
                         .unwrap_or_default(),
                 )
         } else {
-            CspPolicy::from_headers_and_document(&csp_headers, &document, &policy_base)
+            CspPolicy::from_response_headers_and_document(
+                &security_headers,
+                &document,
+                &policy_base,
+            )
         };
         self.document_csp.insert(document.identity(), policy);
         // Seed a dirty style cache entry for the freshly loaded sub-document so
@@ -2853,6 +3093,7 @@ impl HostState {
         // script ever reads their contentDocument.
         self.schedule_connected_resource_loads(&document, false);
         let visit_source = self.pending_iframe_visits.remove(&iframe_id);
+        self.pending_iframe_referrers.remove(&iframe_id);
         if let (Some(visit_source), Some(committed_url)) = (visit_source, child_url.as_deref()) {
             let requested_url = resolve_url_reference(&navigation_url, resource_base.as_ref());
             self.storage_manager.record_page_navigation(
@@ -2901,7 +3142,7 @@ impl HostState {
         let csp = self
             .document_csp
             .get(&opener_document_id)
-            .cloned()
+            .map(CspPolicy::inherited_for_new_global)
             .unwrap_or_default();
         self.register_tree(&document);
         self.document_origins.insert(document_id, origin);
@@ -2909,6 +3150,17 @@ impl HostState {
             .insert(document_id, security_origin);
         self.document_urls
             .insert(document_id, "about:blank".to_owned());
+        let opener_referrer_policy = self.referrer_policy_for_document(opener_document_id);
+        let opener_referrer = self
+            .document_urls
+            .get(&opener_document_id)
+            .cloned()
+            .unwrap_or_default();
+        self.register_document_reporting(document_id, "about:blank", 200);
+        if let Some(metadata) = self.document_reporting.get_mut(&document_id) {
+            metadata.referrer = opener_referrer;
+            metadata.referrer_policy = opener_referrer_policy;
+        }
         if let Some(base) = base {
             self.document_base_urls.insert(document_id, base);
         }
@@ -2954,6 +3206,7 @@ impl HostState {
         &mut self,
         id: u64,
         requested: &str,
+        source: &NavigationReferrerSource,
     ) -> Result<usize, JsHostError> {
         let (opener_document_id, current_document_id) = {
             let entry = self
@@ -2965,11 +3218,27 @@ impl HostState {
         let base = self
             .base_url_for_document(current_document_id)
             .or_else(|| self.base_url_for_document(opener_document_id));
+        let source_url = source.url.as_str();
+        let source_policy = source.policy;
         let LoadedChildDocument {
             document,
-            csp_headers: headers,
+            security_headers: headers,
+            response_status,
+            final_request_referrer,
             url: effective_url,
-        } = self.load_iframe_document(requested, base.as_ref());
+        } = self.load_iframe_document_with_referrer(
+            requested,
+            base.as_ref(),
+            source_url,
+            source_policy,
+        );
+        let referrer = security_reporting::loaded_document_referrer(
+            final_request_referrer.as_deref(),
+            effective_url.as_deref(),
+            source_url,
+            source_policy,
+            None,
+        );
         let document_id = document.identity();
         let document_url = effective_url.unwrap_or_else(|| "about:blank".to_owned());
         let inherits_opener = requested.is_empty() || matches_about_blank_url(requested);
@@ -3000,10 +3269,10 @@ impl HostState {
         let csp = if inherits_opener {
             self.document_csp
                 .get(&opener_document_id)
-                .cloned()
+                .map(CspPolicy::inherited_for_new_global)
                 .unwrap_or_default()
         } else {
-            CspPolicy::from_headers_and_document(&headers, &document, &document_url)
+            CspPolicy::from_response_headers_and_document(&headers, &document, &document_url)
         };
 
         self.register_tree(&document);
@@ -3012,13 +3281,23 @@ impl HostState {
             .auxiliary_contexts
             .get_mut(&id)
             .ok_or(JsHostError::AuxiliaryContextClosedDuringNavigation)?;
-        let old_document = std::mem::replace(&mut entry.document, document);
+        let old_document = std::mem::replace(&mut entry.document, document.clone());
         let _old_realm = entry.realm.take();
         entry.document_url = document_url.clone();
         self.retire_document_tree(&old_document);
         self.document_origins.insert(document_id, storage_origin);
         self.document_security_origins
             .insert(document_id, security_origin);
+        self.register_document_reporting(document_id, &document_url, response_status);
+        if let Some(metadata) = self.document_reporting.get_mut(&document_id) {
+            metadata.referrer = referrer;
+            metadata.referrer_policy = if inherits_opener {
+                source_policy
+            } else {
+                security_reporting::response_referrer_policy(&headers).unwrap_or_default()
+            };
+        }
+        self.apply_connected_referrer_metas(&document);
         self.document_urls.insert(document_id, document_url);
         if let Some(base) = new_base {
             self.document_base_urls.insert(document_id, base);
@@ -3065,11 +3344,26 @@ impl HostState {
         src: &str,
         base_url: Option<&crate::http::Url>,
     ) -> LoadedChildDocument {
+        self.load_iframe_document_with_referrer(
+            src,
+            base_url,
+            "",
+            security_reporting::ReferrerPolicy::default(),
+        )
+    }
+
+    fn load_iframe_document_with_referrer(
+        &mut self,
+        src: &str,
+        base_url: Option<&crate::http::Url>,
+        source_url: &str,
+        policy: security_reporting::ReferrerPolicy,
+    ) -> LoadedChildDocument {
         if src.is_empty() || matches_about_blank_url(src) {
             let url = if src.is_empty() { "about:blank" } else { src };
             return LoadedChildDocument::about_blank(url.to_owned());
         }
-        self.fetch_child_resource(src, base_url)
+        self.fetch_child_resource(src, base_url, source_url, policy)
             .map_or_else(LoadedChildDocument::fetch_failed, |resource| {
                 resource.into_get_document()
             })
@@ -3088,19 +3382,26 @@ impl HostState {
         &mut self,
         src: &str,
         base_url: Option<&crate::http::Url>,
+        source_url: &str,
+        policy: security_reporting::ReferrerPolicy,
     ) -> Option<FetchedChildResource> {
         let url = match resolve_resource_ref(src, base_url)? {
             ResolvedResource::Data { mime_type, data } => {
                 return Some(FetchedChildResource {
                     mime_type,
                     body: data,
-                    csp_headers: Vec::new(),
+                    response_status: 200,
+                    final_request_referrer: String::new(),
+                    security_headers: Vec::new(),
                     effective_url: src.to_owned(),
                 });
             }
             ResolvedResource::Url(url) => url,
         };
         let mut request = crate::http::HttpRequest::get(&url).ok()?;
+        if !source_url.is_empty() {
+            request.set_referrer_source(source_url.to_owned(), policy);
+        }
         if let Ok(site) = self.location_href.parse::<crate::http::Url>() {
             request.set_cookie_context(site, false);
         }
@@ -3115,10 +3416,15 @@ impl HostState {
             effective_url.push_str(fragment);
         }
         let mime_type = response.header("Content-Type").unwrap_or("").to_owned();
-        let csp_headers = child_document::response_csp_headers(&response);
+        let security_headers = child_document::response_security_headers(&response);
         Some(FetchedChildResource {
             mime_type,
-            csp_headers,
+            security_headers,
+            response_status: response.status_code(),
+            final_request_referrer: response
+                .final_request_referrer()
+                .unwrap_or_default()
+                .to_owned(),
             body: response.into_body(),
             effective_url,
         })
@@ -3248,6 +3554,8 @@ impl HostState {
         }
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
+        self.document_reporting.remove(&document_id);
+        self.report_observer_dispatchers.remove(&document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
@@ -3269,6 +3577,8 @@ impl HostState {
             .retain(|id| !tree_ids.contains(id));
         self.pending_forced_iframe_navigations
             .retain(|id| !tree_ids.contains(id));
+        self.pending_iframe_referrers
+            .retain(|id, _| !tree_ids.contains(id));
         self.event_loop.cancel_resource_loads_for_nodes(&tree_ids);
         self.discarded_node_ids.extend(tree_ids.iter().copied());
         self.unregister_tree(document);
@@ -3352,6 +3662,8 @@ impl HostState {
         }
         self.document_origins.remove(&document_id);
         self.document_urls.remove(&document_id);
+        self.document_reporting.remove(&document_id);
+        self.report_observer_dispatchers.remove(&document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
@@ -3372,6 +3684,8 @@ impl HostState {
 
         self.pending_resource_loads
             .retain(|node_id| !tree_ids.contains(node_id));
+        self.pending_iframe_referrers
+            .retain(|id, _| !tree_ids.contains(id));
         self.event_loop.cancel_resource_loads_for_nodes(&tree_ids);
         self.discarded_node_ids.extend(tree_ids.iter().copied());
         self.unregister_tree(&previous.document);
@@ -3383,6 +3697,7 @@ impl HostState {
         self.retire_iframe_document(iframe_id);
         self.pending_forced_iframe_navigations.remove(&iframe_id);
         self.pending_iframe_visits.remove(&iframe_id);
+        self.pending_iframe_referrers.remove(&iframe_id);
         self.iframe_context_ids.remove(&iframe_id);
         self.browsing_context_names.remove(&iframe_id);
     }
@@ -3407,6 +3722,8 @@ impl HostState {
         self.pending_forced_iframe_navigations
             .retain(|node_id| !subtree_ids.contains(node_id));
         self.pending_iframe_visits
+            .retain(|node_id, _| !subtree_ids.contains(node_id));
+        self.pending_iframe_referrers
             .retain(|node_id, _| !subtree_ids.contains(node_id));
         self.event_loop
             .cancel_resource_loads_for_nodes(&subtree_ids);
@@ -3689,6 +4006,39 @@ impl HostState {
         blocked_uri: impl Into<String>,
     ) {
         let blocked_uri = blocked_uri.into();
+        self.record_csp_violation_for_request(
+            document,
+            resource_type,
+            &blocked_uri,
+            0,
+            &blocked_uri,
+        );
+    }
+
+    fn record_csp_violation_with_source(
+        &mut self,
+        document: &NodeHandle,
+        resource_type: ResourceType,
+        blocked_uri: impl Into<String>,
+        source: Option<&security_reporting::CspSourceLocation>,
+    ) {
+        let blocked_uri = blocked_uri.into();
+        self.record_csp_violation_for_request_with_source(
+            document,
+            resource_type,
+            &blocked_uri,
+            0,
+            &blocked_uri,
+            source,
+        );
+    }
+
+    fn record_csp_violation_history(
+        &mut self,
+        document: &NodeHandle,
+        resource_type: ResourceType,
+        blocked_uri: String,
+    ) {
         let document_id = document.identity();
         let directive = resource_type.directive().to_string();
         let key = (document_id, directive.clone(), blocked_uri.clone());
@@ -3714,7 +4064,18 @@ impl HostState {
         blocked_uri: impl Into<String>,
     ) {
         if let Some(document) = document_root_for_node(node) {
-            self.record_csp_violation(&document, resource_type, blocked_uri);
+            let blocked_uri = blocked_uri.into();
+            let policies = self
+                .csp_policy_for_document(&document)
+                .blocking_policy_texts_after_redirects(resource_type, &blocked_uri, 0);
+            self.queue_policy_violation_events_for_node(
+                node,
+                resource_type,
+                &blocked_uri,
+                policies,
+                "enforce",
+            );
+            self.record_csp_violation_history(&document, resource_type, blocked_uri);
         }
     }
 
@@ -3729,7 +4090,7 @@ impl HostState {
         };
         let blocked = !self
             .csp_policy_for_document(&document)
-            .allows_inline(ResourceType::Style)
+            .allows_inline_attribute(ResourceType::Style)
             && node.get_attribute("style").is_some();
         if blocked {
             self.record_csp_violation(
@@ -4123,20 +4484,19 @@ impl HostState {
             .map(|entry| std::mem::take(&mut entry.resources))
             .unwrap_or_default();
         resources.set_error_reporter(self.error_reporter.clone());
+        resources.retain_live_sources();
         let mut web_fonts = crate::font::WebFontRegistry::new();
         let site_for_cookies = self.location_href.parse::<crate::http::Url>().ok();
         let (stylesheet_nodes, font_scope_parents) = collect_stylesheet_nodes(document);
         for (style_node, scope, implicit_scope_root) in stylesheet_nodes {
-            let (css, blocked) = resources.load_node(
+            let (css, checks) = resources.load_node(
                 &style_node,
                 base.as_ref(),
                 &policy,
                 site_for_cookies.as_ref(),
                 Arc::clone(&self.cookie_store),
             );
-            for blocked_uri in blocked {
-                self.record_csp_violation(document, ResourceType::Style, blocked_uri);
-            }
+            self.observe_stylesheet_policy_checks(document, &style_node, checks);
             let (sheet, parse_failed) =
                 crate::paint::stylesheet::parse_stylesheet_forgiving_with_status(&css);
             if parse_failed {
@@ -4200,7 +4560,7 @@ impl HostState {
         }
         let web_fonts = Arc::new(web_fonts);
         resolver.set_web_fonts(web_fonts.clone());
-        let blocked_inline_styles = if policy.allows_inline(ResourceType::Style) {
+        let blocked_inline_styles = if policy.allows_inline_attribute(ResourceType::Style) {
             HashSet::new()
         } else {
             let mut blocked = HashSet::new();
@@ -5469,11 +5829,33 @@ impl JsRuntime {
     ) -> JsResult<()> {
         let realm = self.ensure_iframe_realm(iframe_id, document_id)?;
         let old_realm = self.context.enter_realm(realm);
-        let script_node = self.host_state.borrow().get_node(script_id);
+        let (script_node, document_url) = {
+            let state = self.host_state.borrow();
+            (
+                state.get_node(script_id),
+                state.document_urls.get(&document_id).cloned(),
+            )
+        };
+        let start_position = script_node
+            .as_ref()
+            .and_then(NodeHandle::script_source_position)
+            .unwrap_or((1, 1));
         self.host_state.borrow_mut().write_insertion_ref = script_node;
         let result = (|| {
             self.eval(&format!("__omoikane_set_current_script({script_id})"))?;
-            self.eval(source)?;
+            let evaluated = self.with_active_host(|context| {
+                let metadata = script_errors::classic_script_metadata(false, document_url.clone());
+                Script::parse_with_host_defined(
+                    Source::from_reader(source.as_bytes(), document_url.as_deref().map(Path::new))
+                        .with_start_position(start_position.0, start_position.1),
+                    None,
+                    metadata,
+                    context,
+                )?
+                .evaluate(context)
+            });
+            self.host_state.borrow_mut().pending_javascript_dialog = None;
+            evaluated?;
             self.run_jobs()
         })();
         let _ = self.eval("__omoikane_set_current_script(null)");
@@ -5564,7 +5946,10 @@ impl JsRuntime {
         script_id: usize,
         source: &str,
         filename: &str,
+        csp_requested_url: &str,
         muted_errors: bool,
+        start_position: (u32, u32),
+        set_current_script: bool,
     ) -> JsResult<()> {
         let realm = self.realm_for_document(document_id)?;
         if document_id != self.document().identity() && realm.is_none() {
@@ -5576,11 +5961,17 @@ impl JsRuntime {
         let script_node = self.host_state.borrow().get_node(script_id);
         self.host_state.borrow_mut().write_insertion_ref = script_node;
         let result = (|| {
-            self.eval(&format!("__omoikane_set_current_script({script_id})"))?;
+            if set_current_script {
+                self.eval(&format!("__omoikane_set_current_script({script_id})"))?;
+            }
             let evaluated = self.with_active_host(|context| {
-                let metadata = script_errors::classic_script_metadata(muted_errors);
+                let metadata = script_errors::classic_script_metadata(
+                    muted_errors,
+                    Some(csp_requested_url.to_owned()),
+                );
                 Script::parse_with_host_defined(
-                    Source::from_reader(source.as_bytes(), Some(Path::new(filename))),
+                    Source::from_reader(source.as_bytes(), Some(Path::new(filename)))
+                        .with_start_position(start_position.0, start_position.1),
                     None,
                     metadata,
                     context,
@@ -5600,7 +5991,9 @@ impl JsRuntime {
             evaluated?;
             self.run_jobs()
         })();
-        let _ = self.eval("__omoikane_set_current_script(null)");
+        if set_current_script {
+            let _ = self.eval("__omoikane_set_current_script(null)");
+        }
         self.host_state.borrow_mut().write_insertion_ref = None;
         if let Some(old_realm) = old_realm {
             self.context.enter_realm(old_realm);
@@ -6416,10 +6809,9 @@ impl JsRuntime {
         let document = self.document();
         let base_url = self.host_state.borrow().location_href.clone();
         let policy = CspPolicy::from_headers_and_document(headers, &document, &base_url);
-        self.host_state
-            .borrow_mut()
-            .document_csp
-            .insert(document.identity(), policy);
+        let mut state = self.host_state.borrow_mut();
+        state.advance_report_endpoint_revision(document.identity());
+        state.document_csp.insert(document.identity(), policy);
     }
 
     fn sync_module_csp_violations(&mut self) {
@@ -6428,14 +6820,20 @@ impl JsRuntime {
             return;
         }
         let mut state = self.host_state.borrow_mut();
-        for (document_id, _directive, blocked_uri) in violations {
+        for violation in violations {
             // Module loading is the one CSP path that runs inside Boa's
             // ModuleLoader callback, so retain its blocked target here while
             // sharing the same per-document deduplication as native paths.
-            if state.document_is_active(document_id)
-                && let Some(document) = state.get_node(document_id)
+            if state.document_is_active(violation.document_id)
+                && let Some(document) = state.get_node(violation.document_id)
             {
-                state.record_csp_violation(&document, ResourceType::Script, blocked_uri);
+                state.record_csp_violation_for_request(
+                    &document,
+                    ResourceType::Script,
+                    &violation.reference,
+                    violation.redirects,
+                    &violation.report_reference,
+                );
             }
         }
     }
@@ -6647,24 +7045,27 @@ impl JsRuntime {
         &'a mut self,
         source: &str,
     ) -> impl Future<Output = JsResult<JsValue>> + 'a {
-        self.eval_async_source(source, None, false, (1, 1))
+        self.eval_async_source(source, None, None, false, (1, 1))
     }
 
     fn eval_async_source<'a>(
         &'a mut self,
         source: &str,
         filename: Option<&str>,
+        csp_requested_url: Option<&str>,
         muted_errors: bool,
         start_position: (u32, u32),
     ) -> impl Future<Output = JsResult<JsValue>> + 'a {
         let filename = filename.map(str::to_owned);
+        let csp_requested_url = csp_requested_url.map(str::to_owned);
         let source = source.to_owned();
         let deadline = execution_deadline(self.sandbox.timeout);
         let host_state = Rc::clone(&self.host_state);
         let future = ActiveHostFuture::new(
             async move {
                 let mut context = self.context.enter_runtime_deadline(deadline);
-                let metadata = script_errors::classic_script_metadata(muted_errors);
+                let metadata =
+                    script_errors::classic_script_metadata(muted_errors, csp_requested_url);
                 let script = Script::parse_with_host_defined(
                     Source::from_reader(source.as_bytes(), filename.as_deref().map(Path::new))
                         .with_start_position(start_position.0, start_position.1),
@@ -6760,14 +7161,21 @@ impl JsRuntime {
         let mut deferred = Vec::new();
         let mut fetch_errors = Vec::new();
         for (script_index, script) in scripts.iter().enumerate() {
-            let Some((is_module, is_defer, has_src, source, label, muted_errors)) = self
-                .fetch_or_inline_document_script_source(
-                    script,
-                    script_index,
-                    base_url.as_ref(),
-                    false,
-                    &mut fetch_errors,
-                )
+            let Some((
+                is_module,
+                is_defer,
+                has_src,
+                source,
+                label,
+                muted_errors,
+                csp_requested_url,
+            )) = self.fetch_or_inline_document_script_source(
+                script,
+                script_index,
+                base_url.as_ref(),
+                false,
+                &mut fetch_errors,
+            )
             else {
                 continue;
             };
@@ -6805,6 +7213,7 @@ impl JsRuntime {
             let prepared = PreparedPageSource {
                 source,
                 filename,
+                csp_requested_url,
                 start_position,
                 muted_errors,
             };
@@ -6869,6 +7278,7 @@ impl JsRuntime {
                 let PreparedPageSource {
                     source,
                     filename,
+                    csp_requested_url,
                     start_position,
                     muted_errors,
                 } = prepared;
@@ -6920,6 +7330,7 @@ impl JsRuntime {
                             Box::pin(self.eval_async_source(
                                 &source,
                                 filename.as_deref(),
+                                csp_requested_url.as_deref(),
                                 muted_errors,
                                 start_position,
                             ))
@@ -7023,13 +7434,14 @@ impl JsRuntime {
         std::time::Duration,
         std::time::Duration,
     ) {
-        self.eval_safe_timed_source(source, None, (1, 1), false)
+        self.eval_safe_timed_source(source, None, None, (1, 1), false)
     }
 
     fn eval_safe_timed_source(
         &mut self,
         source: &str,
         filename: Option<&str>,
+        csp_requested_url: Option<&str>,
         start_position: (u32, u32),
         muted_errors: bool,
     ) -> (
@@ -7042,7 +7454,10 @@ impl JsRuntime {
             let parse_start = std::time::Instant::now();
             let input = Source::from_reader(source.as_bytes(), filename.map(Path::new))
                 .with_start_position(start_position.0, start_position.1);
-            let metadata = script_errors::classic_script_metadata(muted_errors);
+            let metadata = script_errors::classic_script_metadata(
+                muted_errors,
+                csp_requested_url.map(str::to_owned),
+            );
             let script = match Script::parse_with_host_defined(input, None, metadata, context) {
                 Ok(script) => script,
                 Err(error) => {
@@ -7721,6 +8136,7 @@ impl JsRuntime {
         id: u64,
         url: &str,
         source: Option<VisitSource>,
+        referrer_source: NavigationReferrerSource,
     ) -> JsResult<()> {
         if !self
             .host_state
@@ -7733,7 +8149,7 @@ impl JsRuntime {
         let document_id = self
             .host_state
             .borrow_mut()
-            .navigate_auxiliary_context(id, url)
+            .navigate_auxiliary_context(id, url, &referrer_source)
             .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
         if let Some(source) = source {
             let state = self.host_state.borrow();
@@ -7768,60 +8184,7 @@ impl JsRuntime {
         };
         let previous = self.context.enter_realm(realm);
         let result = (|| -> JsResult<()> {
-            for script in scripts {
-                let attributes = script.attributes().unwrap_or_default();
-                if !is_executable_classic_script_type(attributes.get("type").map(String::as_str)) {
-                    continue;
-                }
-                let policy = self.host_state.borrow().csp_policy_for_node(&script);
-                let source = if let Some(src) = attributes.get("src") {
-                    if !policy.allows_reference(ResourceType::Script, src) {
-                        self.host_state.borrow_mut().record_csp_violation_for_node(
-                            &script,
-                            ResourceType::Script,
-                            src,
-                        );
-                        continue;
-                    }
-                    let base = self.host_state.borrow().base_url_for_document(document_id);
-                    let fetched = {
-                        let mut state = self.host_state.borrow_mut();
-                        fetch_script_resource_with_client(
-                            src,
-                            base.as_ref(),
-                            &mut state.http_client,
-                        )
-                    };
-                    let Some((effective_url, source, redirect_count)) = fetched else {
-                        self.record_task_error(format!("[popup script: {src}] failed to fetch"));
-                        continue;
-                    };
-                    if !policy.allows_reference_after_redirects(
-                        ResourceType::Script,
-                        &effective_url,
-                        redirect_count,
-                    ) {
-                        self.host_state.borrow_mut().record_csp_violation_for_node(
-                            &script,
-                            ResourceType::Script,
-                            effective_url,
-                        );
-                        continue;
-                    }
-                    source
-                } else {
-                    if !policy.allows_inline(ResourceType::Script) {
-                        self.host_state.borrow_mut().record_csp_violation_for_node(
-                            &script,
-                            ResourceType::Script,
-                            "inline",
-                        );
-                        continue;
-                    }
-                    collect_text_content(&script)
-                };
-                self.eval(&source)?;
-            }
+            self.run_auxiliary_classic_scripts(document_id, scripts)?;
             self.eval(
                 "document.__readyState = 'complete'; document.dispatchEvent(new Event('DOMContentLoaded')); window.dispatchEvent(new Event('load'));",
             )?;
@@ -7839,6 +8202,103 @@ impl JsRuntime {
         }
         self.context.enter_realm(previous);
         result
+    }
+
+    /// Runs popup classic scripts with their owning document and source positions.
+    fn run_auxiliary_classic_scripts(
+        &mut self,
+        document_id: usize,
+        scripts: Vec<NodeHandle>,
+    ) -> JsResult<()> {
+        let document_url = self
+            .host_state
+            .borrow()
+            .document_urls
+            .get(&document_id)
+            .cloned()
+            .unwrap_or_default();
+        for script in scripts {
+            let attributes = script.attributes().unwrap_or_default();
+            if !is_executable_classic_script_type(attributes.get("type").map(String::as_str)) {
+                continue;
+            }
+            let (source, filename, requested_url, muted_errors, start_position) = if let Some(src) =
+                attributes.get("src")
+            {
+                if !self
+                    .host_state
+                    .borrow_mut()
+                    .csp_allows_script_for_node(&script, src)
+                {
+                    self.host_state.borrow_mut().record_csp_violation_for_node(
+                        &script,
+                        ResourceType::Script,
+                        src,
+                    );
+                    continue;
+                }
+                let base = self.host_state.borrow().base_url_for_document(document_id);
+                let requested_url = resource_reference_timing_name(src, base.as_ref());
+                let fetched = {
+                    let mut state = self.host_state.borrow_mut();
+                    let origin = script_errors::document_fetch_origin(&state, document_id);
+                    script_errors::fetch_classic_source(
+                        src,
+                        base.as_ref(),
+                        &origin,
+                        attributes.get("crossorigin").map(String::as_str),
+                        &mut state.http_client,
+                    )
+                };
+                let Some((effective_url, source, redirect_count, muted_errors)) = fetched else {
+                    self.record_task_error(format!("[popup script: {src}] failed to fetch"));
+                    continue;
+                };
+                if !self.host_state.borrow_mut().csp_allows_response_for_node(
+                    &script,
+                    ResourceType::Script,
+                    &effective_url,
+                    redirect_count,
+                    &requested_url,
+                ) {
+                    continue;
+                }
+                (source, effective_url, requested_url, muted_errors, (1, 1))
+            } else {
+                if !self
+                    .host_state
+                    .borrow_mut()
+                    .csp_allows_script_for_node(&script, "inline")
+                {
+                    self.host_state.borrow_mut().record_csp_violation_for_node(
+                        &script,
+                        ResourceType::Script,
+                        "inline",
+                    );
+                    continue;
+                }
+                (
+                    collect_text_content(&script),
+                    document_url.clone(),
+                    document_url.clone(),
+                    false,
+                    script.script_source_position().unwrap_or((1, 1)),
+                )
+            };
+            self.eval_script_in_document_realm(
+                document_id,
+                script.identity(),
+                &source,
+                &filename,
+                &requested_url,
+                muted_errors,
+                start_position,
+                // Popup navigation has never relied on the page-visible setter.
+                // Its replacement must not stop later parser scripts.
+                false,
+            )?;
+        }
+        Ok(())
     }
 
     fn install_posted_message_values(&mut self, port: JsValue, data: JsValue) -> JsResult<()> {
@@ -7932,9 +8392,8 @@ impl JsRuntime {
         }
         if !self
             .host_state
-            .borrow()
-            .csp_policy_for_node(&script_node)
-            .allows_reference(ResourceType::Script, &src)
+            .borrow_mut()
+            .csp_allows_script_for_node(&script_node, &src)
         {
             self.host_state.borrow_mut().record_csp_violation_for_node(
                 &script_node,
@@ -7975,17 +8434,13 @@ impl JsRuntime {
             return Ok(());
         };
         let redirected = resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
-        if !self
-            .host_state
-            .borrow()
-            .csp_policy_for_node(&script_node)
-            .allows_reference_after_redirects(ResourceType::Script, &effective_url, redirect_count)
-        {
-            self.host_state.borrow_mut().record_csp_violation_for_node(
-                &script_node,
-                ResourceType::Script,
-                effective_url.clone(),
-            );
+        if !self.host_state.borrow_mut().csp_allows_response_for_node(
+            &script_node,
+            ResourceType::Script,
+            &effective_url,
+            redirect_count,
+            &resource_reference_timing_name(&src, base_url.as_ref()),
+        ) {
             let dispatch = dispatch_resource_timing_script(
                 "error",
                 node_id,
@@ -8032,6 +8487,7 @@ impl JsRuntime {
                     future: Box::pin(self.eval_async_source(
                         &source,
                         Some(&effective_url),
+                        Some(&timing_name),
                         muted_errors,
                         (1, 1),
                     )),
@@ -8627,6 +9083,11 @@ impl JsRuntime {
         while advanced < max_virtual_ms && tasks_processed < max_tasks {
             if !self.has_pending_timers()
                 && !self.has_pending_geolocation_tasks()
+                && !self
+                    .host_state
+                    .borrow()
+                    .event_loop
+                    .has_pending_security_reporting_tasks()
                 && !self.has_pending_css_transition_work()
             {
                 break;
@@ -8653,6 +9114,7 @@ impl JsRuntime {
                         owner_document_id, ..
                     } => *owner_document_id,
                     Task::WebLock { document_id, .. } => Some(*document_id),
+                    Task::SecurityPolicyViolation { document_id, .. } => Some(*document_id),
                     Task::WindowPostedMessage {
                         target_document_id, ..
                     } => Some(*target_document_id),
@@ -8666,6 +9128,7 @@ impl JsRuntime {
                         Task::Timer { payload, .. } => payload.kind(),
                         Task::Geolocation { .. } => "geolocation",
                         Task::WebLock { .. } => "web-lock",
+                        Task::SecurityPolicyViolation { .. } => "security-policy-violation",
                         Task::Navigation { .. } => "navigation",
                         Task::AuxiliaryNavigate { .. } => "auxiliary-navigation",
                         Task::PostedMessage { .. } => "posted-message",
@@ -8741,6 +9204,11 @@ impl JsRuntime {
                 self.run_timer_payload(payload)
             }
             Task::Geolocation { request_id } => self.run_geolocation_delivery(request_id, false),
+            Task::SecurityPolicyViolation {
+                document_id,
+                element_id,
+                payload,
+            } => self.dispatch_csp_violation_task(document_id, element_id, &payload),
             Task::WebLock {
                 document_id,
                 request_id,
@@ -8812,9 +9280,12 @@ impl JsRuntime {
                 &wire,
                 ports,
             ),
-            Task::AuxiliaryNavigate { id, url, source } => {
-                self.run_auxiliary_navigation(id, &url, source)
-            }
+            Task::AuxiliaryNavigate {
+                id,
+                url,
+                source,
+                referrer_source,
+            } => self.run_auxiliary_navigation(id, &url, source, referrer_source),
             Task::BroadcastChannelMessage {
                 channel_id,
                 data,
@@ -9109,21 +9580,20 @@ impl JsRuntime {
                 node_id,
                 request,
                 visit_source,
+                referrer_source,
             } => {
                 let frame = self.host_state.borrow().get_node(node_id);
                 let Some(frame) = frame else {
-                    self.host_state
-                        .borrow_mut()
-                        .pending_iframe_visits
-                        .remove(&node_id);
+                    let mut state = self.host_state.borrow_mut();
+                    state.pending_iframe_visits.remove(&node_id);
+                    state.pending_iframe_referrers.remove(&node_id);
                     return Ok(());
                 };
                 let frame_is_active = self.host_state.borrow().node_is_in_active_document(&frame);
                 if !frame_is_active {
-                    self.host_state
-                        .borrow_mut()
-                        .pending_iframe_visits
-                        .remove(&node_id);
+                    let mut state = self.host_state.borrow_mut();
+                    state.pending_iframe_visits.remove(&node_id);
+                    state.pending_iframe_referrers.remove(&node_id);
                     return Ok(());
                 }
                 if let Some(visit_source) = visit_source {
@@ -9137,15 +9607,18 @@ impl JsRuntime {
                         .pending_iframe_visits
                         .remove(&node_id);
                 }
+                self.host_state
+                    .borrow_mut()
+                    .pending_iframe_referrers
+                    .insert(node_id, referrer_source);
                 let loaded = self
                     .host_state
                     .borrow_mut()
                     .iframe_document_with_submission(&frame, Some(&request));
                 if let Err(error) = loaded {
-                    self.host_state
-                        .borrow_mut()
-                        .pending_iframe_visits
-                        .remove(&node_id);
+                    let mut state = self.host_state.borrow_mut();
+                    state.pending_iframe_visits.remove(&node_id);
+                    state.pending_iframe_referrers.remove(&node_id);
                     return Err(JsNativeError::typ().with_message(error.to_string()).into());
                 }
                 self.run_timer_payload(TimerPayload::ResourceLoad { node_id })
@@ -9233,6 +9706,7 @@ impl JsRuntime {
         state.pending_resource_loads.remove(&node_id);
         let Some(node) = state.get_node(node_id) else {
             state.pending_iframe_visits.remove(&node_id);
+            state.pending_iframe_referrers.remove(&node_id);
             return Ok(None);
         };
         let resource_document_id = document_root_for_node(&node)
@@ -9240,6 +9714,7 @@ impl JsRuntime {
             .unwrap_or_else(|| state.document.identity());
         if !state.node_is_in_active_document(&node) {
             state.pending_iframe_visits.remove(&node_id);
+            state.pending_iframe_referrers.remove(&node_id);
             Ok(Some((false, Vec::new(), None, resource_document_id)))
         } else {
             let mut initial_scripts: Vec<NodeHandle> = Vec::new();
@@ -9282,6 +9757,7 @@ impl JsRuntime {
                     Ok(document) => document,
                     Err(error) => {
                         state.pending_iframe_visits.remove(&node_id);
+                        state.pending_iframe_referrers.remove(&node_id);
                         return Err(JsNativeError::error()
                             .with_message(error.to_string())
                             .into());
@@ -9292,6 +9768,7 @@ impl JsRuntime {
                     // contentDocument read must not clear a later
                     // form submission's pending visit source.
                     state.pending_iframe_visits.remove(&node_id);
+                    state.pending_iframe_referrers.remove(&node_id);
                 }
                 let ids = state
                     .iframe_documents
@@ -9343,9 +9820,8 @@ impl JsRuntime {
                 }
                 (
                     state.sandbox_allows_scripts_for_node(&script),
-                    state
-                        .csp_policy_for_node(&script)
-                        .allows_inline(ResourceType::Script),
+                    script.get_attribute("src").is_some()
+                        || state.csp_allows_script_for_node(&script, "inline"),
                 )
             };
             if !sandbox_allowed {
@@ -9440,9 +9916,8 @@ impl JsRuntime {
             dispatch_load = false;
         } else if !self
             .host_state
-            .borrow()
-            .csp_policy_for_node(&script_node)
-            .allows_reference(ResourceType::Script, &src)
+            .borrow_mut()
+            .csp_allows_script_for_node(&script_node, &src)
         {
             self.host_state.borrow_mut().record_csp_violation_for_node(
                 &script_node,
@@ -9505,23 +9980,16 @@ impl JsRuntime {
                     self.record_error_from(&src, dispatched);
                 }
                 Some((effective_url, _source, redirect_count, _muted_errors))
-                    if !self
-                        .host_state
-                        .borrow()
-                        .csp_policy_for_node(&script_node)
-                        .allows_reference_after_redirects(
-                            ResourceType::Script,
-                            &effective_url,
-                            redirect_count,
-                        ) =>
+                    if !self.host_state.borrow_mut().csp_allows_response_for_node(
+                        &script_node,
+                        ResourceType::Script,
+                        &effective_url,
+                        redirect_count,
+                        &resource_reference_timing_name(&src, base_url.as_ref()),
+                    ) =>
                 {
                     let redirected =
                         resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
-                    self.host_state.borrow_mut().record_csp_violation_for_node(
-                        &script_node,
-                        ResourceType::Script,
-                        effective_url.clone(),
-                    );
                     dispatch_load = false;
                     let dispatched = self.eval_in_document_realm(
                         dispatch_document_id,
@@ -9557,7 +10025,10 @@ impl JsRuntime {
                                 script_node.identity(),
                                 &source,
                                 &effective_url,
+                                &timing_name,
                                 muted_errors,
+                                (1, 1),
+                                true,
                             )
                             .map(|_| JsValue::undefined())
                             .map_err(JsEvaluationError::JavaScript),
@@ -9793,14 +10264,21 @@ impl JsRuntime {
         let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
 
         for (script_index, script) in scripts.iter().enumerate() {
-            let Some((is_module, is_defer, has_src, source_code, script_label, muted_errors)) =
-                self.fetch_or_inline_document_script_source(
-                    script,
-                    script_index,
-                    base_url,
-                    log_scripts,
-                    &mut errors,
-                )
+            let Some((
+                is_module,
+                is_defer,
+                has_src,
+                source_code,
+                script_label,
+                muted_errors,
+                csp_requested_url,
+            )) = self.fetch_or_inline_document_script_source(
+                script,
+                script_index,
+                base_url,
+                log_scripts,
+                &mut errors,
+            )
             else {
                 continue;
             };
@@ -9830,6 +10308,7 @@ impl JsRuntime {
                     script_label,
                     module_url,
                     muted_errors,
+                    csp_requested_url,
                 ));
                 continue;
             }
@@ -9837,6 +10316,7 @@ impl JsRuntime {
                 script,
                 &source_code,
                 &script_label,
+                csp_requested_url.as_deref(),
                 muted_errors,
                 log_scripts,
                 &mut errors,
@@ -9859,6 +10339,27 @@ impl JsRuntime {
 
         errors
     }
+    /// Returns the pre-redirect external URL or the inline script's document URL.
+    fn csp_requested_url_for_script(
+        &self,
+        script: &NodeHandle,
+        requested_reference: Option<&str>,
+        base_url: Option<&crate::http::Url>,
+    ) -> Option<String> {
+        requested_reference.map_or_else(
+            || {
+                document_root_for_node(script).and_then(|document| {
+                    self.host_state
+                        .borrow()
+                        .document_urls
+                        .get(&document.identity())
+                        .cloned()
+                })
+            },
+            |reference| Some(resource_reference_timing_name(reference, base_url)),
+        )
+    }
+
     /// Classifies one `<script>` element, enforces its CSP policy, and
     /// resolves its source: fetched for an external script, or its text
     /// content for an inline one. Returns `None` (after recording any CSP
@@ -9870,7 +10371,7 @@ impl JsRuntime {
         base_url: Option<&crate::http::Url>,
         log_scripts: bool,
         errors: &mut Vec<String>,
-    ) -> Option<(bool, bool, bool, String, String, bool)> {
+    ) -> Option<(bool, bool, bool, String, String, bool, Option<String>)> {
         let attrs = script.attributes().unwrap_or_default();
         let is_module = attrs
             .get("type")
@@ -9895,12 +10396,16 @@ impl JsRuntime {
 
         let src = attrs.get("src").cloned();
         let has_src = src.is_some();
+        let csp_requested_url = self.csp_requested_url_for_script(script, src.as_deref(), base_url);
         // HTML spec: defer only applies to external (src) scripts.
         let is_defer = is_module || (attrs.contains_key("defer") && src.is_some());
 
-        let policy = self.host_state.borrow().csp_policy_for_node(script);
         if let Some(src_url) = src.as_deref() {
-            if !policy.allows_reference(ResourceType::Script, src_url) {
+            if !self
+                .host_state
+                .borrow_mut()
+                .csp_allows_script_for_node(script, src_url)
+            {
                 self.host_state.borrow_mut().record_csp_violation_for_node(
                     script,
                     ResourceType::Script,
@@ -9908,7 +10413,11 @@ impl JsRuntime {
                 );
                 return None;
             }
-        } else if !policy.allows_inline(ResourceType::Script) {
+        } else if !self
+            .host_state
+            .borrow_mut()
+            .csp_allows_script_for_node(script, "inline")
+        {
             self.host_state.borrow_mut().record_csp_violation_for_node(
                 script,
                 ResourceType::Script,
@@ -9941,16 +10450,13 @@ impl JsRuntime {
             };
             match fetched {
                 Some((effective_url, code, redirect_count, muted)) => {
-                    if !policy.allows_reference_after_redirects(
+                    if !self.host_state.borrow_mut().csp_allows_response_for_node(
+                        script,
                         ResourceType::Script,
                         &effective_url,
                         redirect_count,
+                        &resource_reference_timing_name(&src_url, base_url),
                     ) {
-                        self.host_state.borrow_mut().record_csp_violation_for_node(
-                            script,
-                            ResourceType::Script,
-                            effective_url,
-                        );
                         return None;
                     }
                     let redirected =
@@ -9996,6 +10502,7 @@ impl JsRuntime {
             source_code,
             script_label,
             muted_errors,
+            csp_requested_url,
         ))
     }
 
@@ -10007,6 +10514,7 @@ impl JsRuntime {
         script: &NodeHandle,
         source_code: &str,
         script_label: &str,
+        csp_requested_url: Option<&str>,
         muted_errors: bool,
         log_scripts: bool,
         errors: &mut Vec<String>,
@@ -10040,6 +10548,7 @@ impl JsRuntime {
             .eval_safe_timed_source(
                 source_code,
                 filename.as_deref(),
+                csp_requested_url,
                 start_position,
                 muted_errors,
             );
@@ -10079,11 +10588,20 @@ impl JsRuntime {
     /// as the immediate-execution path above.
     fn run_deferred_document_scripts(
         &mut self,
-        deferred: Vec<(String, NodeHandle, String, Option<String>, bool)>,
+        deferred: Vec<(
+            String,
+            NodeHandle,
+            String,
+            Option<String>,
+            bool,
+            Option<String>,
+        )>,
         log_scripts: bool,
         errors: &mut Vec<String>,
     ) {
-        for (source_code, script, script_label, module_url, muted_errors) in deferred {
+        for (source_code, script, script_label, module_url, muted_errors, csp_requested_url) in
+            deferred
+        {
             if let Err(error) = self.run_written_scripts_before(&script) {
                 self.record_document_script_failure("DOCUMENT_SCRIPT_EVALUATION_FAILED");
                 errors.push(format!("[written scripts] {error}"));
@@ -10096,6 +10614,7 @@ impl JsRuntime {
                     &script,
                     &source_code,
                     &script_label,
+                    csp_requested_url.as_deref(),
                     muted_errors,
                     log_scripts,
                     errors,
@@ -10125,6 +10644,7 @@ impl JsRuntime {
                     self.eval_safe_timed_source(
                         &source_code,
                         Some(&script_label),
+                        csp_requested_url.as_deref(),
                         (1, 1),
                         muted_errors,
                     )
@@ -10425,7 +10945,15 @@ fn resolve_worker_url(
             .with_message("Dedicated Worker must be same-origin")
             .into());
     }
-    Ok(resolved.to_string())
+    let mut worker_url = resolved.to_string();
+    if let Some((_, fragment)) = requested.split_once('#') {
+        let mut parsed = url::Url::parse(&worker_url).map_err(|_| {
+            JsError::from(JsNativeError::syntax().with_message("Invalid Worker URL"))
+        })?;
+        parsed.set_fragment(Some(fragment));
+        worker_url = parsed.to_string();
+    }
+    Ok(worker_url)
 }
 
 fn requires_public_fetch(url: &crate::http::Url, base_url: Option<&crate::http::Url>) -> bool {
@@ -11489,8 +12017,13 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(cancel_animation_frame_native),
         ),
         (
+            js_string!("__omoikane_capture_csp_source"),
+            0,
+            NativeFunction::from_copy_closure(capture_csp_source_native),
+        ),
+        (
             js_string!("__omoikane_fetch"),
-            4,
+            9,
             NativeFunction::from_copy_closure(fetch_native),
         ),
         (
@@ -11625,7 +12158,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_websocket_connect"),
-            2,
+            3,
             NativeFunction::from_copy_closure(websocket_connect_native),
         ),
         (
@@ -11645,7 +12178,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_event_source_fetch"),
-            3,
+            4,
             NativeFunction::from_copy_closure(event_source_fetch_native),
         ),
         (
@@ -11687,6 +12220,16 @@ fn register_host_bindings(
             js_string!("__omoikane_prepare_inserted_inline_script"),
             1,
             NativeFunction::from_copy_closure(prepare_inserted_inline_script_native),
+        ),
+        (
+            js_string!("__omoikane_eval_inserted_inline_script"),
+            1,
+            NativeFunction::from_copy_closure(eval_inserted_inline_script_native),
+        ),
+        (
+            js_string!("__omoikane_discard_prepared_inline_script"),
+            1,
+            NativeFunction::from_copy_closure(discard_prepared_inline_script_native),
         ),
         (
             js_string!("__omoikane_record_inserted_script_error"),
@@ -12144,6 +12687,11 @@ fn register_host_bindings(
             js_string!("__omoikane_document_url"),
             1,
             NativeFunction::from_copy_closure(document_url_native),
+        ),
+        (
+            js_string!("__omoikane_document_referrer"),
+            1,
+            NativeFunction::from_copy_closure(document_referrer_native),
         ),
         (
             js_string!("__omoikane_commit_history_api_url"),
@@ -15543,6 +16091,7 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             // is queued below. Scripts only re-run for an actual cross-document
             // move; iframe/object navigation applies to every insertion.
             if target_document.is_some() {
+                state.apply_connected_referrer_metas(&child);
                 state.schedule_connected_resource_loads(&child, source_document != target_document);
             }
         }
@@ -15632,6 +16181,24 @@ fn document_url_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             .document_urls
             .get(&document_id)
             .map(|url| JsValue::from(js_string!(url.as_str())))
+            .unwrap_or_else(JsValue::null))
+    })
+}
+
+/// Returns the referrer fixed when a live Document was created.
+fn document_referrer_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
+    with_host_state(|state| {
+        Ok(state
+            .borrow()
+            .document_reporting
+            .get(&document_id)
+            .map(|metadata| JsValue::from(js_string!(metadata.referrer.as_str())))
             .unwrap_or_else(JsValue::null))
     })
 }
@@ -16698,6 +17265,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         .to_string(context)?;
     let is_name_attribute = name.eq_ignore_ascii_case("name");
     let is_style_attribute = name.eq_ignore_ascii_case("style");
+    let is_meta_referrer_attribute = is_name_attribute || name.eq_ignore_ascii_case("content");
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -16720,6 +17288,9 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             }
         });
         node.set_attribute_owned(name, dom_string::from_js(&value));
+        if node.has_tag_name("meta") && is_meta_referrer_attribute {
+            state.borrow_mut().apply_connected_referrer_meta(&node);
+        }
         if is_name_attribute {
             state.borrow_mut().refresh_iframe_context_name(&node);
         }
@@ -16777,6 +17348,9 @@ fn set_attribute_ns_native(
     let replace_qualified_name = args.get(5).and_then(JsValue::as_boolean).unwrap_or(false);
     let is_name_attribute = namespace.is_none() && qualified_name == "name";
     let is_style_attribute = namespace.is_none() && qualified_name == "style";
+    let is_meta_referrer_attribute = namespace.is_none()
+        && (qualified_name.eq_ignore_ascii_case("name")
+            || qualified_name.eq_ignore_ascii_case("content"));
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -16804,6 +17378,9 @@ fn set_attribute_ns_native(
             value,
             replace_qualified_name,
         );
+        if node.has_tag_name("meta") && is_meta_referrer_attribute {
+            state.borrow_mut().apply_connected_referrer_meta(&node);
+        }
         if is_name_attribute {
             state.borrow_mut().refresh_iframe_context_name(&node);
         }
@@ -17463,13 +18040,19 @@ fn open_auxiliary_window_native(
             let mut state = host.borrow_mut();
             let source = opener_document_id
                 .and_then(|document_id| state.visit_source_for_document(document_id));
+            let referrer_source = state.navigation_referrer_source_for_document(
+                opener_document_id.unwrap_or_else(|| state.document.identity()),
+            );
             let resolved_url = opener_document_id
                 .and_then(|document_id| state.base_url_for_document(document_id))
                 .map(|base| resolve_url_reference(&url, Some(&base)))
                 .unwrap_or(url);
-            state
-                .event_loop
-                .enqueue_auxiliary_navigation(id, resolved_url, source);
+            state.event_loop.enqueue_auxiliary_navigation(
+                id,
+                resolved_url,
+                source,
+                referrer_source,
+            );
         }
         Ok(JsValue::from(id as f64))
     })
@@ -17497,7 +18080,7 @@ fn navigate_named_link_target_native(
         .to_string(context)?
         .to_std_string_escaped();
     with_host_state(|host| {
-        let (frame_id, document_id, callback, document_url, event_state, visit_source) = {
+        let (frame_id, document_id, callback, document_url, event_state, visit_source, initiator) = {
             let mut state = host.borrow_mut();
             let Some(link) = state.get_node(link_id) else {
                 return Ok(JsValue::from(false));
@@ -17533,11 +18116,13 @@ fn navigate_named_link_target_native(
                 document_url,
                 event_state,
                 visit_source,
+                owner_document_for_node(&link).map(|document| document.identity()),
             )
         };
         let previous_active = {
             let mut state = host.borrow_mut();
             state.pending_iframe_visits.remove(&frame_id);
+            state.capture_iframe_referrer_source(frame_id, initiator.unwrap_or(document_id));
             if let Some(source) = &visit_source {
                 state.pending_iframe_visits.insert(frame_id, source.clone());
             }
@@ -17567,6 +18152,7 @@ fn navigate_named_link_target_native(
                 }
             } else {
                 state.pending_iframe_visits.remove(&frame_id);
+                state.pending_iframe_referrers.remove(&frame_id);
             }
         }
         result.map(|_| JsValue::from(true))
@@ -17591,13 +18177,23 @@ fn navigate_auxiliary_window_native(
         if state.auxiliary_contexts.contains_key(&id) {
             let source =
                 caller.and_then(|document_id| state.visit_source_for_document(document_id));
+            let referrer_source = caller
+                .map(|document_id| state.navigation_referrer_source_for_document(document_id))
+                .unwrap_or(NavigationReferrerSource {
+                    url: String::new(),
+                    document_policy: security_reporting::ReferrerPolicy::default(),
+                    policy: security_reporting::ReferrerPolicy::default(),
+                });
             let resolved_url = caller
                 .and_then(|document_id| state.base_url_for_document(document_id))
                 .map(|base| resolve_url_reference(&url, Some(&base)))
                 .unwrap_or(url);
-            state
-                .event_loop
-                .enqueue_auxiliary_navigation(id, resolved_url, source);
+            state.event_loop.enqueue_auxiliary_navigation(
+                id,
+                resolved_url,
+                source,
+                referrer_source,
+            );
         }
         Ok(JsValue::undefined())
     })
@@ -17691,8 +18287,11 @@ fn close_auxiliary_window_native(
 
 fn create_worker_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let url = string_argument(args.first(), "", context)?;
+    let document_id = caller_document_id(context).ok_or_else(|| {
+        JsNativeError::error().with_message("Worker owner document is unavailable")
+    })?;
     with_host_state(|state| {
-        create_worker_for_owner_state(Rc::clone(state), &url)
+        create_worker_for_owner_state(Rc::clone(state), &url, document_id)
             .map(|id| JsValue::from(js_string!(id.to_string())))
     })
 }
@@ -17726,6 +18325,7 @@ fn evaluate_dedicated_worker_startup(
     worker_id: u64,
     source: &str,
     worker_url: &str,
+    csp_requested_url: &str,
 ) -> JsResult<Option<()>> {
     // Keep the entry out of the owner map while evaluating worker
     // startup. This lets self.close() remove the entry immediately
@@ -17740,7 +18340,12 @@ fn evaluate_dedicated_worker_startup(
         .runtime
         .with_active_host(|context| {
             use script_errors::WorkerScriptOutcome;
-            match script_errors::evaluate_worker_initial_script(context, source, worker_url)? {
+            match script_errors::evaluate_worker_initial_script(
+                context,
+                source,
+                worker_url,
+                csp_requested_url,
+            )? {
                 WorkerScriptOutcome::Completed => Ok(Some(())),
                 WorkerScriptOutcome::ParseFailure => Ok(None),
                 WorkerScriptOutcome::Exception(error) => {
@@ -17782,8 +18387,48 @@ fn evaluate_dedicated_worker_startup(
 struct PreparedDedicatedWorker {
     id: u64,
     url: String,
+    csp_requested_url: String,
     source: Option<String>,
     runtime: JsRuntime,
+}
+
+/// An owned creator snapshot; constructing a Worker never retains a host borrow.
+struct DedicatedWorkerCreator {
+    origin_url: String,
+    base_url: Option<crate::http::Url>,
+    storage: StorageManager,
+    session_id: u64,
+    user_agent: String,
+    worker_id: u64,
+    origin: Option<StorageOrigin>,
+    security_origin: Option<DocumentSecurityOrigin>,
+    secure_context: bool,
+    policy: CspPolicy,
+}
+
+fn dedicated_worker_creator(
+    state: &mut HostState,
+    active_document: Option<usize>,
+) -> DedicatedWorkerCreator {
+    let document_id = active_document.unwrap_or_else(|| state.document.identity());
+    let worker_id = state.next_worker_id;
+    state.next_worker_id = state.next_worker_id.saturating_add(1);
+    DedicatedWorkerCreator {
+        origin_url: script_errors::document_fetch_origin(state, document_id).serialize(),
+        base_url: state.base_url_for_document(document_id),
+        storage: state.storage_manager.clone(),
+        session_id: state.storage_session_id,
+        user_agent: state.navigator_user_agent.clone(),
+        worker_id,
+        origin: state.document_origins.get(&document_id).cloned().flatten(),
+        security_origin: state.document_security_origins.get(&document_id).cloned(),
+        secure_context: document_is_secure_context(state, document_id),
+        policy: state
+            .document_csp
+            .get(&document_id)
+            .cloned()
+            .unwrap_or_default(),
+    }
 }
 
 /// Fetches the source and initializes the private global before author code runs.
@@ -17792,87 +18437,92 @@ fn prepare_dedicated_worker(
     requested_url: &str,
     active_owner_document_id: Option<usize>,
 ) -> JsResult<PreparedDedicatedWorker> {
-    let (
-        owner_url,
-        base_url,
-        storage,
-        session_id,
-        user_agent,
-        worker_id,
-        owner_origin,
-        owner_security_origin,
-        owner_secure_context,
-    ) = {
-        let mut state = owner_state.borrow_mut();
-        let owner_document_id =
-            active_owner_document_id.unwrap_or_else(|| state.document.identity());
-        let id = state.next_worker_id;
-        state.next_worker_id = state.next_worker_id.saturating_add(1);
-        (
-            state
-                .base_url
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| state.location_href.clone()),
-            state.base_url.clone(),
-            state.storage_manager.clone(),
-            state.storage_session_id,
-            state.navigator_user_agent.clone(),
-            id,
-            state
-                .document_origins
-                .get(&owner_document_id)
-                .cloned()
-                .flatten(),
-            state
-                .document_security_origins
-                .get(&owner_document_id)
-                .cloned(),
-            document_is_secure_context(&state, owner_document_id),
-        )
-    };
-    let worker_url = resolve_worker_url(requested_url, &owner_url, base_url.as_ref())?;
-    let source = {
-        let mut state = owner_state.borrow_mut();
-        fetch_script_resource_with_client(requested_url, base_url.as_ref(), &mut state.http_client)
-            .map(|(_, source, _)| source)
+    let creator = dedicated_worker_creator(&mut owner_state.borrow_mut(), active_owner_document_id);
+    let initial_url = resolve_worker_url(
+        requested_url,
+        &creator.origin_url,
+        creator.base_url.as_ref(),
+    )?;
+    let loaded = worker_loading::load_worker_script(
+        &initial_url,
+        creator.base_url.as_ref(),
+        &mut owner_state.borrow_mut().http_client,
+    );
+    let worker_url = loaded
+        .as_ref()
+        .map_or(initial_url.as_str(), |script| script.effective_url.as_str());
+    let is_data_worker = worker_url
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"));
+    // Preserve existing tuple-origin capabilities during data bootstrap. An
+    // opaque origin serializes to "null", which is not a usable URL; bootstrap
+    // those workers from their actual data URL instead.
+    let bootstrap_url = if is_data_worker
+        && matches!(
+            creator.security_origin.as_ref(),
+            Some(DocumentSecurityOrigin::Tuple(_))
+        ) {
+        creator.origin_url.as_str()
+    } else {
+        worker_url
     };
     let mut worker_runtime = JsRuntime::with_document_url_and_storage(
         blank_html_document(),
-        &owner_url,
-        storage,
-        session_id,
+        bootstrap_url,
+        creator.storage,
+        creator.session_id,
     )?;
-    worker_runtime.set_user_agent(user_agent);
-    let worker_state = Rc::clone(&worker_runtime.host_state);
+    worker_runtime.set_user_agent(creator.user_agent);
     {
-        let mut state = worker_state.borrow_mut();
+        let mut state = worker_runtime.host_state.borrow_mut();
         let document_id = state.document.identity();
-        state.location_href = worker_url.clone();
-        state.base_url = worker_url.parse::<crate::http::Url>().ok();
-        state.document_urls.insert(document_id, worker_url.clone());
-        if let Some(base_url) = state.base_url.clone() {
-            state.document_base_urls.insert(document_id, base_url);
-        } else {
-            state.document_base_urls.remove(&document_id);
-        }
-        state.document_origins.insert(document_id, owner_origin);
-        if let Some(origin) = owner_security_origin {
+        state.document_origins.insert(document_id, creator.origin);
+        if let Some(origin) = creator.security_origin {
             state.document_security_origins.insert(document_id, origin);
         }
-        state.secure_context_override = Some(owner_secure_context);
+        if is_data_worker {
+            state.location_href = worker_url.to_owned();
+            state.base_url = None;
+            state
+                .document_urls
+                .insert(document_id, worker_url.to_owned());
+            state.document_base_urls.remove(&document_id);
+            state.register_document_reporting(document_id, worker_url, 0);
+        }
+        state.secure_context_override = Some(creator.secure_context);
         state.worker_owner = Some(Rc::clone(owner_state));
-        state.worker_id = Some(worker_id);
+        state.worker_id = Some(creator.worker_id);
         state.worker_terminated = false;
         state.worker_owner_bound = false;
     }
+    if is_data_worker {
+        let document_id = worker_runtime.document().identity();
+        worker_runtime
+            .context
+            .realm()
+            .host_defined_mut()
+            .insert(realm_origin_snapshot(
+                &worker_runtime.host_state,
+                document_id,
+            )?);
+        // The bootstrap's non-configurable Location accessor retains its
+        // private URL snapshot even when worker installation replaces globals.
+        worker_runtime.eval(&format!("__omoikane_set_location({worker_url:?})"))?;
+    }
+    if let Some(loaded) = loaded.as_ref() {
+        worker_runtime.install_worker_security_metadata(loaded, &creator.policy);
+    }
     worker_runtime.eval(&format!(
-        "__omoikane_install_worker_global({worker_url:?}, {worker_id:?})"
+        "__omoikane_install_worker_global({worker_url:?}, {:?})",
+        creator.worker_id,
     ))?;
+    let source_url = worker_url.to_owned();
     Ok(PreparedDedicatedWorker {
-        id: worker_id,
-        url: worker_url,
-        source,
+        id: creator.worker_id,
+        // Boa uses the script path to resolve dynamic imports as well.
+        url: source_url,
+        csp_requested_url: initial_url,
+        source: loaded.map(|script| script.source),
         runtime: worker_runtime,
     })
 }
@@ -17880,13 +18530,15 @@ fn prepare_dedicated_worker(
 fn create_worker_for_owner_state(
     owner_state: Rc<RefCell<HostState>>,
     requested_url: &str,
+    document_id: usize,
 ) -> JsResult<u64> {
     let PreparedDedicatedWorker {
         id: worker_id,
         url: worker_url,
+        csp_requested_url,
         source,
         runtime: worker_runtime,
-    } = prepare_dedicated_worker(&owner_state, requested_url, active_document_id())?;
+    } = prepare_dedicated_worker(&owner_state, requested_url, Some(document_id))?;
     let entry = Rc::new(RefCell::new(WorkerRuntime {
         runtime: worker_runtime,
         owner_state: Rc::clone(&owner_state),
@@ -17902,8 +18554,13 @@ fn create_worker_for_owner_state(
     let source_loaded = source.is_some();
     let startup_error = match source {
         Some(source) => {
-            let result =
-                evaluate_dedicated_worker_startup(&owner_state, worker_id, &source, &worker_url);
+            let result = evaluate_dedicated_worker_startup(
+                &owner_state,
+                worker_id,
+                &source,
+                &worker_url,
+                &csp_requested_url,
+            );
             match result {
                 Ok(Some(())) => None,
                 Ok(None) => Some(script_errors::WorkerErrorNotification::LoadFailure),
@@ -18283,6 +18940,34 @@ fn websocket_address_policy(
     }
 }
 
+fn capture_csp_source_native(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let source = security_reporting::capture_csp_source(context);
+    let serialized = serde_json::to_string(&source).map_err(|error| {
+        JsNativeError::error().with_message(format!("CSP source serialization failed: {error}"))
+    })?;
+    Ok(js_string!(serialized).into())
+}
+
+fn csp_source_location_argument(
+    args: &[JsValue],
+    index: usize,
+    context: &mut Context,
+) -> JsResult<Option<security_reporting::CspSourceLocation>> {
+    let Some(value) = args.get(index) else {
+        return Ok(None);
+    };
+    let serialized = value.to_string(context)?.to_std_string_escaped();
+    serde_json::from_str(&serialized).map_err(|error| {
+        JsNativeError::typ()
+            .with_message(format!("invalid CSP source metadata: {error}"))
+            .into()
+    })
+}
+
 fn websocket_connect_native(
     _: &JsValue,
     args: &[JsValue],
@@ -18293,14 +18978,17 @@ fn websocket_connect_native(
     let protocols: Vec<String> = serde_json::from_str(&protocols_json).map_err(|_| {
         JsError::from(JsNativeError::typ().with_message("invalid WebSocket protocols"))
     })?;
+    let csp_source = csp_source_location_argument(args, 2, context)?;
     let payload = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let document = state.csp_document_for_context(context)?;
-        if !state
-            .csp_policy_for_document(&document)
-            .allows_reference(ResourceType::Connect, &url)
-        {
-            state.record_csp_violation(&document, ResourceType::Connect, &url);
+        if !state.csp_allows_connect(&document, &url, csp_source.as_ref()) {
+            state.record_csp_violation_with_source(
+                &document,
+                ResourceType::Connect,
+                &url,
+                csp_source.as_ref(),
+            );
             return Err(JsNativeError::error()
                 .with_message("WebSocket connection blocked by CSP connect-src")
                 .into());
@@ -18445,17 +19133,20 @@ fn event_source_fetch_native(
     let url = string_argument(args.first(), "", context)?;
     let last_event_id = string_argument(args.get(1), "", context)?;
     let with_credentials = args.get(2).is_some_and(JsValue::to_boolean);
+    let csp_source = csp_source_location_argument(args, 3, context)?;
     let body = with_host_state(|state| {
         let mut state = state.borrow_mut();
         let parsed = url
             .parse::<crate::http::Url>()
             .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
         let document = state.csp_document_for_context(context)?;
-        if !state
-            .csp_policy_for_document(&document)
-            .allows_reference(ResourceType::Connect, &url)
-        {
-            state.record_csp_violation(&document, ResourceType::Connect, &url);
+        if !state.csp_allows_connect(&document, &url, csp_source.as_ref()) {
+            state.record_csp_violation_with_source(
+                &document,
+                ResourceType::Connect,
+                &url,
+                csp_source.as_ref(),
+            );
             return Err(JsNativeError::error()
                 .with_message("EventSource connection blocked by CSP connect-src")
                 .into());
@@ -18493,16 +19184,15 @@ fn event_source_fetch_native(
         )
         .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
         if let Some(effective_url) = fetched.response.effective_url()
-            && !state
-                .csp_policy_for_document(&document)
-                .allows_url_after_redirects(
-                    ResourceType::Connect,
-                    effective_url,
-                    fetched.response.redirect_count(),
-                )
+            && !state.csp_allows_response_for_document_with_source(
+                &document,
+                ResourceType::Connect,
+                &effective_url.to_string(),
+                fetched.response.redirect_count(),
+                &url,
+                csp_source.as_ref(),
+            )
         {
-            let blocked_uri = effective_url.to_string();
-            state.record_csp_violation(&document, ResourceType::Connect, &blocked_uri);
             return Err(JsNativeError::error()
                 .with_message("EventSource redirect blocked by CSP connect-src")
                 .into());
@@ -18621,6 +19311,7 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
     } else {
         None
     };
+    let csp_source = csp_source_location_argument(args, 8, context)?;
 
     let payload = with_host_state(|state| {
         let mut state = state.borrow_mut();
@@ -18629,12 +19320,14 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
         let normalized_url = parsed_url.to_string();
         let document = state.csp_document_for_context(context)?;
-        if !state
-            .csp_policy_for_document(&document)
-            .allows_reference(ResourceType::Connect, &normalized_url)
-        {
-            state.record_csp_violation(&document, ResourceType::Connect, &normalized_url);
-            return Err(JsNativeError::error()
+        if !state.csp_allows_connect(&document, &normalized_url, csp_source.as_ref()) {
+            state.record_csp_violation_with_source(
+                &document,
+                ResourceType::Connect,
+                &normalized_url,
+                csp_source.as_ref(),
+            );
+            return Err(JsNativeError::typ()
                 .with_message("fetch blocked by CSP connect-src")
                 .into());
         }
@@ -18688,17 +19381,16 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             }
         };
         if let Some(effective_url) = fetched.response.effective_url()
-            && !state
-                .csp_policy_for_document(&document)
-                .allows_url_after_redirects(
-                    ResourceType::Connect,
-                    effective_url,
-                    fetched.response.redirect_count(),
-                )
+            && !state.csp_allows_response_for_document_with_source(
+                &document,
+                ResourceType::Connect,
+                &effective_url.to_string(),
+                fetched.response.redirect_count(),
+                &normalized_url,
+                csp_source.as_ref(),
+            )
         {
-            let blocked_uri = effective_url.to_string();
-            state.record_csp_violation(&document, ResourceType::Connect, &blocked_uri);
-            return Err(JsNativeError::error()
+            return Err(JsNativeError::typ()
                 .with_message("fetch redirect blocked by CSP connect-src")
                 .into());
         }
@@ -19026,13 +19718,21 @@ fn set_inner_html_native(
                 state.destroy_iframe_contexts_in_subtree(child);
             }
         }
+        let mut inserted_children = Vec::new();
         if !html.is_empty() {
             let parsed = crate::html::TreeBuilder::parse_fragment(&html, &node).fragment();
             for child in parsed.child_nodes() {
+                inserted_children.push(child.clone());
                 target.append_child(child);
             }
         }
-        state.borrow_mut().register_tree(&target);
+        {
+            let mut state = state.borrow_mut();
+            state.register_tree(&target);
+            for child in &inserted_children {
+                state.apply_connected_referrer_metas(child);
+            }
+        }
         // The node stays attached to its document; invalidate that document's
         // resolver so a `<style>` inside the new markup is picked up.
         state.borrow_mut().mark_style_dirty_for_node(&node);
@@ -19160,8 +19860,8 @@ fn collect_inserted_scripts_native(
 ///
 /// `undefined` means the node has not reached an active document and may be
 /// retried. `null` means preparation completed without classic inline source
-/// (external/non-classic/blocked/already-started). A string is source that the
-/// bootstrap evaluates synchronously in the owning Document's Window.
+/// (external/non-classic/blocked/already-started). `true` means the source and
+/// its security context are saved for synchronous, one-shot evaluation.
 fn prepare_inserted_inline_script_native(
     _: &JsValue,
     args: &[JsValue],
@@ -19195,14 +19895,122 @@ fn prepare_inserted_inline_script_native(
         if !state.sandbox_allows_scripts_for_node(&node) {
             return Ok(JsValue::null());
         }
-        if !state
-            .csp_policy_for_node(&node)
-            .allows_inline(ResourceType::Script)
-        {
+        if !state.csp_allows_script_for_node(&node, "inline") {
             state.record_csp_violation_for_node(&node, ResourceType::Script, "inline");
             return Ok(JsValue::null());
         }
-        Ok(JsValue::from(js_string!(collect_text_content(&node))))
+        let Some(document) = document_root_for_node(&node) else {
+            return Ok(JsValue::null());
+        };
+        let prepared = PreparedInsertedInlineScript {
+            document_id: document.identity(),
+            source: collect_text_content(&node),
+            policy: state.csp_policy_for_document(&document),
+        };
+        state.prepared_inserted_inline_scripts.insert(id, prepared);
+        Ok(JsValue::from(true))
+    })
+}
+
+/// Evaluates prepared inline source in the owning Document's Realm with its
+/// document URL and parser position available to CSP source attribution.
+fn eval_inserted_inline_script_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    let prepared = with_host_state(|state| {
+        state
+            .borrow_mut()
+            .prepared_inserted_inline_scripts
+            .remove(&id)
+            .ok_or_else(|| {
+                JsNativeError::reference()
+                    .with_message("inline script was not prepared for evaluation")
+                    .into()
+            })
+    })?;
+    ensure_same_origin_node(context, id)?;
+    let (document_url, start_position, realm) = with_host_state(|state| {
+        let state = state.borrow();
+        let node = state.get_node(id).ok_or_else(|| {
+            JsNativeError::reference().with_message("script node no longer exists")
+        })?;
+        let document_id = document_root_for_node(&node)
+            .ok_or_else(|| {
+                JsNativeError::reference().with_message("script document no longer exists")
+            })?
+            .identity();
+        if document_id != prepared.document_id
+            || !state.document_is_active(document_id)
+            || !state.sandbox_allows_scripts_for_node(&node)
+            || !is_inline_classic_script(&node)
+            || !state
+                .csp_policy_for_node(&node)
+                .has_same_policy_rules(&prepared.policy)
+        {
+            return Err(JsNativeError::typ()
+                .with_message("prepared inline script changed document or policy")
+                .into());
+        }
+        let realm = if document_id == state.document.identity() {
+            state.main_realm.clone()
+        } else {
+            state
+                .iframe_documents
+                .values()
+                .find(|entry| entry.document.identity() == document_id)
+                .and_then(|entry| entry.realm.clone())
+                .or_else(|| {
+                    state
+                        .auxiliary_contexts
+                        .values()
+                        .find(|entry| entry.document.identity() == document_id)
+                        .and_then(|entry| entry.realm.clone())
+                })
+        }
+        .ok_or_else(|| {
+            JsNativeError::reference().with_message("script document Realm is no longer live")
+        })?;
+        Ok::<_, JsError>((
+            state.document_urls.get(&document_id).cloned(),
+            node.script_source_position().unwrap_or((1, 1)),
+            realm,
+        ))
+    })?;
+    let previous_realm = context.enter_realm(realm);
+    let result = (|| {
+        let metadata = script_errors::classic_script_metadata(false, document_url.clone());
+        Script::parse_with_host_defined(
+            Source::from_reader(
+                prepared.source.as_bytes(),
+                document_url.as_deref().map(Path::new),
+            )
+            .with_start_position(start_position.0, start_position.1),
+            None,
+            metadata,
+            context,
+        )?
+        .evaluate(context)
+    })();
+    context.enter_realm(previous_realm);
+    result
+}
+
+/// Releases a prepared inline source if an intervening page hook aborts evaluation.
+fn discard_prepared_inline_script_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)?;
+    with_host_state(|state| {
+        state
+            .borrow_mut()
+            .prepared_inserted_inline_scripts
+            .remove(&id);
+        Ok(JsValue::undefined())
     })
 }
 
@@ -19451,6 +20259,7 @@ fn insert_before_native_impl(
             // See `append_child_native`: insertion into a live document creates
             // a fresh iframe/object context, including an in-document reorder.
             if !preserve_state && target_document.is_some() {
+                state.apply_connected_referrer_metas(&new_node);
                 state.schedule_connected_resource_loads(
                     &new_node,
                     source_document != target_document,

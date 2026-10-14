@@ -23,6 +23,7 @@ collect_pattern \
   "/css/css-color/parsing/color-valid-hwb.html" \
   "/css/css-color/parsing/color-valid-lab.html"
 collect_pattern "/css/css-logical/"
+collect_pattern "/reporting/" "/content-security-policy/securitypolicyviolation/constructor-required-fields.html"
 collect_pattern \
   "/dom/events/AddEventListenerOptions-once.any.js" \
   "/dom/events/AddEventListenerOptions-passive.any.js" \

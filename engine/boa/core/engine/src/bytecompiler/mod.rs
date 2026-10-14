@@ -33,7 +33,7 @@ use boa_ast::{
     StatementListItem,
     declaration::{Binding, LexicalDeclaration, VarDeclaration},
     expression::{
-        Call, Identifier, New, Optional, OptionalOperationKind,
+        Call, Identifier, New, Optional, OptionalOperation, OptionalOperationKind,
         access::{PropertyAccess, PropertyAccessField},
         literal::ObjectMethodDefinition,
         operator::{assign::AssignTarget, update::UpdateTarget},
@@ -349,6 +349,63 @@ pub(crate) enum MethodKind {
 enum Callable<'a> {
     Call(&'a Call),
     New(&'a New),
+}
+
+/// Returns the browser-compatible source position recorded for a call frame.
+///
+/// Bare calls point at the identifier, property calls with a static name point
+/// at that name, and other calls point at the opening parenthesis. Constructor
+/// calls point at the `new` keyword.
+fn call_site_position(callable: Callable<'_>) -> Position {
+    let call = match callable {
+        Callable::Call(call) => call,
+        Callable::New(new) => return new.span().start(),
+    };
+
+    match call.function() {
+        Expression::Identifier(identifier) => identifier.span().start(),
+        Expression::PropertyAccess(access) => match access {
+            PropertyAccess::Simple(access) => match access.field() {
+                PropertyAccessField::Const(identifier) => identifier.span().start(),
+                PropertyAccessField::Expr(_) => call.span().start(),
+            },
+            PropertyAccess::Private(access) => access.field().span().start(),
+            PropertyAccess::Super(access) => match access.field() {
+                PropertyAccessField::Const(identifier) => identifier.span().start(),
+                PropertyAccessField::Expr(_) => call.span().start(),
+            },
+        },
+        _ => call.span().start(),
+    }
+}
+
+/// Returns the call-frame position for a call within an optional chain.
+///
+/// A non-shorted call following a static property access points at that
+/// property. Direct calls, shorted calls, and calls after computed properties
+/// point at the opening parenthesis.
+fn optional_call_site_position(
+    operation: &OptionalOperation,
+    previous: Option<&OptionalOperation>,
+) -> Position {
+    debug_assert!(matches!(
+        operation.kind(),
+        OptionalOperationKind::Call { .. }
+    ));
+
+    if !operation.shorted() {
+        match previous.map(OptionalOperation::kind) {
+            Some(OptionalOperationKind::SimplePropertyAccess {
+                field: PropertyAccessField::Const(identifier),
+            }) => return identifier.span().start(),
+            Some(OptionalOperationKind::PrivatePropertyAccess { field }) => {
+                return field.span().start();
+            }
+            _ => {}
+        }
+    }
+
+    operation.span().start()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1519,13 +1576,15 @@ impl<'ctx> ByteCompiler<'ctx> {
             .expect("chain must have at least one element");
         assert!(first.shorted());
 
-        self.compile_optional_item_kind(first.kind(), this, value);
+        self.compile_optional_item(first, None, this, value);
 
+        let mut previous = first;
         for item in rest {
             if item.shorted() {
                 jumps.push(self.jump_if_null_or_undefined(value));
             }
-            self.compile_optional_item_kind(item.kind(), this, value);
+            self.compile_optional_item(item, Some(previous), this, value);
+            previous = item;
         }
 
         let skip_undef = self.jump();
@@ -1568,10 +1627,11 @@ impl<'ctx> ByteCompiler<'ctx> {
                 short_circuits.push(self.jump_if_null_or_undefined(&value));
             }
 
+            let previous = index.checked_sub(1).map(|index| &chain[index]);
             if index + 1 == chain.len() {
-                self.compile_optional_delete_final(item.kind(), &this, &value, dst);
+                self.compile_optional_delete_final(item, previous, &this, &value, dst);
             } else {
-                self.compile_optional_item_kind(item.kind(), &this, &value);
+                self.compile_optional_item(item, previous, &this, &value);
             }
         }
 
@@ -1589,12 +1649,13 @@ impl<'ctx> ByteCompiler<'ctx> {
     /// Delete a final property access, or evaluate a final call as a non-reference.
     fn compile_optional_delete_final(
         &mut self,
-        kind: &OptionalOperationKind,
+        item: &OptionalOperation,
+        previous: Option<&OptionalOperation>,
         this: &Register,
         value: &Register,
         dst: &Register,
     ) {
-        match kind {
+        match item.kind() {
             OptionalOperationKind::SimplePropertyAccess { field } => {
                 self.bytecode.emit_move(dst.variable(), value.variable());
                 match field {
@@ -1616,9 +1677,25 @@ impl<'ctx> ByteCompiler<'ctx> {
                 unreachable!("deleting private properties should always throw early errors")
             }
             OptionalOperationKind::Call { .. } => {
-                self.compile_optional_item_kind(kind, this, value);
+                self.compile_optional_item(item, previous, this, value);
                 self.bytecode.emit_push_true(dst.variable());
             }
+        }
+    }
+
+    fn compile_optional_item(
+        &mut self,
+        item: &OptionalOperation,
+        previous: Option<&OptionalOperation>,
+        this: &Register,
+        value: &Register,
+    ) {
+        if matches!(item.kind(), OptionalOperationKind::Call { .. }) {
+            let position = optional_call_site_position(item, previous);
+            let mut compiler = SourcePositionGuard::new(self, position);
+            compiler.compile_optional_item_kind(item.kind(), this, value);
+        } else {
+            self.compile_optional_item_kind(item.kind(), this, value);
         }
     }
 
@@ -2059,6 +2136,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             New,
         }
 
+        let position = call_site_position(callable);
         let (call, mut kind) = match callable {
             Callable::Call(call) => (call, CallKind::Call),
             Callable::New(new) => (new.call(), CallKind::New),
@@ -2142,7 +2220,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             }
         }
 
-        let mut compiler = self.position_guard(call);
+        let mut compiler = SourcePositionGuard::new(self, position);
 
         let contains_spread = call
             .args()

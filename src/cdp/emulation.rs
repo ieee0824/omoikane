@@ -140,7 +140,7 @@ mod tests {
         let mut session = CdpSession::new().unwrap();
         let (task, pending) = session.prepare_document_page_task(
             "http://example.test/", &DecodedHtml::from_string("<script>globalThis.mediaChanges = 0; matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', () => mediaChanges++);</script>"),
-            1, "null", &[], None,
+            1, "null", &[], 0, None,
         ).unwrap();
         let mut task = Box::pin(task);
         let mut context = Context::from_waker(Waker::noop());
@@ -187,7 +187,7 @@ mod tests {
         let (task, pending) = session.prepare_document_page_task(
             "http://example.test/",
             &DecodedHtml::from_string("<style>#probe {color:red} @media (min-width:1000px) {#probe {color:green}}</style><div id=probe>viewport</div><script>globalThis.initialWidth = innerWidth; globalThis.viewportChanges = 0; globalThis.viewportQuery = matchMedia('(width:640px)'); viewportQuery.onchange = () => viewportChanges++;</script>"),
-            1, "null", &[], None,
+            1, "null", &[], 0, None,
         ).unwrap();
         let mut task = Box::pin(task);
         let mut context = Context::from_waker(Waker::noop());

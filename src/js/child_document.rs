@@ -8,12 +8,18 @@ use super::*;
 #[derive(Debug)]
 pub(super) struct LoadedChildDocument {
     pub(super) document: NodeHandle,
-    /// `Content-Security-Policy` header values from the HTTP response.
+    /// The final response status, including HTTP error responses. Local
+    /// `about:blank`, `about:srcdoc`, and `data:` navigation responses use 200;
+    /// a fetch failure uses the network-error status 0.
+    pub(super) response_status: u16,
+    /// Referer on the final HTTP request; `None` for non-network Documents.
+    pub(super) final_request_referrer: Option<String>,
+    /// CSP, reporting endpoint, and referrer policy headers from the response.
     ///
     /// Empty when no response delivered the document (`about:blank`,
     /// `about:srcdoc`, `data:` URLs, fetch failures) and for GET responses
     /// whose content type is not rendered.
-    pub(super) csp_headers: Vec<String>,
+    pub(super) security_headers: Vec<(String, String)>,
     /// URL committed for the document: the response's effective URL (keeping
     /// the requested fragment), the `data:` URL itself, `about:blank` or
     /// `about:srcdoc`.
@@ -28,7 +34,9 @@ impl LoadedChildDocument {
     pub(super) fn about_blank(url: String) -> Self {
         Self {
             document: blank_html_document(),
-            csp_headers: Vec::new(),
+            response_status: 200,
+            final_request_referrer: None,
+            security_headers: Vec::new(),
             url: Some(url),
         }
     }
@@ -37,7 +45,9 @@ impl LoadedChildDocument {
     pub(super) fn srcdoc(markup: &str) -> Self {
         Self {
             document: crate::html::TreeBuilder::parse(markup).document(),
-            csp_headers: Vec::new(),
+            response_status: 200,
+            final_request_referrer: None,
+            security_headers: Vec::new(),
             url: Some("about:srcdoc".to_owned()),
         }
     }
@@ -46,7 +56,9 @@ impl LoadedChildDocument {
     pub(super) fn fetch_failed() -> Self {
         Self {
             document: blank_html_document(),
-            csp_headers: Vec::new(),
+            response_status: 0,
+            final_request_referrer: None,
+            security_headers: Vec::new(),
             url: None,
         }
     }
@@ -55,12 +67,16 @@ impl LoadedChildDocument {
 /// Bytes obtained for a child document before parsing.
 #[derive(Debug)]
 pub(super) struct FetchedChildResource {
+    /// The status of the final response before its body is consumed.
+    pub(super) response_status: u16,
+    /// Referer on the final HTTP request after redirects.
+    pub(super) final_request_referrer: String,
     /// The response `Content-Type` (empty when absent) or the `data:` MIME type.
     pub(super) mime_type: String,
     /// The response body, adopted regardless of the HTTP status code.
     pub(super) body: Vec<u8>,
-    /// See [`LoadedChildDocument::csp_headers`].
-    pub(super) csp_headers: Vec<String>,
+    /// See [`LoadedChildDocument::security_headers`].
+    pub(super) security_headers: Vec<(String, String)>,
     /// The response's effective URL (keeping the requested fragment) or the
     /// `data:` URL itself.
     pub(super) effective_url: String,
@@ -74,12 +90,16 @@ impl FetchedChildResource {
         match parse_child_document(&self.mime_type, &self.body) {
             Some(document) => LoadedChildDocument {
                 document,
-                csp_headers: self.csp_headers,
+                response_status: self.response_status,
+                final_request_referrer: Some(self.final_request_referrer),
+                security_headers: self.security_headers,
                 url: Some(self.effective_url),
             },
             None => LoadedChildDocument {
                 document: blank_html_document(),
-                csp_headers: Vec::new(),
+                response_status: self.response_status,
+                final_request_referrer: Some(self.final_request_referrer),
+                security_headers: Vec::new(),
                 url: Some(self.effective_url),
             },
         }
@@ -111,12 +131,22 @@ pub(super) fn parse_child_document(mime_type: &str, body: &[u8]) -> Option<NodeH
         .then(|| form_submission::plain_text_document(body))
 }
 
-/// Returns every `Content-Security-Policy` header value of `response`.
-pub(super) fn response_csp_headers(response: &crate::http::HttpResponse) -> Vec<String> {
+/// Returns security and referrer policy headers, preserving repeated values.
+pub(super) fn response_security_headers(
+    response: &crate::http::HttpResponse,
+) -> Vec<(String, String)> {
     response
         .headers()
         .iter()
-        .filter(|(name, _)| name.eq_ignore_ascii_case("content-security-policy"))
-        .map(|(_, value)| value.clone())
+        .filter(|(name, _)| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "content-security-policy"
+                    | "content-security-policy-report-only"
+                    | "reporting-endpoints"
+                    | "referrer-policy"
+            )
+        })
+        .cloned()
         .collect()
 }

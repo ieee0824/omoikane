@@ -11,7 +11,9 @@ use boa_engine::{JsValue, realm::Realm};
 use boa_gc::{Finalize, Trace, Tracer};
 
 use super::script_errors::WorkerErrorNotification;
-use super::{DocumentSecurityOrigin, NavigationRequest, TimerPayload, VisitSource};
+use super::{
+    DocumentSecurityOrigin, NavigationReferrerSource, NavigationRequest, TimerPayload, VisitSource,
+};
 
 /// The HTML task source responsible for a queued task.
 #[allow(dead_code)]
@@ -51,6 +53,12 @@ pub(crate) enum Task {
         request_id: u64,
         stolen: bool,
     },
+    /// A CSP violation delivered asynchronously in its document's realm.
+    SecurityPolicyViolation {
+        document_id: usize,
+        element_id: Option<usize>,
+        payload: String,
+    },
     Navigation {
         request: NavigationRequest,
         source: Option<VisitSource>,
@@ -59,6 +67,7 @@ pub(crate) enum Task {
         id: u64,
         url: String,
         source: Option<VisitSource>,
+        referrer_source: NavigationReferrerSource,
     },
     PostedMessage {
         port: JsValue,
@@ -224,6 +233,7 @@ unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
         } => unsafe { owner.trace(tracer) },
         Task::Geolocation { .. }
         | Task::WebLock { .. }
+        | Task::SecurityPolicyViolation { .. }
         | Task::Navigation { .. }
         | Task::AuxiliaryNavigate { .. }
         | Task::BroadcastChannelMessage { .. }
@@ -269,6 +279,22 @@ impl EventLoop {
                 document_id,
                 request_id,
                 stolen,
+            },
+        );
+    }
+
+    pub(crate) fn enqueue_security_policy_violation(
+        &mut self,
+        document_id: usize,
+        element_id: Option<usize>,
+        payload: String,
+    ) {
+        self.enqueue(
+            TaskSource::Networking,
+            Task::SecurityPolicyViolation {
+                document_id,
+                element_id,
+                payload,
             },
         );
     }
@@ -337,10 +363,16 @@ impl EventLoop {
         id: u64,
         url: String,
         source: Option<VisitSource>,
+        referrer_source: NavigationReferrerSource,
     ) {
         self.enqueue(
             TaskSource::Navigation,
-            Task::AuxiliaryNavigate { id, url, source },
+            Task::AuxiliaryNavigate {
+                id,
+                url,
+                source,
+                referrer_source,
+            },
         );
     }
 
@@ -625,6 +657,16 @@ impl EventLoop {
             })
     }
 
+    pub(crate) fn has_pending_security_reporting_tasks(&self) -> bool {
+        self.queues
+            .get(&TaskSource::Networking)
+            .is_some_and(|queue| {
+                queue
+                    .iter()
+                    .any(|(_, task)| matches!(task, Task::SecurityPolicyViolation { .. }))
+            })
+    }
+
     pub(crate) fn has_pending_geolocation_tasks(&self) -> bool {
         self.queues
             .get(&TaskSource::Geolocation)
@@ -711,6 +753,12 @@ impl EventLoop {
                 ) || matches!(
                     task,
                     Task::WebLock {
+                        document_id: owner_document_id,
+                        ..
+                    } if *owner_document_id == document_id
+                ) || matches!(
+                    task,
+                    Task::SecurityPolicyViolation {
                         document_id: owner_document_id,
                         ..
                     } if *owner_document_id == document_id

@@ -1,3 +1,4 @@
+export let __omoikane_queue_reporting_api_report;
 export let __omoikane_cookie_change_dispatch;
 export let __omoikane_cookie_change_reset;
 
@@ -36,7 +37,15 @@ export let __omoikane_cookie_change_reset;
   const nativeImportScripts = globalThis.__omoikane_import_scripts;
   const nativeReportError = globalThis.__omoikane_report_error;
   const nativeRunMicrotaskCallback = globalThis.__omoikane_run_microtask_callback;
+  const nativeCaptureCspSource = globalThis.__omoikane_capture_csp_source;
+  const nativeFetch = globalThis.__omoikane_fetch;
+  const nativeWebSocketConnect = globalThis.__omoikane_websocket_connect;
+  const nativeEventSourceFetch = globalThis.__omoikane_event_source_fetch;
   delete globalThis.__omoikane_import_scripts;
+  delete globalThis.__omoikane_capture_csp_source;
+  delete globalThis.__omoikane_fetch;
+  delete globalThis.__omoikane_websocket_connect;
+  delete globalThis.__omoikane_event_source_fetch;
   const nativeCurrentWindowEvent = globalThis.__omoikane_current_window_event;
   delete globalThis.__omoikane_current_window_event;
   const nativeRegisterWindowProxy = globalThis.__omoikane_register_window_proxy;
@@ -267,6 +276,7 @@ export let __omoikane_cookie_change_reset;
   delete globalThis.__omoikane_document_content_type;
   delete globalThis.__omoikane_set_document_content_type;
   const nativeDocumentURL = globalThis.__omoikane_document_url;
+  const nativeDocumentReferrer = globalThis.__omoikane_document_referrer;
   const nativeCommitHistoryApiURL = globalThis.__omoikane_commit_history_api_url;
   const nativeCommitFragmentURL = globalThis.__omoikane_commit_fragment_url;
   const nativeDocumentBaseURL = globalThis.__omoikane_document_base_url;
@@ -320,6 +330,7 @@ export let __omoikane_cookie_change_reset;
   delete globalThis.__omoikane_iframe_replay_submission;
   delete globalThis.__omoikane_take_discarded_node_ids;
   delete globalThis.__omoikane_document_url;
+  delete globalThis.__omoikane_document_referrer;
   delete globalThis.__omoikane_document_base_url;
   delete globalThis.__omoikane_set_user_action_target;
 
@@ -6498,20 +6509,24 @@ export let __omoikane_cookie_change_reset;
       if (scripts === null) continue;
       for (const id of scripts) {
         const node = wrapNode(id);
-        const source = __omoikane_prepare_inserted_inline_script(node.__id);
-        if (typeof source === "string") {
-          const doc = node.ownerDocument;
-          const view = doc && doc.defaultView;
-          if (view) {
-            const previousScript = doc.__currentScript || null;
-            try {
-              view.__omoikane_set_current_script(node.__id);
-              view.eval(source);
-            } catch (error) {
-              __omoikane_record_inserted_script_error(node.__id, String(error));
-            } finally {
-              doc.__currentScript = previousScript;
+        const prepared = __omoikane_prepare_inserted_inline_script(node.__id);
+        if (prepared === true) {
+          try {
+            const doc = node.ownerDocument;
+            const view = doc && doc.defaultView;
+            if (view) {
+              const previousScript = doc.__currentScript || null;
+              try {
+                view.__omoikane_set_current_script(id);
+                __omoikane_eval_inserted_inline_script(id);
+              } catch (error) {
+                __omoikane_record_inserted_script_error(id, String(error));
+              } finally {
+                doc.__currentScript = previousScript;
+              }
             }
+          } finally {
+            __omoikane_discard_prepared_inline_script(id);
           }
         }
       }
@@ -7748,7 +7763,8 @@ export let __omoikane_cookie_change_reset;
     }
 
     get referrer() {
-      return "";
+      requireNodeReceiver(this);
+      return nativeDocumentReferrer(internalNodeId(this)) ?? "";
     }
 
     get contentType() {
@@ -13207,6 +13223,18 @@ export let __omoikane_cookie_change_reset;
   }
 
   class HTMLMetaElement extends HTMLElement {
+    get name() {
+      return this.getAttribute("name") || "";
+    }
+    set name(v) {
+      this.setAttribute("name", String(v));
+    }
+    get content() {
+      return this.getAttribute("content") || "";
+    }
+    set content(v) {
+      this.setAttribute("content", String(v));
+    }
     get httpEquiv() {
       return this.getAttribute("http-equiv") || "";
     }
@@ -16057,6 +16085,19 @@ export let __omoikane_cookie_change_reset;
       changedDocument.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
     }
   };
+  const dispatchCspEvent = Node.prototype.dispatchEvent;
+  globalThis.__omoikane_dispatch_csp_violation = function(targetId, init, workerGlobal) {
+    const target = workerGlobal ? globalThis : wrapNode(targetId);
+    if (!target) return;
+    const event = new platformEventInterfaces.SecurityPolicyViolationEvent("securitypolicyviolation", {
+      ...init, sourceFile: init.sourceFile ?? "",
+    });
+    event.isTrusted = true;
+    safeApply(workerGlobal ? dispatchCspGlobalEvent : dispatchCspEvent, target, [event]);
+    if (init.reportToPresent && platformEventInterfaces.queueCspReport) {
+      platformEventInterfaces.queueCspReport(init);
+    }
+  };
   globalThis.__omoikane_close_auxiliary_document = function() {
     if (browsingInput.visibilityHiddenDocumentIds.has(__omoikane_document_id)) return;
     browsingInput.visibilityHiddenDocumentIds.add(__omoikane_document_id);
@@ -17563,7 +17604,9 @@ export let __omoikane_cookie_change_reset;
     }
   };
   globalThis.__omoikane_set_location = function(href) {
-    __applyLocationUrl(href, false);
+    const url = new URL(String(href), __locationHref);
+    __locationHref = url.href;
+    __locationHash = url.hash;
   };
   globalThis.history = {
     scrollRestoration: "auto",
@@ -20466,6 +20509,7 @@ export let __omoikane_cookie_change_reset;
     }
     send(body = null) {
       if (this.readyState !== 1 || this._sendFlag) throw new Error("InvalidStateError");
+      const cspSource = nativeCaptureCspSource();
       this._sendFlag = true;
       this._terminal = false;
       const requestId = this._requestId;
@@ -20516,7 +20560,7 @@ export let __omoikane_cookie_change_reset;
             };
           })
         : Promise.resolve().then(() =>
-            __omoikane_fetch(
+            nativeFetch(
               this._url,
               this._method,
               JSON.stringify(Object.entries(this._headers)),
@@ -20525,6 +20569,7 @@ export let __omoikane_cookie_change_reset;
               this.withCredentials ? "include" : "same-origin",
               "follow",
               this._timeout,
+              cspSource,
             )
           ).then(raw => JSON.parse(String(raw)));
       payload.then(data => {
@@ -22445,6 +22490,7 @@ export let __omoikane_cookie_change_reset;
     if (visualScroll) visualViewport.dispatchEvent(new Event("scroll"));
   };
   globalThis.EventTarget = EventTarget;
+  const dispatchCspGlobalEvent = EventTarget.prototype.dispatchEvent;
   // DOM nodes and the Window inherit the EventTarget interface. Their own
   // listener operations retain the document-backed event dispatch state.
   Object.setPrototypeOf(Node.prototype, EventTarget.prototype);
@@ -25854,6 +25900,7 @@ export let __omoikane_cookie_change_reset;
   class WebSocket extends EventTarget {
     constructor(url, protocols = []) {
       super();
+      const cspSource = nativeCaptureCspSource();
       this.url = String(url);
       const list = protocols === undefined ? [] : (Array.isArray(protocols) ? protocols.map(String) : [String(protocols)]);
       if (new Set(list).size !== list.length) throw new DOMException("Duplicate subprotocol", "SyntaxError");
@@ -25865,7 +25912,7 @@ export let __omoikane_cookie_change_reset;
       this.binaryType = "blob";
       this.onopen = this.onmessage = this.onerror = this.onclose = null;
       try {
-        const result = JSON.parse(__omoikane_websocket_connect(this.url, JSON.stringify(list)));
+        const result = JSON.parse(nativeWebSocketConnect(this.url, JSON.stringify(list), cspSource));
         this.__id = result.id;
         this.protocol = result.protocol;
         __omoikane_queue_networking_task(() => {
@@ -25943,23 +25990,35 @@ export let __omoikane_cookie_change_reset;
   WebSocket.CLOSING = WebSocket.prototype.CLOSING = 2;
   WebSocket.CLOSED = WebSocket.prototype.CLOSED = 3;
 
+  const eventSourceCspSources = new WeakMap();
   class EventSource extends EventTarget {
     constructor(url, init = {}) {
       super();
-      this.url = String(url);
+      const cspSource = nativeCaptureCspSource();
+      if (typeof url === "symbol") throw new IntrinsicTypeError("Cannot convert a Symbol to a string");
+      const input = String(url);
+      const base = typeof document === "undefined" ? nativeDocumentBaseURL(__omoikane_document_id) : document.baseURI;
+      try {
+        this.url = new URL(input, base || globalThis.location.href).href;
+      } catch (_) {
+        throw new DOMException("Invalid EventSource URL", "SyntaxError");
+      }
       this.withCredentials = !!(init && init.withCredentials);
       this.readyState = EventSource.CONNECTING;
       this.onopen = this.onmessage = this.onerror = null;
       this.__closed = false;
       this.__lastEventId = "";
       this.__retry = 3000;
+      safeWeakMapSet(eventSourceCspSources, this, cspSource);
       this.__connect();
     }
     close() { this.__closed = true; this.readyState = EventSource.CLOSED; }
     __connect() {
       if (this.__closed) return;
       try {
-        const text = __omoikane_event_source_fetch(this.url, this.__lastEventId, this.withCredentials);
+        const cspSource = safeWeakMapGet(eventSourceCspSources, this) ?? "null";
+        safeWeakMapDelete(eventSourceCspSources, this);
+        const text = nativeEventSourceFetch(this.url, this.__lastEventId, this.withCredentials, cspSource);
         __omoikane_queue_networking_task(() => {
           if (this.__closed) return;
           this.readyState = EventSource.OPEN;
@@ -26431,6 +26490,7 @@ export let __omoikane_cookie_change_reset;
   }
 
   globalThis.fetch = function(input, init = {}) {
+    const cspSource = nativeCaptureCspSource();
     const source = input instanceof Request ? input : null;
     const request = new Request(input, init);
     if (source && init.body === undefined && !bodyIsEmpty(source.__body)) disturbBody(source);
@@ -26456,7 +26516,7 @@ export let __omoikane_cookie_change_reset;
     }
     return Promise.resolve().then(() => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
-      return __omoikane_fetch(
+      return nativeFetch(
         request.url,
         request.method,
         JSON.stringify([...request.headers]),
@@ -26464,6 +26524,8 @@ export let __omoikane_cookie_change_reset;
         request.mode,
         request.credentials,
         request.redirect,
+        undefined,
+        cspSource,
       );
     }).then(raw => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
@@ -27818,6 +27880,15 @@ export let __omoikane_cookie_change_reset;
       }
       return false;
     });
+  };
+  globalThis.__omoikane_install_security_reporting = factory => {
+    Object.assign(platformEventInterfaces, factory({ queueTask: __omoikane_queue_networking_task }));
+  };
+  globalThis.__omoikane_generate_test_report = (message, reportURL) => {
+    platformEventInterfaces.queueTestReport(message, reportURL);
+  };
+  __omoikane_queue_reporting_api_report = report => {
+    platformEventInterfaces.queueReport(report);
   };
   globalThis.__omoikane_install_touch_events = factory => {
     Object.assign(platformEventInterfaces, factory({ UIEvent, isTouch: platformEventInterfaces.isTouch }));
