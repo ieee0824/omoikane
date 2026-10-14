@@ -99,9 +99,10 @@ impl Eval {
         // 1. Assert: If direct is false, then strictCaller is also false.
         debug_assert!(direct || !strict);
 
-        // 2. If Type(x) is not String, return x.
+        // 2. A host-defined trusted script also carries executable source.
         // TODO: rework parser to take an iterator of `u32` unicode codepoints
-        let Some(x) = x.as_string() else {
+        let trusted_source = context.host_hooks().trusted_script_value(x);
+        let Some(source) = x.as_string().or_else(|| trusted_source.clone()) else {
             return Ok(x.clone());
         };
 
@@ -113,16 +114,23 @@ impl Eval {
         let eval_realm = context.realm().clone();
 
         // 5. Perform ? HostEnsureCanCompileStrings(evalRealm, « », x, direct).
-        context
-            .host_hooks()
-            .ensure_can_compile_strings(eval_realm, &[], &x, direct, context)?;
+        context.host_hooks().ensure_can_compile_strings(
+            eval_realm,
+            &[],
+            &source,
+            &source,
+            direct,
+            trusted_source.is_some(),
+            false,
+            context,
+        )?;
 
         // 11. Perform the following substeps in an implementation-defined order, possibly interleaving parsing and error detection:
         //     a. Let script be ParseText(StringToCodePoints(x), Script).
         //     b. If script is a List of errors, throw a SyntaxError exception.
         //     c. If script Contains ScriptBody is false, return undefined.
         //     d. Let body be the ScriptBody of script.
-        let x = x.to_vec();
+        let x = source.to_vec();
         let source = Source::from_utf16(&x);
 
         let mut parser = Parser::new(source);

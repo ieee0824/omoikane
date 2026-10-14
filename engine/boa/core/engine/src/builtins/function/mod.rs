@@ -395,6 +395,31 @@ impl BuiltInConstructor for BuiltInFunctionObject {
     }
 }
 
+fn dynamic_function_code_string(
+    r#async: bool,
+    generator: bool,
+    parameters: &[JsString],
+    body: &JsString,
+) -> JsString {
+    let prefix = match (r#async, generator) {
+        (true, true) => "async function*",
+        (true, false) => "async function",
+        (false, true) => "function*",
+        (false, false) => "function",
+    };
+    let mut code: Vec<u16> = format!("{prefix} anonymous(").encode_utf16().collect();
+    for (index, parameter) in parameters.iter().enumerate() {
+        if index != 0 {
+            code.push(u16::from(b','));
+        }
+        code.extend(parameter.iter());
+    }
+    code.extend("\n) {\n".encode_utf16());
+    code.extend(body.iter());
+    code.extend("\n}".encode_utf16());
+    JsString::from(code.as_slice())
+}
+
 impl BuiltInFunctionObject {
     /// `CreateDynamicFunction ( constructor, newTarget, kind, args )`
     ///
@@ -458,30 +483,45 @@ impl BuiltInFunctionObject {
         let prototype = get_prototype_from_constructor(&new_target, default, context)?;
 
         // 6. Let argCount be the number of elements in parameterArgs.
-        let (body, param_list) = if let Some((body, params)) = args.split_last() {
+        let (body, param_list, trusted_script) = if let Some((body, params)) = args.split_last() {
             // 7. Let parameterStrings be a new empty List.
             let mut parameters = Vec::with_capacity(args.len());
+            let mut all_parameters_trusted = true;
 
             // 8. For each element arg of parameterArgs, do
             for param in params {
                 // a. Append ? ToString(arg) to parameterStrings.
-                parameters.push(param.to_string(context)?);
+                if let Some(source) = context.host_hooks().trusted_script_value(param) {
+                    parameters.push(source);
+                } else {
+                    all_parameters_trusted = false;
+                    parameters.push(param.to_string(context)?);
+                }
             }
 
             // 9. Let bodyString be ? ToString(bodyArg).
-            let body = body.to_string(context)?;
+            let trusted_body = context.host_hooks().trusted_script_value(body);
+            let body_is_trusted = trusted_body.is_some();
+            let body = match trusted_body {
+                Some(source) => source,
+                None => body.to_string(context)?,
+            };
 
-            (body, parameters)
+            (body, parameters, body_is_trusted && all_parameters_trusted)
         } else {
-            (js_string!(), Vec::new())
+            (js_string!(), Vec::new(), false)
         };
         let current_realm = context.realm().clone();
+        let code = dynamic_function_code_string(r#async, generator, &param_list, &body);
 
         context.host_hooks().ensure_can_compile_strings(
             current_realm,
             &param_list,
             &body,
+            &code,
             false,
+            trusted_script,
+            true,
             context,
         )?;
 

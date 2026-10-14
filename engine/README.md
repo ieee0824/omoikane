@@ -47,6 +47,28 @@ does not execute nested workflows. Omoikane's root workflows must exercise the
 engine alongside browser compatibility and release gates. Source placement and
 successful dependency resolution alone are not completion of #552/#515.
 
+## Trusted Types dynamic-code hooks
+
+The local Trusted Types integration follows the [dynamic-code brand checks
+proposal](https://tc39.es/proposal-dynamic-code-brand-checks/) and extends
+Boa's `HostHooks` with a native `TrustedScript` source lookup. It passes the
+original brand status, compilation kind, and the exact generated source from
+`eval` and dynamic Function constructors to
+`HostEnsureCanCompileStrings`. The browser embedding checks CSP and default
+policy results before Boa parses the source. These edits live in
+`core/engine/src/context/hooks.rs`, `builtins/eval/mod.rs`, and
+`builtins/function/mod.rs`; the imported origin manifest is unchanged.
+Both interpreter and opt-in baseline JIT calls enter these common builtins and
+host hooks. Verify the engine behavior with the nested locked Boa tests and the
+`baseline-jit` tests above, then run Omoikane's Trusted Types, CSP, and dynamic
+script regressions with a separate guarded root target.
+
+Inline event-handler attributes also use Boa's Function constructor internally.
+The browser checks `script-src-attr` at the element, then grants one exact
+generated source string to that constructor call. The grant is private to the
+host call and consumed by its first matching hook, so `script-src 'unsafe-inline'`
+can authorize an event handler without authorizing page `eval` or `Function`.
+
 ## RegExp exact-position matching
 
 [`regress/`](regress/) preserves the published regress 0.10.5 package, including
