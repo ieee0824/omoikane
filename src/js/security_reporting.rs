@@ -217,9 +217,7 @@ impl JsRuntime {
             let mut request = HttpRequest::new(Method::Post, url.clone());
             request.set_header("Content-Type", "application/csp-report");
             request.set_body(body.clone());
-            if let Some(base) = base.as_ref() {
-                request.set_cookie_context(base.clone(), false);
-            }
+            state.set_document_cookie_request_context(document_id, &mut request);
             request.set_header("Origin", origin.serialize());
             if requires_public_fetch(&url, base.as_ref()) {
                 request.require_public_ip();
@@ -510,9 +508,7 @@ impl HostState {
         let mut request = HttpRequest::new(Method::Post, url.clone());
         request.set_header("Content-Type", "application/reports+json");
         request.set_body(body);
-        if let Some(base) = base.as_ref() {
-            request.set_cookie_context(base.clone(), false);
-        }
+        self.set_document_cookie_request_context(document_id, &mut request);
         if requires_public_fetch(&url, base.as_ref()) {
             request.require_public_ip();
         }
@@ -3452,6 +3448,167 @@ mod tests {
         );
         assert_eq!(body["csp-report"]["disposition"], "enforce");
         assert_eq!(body["csp-report"]["effective-directive"], "connect-src");
+    }
+
+    #[test]
+    fn third_party_reports_use_document_storage_access_for_cookies() {
+        type Sent = (String, Option<String>);
+        struct Transport(Arc<Mutex<Vec<Sent>>>);
+        impl crate::http::HttpTransport for Transport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+                let path = request.url().path();
+                if path == "/frame" {
+                    return Ok(crate::http::HttpResponse::new(
+                        200,
+                        "OK",
+                        vec![
+                            ("Content-Type".into(), "text/html".into()),
+                            (
+                                "Reporting-Endpoints".into(),
+                                "reports=\"https://third.test/modern\"".into(),
+                            ),
+                        ],
+                        b"<html><body><script>globalThis.frameReady = true</script></body></html>"
+                            .to_vec(),
+                    ));
+                }
+                if request.method() == Method::Post {
+                    self.0
+                        .lock()
+                        .unwrap()
+                        .push((path.to_owned(), request.header("Cookie").map(str::to_owned)));
+                }
+                Ok(crate::http::HttpResponse::new(
+                    200,
+                    "OK",
+                    vec![
+                        (
+                            "Access-Control-Allow-Origin".into(),
+                            "https://third.test".into(),
+                        ),
+                        ("Access-Control-Allow-Methods".into(), "POST".into()),
+                        ("Access-Control-Allow-Headers".into(), "content-type".into()),
+                        (
+                            "Set-Cookie".into(),
+                            "report=stored; Path=/; Secure; SameSite=None".into(),
+                        ),
+                    ],
+                    vec![],
+                ))
+            }
+        }
+
+        let document = crate::html::TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime = JsRuntime::with_document_and_url(document, "https://top.test/").unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        runtime.set_http_resource_transport(Some(Arc::new(Transport(Arc::clone(&sent)))));
+        let third_url: crate::http::Url = "https://third.test/frame".parse().unwrap();
+        let store = runtime.host_state.borrow().cookie_store.clone();
+        store
+            .lock()
+            .unwrap()
+            .add_from_header_for_url("session=seed; Path=/; Secure; SameSite=None", &third_url);
+        runtime
+            .eval("const frame = document.createElement('iframe'); frame.src = 'https://third.test/frame'; document.body.appendChild(frame)")
+            .unwrap();
+        runtime.tick(0).unwrap();
+        let child = runtime
+            .host_state
+            .borrow()
+            .iframe_documents
+            .values()
+            .next()
+            .unwrap()
+            .document
+            .clone();
+        let child_id = child.identity();
+        assert_eq!(
+            runtime.host_state.borrow().document_urls.get(&child_id),
+            Some(&"https://third.test/frame".to_owned())
+        );
+        assert!(runtime.existing_realm_for_document(child_id).is_some());
+        let legacy = serde_json::json!({
+            "documentURI": "https://third.test/frame", "referrer": "",
+            "blockedURI": "https://third.test/blocked", "effectiveDirective": "connect-src",
+            "violatedDirective": "connect-src",
+            "originalPolicy": "connect-src 'none'; report-uri https://third.test/legacy",
+            "disposition": "enforce", "statusCode": 200, "sample": ""
+        });
+        let modern = serde_json::json!({
+            "type": "test", "url": "https://third.test/frame", "body": {}
+        });
+
+        runtime.deliver_csp_report(child_id, &legacy.to_string());
+        wait_for_report_delivery(&mut runtime);
+        runtime.deliver_modern_report(child_id, "reports", modern.clone());
+        wait_for_report_delivery(&mut runtime);
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .document_cookie(&third_url, &third_url),
+            "session=seed"
+        );
+
+        runtime
+            .with_trusted_storage_access_input(|runtime| {
+                runtime.eval_in_document_realm(
+                    child_id,
+                    "document.addEventListener('click', () => document.requestStorageAccess().then( \
+                       () => document.documentElement.setAttribute('data-granted', 'yes'), \
+                       e => document.documentElement.setAttribute('data-granted', e.name)), {once:true}); \
+                     __omoikane_dispatch_mouse_input(document.body.__id, 'click', {button:0}, false)",
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            child
+                .child_nodes()
+                .into_iter()
+                .find(|node| node.node_type() == NodeType::Element)
+                .and_then(|html| html.get_attribute("data-granted"))
+                .as_deref(),
+            Some("yes")
+        );
+        {
+            let state = runtime.host_state.borrow();
+            let mut request = HttpRequest::new(Method::Post, third_url.clone());
+            state.set_document_cookie_request_context(child_id, &mut request);
+            assert!(
+                request.storage_access_eligible(),
+                "grant missing from report request"
+            );
+            assert_eq!(
+                script_errors::document_fetch_origin(&state, child_id),
+                CorsOrigin::from_url(&third_url),
+                "legacy report credentials need the child security origin"
+            );
+        }
+        runtime.deliver_csp_report(child_id, &legacy.to_string());
+        wait_for_report_delivery(&mut runtime);
+        runtime.deliver_modern_report(child_id, "reports", modern);
+        wait_for_report_delivery(&mut runtime);
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 4, "both report delivery paths must send twice");
+        assert_eq!(sent[0], ("/legacy".into(), None));
+        assert_eq!(sent[1], ("/modern".into(), None));
+        assert_eq!(sent[2], ("/legacy".into(), Some("session=seed".into())));
+        assert_eq!(
+            sent[3],
+            ("/modern".into(), Some("session=seed; report=stored".into()))
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .document_cookie(&third_url, &third_url)
+                .contains("report=stored")
+        );
     }
 
     #[test]
