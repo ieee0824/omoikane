@@ -785,6 +785,16 @@ impl Context {
         frames.into_iter().skip(1).rev()
     }
 
+    /// Returns stack frames with their actual execution Realms, most recent first.
+    ///
+    /// Each frame retains its execution Realm independently of its saved caller
+    /// Realm. Native calls can enter another Realm without pushing a VM frame,
+    /// and indirect `eval` can inherit a different Realm's `[[ScriptOrModule]]`.
+    pub fn stack_trace_with_realms(&self) -> impl Iterator<Item = (&CallFrame, Realm)> {
+        self.stack_trace()
+            .map(|frame| (frame, frame.execution_realm().clone()))
+    }
+
     /// Replaces the currently active realm with `realm`, and returns the old realm.
     #[inline]
     pub fn enter_realm(&mut self, realm: Realm) -> Realm {
