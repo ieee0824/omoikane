@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use super::client::{is_redirect, redirect_method, resolve_redirect_url};
 use super::request::copy_header_on_redirect;
+use super::site::SchemefulSite;
 use super::{Client, HttpRequest, HttpResponse, Method, Url};
 
 const MAX_REDIRECTS: usize = 10;
@@ -45,6 +46,16 @@ impl Origin {
 
     pub fn is_same_origin(&self, url: &Url) -> bool {
         self.tuple.is_some() && *self == Self::from_url(url)
+    }
+
+    /// Checks CORP's schemeless site relation and its HTTPS response guard.
+    pub(crate) fn is_same_site_for_corp(&self, url: &Url) -> bool {
+        let Some((scheme, host, _)) = &self.tuple else {
+            return false;
+        };
+        SchemefulSite::from_parts(scheme, host)
+            .is_schemelessly_same_site(&SchemefulSite::from_url(url))
+            && (scheme == "https" || url.scheme() != "https")
     }
 }
 
@@ -125,6 +136,8 @@ pub enum CorsError {
     Timeout,
     SameOriginMode,
     CorsCheck,
+    /// The opaque response was rejected by Cross-Origin-Resource-Policy.
+    CorpCheck,
     Preflight,
     Redirect,
     TooManyRedirects,
@@ -139,6 +152,7 @@ impl fmt::Display for CorsError {
                 formatter.write_str("cross-origin request blocked by same-origin mode")
             }
             Self::CorsCheck => formatter.write_str("CORS response check failed"),
+            Self::CorpCheck => formatter.write_str("CORP response check failed"),
             Self::Preflight => formatter.write_str("CORS preflight failed"),
             Self::Redirect => formatter.write_str("redirect disallowed by request redirect mode"),
             Self::TooManyRedirects => formatter.write_str("too many redirects"),
@@ -182,7 +196,7 @@ pub fn fetch_with_timeout(
     cache: &mut PreflightCache,
     timeout: Option<Duration>,
 ) -> Result<FetchResponse, CorsError> {
-    fetch_with_address_policy(
+    fetch_with_policy(
         client,
         request,
         origin,
@@ -190,6 +204,9 @@ pub fn fetch_with_timeout(
         credentials,
         redirect_mode,
         cache,
+        super::corp::EmbedderPolicyValue::UnsafeNone,
+        super::corp::EmbedderPolicyValue::UnsafeNone,
+        &mut Vec::new(),
         timeout,
         false,
     )
@@ -208,7 +225,7 @@ pub(crate) fn fetch_with_timeout_restricting_redirects(
     cache: &mut PreflightCache,
     timeout: Option<Duration>,
 ) -> Result<FetchResponse, CorsError> {
-    fetch_with_address_policy(
+    fetch_with_policy(
         client,
         request,
         origin,
@@ -216,12 +233,90 @@ pub(crate) fn fetch_with_timeout_restricting_redirects(
         credentials,
         redirect_mode,
         cache,
+        super::corp::EmbedderPolicyValue::UnsafeNone,
+        super::corp::EmbedderPolicyValue::UnsafeNone,
+        &mut Vec::new(),
         timeout,
         true,
     )
 }
 
-fn fetch_with_address_policy(
+/// Applies the requesting document's COEP to opaque responses and no-CORS
+/// credentials on every redirect hop. Module imports also keep public-address
+/// checks once a redirect leaves the initial origin.
+pub(crate) fn fetch_with_embedder_policy(
+    client: &mut Client,
+    request: HttpRequest,
+    origin: &Origin,
+    mode: RequestMode,
+    credentials: CredentialsMode,
+    redirect_mode: RedirectMode,
+    cache: &mut PreflightCache,
+    embedder_policy: super::corp::EmbedderPolicyValue,
+    timeout: Option<Duration>,
+) -> Result<FetchResponse, CorsError> {
+    fetch_with_policy(
+        client,
+        request,
+        origin,
+        mode,
+        credentials,
+        redirect_mode,
+        cache,
+        embedder_policy,
+        super::corp::EmbedderPolicyValue::UnsafeNone,
+        &mut Vec::new(),
+        timeout,
+        true,
+    )
+}
+
+/// A COEP-induced CORP violation from one opaque response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CorpViolation {
+    /// The original request URL, before any redirect target can be disclosed.
+    pub(crate) blocked_url: String,
+    pub(crate) report_only: bool,
+    pub(crate) enforced: bool,
+}
+
+/// Fetches while collecting COEP reports independently from block decisions.
+///
+/// `violations` also receives reports when a later hop blocks and this
+/// function returns `Err`. The caller supplies its request destination and
+/// queues the resulting reports for the requesting Document.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fetch_with_embedder_policy_reporting(
+    client: &mut Client,
+    request: HttpRequest,
+    origin: &Origin,
+    mode: RequestMode,
+    credentials: CredentialsMode,
+    redirect_mode: RedirectMode,
+    cache: &mut PreflightCache,
+    embedder_policy: super::corp::EmbedderPolicyValue,
+    report_only_embedder_policy: super::corp::EmbedderPolicyValue,
+    violations: &mut Vec<CorpViolation>,
+    timeout: Option<Duration>,
+) -> Result<FetchResponse, CorsError> {
+    fetch_with_policy(
+        client,
+        request,
+        origin,
+        mode,
+        credentials,
+        redirect_mode,
+        cache,
+        embedder_policy,
+        report_only_embedder_policy,
+        violations,
+        timeout,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_with_policy(
     client: &mut Client,
     mut request: HttpRequest,
     origin: &Origin,
@@ -229,12 +324,19 @@ fn fetch_with_address_policy(
     credentials: CredentialsMode,
     redirect_mode: RedirectMode,
     cache: &mut PreflightCache,
+    embedder_policy: super::corp::EmbedderPolicyValue,
+    report_only_embedder_policy: super::corp::EmbedderPolicyValue,
+    violations: &mut Vec<CorpViolation>,
     timeout: Option<Duration>,
     restrict_redirects: bool,
 ) -> Result<FetchResponse, CorsError> {
     let unrestricted_origin = restrict_redirects.then(|| Origin::from_url(request.url()));
+    let initial_url = request.url().to_string();
     let mut redirected = false;
     let mut cross_origin_seen = false;
+    // Redirect-taint affects the serialized Origin used by CORS, not the
+    // underlying client origin used by same-origin mode and CORP.
+    let mut cors_origin = origin.clone();
     for redirect_count in 0..=MAX_REDIRECTS {
         let cross_origin = !origin.is_same_origin(request.url());
         cross_origin_seen |= cross_origin;
@@ -247,19 +349,23 @@ fn fetch_with_address_policy(
             }
         }
         if mode == RequestMode::Cors
-            && (cross_origin || !matches!(request.method(), Method::Get | Method::Head))
+            && (cross_origin_seen || !matches!(request.method(), Method::Get | Method::Head))
         {
-            request.set_header("Origin", origin.serialize());
+            request.set_header("Origin", cors_origin.serialize());
         }
-        if cross_origin && mode == RequestMode::Cors {
-            ensure_preflight(client, &request, origin, credentials, cache, timeout)?;
+        if cross_origin_seen && mode == RequestMode::Cors {
+            ensure_preflight(client, &request, &cors_origin, credentials, cache, timeout)?;
         }
 
         let send_credentials = match credentials {
             CredentialsMode::Omit => false,
-            CredentialsMode::SameOrigin => !cross_origin,
+            // Once a redirect crossed origins, Fetch's response tainting is
+            // no longer basic, even if a later hop returns to the origin.
+            CredentialsMode::SameOrigin => !cross_origin_seen,
             CredentialsMode::Include => true,
-        };
+        } && !(mode == RequestMode::NoCors
+            && cross_origin_seen
+            && embedder_policy == super::corp::EmbedderPolicyValue::Credentialless);
         // Credentials mode controls automatic credentials such as cookies.
         // An Authorization header explicitly supplied by the caller remains
         // part of the request, including a credentialless CORS request.
@@ -274,9 +380,31 @@ fn fetch_with_address_policy(
                 }
             })?;
 
+        if mode == RequestMode::NoCors && cross_origin_seen {
+            let check = super::corp::check_response(
+                origin,
+                request.url(),
+                response.headers(),
+                embedder_policy,
+                report_only_embedder_policy,
+                send_credentials,
+                false,
+            );
+            if check.report_only_violation || check.enforced_violation {
+                violations.push(CorpViolation {
+                    blocked_url: initial_url.clone(),
+                    report_only: check.report_only_violation,
+                    enforced: check.enforced_violation,
+                });
+            }
+            if check.blocked {
+                return Err(CorsError::CorpCheck);
+            }
+        }
+
         if is_redirect(response.status_code()) {
-            if cross_origin && mode == RequestMode::Cors {
-                cors_check(&response, origin, credentials)?;
+            if cross_origin_seen && mode == RequestMode::Cors {
+                cors_check(&response, &cors_origin, credentials)?;
             }
             match redirect_mode {
                 RedirectMode::Error => return Err(CorsError::Redirect),
@@ -297,6 +425,13 @@ fn fetch_with_address_policy(
             let location = response.header("location").ok_or(CorsError::Redirect)?;
             let next_url = resolve_redirect_url(request.url(), location)
                 .map_err(|error| CorsError::Network(error.to_string()))?;
+            if !origin.is_same_origin(request.url())
+                && Origin::from_url(request.url()) != Origin::from_url(&next_url)
+            {
+                // Fetch's URL-list redirect-taint is sticky, including when
+                // this hop returns to the client's original origin.
+                cors_origin = Origin::opaque();
+            }
             request = redirected_request(
                 &request,
                 response.status_code(),
@@ -307,8 +442,8 @@ fn fetch_with_address_policy(
             continue;
         }
 
-        if cross_origin && mode == RequestMode::Cors {
-            cors_check(&response, origin, credentials)?;
+        if cross_origin_seen && mode == RequestMode::Cors {
+            cors_check(&response, &cors_origin, credentials)?;
         }
         let response_type = if cross_origin_seen && mode == RequestMode::NoCors {
             ResponseType::Opaque
@@ -627,6 +762,9 @@ fn header_tokens(response: &HttpResponse, name: &str) -> Vec<String> {
 mod address_policy_tests;
 
 #[cfg(test)]
+#[path = "cors/corp_tests.rs"]
+mod corp_tests;
+
 mod tests {
     use super::*;
 

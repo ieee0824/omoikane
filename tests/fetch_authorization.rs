@@ -20,8 +20,12 @@ fn read_request(stream: &mut TcpStream) -> String {
         .to_ascii_lowercase()
 }
 
+fn respond_with_origin(stream: &mut TcpStream, status: &str, origin: &str, extra: &str) {
+    write!(stream, "HTTP/1.1 {status}\r\nAccess-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Credentials: true\r\nAccess-Control-Allow-Methods: POST\r\nAccess-Control-Allow-Headers: authorization\r\nContent-Length: 0\r\nConnection: close\r\n{extra}\r\n").unwrap();
+}
+
 fn respond(stream: &mut TcpStream, status: &str, extra: &str) {
-    write!(stream, "HTTP/1.1 {status}\r\nAccess-Control-Allow-Origin: {PAGE_ORIGIN}\r\nAccess-Control-Allow-Credentials: true\r\nAccess-Control-Allow-Methods: POST\r\nAccess-Control-Allow-Headers: authorization\r\nContent-Length: 0\r\nConnection: close\r\n{extra}\r\n").unwrap();
+    respond_with_origin(stream, status, PAGE_ORIGIN, extra);
 }
 
 fn request(url: Url) -> HttpRequest {
@@ -109,7 +113,7 @@ fn a_redirect_to_another_origin_still_removes_explicit_authorization() {
         );
         let mut redirected = accept_with_timeout(&next, ACCEPT_TIMEOUT).unwrap();
         let redirected_request = read_request(&mut redirected);
-        respond(&mut redirected, "200 OK", "");
+        respond_with_origin(&mut redirected, "200 OK", "null", "");
         (initial_request, redirected_request)
     });
     let origin = Origin::from_url(&format!("{PAGE_ORIGIN}/").parse().unwrap());
@@ -128,4 +132,5 @@ fn a_redirect_to_another_origin_still_removes_explicit_authorization() {
     assert!(initial.contains("\r\nauthorization: bearer synthetic-test-token\r\n"));
     assert!(redirected.starts_with("post /destination "));
     assert!(!redirected.contains("\r\nauthorization:"));
+    assert!(redirected.contains("\r\norigin: null\r\n"));
 }

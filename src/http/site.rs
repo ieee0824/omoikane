@@ -29,6 +29,11 @@ impl SchemefulSite {
             domain: domain.to_ascii_lowercase(),
         }
     }
+
+    /// Compares registrable domains while ignoring URL schemes and ports.
+    pub(crate) fn is_schemelessly_same_site(&self, other: &Self) -> bool {
+        self.domain == other.domain
+    }
 }
 
 #[cfg(test)]
@@ -57,6 +62,16 @@ mod tests {
         assert_ne!(
             SchemefulSite::from_parts("https", "127.1.0.1"),
             SchemefulSite::from_parts("https", "127.2.0.1")
+        );
+    }
+
+    #[test]
+    fn schemeless_site_comparison_keeps_registrable_domain_boundaries() {
+        let secure = SchemefulSite::from_parts("https", "a.example.co.uk");
+        let insecure = SchemefulSite::from_parts("http", "b.example.co.uk");
+        assert!(secure.is_schemelessly_same_site(&insecure));
+        assert!(
+            !secure.is_schemelessly_same_site(&SchemefulSite::from_parts("https", "other.co.uk"))
         );
     }
 }
