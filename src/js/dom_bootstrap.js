@@ -18714,17 +18714,23 @@ export let __omoikane_update_auxiliary_opener;
   // -------------------------------------------------------------------------
   // Service Worker registration/container lifecycle core.
   //
-  // Script execution and fetch interception are intentionally out of scope
-  // for this deterministic model.  Registrations still retain their
-  // same-origin script/scope URLs, expose the installing/active state
-  // transitions, and select the longest matching scope for the current
-  // document.  Keeping records in this realm avoids moving Boa objects across
-  // runtimes while preserving the Web IDL-facing object graph.
+  // Each classic script executes in a separate Worker global. Registrations
+  // retain their same-origin script/scope URLs in this realm while the native
+  // Worker message bridge carries structured-cloned messages across globals.
+  // Fetch interception remains outside this core.
   // -------------------------------------------------------------------------
   const serviceWorkerConstructionToken = {};
   const serviceWorkerContainerConstructionToken = {};
   const serviceWorkerContainerOwnerDocuments = browsingInput.serviceWorkerContainerOwnerDocuments ||
     (browsingInput.serviceWorkerContainerOwnerDocuments = new WeakMap());
+  const serviceWorkerMessageSources = browsingInput.serviceWorkerMessageSources ||
+    (browsingInput.serviceWorkerMessageSources = new WeakMap());
+  globalThis.__omoikane_service_worker_message_source = function(container, id) {
+    const sources = safeWeakMapGet(serviceWorkerMessageSources, container);
+    if (!sources) return undefined;
+    const worker = sources.get(String(id));
+    return worker && !worker.__terminated ? worker : null;
+  };
 
   // EventTarget is declared later in this bootstrap (after Navigator is
   // constructed).  This bridge keeps construction safe during that initial
@@ -18749,20 +18755,27 @@ export let __omoikane_update_auxiliary_opener;
   }
 
   function serviceWorkerScopeURL(scriptURL, options) {
-    const requested = options && options.scope !== undefined
-      ? serviceWorkerURL(options.scope, scriptURL.href)
+    const requestedScope = options == null ? undefined : options.scope;
+    const requested = requestedScope !== undefined
+      ? serviceWorkerURL(requestedScope)
       : serviceWorkerURL(scriptURL.pathname.slice(0, scriptURL.pathname.lastIndexOf("/") + 1), scriptURL.href);
     requested.hash = "";
     return requested;
   }
 
+  function serviceWorkerHasEncodedPathSeparator(url) {
+    return /%(?:2f|5c)/i.test(url.pathname);
+  }
+
   class ServiceWorker extends ServiceWorkerEventTarget {
-    constructor(record, state, token) {
+    constructor(record, state, id, token) {
       if (token !== serviceWorkerConstructionToken) throw new TypeError("Illegal constructor");
       super();
       this.scriptURL = record.scriptURL;
       this._state = String(state);
       this._record = record;
+      this.__id = id;
+      this.__terminated = false;
       this._onstatechange = null;
     }
     get state() { return this._state; }
@@ -18772,8 +18785,10 @@ export let __omoikane_update_auxiliary_opener;
       this._state = next;
       this.dispatchEvent(new Event("statechange"));
     }
-    postMessage() {
-      throw new DOMException("Service worker script execution is not available.", "InvalidStateError");
+    postMessage(message, options = undefined) {
+      if (this.__terminated) throw new DOMException("Service worker is stopped.", "InvalidStateError");
+      const data = __omoikane_encode_worker_message(message, options);
+      __omoikane_worker_post_message(this.__id, data);
     }
     get onstatechange() { return this._onstatechange; }
     set onstatechange(callback) {
@@ -18782,6 +18797,15 @@ export let __omoikane_update_auxiliary_opener;
       if (this._onstatechange) this.addEventListener("statechange", this._onstatechange);
     }
     get [Symbol.toStringTag]() { return "ServiceWorker"; }
+  }
+
+  function terminateServiceWorker(worker) {
+    if (!worker || worker.__terminated) return;
+    worker.__terminated = true;
+    const container = worker._record.registration._container;
+    safeWeakMapGet(serviceWorkerMessageSources, container).delete(String(worker.__id));
+    worker.__setState("redundant");
+    __omoikane_terminate_worker(worker.__id);
   }
 
   class ServiceWorkerRegistration extends ServiceWorkerEventTarget {
@@ -18801,8 +18825,11 @@ export let __omoikane_update_auxiliary_opener;
     }
     unregister() {
       return Promise.resolve().then(() => {
-        if (!this._container._records.has(this.scope)) return false;
+        if (this._container._records.get(this.scope) !== this._record) return false;
         this._container._records.delete(this.scope);
+        for (const worker of new Set([this.installing, this.waiting, this.active])) {
+          terminateServiceWorker(worker);
+        }
         this.installing = null;
         this.waiting = null;
         this.active = null;
@@ -18824,6 +18851,7 @@ export let __omoikane_update_auxiliary_opener;
       if (token !== serviceWorkerContainerConstructionToken) throw new TypeError("Illegal constructor");
       super();
       safeWeakMapSet(serviceWorkerContainerOwnerDocuments, this, __omoikane_document_id);
+      safeWeakMapSet(serviceWorkerMessageSources, this, new Map());
       this._records = new Map();
       this.controller = null;
       this._readyResolved = false;
@@ -18832,12 +18860,22 @@ export let __omoikane_update_auxiliary_opener;
       this._oncontrollerchange = null;
     }
     __validateRegistration(scriptURL, options) {
-      const script = serviceWorkerURL(scriptURL);
       const origin = serviceWorkerCurrentOrigin();
-      if (!origin || origin === "null" || serviceWorkerOrigin(script) !== origin) {
+      if (!origin || origin === "null") {
+        throw new DOMException("Service workers require a non-opaque origin.", "SecurityError");
+      }
+      const script = serviceWorkerURL(scriptURL);
+      script.hash = "";
+      if (!/^https?:$/.test(script.protocol) || serviceWorkerHasEncodedPathSeparator(script)) {
+        throw new TypeError("Invalid service worker script URL.");
+      }
+      if (serviceWorkerOrigin(script) !== origin) {
         throw new DOMException("Service worker script must be same-origin.", "SecurityError");
       }
       const scope = serviceWorkerScopeURL(script, options || {});
+      if (!/^https?:$/.test(scope.protocol) || serviceWorkerHasEncodedPathSeparator(scope)) {
+        throw new TypeError("Invalid service worker scope URL.");
+      }
       if (serviceWorkerOrigin(scope) !== origin) {
         throw new DOMException("Service worker scope must be same-origin.", "SecurityError");
       }
@@ -18862,37 +18900,71 @@ export let __omoikane_update_auxiliary_opener;
         if (typeof nativeIsSecureContext !== "function" || !nativeIsSecureContext()) {
           throw new DOMException("Service workers require a secure context.", "SecurityError");
         }
+        const requestedType = options == null ? undefined : options.type;
+        if (requestedType !== undefined && String(requestedType) !== "classic") {
+          throw new TypeError("Only classic service worker scripts are supported.");
+        }
         const validated = this.__validateRegistration(checkedURL, options || {});
         let record = this._records.get(validated.scope);
+        if (record && record.scriptURL === validated.script) return record.registration;
+        const workerId = __omoikane_start_service_worker(validated.script, validated.scope, ownerDocumentId);
+        if (workerId === "security") {
+          throw new DOMException("Service worker response disallows its MIME type or scope.", "SecurityError");
+        }
+        if (workerId === null) {
+          throw new TypeError("Service worker script could not be fetched or evaluated.");
+        }
         if (record) {
-          if (record.scriptURL !== validated.script) {
-            record.scriptURL = validated.script;
-            record.worker = new ServiceWorker(record, "installing", serviceWorkerConstructionToken);
-            record.registration.installing = record.worker;
-            record.registration.waiting = null;
-            record.registration.active = null;
-            record.registration.dispatchEvent(new Event("updatefound"));
-          }
+          terminateServiceWorker(record.registration.installing);
+          terminateServiceWorker(record.registration.waiting);
+          record.scriptURL = validated.script;
+          record.worker = new ServiceWorker(record, "installing", workerId, serviceWorkerConstructionToken);
+          record.registration.installing = record.worker;
+          record.registration.waiting = null;
+          record.registration.dispatchEvent(new Event("updatefound"));
         } else {
           record = { scriptURL: validated.script, scope: validated.scope, worker: null, registration: null };
-          record.worker = new ServiceWorker(record, "installing", serviceWorkerConstructionToken);
+          record.worker = new ServiceWorker(record, "installing", workerId, serviceWorkerConstructionToken);
           record.registration = new ServiceWorkerRegistration(record, this, serviceWorkerContainerConstructionToken);
           this._records.set(validated.scope, record);
         }
         const registration = record.registration;
-        // The core has no script evaluator, so install/activate is a single
-        // deterministic microtask transition after registration creation.
-        queueMicrotask(() => {
-          if (!this._records.has(record.scope)) return;
-          record.worker.__setState("activated");
+        const installing = record.worker;
+        safeWeakMapGet(serviceWorkerMessageSources, this).set(String(workerId), installing);
+        __omoikane_bind_worker_owner(workerId, this);
+        // Registration must resolve while `installing` is still visible. A
+        // later task allows callers to connect to that worker first.
+        __omoikane_queue_dom_manipulation_task(() => {
+          if (this._records.get(record.scope) !== record || record.worker !== installing) return;
           registration.installing = null;
-          registration.waiting = null;
-          registration.active = record.worker;
-          this.__updateController();
-          if (!this._readyResolved && this.controller === record.worker) {
-            this._readyResolved = true;
-            this._readyResolve(registration);
-          }
+          registration.waiting = installing;
+          installing.__setState("installed");
+          if (this._records.get(record.scope) !== record || registration.waiting !== installing) return;
+          __omoikane_queue_dom_manipulation_task(() => {
+            if (this._records.get(record.scope) !== record || registration.waiting !== installing) return;
+            terminateServiceWorker(registration.active);
+            if (this._records.get(record.scope) !== record || registration.waiting !== installing) return;
+            registration.active = installing;
+            registration.waiting = null;
+            installing.__setState("activating");
+            if (this._records.get(record.scope) !== record || registration.active !== installing) return;
+            const activated = __omoikane_dispatch_service_worker_activate(workerId);
+            if (this._records.get(record.scope) !== record || registration.active !== installing) return;
+            if (!activated) {
+              terminateServiceWorker(installing);
+              if (this._records.get(record.scope) === record && registration.active === installing) {
+                registration.active = null;
+                this.__updateController();
+              }
+              return;
+            }
+            this.__updateController();
+            installing.__setState("activated");
+            if (!this._readyResolved && this.controller === installing) {
+              this._readyResolved = true;
+              this._readyResolve(registration);
+            }
+          });
         });
         return registration;
       });
@@ -25997,6 +26069,26 @@ export let __omoikane_update_auxiliary_opener;
     globalThis.close = function() {
       __omoikane_worker_close();
     };
+  };
+
+  globalThis.__omoikane_install_service_worker_global = function() {
+    // The common Worker bootstrap supplies importScripts, a separate Trusted
+    // Types factory, and the response CSP before the ServiceWorker script runs.
+    try { delete globalThis.DedicatedWorkerGlobalScope; } catch (_) { globalThis.DedicatedWorkerGlobalScope = undefined; }
+    globalThis.ServiceWorkerGlobalScope = Object;
+    const sendToOwner = globalThis.postMessage;
+    const client = Object.freeze({
+      postMessage(message, options = undefined) {
+        sendToOwner(message, options);
+      },
+    });
+    Object.defineProperty(globalThis, "__omoikane_service_worker_client", {
+      configurable: false,
+      writable: false,
+      value: client,
+    });
+    try { delete globalThis.postMessage; } catch (_) { globalThis.postMessage = undefined; }
+    try { delete globalThis.close; } catch (_) { globalThis.close = undefined; }
   };
 
   globalThis.__omoikane_install_shared_worker_global = function(url, sharedWorkerId) {

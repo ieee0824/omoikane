@@ -138,6 +138,9 @@ mod popover_tests;
 #[cfg(test)]
 mod query_tests;
 mod scroll_snap;
+mod service_worker;
+#[cfg(test)]
+mod service_worker_tests;
 mod shared_worker;
 use shared_worker::terminate_shared_worker_connections;
 mod text_selection;
@@ -2541,6 +2544,7 @@ struct WorkerRuntime {
     owner_object: Option<JsValue>,
     outgoing: VecDeque<String>,
     startup_error: Option<script_errors::WorkerErrorNotification>,
+    service_worker: bool,
     terminated: bool,
 }
 
@@ -11824,6 +11828,11 @@ impl JsRuntime {
                 .remove(&worker_id);
             return Ok(());
         }
+        let source = if worker.service_worker {
+            "__omoikane_service_worker_client"
+        } else {
+            "null"
+        };
         let owner_state = Rc::clone(&worker.owner_state);
         let (errors, owner_realm, terminated) = {
             let runtime = &mut worker.runtime;
@@ -11838,9 +11847,9 @@ impl JsRuntime {
                     );
                 }
             } else {
-                if let Err(error) = runtime.eval(
-                    "__omoikane_worker_message_data = __omoikane_decode_worker_message(__omoikane_worker_message_wire); self.dispatchEvent(new MessageEvent('message', { data: __omoikane_worker_message_data, origin: __omoikane_worker_message_origin, source: null, ports: [] }));",
-                ) {
+                if let Err(error) = runtime.eval(&format!(
+                    "__omoikane_worker_message_data = __omoikane_decode_worker_message(__omoikane_worker_message_wire); self.dispatchEvent(new MessageEvent('message', {{ data: __omoikane_worker_message_data, origin: __omoikane_worker_message_origin, source: {source}, ports: [] }}));",
+                )) {
                     runtime.collect_worker_task_error("worker message", error, &mut errors);
                 }
                 if let Err(error) = runtime.clear_worker_message_values() {
@@ -11881,7 +11890,7 @@ impl JsRuntime {
 
     fn run_worker_owner_message(
         &mut self,
-        _worker_id: u64,
+        worker_id: u64,
         owner_object: JsValue,
         owner_realm: Option<Realm>,
         data: String,
@@ -11899,7 +11908,7 @@ impl JsRuntime {
         }
         let result = self.eval(
             &format!(
-                "__omoikane_worker_owner_data = __omoikane_decode_worker_message(__omoikane_worker_owner_wire); if (!__omoikane_worker_owner.__terminated) {{ __omoikane_worker_owner.dispatchEvent(new MessageEvent('message', {{ data: __omoikane_worker_owner_data, origin: {owner_origin:?}, source: null, ports: [] }})); }}"
+                "__omoikane_worker_owner_data = __omoikane_decode_worker_message(__omoikane_worker_owner_wire); ((source) => {{ if (source !== null && !__omoikane_worker_owner.__terminated) {{ __omoikane_worker_owner.dispatchEvent(new MessageEvent('message', {{ data: __omoikane_worker_owner_data, origin: {owner_origin:?}, source: source || null, ports: [] }})); }} }})(__omoikane_service_worker_message_source(__omoikane_worker_owner, '{worker_id}'));"
             ),
         );
         let cleanup = self.clear_worker_owner_values();
@@ -15062,6 +15071,18 @@ fn register_host_bindings(
             js_string!("__omoikane_create_worker"),
             1,
             NativeFunction::from_copy_closure(create_worker_native),
+        ),
+        (
+            js_string!("__omoikane_start_service_worker"),
+            3,
+            NativeFunction::from_copy_closure(service_worker::start_service_worker_native),
+        ),
+        (
+            js_string!("__omoikane_dispatch_service_worker_activate"),
+            1,
+            NativeFunction::from_copy_closure(
+                service_worker::dispatch_service_worker_activate_native,
+            ),
         ),
         (
             js_string!("__omoikane_bind_worker_owner"),
@@ -21702,6 +21723,8 @@ struct PreparedDedicatedWorker {
     url: String,
     csp_requested_url: String,
     source: Option<String>,
+    content_type: Option<String>,
+    service_worker_allowed: Option<String>,
     runtime: JsRuntime,
 }
 
@@ -21759,6 +21782,7 @@ fn load_dedicated_worker_for_creator(
     creator: &DedicatedWorkerCreator,
     initial_url: &str,
     source: Option<&security_reporting::CspSourceLocation>,
+    service_worker: bool,
 ) -> JsResult<Option<worker_loading::LoadedWorkerScript>> {
     let allowed = {
         let mut state = owner_state.borrow_mut();
@@ -21780,13 +21804,23 @@ fn load_dedicated_worker_for_creator(
     let result = {
         let mut state = owner_state.borrow_mut();
         let cookie_context = state.document_cookie_request_context(creator.document_id);
-        worker_loading::load_worker_script_with_policy(
-            initial_url,
-            creator.base_url.as_ref(),
-            Some(&cookie_context),
-            &mut state.http_client,
-            &creator.policy,
-        )
+        if service_worker {
+            worker_loading::load_service_worker_script_with_policy(
+                initial_url,
+                creator.base_url.as_ref(),
+                Some(&cookie_context),
+                &mut state.http_client,
+                &creator.policy,
+            )
+        } else {
+            worker_loading::load_worker_script_with_policy(
+                initial_url,
+                creator.base_url.as_ref(),
+                Some(&cookie_context),
+                &mut state.http_client,
+                &creator.policy,
+            )
+        }
     };
     owner_state.borrow_mut().observe_worker_policy_checks(
         creator.document_id,
@@ -21802,6 +21836,7 @@ fn prepare_dedicated_worker(
     requested_url: &str,
     owner_document_id: usize,
     source: Option<&security_reporting::CspSourceLocation>,
+    service_worker: bool,
 ) -> JsResult<PreparedDedicatedWorker> {
     let creator = dedicated_worker_creator(&mut owner_state.borrow_mut(), Some(owner_document_id));
     let initial_url = resolve_worker_url(
@@ -21809,7 +21844,13 @@ fn prepare_dedicated_worker(
         &creator.origin_url,
         creator.base_url.as_ref(),
     )?;
-    let loaded = load_dedicated_worker_for_creator(owner_state, &creator, &initial_url, source)?;
+    let loaded = load_dedicated_worker_for_creator(
+        owner_state,
+        &creator,
+        &initial_url,
+        source,
+        service_worker,
+    )?;
     let worker_url = loaded.as_ref().map_or_else(
         || initial_url.clone(),
         |script| script.effective_url.clone(),
@@ -21932,6 +21973,12 @@ fn prepare_dedicated_worker(
         // Boa uses the script path to resolve dynamic imports as well.
         url: worker_url,
         csp_requested_url: initial_url,
+        content_type: loaded
+            .as_ref()
+            .and_then(|script| script.content_type.clone()),
+        service_worker_allowed: loaded
+            .as_ref()
+            .and_then(|script| script.service_worker_allowed.clone()),
         source: loaded
             .filter(|_| !inheritance.blocked)
             .map(|script| script.source),
@@ -21950,14 +21997,23 @@ fn create_worker_for_owner_state(
         url: worker_url,
         csp_requested_url,
         source,
+        content_type: _,
+        service_worker_allowed: _,
         runtime: worker_runtime,
-    } = prepare_dedicated_worker(&owner_state, requested_url, owner_document_id, csp_source)?;
+    } = prepare_dedicated_worker(
+        &owner_state,
+        requested_url,
+        owner_document_id,
+        csp_source,
+        false,
+    )?;
     let entry = Rc::new(RefCell::new(WorkerRuntime {
         runtime: worker_runtime,
         owner_state: Rc::clone(&owner_state),
         owner_object: None,
         outgoing: VecDeque::new(),
         startup_error: None,
+        service_worker: false,
         terminated: false,
     }));
     owner_state
