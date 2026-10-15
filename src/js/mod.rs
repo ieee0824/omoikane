@@ -920,13 +920,11 @@ fn resolve_module_reference(
         .and_then(|path| url::Url::parse(path).ok())
         .filter(|url| matches!(url.scheme(), "http" | "https" | "data"))
         .or_else(|| document_base.and_then(|base| url::Url::parse(&base.to_string()).ok()));
-    let resolved = url::Url::parse(specifier)
-        .or_else(|_| {
-            base.as_ref()
-                .ok_or(url::ParseError::RelativeUrlWithoutBase)?
-                .join(specifier)
-        })
-        .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
+    let resolved = match base {
+        Some(base) => base.join(specifier),
+        None => url::Url::parse(specifier),
+    }
+    .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
     match resolved.scheme() {
         "data" => Ok(ModuleReference::Data(resolved)),
         "http" | "https" => resolved
