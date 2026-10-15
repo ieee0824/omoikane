@@ -138,6 +138,8 @@ pub enum CorsError {
     CorsCheck,
     /// The opaque response was rejected by Cross-Origin-Resource-Policy.
     CorpCheck,
+    /// A caller-supplied request policy rejected a redirect before I/O.
+    RequestPolicy,
     Preflight,
     Redirect,
     TooManyRedirects,
@@ -153,6 +155,7 @@ impl fmt::Display for CorsError {
             }
             Self::CorsCheck => formatter.write_str("CORS response check failed"),
             Self::CorpCheck => formatter.write_str("CORP response check failed"),
+            Self::RequestPolicy => formatter.write_str("redirect blocked by request policy"),
             Self::Preflight => formatter.write_str("CORS preflight failed"),
             Self::Redirect => formatter.write_str("redirect disallowed by request redirect mode"),
             Self::TooManyRedirects => formatter.write_str("too many redirects"),
@@ -209,6 +212,7 @@ pub fn fetch_with_timeout(
         &mut Vec::new(),
         timeout,
         false,
+        None,
     )
 }
 
@@ -238,6 +242,39 @@ pub(crate) fn fetch_with_timeout_restricting_redirects(
         &mut Vec::new(),
         timeout,
         true,
+        None,
+    )
+}
+
+/// Fetches with the same CORS and address-policy state while checking each
+/// redirect target before any preflight or resource request is sent to it.
+/// The caller checks the initial URL separately and owns any notifications.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fetch_with_timeout_restricting_redirects_checked(
+    client: &mut Client,
+    request: HttpRequest,
+    origin: &Origin,
+    mode: RequestMode,
+    credentials: CredentialsMode,
+    redirect_mode: RedirectMode,
+    cache: &mut PreflightCache,
+    timeout: Option<Duration>,
+    check_redirect: &mut dyn FnMut(&Url, usize) -> bool,
+) -> Result<FetchResponse, CorsError> {
+    fetch_with_policy(
+        client,
+        request,
+        origin,
+        mode,
+        credentials,
+        redirect_mode,
+        cache,
+        super::corp::EmbedderPolicyValue::UnsafeNone,
+        super::corp::EmbedderPolicyValue::UnsafeNone,
+        &mut Vec::new(),
+        timeout,
+        true,
+        Some(check_redirect),
     )
 }
 
@@ -268,6 +305,7 @@ pub(crate) fn fetch_with_embedder_policy(
         &mut Vec::new(),
         timeout,
         true,
+        None,
     )
 }
 
@@ -312,6 +350,7 @@ pub(crate) fn fetch_with_embedder_policy_reporting(
         violations,
         timeout,
         false,
+        None,
     )
 }
 
@@ -329,6 +368,7 @@ fn fetch_with_policy(
     violations: &mut Vec<CorpViolation>,
     timeout: Option<Duration>,
     restrict_redirects: bool,
+    mut check_redirect: Option<&mut dyn FnMut(&Url, usize) -> bool>,
 ) -> Result<FetchResponse, CorsError> {
     let unrestricted_origin = restrict_redirects.then(|| Origin::from_url(request.url()));
     let initial_url = request.url().to_string();
@@ -338,6 +378,13 @@ fn fetch_with_policy(
     // underlying client origin used by same-origin mode and CORP.
     let mut cors_origin = origin.clone();
     for redirect_count in 0..=MAX_REDIRECTS {
+        if redirect_count != 0
+            && check_redirect
+                .as_mut()
+                .is_some_and(|check| !check(request.url(), redirect_count))
+        {
+            return Err(CorsError::RequestPolicy);
+        }
         let cross_origin = !origin.is_same_origin(request.url());
         cross_origin_seen |= cross_origin;
         if cross_origin && mode == RequestMode::SameOrigin {
