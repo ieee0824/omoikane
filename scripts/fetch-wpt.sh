@@ -39,6 +39,15 @@ collect_pattern \
   "/html/semantics/embedded-content/the-iframe-element/iframe-allow.html"
 collect_pattern \
   "/trusted-types/support/" \
+  "/trusted-types/DedicatedWorker-eval.html" \
+  "/trusted-types/SharedWorker-eval.html" \
+  "/trusted-types/DedicatedWorker-importScripts.html" \
+  "/trusted-types/SharedWorker-importScripts.html" \
+  "/trusted-types/DedicatedWorker-block-eval-function-constructor.html" \
+  "/trusted-types/SharedWorker-block-eval-function-constructor.html" \
+  "/trusted-types/trusted-types-reporting-for-DedicatedWorker-eval.html" \
+  "/trusted-types/trusted-types-reporting-for-SharedWorker-eval.html" \
+  "/trusted-types/should-trusted-type-policy-creation-be-blocked-by-csp-004-worker.html" \
   "/trusted-types/navigate-to-javascript-url-001.html" \
   "/trusted-types/navigate-to-javascript-url-002.html" \
   "/trusted-types/navigate-to-javascript-url-003.html" \

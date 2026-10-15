@@ -442,6 +442,24 @@ fn shared_worker_connects_multiple_ports_and_round_trips_cloned_messages() {
 }
 
 #[test]
+fn shared_worker_connect_event_source_is_the_message_port() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.sharedConnectSource = [];
+               const source = encodeURIComponent('addEventListener("connect", event => event.source.postMessage({ same: event.source === event.ports[0], messagePort: event.source instanceof MessagePort }));');
+               const worker = new SharedWorker('data:text/javascript,' + source, 'connect-source');
+               worker.port.onmessage = event => sharedConnectSource.push(event.data);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "JSON.stringify(sharedConnectSource)"),
+        r#"[{"same":true,"messagePort":true}]"#
+    );
+}
+
+#[test]
 fn shared_worker_is_shared_across_same_origin_runtimes() {
     let source = "data:text/javascript,onconnect%3De%3D%3E%7Be.ports%5B0%5D.onmessage%3Dm%3D%3Ee.ports%5B0%5D.postMessage(m.data)%7D";
     let mut first_runtime = JsRuntime::new().unwrap();
