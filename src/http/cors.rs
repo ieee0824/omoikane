@@ -309,6 +309,40 @@ pub(crate) fn fetch_with_embedder_policy(
     )
 }
 
+/// Applies COEP while a caller checks each redirect target before its request.
+///
+/// The caller checks the initial request URL; redirect checks run before I/O
+/// without resetting CORS credential taint or the embedder policy.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fetch_with_embedder_policy_checked(
+    client: &mut Client,
+    request: HttpRequest,
+    origin: &Origin,
+    mode: RequestMode,
+    credentials: CredentialsMode,
+    redirect_mode: RedirectMode,
+    cache: &mut PreflightCache,
+    embedder_policy: super::corp::EmbedderPolicyValue,
+    timeout: Option<Duration>,
+    check_redirect: &mut dyn FnMut(&Url, usize) -> bool,
+) -> Result<FetchResponse, CorsError> {
+    fetch_with_policy(
+        client,
+        request,
+        origin,
+        mode,
+        credentials,
+        redirect_mode,
+        cache,
+        embedder_policy,
+        super::corp::EmbedderPolicyValue::UnsafeNone,
+        &mut Vec::new(),
+        timeout,
+        true,
+        Some(check_redirect),
+    )
+}
+
 /// A COEP-induced CORP violation from one opaque response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CorpViolation {

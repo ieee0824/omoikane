@@ -72,6 +72,14 @@ pub(super) struct ModuleCspViolation {
     pub(super) reference: String,
     pub(super) redirects: usize,
     pub(super) report_reference: String,
+    pub(super) worklet: Option<WorkletModuleViolation>,
+}
+
+#[derive(Debug)]
+pub(super) struct WorkletModuleViolation {
+    pub(super) owner: worklet::ModuleOwner,
+    pub(super) report_only: Vec<csp::PolicyViolation>,
+    pub(super) enforced: Vec<csp::PolicyViolation>,
 }
 
 #[cfg(test)]
@@ -447,16 +455,30 @@ impl HttpModuleLoader {
     pub(super) fn observe_module_policy(
         &self,
         document_id: usize,
-        policy: &CspPolicy,
+        graph: &ModuleGraphContext,
         reference: &str,
         redirects: usize,
         report_reference: &str,
+        stage: ModulePolicyStage,
     ) {
-        let policies = policy.report_only_policy_texts_after_redirects(
+        let policies = graph.csp.report_only_policy_texts_after_redirects(
             ResourceType::Script,
             reference,
             redirects,
         );
+        if graph.worklet_owner.is_some() {
+            if !policies.is_empty() {
+                self.record_csp_violation(
+                    document_id,
+                    reference.to_owned(),
+                    redirects,
+                    report_reference,
+                    graph,
+                    stage,
+                );
+            }
+            return;
+        }
         if let Some(owner) = self.owner.upgrade() {
             owner.borrow_mut().queue_policy_violation_events(
                 document_id,
@@ -471,23 +493,60 @@ impl HttpModuleLoader {
     pub(super) fn module_csp_allows_response(
         &self,
         document_id: usize,
-        policy: &CspPolicy,
+        graph: &ModuleGraphContext,
         url: &crate::http::Url,
         redirects: usize,
         report_reference: &str,
     ) -> bool {
         self.observe_module_policy(
             document_id,
-            policy,
+            graph,
             &url.to_string(),
             redirects,
             report_reference,
+            ModulePolicyStage::Response,
         );
-        policy.allows_url_after_redirects(ResourceType::Script, url, redirects)
+        graph
+            .csp
+            .allows_url_after_redirects(ResourceType::Script, url, redirects)
     }
 }
 
 impl HostState {
+    pub(super) fn record_worklet_module_violation(
+        &mut self,
+        document: &NodeHandle,
+        violation: ModuleCspViolation,
+    ) {
+        let Some(notice) = violation.worklet else {
+            return;
+        };
+        self.queue_policy_violation_events_with_source(
+            document.identity(),
+            ResourceType::Script,
+            &violation.report_reference,
+            notice.report_only,
+            "report",
+            notice.owner.source.as_ref(),
+        );
+        let blocked = !notice.enforced.is_empty();
+        self.queue_policy_violation_events_with_source(
+            document.identity(),
+            ResourceType::Script,
+            &violation.report_reference,
+            notice.enforced,
+            "enforce",
+            notice.owner.source.as_ref(),
+        );
+        if blocked {
+            self.record_csp_violation_history(
+                document,
+                ResourceType::Script,
+                violation.report_reference,
+            );
+        }
+    }
+
     /// Snapshots one report's endpoint and HTTP policy while its owner
     /// Document is still live, then queues owned data for background delivery.
     pub(super) fn queue_modern_report(
