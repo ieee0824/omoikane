@@ -352,8 +352,8 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
         &url,
     )
     .expect("create WPT runtime");
-    // Top-level fixture headers are part of the Document's policy, including
-    // header-only report-only CSP cases. Apply them before parser scripts run.
+    // Static `.headers` fixtures govern the Document and its script resources.
+    // Apply them before parser scripts run, including report-only CSP cases.
     runtime.install_document_response_headers(response.headers());
     if path.ends_with("/allow-crossorigin.html") || path.ends_with("/disallow-crossorigin.html") {
         runtime.set_http_resource_transport(Some(super::cross_origin::transport(base_url)));
