@@ -14,6 +14,7 @@ struct Mutation {
     max_age: Option<i64>,
     same_site: String,
     partitioned: bool,
+    deletion: bool,
 }
 
 fn expiry_time(milliseconds: f64) -> Option<SystemTime> {
@@ -189,6 +190,7 @@ pub(super) fn mutate_native(
             max_age: mutation.max_age,
             same_site,
             partitioned: mutation.partitioned,
+            deletion: mutation.deletion,
         };
         state
             .cookie_store

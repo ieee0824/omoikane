@@ -9352,7 +9352,16 @@ impl JsRuntime {
 
     fn dispatch_cookie_changes(&mut self) -> JsResult<()> {
         // Cookie writes can arrive from HTTP, document.cookie, or CookieStore.
-        // Deliver them at a task boundary after promise jobs have settled.
+        // Expiration also changes the jar without a new script or HTTP write.
+        // Deliver all of them at a task boundary after promise jobs have settled.
+        {
+            let state = self.host_state.borrow();
+            state
+                .cookie_store
+                .lock()
+                .unwrap()
+                .evict_expired_at(std::time::SystemTime::now());
+        }
         for _ in 0..64 {
             let (sequence, child_documents) = {
                 let state = self.host_state.borrow();

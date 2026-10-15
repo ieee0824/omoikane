@@ -44,6 +44,11 @@ impl State {
             .map(|context| context.cookie_context.clone())
     }
 
+    /// Whether this state belongs to an isolated WorkletGlobalScope.
+    pub(super) fn is_child_global(&self) -> bool {
+        self.id.is_some()
+    }
+
     pub(super) fn has_pending_render_work(&self) -> bool {
         !self.terminated
             && self.runtime.as_ref().is_some_and(|runtime| {

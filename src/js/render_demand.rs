@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::cdp::NextRendering;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RuntimePaintKey {
@@ -93,17 +93,235 @@ impl JsRuntime {
         if visual_work || modules || workers || state.worklet.has_pending_render_work() {
             return NextRendering::EveryFrame;
         }
-        state
+        let timer_delay = state
             .event_loop
             .next_timer_delay_ms()
-            .map(|delay| NextRendering::After(Duration::from_millis(delay)))
-            .unwrap_or(NextRendering::Idle)
+            .map(Duration::from_millis);
+        let cookie_delay = if state.worker_id.is_some()
+            || state.shared_worker.is_global()
+            || state.worklet.is_child_global()
+            || state.cookie_change_callbacks.is_empty()
+        {
+            // Worker globals can retain bootstrap-private CookieStore callbacks
+            // after removing the page-facing API. They do not deliver change
+            // events, and scheduling them for cookie expiry would keep their
+            // owner Window in EveryFrame mode for the cookie's lifetime.
+            None
+        } else {
+            let cookie_store = state.cookie_store.lock().unwrap();
+            // Another Window can remove an expired cookie from the shared jar.
+            // Keep this idle Window runnable until it consumes that change.
+            if cookie_store.change_sequence() != state.cookie_change_sequence {
+                Some(Duration::ZERO)
+            } else {
+                cookie_store.next_expiry_delay_at(SystemTime::now())
+            }
+        };
+        match (timer_delay, cookie_delay) {
+            (Some(page_delay), Some(wall_delay)) => NextRendering::AfterBoth {
+                page_delay,
+                wall_delay,
+            },
+            (Some(delay), None) => NextRendering::After(delay),
+            (None, Some(delay)) => NextRendering::AfterWall(delay),
+            (None, None) => NextRendering::Idle,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expiring_cookie_wakes_an_otherwise_idle_window() {
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/page").unwrap();
+        runtime
+            .eval("cookieStore.set({name:'wake', value:'1', expires:Date.now()+60000})")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        let NextRendering::AfterWall(delay) = runtime.next_rendering() else {
+            panic!("an expiring cookie should wake the idle renderer");
+        };
+        assert!(delay > Duration::ZERO && delay <= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn script_timer_and_cookie_expiry_keep_separate_deadlines() {
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/page").unwrap();
+        runtime
+            .eval(
+                "cookieStore.set({name:'wake', value:'1', expires:Date.now()+60000}); setTimeout(() => {}, 30000)",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        let NextRendering::AfterBoth {
+            page_delay,
+            wall_delay,
+        } = runtime.next_rendering()
+        else {
+            panic!("script timer and cookie expiry must retain separate clock sources");
+        };
+        assert_eq!(page_delay, Duration::from_secs(30));
+        assert!(wall_delay > Duration::ZERO && wall_delay <= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn shared_cookie_expiration_wakes_another_idle_window() {
+        let shared = Arc::new(Mutex::new(crate::http::CookieJar::new()));
+        let url = "https://example.test/page";
+        let document = || crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut first = JsRuntime::with_document_and_url(document(), url).unwrap();
+        let mut second = JsRuntime::with_document_and_url(document(), url).unwrap();
+        first.set_shared_cookie_store(Arc::clone(&shared));
+        second.set_shared_cookie_store(Arc::clone(&shared));
+        second
+            .eval(
+                "globalThis.cookieDeletions = []; cookieStore.onchange = event => cookieDeletions.push(...event.deleted.map(cookie => cookie.name));",
+            )
+            .unwrap();
+        assert_eq!(second.next_rendering(), NextRendering::Idle);
+        struct WakeCounter(std::sync::atomic::AtomicUsize);
+        impl std::task::Wake for WakeCounter {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let wake_counter = Arc::new(WakeCounter(std::sync::atomic::AtomicUsize::new(0)));
+        let changes = shared
+            .lock()
+            .unwrap()
+            .subscribe_changes(std::task::Waker::from(Arc::clone(&wake_counter)));
+        let other_thread_store = Arc::clone(&shared);
+        std::thread::spawn(move || {
+            other_thread_store.lock().unwrap().add_from_header_for_url(
+                "shared=one; Max-Age=60; Secure; Path=/",
+                &url.parse().unwrap(),
+            );
+        })
+        .join()
+        .unwrap();
+        assert_eq!(wake_counter.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            changes.take_changed(),
+            "an idle host must receive the external mutation"
+        );
+        assert_eq!(
+            second.next_rendering(),
+            NextRendering::AfterWall(Duration::ZERO)
+        );
+        second.tick(0).unwrap();
+        let NextRendering::AfterWall(delay) = second.next_rendering() else {
+            panic!("the second Window should schedule the shared cookie expiry");
+        };
+        assert!(delay > Duration::ZERO);
+        let before_expiry_sequence = shared.lock().unwrap().change_sequence();
+
+        // Advance the jar's explicit sweep time rather than sleeping; the
+        // separate integration test covers a real wall-clock deadline.
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap()
+                .evict_expired_at(SystemTime::now() + Duration::from_secs(61)),
+            1
+        );
+        assert_eq!(
+            shared.lock().unwrap().change_sequence(),
+            before_expiry_sequence + 1
+        );
+        assert_eq!(wake_counter.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            changes.take_changed(),
+            "an expiry sweep must wake each subscribed host"
+        );
+        first.tick(0).unwrap();
+        assert_eq!(shared.lock().unwrap().len(), 0);
+        assert_eq!(
+            second.next_rendering(),
+            NextRendering::AfterWall(Duration::ZERO)
+        );
+        second.tick(0).unwrap();
+        assert!(
+            second
+                .eval("cookieDeletions.join(',') === 'shared'")
+                .unwrap()
+                .to_boolean()
+        );
+        assert_eq!(second.next_rendering(), NextRendering::Idle);
+        second.tick(0).unwrap();
+        assert_eq!(
+            shared.lock().unwrap().change_sequence(),
+            before_expiry_sequence + 1
+        );
+        assert!(
+            second
+                .eval("cookieDeletions.join(',') === 'shared'")
+                .unwrap()
+                .to_boolean()
+        );
+    }
+
+    #[test]
+    fn invisible_shared_cookie_change_does_not_keep_a_window_awake() {
+        let shared = Arc::new(Mutex::new(crate::http::CookieJar::new()));
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/page").unwrap();
+        runtime.set_shared_cookie_store(Arc::clone(&shared));
+        runtime
+            .eval("globalThis.changes = 0; cookieStore.onchange = () => changes++")
+            .unwrap();
+        assert_eq!(runtime.next_rendering(), NextRendering::Idle);
+
+        shared.lock().unwrap().add_from_header_for_url(
+            "foreign=one; Secure; Path=/",
+            &"https://other.test/".parse().unwrap(),
+        );
+        assert_eq!(
+            runtime.next_rendering(),
+            NextRendering::AfterWall(Duration::ZERO)
+        );
+        runtime.tick(0).unwrap();
+        assert_eq!(runtime.next_rendering(), NextRendering::Idle);
+        assert!(runtime.eval("changes === 0").unwrap().to_boolean());
+    }
+
+    #[test]
+    fn a_secure_worker_global_does_not_spin_for_cookie_expiration() {
+        let url = "https://example.test/page";
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime = JsRuntime::with_document_and_url(document, url).unwrap();
+        assert!(
+            !runtime
+                .host_state
+                .borrow()
+                .cookie_change_callbacks
+                .is_empty()
+        );
+        runtime
+            .eval("__omoikane_install_worker_global('https://example.test/worker.js', '1')")
+            .unwrap();
+        assert!(
+            runtime
+                .eval("typeof cookieStore === 'undefined'")
+                .unwrap()
+                .to_boolean()
+        );
+        runtime.host_state.borrow_mut().worker_id = Some(1);
+        let cookie_store = Arc::clone(&runtime.host_state.borrow().cookie_store);
+        cookie_store.lock().unwrap().add_from_header_for_url(
+            "background=one; Max-Age=60; Secure; Path=/",
+            &url.parse().unwrap(),
+        );
+        assert_eq!(runtime.next_rendering(), NextRendering::Idle);
+    }
 
     #[test]
     fn shared_visited_history_invalidates_the_private_paint_key() {

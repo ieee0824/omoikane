@@ -293,6 +293,52 @@ fn set_rejects_invalid_fields_and_expires_cookies() {
 }
 
 #[test]
+fn partitioned_delete_succeeds_without_touching_unpartitioned_cookie() {
+    let mut runtime = runtime_at("https://example.test/page");
+    runtime
+        .eval(
+            r#"
+            globalThis.partitionedDeleteResult = null;
+            (async () => {
+              await cookieStore.set('session', 'unpartitioned');
+              const deleted = await cookieStore.delete({name:'session', partitioned:true});
+              const afterPartitionedDelete = await cookieStore.get('session');
+              const rejectedSet = await cookieStore.set({name:'session', value:'other', partitioned:true})
+                .then(() => false, error => error instanceof TypeError);
+              const rejectedZeroAgeSet = await cookieStore.set({name:'session', value:'other', partitioned:true, maxAge:0})
+                .then(() => false, error => error instanceof TypeError);
+              const rejectedInvalidDelete = await cookieStore.delete({name:'session', partitioned:true, path:'relative'})
+                .then(() => false, error => error instanceof TypeError);
+              const stillPresent = await cookieStore.get('session');
+              await cookieStore.delete('session');
+              partitionedDeleteResult = {
+                deleted,
+                afterPartitionedDelete: afterPartitionedDelete?.value,
+                rejectedSet,
+                rejectedZeroAgeSet,
+                rejectedInvalidDelete,
+                stillPresent: stillPresent?.value,
+                afterOrdinaryDelete: await cookieStore.get('session'),
+              };
+            })().catch(error => partitionedDeleteResult = error.name + ':' + error.message);
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(
+        runtime
+            .eval(
+                "partitionedDeleteResult?.deleted === undefined && partitionedDeleteResult?.afterPartitionedDelete === 'unpartitioned' && partitionedDeleteResult?.rejectedSet === true && partitionedDeleteResult?.rejectedZeroAgeSet === true && partitionedDeleteResult?.rejectedInvalidDelete === true && partitionedDeleteResult?.stillPresent === 'unpartitioned' && partitionedDeleteResult?.afterOrdinaryDelete === null"
+            )
+            .unwrap()
+            .to_boolean(),
+        "result: {:?}; task errors: {:?}",
+        runtime.eval("JSON.stringify(partitionedDeleteResult)").unwrap(),
+        runtime.take_task_errors()
+    );
+}
+
+#[test]
 fn set_distinguishes_host_only_and_domain_cookies() {
     let mut runtime = runtime_at("https://example.test/page");
     runtime
@@ -454,6 +500,99 @@ fn identical_cookie_writes_do_not_dispatch_duplicate_change_events() {
         runtime.eval("JSON.stringify(cookieEvents)").unwrap(),
         runtime.eval("writeError").unwrap(),
         runtime.take_task_errors()
+    );
+}
+
+#[test]
+fn natural_expiration_dispatches_one_deletion_without_another_cookie_operation() {
+    let mut runtime = runtime_at("https://example.test/page");
+    runtime
+        .eval(
+            r#"
+            globalThis.expiryEvents = [];
+            globalThis.expiryError = null;
+            cookieStore.onchange = event => expiryEvents.push({
+              changed: event.changed.map(item => item.name),
+              deleted: event.deleted.map(item => item.name),
+            });
+            cookieStore.set({name:'short', value:'one', expires:Date.now()+1500})
+              .catch(error => expiryError = error.name);
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+
+    // Drive the host event loop, without another document.cookie or
+    // cookieStore operation, until the real expiry deadline has passed.
+    for _ in 0..120 {
+        if runtime
+            .eval("expiryEvents.some(event => event.deleted.includes('short'))")
+            .unwrap()
+            .to_boolean()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        runtime.tick(0).unwrap();
+    }
+    assert!(
+        runtime
+            .eval(
+                "expiryError === null && expiryEvents.some(event => event.changed.includes('short')) && expiryEvents.filter(event => event.deleted.includes('short')).length === 1"
+            )
+            .unwrap()
+            .to_boolean(),
+        "events: {:?}; error: {:?}; task errors: {:?}",
+        runtime.eval("JSON.stringify(expiryEvents)").unwrap(),
+        runtime.eval("expiryError").unwrap(),
+        runtime.take_task_errors()
+    );
+    runtime.tick(0).unwrap();
+    assert!(
+        runtime
+            .eval("expiryEvents.filter(event => event.deleted.includes('short')).length === 1")
+            .unwrap()
+            .to_boolean()
+    );
+}
+
+#[test]
+fn immediately_expired_cookies_report_deletions_even_without_a_previous_cookie() {
+    let mut runtime = runtime_at("https://example.test/page");
+    runtime
+        .eval(
+            r#"
+            globalThis.immediateEvents = [];
+            globalThis.immediateError = null;
+            cookieStore.onchange = event => immediateEvents.push({
+              changed: event.changed.map(item => item.name),
+              deleted: event.deleted.map(item => item.name),
+            });
+            Promise.all([
+              cookieStore.set({name:'zeroAge', value:'value', maxAge:0}),
+              cookieStore.set({name:'pastExpiry', value:'value', expires:Date.now()-1000}),
+              cookieStore.delete('neverPresent'),
+            ]).catch(error => immediateError = error.name);
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(
+        runtime
+            .eval(
+                "immediateError === null && JSON.stringify(immediateEvents.map(event => event.deleted)) === '[[\"zeroAge\"],[\"pastExpiry\"],[\"neverPresent\"]]' && immediateEvents.every(event => event.changed.length === 0) && document.cookie === ''"
+            )
+            .unwrap()
+            .to_boolean(),
+        "events: {:?}; error: {:?}; task errors: {:?}",
+        runtime.eval("JSON.stringify(immediateEvents)").unwrap(),
+        runtime.eval("immediateError").unwrap(),
+        runtime.take_task_errors()
+    );
+    runtime.tick(0).unwrap();
+    assert_eq!(
+        runtime.eval("immediateEvents.length").unwrap().as_number(),
+        Some(3.0)
     );
 }
 

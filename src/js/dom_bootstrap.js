@@ -23313,6 +23313,7 @@ export let __omoikane_update_auxiliary_opener;
       fields.path ??= "/";
       fields.sameSite ??= "strict";
       fields.partitioned ??= false;
+      fields.deletion = deletion;
       if (!["strict", "lax", "none"].includes(fields.sameSite)) {
         throw new TypeError("Invalid Cookie Store sameSite");
       }
