@@ -14,13 +14,15 @@ pub(super) enum PolicyFeature {
     Fullscreen,
     Geolocation,
     CrossOriginIsolated,
+    StorageAccess,
 }
 
 impl PolicyFeature {
-    pub(super) const ALL: [Self; 3] = [
+    pub(super) const ALL: [Self; 4] = [
         Self::Fullscreen,
         Self::Geolocation,
         Self::CrossOriginIsolated,
+        Self::StorageAccess,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -28,17 +30,36 @@ impl PolicyFeature {
             Self::Fullscreen => "fullscreen",
             Self::Geolocation => "geolocation",
             Self::CrossOriginIsolated => "cross-origin-isolated",
+            Self::StorageAccess => "storage-access",
         }
     }
 
     pub(super) fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|feature| feature.name() == name)
     }
+
+    /// Storage Access is delegated to child Documents by default; the other
+    /// represented features require a same-origin child or explicit delegation.
+    pub(super) fn default_allows(
+        self,
+        target: &DocumentSecurityOrigin,
+        owner: &DocumentSecurityOrigin,
+    ) -> bool {
+        self == Self::StorageAccess || target == owner
+    }
+
+    fn default_allowlist(self, owner: &DocumentSecurityOrigin) -> Vec<String> {
+        if self == Self::StorageAccess {
+            vec!["*".to_owned()]
+        } else {
+            vec![serialize_origin(owner)]
+        }
+    }
 }
 
 /// Declared response policy for each represented feature. An omitted member
-/// permits delegation; the feature's `self` default applies when querying the
-/// document's observable policy or serializing its allowlist.
+/// permits delegation; the feature's default allowlist applies when querying
+/// the document's observable policy or serializing its allowlist.
 #[derive(Clone, Debug, Default)]
 pub(super) struct DocumentPolicy {
     declarations: HashMap<PolicyFeature, FeatureAllowlist>,
@@ -64,7 +85,9 @@ impl DocumentPolicy {
     ) -> bool {
         self.declarations
             .get(&feature)
-            .map_or(target == owner, |allowlist| allowlist.allows(target, owner))
+            .map_or(feature.default_allows(target, owner), |allowlist| {
+                allowlist.allows(target, owner)
+            })
     }
 
     /// Tests only the response declaration. Without a member, the response
@@ -87,7 +110,7 @@ impl DocumentPolicy {
         owner: &DocumentSecurityOrigin,
     ) -> Vec<String> {
         self.declarations.get(&feature).map_or_else(
-            || vec![serialize_origin(owner)],
+            || feature.default_allowlist(owner),
             |policy| policy.serialize(owner),
         )
     }
@@ -106,57 +129,69 @@ enum FeatureAllowlist {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum OriginExpression {
-    Exact(StorageOrigin),
     Scheme(String),
-    Pattern {
+    Host {
         scheme: String,
         host: String,
         subdomains_only: bool,
-        port: Option<u16>,
+        port: HostPort,
+        path: Option<String>,
         serialized: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HostPort {
+    Default,
+    Any,
+    Explicit(u16),
 }
 
 impl OriginExpression {
     fn allows(&self, target: &StorageOrigin) -> bool {
         match self {
-            Self::Exact(origin) => origin == target,
             Self::Scheme(scheme) => url::Url::parse(&target.serialize())
                 .is_ok_and(|url| scheme_matches(scheme, url.scheme())),
-            Self::Pattern {
+            Self::Host {
                 scheme,
                 host,
                 subdomains_only,
                 port,
+                path,
                 ..
             } => {
                 let Ok(url) = url::Url::parse(&target.serialize()) else {
                     return false;
                 };
-                let Some(target_host) = url.host_str() else {
+                let Some(url::Host::Domain(target_host)) = url.host() else {
                     return false;
                 };
-                let matches_host = if *subdomains_only {
+                let matches_host = if host == "*" {
+                    true
+                } else if *subdomains_only {
                     target_host
                         .strip_suffix(host.as_str())
                         .is_some_and(|prefix| !prefix.is_empty() && prefix.ends_with('.'))
                 } else {
                     target_host == host
                 };
-                url.scheme() == scheme.as_str()
-                    && matches_host
-                    && port
-                        .as_ref()
-                        .is_none_or(|required| url.port_or_known_default() == Some(*required))
+                let matches_port = match port {
+                    HostPort::Default => url.port().is_none(),
+                    HostPort::Any => true,
+                    HostPort::Explicit(required) => url.port_or_known_default() == Some(*required),
+                };
+                // Permissions Policy matches the URL of the serialized origin,
+                // whose path is always `/`.
+                let matches_path = path.as_deref().is_none_or(|path| path == "/");
+                scheme_matches(scheme, url.scheme()) && matches_host && matches_port && matches_path
             }
         }
     }
 
     fn serialize(&self) -> String {
         match self {
-            Self::Exact(origin) => serialize_tuple_origin(origin),
             Self::Scheme(scheme) => format!("{scheme}:"),
-            Self::Pattern { serialized, .. } => serialized.clone(),
+            Self::Host { serialized, .. } => serialized.clone(),
         }
     }
 }
@@ -512,7 +547,8 @@ pub(super) fn container_allows(
             .last()
     });
     let Some(directive) = directive else {
-        return target == owner || (feature == PolicyFeature::Fullscreen && allowfullscreen);
+        return feature.default_allows(target, owner)
+            || (feature == PolicyFeature::Fullscreen && allowfullscreen);
     };
     let tokens = directive
         .split_ascii_whitespace()
@@ -526,11 +562,41 @@ pub(super) fn container_allows(
             || (token.eq_ignore_ascii_case("'self'") && target == owner)
             || (token.eq_ignore_ascii_case("'src'")
                 && declared_src.is_some_and(|src| target == src))
-            || parse_origin_expression(token).is_some_and(|allowed| {
+            || parse_container_expression(token).is_some_and(|allowed| {
                 matches!(target, DocumentSecurityOrigin::Tuple(origin) if allowed.allows(origin))
             })
-            || matches!(target, DocumentSecurityOrigin::Tuple(origin) if StorageOrigin::from_url(token).is_some_and(|allowed| &allowed == origin))
     })
+}
+
+fn parse_container_expression(token: &str) -> Option<OriginExpression> {
+    // PP §9.3 parses an iframe allow URL, then stores its serialized origin as
+    // a source expression. Its path, query, and default-port spelling disappear.
+    if !token.contains("://") {
+        return parse_origin_expression(token);
+    }
+    let remainder = token.split_once("://")?.1;
+    let authority = remainder
+        .split(|character| matches!(character, '/' | '?' | '#'))
+        .next()?;
+    if authority.contains('@') || authority.contains('\\') {
+        return None;
+    }
+    if let Ok(url) = url::Url::parse(token) {
+        if matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+        {
+            return parse_origin_expression(&url.origin().ascii_serialization());
+        }
+    }
+    // Preserve the existing `allow` extensions for wildcard host/port tokens
+    // which cannot be parsed as ordinary URLs, also dropping their URL path.
+    if authority.contains('*') {
+        let scheme = token.split_once("://")?.0;
+        return parse_origin_expression(&format!("{scheme}://{authority}"));
+    }
+    None
 }
 
 fn parse_origin_expression(origin: &str) -> Option<OriginExpression> {
@@ -542,13 +608,13 @@ fn parse_origin_expression(origin: &str) -> Option<OriginExpression> {
             return Some(OriginExpression::Scheme(scheme.to_ascii_lowercase()));
         }
     }
-    if origin.contains('*') {
+    let (authority, path) = host_source_parts(origin)?;
+    if authority.contains('*') {
         return parse_wildcard_origin(origin);
     }
     let url = url::Url::parse(origin).ok()?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
-        || url.path() != "/"
         || url.query().is_some()
         || url.fragment().is_some()
         || !url.username().is_empty()
@@ -556,33 +622,137 @@ fn parse_origin_expression(origin: &str) -> Option<OriginExpression> {
     {
         return None;
     }
-    StorageOrigin::from_url(origin).map(OriginExpression::Exact)
+    let port = explicit_host_port(origin).map_or(HostPort::Default, HostPort::Explicit);
+    host_expression(&url, false, false, port, path)
+}
+
+fn host_source_parts(value: &str) -> Option<(&str, Option<&str>)> {
+    let remainder = value.split_once("://")?.1;
+    let (authority, path) = remainder.find('/').map_or((remainder, None), |index| {
+        (&remainder[..index], Some(&remainder[index..]))
+    });
+    if authority.is_empty()
+        || !authority
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'*'))
+        || path.is_some_and(|path| !valid_csp_path(path))
+    {
+        return None;
+    }
+    Some((authority, path))
+}
+
+fn valid_csp_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            if !bytes
+                .get(index + 1..index + 3)
+                .is_some_and(|hex| hex.iter().all(|byte| byte.is_ascii_hexdigit()))
+            {
+                return false;
+            }
+            index += 3;
+        } else if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'/' | b'-'
+                    | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b'='
+                    | b':'
+                    | b'@'
+            )
+        {
+            index += 1;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn explicit_host_port(value: &str) -> Option<u16> {
+    let authority = host_source_parts(value)?.0;
+    authority.rsplit_once(':')?.1.parse().ok()
+}
+
+fn host_expression(
+    url: &url::Url,
+    subdomains_only: bool,
+    any_host: bool,
+    port: HostPort,
+    path: Option<&str>,
+) -> Option<OriginExpression> {
+    let url::Host::Domain(host) = url.host()? else {
+        return None;
+    };
+    let host_expression = if any_host {
+        "*".to_owned()
+    } else if subdomains_only {
+        format!("*.{host}")
+    } else {
+        host.to_owned()
+    };
+    let mut serialized = format!("{}://{host_expression}", url.scheme());
+    match &port {
+        HostPort::Default => {}
+        HostPort::Any => serialized.push_str(":*"),
+        HostPort::Explicit(value) => {
+            serialized.push(':');
+            serialized.push_str(&value.to_string());
+        }
+    }
+    if let Some(path) = path {
+        serialized.push_str(path);
+    }
+    Some(OriginExpression::Host {
+        scheme: url.scheme().to_owned(),
+        host: if any_host {
+            "*".to_owned()
+        } else {
+            host.to_owned()
+        },
+        subdomains_only,
+        port,
+        path: path.map(str::to_owned),
+        serialized,
+    })
 }
 
 fn parse_wildcard_origin(origin: &str) -> Option<OriginExpression> {
-    let (scheme, authority) = origin.split_once("://")?;
+    let (scheme, _) = origin.split_once("://")?;
     if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
         return None;
     }
-    let authority = authority.strip_suffix('/').unwrap_or(authority);
-    let any_port = authority.ends_with(":*");
-    let authority = if any_port {
-        authority.strip_suffix(":*")?
-    } else {
-        authority
-    };
+    let (authority, path) = host_source_parts(origin)?;
     let subdomains_only = authority.starts_with("*.");
+    let any_host = authority == "*" || authority.starts_with("*:");
     let authority = if subdomains_only {
-        authority.strip_prefix("*.")?
+        authority.strip_prefix("*.")?.to_owned()
+    } else if any_host {
+        format!("example.test{}", authority.strip_prefix('*')?)
     } else {
-        authority
+        authority.to_owned()
     };
-    if authority.contains('*') || (!subdomains_only && !any_port) {
+    let any_port = authority.ends_with(":*");
+    let authority = authority.strip_suffix(":*").unwrap_or(&authority);
+    if authority.contains('*') || (!subdomains_only && !any_host && !any_port) {
         return None;
     }
     let url = url::Url::parse(&format!("{scheme}://{authority}")).ok()?;
     if url.host_str().is_none()
-        || url.path() != "/"
         || url.query().is_some()
         || url.fragment().is_some()
         || !url.username().is_empty()
@@ -590,24 +760,12 @@ fn parse_wildcard_origin(origin: &str) -> Option<OriginExpression> {
     {
         return None;
     }
-    let mut serialized = url.origin().ascii_serialization();
-    if subdomains_only {
-        serialized = serialized.replacen("://", "://*.", 1);
-    }
-    if any_port {
-        serialized.push_str(":*");
-    }
-    Some(OriginExpression::Pattern {
-        scheme: url.scheme().to_owned(),
-        host: url.host_str()?.to_owned(),
-        subdomains_only,
-        port: if any_port {
-            None
-        } else {
-            url.port_or_known_default()
-        },
-        serialized,
-    })
+    let port = if any_port {
+        HostPort::Any
+    } else {
+        explicit_host_port(origin).map_or(HostPort::Default, HostPort::Explicit)
+    };
+    host_expression(&url, subdomains_only, any_host, port, path)
 }
 
 fn policy_query_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -810,6 +968,107 @@ mod tests {
     }
 
     #[test]
+    fn http_host_sources_upgrade_scheme_but_keep_csp_port_matching() {
+        let parse = |source: &str| {
+            FeatureAllowlist::from_response_headers(
+                &[(
+                    "Permissions-Policy".to_owned(),
+                    format!("geolocation=(\"{source}\")"),
+                )],
+                PolicyFeature::Geolocation,
+            )
+            .unwrap()
+        };
+        let origin =
+            |value: &str| DocumentSecurityOrigin::Tuple(StorageOrigin::from_url(value).unwrap());
+        let owner = origin("https://owner.test/");
+        for (source, target, allowed) in [
+            ("http://example.test", "http://example.test/", true),
+            ("http://example.test", "https://example.test/", true),
+            ("http://example.test", "https://example.test:8443/", false),
+            ("http://example.test:80", "http://example.test/", true),
+            ("http://example.test:80", "https://example.test/", false),
+            ("http://example.test:80", "https://example.test:80/", true),
+            ("http://example.test:443", "https://example.test/", true),
+            ("http://example.test:443", "http://example.test/", false),
+            (
+                "http://example.test:8443",
+                "https://example.test:8443/",
+                true,
+            ),
+            ("https://example.test", "http://example.test/", false),
+            ("https://*", "https://other.test/", true),
+            ("https://*", "https://other.test:8443/", false),
+            ("https://*", "http://other.test/", false),
+            ("https://*", "https://127.0.0.1/", false),
+            ("https://*:*", "https://other.test:8443/", true),
+            ("https://*:443", "https://other.test/", true),
+            ("http://*", "https://other.test/", true),
+            ("http://*.example.test", "https://a.example.test/", true),
+            ("http://*.example.test", "https://example.test/", false),
+            (
+                "http://*.example.test",
+                "https://a.example.test:8443/",
+                false,
+            ),
+            ("http://*.example.test:80", "https://a.example.test/", false),
+            (
+                "http://*.example.test:80",
+                "https://a.example.test:80/",
+                true,
+            ),
+            (
+                "http://*.example.test:*",
+                "https://a.example.test:8443/",
+                true,
+            ),
+        ] {
+            assert_eq!(
+                parse(source).allows(&origin(target), &owner),
+                allowed,
+                "{source} → {target}"
+            );
+        }
+        assert_eq!(
+            parse("http://example.test:80").serialize(&owner),
+            vec!["http://example.test:80"]
+        );
+        assert_eq!(
+            url::Url::parse("http://example.test:80/").unwrap().port(),
+            None
+        );
+        assert_eq!(
+            url::Url::parse("https://example.test:443/").unwrap().port(),
+            None
+        );
+        let root_path = parse("https://example.test/");
+        assert!(root_path.allows(&origin("https://example.test/"), &owner));
+        assert_eq!(root_path.serialize(&owner), vec!["https://example.test/"]);
+        let other_path = parse("https://example.test/maps");
+        assert!(!other_path.allows(&origin("https://example.test/"), &owner));
+        assert_eq!(
+            other_path.serialize(&owner),
+            vec!["https://example.test/maps"]
+        );
+        assert!(parse("http://*.example.test/").allows(&origin("https://a.example.test/"), &owner));
+        assert!(
+            !parse("http://*.example.test/maps").allows(&origin("https://a.example.test/"), &owner)
+        );
+        for source in ["https://127.0.0.1", "https://*.127.0.0.1"] {
+            let allowlist = parse(source);
+            assert_eq!(
+                allowlist.serialize(&owner),
+                Vec::<String>::new(),
+                "{source}"
+            );
+            assert!(
+                !allowlist.allows(&origin("https://127.0.0.1/"), &owner),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
     fn duplicate_header_members_use_the_last_value() {
         let owner =
             DocumentSecurityOrigin::Tuple(StorageOrigin::from_url("https://owner.test/").unwrap());
@@ -956,6 +1215,19 @@ mod tests {
         assert!(default.permits_delegation(PolicyFeature::Geolocation, &child, &owner));
         assert!(default.allows(PolicyFeature::CrossOriginIsolated, &owner, &owner));
         assert!(!default.allows(PolicyFeature::CrossOriginIsolated, &child, &owner));
+        assert!(default.allows(PolicyFeature::StorageAccess, &child, &owner));
+        assert_eq!(
+            default.allowlist(PolicyFeature::StorageAccess, &owner),
+            vec!["*"]
+        );
+        assert!(container_allows(
+            PolicyFeature::StorageAccess,
+            None,
+            false,
+            &child,
+            &owner,
+            None
+        ));
     }
 
     #[test]
@@ -1047,11 +1319,20 @@ mod tests {
     }
 
     #[test]
-    fn iframe_allow_url_expression_uses_its_origin() {
+    fn iframe_allow_url_tokens_serialize_origin_before_source_matching() {
+        // PP §9.3 drops the iframe URL path before PP §4.7 matches its source.
         let owner =
             DocumentSecurityOrigin::Tuple(StorageOrigin::from_url("https://owner.test/").unwrap());
         let child =
             DocumentSecurityOrigin::Tuple(StorageOrigin::from_url("https://child.test/").unwrap());
+        assert!(container_allows(
+            PolicyFeature::Geolocation,
+            Some("geolocation https://child.test/"),
+            false,
+            &child,
+            &owner,
+            None
+        ));
         assert!(container_allows(
             PolicyFeature::Geolocation,
             Some("geolocation https://child.test/maps"),
@@ -1065,6 +1346,126 @@ mod tests {
             Some("geolocation https://other.test/maps"),
             false,
             &child,
+            &owner,
+            None
+        ));
+        assert!(container_allows(
+            PolicyFeature::Geolocation,
+            Some("geolocation https://*"),
+            false,
+            &child,
+            &owner,
+            None
+        ));
+        assert!(!container_allows(
+            PolicyFeature::Geolocation,
+            Some("geolocation https://child.test:8443/maps"),
+            false,
+            &child,
+            &owner,
+            None
+        ));
+        assert!(container_allows(
+            PolicyFeature::Geolocation,
+            Some("geolocation http://child.test/"),
+            false,
+            &child,
+            &owner,
+            None
+        ));
+        assert!(container_allows(
+            PolicyFeature::Geolocation,
+            Some("geolocation http://child.test/maps"),
+            false,
+            &child,
+            &owner,
+            None
+        ));
+        assert!(container_allows(
+            PolicyFeature::Geolocation,
+            Some("geolocation http://child.test:80/maps"),
+            false,
+            &child,
+            &owner,
+            None
+        ));
+        let grandchild = DocumentSecurityOrigin::Tuple(
+            StorageOrigin::from_url("https://sub.child.test/").unwrap(),
+        );
+        assert!(container_allows(
+            PolicyFeature::Geolocation,
+            Some("geolocation https://*.child.test/maps"),
+            false,
+            &grandchild,
+            &owner,
+            None
+        ));
+        assert!(container_allows(
+            PolicyFeature::Geolocation,
+            Some("geolocation http://child.test:80/"),
+            false,
+            &child,
+            &owner,
+            None
+        ));
+        assert!(container_allows(
+            PolicyFeature::Geolocation,
+            Some("geolocation http://child.test:443/"),
+            false,
+            &child,
+            &owner,
+            None
+        ));
+        assert!(container_allows(
+            PolicyFeature::Geolocation,
+            Some("geolocation http://child.test:443/maps"),
+            false,
+            &child,
+            &owner,
+            None
+        ));
+        for allowed in [
+            "geolocation https://child.test/?query",
+            "geolocation https://child.test/maps?query",
+            "geolocation https://child.test/#fragment",
+        ] {
+            assert!(
+                container_allows(
+                    PolicyFeature::Geolocation,
+                    Some(allowed),
+                    false,
+                    &child,
+                    &owner,
+                    None
+                ),
+                "{allowed}"
+            );
+        }
+        for invalid in [
+            "geolocation https://child.test\\maps",
+            "geolocation https://user@child.test/maps",
+            "geolocation https://:password@child.test/maps",
+            "geolocation https://@child.test/maps",
+        ] {
+            assert!(
+                !container_allows(
+                    PolicyFeature::Geolocation,
+                    Some(invalid),
+                    false,
+                    &child,
+                    &owner,
+                    None
+                ),
+                "{invalid}"
+            );
+        }
+        let evil =
+            DocumentSecurityOrigin::Tuple(StorageOrigin::from_url("https://evil.test/").unwrap());
+        assert!(!container_allows(
+            PolicyFeature::Geolocation,
+            Some("geolocation https://child.test@evil.test/maps"),
+            false,
+            &evil,
             &owner,
             None
         ));

@@ -4536,7 +4536,7 @@ impl HostState {
             && self
                 .document_permissions
                 .get(&document_id)
-                .map_or(target == owner, |policy| {
+                .map_or(feature.default_allows(target, owner), |policy| {
                     policy.allows(feature, target, owner)
                 })
     }
