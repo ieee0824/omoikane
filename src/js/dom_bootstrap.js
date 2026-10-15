@@ -26032,7 +26032,7 @@ export let __omoikane_update_auxiliary_opener;
     });
     globalThis.__omoikane_dispatch_shared_worker_connect = function(connectionId) {
       const port = globalThis.__omoikane_get_shared_worker_port(connectionId);
-      globalThis.dispatchEvent(new MessageEvent("connect", { ports: [port] }));
+      globalThis.dispatchEvent(new MessageEvent("connect", { source: port, ports: [port] }));
     };
     // SharedWorkerGlobalScope communicates through the ports in connect
     // events; a global postMessage call is therefore intentionally inert.
