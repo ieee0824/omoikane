@@ -1373,11 +1373,19 @@ impl HttpModuleLoader {
         })?;
         let mut pool = self.fetch_pool.borrow_mut();
         if pool.is_none() {
-            let cookies = owner.borrow().module_fetch_cookie_store();
-            *pool = Some(ModuleFetchPool::new(cookies).map_err(|error| {
-                self.report_import_load_failure();
-                JsNativeError::typ().with_message(error.to_string())
-            })?);
+            let (cookies, client) = {
+                let state = owner.borrow();
+                (
+                    state.module_fetch_cookie_store(),
+                    state.http_client.fork_for_worker(),
+                )
+            };
+            *pool = Some(
+                ModuleFetchPool::new_with_client(cookies, client).map_err(|error| {
+                    self.report_import_load_failure();
+                    JsNativeError::typ().with_message(error.to_string())
+                })?,
+            );
         }
         let state = owner.borrow();
         let mut isolation = state.module_fetch_isolation_for_document(document_id);
@@ -8482,9 +8490,10 @@ impl JsRuntime {
     /// Sets an explicit transport for requests using this runtime's HTTP client.
     ///
     /// The transport owns connection policy; URL, cookie, redirect and CORS
-    /// processing still run normally. New Workers inherit this transport;
-    /// existing Workers, asynchronous module downloads, and WebSocket
-    /// connections use their own clients. `None` restores the default transport.
+    /// processing still run normally. New Workers, Worklets and module-fetch
+    /// pools inherit this transport when created. Existing child runtimes and
+    /// pools retain their clients; WebSocket connections use their own clients.
+    /// `None` restores the default transport.
     pub fn set_http_resource_transport(
         &mut self,
         transport: Option<Arc<dyn crate::http::HttpTransport>>,

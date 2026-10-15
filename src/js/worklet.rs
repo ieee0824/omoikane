@@ -372,6 +372,7 @@ fn create_worklet_runtime(
     {
         let owner = owner_state.borrow();
         let mut state = worklet_state.borrow_mut();
+        state.http_client = owner.http_client.fork_for_worker();
         state.worklet.module_fetch_context = Some(ModuleFetchContext {
             cookies: Arc::clone(&owner.cookie_store),
             cookie_context: owner
@@ -1076,13 +1077,6 @@ mod tests {
                 .eval("CSS.paintWorklet.addModule('/bootstrap.js');")
                 .unwrap();
             runtime.run_until_idle().unwrap();
-            let child = runtime.host_state.borrow().worklet.runtime.clone().unwrap();
-            {
-                let child = child.borrow();
-                let cookies = child.host_state.borrow().module_fetch_cookie_store();
-                *child.module_loader.fetch_pool.borrow_mut() =
-                    Some(ModuleFetchPool::new_for_test(cookies, transport).unwrap());
-            }
             Self {
                 runtime,
                 requests,

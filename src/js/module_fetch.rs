@@ -195,6 +195,16 @@ impl ModuleFetchPool {
         cookies: Arc<Mutex<CookieJar>>,
         transport: Option<Arc<dyn HttpTransport>>,
     ) -> std::io::Result<Self> {
+        let mut client = Client::new();
+        client.set_transport(transport);
+        Self::new_with_client(cookies, client)
+    }
+
+    /// Copies the creator's HTTP policy into independent worker connections.
+    pub(super) fn new_with_client(
+        cookies: Arc<Mutex<CookieJar>>,
+        client: Client,
+    ) -> std::io::Result<Self> {
         let (sender, receiver) = mpsc::channel::<Request>();
         let receiver = Arc::new(Mutex::new(receiver));
         let live = Arc::new(AtomicBool::new(true));
@@ -202,14 +212,10 @@ impl ModuleFetchPool {
             let receiver = receiver.clone();
             let cookies = cookies.clone();
             let live = live.clone();
-            let transport = transport.clone();
+            let mut client = client.fork_for_worker();
             std::thread::Builder::new()
                 .name(format!("omoikane-module-{index}"))
                 .spawn(move || {
-                    let mut client = Client::new();
-                    if let Some(transport) = transport {
-                        client.set_transport(Some(transport));
-                    }
                     client.set_shared_cookie_store(cookies.clone());
                     loop {
                         // Release the receiver lock before doing any I/O so
