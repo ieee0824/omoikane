@@ -794,10 +794,18 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    struct GraphRequestMetadata {
+        url: String,
+        cookie: Option<String>,
+        origin: Option<String>,
+        public_only: bool,
+    }
+
     struct GraphTransport {
         root_source: String,
         requests: Arc<Mutex<Vec<String>>>,
         reports: Arc<Mutex<Vec<serde_json::Value>>>,
+        metadata: Arc<Mutex<Vec<GraphRequestMetadata>>>,
     }
 
     impl HttpTransport for GraphTransport {
@@ -810,6 +818,12 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(request.url().to_string());
+            self.metadata.lock().unwrap().push(GraphRequestMetadata {
+                url: request.url().to_string(),
+                cookie: request.header("cookie").map(str::to_owned),
+                origin: request.header("origin").map(str::to_owned),
+                public_only: request.requires_public_ip(),
+            });
             let source = match request.url().path() {
                 "/bootstrap.js" => "registerPaint('bootstrap', class {});",
                 "/root.js" => &self.root_source,
@@ -874,6 +888,7 @@ mod tests {
         runtime: JsRuntime,
         requests: Arc<Mutex<Vec<String>>>,
         reports: Arc<Mutex<Vec<serde_json::Value>>>,
+        metadata: Arc<Mutex<Vec<GraphRequestMetadata>>>,
     }
 
     impl GraphFixture {
@@ -897,10 +912,12 @@ mod tests {
             ]);
             let requests = Arc::new(Mutex::new(Vec::new()));
             let reports = Arc::new(Mutex::new(Vec::new()));
+            let metadata = Arc::new(Mutex::new(Vec::new()));
             let transport = Arc::new(GraphTransport {
                 root_source: source.into(),
                 requests: Arc::clone(&requests),
                 reports: Arc::clone(&reports),
+                metadata: Arc::clone(&metadata),
             });
             runtime.set_http_resource_transport(Some(transport.clone()));
             runtime
@@ -918,6 +935,7 @@ mod tests {
                 runtime,
                 requests,
                 reports,
+                metadata,
             }
         }
 
@@ -947,6 +965,209 @@ mod tests {
                     .all(|url| { url != "https://other.example.test/import.js" })
             );
         }
+    }
+
+    #[test]
+    fn worklet_graph_evaluates_allowed_data_module_without_http() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self' data:",
+            false,
+            "import {value} from 'data:text/javascript,export%20const%20value%3D42'; \
+             if(value!==42)throw new Error('wrong data export');",
+        );
+        fixture.load();
+        assert!(
+            fixture
+                .runtime
+                .eval("workletResult==='loaded' && workletEvents.length===0",)
+                .unwrap()
+                .to_boolean()
+        );
+        assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn worklet_graph_reports_data_module_block_to_its_owner() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self'",
+            false,
+            "import 'data:text/javascript,export%20const%20value%3D42';",
+        );
+        fixture.load();
+        assert!(
+            fixture
+                .runtime
+                .eval(
+                    "workletResult!=='pending' && workletResult!=='loaded' && \
+             JSON.stringify(workletEvents)==='[[true,\"script-src-elem\",\"data\",\"enforce\"]]'",
+                )
+                .unwrap()
+                .to_boolean()
+        );
+        assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn worklet_graph_report_only_data_module_runs_and_reports_both_stages() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self'; report-to graph",
+            true,
+            "import {value} from 'data:text/javascript,export%20const%20value%3D42'; \
+             if(value!==42)throw new Error('wrong data export');",
+        );
+        fixture.load();
+        assert!(fixture.runtime.eval(
+            "workletResult==='loaded' && workletEvents.length===2 && \
+             workletEvents.every(event => JSON.stringify(event)=== \
+               '[true,\"script-src-elem\",\"data\",\"report\"]') && \
+             workletReports.length===2 && workletReports.every(report => report.body.blockedURL==='data')",
+        ).unwrap().to_boolean());
+        assert_eq!(fixture.reports.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn worklet_graph_decodes_base64_data_module() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self' data:",
+            false,
+            "import {value} from 'data:text/javascript;base64,ZXhwb3J0IGNvbnN0IHZhbHVlPTQyOw=='; \
+             if(value!==42)throw new Error('wrong base64 export');",
+        );
+        fixture.load();
+        assert!(
+            fixture
+                .runtime
+                .eval("workletResult==='loaded'")
+                .unwrap()
+                .to_boolean()
+        );
+        assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn worklet_graph_data_fragment_is_identity_without_becoming_source_text() {
+        let data = "data:text/javascript,globalThis.dataRuns=(globalThis.dataRuns||0)+1;export const id={};export const url=import.meta.url;";
+        let first = serde_json::to_string(&format!("{data}#one")).unwrap();
+        let second = serde_json::to_string(&format!("{data}#two")).unwrap();
+        let source = format!(
+            "import * as a from {first}; import * as b from {first}; import * as c from {second}; \
+             if(a.id!==b.id || a.id===c.id || dataRuns!==2 || \
+                !a.url.endsWith('#one') || !c.url.endsWith('#two'))throw new Error('wrong module identity');"
+        );
+        let mut fixture = GraphFixture::new("script-src-elem 'self' data:", false, &source);
+        fixture.load();
+        assert!(
+            fixture
+                .runtime
+                .eval("workletResult==='loaded'")
+                .unwrap()
+                .to_boolean()
+        );
+        assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn worklet_graph_rejects_data_module_with_non_javascript_mime() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self' data:",
+            false,
+            "import 'data:text/plain,globalThis.wrongMimeRan%3Dtrue';",
+        );
+        fixture.load();
+        assert!(fixture.runtime.eval(
+            "workletResult!=='pending' && workletResult!=='loaded' && workletEvents.length===0",
+        ).unwrap().to_boolean());
+        let child = fixture
+            .runtime
+            .host_state
+            .borrow()
+            .worklet
+            .runtime
+            .clone()
+            .unwrap();
+        assert!(
+            child
+                .borrow_mut()
+                .eval("typeof wrongMimeRan==='undefined'")
+                .unwrap()
+                .to_boolean()
+        );
+    }
+
+    #[test]
+    fn worklet_graph_data_module_does_not_resolve_relative_import_against_document() {
+        for specifier in [
+            "./import.js",
+            "../import.js",
+            "/import.js",
+            "//other.example.test/import.js",
+        ] {
+            let data = format!("data:text/javascript,import%20%27{specifier}%27;");
+            let source = format!("import {};", serde_json::to_string(&data).unwrap());
+            let mut fixture = GraphFixture::new("script-src-elem 'self' data:", false, &source);
+            fixture.load();
+            assert!(fixture.runtime.eval(
+                "workletResult!=='pending' && workletResult!=='loaded' && workletEvents.length===0",
+            ).unwrap().to_boolean(), "relative import: {specifier}");
+            assert_eq!(
+                fixture.requests.lock().unwrap().len(),
+                2,
+                "relative import: {specifier}"
+            );
+        }
+    }
+
+    #[test]
+    fn worklet_graph_data_module_keeps_owner_csp_for_absolute_http_import() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self' data:",
+            false,
+            "import 'data:text/javascript,import%20%27https://other.example.test/import.js%27;';",
+        );
+        fixture.load();
+        fixture.assert_no_import_request();
+        assert!(fixture.runtime.eval(
+            "workletResult!=='pending' && workletResult!=='loaded' && \
+             JSON.stringify(workletEvents)==='[[true,\"script-src-elem\",\"https://other.example.test/import.js\",\"enforce\"]]'",
+        ).unwrap().to_boolean());
+    }
+
+    #[test]
+    fn worklet_graph_data_module_keeps_http_owner_cookies_origin_and_address_policy() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem * data:",
+            false,
+            "import 'data:text/javascript,import%20%27https://isolated.example.test/import.js%27;import%20%27https://other.example.test/import.js%27;';",
+        );
+        fixture
+            .runtime
+            .eval("document.cookie='session=owner';")
+            .unwrap();
+        fixture.load();
+        assert!(
+            fixture
+                .runtime
+                .eval("workletResult==='loaded'")
+                .unwrap()
+                .to_boolean()
+        );
+        let metadata = fixture.metadata.lock().unwrap();
+        let owner = metadata
+            .iter()
+            .find(|request| request.url == "https://isolated.example.test/import.js")
+            .unwrap();
+        assert_eq!(owner.cookie.as_deref(), Some("session=owner"));
+        assert!(!owner.public_only);
+        let cross = metadata
+            .iter()
+            .find(|request| request.url == "https://other.example.test/import.js")
+            .unwrap();
+        assert_eq!(cross.cookie, None);
+        assert_eq!(
+            cross.origin.as_deref(),
+            Some("https://isolated.example.test")
+        );
+        assert!(cross.public_only);
     }
 
     #[test]
