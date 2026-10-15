@@ -895,6 +895,51 @@ enum ModulePolicyStage {
     Response,
 }
 
+enum ModuleReference {
+    Http(crate::http::Url),
+    Data(url::Url),
+}
+
+impl ModuleReference {
+    fn serialize(&self) -> String {
+        match self {
+            Self::Http(url) => url.to_string(),
+            Self::Data(url) => url.to_string(),
+        }
+    }
+}
+
+/// Resolves against the actual referrer, retaining an opaque data URL base.
+/// The Document base is only a fallback for scripts without a URL referrer.
+fn resolve_module_reference(
+    specifier: &str,
+    referrer: Option<&str>,
+    document_base: Option<&crate::http::Url>,
+) -> JsResult<ModuleReference> {
+    let base = referrer
+        .and_then(|path| url::Url::parse(path).ok())
+        .filter(|url| matches!(url.scheme(), "http" | "https" | "data"))
+        .or_else(|| document_base.and_then(|base| url::Url::parse(&base.to_string()).ok()));
+    let resolved = url::Url::parse(specifier)
+        .or_else(|_| {
+            base.as_ref()
+                .ok_or(url::ParseError::RelativeUrlWithoutBase)?
+                .join(specifier)
+        })
+        .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
+    match resolved.scheme() {
+        "data" => Ok(ModuleReference::Data(resolved)),
+        "http" | "https" => resolved
+            .as_str()
+            .parse::<crate::http::Url>()
+            .map(ModuleReference::Http)
+            .map_err(|error| JsNativeError::typ().with_message(error.to_string()).into()),
+        _ => Err(JsNativeError::typ()
+            .with_message("unsupported module URL scheme")
+            .into()),
+    }
+}
+
 #[derive(Debug, Default)]
 struct HttpModuleLoader {
     /// Module records are scoped to the owning Document.  Boa can reuse a
@@ -955,23 +1000,15 @@ impl ModuleLoader for HttpModuleLoader {
                 .and_then(|path| path.to_str())
                 .and_then(|path| path.parse::<crate::http::Url>().ok())
                 .or_else(|| document_context.as_ref().and_then(|(base, _)| base.clone()));
-            let resolved = if specifier.starts_with("http://") || specifier.starts_with("https://")
-            {
-                specifier
-                    .parse::<crate::http::Url>()
-                    .inspect_err(|_| self.report_import_load_failure())
-                    .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?
-            } else {
-                let base = referrer_url.as_ref().ok_or_else(|| {
-                    self.report_import_load_failure();
-                    JsNativeError::typ()
-                        .with_message(format!("cannot resolve module specifier: {specifier}"))
-                })?;
-                crate::http::url::resolve_url(base, &specifier)
-                    .inspect_err(|_| self.report_import_load_failure())
-                    .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?
-            };
-            let resolved_string = resolved.to_string();
+            let reference = resolve_module_reference(
+                &specifier,
+                referrer.path().and_then(|path| path.to_str()),
+                document_context
+                    .as_ref()
+                    .and_then(|(base, _)| base.as_ref()),
+            )
+            .inspect_err(|_| self.report_import_load_failure())?;
+            let resolved_string = reference.serialize();
 
             let csp_context = referrer
                 .path()
@@ -1005,30 +1042,12 @@ impl ModuleLoader for HttpModuleLoader {
 
             self.ensure_worklet_graph_owner_is_live(csp_context.as_ref().map(|(_, graph)| graph))?;
             if let Some((document_id, graph)) = csp_context.as_ref() {
-                self.observe_module_policy(
+                self.check_module_policy(
                     *document_id,
                     graph,
                     &resolved_string,
-                    0,
-                    &resolved_string,
                     ModulePolicyStage::Request,
-                );
-            }
-            if let Some((document_id, graph)) = csp_context.as_ref()
-                && !graph.csp.allows_url(ResourceType::Script, &resolved)
-            {
-                self.record_csp_violation(
-                    *document_id,
-                    resolved_string.clone(),
-                    0,
-                    &resolved_string,
-                    graph,
-                    ModulePolicyStage::Request,
-                );
-                self.report_import_load_failure();
-                return Err(JsNativeError::error()
-                    .with_message(format!("CSP blocked module import: {resolved_string}"))
-                    .into());
+                )?;
             }
 
             if let Some(module) = self
@@ -1046,6 +1065,19 @@ impl ModuleLoader for HttpModuleLoader {
                 }
                 return Ok(module.clone());
             }
+
+            let resolved = match reference {
+                ModuleReference::Http(url) => url,
+                ModuleReference::Data(url) => {
+                    return self.load_data_module(
+                        module_document_id,
+                        url,
+                        realm,
+                        context,
+                        csp_context.map(|(_, graph)| graph),
+                    );
+                }
+            };
 
             let public_only = requires_public_fetch(&resolved, referrer_url.as_ref());
             let key = (module_document_id, resolved_string.clone());
@@ -1122,15 +1154,14 @@ impl ModuleLoader for HttpModuleLoader {
             let fetch_elapsed = fetched.elapsed;
             let wait_elapsed = wait_start.elapsed();
             let source_bytes = response.body().len();
-            let source = String::from_utf8_lossy(response.body());
-            let parse_start = std::time::Instant::now();
-            let module = Module::parse(
-                Source::from_reader(source.as_bytes(), Some(Path::new(&resolved_string))),
-                Some(realm),
-                &mut context.borrow_mut(),
-            )
-            .inspect_err(|_| self.report_import_load_failure())?;
-            let parse_elapsed = parse_start.elapsed();
+            let (module, parse_elapsed) = self.parse_module_source(
+                module_document_id,
+                &resolved_string,
+                response.body(),
+                realm,
+                context,
+                csp_context.map(|(_, graph)| graph),
+            )?;
             if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
                 eprintln!(
                     "[omoikane][module] loaded {resolved_string} bytes={source_bytes} fetch_ms={:.3} parse_ms={:.3} wait_ms={:.3}",
@@ -1139,14 +1170,6 @@ impl ModuleLoader for HttpModuleLoader {
                     wait_elapsed.as_secs_f64() * 1_000.0,
                 );
             }
-            if let Some((document_id, graph)) = csp_context {
-                self.csp_contexts
-                    .borrow_mut()
-                    .insert((document_id, resolved_string.clone()), graph);
-            }
-            self.modules
-                .borrow_mut()
-                .insert((module_document_id, resolved_string), module.clone());
             Ok(module)
         }
     }
@@ -1177,6 +1200,88 @@ impl ModuleLoader for HttpModuleLoader {
 }
 
 impl HttpModuleLoader {
+    fn check_module_policy(
+        &self,
+        document_id: usize,
+        graph: &ModuleGraphContext,
+        reference: &str,
+        stage: ModulePolicyStage,
+    ) -> JsResult<()> {
+        self.observe_module_policy(document_id, graph, reference, 0, reference, stage);
+        if graph.csp.allows_reference(ResourceType::Script, reference) {
+            return Ok(());
+        }
+        self.record_csp_violation(
+            document_id,
+            reference.to_owned(),
+            0,
+            reference,
+            graph,
+            stage,
+        );
+        self.report_import_load_failure();
+        Err(JsNativeError::error()
+            .with_message(format!("CSP blocked module import: {reference}"))
+            .into())
+    }
+
+    fn load_data_module(
+        &self,
+        document_id: usize,
+        mut url: url::Url,
+        realm: Realm,
+        context: &AsyncContext<'_>,
+        graph: Option<ModuleGraphContext>,
+    ) -> JsResult<Module> {
+        let reference = url.to_string();
+        // The fragment identifies a module-map entry, but is not response data.
+        url.set_fragment(None);
+        let data = crate::http::parse_data_uri(url.as_str()).ok_or_else(|| {
+            self.report_import_load_failure();
+            JsNativeError::typ().with_message("invalid data module URL")
+        })?;
+        if let Some(graph) = graph.as_ref() {
+            self.check_module_policy(document_id, graph, &reference, ModulePolicyStage::Response)?;
+        }
+        if !is_javascript_mime_type(&data.mime_type) {
+            self.report_import_load_failure();
+            return Err(JsNativeError::typ()
+                .with_message("data module is not JavaScript")
+                .into());
+        }
+        self.parse_module_source(document_id, &reference, &data.data, realm, context, graph)
+            .map(|(module, _)| module)
+    }
+
+    fn parse_module_source(
+        &self,
+        document_id: usize,
+        reference: &str,
+        bytes: &[u8],
+        realm: Realm,
+        context: &AsyncContext<'_>,
+        graph: Option<ModuleGraphContext>,
+    ) -> JsResult<(Module, Duration)> {
+        let source = String::from_utf8_lossy(bytes);
+        let started = Instant::now();
+        let module = Module::parse(
+            Source::from_reader(source.as_bytes(), Some(Path::new(reference))),
+            Some(realm),
+            &mut context.borrow_mut(),
+        )
+        .inspect_err(|_| self.report_import_load_failure())?;
+        let elapsed = started.elapsed();
+        if let Some(graph) = graph {
+            self.csp_contexts
+                .borrow_mut()
+                .insert((document_id, reference.to_owned()), graph);
+        }
+        self.modules
+            .borrow_mut()
+            .insert((document_id, reference.to_owned()), module.clone());
+        Ok((module, elapsed))
+    }
+
     fn start_module_fetch(
         &self,
         document_id: usize,
