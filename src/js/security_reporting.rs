@@ -65,14 +65,14 @@ pub(super) fn capture_csp_source(context: &Context) -> Option<CspSourceLocation>
     None
 }
 
-/// A module check retains the initial request URL separately from its target.
+/// A module check retains the policies that rejected its request. The module
+/// loader cannot dispatch these events until Boa returns control to the page.
 #[derive(Debug)]
 pub(super) struct ModuleCspViolation {
     pub(super) document_id: usize,
-    pub(super) reference: String,
-    pub(super) redirects: usize,
     pub(super) report_reference: String,
     pub(super) worklet: Option<WorkletModuleViolation>,
+    pub(super) policies: Vec<csp::PolicyViolation>,
 }
 
 #[derive(Debug)]
@@ -504,11 +504,13 @@ impl HttpModuleLoader {
         report_reference: &str,
         stage: ModulePolicyStage,
     ) {
-        let policies = graph.csp.report_only_policy_texts_after_redirects(
-            ResourceType::Script,
-            reference,
-            redirects,
-        );
+        let request = csp::ScriptRequest {
+            nonce: None,
+            parser_inserted: false,
+        };
+        let policies = graph
+            .csp
+            .script_policy_violations(reference, redirects, request, true);
         if graph.worklet_owner.is_some() {
             if !policies.is_empty() {
                 self.record_csp_violation(
@@ -551,7 +553,16 @@ impl HttpModuleLoader {
         );
         graph
             .csp
-            .allows_url_after_redirects(ResourceType::Script, url, redirects)
+            .script_policy_violations(
+                &url.to_string(),
+                redirects,
+                csp::ScriptRequest {
+                    nonce: None,
+                    parser_inserted: false,
+                },
+                false,
+            )
+            .is_empty()
     }
 }
 
@@ -965,77 +976,146 @@ impl HostState {
         false
     }
 
-    pub(super) fn csp_allows_response_for_node(
+    /// Applies script request metadata for `importScripts()` in a Worker
+    /// global. These requests are script-like but never parser-inserted.
+    pub(super) fn csp_allows_imported_script_with_source(
         &mut self,
-        node: &NodeHandle,
-        resource_type: ResourceType,
+        document: &NodeHandle,
         reference: &str,
         redirects: usize,
         report_reference: &str,
+        source: Option<&CspSourceLocation>,
+    ) -> bool {
+        let policy = self.csp_policy_for_document(document);
+        let request = csp::ScriptRequest {
+            nonce: None,
+            parser_inserted: false,
+        };
+        let monitored = policy.script_policy_violations(reference, redirects, request, true);
+        self.queue_policy_violation_events_with_source(
+            document.identity(),
+            ResourceType::Script,
+            report_reference,
+            monitored,
+            "report",
+            source,
+        );
+        let enforced = policy.script_policy_violations(reference, redirects, request, false);
+        if enforced.is_empty() {
+            return true;
+        }
+        self.queue_policy_violation_events_with_source(
+            document.identity(),
+            ResourceType::Script,
+            report_reference,
+            enforced,
+            "enforce",
+            source,
+        );
+        self.record_csp_violation_history(document, ResourceType::Script, report_reference.into());
+        false
+    }
+
+    pub(super) fn csp_allows_response_for_script_node(
+        &mut self,
+        node: &NodeHandle,
+        reference: &str,
+        redirects: usize,
+        report_reference: &str,
+        request: csp::ScriptRequest<'_>,
     ) -> bool {
         let Some(document) = document_root_for_node(node) else {
             return true;
         };
         let policy = self.csp_policy_for_document(&document);
-        let nonce = node.get_attribute("nonce");
-        let violations = |report_only| {
-            if resource_type == ResourceType::Script
-                && node.local_name().as_deref() == Some("script")
-            {
-                policy.script_policy_violations_with_nonce(
-                    reference,
-                    redirects,
-                    nonce.as_deref(),
-                    report_only,
-                )
-            } else if report_only {
-                policy.report_only_policy_texts_after_redirects(resource_type, reference, redirects)
-            } else {
-                policy.blocking_policy_texts_after_redirects(resource_type, reference, redirects)
-            }
-        };
-        let monitored = violations(true);
-        self.queue_policy_violation_events_for_node(
+        self.check_external_script_request(
+            &document,
             node,
-            resource_type,
+            &policy,
+            reference,
+            redirects,
             report_reference,
-            monitored,
-            "report",
-        );
-        let enforced = violations(false);
-        if enforced.is_empty() {
-            return true;
-        }
-        self.queue_policy_violation_events_for_node(
-            node,
-            resource_type,
-            report_reference,
-            enforced,
-            "enforce",
-        );
-        self.record_csp_violation_history(&document, resource_type, report_reference.to_owned());
-        false
+            request,
+        )
     }
 
     pub(super) fn csp_allows_script_for_node(
         &mut self,
         node: &NodeHandle,
         reference: &str,
+        request: csp::ScriptRequest<'_>,
     ) -> bool {
+        let Some(document) = document_root_for_node(node) else {
+            return true;
+        };
         let policy = self.csp_policy_for_node(node);
-        let nonce = (node.local_name().as_deref() == Some("script"))
-            .then(|| node.get_attribute("nonce"))
-            .flatten();
-        self.queue_policy_violation_events_for_node(
+        let base = self.base_url_for_document(document.identity());
+        let report_reference = resource_reference_timing_name(reference, base.as_ref());
+        self.check_external_script_request(
+            &document,
             node,
-            ResourceType::Script,
+            &policy,
             reference,
-            policy.script_policy_violations_with_nonce(reference, 0, nonce.as_deref(), true),
+            0,
+            &report_reference,
+            request,
+        )
+    }
+
+    pub(super) fn csp_allows_written_script_request(
+        &mut self,
+        document: &NodeHandle,
+        script: &NodeHandle,
+        reference: &str,
+        redirects: usize,
+        report_reference: &str,
+        request: csp::ScriptRequest<'_>,
+    ) -> bool {
+        let policy = self.csp_policy_for_document(document);
+        self.check_external_script_request(
+            document,
+            script,
+            &policy,
+            reference,
+            redirects,
+            report_reference,
+            request,
+        )
+    }
+
+    fn check_external_script_request(
+        &mut self,
+        document: &NodeHandle,
+        script: &NodeHandle,
+        policy: &CspPolicy,
+        reference: &str,
+        redirects: usize,
+        report_reference: &str,
+        request: csp::ScriptRequest<'_>,
+    ) -> bool {
+        let target = (document.identity(), Some(script.identity()));
+        self.enqueue_policy_violation_events(
+            target,
+            ResourceType::Script,
+            report_reference,
+            policy.script_policy_violations(reference, redirects, request, true),
             "report",
+            "",
         );
-        policy
-            .script_policy_violations_with_nonce(reference, 0, nonce.as_deref(), false)
-            .is_empty()
+        let enforced = policy.script_policy_violations(reference, redirects, request, false);
+        if enforced.is_empty() {
+            return true;
+        }
+        self.enqueue_policy_violation_events(
+            target,
+            ResourceType::Script,
+            report_reference,
+            enforced,
+            "enforce",
+            "",
+        );
+        self.record_csp_violation_history(document, ResourceType::Script, report_reference.into());
+        false
     }
 
     /// Checks parser-owned inline script text before evaluation. The source
@@ -1158,24 +1238,6 @@ impl HostState {
         );
     }
 
-    pub(super) fn record_csp_violation_for_request(
-        &mut self,
-        document: &NodeHandle,
-        resource_type: ResourceType,
-        reference: &str,
-        redirects: usize,
-        report_reference: &str,
-    ) {
-        self.record_csp_violation_for_request_with_source(
-            document,
-            resource_type,
-            reference,
-            redirects,
-            report_reference,
-            None,
-        );
-    }
-
     pub(super) fn record_csp_violation_for_request_with_source(
         &mut self,
         document: &NodeHandle,
@@ -1202,7 +1264,7 @@ impl HostState {
         self.record_csp_violation_history(document, resource_type, report_reference.to_owned());
     }
 
-    fn queue_policy_violation_events(
+    pub(super) fn queue_policy_violation_events(
         &mut self,
         document_id: usize,
         resource_type: ResourceType,
@@ -2995,7 +3057,7 @@ mod tests {
             JsRuntime::with_document_and_url(document, "https://example.test/path/document")
                 .unwrap();
         runtime.install_csp_policy(&["script-src 'none'; report-to observations".into()]);
-        runtime.eval("globalThis.reports=[]; globalThis.targets=[]; document.addEventListener('securitypolicyviolation', e=>targets.push(e.target === document)); new ReportingObserver(batch=>reports.push(...batch)).observe();").unwrap();
+        runtime.eval("globalThis.reports=[]; globalThis.targets=[]; document.addEventListener('securitypolicyviolation', e=>targets.push(e.target === document.querySelector('script'))); new ReportingObserver(batch=>reports.push(...batch)).observe();").unwrap();
         assert!(runtime.execute_document_scripts(None).is_empty());
         runtime.run_timers(10, 1, 30);
         assert!(runtime.eval("reports.length === 1 && reports[0].body.blockedURL === 'https://example.test/blocked.js' && targets.length === 1 && targets[0]").unwrap().as_boolean().unwrap());
@@ -3016,7 +3078,7 @@ mod tests {
             runtime.eval(r#"
                 globalThis.received=[]; globalThis.childReports=[];
                 const child=frame.contentDocument;
-                child.addEventListener('securitypolicyviolation', e=>received.push([e.blockedURI,e.target===child]));
+                child.addEventListener('securitypolicyviolation', e=>received.push([e.blockedURI,e.target===script]));
                 new frame.contentWindow.ReportingObserver(batch=>childReports.push(...batch)).observe();
                 const script=child.createElement('script');
                 script.src='blocked.js#fragment'; child.body.appendChild(script);

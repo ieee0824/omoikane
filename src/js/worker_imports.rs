@@ -76,13 +76,8 @@ fn fetch_import_source(
     let document = state.document.clone();
     match resolve_resource_ref(requested, base)? {
         ResolvedResource::Data { .. } => {
-            if !state.csp_allows_response_for_document_with_source(
-                &document,
-                ResourceType::Script,
-                requested,
-                0,
-                requested,
-                location,
+            if !state.csp_allows_imported_script_with_source(
+                &document, requested, 0, requested, location,
             ) {
                 return None;
             }
@@ -93,13 +88,8 @@ fn fetch_import_source(
                 &mut state.http_client,
             )?;
             state
-                .csp_allows_response_for_document_with_source(
-                    &document,
-                    ResourceType::Script,
-                    requested,
-                    0,
-                    requested,
-                    location,
+                .csp_allows_imported_script_with_source(
+                    &document, requested, 0, requested, location,
                 )
                 .then_some((url, source, false))
         }
@@ -126,9 +116,8 @@ fn fetch_http_import_source(
         .embedder;
     let mut crossed_origin = false;
     for redirects in 0..=10 {
-        if !state.csp_allows_response_for_document_with_source(
+        if !state.csp_allows_imported_script_with_source(
             document,
-            ResourceType::Script,
             &current.to_string(),
             redirects,
             initial,
@@ -185,9 +174,8 @@ fn fetch_http_import_source(
             current = next;
             continue;
         }
-        if !state.csp_allows_response_for_document_with_source(
+        if !state.csp_allows_imported_script_with_source(
             document,
-            ResourceType::Script,
             &current.to_string(),
             redirects,
             initial,
@@ -380,6 +368,38 @@ mod tests {
         assert_eq!(body["type"], "corp");
         assert_eq!(body["blockedURL"], initial);
         assert_eq!(body["destination"], "script");
+    }
+
+    #[test]
+    fn strict_dynamic_allows_non_parser_import_scripts_request() {
+        let listener = bind_loopback().unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = FixtureWorker::spawn(move || {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            let body = "globalThis.importedByStrictDynamic = true";
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+        });
+        let mut runtime =
+            JsRuntime::with_document_and_url(blank_html_document(), "http://127.0.0.1:1/worker.js")
+                .unwrap();
+        runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+        runtime.install_csp_policy(&["script-src 'strict-dynamic' 'nonce-root'".into()]);
+        let requested = JsValue::from(JsString::from(format!("http://{address}/import.js")));
+        let imported = runtime
+            .with_active_host(|context| {
+                import_scripts(&JsValue::undefined(), &[requested], context)
+            })
+            .unwrap();
+        assert_eq!(imported.as_boolean(), Some(true));
+        assert_eq!(
+            runtime
+                .eval("importedByStrictDynamic && document.cspViolations.length === 0")
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+        server.join();
     }
 
     #[test]

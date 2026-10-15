@@ -1,7 +1,7 @@
 //! Bounded HTTP workers for module graphs. Only HTTP data crosses threads;
 //! Boa module records, parsing, and evaluation stay on the owning JS thread.
 
-use super::csp::{CspPolicy, ResourceType};
+use super::csp::{CspPolicy, ScriptRequest};
 use crate::http::corp::EmbedderPolicyValue;
 use crate::http::cors::{self, CredentialsMode, Origin, PreflightCache, RedirectMode, RequestMode};
 use crate::http::{
@@ -148,7 +148,17 @@ fn download_module(
                     reference: url.to_string(),
                     redirects,
                 });
-                policy.allows_url_after_redirects(ResourceType::Script, url, redirects)
+                policy
+                    .script_policy_violations(
+                        &url.to_string(),
+                        redirects,
+                        ScriptRequest {
+                            nonce: None,
+                            parser_inserted: false,
+                        },
+                        false,
+                    )
+                    .is_empty()
             };
             cors::fetch_with_embedder_policy_checked(
                 client,

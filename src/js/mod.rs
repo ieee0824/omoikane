@@ -165,6 +165,8 @@ mod storage;
 mod storage_access;
 #[cfg(test)]
 mod storage_access_tests;
+#[cfg(test)]
+mod strict_dynamic_tests;
 mod stylesheet;
 use csp::{CspPolicy, CspViolation, ResourceType};
 use event_loop::{EventLoop, Task};
@@ -1259,7 +1261,19 @@ impl HttpModuleLoader {
         context: &AsyncContext<'_>,
     ) -> JsResult<()> {
         self.observe_module_policy(document_id, graph, reference, 0, reference, stage);
-        if graph.csp.allows_reference(ResourceType::Script, reference) {
+        if graph
+            .csp
+            .script_policy_violations(
+                reference,
+                0,
+                csp::ScriptRequest {
+                    nonce: None,
+                    parser_inserted: false,
+                },
+                false,
+            )
+            .is_empty()
+        {
             return Ok(());
         }
         self.record_csp_violation(
@@ -1440,11 +1454,19 @@ impl HttpModuleLoader {
                 report_reference,
                 ModulePolicyStage::Request,
             );
-            if !graph.csp.allows_reference_after_redirects(
-                ResourceType::Script,
-                &check.reference,
-                check.redirects,
-            ) {
+            if !graph
+                .csp
+                .script_policy_violations(
+                    &check.reference,
+                    check.redirects,
+                    csp::ScriptRequest {
+                        nonce: None,
+                        parser_inserted: false,
+                    },
+                    false,
+                )
+                .is_empty()
+            {
                 allowed = false;
                 self.record_csp_violation(
                     document_id,
@@ -1556,29 +1578,29 @@ impl HttpModuleLoader {
         }) {
             return;
         }
+        let request = csp::ScriptRequest {
+            nonce: None,
+            parser_inserted: false,
+        };
+        let policies = graph
+            .csp
+            .script_policy_violations(&reference, redirects, request, false);
         let worklet =
             graph
                 .worklet_owner
                 .as_ref()
                 .map(|owner| security_reporting::WorkletModuleViolation {
                     owner: owner.clone(),
-                    report_only: graph.csp.report_only_policy_texts_after_redirects(
-                        ResourceType::Script,
-                        &reference,
-                        redirects,
-                    ),
-                    enforced: graph.csp.blocking_policy_texts_after_redirects(
-                        ResourceType::Script,
-                        &reference,
-                        redirects,
-                    ),
+                    report_only: graph
+                        .csp
+                        .script_policy_violations(&reference, redirects, request, true),
+                    enforced: policies.clone(),
                 });
         violations.push(security_reporting::ModuleCspViolation {
             document_id,
-            reference,
-            redirects,
             report_reference: report_reference.to_owned(),
             worklet,
+            policies,
         });
     }
 
@@ -5846,28 +5868,6 @@ impl HostState {
         });
     }
 
-    fn record_csp_violation_for_node(
-        &mut self,
-        node: &NodeHandle,
-        resource_type: ResourceType,
-        blocked_uri: impl Into<String>,
-    ) {
-        if let Some(document) = document_root_for_node(node) {
-            let blocked_uri = blocked_uri.into();
-            let policies = self
-                .csp_policy_for_document(&document)
-                .blocking_policy_texts_after_redirects(resource_type, &blocked_uri, 0);
-            self.queue_policy_violation_events_for_node(
-                node,
-                resource_type,
-                &blocked_uri,
-                policies,
-                "enforce",
-            );
-            self.record_csp_violation_history(&document, resource_type, blocked_uri);
-        }
-    }
-
     /// Rechecks CSP after each explicit `style` attribute mutation, even when
     /// the new text equals the old text. Resolver rebuilds retain the snapshot
     /// to avoid duplicate reports from unrelated style recalculation.
@@ -8646,12 +8646,17 @@ impl JsRuntime {
             if state.document_is_active(violation.document_id)
                 && let Some(document) = state.get_node(violation.document_id)
             {
-                state.record_csp_violation_for_request(
+                state.queue_policy_violation_events(
+                    violation.document_id,
+                    ResourceType::Script,
+                    &violation.report_reference,
+                    violation.policies,
+                    "enforce",
+                );
+                state.record_csp_violation_history(
                     &document,
                     ResourceType::Script,
-                    &violation.reference,
-                    violation.redirects,
-                    &violation.report_reference,
+                    violation.report_reference,
                 );
             }
         }
@@ -10285,16 +10290,15 @@ impl JsRuntime {
             let (source, filename, requested_url, muted_errors, start_position) = if let Some(src) =
                 attributes.get("src")
             {
+                let request = csp::ScriptRequest {
+                    nonce: attributes.get("nonce").map(String::as_str),
+                    parser_inserted: true,
+                };
                 if !self
                     .host_state
                     .borrow_mut()
-                    .csp_allows_script_for_node(&script, src)
+                    .csp_allows_script_for_node(&script, src, request)
                 {
-                    self.host_state.borrow_mut().record_csp_violation_for_node(
-                        &script,
-                        ResourceType::Script,
-                        src,
-                    );
                     continue;
                 }
                 let base = self.host_state.borrow().base_url_for_document(document_id);
@@ -10312,13 +10316,17 @@ impl JsRuntime {
                     self.record_task_error(format!("[popup script: {src}] failed to fetch"));
                     continue;
                 };
-                if !self.host_state.borrow_mut().csp_allows_response_for_node(
-                    &script,
-                    ResourceType::Script,
-                    &effective_url,
-                    redirect_count,
-                    &requested_url,
-                ) {
+                if !self
+                    .host_state
+                    .borrow_mut()
+                    .csp_allows_response_for_script_node(
+                        &script,
+                        &effective_url,
+                        redirect_count,
+                        &requested_url,
+                        request,
+                    )
+                {
                     continue;
                 }
                 (source, effective_url, requested_url, muted_errors, (1, 1))
@@ -10444,16 +10452,16 @@ impl JsRuntime {
             }
             return Ok(());
         }
+        let nonce = script_node.get_attribute("nonce");
+        let request = csp::ScriptRequest {
+            nonce: nonce.as_deref(),
+            parser_inserted: false,
+        };
         if !self
             .host_state
             .borrow_mut()
-            .csp_allows_script_for_node(&script_node, &src)
+            .csp_allows_script_for_node(&script_node, &src, request)
         {
-            self.host_state.borrow_mut().record_csp_violation_for_node(
-                &script_node,
-                ResourceType::Script,
-                &src,
-            );
             return Ok(());
         }
         let fetch_start = std::time::Instant::now();
@@ -10490,13 +10498,17 @@ impl JsRuntime {
             return Ok(());
         };
         let redirected = resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
-        if !self.host_state.borrow_mut().csp_allows_response_for_node(
-            &script_node,
-            ResourceType::Script,
-            &effective_url,
-            redirect_count,
-            &resource_reference_timing_name(&src, base_url.as_ref()),
-        ) {
+        if !self
+            .host_state
+            .borrow_mut()
+            .csp_allows_response_for_script_node(
+                &script_node,
+                &effective_url,
+                redirect_count,
+                &resource_reference_timing_name(&src, base_url.as_ref()),
+                request,
+            )
+        {
             let dispatch = dispatch_resource_timing_script(
                 "error",
                 node_id,
@@ -11834,6 +11846,7 @@ impl JsRuntime {
                 dispatch_document_id,
                 dynamic_script,
                 dispatch_load,
+                false,
             );
             dispatch_load = updated_load;
             dispatch_timing = updated_timing;
@@ -12134,6 +12147,7 @@ impl JsRuntime {
             document_id,
             (script.clone(), src, kind, base, document_id),
             true,
+            true,
         );
         if loaded && self.host_state.borrow().node_is_in_active_document(script) {
             self.dispatch_resource_load_event(script.identity(), document_id, timing);
@@ -12150,8 +12164,14 @@ impl JsRuntime {
         dispatch_document_id: usize,
         dynamic_script: DynamicScriptInfo,
         mut dispatch_load: bool,
+        parser_inserted: bool,
     ) -> (bool, Option<(String, bool, f64)>) {
         let (script_node, src, kind, base_url, document_id) = dynamic_script;
+        let nonce = script_node.get_attribute("nonce");
+        let request = csp::ScriptRequest {
+            nonce: nonce.as_deref(),
+            parser_inserted,
+        };
         let mut dispatch_timing: Option<(String, bool, f64)> = None;
         let _script_document = activate_module_document(&self.host_state, document_id);
         let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
@@ -12175,16 +12195,11 @@ impl JsRuntime {
             );
             self.record_error_from(&src, dispatched);
             dispatch_load = false;
-        } else if !self
-            .host_state
-            .borrow_mut()
-            .csp_allows_script_for_node(&script_node, &src)
-        {
-            self.host_state.borrow_mut().record_csp_violation_for_node(
-                &script_node,
-                ResourceType::Script,
-                &src,
-            );
+        } else if !self.host_state.borrow_mut().csp_allows_script_for_node(
+            &script_node,
+            &src,
+            request,
+        ) {
             if log_scripts {
                 eprintln!("[omoikane][script] blocked dynamic {src} by CSP");
             }
@@ -12244,13 +12259,16 @@ impl JsRuntime {
                     self.record_error_from(&src, dispatched);
                 }
                 Some((effective_url, _source, redirect_count, _muted_errors))
-                    if !self.host_state.borrow_mut().csp_allows_response_for_node(
-                        &script_node,
-                        ResourceType::Script,
-                        &effective_url,
-                        redirect_count,
-                        &resource_reference_timing_name(&src, base_url.as_ref()),
-                    ) =>
+                    if !self
+                        .host_state
+                        .borrow_mut()
+                        .csp_allows_response_for_script_node(
+                            &script_node,
+                            &effective_url,
+                            redirect_count,
+                            &resource_reference_timing_name(&src, base_url.as_ref()),
+                            request,
+                        ) =>
                 {
                     let redirected =
                         resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
@@ -12686,6 +12704,10 @@ impl JsRuntime {
         let src = attrs.get("src").cloned();
         let has_src = src.is_some();
         let csp_requested_url = self.csp_requested_url_for_script(script, src.as_deref(), base_url);
+        let request = csp::ScriptRequest {
+            nonce: attrs.get("nonce").map(String::as_str),
+            parser_inserted: true,
+        };
         // HTML spec: defer only applies to external (src) scripts.
         let is_defer = is_module || (attrs.contains_key("defer") && src.is_some());
 
@@ -12693,13 +12715,8 @@ impl JsRuntime {
             if !self
                 .host_state
                 .borrow_mut()
-                .csp_allows_script_for_node(script, src_url)
+                .csp_allows_script_for_node(script, src_url, request)
             {
-                self.host_state.borrow_mut().record_csp_violation_for_node(
-                    script,
-                    ResourceType::Script,
-                    src_url,
-                );
                 return None;
             }
         } else {
@@ -12739,13 +12756,17 @@ impl JsRuntime {
             };
             match fetched {
                 Some((effective_url, code, redirect_count, muted)) => {
-                    if !self.host_state.borrow_mut().csp_allows_response_for_node(
-                        script,
-                        ResourceType::Script,
-                        &effective_url,
-                        redirect_count,
-                        &resource_reference_timing_name(&src_url, base_url),
-                    ) {
+                    if !self
+                        .host_state
+                        .borrow_mut()
+                        .csp_allows_response_for_script_node(
+                            script,
+                            &effective_url,
+                            redirect_count,
+                            &resource_reference_timing_name(&src_url, base_url),
+                            request,
+                        )
+                    {
                         return None;
                     }
                     let redirected =

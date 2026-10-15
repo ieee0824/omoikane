@@ -561,6 +561,103 @@ fn csp_blocks_dependency_and_redirect_target_before_fetch() {
 }
 
 #[test]
+fn strict_dynamic_allows_module_graph_import_and_redirect_with_report_only_events() {
+    let server = ModuleServer::new(HashMap::from([
+        (
+            "/redirect.js".into(),
+            Route {
+                status: 302,
+                headers: "Location: /dependency.js\r\n".into(),
+                ..route("")
+            },
+        ),
+        ("/dependency.js".into(), route("export const value = 42;")),
+    ]));
+    let source = "import { value } from './redirect.js'; globalThis.dependencyValue = value;";
+    let document = TreeBuilder::parse(&format!(
+        "<body><script type=module nonce=ok>{source}</script>"
+    ))
+    .document();
+    let url = format!("{}/index.html", server.origin);
+    let mut runtime = JsRuntime::with_document_and_url(document, &url).unwrap();
+    runtime.install_response_security_headers(&[
+        (
+            "Content-Security-Policy".into(),
+            "script-src-elem 'strict-dynamic' 'nonce-ok'".into(),
+        ),
+        (
+            "Content-Security-Policy-Report-Only".into(),
+            "script-src-elem https:; report-to modules".into(),
+        ),
+    ]);
+    runtime
+        .eval("globalThis.moduleReports = []; new ReportingObserver(batch => moduleReports.push(...batch), {types: ['csp-violation']}).observe();")
+        .unwrap();
+
+    let errors = execute(&mut runtime, &server.origin);
+    assert!(errors.is_empty(), "{errors:?}");
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        module_report_snapshot(&mut runtime),
+        serde_json::json!([
+            42,
+            0,
+            [
+                ["csp-violation", "report", "inline"],
+                [
+                    "csp-violation",
+                    "report",
+                    format!("{}/redirect.js", server.origin)
+                ],
+                [
+                    "csp-violation",
+                    "report",
+                    format!("{}/redirect.js", server.origin)
+                ],
+                [
+                    "csp-violation",
+                    "report",
+                    format!("{}/redirect.js", server.origin)
+                ]
+            ]
+        ])
+    );
+    assert_eq!(server.paths(), ["/redirect.js", "/dependency.js"]);
+}
+
+#[test]
+fn second_enforced_policy_can_block_strict_dynamic_module_import() {
+    let server = ModuleServer::new(HashMap::from([(
+        "/dependency.js".into(),
+        route("export const value = 42;"),
+    )]));
+    let document =
+        TreeBuilder::parse("<body><script type=module nonce=ok>import './dependency.js';</script>")
+            .document();
+    let url = format!("{}/index.html", server.origin);
+    let mut runtime = JsRuntime::with_document_and_url(document, &url).unwrap();
+    runtime.install_csp_policy(&[
+        "script-src-elem 'strict-dynamic' 'nonce-ok'".into(),
+        "script-src-elem 'nonce-ok' https:".into(),
+    ]);
+    let errors = execute(&mut runtime, &server.origin);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("CSP blocked module import")),
+        "{errors:?}"
+    );
+    assert_eq!(server.paths(), Vec::<String>::new());
+    assert_eq!(
+        runtime
+            .eval("document.cspViolations.length")
+            .unwrap()
+            .as_number(),
+        Some(1.0)
+    );
+}
+
+#[test]
 fn cross_origin_import_cannot_connect_to_private_address() {
     let server = ModuleServer::new(HashMap::new());
     let mut runtime = runtime_with_module(

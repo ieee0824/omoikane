@@ -94,6 +94,23 @@ collect_pattern \
   "/content-security-policy/support/ping.js" \
   "/content-security-policy/support/post-message.js"
 collect_pattern \
+  "/content-security-policy/script-src/script-src-strict_dynamic_discard_source_expressions.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_discard_source_expressions.html.headers" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_parser_inserted.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_parser_inserted.html.headers" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_parser_inserted_correct_nonce.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_parser_inserted_correct_nonce.html.headers" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_non_parser_inserted.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_non_parser_inserted.html.headers" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_non_parser_inserted_module.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_non_parser_inserted_module.html.headers" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_parser_inserted_module.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_parser_inserted_module.html.headers" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_double_policy_report_only.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_double_policy_report_only.html.headers" \
+  "/content-security-policy/script-src/simpleSourcedScript.js" \
+  "/content-security-policy/script-src/simpleSourcedModule.js"
+collect_pattern \
   "/content-security-policy/unsafe-hashes/javascript_src_allowed-href.html" \
   "/content-security-policy/unsafe-hashes/javascript_src_denied_missing_unsafe_hashes-href.html" \
   "/content-security-policy/unsafe-hashes/javascript_src_denied_wrong_hash-href.html" \

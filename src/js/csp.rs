@@ -79,6 +79,14 @@ pub(crate) struct PolicyViolation {
     pub(crate) report_sample: bool,
 }
 
+/// Request metadata used while checking an external script against CSP.
+/// The nonce is borrowed only for the duration of a single policy check.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScriptRequest<'a> {
+    pub(crate) nonce: Option<&'a str>,
+    pub(crate) parser_inserted: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SourceExpression {
     None,
@@ -403,13 +411,13 @@ impl CspPolicy {
         self.violating_policy_texts(&self.policies, resource_type, reference, redirects, None)
     }
 
-    /// Reports only script policies that reject both the URL/inline source
-    /// and the script element's nonce.
-    pub(crate) fn script_policy_violations_with_nonce(
+    /// Reports script policies that reject this external request's URL and
+    /// author-supplied request metadata.
+    pub(crate) fn script_policy_violations(
         &self,
         reference: &str,
         redirects: usize,
-        nonce: Option<&str>,
+        request: ScriptRequest<'_>,
         report_only: bool,
     ) -> Vec<PolicyViolation> {
         let policies = if report_only {
@@ -417,7 +425,13 @@ impl CspPolicy {
         } else {
             &self.policies
         };
-        self.violating_policy_texts(policies, ResourceType::Script, reference, redirects, nonce)
+        self.violating_policy_texts(
+            policies,
+            ResourceType::Script,
+            reference,
+            redirects,
+            Some(request),
+        )
     }
 
     fn violating_policy_texts(
@@ -426,9 +440,11 @@ impl CspPolicy {
         resource_type: ResourceType,
         reference: &str,
         redirects: usize,
-        nonce: Option<&str>,
+        script_request: Option<ScriptRequest<'_>>,
     ) -> Vec<PolicyViolation> {
-        let inline = is_inline_reference(reference);
+        // External script URLs can literally be named `inline`. A caller that
+        // supplies request metadata is checking a fetch, not inline source.
+        let inline = script_request.is_none() && is_inline_reference(reference);
         let attribute =
             resource_type == ResourceType::Style && reference.starts_with("style-attribute:");
         let url = ResourceUrl::parse(reference, self.base_url.as_ref());
@@ -437,11 +453,10 @@ impl CspPolicy {
             .filter_map(|policy| {
                 let violated = if policy.sources_for(resource_type, attribute).is_none() {
                     false
-                } else if resource_type == ResourceType::Script && policy.allows_script_nonce(nonce)
-                {
-                    false
                 } else if inline {
                     !policy.allows_inline(resource_type, attribute)
+                } else if let Some(request) = script_request {
+                    !policy.allows_script_request(&self.base_url, url.as_ref(), redirects, request)
                 } else {
                     url.as_ref().is_none_or(|url| {
                         !policy.allows_url(resource_type, &self.base_url, url, redirects)
@@ -685,6 +700,25 @@ impl ParsedPolicy {
                     matches!(source, SourceExpression::Nonce(expected) if expected == nonce)
                 })
             })
+    }
+
+    fn allows_script_request(
+        &self,
+        base_url: &Option<Url>,
+        url: Option<&ResourceUrl>,
+        redirects: usize,
+        request: ScriptRequest<'_>,
+    ) -> bool {
+        let Some(sources) = self.sources_for(ResourceType::Script, false) else {
+            return true;
+        };
+        if self.allows_script_nonce(request.nonce) {
+            return true;
+        }
+        if sources.contains(&SourceExpression::StrictDynamic) {
+            return !request.parser_inserted;
+        }
+        url.is_some_and(|url| self.allows_url(ResourceType::Script, base_url, url, redirects))
     }
 
     fn allows_url(
@@ -1294,25 +1328,112 @@ mod tests {
             "script-src 'nonce-AbC+_=' 'unsafe-inline'",
             "https://example.test/",
         );
-        for reference in ["inline", "https://other.test/script.js"] {
-            assert!(
-                policy
-                    .script_policy_violations_with_nonce(reference, 0, Some("AbC+_="), false)
-                    .is_empty()
+        let reference = "https://other.test/script.js";
+        for (nonce, blocked) in [
+            (Some("AbC+_="), false),
+            (Some("abc+_="), true),
+            (None, true),
+        ] {
+            let violations = policy.script_policy_violations(
+                reference,
+                0,
+                ScriptRequest {
+                    nonce,
+                    parser_inserted: true,
+                },
+                false,
             );
-            assert_eq!(
-                policy
-                    .script_policy_violations_with_nonce(reference, 0, Some("abc+_="), false)
-                    .len(),
-                1
-            );
-            assert_eq!(
-                policy
-                    .script_policy_violations_with_nonce(reference, 0, None, false)
-                    .len(),
-                1
-            );
+            assert_eq!(!violations.is_empty(), blocked);
         }
+        assert!(policy.allows_inline_source_with_nonce(
+            InlineType::Script,
+            "run()",
+            Some("AbC+_=")
+        ));
+        assert!(!policy.allows_inline_source_with_nonce(
+            InlineType::Script,
+            "run()",
+            Some("abc+_=")
+        ));
+    }
+
+    #[test]
+    fn strict_dynamic_uses_parser_metadata_per_policy() {
+        let policy = make_policy(
+            "script-src-elem 'strict-dynamic' https: 'nonce-ok'",
+            "https://example.test/",
+        )
+        .with_report_only_headers(&["script-src 'strict-dynamic' 'nonce-other'".into()]);
+        let url = "https://other.test/script.js";
+        let request = |nonce, parser_inserted| ScriptRequest {
+            nonce,
+            parser_inserted,
+        };
+        assert_eq!(
+            policy
+                .script_policy_violations(url, 0, request(None, true), false)
+                .len(),
+            1
+        );
+        assert_eq!(
+            policy
+                .script_policy_violations(url, 0, request(None, true), true)
+                .len(),
+            1
+        );
+        assert!(
+            policy
+                .script_policy_violations(url, 0, request(None, false), false)
+                .is_empty()
+        );
+        assert!(
+            policy
+                .script_policy_violations(url, 0, request(None, false), true)
+                .is_empty()
+        );
+        assert!(
+            policy
+                .script_policy_violations(url, 0, request(Some("ok"), true), false)
+                .is_empty()
+        );
+        assert!(
+            policy
+                .script_policy_violations("inline", 0, request(Some("ok"), true), false)
+                .is_empty()
+        );
+        assert_eq!(
+            policy
+                .script_policy_violations("inline", 0, request(None, true), false)
+                .len(),
+            1
+        );
+        assert_eq!(
+            policy
+                .script_policy_violations(url, 0, request(Some("ok"), true), true)
+                .len(),
+            1
+        );
+
+        let without_strict_dynamic = make_policy(
+            "script-src-elem https://example.test 'nonce-ok'",
+            "https://example.test/",
+        );
+        assert!(
+            without_strict_dynamic
+                .script_policy_violations(
+                    "https://example.test/app.js",
+                    0,
+                    request(None, true),
+                    false,
+                )
+                .is_empty()
+        );
+        assert!(
+            without_strict_dynamic
+                .script_policy_violations(url, 0, request(None, false), false)
+                .len()
+                == 1
+        );
     }
 
     #[test]
