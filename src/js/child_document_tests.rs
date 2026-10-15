@@ -89,6 +89,11 @@ fn get_resources_drop_csp_only_when_the_content_type_is_not_rendered() {
         mime_type: mime_type.to_owned(),
         body: b"<p id=x>body</p>".to_vec(),
         security_headers: vec![("Content-Security-Policy".to_owned(), CSP.to_owned())],
+        response_headers: vec![(
+            "Cross-Origin-Embedder-Policy".to_owned(),
+            "require-corp".to_owned(),
+        )],
+        redirects: Vec::new(),
         effective_url: "https://child.example/a#f".to_owned(),
     };
     let html = resource("text/html").into_get_document();
@@ -99,12 +104,14 @@ fn get_resources_drop_csp_only_when_the_content_type_is_not_rendered() {
     );
     assert_eq!(html.url.as_deref(), Some("https://child.example/a#f"));
     assert_eq!(html.response_status, 404);
+    assert_eq!(html.response_headers[0].1, "require-corp");
 
     let image = resource("image/png").into_get_document();
     assert!(is_blank(&image.document));
     assert!(image.security_headers.is_empty());
     assert_eq!(image.url.as_deref(), Some("https://child.example/a#f"));
     assert_eq!(image.response_status, 404);
+    assert_eq!(image.response_headers[0].1, "require-corp");
 }
 
 #[test]

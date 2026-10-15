@@ -383,3 +383,55 @@ fn document_write_async_script_does_not_block_parsing_or_dcl() {
         "[\"returned:true\",\"dcl\",\"async:true\"]"
     );
 }
+
+#[test]
+fn written_module_entry_requires_cors_even_when_corp_allows_cross_origin() {
+    struct Transport {
+        allow_cors: bool,
+    }
+    impl crate::http::HttpTransport for Transport {
+        fn send(
+            &self,
+            request: &crate::http::HttpRequest,
+            _: Option<std::time::Duration>,
+        ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+            assert_eq!(request.url().to_string(), "https://module.test/entry.js");
+            let body = "globalThis.writtenModuleRan = true; export const value = 1;";
+            let cors = if self.allow_cors {
+                "Access-Control-Allow-Origin: https://page.test\r\n"
+            } else {
+                ""
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nCross-Origin-Resource-Policy: cross-origin\r\n{cors}Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            crate::http::HttpResponse::parse(&mut response.as_bytes())
+        }
+    }
+    for allow_cors in [false, true] {
+        let document = TreeBuilder::parse(
+            r#"<body><script>document.write('<script type=module src="https://module.test/entry.js"><\/script>');</script>"#,
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document_and_url(document, "https://page.test/").unwrap();
+        runtime.install_response_security_headers(&[(
+            "Cross-Origin-Embedder-Policy".into(),
+            "require-corp".into(),
+        )]);
+        runtime
+            .host_state
+            .borrow_mut()
+            .http_client
+            .set_transport(Some(std::sync::Arc::new(Transport { allow_cors })));
+        runtime = execute(runtime, false);
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("globalThis.writtenModuleRan === true")
+                .unwrap()
+                .as_boolean(),
+            Some(allow_cors)
+        );
+    }
+}

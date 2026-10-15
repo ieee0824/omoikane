@@ -93,6 +93,43 @@ fn javascript_navigation_html_completion_inherits_trusted_types_policy() {
 }
 
 #[test]
+fn javascript_navigation_html_completion_inherits_permissions_and_isolation_policy() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document("https://example.test/page", "<body></body>", 1, "null")
+        .unwrap();
+    let headers = vec![
+        ("Cross-Origin-Opener-Policy".into(), "same-origin".into()),
+        ("Cross-Origin-Embedder-Policy".into(), "require-corp".into()),
+        ("Permissions-Policy".into(), "fullscreen=()".into()),
+    ];
+    session.runtime.install_response_security_headers(&headers);
+    session.runtime.install_isolation_policy(&headers);
+    assert!(
+        session
+            .runtime
+            .eval("crossOriginIsolated && !document.permissionsPolicy.allowsFeature('fullscreen')")
+            .unwrap()
+            .to_boolean()
+    );
+    let previous_document = session.runtime.document().identity();
+    session
+        .dispatch(
+            "Page.navigate",
+            json!({"url":"javascript:%27%3Cmain%3Enew%3C%2Fmain%3E%27"}),
+        )
+        .unwrap();
+    assert_ne!(session.runtime.document().identity(), previous_document);
+    assert!(
+        session
+            .runtime
+            .eval("crossOriginIsolated && !document.permissionsPolicy.allowsFeature('fullscreen')")
+            .unwrap()
+            .to_boolean()
+    );
+}
+
+#[test]
 fn child_to_top_javascript_navigation_uses_child_request_client_csp() {
     let mut session = CdpSession::new().unwrap();
     session
@@ -1955,6 +1992,50 @@ fn page_domain_navigates_reloads_and_emits_network_events() {
             .any(|event| event.method == "Page.loadEventFired")
     );
 
+    server.join();
+}
+
+#[test]
+fn page_navigation_installs_isolation_headers_before_author_script() {
+    let listener = bind_loopback().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = FixtureWorker::spawn(move || {
+        for _ in 0..2 {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            let isolated = request.starts_with("GET /isolated ");
+            let policy = if isolated {
+                "Cross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\n"
+            } else {
+                ""
+            };
+            let body = "<script>globalThis.initialIsolation = crossOriginIsolated</script>";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\n{policy}Content-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            )
+            .unwrap();
+        }
+    });
+    let mut session = CdpSession::new().unwrap();
+    for (path, expected) in [("isolated", true), ("plain", false)] {
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({"url": format!("http://127.0.0.1:{port}/{path}")}),
+            )
+            .unwrap();
+        assert_eq!(
+            session
+                .runtime
+                .eval("initialIsolation")
+                .unwrap()
+                .as_boolean(),
+            Some(expected),
+            "{path}"
+        );
+    }
     server.join();
 }
 

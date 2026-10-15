@@ -673,7 +673,7 @@ fn iframe_denied_geolocation_blocks_its_own_realm_request() {
 }
 
 #[test]
-fn popup_initial_about_blank_inherits_policy_but_navigation_replaces_it() {
+fn popup_initial_and_local_documents_have_fresh_top_level_permissions_policy() {
     let mut runtime = JsRuntime::with_document_and_url(
         TreeBuilder::parse("<body></body>").document(),
         "https://owner.test/page",
@@ -687,20 +687,35 @@ fn popup_initial_about_blank_inherits_policy_but_navigation_replaces_it() {
     let top_document_id = state.document.identity();
     let popup_id = state
         .open_auxiliary_context(top_document_id, "policy-popup")
-        .unwrap();
+        .unwrap()
+        .0;
     let initial_document_id = state.auxiliary_contexts[&popup_id].document.identity();
-    assert!(!state.fullscreen_allowed_for_document(initial_document_id));
+    assert!(!state.fullscreen_allowed_for_document(top_document_id));
+    assert!(!state.feature_enabled_in_document(top_document_id, super::PolicyFeature::Geolocation));
+    assert!(state.fullscreen_allowed_for_document(initial_document_id));
     assert!(
-        !state.feature_enabled_in_document(initial_document_id, super::PolicyFeature::Geolocation)
+        state.feature_enabled_in_document(initial_document_id, super::PolicyFeature::Geolocation)
     );
 
     let source = state.navigation_referrer_source_for_document(top_document_id);
-    let navigated_document_id = state
-        .navigate_auxiliary_context(popup_id, "data:text/html,<p>new</p>", &source)
-        .unwrap();
-    assert_ne!(initial_document_id, navigated_document_id);
-    assert!(state.fullscreen_allowed_for_document(navigated_document_id));
-    assert!(
-        state.feature_enabled_in_document(navigated_document_id, super::PolicyFeature::Geolocation)
-    );
+    let client = state.navigation_security_snapshot(top_document_id).unwrap();
+    for url in ["about:blank", "data:text/html,<p>new</p>"] {
+        let old_document_id = state.auxiliary_contexts[&popup_id].document.identity();
+        let prepared = state
+            .prepare_auxiliary_navigation(popup_id, url, &source, &client)
+            .unwrap();
+        let navigated_document_id = state.commit_auxiliary_navigation(prepared).unwrap();
+        assert_ne!(old_document_id, navigated_document_id);
+        assert!(
+            state.fullscreen_allowed_for_document(navigated_document_id),
+            "{url}"
+        );
+        assert!(
+            state.feature_enabled_in_document(
+                navigated_document_id,
+                super::PolicyFeature::Geolocation
+            ),
+            "{url}"
+        );
+    }
 }
