@@ -163,6 +163,12 @@ impl JsRuntime {
         element_id: Option<usize>,
         payload: &str,
     ) -> JsResult<()> {
+        if !self.host_state.borrow().document_is_active(document_id) {
+            return Ok(());
+        }
+        // Reports belong to the Document's global even if it has never run
+        // author code. Falling back to the caller would notify its observers.
+        self.realm_for_document(document_id)?;
         let (target_id, worker_global) = {
             let state = self.host_state.borrow();
             let target = element_id
@@ -1214,7 +1220,7 @@ impl HostState {
         );
     }
 
-    fn queue_policy_violation_events_with_source(
+    pub(super) fn queue_policy_violation_events_with_source(
         &mut self,
         document_id: usize,
         resource_type: ResourceType,

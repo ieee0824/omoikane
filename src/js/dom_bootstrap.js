@@ -14076,9 +14076,6 @@ export let __omoikane_update_auxiliary_opener;
       const isSource = String(name).toLowerCase() === "src";
       if (isSource) noteElementResourceStart(this);
       super.setAttribute(name, value);
-      if (isSource && /^(?:data:|blob:)/i.test(String(value))) {
-        finishElementResourceTiming(this, 200, false);
-      }
     }
     get src() {
       return this.getAttribute("src") || "";

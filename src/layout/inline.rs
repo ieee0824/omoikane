@@ -15,7 +15,7 @@ use crate::font::{
     load_default_text_fonts_shared, select_text_font, shape_text_with_fallback_candidates,
 };
 use crate::http::cors::{self, CredentialsMode, PreflightCache, RedirectMode, RequestMode};
-use crate::http::{HttpRequest, Url, url::resolve_url};
+use crate::http::{Client, HttpRequest, HttpResponse, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
 
 use super::{
@@ -1950,7 +1950,10 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
             Some(context) => {
                 client.set_shared_cookie_store(Arc::clone(&context.store));
                 let mut violations = Vec::new();
-                let fetched = cors::fetch_with_embedder_policy_reporting(
+                let mut check_redirect = |target: &Url, redirects| {
+                    super::image_security::allows_image_request(&target.to_string(), redirects, url)
+                };
+                let fetched = cors::fetch_with_embedder_policy_reporting_checked(
                     &mut client,
                     request,
                     &context.origin,
@@ -1962,13 +1965,14 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
                     context.report_only_embedder_policy,
                     &mut violations,
                     None,
+                    &mut check_redirect,
                 );
                 context.coep_reports.borrow_mut().extend(violations);
                 let response = fetched.ok().map(|fetched| fetched.response);
                 client.clear_shared_cookie_store();
                 response
             }
-            None => client.send(request).ok(),
+            None => fetch_image_without_document(&mut client, request, url),
         }
     })?;
 
@@ -1997,6 +2001,32 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
         return Some(image);
     }
     decode_image_bytes(body, &content_type, url)
+}
+
+/// Retains the standalone client path while checking redirect targets before I/O.
+fn fetch_image_without_document(
+    client: &mut Client,
+    request: HttpRequest,
+    initial: &str,
+) -> Option<HttpResponse> {
+    let mut redirects = 0;
+    let mut observe = |request: &HttpRequest, response: &HttpResponse| {
+        if !matches!(response.status_code(), 301 | 302 | 303 | 307 | 308) {
+            return true;
+        }
+        let Some(location) = response.header("location") else {
+            return true;
+        };
+        let Ok(target) = resolve_url(request.url(), location) else {
+            return true;
+        };
+        redirects += 1;
+        super::image_security::allows_image_request(&target.to_string(), redirects, initial)
+    };
+    client
+        .send_observing_navigation(request, &mut observe)
+        .ok()
+        .flatten()
 }
 
 /// Decodes image bytes, picking the decoder from the media type and falling back
@@ -2066,6 +2096,10 @@ fn decode_or_fetch_image(url_like: &str) -> Option<Image> {
 fn decode_or_fetch_image_with_base(url_like: &str, base_url: Option<&Url>) -> Option<Image> {
     let url_like = url_like.trim();
     if url_like.is_empty() {
+        return None;
+    }
+    let reference = canonical_image_asset_reference(url_like, base_url)?;
+    if !super::image_security::allows_image_request(&reference, 0, &reference) {
         return None;
     }
     if url_like

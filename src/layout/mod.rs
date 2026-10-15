@@ -57,6 +57,10 @@ use table::{
 
 pub(crate) use inline::element_inline_image;
 pub(crate) use inline::{canonical_image_asset_reference, decode_or_fetch_image_asset};
+mod image_security;
+pub(crate) use image_security::{
+    ImageDocumentState, ImagePolicyNotice, with_image_security_policy,
+};
 
 // Re-exports used by tests
 #[cfg(test)]
@@ -68,6 +72,15 @@ pub(crate) use inline::split_words_no_cjk_break;
 #[cfg(test)]
 pub(crate) use inline::split_words_preserving_spaces_cjk;
 
+type ImageCacheOwner = (
+    Arc<Mutex<CookieJar>>,
+    crate::http::CookieRequestContext,
+    usize,
+    CorsOrigin,
+    EmbedderPolicyValue,
+    EmbedderPolicyValue,
+);
+
 // Thread-local cache for fetched images and fonts to avoid redundant loads
 thread_local! {
     static IMAGE_CACHE: RefCell<HashMap<String, Option<Image>>> = RefCell::new(HashMap::new());
@@ -77,7 +90,7 @@ thread_local! {
     static LAYOUT_FONTS: RefCell<Option<LayoutFontContext>> = const { RefCell::new(None) };
     static IMAGE_BASE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
     static IMAGE_COOKIE_CONTEXT: RefCell<Option<ImageRequestContext>> = const { RefCell::new(None) };
-    static IMAGE_CACHE_OWNER: RefCell<Option<(Arc<Mutex<CookieJar>>, crate::http::CookieRequestContext, usize, CorsOrigin, EmbedderPolicyValue, EmbedderPolicyValue)>> = const { RefCell::new(None) };
+    static IMAGE_CACHE_OWNER: RefCell<Option<ImageCacheOwner>> = const { RefCell::new(None) };
     static HTML_TAG_SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
     static CONTENT_VISIBILITY_LAYOUT: RefCell<Option<ContentVisibilityLayoutSession>> = const { RefCell::new(None) };
     static LAYOUT_ERROR_REPORTER: RefCell<Option<(Arc<ErrorReporter>, ExecutionSurface)>> = const { RefCell::new(None) };

@@ -154,11 +154,12 @@ mod text_stream_tests;
 mod window_named_tests;
 use module_fetch::{ModuleFetch, ModuleFetchPool, ModuleIsolation};
 
-mod csp;
+pub(crate) mod csp;
 mod event_loop;
 mod html_parsing;
 mod html_sanitizer;
 mod html_serialization;
+mod image_loading;
 mod security_reporting;
 mod storage;
 mod storage_access;
@@ -1606,6 +1607,15 @@ enum TimerPayload {
     },
     /// A connected iframe/object resource load, followed by `load` dispatch.
     ResourceLoad { node_id: usize },
+    /// Decoded image completion, checked again against its live owning document.
+    ImageResourceEvent {
+        node_id: usize,
+        document_id: usize,
+        source: String,
+        timing_name: String,
+        loaded: bool,
+        elapsed_ms: f64,
+    },
     /// Parser scripts and load events for a javascript: replacement Document.
     JavascriptDocumentLoad {
         iframe_id: usize,
@@ -1987,6 +1997,7 @@ impl TimerPayload {
             Self::Source(_) => "source",
             Self::Callback { .. } => "callback",
             Self::ResourceLoad { .. } => "resource-load",
+            Self::ImageResourceEvent { .. } => "image-resource-event",
             Self::JavascriptDocumentLoad { .. } => "javascript-document-load",
             Self::FormSubmission { .. } => "form-submission",
             Self::GeolocationTimeout { .. } => "geolocation-timeout",
@@ -2310,6 +2321,7 @@ struct HostState {
     page_hidden: bool,
     live_css_animations: bool,
     image_timeline: crate::paint::animation::ImageTimeline,
+    image_resources: HashMap<usize, Rc<RefCell<crate::layout::ImageDocumentState>>>,
     visible_image_playbacks: Vec<Arc<crate::paint::animation::ImagePlayback>>,
     /// Committed URL per live Document. Nested Window/Document access must not
     /// accidentally expose the top-level Location after iframe navigation.
@@ -2984,6 +2996,7 @@ impl HostState {
             page_hidden: false,
             live_css_animations: false,
             image_timeline: Arc::new(Mutex::new(HashMap::new())),
+            image_resources: HashMap::new(),
             visible_image_playbacks: Vec::new(),
             document_urls,
             document_reporting: HashMap::from([(
@@ -3338,7 +3351,8 @@ impl HostState {
                     node,
                 ))
                 .is_empty();
-            let is_resource = is_nested_frame_tag(&tag)
+            let is_resource = (tag.eq_ignore_ascii_case("img") && node.has_attribute("src"))
+                || is_nested_frame_tag(&tag)
                 || style_has_import
                 || (include_scripts
                     && tag.eq_ignore_ascii_case("script")
@@ -3380,6 +3394,7 @@ impl HostState {
     /// - the element is **connected** to a document — a detached element defers
     ///   its load until it is later connected, so `about:blank`/`src` set on a
     ///   freestanding element never fires prematurely;
+    ///   Images instead use their active owner Document, including detached images;
     /// - the resource actually **changed** — setting the attribute to the value
     ///   already loaded is a no-op navigation.
     ///
@@ -3390,7 +3405,11 @@ impl HostState {
         node: &NodeHandle,
         resource_attr: &str,
     ) {
-        if !self.node_is_in_active_document(node) {
+        let active_image = node.has_tag_name("img")
+            && self
+                .node_lifetime_owner(node.identity())
+                .is_some_and(|document| self.document_is_active(document.identity()));
+        if !active_image && !self.node_is_in_active_document(node) {
             return;
         }
         if is_html_script_node(node)
@@ -5173,6 +5192,7 @@ impl HostState {
         self.storage_access_active_documents.remove(&document_id);
         self.document_urls.remove(&document_id);
         self.document_reporting.remove(&document_id);
+        self.image_resources.remove(&document_id);
         self.report_observer_dispatchers.remove(&document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
@@ -5302,6 +5322,7 @@ impl HostState {
         self.storage_access_active_documents.remove(&document_id);
         self.document_urls.remove(&document_id);
         self.document_reporting.remove(&document_id);
+        self.image_resources.remove(&document_id);
         self.report_observer_dispatchers.remove(&document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
@@ -5373,6 +5394,16 @@ impl HostState {
         for iframe_id in iframe_ids {
             self.destroy_iframe_context(iframe_id);
         }
+        // Removing an image does not abort its request while its owner Document
+        // remains active. Retiring a child Document above still cancels its loads.
+        subtree_ids.retain(|node_id| {
+            !self
+                .get_node(*node_id)
+                .is_some_and(|node| node.has_tag_name("img"))
+                || self
+                    .node_lifetime_owner(*node_id)
+                    .is_none_or(|document| !self.document_is_active(document.identity()))
+        });
         self.pending_resource_loads
             .retain(|node_id| !subtree_ids.contains(node_id));
         self.pending_forced_iframe_navigations
@@ -6521,10 +6552,7 @@ impl HostState {
             &document,
             self.base_url_for_document(document_id).as_ref(),
         );
-        let image_context = self.document_cookie_request_context(document_id);
-        let image_cookies = Arc::clone(&self.cookie_store);
-        let image_origin = script_errors::document_fetch_origin(self, document_id);
-        let image_embedder = self.isolation_policy_for_document(document_id).embedder;
+        let image_environment = self.image_environment(document_id);
         let animation_time = self.event_loop.rendering_time_ms() as u64;
         let layout_reporter = self.error_reporter.clone();
         let relevant_nodes = self
@@ -6555,33 +6583,25 @@ impl HostState {
                     crate::paint::text::load_text_fonts(),
                     Some(entry.web_fonts.clone()),
                     || {
-                        crate::layout::with_image_cookie_store_reporting(
-                            image_cookies,
-                            image_context,
-                            document_id,
-                            image_origin,
-                            image_embedder.value.into(),
-                            image_embedder.report_only_value.into(),
-                            || {
-                                crate::layout::with_image_base_url(base, || {
-                                    crate::layout::with_image_animation_time(animation_time, || {
-                                        crate::layout::with_error_reporter(layout_reporter, || {
-                                            crate::layout::layout_tree_with_content_visibility(
-                                                &document,
-                                                resolver,
-                                                viewport,
-                                                content_visibility_input,
-                                            )
-                                        })
+                        image_environment.run(false, || {
+                            crate::layout::with_image_base_url(base, || {
+                                crate::layout::with_image_animation_time(animation_time, || {
+                                    crate::layout::with_error_reporter(layout_reporter, || {
+                                        crate::layout::layout_tree_with_content_visibility(
+                                            &document,
+                                            resolver,
+                                            viewport,
+                                            content_visibility_input,
+                                        )
                                     })
                                 })
-                            },
-                        )
+                            })
+                        })
                     },
                 ))
             })
             .unwrap_or_default();
-        self.queue_coep_corp_violations(document_id, "image", image_reports);
+        self.queue_image_reports(document_id, image_reports);
         self.content_visibility_auto_nodes = content_visibility_report.auto_nodes;
         self.content_visibility_skipped_nodes = content_visibility_report.skipped_nodes;
         self.content_visibility_remembered_sizes
@@ -8202,10 +8222,7 @@ impl JsRuntime {
             &state.document,
             state.base_url_for_document(document_id).as_ref(),
         );
-        let image_context = state.document_cookie_request_context(document_id);
-        let image_cookies = Arc::clone(&state.cookie_store);
-        let image_origin = script_errors::document_fetch_origin(&state, document_id);
-        let image_embedder = state.isolation_policy_for_document(document_id).embedder;
+        let image_environment = state.image_environment(document_id);
         let animation_time = state.event_loop.rendering_time_ms() as u64;
         let state = &mut *state;
         let layout = state
@@ -8224,30 +8241,22 @@ impl JsRuntime {
             .as_mut()
             .ok_or(crate::paint::PaintError::InvalidImageBuffer)?;
         let start = Instant::now();
-        let (canvas, image_reports) = crate::layout::with_image_cookie_store_reporting(
-            image_cookies,
-            image_context,
-            document_id,
-            image_origin,
-            image_embedder.value.into(),
-            image_embedder.report_only_value.into(),
-            || {
-                crate::layout::with_image_base_url(base, || {
-                    crate::layout::with_image_animation_time(animation_time, || {
-                        crate::paint::paint_layout_with_document_snapshots(
-                            &layout,
-                            resolver,
-                            viewport,
-                            crate::paint::text::load_text_fonts(),
-                            Some(&entry.web_fonts),
-                            visited_link_ids,
-                            &snapshots,
-                        )
-                    })
+        let (canvas, image_reports) = image_environment.run(false, || {
+            crate::layout::with_image_base_url(base, || {
+                crate::layout::with_image_animation_time(animation_time, || {
+                    crate::paint::paint_layout_with_document_snapshots(
+                        &layout,
+                        resolver,
+                        viewport,
+                        crate::paint::text::load_text_fonts(),
+                        Some(&entry.web_fonts),
+                        visited_link_ids,
+                        &snapshots,
+                    )
                 })
-            },
-        );
-        state.queue_coep_corp_violations(document_id, "image", image_reports);
+            })
+        });
+        state.queue_image_reports(document_id, image_reports);
         crate::paint::record_render_timings(&crate::paint::RenderTimings {
             layout: layout_time,
             paint: start.elapsed(),
@@ -11741,6 +11750,21 @@ impl JsRuntime {
                 self.run_timer_payload(TimerPayload::ResourceLoad { node_id })
             }
             TimerPayload::ResourceLoad { node_id } => self.run_resource_load_timer(node_id),
+            TimerPayload::ImageResourceEvent {
+                node_id,
+                document_id,
+                source,
+                timing_name,
+                loaded,
+                elapsed_ms,
+            } => self.dispatch_image_resource_event(
+                node_id,
+                document_id,
+                &source,
+                &timing_name,
+                loaded,
+                elapsed_ms,
+            ),
             TimerPayload::JavascriptDocumentLoad {
                 iframe_id,
                 document_id,
@@ -11756,6 +11780,9 @@ impl JsRuntime {
     /// pending initial iframe scripts and dynamic script, runs them, and
     /// dispatches the resulting `load` (or `error`) event.
     fn run_resource_load_timer(&mut self, node_id: usize) -> JsResult<()> {
+        if self.run_image_resource_load(node_id)? {
+            return Ok(());
+        }
         if self
             .host_state
             .borrow()
@@ -16973,10 +17000,7 @@ fn resolved_layout_size(
         document,
         state.base_url_for_document(document_id).as_ref(),
     );
-    let image_context = state.document_cookie_request_context(document_id);
-    let image_cookies = Arc::clone(&state.cookie_store);
-    let image_origin = script_errors::document_fetch_origin(state, document_id);
-    let image_embedder = state.isolation_policy_for_document(document_id).embedder;
+    let image_environment = state.image_environment(document_id);
     let animation_time = state.event_loop.rendering_time_ms() as u64;
     let (layout, image_reports) =
         state
@@ -16988,25 +17012,17 @@ fn resolved_layout_size(
                     crate::paint::text::load_text_fonts(),
                     Some(entry.web_fonts.clone()),
                     || {
-                        crate::layout::with_image_cookie_store_reporting(
-                            image_cookies,
-                            image_context,
-                            document_id,
-                            image_origin,
-                            image_embedder.value.into(),
-                            image_embedder.report_only_value.into(),
-                            || {
-                                crate::layout::with_image_base_url(base, || {
-                                    crate::layout::with_image_animation_time(animation_time, || {
-                                        crate::layout::layout_tree(document, resolver, viewport)
-                                    })
+                        image_environment.run(false, || {
+                            crate::layout::with_image_base_url(base, || {
+                                crate::layout::with_image_animation_time(animation_time, || {
+                                    crate::layout::layout_tree(document, resolver, viewport)
                                 })
-                            },
-                        )
+                            })
+                        })
                     },
                 ))
             })?;
-    state.queue_coep_corp_violations(document_id, "image", image_reports);
+    state.queue_image_reports(document_id, image_reports);
     layout
         .as_ref()
         .and_then(|root| layout_used_size(root, node, pseudo))
@@ -17612,10 +17628,7 @@ fn build_child_document_layout(
         document,
         state.base_url_for_document(document_id).as_ref(),
     );
-    let image_context = state.document_cookie_request_context(document_id);
-    let image_cookies = Arc::clone(&state.cookie_store);
-    let image_origin = script_errors::document_fetch_origin(state, document_id);
-    let image_embedder = state.isolation_policy_for_document(document_id).embedder;
+    let image_environment = state.image_environment(document_id);
     let animation_time = state.event_loop.rendering_time_ms() as u64;
     let entry = state.document_styles.get_mut(&document_id)?;
     let resolver = entry.resolver.as_mut()?;
@@ -17623,24 +17636,16 @@ fn build_child_document_layout(
         crate::paint::text::load_text_fonts(),
         Some(entry.web_fonts.clone()),
         || {
-            crate::layout::with_image_cookie_store_reporting(
-                image_cookies,
-                image_context,
-                document_id,
-                image_origin,
-                image_embedder.value.into(),
-                image_embedder.report_only_value.into(),
-                || {
-                    crate::layout::with_image_base_url(base, || {
-                        crate::layout::with_image_animation_time(animation_time, || {
-                            crate::layout::layout_tree(document, resolver, viewport)
-                        })
+            image_environment.run(false, || {
+                crate::layout::with_image_base_url(base, || {
+                    crate::layout::with_image_animation_time(animation_time, || {
+                        crate::layout::layout_tree(document, resolver, viewport)
                     })
-                },
-            )
+                })
+            })
         },
     );
-    state.queue_coep_corp_violations(document_id, "image", image_reports);
+    state.queue_image_reports(document_id, image_reports);
     layout
 }
 
@@ -19917,7 +19922,9 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         let resource_attr = node.tag_name().and_then(|tag| {
             if tag.eq_ignore_ascii_case("iframe") && name.eq_ignore_ascii_case("srcdoc") {
                 Some("srcdoc")
-            } else if (is_nested_frame_tag(&tag) || tag.eq_ignore_ascii_case("script"))
+            } else if (is_nested_frame_tag(&tag)
+                || tag.eq_ignore_ascii_case("script")
+                || tag.eq_ignore_ascii_case("img"))
                 && name.eq_ignore_ascii_case("src")
             {
                 Some("src")
@@ -20000,7 +20007,9 @@ fn set_attribute_ns_native(
             node.tag_name().and_then(|tag| {
                 if tag.eq_ignore_ascii_case("iframe") && qualified_name == "srcdoc" {
                     Some("srcdoc")
-                } else if (is_nested_frame_tag(&tag) || tag.eq_ignore_ascii_case("script"))
+                } else if (is_nested_frame_tag(&tag)
+                    || tag.eq_ignore_ascii_case("script")
+                    || tag.eq_ignore_ascii_case("img"))
                     && qualified_name == "src"
                 {
                     Some("src")
@@ -23826,7 +23835,9 @@ fn remove_attribute_native(
         let resource_attr = node.tag_name().and_then(|tag| {
             if tag.eq_ignore_ascii_case("iframe") && name.eq_ignore_ascii_case("srcdoc") {
                 Some("srcdoc")
-            } else if (is_nested_frame_tag(&tag) || tag.eq_ignore_ascii_case("script"))
+            } else if (is_nested_frame_tag(&tag)
+                || tag.eq_ignore_ascii_case("script")
+                || tag.eq_ignore_ascii_case("img"))
                 && name.eq_ignore_ascii_case("src")
             {
                 Some("src")
@@ -23896,7 +23907,9 @@ fn remove_attribute_ns_native(
             node.tag_name().and_then(|tag| {
                 if tag.eq_ignore_ascii_case("iframe") && qualified_name == "srcdoc" {
                     Some("srcdoc")
-                } else if (is_nested_frame_tag(&tag) || tag.eq_ignore_ascii_case("script"))
+                } else if (is_nested_frame_tag(&tag)
+                    || tag.eq_ignore_ascii_case("script")
+                    || tag.eq_ignore_ascii_case("img"))
                     && qualified_name == "src"
                 {
                     Some("src")

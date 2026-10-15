@@ -22,6 +22,7 @@ pub(crate) enum ResourceType {
     Style,
     Connect,
     Font,
+    Image,
 }
 
 /// Runtime references representing inline code rather than a fetch request.
@@ -45,6 +46,7 @@ impl ResourceType {
             Self::Style => "style-src",
             Self::Connect => "connect-src",
             Self::Font => "font-src",
+            Self::Image => "img-src",
         }
     }
 
@@ -55,6 +57,7 @@ impl ResourceType {
             Self::Style => "style",
             Self::Connect => "connect",
             Self::Font => "font",
+            Self::Image => "image",
         }
     }
 }
@@ -608,6 +611,7 @@ impl ParsedPolicy {
             (ResourceType::Style, true) => &["style-src-attr", "style-src", "default-src"],
             (ResourceType::Connect, _) => &["connect-src", "default-src"],
             (ResourceType::Font, _) => &["font-src", "default-src"],
+            (ResourceType::Image, _) => &["img-src", "default-src"],
         };
         fallbacks
             .iter()
@@ -774,12 +778,13 @@ impl ResourceUrl {
 
     fn parse(reference: &str, base_url: Option<&Url>) -> Option<Self> {
         let reference = reference.trim();
-        if reference
-            .get(..5)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
-        {
+        if let Some(scheme) = reference.get(..5).and_then(|prefix| {
+            ["data:", "blob:"]
+                .into_iter()
+                .find(|scheme| prefix.eq_ignore_ascii_case(scheme))
+        }) {
             return Some(Self {
-                scheme: "data".to_string(),
+                scheme: scheme.trim_end_matches(':').to_string(),
                 host: String::new(),
                 port: 0,
                 path: String::new(),
@@ -1715,7 +1720,11 @@ mod tests {
         let text = "default-src 'report-sample'";
         let policy = make_policy(text, "https://example.test/")
             .with_report_only_headers(&[text.to_string()]);
-        for resource in [ResourceType::Script, ResourceType::Style] {
+        for resource in [
+            ResourceType::Script,
+            ResourceType::Style,
+            ResourceType::Image,
+        ] {
             for (reference, redirects) in [
                 ("https://example.test/resource", 0),
                 ("/resource", 0),
@@ -1958,5 +1967,70 @@ mod tests {
         assert!(parse_source_expression("example.com:").is_none());
         assert!(parse_source_expression("example.com:not-a-port").is_none());
         assert!(parse_source_expression("example.com:65536").is_none());
+    }
+
+    #[test]
+    fn image_sources_use_img_src_before_default_src() {
+        let fallback = make_policy("default-src 'none'", "https://example.test/page");
+        assert!(!fallback.allows_reference(ResourceType::Image, "https://example.test/image.png"));
+        let image_policy = make_policy(
+            "default-src 'none'; img-src 'self'",
+            "https://example.test/page",
+        );
+        assert!(
+            image_policy.allows_reference(ResourceType::Image, "https://example.test/image.png")
+        );
+        assert!(
+            !image_policy.allows_reference(ResourceType::Image, "https://other.test/image.png")
+        );
+        assert!(
+            !image_policy.allows_reference(ResourceType::Script, "https://example.test/image.png")
+        );
+    }
+
+    #[test]
+    fn image_source_schemes_require_explicit_data_and_blob_permission() {
+        let policy = make_policy("img-src 'self' data: blob:", "https://example.test/page");
+        assert!(policy.allows_reference(ResourceType::Image, "data:image/png;base64,aGVsbG8="));
+        assert!(policy.allows_reference(ResourceType::Image, "blob:https://example.test/id"));
+        let denied = make_policy("img-src 'none'", "https://example.test/page");
+        assert!(!denied.allows_reference(ResourceType::Image, "data:image/png;base64,aGVsbG8="));
+        assert!(!denied.allows_reference(ResourceType::Image, "blob:https://example.test/id"));
+    }
+
+    #[test]
+    fn redirected_image_sources_skip_paths_but_keep_origin_boundaries() {
+        let policy = make_policy(
+            "img-src https://example.test:8443/allowed/",
+            "https://example.test/page",
+        );
+        let changed_path = "https://example.test:8443/elsewhere/image.png"
+            .parse()
+            .unwrap();
+        assert!(!policy.allows_url(ResourceType::Image, &changed_path));
+        assert!(policy.allows_url_after_redirects(ResourceType::Image, &changed_path, 1));
+        let other_origin = "https://other.test:8443/allowed/image.png".parse().unwrap();
+        assert!(!policy.allows_url_after_redirects(ResourceType::Image, &other_origin, 1));
+    }
+
+    #[test]
+    fn image_report_only_violations_do_not_block_an_enforcing_allowlist() {
+        let policy = make_policy("img-src 'self'", "https://example.test/page")
+            .with_report_only_headers(&["img-src 'none'".into()]);
+        let reference = "https://example.test/image.png";
+        assert!(policy.allows_reference(ResourceType::Image, reference));
+        assert!(
+            policy
+                .blocking_policy_texts_after_redirects(ResourceType::Image, reference, 0)
+                .is_empty()
+        );
+        assert_eq!(
+            policy.report_only_policy_texts(ResourceType::Image, reference),
+            vec![PolicyViolation {
+                serialized: "img-src 'none'".into(),
+                report_sample: false,
+            }]
+        );
+        assert!(!policy.allows_reference(ResourceType::Image, "https://other.test/image.png"));
     }
 }
