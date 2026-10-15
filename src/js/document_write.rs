@@ -13,6 +13,7 @@ pub(super) struct WrittenScript {
     pub(super) document: NodeHandle,
     kind: ScriptKind,
     src: Option<String>,
+    nonce: Option<String>,
     inline_source: String,
     deferred: bool,
     async_script: bool,
@@ -26,6 +27,7 @@ impl WrittenScript {
             document: document.clone(),
             kind,
             src: node.get_attribute("src"),
+            nonce: node.get_attribute("nonce"),
             inline_source: collect_text_content(node),
             deferred: kind == ScriptKind::Module
                 || node.get_attribute("async").is_some()
@@ -598,8 +600,20 @@ fn script_source(
         return None;
     }
     if let Some(src) = prepared.src.as_ref() {
-        if !host.csp_allows_script_for_node(document, &src) {
-            host.record_csp_violation_for_node(document, ResourceType::Script, src);
+        let base = host.base_url_for_document(document.identity());
+        let report_reference = resource_reference_timing_name(src, base.as_ref());
+        let request = csp::ScriptRequest {
+            nonce: prepared.nonce.as_deref(),
+            parser_inserted: true,
+        };
+        if !host.csp_allows_written_script_request(
+            document,
+            &prepared.node,
+            src,
+            0,
+            &report_reference,
+            request,
+        ) {
             return None;
         }
         let base = host.base_url_for_document(document.identity());
@@ -614,12 +628,13 @@ fn script_source(
         let Some((url, source, redirects, muted_errors)) = fetched else {
             return None;
         };
-        if !host.csp_allows_response_for_document(
+        if !host.csp_allows_written_script_request(
             document,
-            ResourceType::Script,
+            &prepared.node,
             &url,
             redirects,
             &resource_reference_timing_name(src, base.as_ref()),
+            request,
         ) {
             return None;
         }
