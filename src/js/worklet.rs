@@ -17,13 +17,33 @@ pub(super) struct State {
     /// control-plane handle. It is cleared during teardown so the cycle does
     /// not keep a navigated page alive.
     owner: Option<Rc<RefCell<HostState>>>,
+    /// Module graph requests use the owner's cookie jar and partition context;
+    /// these are kept separate from the Worklet global's other network APIs.
+    module_fetch_context: Option<ModuleFetchContext>,
     id: Option<u64>,
     terminated: bool,
     modules: HashSet<String>,
     registrations: HashSet<String>,
 }
 
+struct ModuleFetchContext {
+    cookies: Arc<Mutex<crate::http::CookieJar>>,
+    cookie_context: crate::http::CookieRequestContext,
+}
+
 impl State {
+    pub(super) fn module_cookie_store(&self) -> Option<Arc<Mutex<crate::http::CookieJar>>> {
+        self.module_fetch_context
+            .as_ref()
+            .map(|context| Arc::clone(&context.cookies))
+    }
+
+    pub(super) fn module_cookie_context(&self) -> Option<crate::http::CookieRequestContext> {
+        self.module_fetch_context
+            .as_ref()
+            .map(|context| context.cookie_context.clone())
+    }
+
     pub(super) fn has_pending_render_work(&self) -> bool {
         !self.terminated
             && self.runtime.as_ref().is_some_and(|runtime| {
@@ -39,6 +59,7 @@ impl Default for State {
             runtime_origin: None,
             next_id: 1,
             owner: None,
+            module_fetch_context: None,
             id: None,
             terminated: false,
             modules: HashSet::new(),
@@ -68,6 +89,7 @@ pub(super) fn terminate_worklet_runtime(state: &Rc<RefCell<HostState>>) {
     let mut child_state = child_state.borrow_mut();
     child_state.worklet.terminated = true;
     child_state.worklet.owner = None;
+    child_state.worklet.module_fetch_context = None;
     child_state.worklet.modules.clear();
     child_state.worklet.registrations.clear();
 }
@@ -107,6 +129,62 @@ fn worklet_error_name(error: &str) -> &'static str {
     "OperationError"
 }
 
+/// Fetches a Worklet module with module-script CORS credentials. A redirected
+/// cross-origin request omits cookies, and public-address checks remain active
+/// after leaving the initial origin.
+fn fetch_worklet_module_source(
+    state: &mut HostState,
+    requested: &str,
+    base: Option<&crate::http::Url>,
+    cookie_context: &crate::http::CookieRequestContext,
+    origin: &CorsOrigin,
+) -> Option<(String, String)> {
+    match resolve_resource_ref(requested, base)? {
+        ResolvedResource::Data { .. } => fetch_script_resource_with_client_in_context(
+            requested,
+            base,
+            Some(cookie_context),
+            &mut state.http_client,
+        )
+        .map(|(url, source, _, _)| (url, source)),
+        ResolvedResource::Url(initial) => {
+            let initial = initial.parse::<crate::http::Url>().ok()?;
+            let mut request = HttpRequest::new(Method::Get, initial.clone());
+            if requires_public_fetch(&initial, base) {
+                request.require_public_ip();
+            }
+            cookie_context.apply(&mut request);
+            let response = crate::http::cors::fetch_with_timeout_restricting_redirects(
+                &mut state.http_client,
+                request,
+                origin,
+                RequestMode::Cors,
+                CredentialsMode::SameOrigin,
+                RedirectMode::Follow,
+                &mut PreflightCache::default(),
+                None,
+            )
+            .ok()?
+            .response;
+            if response.status_code() != 200 {
+                state.http_client.report_resource_failure();
+                return None;
+            }
+            let source = match std::str::from_utf8(response.body()) {
+                Ok(source) => source.to_owned(),
+                Err(_) => {
+                    state.http_client.report_resource_failure();
+                    return None;
+                }
+            };
+            let effective = response
+                .effective_url()
+                .map_or_else(|| initial.to_string(), ToString::to_string);
+            Some((effective, source))
+        }
+    }
+}
+
 fn create_worklet_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     let id = with_host_state(|state| {
         let mut state = state.borrow_mut();
@@ -128,7 +206,17 @@ fn worklet_add_module_native(
     let id = worker_id_argument(args, context)?;
     let requested_url = string_argument(args.get(1), "", context)?;
     with_host_state(|owner_state| {
-        let (owner_url, base_url, storage, session_id, user_agent, secure, cookie_context) = {
+        let (
+            owner_url,
+            base_url,
+            storage,
+            session_id,
+            user_agent,
+            secure,
+            cookie_context,
+            origin,
+            owner_document_id,
+        ) = {
             let state = owner_state.borrow();
             let document_id = state.csp_document_for_context(context)?.identity();
             let base_url = state.base_url_for_document(document_id);
@@ -150,6 +238,8 @@ fn worklet_add_module_native(
                 state.navigator_user_agent.clone(),
                 document_is_secure_context(&state, document_id),
                 state.document_cookie_request_context(document_id),
+                script_errors::document_fetch_origin(&state, document_id),
+                document_id,
             )
         };
         if !secure {
@@ -171,13 +261,14 @@ fn worklet_add_module_native(
                 false,
             ));
         }
-        let resolved_url = match resolve_worker_url(&requested_url, &owner_url, base_url.as_ref()) {
-            Ok(url) => url,
-            Err(error) => {
+        let resolved_url = match resolve_resource_ref(&requested_url, base_url.as_ref()) {
+            Some(ResolvedResource::Data { .. }) => requested_url.clone(),
+            Some(ResolvedResource::Url(url)) => url,
+            None => {
                 return Ok(worklet_status(
                     false,
                     "SecurityError",
-                    &error.to_string(),
+                    "Worklet module URL cannot be resolved",
                     false,
                 ));
             }
@@ -205,14 +296,15 @@ fn worklet_add_module_native(
         // addModule() calls side-effect free and makes retries deterministic.
         let fetched = {
             let mut state = owner_state.borrow_mut();
-            fetch_script_resource_with_client_in_context(
+            fetch_worklet_module_source(
+                &mut state,
                 &requested_url,
                 base_url.as_ref(),
-                Some(&cookie_context),
-                &mut state.http_client,
+                &cookie_context,
+                &origin,
             )
         };
-        let (effective_url, source, _) = match fetched {
+        let (effective_url, source) = match fetched {
             Some(value) => value,
             None => {
                 return Ok(worklet_status(
@@ -223,42 +315,6 @@ fn worklet_add_module_native(
                 ));
             }
         };
-        // A redirect must not turn a same-origin module into a cross-origin
-        // script. Data URLs are intentionally retained for deterministic
-        // inline tests, matching the existing Worker implementation.
-        if !effective_url.starts_with("data:") {
-            let owner = match owner_url.parse::<crate::http::Url>() {
-                Ok(url) => url,
-                Err(_) => {
-                    return Ok(worklet_status(
-                        false,
-                        "SecurityError",
-                        "Worklet owner has no origin",
-                        false,
-                    ));
-                }
-            };
-            let effective = match effective_url.parse::<crate::http::Url>() {
-                Ok(url) => url,
-                Err(_) => {
-                    return Ok(worklet_status(
-                        false,
-                        "TypeError",
-                        "Worklet module URL is invalid",
-                        false,
-                    ));
-                }
-            };
-            if !same_origin_url(&owner, &effective) {
-                return Ok(worklet_status(
-                    false,
-                    "SecurityError",
-                    "Worklet module must be same-origin",
-                    false,
-                ));
-            }
-        }
-
         let runtime_handle = if let Some(runtime) = owner_state.borrow().worklet.runtime.clone() {
             runtime
         } else {
@@ -281,7 +337,22 @@ fn worklet_add_module_native(
             runtime.set_user_agent(user_agent);
             let worklet_state = Rc::clone(&runtime.host_state);
             {
+                let owner = owner_state.borrow();
                 let mut state = worklet_state.borrow_mut();
+                state.worklet.module_fetch_context = Some(ModuleFetchContext {
+                    cookies: Arc::clone(&owner.cookie_store),
+                    cookie_context: owner
+                        .document_cookie_request_context(owner_document_id)
+                        .for_worker_internal(),
+                });
+                let mut isolation = IsolationPolicy::default();
+                isolation.embedder = owner
+                    .isolation_policy_for_document(owner_document_id)
+                    .embedder;
+                let worklet_document_id = state.document.identity();
+                state
+                    .document_isolation_policies
+                    .insert(worklet_document_id, isolation);
                 state.worklet.owner = Some(Rc::clone(owner_state));
                 state.worklet.id = Some(id);
                 state.worklet.terminated = false;
@@ -324,7 +395,12 @@ fn worklet_add_module_native(
         let evaluation = {
             let mut runtime = runtime_handle.borrow_mut();
             let document = runtime.document();
-            let (result, _, _) = runtime.eval_module_timed(&source, &effective_url, document);
+            let (result, _, _) = runtime.eval_module_timed(
+                &source,
+                &effective_url,
+                document,
+                crate::http::cors::CredentialsMode::SameOrigin,
+            );
             result
         };
         if let Err(error) = evaluation {
@@ -430,6 +506,7 @@ fn worklet_teardown_native(
             let mut state = worklet_state.borrow_mut();
             state.worklet.terminated = true;
             state.worklet.owner = None;
+            state.worklet.module_fetch_context = None;
             state.worklet.modules.clear();
             state.worklet.registrations.clear();
         }
@@ -521,5 +598,197 @@ impl JsRuntime {
         if terminated {
             terminate_worklet_runtime(&self.host_state);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::{HttpParseError, HttpResponse, HttpTransport};
+    use std::time::Duration;
+
+    #[test]
+    fn worklet_cross_origin_redirect_uses_cors_without_credentials() {
+        struct RedirectTransport(Arc<Mutex<Vec<(String, Option<String>, bool)>>>);
+
+        impl HttpTransport for RedirectTransport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<HttpResponse, HttpParseError> {
+                self.0.lock().unwrap().push((
+                    request.url().to_string(),
+                    request.header("cookie").map(str::to_owned),
+                    request.requires_public_ip(),
+                ));
+                Ok(match request.url().path() {
+                    "/entry.js" => HttpResponse::new(
+                        302,
+                        "Found",
+                        vec![(
+                            "Location".into(),
+                            "https://other.example.test/module.js".into(),
+                        )],
+                        Vec::new(),
+                    ),
+                    "/module.js" => HttpResponse::new(
+                        200,
+                        "OK",
+                        vec![(
+                            "Access-Control-Allow-Origin".into(),
+                            "https://isolated.example.test".into(),
+                        )],
+                        b"registerPaint('test', class {});".to_vec(),
+                    ),
+                    path => panic!("unexpected Worklet module path: {path}"),
+                })
+            }
+        }
+
+        let owner_url: crate::http::Url = "https://isolated.example.test/page".parse().unwrap();
+        let other_url: crate::http::Url = "https://other.example.test/module.js".parse().unwrap();
+        let mut runtime =
+            JsRuntime::with_document_and_url(blank_html_document(), &owner_url.to_string())
+                .unwrap();
+        let store = Arc::clone(&runtime.host_state.borrow().cookie_store);
+        {
+            let mut store = store.lock().unwrap();
+            store.add_from_header_for_url("owner=secret; Secure; SameSite=None", &owner_url);
+            store.add_from_header_for_url("other=secret; Secure; SameSite=None", &other_url);
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        runtime.set_http_resource_transport(Some(Arc::new(RedirectTransport(Arc::clone(&seen)))));
+        runtime
+            .eval(
+                "globalThis.workletResult='pending'; \
+                 CSS.paintWorklet.addModule('/entry.js').then( \
+                   ()=>workletResult='loaded', error=>workletResult=error.name);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("workletResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "loaded"
+        );
+        assert_eq!(
+            runtime
+                .eval("CSS.paintWorklet.moduleCount")
+                .unwrap()
+                .as_number(),
+            Some(1.0)
+        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].1.as_deref(), Some("owner=secret"));
+        assert!(!seen[0].2);
+        assert_eq!(seen[1].1, None);
+        assert!(seen[1].2);
+        let worklet = runtime.host_state.borrow().worklet.runtime.clone().unwrap();
+        let worklet_state = Rc::clone(&worklet.borrow().host_state);
+        let worklet_state = worklet_state.borrow();
+        assert!(!Arc::ptr_eq(&worklet_state.cookie_store, &store));
+        assert!(Arc::ptr_eq(
+            &worklet_state.worklet.module_cookie_store().unwrap(),
+            &store
+        ));
+        let owner_context = runtime
+            .host_state
+            .borrow()
+            .document_cookie_request_context(runtime.document().identity())
+            .for_worker_internal();
+        assert_eq!(
+            worklet_state.worklet.module_cookie_context(),
+            Some(owner_context)
+        );
+        assert_eq!(
+            worklet_state
+                .module_fetch_isolation_for_document(worklet_state.document.identity())
+                .embedder,
+            crate::http::corp::EmbedderPolicyValue::UnsafeNone
+        );
+    }
+
+    #[test]
+    fn worklet_accepts_cors_approved_cross_origin_module_url() {
+        struct CrossOriginTransport(Arc<Mutex<Vec<(Option<String>, bool)>>>);
+
+        impl HttpTransport for CrossOriginTransport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<HttpResponse, HttpParseError> {
+                assert_eq!(
+                    request.url().to_string(),
+                    "https://other.example.test/module.js"
+                );
+                self.0.lock().unwrap().push((
+                    request.header("cookie").map(str::to_owned),
+                    request.requires_public_ip(),
+                ));
+                Ok(HttpResponse::new(
+                    200,
+                    "OK",
+                    vec![(
+                        "Access-Control-Allow-Origin".into(),
+                        "https://isolated.example.test".into(),
+                    )],
+                    b"registerPaint('direct', class {});".to_vec(),
+                ))
+            }
+        }
+
+        let module_url: crate::http::Url = "https://other.example.test/module.js".parse().unwrap();
+        let mut runtime = JsRuntime::with_document_and_url(
+            blank_html_document(),
+            "https://isolated.example.test/page",
+        )
+        .unwrap();
+        runtime.install_isolation_policy(&[(
+            "Cross-Origin-Embedder-Policy".into(),
+            "require-corp".into(),
+        )]);
+        let cookie_store = Arc::clone(&runtime.host_state.borrow().cookie_store);
+        cookie_store
+            .lock()
+            .unwrap()
+            .add_from_header_for_url("other=secret; Secure; SameSite=None", &module_url);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .set_http_resource_transport(Some(Arc::new(CrossOriginTransport(Arc::clone(&seen)))));
+        runtime
+            .eval(
+                "globalThis.workletResult='pending'; \
+                 CSS.paintWorklet.addModule('https://other.example.test/module.js').then( \
+                   ()=>workletResult='loaded', error=>workletResult=error.name);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            runtime
+                .eval("workletResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "loaded"
+        );
+        assert_eq!(*seen.lock().unwrap(), vec![(None, true)]);
+        let worklet = runtime.host_state.borrow().worklet.runtime.clone().unwrap();
+        let worklet_state = Rc::clone(&worklet.borrow().host_state);
+        let worklet_state = worklet_state.borrow();
+        assert_eq!(
+            worklet_state
+                .isolation_policy_for_document(worklet_state.document.identity())
+                .embedder
+                .value,
+            cross_origin_isolation::EmbedderPolicyValue::RequireCorp
+        );
     }
 }

@@ -5,6 +5,9 @@ use crate::dom::{Node, NodeHandle, WeakNodeHandle};
 use crate::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
 };
+use crate::http::cors::{
+    self, CredentialsMode, Origin as CorsOrigin, PreflightCache, RedirectMode, RequestMode,
+};
 use crate::http::{Client, CookieJar, CookieRequestContext, HttpRequest, Url};
 use crate::paint::stylesheet as css;
 use std::collections::{HashMap, HashSet};
@@ -93,6 +96,10 @@ pub(super) struct StylesheetLoader {
     node_sources: HashMap<usize, (WeakNodeHandle, NodeSource)>,
     client: Client,
     cookie_context: Option<CookieRequestContext>,
+    isolation_origin: Option<CorsOrigin>,
+    embedder_policy: crate::http::corp::EmbedderPolicyValue,
+    report_only_embedder_policy: crate::http::corp::EmbedderPolicyValue,
+    coep_violations: Vec<cors::CorpViolation>,
     reporter: Option<(Arc<ErrorReporter>, ExecutionSurface)>,
 }
 
@@ -109,6 +116,28 @@ impl StylesheetLoader {
     /// a resolver rebuild rather than scanning the map for every stylesheet.
     pub(super) fn retain_live_sources(&mut self) {
         self.node_sources.retain(|_, (node, _)| node.is_alive());
+    }
+
+    pub(super) fn set_isolation(
+        &mut self,
+        origin: CorsOrigin,
+        embedder_policy: crate::http::corp::EmbedderPolicyValue,
+        report_only_embedder_policy: crate::http::corp::EmbedderPolicyValue,
+    ) {
+        if self.isolation_origin.as_ref() != Some(&origin)
+            || self.embedder_policy != embedder_policy
+            || self.report_only_embedder_policy != report_only_embedder_policy
+        {
+            self.resources.clear();
+        }
+        self.isolation_origin = Some(origin);
+        self.embedder_policy = embedder_policy;
+        self.report_only_embedder_policy = report_only_embedder_policy;
+    }
+
+    /// Takes COEP violations recorded during external stylesheet and import fetches.
+    pub(super) fn take_coep_violations(&mut self) -> Vec<cors::CorpViolation> {
+        std::mem::take(&mut self.coep_violations)
     }
 
     pub(super) fn set_error_reporter(
@@ -330,10 +359,41 @@ impl StylesheetLoader {
                     request.set_storage_access_eligible(false);
                 }
             }
-            let response = self
-                .client
-                .send_once_with_timeout(request, true, None)
-                .ok()?;
+            let origin = self.isolation_origin.clone().unwrap_or_else(|| {
+                document_base
+                    .map(CorsOrigin::from_url)
+                    .unwrap_or_else(CorsOrigin::opaque)
+            });
+            let mut violations = Vec::new();
+            // Each CSS redirect is fetched separately so CSP can reject the
+            // next URL before transmission. Preserve credentialless taint
+            // across those calls, including a redirect back to our origin.
+            let credentials = if crossed_origin
+                && self.embedder_policy == crate::http::corp::EmbedderPolicyValue::Credentialless
+            {
+                CredentialsMode::Omit
+            } else {
+                CredentialsMode::Include
+            };
+            let fetched = cors::fetch_with_embedder_policy_reporting(
+                &mut self.client,
+                request,
+                &origin,
+                RequestMode::NoCors,
+                credentials,
+                RedirectMode::Manual,
+                &mut PreflightCache::default(),
+                self.embedder_policy,
+                self.report_only_embedder_policy,
+                &mut violations,
+                None,
+            );
+            self.coep_violations
+                .extend(violations.into_iter().map(|mut violation| {
+                    violation.blocked_url = original.to_owned();
+                    violation
+                }));
+            let response = fetched.ok()?.response;
             if matches!(response.status_code(), 301 | 302 | 303 | 307 | 308) {
                 if redirects == 10 {
                     return None;
@@ -528,11 +588,97 @@ fn check_cached_resource(
 mod tests {
     use super::*;
     use crate::html::TreeBuilder;
+    use crate::http::{HttpParseError, HttpResponse, HttpTransport};
     use crate::test_support::http_fixture::{
         ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
         read_request_headers,
     };
     use std::io::Write;
+    use std::time::Duration;
+
+    #[test]
+    fn credentialless_stylesheet_redirect_back_to_origin_keeps_cookies_omitted() {
+        struct RedirectTransport(Arc<Mutex<Vec<(String, Option<String>)>>>);
+
+        impl HttpTransport for RedirectTransport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<HttpResponse, HttpParseError> {
+                self.0.lock().unwrap().push((
+                    request.url().to_string(),
+                    request.header("cookie").map(str::to_owned),
+                ));
+                Ok(match request.url().path() {
+                    "/entry.css" => HttpResponse::new(
+                        302,
+                        "Found",
+                        vec![(
+                            "Location".into(),
+                            "https://resource.example.test/jump.css".into(),
+                        )],
+                        Vec::new(),
+                    ),
+                    "/jump.css" => HttpResponse::new(
+                        302,
+                        "Found",
+                        vec![(
+                            "Location".into(),
+                            "https://owner.example.test/final.css".into(),
+                        )],
+                        Vec::new(),
+                    ),
+                    "/final.css" => HttpResponse::new(
+                        200,
+                        "OK",
+                        vec![("Content-Type".into(), "text/css".into())],
+                        b"body { color: red }".to_vec(),
+                    ),
+                    path => panic!("unexpected stylesheet path: {path}"),
+                })
+            }
+        }
+
+        let base: Url = "https://owner.example.test/document".parse().unwrap();
+        let document = TreeBuilder::parse("<link rel=stylesheet href='/entry.css'>").document();
+        let link = document.query_selector("link").unwrap();
+        let cookies = Arc::new(Mutex::new(CookieJar::new()));
+        cookies
+            .lock()
+            .unwrap()
+            .add_from_header_for_url("session=secret; Secure; SameSite=None", &base);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut loader = StylesheetLoader::default();
+        loader
+            .client
+            .set_transport(Some(Arc::new(RedirectTransport(Arc::clone(&seen)))));
+        loader.set_isolation(
+            CorsOrigin::from_url(&base),
+            crate::http::corp::EmbedderPolicyValue::Credentialless,
+            crate::http::corp::EmbedderPolicyValue::UnsafeNone,
+        );
+        let (css, checks) = loader.load_node(
+            &link,
+            Some(&base),
+            &CspPolicy::default(),
+            CookieRequestContext::new(Some(base.clone()), None, false),
+            cookies,
+        );
+        assert!(css.contains("color: red"));
+        assert!(checks.iter().all(|check| !check.blocked));
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [
+                (
+                    "https://owner.example.test/entry.css".to_owned(),
+                    Some("session=secret".to_owned()),
+                ),
+                ("https://resource.example.test/jump.css".to_owned(), None),
+                ("https://owner.example.test/final.css".to_owned(), None),
+            ]
+        );
+    }
 
     fn load(
         loader: &mut StylesheetLoader,

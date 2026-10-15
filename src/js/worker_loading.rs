@@ -16,6 +16,8 @@ pub(super) struct LoadedWorkerScript {
     pub(super) response_status: u16,
     /// Final response CSP, report-only CSP, and Reporting-Endpoints headers.
     pub(super) security_headers: Vec<(String, String)>,
+    /// Complete final response headers for COOP/COEP policy inheritance.
+    pub(super) response_headers: Vec<(String, String)>,
 }
 
 /// One redirect request or final response checked against the creator's CSP.
@@ -85,6 +87,7 @@ fn load_worker_script_checked(
                 source: String::from_utf8(data).ok()?,
                 response_status: 200,
                 security_headers: Vec::new(),
+                response_headers: Vec::new(),
             })
         }
         ResolvedResource::Url(_) => {
@@ -187,6 +190,7 @@ fn load_http_worker_script(
             source,
             response_status: response.status_code(),
             security_headers: child_document::response_security_headers(&response),
+            response_headers: response.headers().to_vec(),
         });
     }
     None

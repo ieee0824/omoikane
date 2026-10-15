@@ -272,6 +272,7 @@ impl HostState {
         self.load_iframe_form_submission_with_referrer(
             submission,
             source_document_id,
+            source_document_id,
             "",
             security_reporting::ReferrerPolicy::default(),
         )
@@ -281,6 +282,7 @@ impl HostState {
         &mut self,
         submission: &Submission,
         source_document_id: usize,
+        container_document_id: usize,
         source_url: &str,
         policy: security_reporting::ReferrerPolicy,
     ) -> Result<LoadedChildDocument, JsHostError> {
@@ -290,6 +292,7 @@ impl HostState {
                 &submission.url,
                 site.as_ref(),
                 Some(source_document_id),
+                Some(container_document_id),
                 false,
                 source_url,
                 policy,
@@ -307,7 +310,11 @@ impl HostState {
         if let Some(content_type) = &submission.content_type {
             request.set_header("Content-Type", content_type);
         }
-        let response = self.http_client.send(request)?;
+        let Some((response, redirects)) =
+            self.send_navigation_request(request, Some(container_document_id))?
+        else {
+            return Ok(LoadedChildDocument::fetch_failed());
+        };
         let mime_type = response.header("Content-Type").unwrap_or("");
         let document = child_document::parse_child_document(mime_type, response.body())
             .unwrap_or_else(blank_html_document);
@@ -324,6 +331,8 @@ impl HostState {
                     .to_owned(),
             ),
             security_headers: child_document::response_security_headers(&response),
+            response_headers: response.headers().to_vec(),
+            redirects,
             url: Some(url),
         })
     }

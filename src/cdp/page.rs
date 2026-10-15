@@ -29,7 +29,7 @@ impl CdpSession {
             return Ok(());
         };
         let current_url = self.current_url.clone();
-        self.install_document_with_csp(
+        self.install_document_with_headers(
             &current_url,
             &DecodedHtml::from_string(html.as_str()),
             self.history_entries.len(),
@@ -181,7 +181,7 @@ impl CdpSession {
                 "type": "Document",
             }),
         );
-        let (html, status, document_url, security_headers) = self
+        let (html, status, document_url, response_headers) = self
             .load_page_request(url, Method::Get, None, None)
             .map_err(|error| JsonRpcError {
                 code: -32000,
@@ -195,7 +195,7 @@ impl CdpSession {
                 &html,
                 history_length,
                 &history_state,
-                &security_headers,
+                &response_headers,
                 status,
                 form_state.as_ref(),
             )
@@ -269,7 +269,7 @@ impl CdpSession {
             }),
         );
 
-        let (html, status, document_url, security_headers) = self
+        let (html, status, document_url, response_headers) = self
             .load_page_request(url, method, body, content_type)
             .map_err(|error| JsonRpcError {
                 code: -32000,
@@ -278,12 +278,12 @@ impl CdpSession {
 
         let form_state = self.navigation_form_state(commit, &document_url)?;
         let (next_history_length, next_history_state) = self.prospective_history_state(commit);
-        self.install_document_with_csp(
+        self.install_document_with_headers(
             &document_url,
             &html,
             next_history_length,
             &next_history_state,
-            &security_headers,
+            &response_headers,
             status,
             form_state.as_ref(),
             false,
@@ -636,26 +636,12 @@ impl CdpSession {
             .effective_url()
             .map(ToString::to_string)
             .unwrap_or_else(|| url.to_string());
-        let security_headers = response
-            .headers()
-            .iter()
-            .filter(|(name, _)| {
-                matches!(
-                    name.to_ascii_lowercase().as_str(),
-                    "content-security-policy"
-                        | "content-security-policy-report-only"
-                        | "permissions-policy"
-                        | "reporting-endpoints"
-                        | "referrer-policy"
-                )
-            })
-            .cloned()
-            .collect();
+        let response_headers = response.headers().to_vec();
         Ok((
             decode_html_response(&response),
             response.status_code(),
             effective_url,
-            security_headers,
+            response_headers,
         ))
     }
 
@@ -667,7 +653,7 @@ impl CdpSession {
         history_length: usize,
         history_state_json: &str,
     ) -> Result<(), CdpSessionError> {
-        self.install_document_with_csp(
+        self.install_document_with_headers(
             url,
             &DecodedHtml::from_string(html),
             history_length,
@@ -679,13 +665,13 @@ impl CdpSession {
         )
     }
 
-    fn install_document_with_csp(
+    fn install_document_with_headers(
         &mut self,
         url: &str,
         html: &DecodedHtml,
         history_length: usize,
         history_state_json: &str,
-        security_headers: &[(String, String)],
+        response_headers: &[(String, String)],
         response_status: u16,
         form_state: Option<&FormStateSnapshot>,
         inherit_javascript_security: bool,
@@ -699,11 +685,12 @@ impl CdpSession {
         )
         .map_err(CdpSessionError::JavaScript)?;
         self.configure_replacement_runtime(&mut runtime)?;
-        runtime.install_response_security_headers(security_headers);
+        runtime.install_response_security_headers(response_headers);
+        runtime.set_document_response_status(response_status);
+        runtime.install_isolation_policy(response_headers);
         if inherit_javascript_security {
             runtime.inherit_javascript_navigation_security(&self.runtime);
         }
-        runtime.set_document_response_status(response_status);
         if let Some(state) = form_state {
             runtime
                 .restore_form_state(state, FormStateRestoreMode::Restore)
@@ -761,7 +748,7 @@ impl CdpSession {
         html: &DecodedHtml,
         history_length: usize,
         history_state_json: &str,
-        security_headers: &[(String, String)],
+        response_headers: &[(String, String)],
         response_status: u16,
         form_state: Option<&FormStateSnapshot>,
     ) -> Result<(OwnedPageTask, PendingDocumentCommit), CdpSessionError> {
@@ -774,8 +761,9 @@ impl CdpSession {
         )
         .map_err(CdpSessionError::JavaScript)?;
         self.configure_replacement_runtime(&mut runtime)?;
-        runtime.install_response_security_headers(security_headers);
+        runtime.install_response_security_headers(response_headers);
         runtime.set_document_response_status(response_status);
+        runtime.install_isolation_policy(response_headers);
         if let Some(state) = form_state {
             runtime
                 .restore_form_state(state, FormStateRestoreMode::Restore)

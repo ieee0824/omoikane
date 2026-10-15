@@ -401,6 +401,12 @@ impl HostState {
     /// Style resolvers can own native DOM handles. A document record's death,
     /// not the DOM Rc count, determines cache reclamation after JS collection.
     pub(super) fn sweep_node_lifetimes(&mut self) {
+        self.retired_document_group_ids.retain(|id, _| {
+            self.node_lifetimes
+                .documents
+                .get(id)
+                .is_some_and(|document| document.strong_count() != 0)
+        });
         self.retired_document_security_origins.retain(|id, _| {
             self.node_lifetimes
                 .documents

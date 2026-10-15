@@ -69,6 +69,9 @@ pub(crate) enum Task {
         id: u64,
         url: String,
         client_document_id: usize,
+        /// The target group observed when navigation was queued. The source
+        /// Document can retire before this task runs.
+        source_group_id: u64,
         client_security: Option<NavigationSecuritySnapshot>,
         source: Option<VisitSource>,
         referrer_source: NavigationReferrerSource,
@@ -83,6 +86,9 @@ pub(crate) enum Task {
         target_iframe: Option<(usize, u64)>,
         target_auxiliary_id: Option<u64>,
         source_document_id: usize,
+        /// The sender's group when the message was queued. The source may
+        /// close before delivery, while the target must remain in this group.
+        source_group_id: u64,
         source_iframe_id: Option<usize>,
         source_auxiliary_id: Option<u64>,
         sender_security_origin: Option<DocumentSecurityOrigin>,
@@ -378,6 +384,7 @@ impl EventLoop {
         id: u64,
         url: String,
         client_document_id: usize,
+        source_group_id: u64,
         client_security: Option<NavigationSecuritySnapshot>,
         source: Option<VisitSource>,
         referrer_source: NavigationReferrerSource,
@@ -388,6 +395,7 @@ impl EventLoop {
                 id,
                 url,
                 client_document_id,
+                source_group_id,
                 client_security,
                 source,
                 referrer_source,

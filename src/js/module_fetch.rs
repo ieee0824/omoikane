@@ -1,7 +1,11 @@
 //! Bounded HTTP workers for module graphs. Only HTTP data crosses threads;
 //! Boa module records, parsing, and evaluation stay on the owning JS thread.
 
-use crate::http::{Client, CookieJar, CookieRequestContext, HttpRequest, HttpResponse};
+use crate::http::corp::EmbedderPolicyValue;
+use crate::http::cors::{self, CredentialsMode, Origin, PreflightCache, RedirectMode, RequestMode};
+use crate::http::{
+    Client, CookieJar, CookieRequestContext, HttpRequest, HttpResponse, HttpTransport,
+};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,7 +85,16 @@ struct Request {
     url: String,
     public_only: bool,
     cookie_context: Option<CookieRequestContext>,
+    isolation: Option<ModuleIsolation>,
     fetch: ModuleFetch,
+}
+
+/// The requesting document's origin, enforced COEP and graph credentials.
+#[derive(Clone)]
+pub(super) struct ModuleIsolation {
+    pub origin: Origin,
+    pub embedder: EmbedderPolicyValue,
+    pub credentials: CredentialsMode,
 }
 
 #[derive(Debug)]
@@ -92,6 +105,22 @@ pub(super) struct ModuleFetchPool {
 
 impl ModuleFetchPool {
     pub fn new(cookies: Arc<Mutex<CookieJar>>) -> std::io::Result<Self> {
+        Self::new_with_transport(cookies, None)
+    }
+
+    /// Uses a synthetic transport to exercise whole module graphs in tests.
+    #[cfg(test)]
+    pub(super) fn new_for_test(
+        cookies: Arc<Mutex<CookieJar>>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> std::io::Result<Self> {
+        Self::new_with_transport(cookies, Some(transport))
+    }
+
+    fn new_with_transport(
+        cookies: Arc<Mutex<CookieJar>>,
+        transport: Option<Arc<dyn HttpTransport>>,
+    ) -> std::io::Result<Self> {
         let (sender, receiver) = mpsc::channel::<Request>();
         let receiver = Arc::new(Mutex::new(receiver));
         let live = Arc::new(AtomicBool::new(true));
@@ -99,10 +128,15 @@ impl ModuleFetchPool {
             let receiver = receiver.clone();
             let cookies = cookies.clone();
             let live = live.clone();
+            let transport = transport.clone();
             std::thread::Builder::new()
                 .name(format!("omoikane-module-{index}"))
                 .spawn(move || {
                     let mut client = Client::new();
+                    if let Some(transport) = transport {
+                        client.set_transport(Some(transport));
+                    }
+                    client.set_shared_cookie_store(cookies.clone());
                     loop {
                         // Release the receiver lock before doing any I/O so
                         // all workers can service independent requests.
@@ -127,9 +161,25 @@ impl ModuleFetchPool {
                             if let Some(context) = request.cookie_context.as_ref() {
                                 context.apply(&mut http);
                             }
-                            let response = client
-                                .send_with_shared_cookies(http, &cookies)
-                                .map_err(|error| Arc::<str>::from(error.to_string()))?;
+                            let response = if let Some(isolation) = request.isolation.as_ref() {
+                                cors::fetch_with_embedder_policy(
+                                    &mut client,
+                                    http,
+                                    &isolation.origin,
+                                    RequestMode::Cors,
+                                    isolation.credentials,
+                                    RedirectMode::Follow,
+                                    &mut PreflightCache::default(),
+                                    isolation.embedder,
+                                    None,
+                                )
+                                .map_err(|error| Arc::<str>::from(error.to_string()))?
+                                .response
+                            } else {
+                                client
+                                    .send_with_shared_cookies(http, &cookies)
+                                    .map_err(|error| Arc::<str>::from(error.to_string()))?
+                            };
                             Ok(Arc::new(FetchedModule {
                                 response,
                                 elapsed: started.elapsed(),
@@ -148,6 +198,17 @@ impl ModuleFetchPool {
         public_only: bool,
         cookie_context: Option<CookieRequestContext>,
     ) -> ModuleFetch {
+        self.fetch_with_isolation(url, public_only, cookie_context, None)
+    }
+
+    /// Downloads a module under a COEP owner's CORS policy.
+    pub fn fetch_with_isolation(
+        &self,
+        url: String,
+        public_only: bool,
+        cookie_context: Option<CookieRequestContext>,
+        isolation: Option<ModuleIsolation>,
+    ) -> ModuleFetch {
         let fetch = ModuleFetch::default();
         if self
             .sender
@@ -155,6 +216,7 @@ impl ModuleFetchPool {
                 url,
                 public_only,
                 cookie_context,
+                isolation,
                 fetch: fetch.clone(),
             })
             .is_err()
@@ -316,6 +378,63 @@ mod tests {
         assert!(cookies.contains("post=1"));
         assert!(!cookies.contains("worker=1"));
         assert!(!cookies.contains("nested=1"));
+    }
+
+    #[test]
+    fn module_fetch_requires_cors_response_permission_with_or_without_coep() {
+        let listener = bind_loopback().unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let owner: Url = format!("http://localhost:{port}/page").parse().unwrap();
+        let origin = Origin::from_url(&owner);
+        let access_control = origin.serialize();
+        let server = FixtureWorker::spawn(move || {
+            for _ in 0..4 {
+                let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                let permitted = request.starts_with("GET /permitted.js ");
+                let header = if permitted {
+                    format!("Access-Control-Allow-Origin: {access_control}\r\n")
+                } else {
+                    String::new()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\n{header}Content-Type: text/javascript\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+        });
+        let pool = ModuleFetchPool::new(Arc::new(Mutex::new(CookieJar::new()))).unwrap();
+        for embedder in [
+            EmbedderPolicyValue::RequireCorp,
+            EmbedderPolicyValue::UnsafeNone,
+        ] {
+            let isolation = Some(ModuleIsolation {
+                origin: origin.clone(),
+                embedder,
+                credentials: CredentialsMode::SameOrigin,
+            });
+            for (path, allowed) in [("permitted.js", true), ("denied.js", false)] {
+                let url = format!("http://127.0.0.1:{port}/{path}");
+                let mut fetch = pool.fetch_with_isolation(
+                    url,
+                    false,
+                    Some(CookieRequestContext::new(Some(owner.clone()), None, false)),
+                    isolation.clone(),
+                );
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let mut context = Context::from_waker(Waker::noop());
+                    if let Poll::Ready(result) = Pin::new(&mut fetch).poll(&mut context) {
+                        assert_eq!(result.is_ok(), allowed, "{embedder:?} {path}: {result:?}");
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "module fetch timed out");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+        server.join();
     }
 
     #[test]
