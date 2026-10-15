@@ -131,35 +131,181 @@ fn worklet_status(ok: bool, name: &str, message: &str, duplicate: bool) -> JsVal
     .into()
 }
 
-fn worklet_error_name(error: &str) -> &'static str {
-    for name in [
-        "InvalidModificationError",
-        "InvalidStateError",
-        "DataCloneError",
-        "SecurityError",
-        "NotAllowedError",
-        "OperationError",
-        "NetworkError",
-        "AbortError",
-        "AggregateError",
-        "EvalError",
-        "RangeError",
-        "ReferenceError",
-        "SyntaxError",
-        "TypeError",
-        "URIError",
-        "Error",
-    ] {
-        if error.starts_with(name) || error.contains(&format!("name: \"{name}\"")) {
-            return name;
-        }
+/// Reads immutable native tags and own data properties without running getters
+/// installed by an earlier module in the shared Worklet global.
+fn worklet_javascript_error_details(error: &JsError) -> (String, String) {
+    if let Some(native) = error.as_native() {
+        return (native.kind.to_string(), native.message().to_owned());
     }
-    "OperationError"
+    let Some(object) = error.as_opaque().and_then(JsValue::as_object) else {
+        return ("Error".into(), "Worklet module preparation failed".into());
+    };
+    use boa_engine::builtins::error::{Error, ErrorKind};
+    let Some(data) = object.downcast_ref::<Error>() else {
+        return ("Error".into(), "Worklet module preparation failed".into());
+    };
+    let name = [
+        (ErrorKind::Syntax, "SyntaxError"),
+        (ErrorKind::Type, "TypeError"),
+        (ErrorKind::Reference, "ReferenceError"),
+        (ErrorKind::Range, "RangeError"),
+        (ErrorKind::Eval, "EvalError"),
+        (ErrorKind::Uri, "URIError"),
+    ]
+    .into_iter()
+    .find(|(kind, _)| *data == Error::new(*kind))
+    .map_or("Error", |(_, name)| name);
+    let message = object
+        .borrow()
+        .properties()
+        .get(&js_string!("message").into())
+        .and_then(|property| property.value().and_then(JsValue::as_string))
+        .map_or_else(String::new, |value| value.to_std_string_escaped());
+    (name.to_owned(), message)
 }
 
-/// Fetches a Worklet module with module-script CORS credentials. A redirected
-/// cross-origin request omits cookies, and public-address checks remain active
-/// after leaving the initial origin.
+fn worklet_javascript_error_status(error: JsError) -> JsValue {
+    let (name, message) = worklet_javascript_error_details(&error);
+    js_string!(
+        serde_json::json!({
+            "ok": false, "duplicate": false, "javascript": true,
+            "name": name, "message": message,
+        })
+        .to_string()
+    )
+    .into()
+}
+
+/// Resolves with the owner's base URL before decoding or fetching any payload.
+fn resolve_worklet_module_url(
+    requested: &str,
+    base: Option<&crate::http::Url>,
+) -> Result<url::Url, url::ParseError> {
+    match base {
+        Some(base) => url::Url::parse(&base.to_string())?.join(requested),
+        None => url::Url::parse(requested),
+    }
+}
+
+fn decode_worklet_module_source(bytes: &[u8], mime: &str) -> Result<String, WorkletFetchError> {
+    let essence = mime.split(';').next().unwrap_or("");
+    if !is_javascript_mime_type(essence) {
+        return Err(WorkletFetchError::Network);
+    }
+    // HTML modules use UTF-8, independent of Content-Type's charset parameter.
+    let source = String::from_utf8_lossy(bytes);
+    Ok(source
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&source)
+        .to_owned())
+}
+
+fn check_worklet_module_response(
+    policy: &CspPolicy,
+    checks: &mut Vec<WorkletPolicyCheck>,
+    reference: &str,
+    redirects: usize,
+    initial: &str,
+) -> Result<(), WorkletFetchError> {
+    checks.push(WorkletPolicyCheck {
+        reference: reference.to_owned(),
+        redirects,
+        initial_url: initial.to_owned(),
+    });
+    if policy.allows_reference_after_redirects(ResourceType::Script, reference, redirects) {
+        Ok(())
+    } else {
+        Err(WorkletFetchError::Policy)
+    }
+}
+
+fn fetch_worklet_data_module(
+    initial: &url::Url,
+    policy: &CspPolicy,
+    checks: &mut Vec<WorkletPolicyCheck>,
+) -> Result<(String, String), WorkletFetchError> {
+    let mut payload_url = initial.clone();
+    payload_url.set_fragment(None);
+    let data =
+        crate::http::parse_data_uri(payload_url.as_str()).ok_or(WorkletFetchError::Network)?;
+    check_worklet_module_response(policy, checks, initial.as_str(), 0, initial.as_str())?;
+    let source = decode_worklet_module_source(&data.data, &data.mime_type)?;
+    Ok((initial.to_string(), source))
+}
+
+/// Fetches with module-script CORS credentials and pre-I/O redirect checks.
+fn fetch_worklet_http_module(
+    state: &mut HostState,
+    initial: &url::Url,
+    base: Option<&crate::http::Url>,
+    cookie_context: &crate::http::CookieRequestContext,
+    origin: &CorsOrigin,
+    policy: &CspPolicy,
+    checks: &mut Vec<WorkletPolicyCheck>,
+) -> Result<(String, String), WorkletFetchError> {
+    let request_url = initial
+        .as_str()
+        .parse::<crate::http::Url>()
+        .map_err(|_| WorkletFetchError::Network)?;
+    let mut request = HttpRequest::new(Method::Get, request_url.clone());
+    if requires_public_fetch(&request_url, base) {
+        request.require_public_ip();
+    }
+    cookie_context.apply(&mut request);
+    let fetched = {
+        let mut check_redirect = |url: &crate::http::Url, redirects: usize| {
+            let reference = url.to_string();
+            checks.push(WorkletPolicyCheck {
+                reference: reference.clone(),
+                redirects,
+                initial_url: initial.to_string(),
+            });
+            policy.allows_reference_after_redirects(ResourceType::Script, &reference, redirects)
+        };
+        crate::http::cors::fetch_with_timeout_restricting_redirects_checked(
+            &mut state.http_client,
+            request,
+            origin,
+            RequestMode::Cors,
+            CredentialsMode::SameOrigin,
+            RedirectMode::Follow,
+            &mut PreflightCache::default(),
+            None,
+            &mut check_redirect,
+        )
+    };
+    let response = fetched
+        .map_err(|error| match error {
+            crate::http::cors::CorsError::RequestPolicy => WorkletFetchError::Policy,
+            _ => WorkletFetchError::Network,
+        })?
+        .response;
+    let effective = if response.redirect_count() == 0 {
+        initial.to_string()
+    } else {
+        response
+            .effective_url()
+            .map_or_else(|| request_url.to_string(), ToString::to_string)
+    };
+    check_worklet_module_response(
+        policy,
+        checks,
+        &effective,
+        response.redirect_count(),
+        initial.as_str(),
+    )?;
+    if !(200..=299).contains(&response.status_code()) {
+        state.http_client.report_resource_failure();
+        return Err(WorkletFetchError::Network);
+    }
+    let source = decode_worklet_module_source(
+        response.body(),
+        response.header("content-type").unwrap_or(""),
+    )
+    .inspect_err(|_| state.http_client.report_resource_failure())?;
+    Ok((effective, source))
+}
+
 fn fetch_worklet_module_source(
     state: &mut HostState,
     requested: &str,
@@ -169,86 +315,23 @@ fn fetch_worklet_module_source(
     policy: &CspPolicy,
     checks: &mut Vec<WorkletPolicyCheck>,
 ) -> Result<(String, String), WorkletFetchError> {
-    match resolve_resource_ref(requested, base).ok_or(WorkletFetchError::Network)? {
-        ResolvedResource::Data { .. } => fetch_script_resource_with_client_in_context(
-            requested,
-            base,
-            Some(cookie_context),
-            &mut state.http_client,
-        )
-        .map(|(url, source, _, _)| (url, source))
-        .ok_or(WorkletFetchError::Network),
-        ResolvedResource::Url(initial) => {
-            let initial = initial
-                .parse::<crate::http::Url>()
-                .map_err(|_| WorkletFetchError::Network)?;
-            let mut request = HttpRequest::new(Method::Get, initial.clone());
-            if requires_public_fetch(&initial, base) {
-                request.require_public_ip();
-            }
-            cookie_context.apply(&mut request);
-            let fetched = {
-                let mut check_redirect = |url: &crate::http::Url, redirects: usize| {
-                    let reference = url.to_string();
-                    checks.push(WorkletPolicyCheck {
-                        reference: reference.clone(),
-                        redirects,
-                        initial_url: initial.to_string(),
-                    });
-                    policy.allows_reference_after_redirects(
-                        ResourceType::Script,
-                        &reference,
-                        redirects,
-                    )
-                };
-                crate::http::cors::fetch_with_timeout_restricting_redirects_checked(
-                    &mut state.http_client,
-                    request,
-                    origin,
-                    RequestMode::Cors,
-                    CredentialsMode::SameOrigin,
-                    RedirectMode::Follow,
-                    &mut PreflightCache::default(),
-                    None,
-                    &mut check_redirect,
-                )
-            };
-            let response = fetched
-                .map_err(|error| match error {
-                    crate::http::cors::CorsError::RequestPolicy => WorkletFetchError::Policy,
-                    _ => WorkletFetchError::Network,
-                })?
-                .response;
-            let effective = response
-                .effective_url()
-                .map_or_else(|| initial.to_string(), ToString::to_string);
-            // Fetch reports request-stage and response-stage report-only
-            // violations separately, including when both check the same URL.
-            checks.push(WorkletPolicyCheck {
-                reference: effective.clone(),
-                redirects: response.redirect_count(),
-                initial_url: initial.to_string(),
-            });
-            if !policy.allows_reference_after_redirects(
-                ResourceType::Script,
-                &effective,
-                response.redirect_count(),
-            ) {
-                return Err(WorkletFetchError::Policy);
-            }
-            if response.status_code() != 200 {
+    let initial = url::Url::parse(requested).map_err(|_| WorkletFetchError::Network)?;
+    match initial.scheme() {
+        "data" => fetch_worklet_data_module(&initial, policy, checks).inspect_err(|error| {
+            if matches!(error, WorkletFetchError::Network) {
                 state.http_client.report_resource_failure();
-                return Err(WorkletFetchError::Network);
             }
-            let source = match std::str::from_utf8(response.body()) {
-                Ok(source) => source.to_owned(),
-                Err(_) => {
-                    state.http_client.report_resource_failure();
-                    return Err(WorkletFetchError::Network);
-                }
-            };
-            Ok((effective, source))
-        }
+        }),
+        "http" | "https" => fetch_worklet_http_module(
+            state,
+            &initial,
+            base,
+            cookie_context,
+            origin,
+            policy,
+            checks,
+        ),
+        _ => Err(WorkletFetchError::Network),
     }
 }
 
@@ -380,6 +463,53 @@ fn report_worklet_redirect_checks(
     }
 }
 
+fn load_worklet_dependencies(runtime: &mut JsRuntime, module: &Module) -> Result<(), JsValue> {
+    let promise = runtime.with_active_host_value(|context| module.load(context));
+    // The host, rather than author code, owns this intermediate promise.
+    promise.mark_handled();
+    runtime
+        .run_jobs()
+        .map_err(|error| worklet_status(false, "OperationError", &error.to_string(), false))?;
+    match promise.state() {
+        PromiseState::Fulfilled(_) => Ok(()),
+        PromiseState::Rejected(value) => {
+            let fetch_failed = value.as_object().is_some_and(|object| {
+                runtime
+                    .module_loader
+                    .worklet_fetch_errors
+                    .borrow()
+                    .contains_key(&object)
+            });
+            if fetch_failed {
+                Err(worklet_status(
+                    false,
+                    "AbortError",
+                    "Failed to fetch Worklet module graph",
+                    false,
+                ))
+            } else {
+                Err(worklet_javascript_error_status(JsError::from_opaque(value)))
+            }
+        }
+        PromiseState::Pending => Err(worklet_status(
+            false,
+            "OperationError",
+            "Worklet module loading remained pending",
+            false,
+        )),
+    }
+}
+
+fn report_worklet_evaluation_error(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let error = JsError::from_opaque(args.first().cloned().unwrap_or_else(JsValue::undefined));
+    script_errors::report_exception(context, &error)?;
+    Ok(JsValue::undefined())
+}
+
 fn evaluate_worklet_module(
     runtime_handle: &WorkletRuntimeHandle,
     source: &str,
@@ -387,19 +517,39 @@ fn evaluate_worklet_module(
     resolved_url: String,
     graph: ModuleGraphContext,
 ) -> JsValue {
-    let evaluation = {
-        let mut runtime = runtime_handle.borrow_mut();
-        let document = runtime.document();
-        let (result, _, _) =
-            runtime.eval_module_timed_with_context(source, effective_url, document, graph);
-        result
+    let mut runtime = runtime_handle.borrow_mut();
+    let document = runtime.document();
+    runtime
+        .module_loader
+        .set_context_for_module_graph(document.identity(), effective_url, graph);
+    let module = match Module::parse(
+        Source::from_reader(source.as_bytes(), Some(Path::new(effective_url))),
+        None,
+        &mut runtime.context,
+    ) {
+        Ok(module) => module,
+        Err(error) => return worklet_javascript_error_status(error),
     };
-    if let Err(error) = evaluation {
-        let message = error.to_string();
-        return worklet_status(false, worklet_error_name(&message), &message, false);
+    let _document = activate_module_document(&runtime.host_state, document.identity());
+    if let Err(status) = load_worklet_dependencies(&mut runtime, &module) {
+        return status;
     }
-    runtime_handle
-        .borrow()
+    if let Err(error) = runtime.with_active_host(|context| module.link(context)) {
+        return worklet_javascript_error_status(error);
+    }
+    runtime.with_active_host_value(|context| {
+        let evaluation = module.evaluate(context);
+        let report = NativeFunction::from_fn_ptr(report_worklet_evaluation_error)
+            .to_js_function(context.realm());
+        evaluation.catch(report, context).mark_handled();
+    });
+    // HTML resolves addModule after starting evaluation. Runtime exceptions
+    // are reported in the Worklet global, including later async rejections.
+    if let Err(error) = runtime.run_jobs() {
+        return worklet_status(false, "OperationError", &error.to_string(), false);
+    }
+    runtime.host_state.borrow_mut().pending_javascript_dialog = None;
+    runtime
         .host_state
         .borrow_mut()
         .worklet
@@ -475,13 +625,12 @@ fn worklet_add_module_native(
                 false,
             ));
         }
-        let resolved_url = match resolve_resource_ref(&requested_url, base_url.as_ref()) {
-            Some(ResolvedResource::Data { .. }) => requested_url.clone(),
-            Some(ResolvedResource::Url(url)) => url,
-            None => {
+        let resolved_url = match resolve_worklet_module_url(&requested_url, base_url.as_ref()) {
+            Ok(url) => url.to_string(),
+            Err(_) => {
                 return Ok(worklet_status(
                     false,
-                    "SecurityError",
+                    "SyntaxError",
                     "Worklet module URL cannot be resolved",
                     false,
                 ));
@@ -497,9 +646,9 @@ fn worklet_add_module_native(
             Err(status) => return Ok(status),
         };
         // A module map hit is resolved entirely from the deterministic cache:
-        // do not refetch a resource that has already executed successfully.
+        // do not refetch a resource whose graph was already prepared.
         // This also ensures a repeated `addModule()` call cannot observe a
-        // changing network response after the first successful registration.
+        // changing network response after the first addModule completion.
         if let Some(runtime) = owner_state.borrow().worklet.runtime.clone() {
             let runtime_ref = runtime.borrow();
             let worklet_state = runtime_ref.host_state.borrow();
@@ -522,7 +671,7 @@ fn worklet_add_module_native(
             let mut state = owner_state.borrow_mut();
             fetch_worklet_module_source(
                 &mut state,
-                &requested_url,
+                &resolved_url,
                 base_url.as_ref(),
                 &cookie_context,
                 &origin,
@@ -549,7 +698,7 @@ fn worklet_add_module_native(
             Err(WorkletFetchError::Network) => {
                 return Ok(worklet_status(
                     false,
-                    "TypeError",
+                    "AbortError",
                     &format!("failed to fetch Worklet module: {requested_url}"),
                     false,
                 ));
@@ -878,7 +1027,10 @@ mod tests {
             Ok(HttpResponse::new(
                 200,
                 "OK",
-                vec![("Access-Control-Allow-Origin".into(), "*".into())],
+                vec![
+                    ("Access-Control-Allow-Origin".into(), "*".into()),
+                    ("Content-Type".into(), "text/javascript".into()),
+                ],
                 source.as_bytes().to_vec(),
             ))
         }
@@ -949,7 +1101,7 @@ mod tests {
                      event.blockedURI, event.disposition])); \
                  new ReportingObserver(batch => workletReports.push(...batch)).observe(); \
                  CSS.paintWorklet.addModule('/root.js').then( \
-                   () => workletResult = 'loaded', error => workletResult = error.name);",
+                   () => workletResult = 'loaded', error => { workletResult = error.name; globalThis.workletErrorIsDom=error instanceof DOMException; globalThis.workletErrorIsNative=error instanceof Error; });",
                 )
                 .unwrap();
             self.runtime.run_until_idle().unwrap();
@@ -973,9 +1125,24 @@ mod tests {
             "script-src-elem 'self' data:",
             false,
             "import {value} from 'data:text/javascript,export%20const%20value%3D42'; \
-             if(value!==42)throw new Error('wrong data export');",
+             globalThis.verifiedDataExport=value;",
         );
         fixture.load();
+        let child = fixture
+            .runtime
+            .host_state
+            .borrow()
+            .worklet
+            .runtime
+            .clone()
+            .unwrap();
+        assert!(
+            child
+                .borrow_mut()
+                .eval("verifiedDataExport===42")
+                .unwrap()
+                .to_boolean()
+        );
         assert!(
             fixture
                 .runtime
@@ -1013,9 +1180,24 @@ mod tests {
             "script-src-elem 'self'; report-to graph",
             true,
             "import {value} from 'data:text/javascript,export%20const%20value%3D42'; \
-             if(value!==42)throw new Error('wrong data export');",
+             globalThis.verifiedDataExport=value;",
         );
         fixture.load();
+        let child = fixture
+            .runtime
+            .host_state
+            .borrow()
+            .worklet
+            .runtime
+            .clone()
+            .unwrap();
+        assert!(
+            child
+                .borrow_mut()
+                .eval("verifiedDataExport===42")
+                .unwrap()
+                .to_boolean()
+        );
         assert!(fixture.runtime.eval(
             "workletResult==='loaded' && workletEvents.length===2 && \
              workletEvents.every(event => JSON.stringify(event)=== \
@@ -1031,9 +1213,24 @@ mod tests {
             "script-src-elem 'self' data:",
             false,
             "import {value} from 'data:text/javascript;base64,ZXhwb3J0IGNvbnN0IHZhbHVlPTQyOw=='; \
-             if(value!==42)throw new Error('wrong base64 export');",
+             globalThis.verifiedDataExport=value;",
         );
         fixture.load();
+        let child = fixture
+            .runtime
+            .host_state
+            .borrow()
+            .worklet
+            .runtime
+            .clone()
+            .unwrap();
+        assert!(
+            child
+                .borrow_mut()
+                .eval("verifiedDataExport===42")
+                .unwrap()
+                .to_boolean()
+        );
         assert!(
             fixture
                 .runtime
@@ -1051,11 +1248,26 @@ mod tests {
         let second = serde_json::to_string(&format!("{data}#two")).unwrap();
         let source = format!(
             "import * as a from {first}; import * as b from {first}; import * as c from {second}; \
-             if(a.id!==b.id || a.id===c.id || dataRuns!==2 || \
-                !a.url.endsWith('#one') || !c.url.endsWith('#two'))throw new Error('wrong module identity');"
+             globalThis.verifiedDataIdentity=a.id===b.id && a.id!==c.id && dataRuns===2 && \
+                a.url.endsWith('#one') && c.url.endsWith('#two');"
         );
         let mut fixture = GraphFixture::new("script-src-elem 'self' data:", false, &source);
         fixture.load();
+        let child = fixture
+            .runtime
+            .host_state
+            .borrow()
+            .worklet
+            .runtime
+            .clone()
+            .unwrap();
+        assert!(
+            child
+                .borrow_mut()
+                .eval("verifiedDataIdentity===true")
+                .unwrap()
+                .to_boolean()
+        );
         assert!(
             fixture
                 .runtime
@@ -1118,6 +1330,46 @@ mod tests {
     }
 
     #[test]
+    fn worklet_graph_same_scheme_relative_import_uses_the_owner_origin() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self'",
+            false,
+            "import {imported} from 'https:dir/../import.js';globalThis.ownerImportValue=imported;",
+        );
+        fixture.load();
+        assert!(
+            fixture
+                .runtime
+                .eval("workletResult==='loaded' && workletEvents.length===0")
+                .unwrap()
+                .to_boolean()
+        );
+        let child = fixture
+            .runtime
+            .host_state
+            .borrow()
+            .worklet
+            .runtime
+            .clone()
+            .unwrap();
+        assert!(
+            child
+                .borrow_mut()
+                .eval("ownerImportValue===true")
+                .unwrap()
+                .to_boolean()
+        );
+        assert_eq!(
+            *fixture.requests.lock().unwrap(),
+            vec![
+                "https://isolated.example.test/bootstrap.js",
+                "https://isolated.example.test/root.js",
+                "https://isolated.example.test/import.js"
+            ]
+        );
+    }
+
+    #[test]
     fn worklet_graph_data_module_keeps_owner_csp_for_absolute_http_import() {
         let mut fixture = GraphFixture::new(
             "script-src-elem 'self' data:",
@@ -1168,6 +1420,237 @@ mod tests {
             Some("https://isolated.example.test")
         );
         assert!(cross.public_only);
+    }
+
+    #[test]
+    fn worklet_graph_loading_failures_reject_with_abort_error() {
+        for (policy, source) in [
+            (
+                "script-src-elem 'self'",
+                "import 'https://other.example.test/import.js';",
+            ),
+            ("script-src-elem 'self'", "import './missing.js';"),
+            (
+                "script-src-elem 'self' data:",
+                "import 'data:text/plain,export%20const%20value%3D42';",
+            ),
+        ] {
+            let mut fixture = GraphFixture::new(policy, false, source);
+            fixture.load();
+            let actual = fixture
+                .runtime
+                .eval("workletResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped();
+            assert_eq!(actual, "AbortError", "module: {source}");
+        }
+    }
+
+    #[test]
+    fn worklet_graph_parse_link_and_resolution_errors_keep_native_kind() {
+        for (source, expected) in [
+            ("import 'data:text/javascript,export%20%3D';", "SyntaxError"),
+            ("const =", "SyntaxError"),
+            (
+                "import {missing} from 'data:text/javascript,export%20const%20value%3D42';",
+                "SyntaxError",
+            ),
+            (
+                "import 'data:text/javascript,import%20%27./import.js%27;';",
+                "TypeError",
+            ),
+        ] {
+            let mut fixture = GraphFixture::new("script-src-elem 'self' data:", false, source);
+            fixture.load();
+            let actual = fixture
+                .runtime
+                .eval("workletResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped();
+            assert_eq!(actual, expected, "module: {source}");
+            assert!(
+                fixture
+                    .runtime
+                    .eval("!workletErrorIsDom && workletErrorIsNative")
+                    .unwrap()
+                    .to_boolean()
+            );
+        }
+    }
+
+    #[test]
+    fn worklet_root_http_and_cors_failures_reject_with_abort_error() {
+        for url in ["/missing.js", "https://other.example.test/missing.js"] {
+            let mut fixture = GraphFixture::new("script-src-elem *", false, "");
+            fixture
+                .runtime
+                .eval(&format!(
+                    "globalThis.rootResult='pending';CSS.paintWorklet.addModule({}).then( \
+                 ()=>rootResult='loaded',error=>rootResult=error.name);",
+                    serde_json::to_string(url).unwrap(),
+                ))
+                .unwrap();
+            fixture.runtime.run_until_idle().unwrap();
+            let actual = fixture
+                .runtime
+                .eval("rootResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped();
+            assert_eq!(actual, "AbortError", "module: {url}");
+            assert!(
+                fixture
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.ends_with(url.trim_start_matches('/')))
+            );
+        }
+    }
+
+    #[test]
+    fn worklet_runtime_exceptions_are_reported_without_rejecting_add_module() {
+        for source in [
+            "throw new TypeError('author failure');",
+            "throw new SyntaxError('author failure');",
+            "throw {name:'AbortError',message:'author failure'};",
+            "throw 'author failure';",
+            "await Promise.reject(new TypeError('author failure'));",
+        ] {
+            let mut fixture = GraphFixture::new("script-src-elem 'self'", false, source);
+            let child = fixture
+                .runtime
+                .host_state
+                .borrow()
+                .worklet
+                .runtime
+                .clone()
+                .unwrap();
+            child.borrow_mut().eval("globalThis.runtimeErrors=[];globalThis.runtimeRejections=[];addEventListener('error',e=>{runtimeErrors.push(e.message);e.preventDefault()});addEventListener('unhandledrejection',e=>runtimeRejections.push(e.reason));").unwrap();
+            fixture.load();
+            assert!(
+                fixture
+                    .runtime
+                    .eval("workletResult==='loaded'")
+                    .unwrap()
+                    .to_boolean(),
+                "{source}"
+            );
+            assert!(child.borrow_mut().eval("runtimeErrors.length===1 && runtimeErrors[0]==='author failure' && runtimeRejections.length===0").unwrap().to_boolean(), "{source}");
+        }
+    }
+
+    #[test]
+    fn worklet_pending_evaluation_resolves_add_module_and_reports_later_rejection() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self'",
+            false,
+            "await new Promise((_, reject)=>{globalThis.rejectEvaluation=reject});",
+        );
+        fixture.load();
+        assert!(
+            fixture
+                .runtime
+                .eval("workletResult==='loaded'")
+                .unwrap()
+                .to_boolean()
+        );
+        let child = fixture
+            .runtime
+            .host_state
+            .borrow()
+            .worklet
+            .runtime
+            .clone()
+            .unwrap();
+        child.borrow_mut().eval("globalThis.runtimeErrors=[];addEventListener('error',e=>{runtimeErrors.push(e.message);e.preventDefault()});rejectEvaluation(new Error('late failure'));").unwrap();
+        fixture.runtime.run_until_idle().unwrap();
+        assert!(
+            child
+                .borrow_mut()
+                .eval("runtimeErrors.join(',')==='late failure'")
+                .unwrap()
+                .to_boolean()
+        );
+    }
+
+    #[test]
+    fn worklet_cached_fetch_failure_remains_abort_error_after_collection() {
+        let mut fixture =
+            GraphFixture::new("script-src-elem 'self'", false, "import './missing.js';");
+        fixture.load();
+        boa_gc::force_collect();
+        fixture.runtime.eval("globalThis.retry='pending';CSS.paintWorklet.addModule('/root.js').catch(e=>retry=e.name);").unwrap();
+        fixture.runtime.run_until_idle().unwrap();
+        assert!(
+            fixture
+                .runtime
+                .eval("retry==='AbortError'")
+                .unwrap()
+                .to_boolean()
+        );
+    }
+
+    #[test]
+    fn worklet_preparation_errors_ignore_mutated_error_prototypes_and_constructors() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self' data:",
+            false,
+            "import 'data:text/javascript,export%20%3D';",
+        );
+        let child = fixture
+            .runtime
+            .host_state
+            .borrow()
+            .worklet
+            .runtime
+            .clone()
+            .unwrap();
+        child.borrow_mut().eval("globalThis.errorGetterCalls=0;for(const key of ['cause','constructor'])Object.defineProperty(Error.prototype,key,{get(){errorGetterCalls++;throw new Error('must not read getter')}});").unwrap();
+        fixture.runtime.eval("globalThis.OriginalSyntaxError=SyntaxError;globalThis.SyntaxError=function(){throw new Error('must not call author constructor')};").unwrap();
+        fixture.load();
+        assert!(
+            fixture
+                .runtime
+                .eval("workletResult==='SyntaxError' && workletErrorIsNative && !workletErrorIsDom")
+                .unwrap()
+                .to_boolean()
+        );
+        assert!(
+            child
+                .borrow_mut()
+                .eval("errorGetterCalls===0")
+                .unwrap()
+                .to_boolean()
+        );
+    }
+
+    #[test]
+    fn worklet_fetch_failure_tags_are_released_with_the_document() {
+        let mut fixture =
+            GraphFixture::new("script-src-elem 'self'", false, "import './missing.js';");
+        fixture.load();
+        let child = fixture
+            .runtime
+            .host_state
+            .borrow()
+            .worklet
+            .runtime
+            .clone()
+            .unwrap();
+        let child = child.borrow();
+        let document_id = child.document().identity();
+        assert!(!child.module_loader.worklet_fetch_errors.borrow().is_empty());
+        child
+            .module_loader
+            .clear_csp_context_for_document(document_id);
+        assert!(child.module_loader.worklet_fetch_errors.borrow().is_empty());
     }
 
     #[test]
@@ -1487,6 +1970,264 @@ mod tests {
         );
     }
 
+    struct RootModuleTransport {
+        status: u16,
+        mime: Option<&'static str>,
+        body: Vec<u8>,
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl HttpTransport for RootModuleTransport {
+        fn send(
+            &self,
+            request: &HttpRequest,
+            _: Option<Duration>,
+        ) -> Result<HttpResponse, HttpParseError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push(request.url().to_string());
+            let headers = self
+                .mime
+                .map(|mime| vec![("Content-Type".into(), mime.into())])
+                .unwrap_or_default();
+            Ok(HttpResponse::new(
+                self.status,
+                "Fixture",
+                headers,
+                self.body.clone(),
+            ))
+        }
+    }
+
+    fn root_module_fixture(
+        status: u16,
+        mime: Option<&'static str>,
+        body: &[u8],
+    ) -> (JsRuntime, Arc<Mutex<Vec<String>>>) {
+        let mut runtime = JsRuntime::with_document_and_url(
+            blank_html_document(),
+            "https://isolated.example.test/page",
+        )
+        .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        runtime.set_http_resource_transport(Some(Arc::new(RootModuleTransport {
+            status,
+            mime,
+            body: body.to_vec(),
+            requests: Arc::clone(&requests),
+        })));
+        (runtime, requests)
+    }
+
+    fn load_root_module(runtime: &mut JsRuntime, url: &str) {
+        runtime.eval(&format!("globalThis.rootResult='pending';CSS.paintWorklet.addModule({}).then(()=>rootResult='loaded',e=>{{rootResult=e.name;globalThis.rootErrorIsDom=e instanceof DOMException;}});", serde_json::to_string(url).unwrap())).unwrap();
+        runtime.run_until_idle().unwrap();
+    }
+
+    #[test]
+    fn worklet_root_url_syntax_is_distinct_from_data_decode_and_scheme_failure() {
+        for (url, expected) in [
+            ("http://[", "SyntaxError"),
+            ("data:text/javascript;base64,%%%", "AbortError"),
+            ("about:blank", "AbortError"),
+            ("file:///module.js", "AbortError"),
+        ] {
+            let (mut runtime, requests) = root_module_fixture(
+                200,
+                Some("text/javascript"),
+                b"registerPaint('unexpected',class{});",
+            );
+            load_root_module(&mut runtime, url);
+            assert_eq!(
+                runtime
+                    .eval("rootResult")
+                    .unwrap()
+                    .as_string()
+                    .unwrap()
+                    .to_std_string_escaped(),
+                expected,
+                "{url}"
+            );
+            assert!(
+                runtime
+                    .eval("rootErrorIsDom && CSS.paintWorklet.moduleCount===0")
+                    .unwrap()
+                    .to_boolean()
+            );
+            assert!(requests.lock().unwrap().is_empty(), "{url}");
+        }
+    }
+
+    #[test]
+    fn worklet_root_http_requires_a_javascript_mime_type() {
+        for mime in [
+            None,
+            Some("text/plain"),
+            Some("application/json"),
+            Some("text/javascript, text/plain"),
+        ] {
+            let (mut runtime, _) =
+                root_module_fixture(200, mime, b"registerPaint('unexpected',class{});");
+            load_root_module(&mut runtime, "/module.js");
+            assert!(runtime.eval("rootResult==='AbortError' && rootErrorIsDom && CSS.paintWorklet.moduleCount===0").unwrap().to_boolean(), "{mime:?}");
+            assert!(runtime.host_state.borrow().worklet.runtime.is_none());
+        }
+    }
+
+    #[test]
+    fn worklet_root_accepts_ok_statuses_and_mime_parameters() {
+        for status in [200, 201, 204, 299] {
+            let (mut runtime, _) =
+                root_module_fixture(status, Some("Text/JavaScript; charset=windows-1252"), b"");
+            load_root_module(&mut runtime, "/module.js");
+            assert!(
+                runtime
+                    .eval("rootResult==='loaded' && CSS.paintWorklet.moduleCount===1")
+                    .unwrap()
+                    .to_boolean(),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn worklet_root_decodes_utf8_with_replacement() {
+        let (mut runtime, _) = root_module_fixture(
+            200,
+            Some("text/javascript; charset=windows-1252"),
+            b"globalThis.decoded='\xff';registerPaint('decoded',class{});",
+        );
+        load_root_module(&mut runtime, "/module.js");
+        assert!(runtime.eval("rootResult==='loaded' && CSS.paintWorklet.registeredNames.join(',')==='decoded'").unwrap().to_boolean());
+        let child = runtime.host_state.borrow().worklet.runtime.clone().unwrap();
+        assert_eq!(
+            child
+                .borrow_mut()
+                .eval("decoded")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "\u{fffd}"
+        );
+    }
+
+    #[test]
+    fn worklet_root_data_decodes_invalid_utf8_with_replacement() {
+        let (mut runtime, requests) = root_module_fixture(200, Some("text/javascript"), b"");
+        load_root_module(
+            &mut runtime,
+            "data:text/javascript,globalThis.decoded%3D%27%FF%27;registerPaint('decoded',class{});",
+        );
+        assert!(runtime.eval("rootResult==='loaded' && CSS.paintWorklet.registeredNames.join(',')==='decoded'").unwrap().to_boolean());
+        let child = runtime.host_state.borrow().worklet.runtime.clone().unwrap();
+        assert_eq!(
+            child
+                .borrow_mut()
+                .eval("decoded")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "\u{fffd}"
+        );
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn worklet_root_utf8_bom_does_not_remove_bom_inside_the_script() {
+        let (mut runtime, _) = root_module_fixture(
+            200,
+            Some("application/javascript"),
+            b"\xef\xbb\xbfglobalThis.bomText='\xef\xbb\xbf';registerPaint('bom',class{});",
+        );
+        load_root_module(&mut runtime, "/module.js");
+        assert!(
+            runtime
+                .eval("rootResult==='loaded' && CSS.paintWorklet.registeredNames.join(',')==='bom'")
+                .unwrap()
+                .to_boolean()
+        );
+        let child = runtime.host_state.borrow().worklet.runtime.clone().unwrap();
+        assert!(
+            child
+                .borrow_mut()
+                .eval("bomText.length===1 && bomText.charCodeAt(0)===65279")
+                .unwrap()
+                .to_boolean()
+        );
+    }
+
+    #[test]
+    fn worklet_root_standard_resolution_preserves_fragment_identity() {
+        let source = b"globalThis.rootRuns=(globalThis.rootRuns||0)+1;globalThis.rootUrls=globalThis.rootUrls||[];rootUrls.push(import.meta.url);registerPaint('root-'+rootRuns,class{});";
+        let (mut runtime, requests) = root_module_fixture(200, Some("text/javascript"), source);
+        for url in [
+            "https:dir/../module.js?version=1#one",
+            "./module.js?version=1#one",
+            "./module.js?version=1#two",
+        ] {
+            load_root_module(&mut runtime, url);
+        }
+        assert!(runtime.eval("rootResult==='loaded' && CSS.paintWorklet.moduleCount===2 && CSS.paintWorklet.registeredNames.join(',')==='root-1,root-2'").unwrap().to_boolean());
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec!["https://isolated.example.test/module.js?version=1"; 2]
+        );
+        let child = runtime.host_state.borrow().worklet.runtime.clone().unwrap();
+        assert!(child.borrow_mut().eval("JSON.stringify(rootUrls)===JSON.stringify(['https://isolated.example.test/module.js?version=1#one','https://isolated.example.test/module.js?version=1#two'])").unwrap().to_boolean());
+    }
+
+    #[test]
+    fn worklet_root_data_fragment_is_excluded_from_source_and_retained_in_identity() {
+        let (mut runtime, requests) = root_module_fixture(200, Some("text/javascript"), b"");
+        let data = "data:text/javascript,globalThis.rootRuns=(globalThis.rootRuns||0)+1;globalThis.rootUrls=globalThis.rootUrls||[];rootUrls.push(import.meta.url);registerPaint('data-'+rootRuns,class{});";
+        for fragment in ["one", "one", "two"] {
+            load_root_module(&mut runtime, &format!("{data}#{fragment}"));
+        }
+        assert!(runtime.eval("rootResult==='loaded' && CSS.paintWorklet.moduleCount===2 && CSS.paintWorklet.registeredNames.join(',')==='data-1,data-2'").unwrap().to_boolean());
+        assert!(requests.lock().unwrap().is_empty());
+        let child = runtime.host_state.borrow().worklet.runtime.clone().unwrap();
+        assert!(child.borrow_mut().eval("rootUrls.length===2 && rootUrls[0].endsWith('#one') && rootUrls[1].endsWith('#two')").unwrap().to_boolean());
+    }
+
+    #[test]
+    fn worklet_root_decodes_unpadded_base64_data() {
+        let (mut runtime, requests) = root_module_fixture(200, Some("text/javascript"), b"");
+        load_root_module(
+            &mut runtime,
+            "data:text/javascript;base64,Z2xvYmFsVGhpcy51bnBhZGRlZD00Mjs",
+        );
+        assert!(runtime.eval("rootResult==='loaded'").unwrap().to_boolean());
+        let child = runtime.host_state.borrow().worklet.runtime.clone().unwrap();
+        assert!(
+            child
+                .borrow_mut()
+                .eval("unpadded===42")
+                .unwrap()
+                .to_boolean()
+        );
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn worklet_root_data_report_only_checks_both_fetch_stages() {
+        let (mut runtime, requests) = root_module_fixture(200, Some("text/javascript"), b"");
+        runtime.install_document_response_headers(&[(
+            "Content-Security-Policy-Report-Only".into(),
+            "script-src-elem 'self'; report-to observations".into(),
+        )]);
+        runtime.eval("globalThis.rootEvents=[];globalThis.rootReports=[];document.addEventListener('securitypolicyviolation',e=>rootEvents.push([e.target===document,e.blockedURI,e.disposition]));new ReportingObserver(batch=>rootReports.push(...batch)).observe();").unwrap();
+        load_root_module(
+            &mut runtime,
+            "data:text/javascript,registerPaint('data',class{});",
+        );
+        security_reporting::wait_for_report_delivery(&mut runtime);
+        assert!(runtime.eval("rootResult==='loaded' && CSS.paintWorklet.registeredNames.join(',')==='data' && JSON.stringify(rootEvents)==='[[true,\"data\",\"report\"],[true,\"data\",\"report\"]]' && rootReports.length===2 && rootReports.every(r=>r.body.blockedURL==='data')").unwrap().to_boolean());
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn owner_script_src_elem_blocks_worklet_before_request() {
         struct CountingTransport(Arc<AtomicUsize>);
@@ -1520,7 +2261,7 @@ mod tests {
             .eval(
                 "globalThis.workletResult = 'pending'; \
                  CSS.paintWorklet.addModule('/blocked.js').then( \
-                   () => workletResult = 'loaded', error => workletResult = error.name);",
+                   () => workletResult = 'loaded', error => { workletResult = error.name; globalThis.workletErrorIsDom=error instanceof DOMException; globalThis.workletErrorIsNative=error instanceof Error; });",
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
@@ -1561,10 +2302,13 @@ mod tests {
                     "/blocked.js" => HttpResponse::new(
                         200,
                         "OK",
-                        vec![(
-                            "Access-Control-Allow-Origin".into(),
-                            "https://isolated.example.test".into(),
-                        )],
+                        vec![
+                            ("Content-Type".into(), "text/javascript".into()),
+                            (
+                                "Access-Control-Allow-Origin".into(),
+                                "https://isolated.example.test".into(),
+                            ),
+                        ],
                         b"registerPaint('blocked', class {});".to_vec(),
                     ),
                     path => panic!("unexpected Worklet module path: {path}"),
@@ -1585,7 +2329,7 @@ mod tests {
             .eval(
                 "globalThis.workletResult = 'pending'; \
                  CSS.paintWorklet.addModule('/entry.js').then( \
-                   () => workletResult = 'loaded', error => workletResult = error.name);",
+                   () => workletResult = 'loaded', error => { workletResult = error.name; globalThis.workletErrorIsDom=error instanceof DOMException; globalThis.workletErrorIsNative=error instanceof Error; });",
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
@@ -1629,10 +2373,13 @@ mod tests {
                     "/module.js" => HttpResponse::new(
                         200,
                         "OK",
-                        vec![(
-                            "Access-Control-Allow-Origin".into(),
-                            "https://isolated.example.test".into(),
-                        )],
+                        vec![
+                            ("Content-Type".into(), "text/javascript".into()),
+                            (
+                                "Access-Control-Allow-Origin".into(),
+                                "https://isolated.example.test".into(),
+                            ),
+                        ],
                         b"registerPaint('allowed', class {});".to_vec(),
                     ),
                     "/reports" => HttpResponse::new(204, "No Content", Vec::new(), Vec::new()),
@@ -1668,7 +2415,7 @@ mod tests {
                      event.blockedURI, event.disposition])); \
                  new ReportingObserver(batch => workletReports.push(...batch)).observe(); \
                  CSS.paintWorklet.addModule('/entry.js').then( \
-                   () => workletResult = 'loaded', error => workletResult = error.name);",
+                   () => workletResult = 'loaded', error => { workletResult = error.name; globalThis.workletErrorIsDom=error instanceof DOMException; globalThis.workletErrorIsNative=error instanceof Error; });",
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
@@ -1730,10 +2477,13 @@ mod tests {
                     "/module.js" => HttpResponse::new(
                         200,
                         "OK",
-                        vec![(
-                            "Access-Control-Allow-Origin".into(),
-                            "https://isolated.example.test".into(),
-                        )],
+                        vec![
+                            ("Content-Type".into(), "text/javascript".into()),
+                            (
+                                "Access-Control-Allow-Origin".into(),
+                                "https://isolated.example.test".into(),
+                            ),
+                        ],
                         b"registerPaint('test', class {});".to_vec(),
                     ),
                     path => panic!("unexpected Worklet module path: {path}"),
@@ -1830,10 +2580,13 @@ mod tests {
                 Ok(HttpResponse::new(
                     200,
                     "OK",
-                    vec![(
-                        "Access-Control-Allow-Origin".into(),
-                        "https://isolated.example.test".into(),
-                    )],
+                    vec![
+                        ("Content-Type".into(), "text/javascript".into()),
+                        (
+                            "Access-Control-Allow-Origin".into(),
+                            "https://isolated.example.test".into(),
+                        ),
+                    ],
                     b"registerPaint('direct', class {});".to_vec(),
                 ))
             }

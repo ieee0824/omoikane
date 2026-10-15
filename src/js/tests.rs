@@ -354,7 +354,7 @@ fn worklet_rejects_cors_denied_and_insecure_modules() {
         )
         .unwrap();
     cross_origin.run_jobs().unwrap();
-    assert_eq!(eval_str(&mut cross_origin, "workletError"), "TypeError");
+    assert_eq!(eval_str(&mut cross_origin, "workletError"), "AbortError");
     assert_eq!(
         cross_origin
             .eval("CSS.paintWorklet.moduleCount")
@@ -378,7 +378,7 @@ fn worklet_rejects_cors_denied_and_insecure_modules() {
 }
 
 #[test]
-fn worklet_rejects_duplicate_registration_names() {
+fn worklet_reports_duplicate_registration_without_rejecting_add_module() {
     let mut runtime = JsRuntime::new().unwrap();
     runtime
         .eval(
@@ -389,10 +389,8 @@ fn worklet_rejects_duplicate_registration_names() {
         )
         .unwrap();
     runtime.run_until_idle().unwrap();
-    assert_eq!(
-        eval_str(&mut runtime, "workletError"),
-        "InvalidModificationError"
-    );
+    assert_eq!(eval_str(&mut runtime, "workletError"), "");
+    assert!(runtime.eval("CSS.paintWorklet.moduleCount===2 && CSS.paintWorklet.registeredNames.join(',')==='same-name'").unwrap().to_boolean());
 }
 
 #[test]
