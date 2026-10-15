@@ -244,3 +244,88 @@ fn csp_reports_use_final_document_response_status_after_navigation_redirect() {
         })
     );
 }
+
+#[test]
+fn reporting_automation_generates_before_page_microtasks_and_requires_opt_in() {
+    let document = TreeBuilder::parse("<!doctype html><body></body>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://example.test/reporting#fragment")
+            .unwrap();
+    assert_eq!(
+        runtime
+            .eval("typeof __omoikane_automation_generate_test_report")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "undefined"
+    );
+    runtime.enable_reporting_automation().unwrap();
+    runtime
+        .eval("globalThis.test_driver_internal = {}; globalThis.add_completion_callback = callback => globalThis.finishAutomation = callback;")
+        .unwrap();
+    runtime
+        .eval(include_str!("wpt_smoke/testdriver_vendor.js"))
+        .unwrap();
+    runtime
+        .eval(
+            r#"
+            globalThis.notifications = 0;
+            globalThis.reportObserver = new ReportingObserver(() => notifications++);
+            reportObserver.observe();
+            globalThis.commandResolved = false;
+            test_driver_internal.generate_test_report('quoted "message"')
+                .then(() => commandResolved = true);
+            globalThis.recordsBeforeHostTick = null;
+            Promise.resolve().then(() => recordsBeforeHostTick = reportObserver.takeRecords());
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.eval("notifications").unwrap().as_number(),
+        Some(0.0)
+    );
+    runtime.run_jobs().unwrap();
+    assert_eq!(
+        runtime.eval(r#"commandResolved && recordsBeforeHostTick.length === 1 && recordsBeforeHostTick[0].type === 'test' && recordsBeforeHostTick[0].url === 'https://example.test/reporting' && recordsBeforeHostTick[0].body.message === 'quoted "message"' && notifications === 0"#).unwrap().as_boolean(),
+        Some(true)
+    );
+    runtime.eval("finishAutomation(); globalThis.lateCommandResolved = false; test_driver_internal.generate_test_report('after completion').then(() => lateCommandResolved = true);").unwrap();
+    runtime.run_jobs().unwrap();
+    assert_eq!(
+        runtime
+            .eval("reportObserver.takeRecords().length === 0 && !lateCommandResolved")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
+fn reporting_task_pump_yields_without_losing_self_scheduled_notifications() {
+    let document = TreeBuilder::parse("<!doctype html><body></body>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    runtime.enable_reporting_automation().unwrap();
+    runtime.set_task_pump_limit(std::num::NonZeroUsize::new(3));
+    runtime
+        .eval(
+            r#"
+        globalThis.reportsSeen = 0;
+        globalThis.keepReporting = true;
+        new ReportingObserver(() => {
+            reportsSeen++;
+            if (keepReporting) __omoikane_automation_generate_test_report('next');
+        }).observe();
+        __omoikane_automation_generate_test_report('first');
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(runtime.eval("reportsSeen").unwrap().as_number(), Some(3.0));
+    runtime.run_until_idle().unwrap();
+    assert_eq!(runtime.eval("reportsSeen").unwrap().as_number(), Some(6.0));
+    runtime.eval("keepReporting = false;").unwrap();
+    runtime.set_task_pump_limit(None);
+    runtime.run_until_idle().unwrap();
+    assert_eq!(runtime.eval("reportsSeen").unwrap().as_number(), Some(7.0));
+}

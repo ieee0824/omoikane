@@ -7295,6 +7295,7 @@ pub struct JsRuntime {
     host_state: Rc<RefCell<HostState>>,
     module_loader: Rc<HttpModuleLoader>,
     sandbox: SandboxConfig,
+    task_pump_limit: usize,
 }
 
 /// Operation on the browser-owned page search session.
@@ -7500,6 +7501,7 @@ impl JsRuntime {
             host_state,
             module_loader,
             sandbox,
+            task_pump_limit: usize::MAX,
         };
         let bindings = register_host_bindings(&mut runtime.context, &runtime.host_state)?;
         {
@@ -9641,7 +9643,17 @@ impl JsRuntime {
         self.run_until_idle()
     }
 
-    /// Runs queued macrotasks and pending promise jobs until idle.
+    /// Limits macrotasks drained by each synchronous or asynchronous task pump.
+    ///
+    /// Pending tasks retain their FIFO order for the next pump. Embedders can
+    /// regain control from self-scheduling pages between turns. `None` restores
+    /// the default unlimited drain; microtask checkpoints are unaffected.
+    pub fn set_task_pump_limit(&mut self, limit: Option<std::num::NonZeroUsize>) {
+        self.task_pump_limit = limit.map_or(usize::MAX, std::num::NonZeroUsize::get);
+    }
+
+    /// Runs queued macrotasks and pending promise jobs until idle or the
+    /// configured [`Self::set_task_pump_limit`] is reached.
     ///
     /// Propagates the first error thrown by a timer callback or source string.
     pub fn run_until_idle(&mut self) -> JsResult<()> {
@@ -9655,7 +9667,7 @@ impl JsRuntime {
         self.run_worker_background_tasks();
         self.run_worklet_background_tasks();
         self.run_shared_worker_background_tasks();
-        loop {
+        for _ in 0..self.task_pump_limit {
             if self.is_terminated_worker() {
                 break;
             }
@@ -9787,7 +9799,7 @@ impl JsRuntime {
         self.dispatch_cookie_changes()?;
         self.run_worklet_background_tasks();
         self.run_shared_worker_background_tasks();
-        loop {
+        for _ in 0..self.task_pump_limit {
             if self.is_terminated_worker() {
                 break;
             }

@@ -388,28 +388,65 @@ impl JsRuntime {
     /// Observer notification is queued in the document realm. Delivery is
     /// best-effort, using the same document endpoints and CORS rules as CSP.
     pub fn generate_test_report_for_group(&mut self, message: &str, group: &str) -> JsResult<()> {
-        let document_id = self.document().identity();
-        let report_url = self
-            .host_state
-            .borrow()
-            .report_url_for_document(document_id);
-        let serialized_message = serde_json::to_string(message).map_err(|error| {
-            JsNativeError::error().with_message(format!("report message serialization: {error}"))
-        })?;
-        self.eval(&format!(
-            "__omoikane_generate_test_report({serialized_message}, {report_url:?})"
-        ))?;
-        let report = {
-            let state = self.host_state.borrow();
-            serde_json::json!({
-                "type": "test", "url": report_url, "age": 0,
-                "user_agent": state.navigator_user_agent,
-                "body": {"body_message": message}
-            })
-        };
-        self.deliver_modern_report(document_id, group, report);
-        Ok(())
+        let args = [js_string!(message).into(), js_string!(group).into()];
+        self.with_active_host(|context| {
+            generate_test_report_native(&JsValue::undefined(), &args, context).map(|_| ())
+        })
     }
+
+    /// Enables a report-generation command binding for an automation driver.
+    ///
+    /// This is opt-in: ordinary runtimes do not expose the automation binding.
+    /// Commands enqueue genuine observer notifications and endpoint delivery
+    /// immediately, so page microtasks cannot overtake a queued host command.
+    pub fn enable_reporting_automation(&mut self) -> JsResult<()> {
+        self.with_active_host(|context| {
+            context.register_global_builtin_callable(
+                js_string!("__omoikane_automation_generate_test_report"),
+                1,
+                NativeFunction::from_copy_closure(generate_test_report_native),
+            )
+        })
+    }
+}
+
+fn generate_test_report_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let message = string_argument(args.first(), "", context)?;
+    let group = string_argument(args.get(1), "default", context)?;
+    let (document_id, report_url) = with_host_state(|state| {
+        let state = state.borrow();
+        let document_id = state.document.identity();
+        Ok((document_id, state.report_url_for_document(document_id)))
+    })?;
+    let dispatcher = context
+        .global_object()
+        .get(js_string!("__omoikane_generate_test_report"), context)?;
+    let callable = dispatcher.as_callable().ok_or_else(|| {
+        JsNativeError::typ().with_message("test report observer dispatcher is not callable")
+    })?;
+    callable.call(
+        &JsValue::undefined(),
+        &[
+            js_string!(message.as_str()).into(),
+            js_string!(report_url.as_str()).into(),
+        ],
+        context,
+    )?;
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let report = serde_json::json!({
+            "type": "test", "url": report_url, "age": 0,
+            "user_agent": state.navigator_user_agent,
+            "body": {"body_message": message}
+        });
+        state.queue_modern_report(document_id, &group, report);
+        Ok(())
+    })?;
+    Ok(JsValue::undefined())
 }
 
 fn report_to_group(policy: &str) -> Option<String> {
