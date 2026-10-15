@@ -131,30 +131,49 @@ fn worklet_status(ok: bool, name: &str, message: &str, duplicate: bool) -> JsVal
     .into()
 }
 
-fn worklet_error_name(error: &str) -> &'static str {
-    for name in [
-        "InvalidModificationError",
-        "InvalidStateError",
-        "DataCloneError",
-        "SecurityError",
-        "NotAllowedError",
-        "OperationError",
-        "NetworkError",
-        "AbortError",
-        "AggregateError",
-        "EvalError",
-        "RangeError",
-        "ReferenceError",
-        "SyntaxError",
-        "TypeError",
-        "URIError",
-        "Error",
-    ] {
-        if error.starts_with(name) || error.contains(&format!("name: \"{name}\"")) {
-            return name;
-        }
+/// Reads immutable native tags and own data properties without running getters
+/// installed by an earlier module in the shared Worklet global.
+fn worklet_javascript_error_details(error: &JsError) -> (String, String) {
+    if let Some(native) = error.as_native() {
+        return (native.kind.to_string(), native.message().to_owned());
     }
-    "OperationError"
+    let Some(object) = error.as_opaque().and_then(JsValue::as_object) else {
+        return ("Error".into(), "Worklet module preparation failed".into());
+    };
+    use boa_engine::builtins::error::{Error, ErrorKind};
+    let Some(data) = object.downcast_ref::<Error>() else {
+        return ("Error".into(), "Worklet module preparation failed".into());
+    };
+    let name = [
+        (ErrorKind::Syntax, "SyntaxError"),
+        (ErrorKind::Type, "TypeError"),
+        (ErrorKind::Reference, "ReferenceError"),
+        (ErrorKind::Range, "RangeError"),
+        (ErrorKind::Eval, "EvalError"),
+        (ErrorKind::Uri, "URIError"),
+    ]
+    .into_iter()
+    .find(|(kind, _)| *data == Error::new(*kind))
+    .map_or("Error", |(_, name)| name);
+    let message = object
+        .borrow()
+        .properties()
+        .get(&js_string!("message").into())
+        .and_then(|property| property.value().and_then(JsValue::as_string))
+        .map_or_else(String::new, |value| value.to_std_string_escaped());
+    (name.to_owned(), message)
+}
+
+fn worklet_javascript_error_status(error: JsError) -> JsValue {
+    let (name, message) = worklet_javascript_error_details(&error);
+    js_string!(
+        serde_json::json!({
+            "ok": false, "duplicate": false, "javascript": true,
+            "name": name, "message": message,
+        })
+        .to_string()
+    )
+    .into()
 }
 
 /// Fetches a Worklet module with module-script CORS credentials. A redirected
@@ -380,6 +399,53 @@ fn report_worklet_redirect_checks(
     }
 }
 
+fn load_worklet_dependencies(runtime: &mut JsRuntime, module: &Module) -> Result<(), JsValue> {
+    let promise = runtime.with_active_host_value(|context| module.load(context));
+    // The host, rather than author code, owns this intermediate promise.
+    promise.mark_handled();
+    runtime
+        .run_jobs()
+        .map_err(|error| worklet_status(false, "OperationError", &error.to_string(), false))?;
+    match promise.state() {
+        PromiseState::Fulfilled(_) => Ok(()),
+        PromiseState::Rejected(value) => {
+            let fetch_failed = value.as_object().is_some_and(|object| {
+                runtime
+                    .module_loader
+                    .worklet_fetch_errors
+                    .borrow()
+                    .contains_key(&object)
+            });
+            if fetch_failed {
+                Err(worklet_status(
+                    false,
+                    "AbortError",
+                    "Failed to fetch Worklet module graph",
+                    false,
+                ))
+            } else {
+                Err(worklet_javascript_error_status(JsError::from_opaque(value)))
+            }
+        }
+        PromiseState::Pending => Err(worklet_status(
+            false,
+            "OperationError",
+            "Worklet module loading remained pending",
+            false,
+        )),
+    }
+}
+
+fn report_worklet_evaluation_error(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let error = JsError::from_opaque(args.first().cloned().unwrap_or_else(JsValue::undefined));
+    script_errors::report_exception(context, &error)?;
+    Ok(JsValue::undefined())
+}
+
 fn evaluate_worklet_module(
     runtime_handle: &WorkletRuntimeHandle,
     source: &str,
@@ -387,19 +453,39 @@ fn evaluate_worklet_module(
     resolved_url: String,
     graph: ModuleGraphContext,
 ) -> JsValue {
-    let evaluation = {
-        let mut runtime = runtime_handle.borrow_mut();
-        let document = runtime.document();
-        let (result, _, _) =
-            runtime.eval_module_timed_with_context(source, effective_url, document, graph);
-        result
+    let mut runtime = runtime_handle.borrow_mut();
+    let document = runtime.document();
+    runtime
+        .module_loader
+        .set_context_for_module_graph(document.identity(), effective_url, graph);
+    let module = match Module::parse(
+        Source::from_reader(source.as_bytes(), Some(Path::new(effective_url))),
+        None,
+        &mut runtime.context,
+    ) {
+        Ok(module) => module,
+        Err(error) => return worklet_javascript_error_status(error),
     };
-    if let Err(error) = evaluation {
-        let message = error.to_string();
-        return worklet_status(false, worklet_error_name(&message), &message, false);
+    let _document = activate_module_document(&runtime.host_state, document.identity());
+    if let Err(status) = load_worklet_dependencies(&mut runtime, &module) {
+        return status;
     }
-    runtime_handle
-        .borrow()
+    if let Err(error) = runtime.with_active_host(|context| module.link(context)) {
+        return worklet_javascript_error_status(error);
+    }
+    runtime.with_active_host_value(|context| {
+        let evaluation = module.evaluate(context);
+        let report = NativeFunction::from_fn_ptr(report_worklet_evaluation_error)
+            .to_js_function(context.realm());
+        evaluation.catch(report, context).mark_handled();
+    });
+    // HTML resolves addModule after starting evaluation. Runtime exceptions
+    // are reported in the Worklet global, including later async rejections.
+    if let Err(error) = runtime.run_jobs() {
+        return worklet_status(false, "OperationError", &error.to_string(), false);
+    }
+    runtime.host_state.borrow_mut().pending_javascript_dialog = None;
+    runtime
         .host_state
         .borrow_mut()
         .worklet
@@ -481,7 +567,7 @@ fn worklet_add_module_native(
             None => {
                 return Ok(worklet_status(
                     false,
-                    "SecurityError",
+                    "SyntaxError",
                     "Worklet module URL cannot be resolved",
                     false,
                 ));
@@ -549,7 +635,7 @@ fn worklet_add_module_native(
             Err(WorkletFetchError::Network) => {
                 return Ok(worklet_status(
                     false,
-                    "TypeError",
+                    "AbortError",
                     &format!("failed to fetch Worklet module: {requested_url}"),
                     false,
                 ));
@@ -949,7 +1035,7 @@ mod tests {
                      event.blockedURI, event.disposition])); \
                  new ReportingObserver(batch => workletReports.push(...batch)).observe(); \
                  CSS.paintWorklet.addModule('/root.js').then( \
-                   () => workletResult = 'loaded', error => workletResult = error.name);",
+                   () => workletResult = 'loaded', error => { workletResult = error.name; globalThis.workletErrorIsDom=error instanceof DOMException; globalThis.workletErrorIsNative=error instanceof Error; });",
                 )
                 .unwrap();
             self.runtime.run_until_idle().unwrap();
@@ -1168,6 +1254,237 @@ mod tests {
             Some("https://isolated.example.test")
         );
         assert!(cross.public_only);
+    }
+
+    #[test]
+    fn worklet_graph_loading_failures_reject_with_abort_error() {
+        for (policy, source) in [
+            (
+                "script-src-elem 'self'",
+                "import 'https://other.example.test/import.js';",
+            ),
+            ("script-src-elem 'self'", "import './missing.js';"),
+            (
+                "script-src-elem 'self' data:",
+                "import 'data:text/plain,export%20const%20value%3D42';",
+            ),
+        ] {
+            let mut fixture = GraphFixture::new(policy, false, source);
+            fixture.load();
+            let actual = fixture
+                .runtime
+                .eval("workletResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped();
+            assert_eq!(actual, "AbortError", "module: {source}");
+        }
+    }
+
+    #[test]
+    fn worklet_graph_parse_link_and_resolution_errors_keep_native_kind() {
+        for (source, expected) in [
+            ("import 'data:text/javascript,export%20%3D';", "SyntaxError"),
+            ("const =", "SyntaxError"),
+            (
+                "import {missing} from 'data:text/javascript,export%20const%20value%3D42';",
+                "SyntaxError",
+            ),
+            (
+                "import 'data:text/javascript,import%20%27./import.js%27;';",
+                "TypeError",
+            ),
+        ] {
+            let mut fixture = GraphFixture::new("script-src-elem 'self' data:", false, source);
+            fixture.load();
+            let actual = fixture
+                .runtime
+                .eval("workletResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped();
+            assert_eq!(actual, expected, "module: {source}");
+            assert!(
+                fixture
+                    .runtime
+                    .eval("!workletErrorIsDom && workletErrorIsNative")
+                    .unwrap()
+                    .to_boolean()
+            );
+        }
+    }
+
+    #[test]
+    fn worklet_root_http_and_cors_failures_reject_with_abort_error() {
+        for url in ["/missing.js", "https://other.example.test/missing.js"] {
+            let mut fixture = GraphFixture::new("script-src-elem *", false, "");
+            fixture
+                .runtime
+                .eval(&format!(
+                    "globalThis.rootResult='pending';CSS.paintWorklet.addModule({}).then( \
+                 ()=>rootResult='loaded',error=>rootResult=error.name);",
+                    serde_json::to_string(url).unwrap(),
+                ))
+                .unwrap();
+            fixture.runtime.run_until_idle().unwrap();
+            let actual = fixture
+                .runtime
+                .eval("rootResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped();
+            assert_eq!(actual, "AbortError", "module: {url}");
+            assert!(
+                fixture
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.ends_with(url.trim_start_matches('/')))
+            );
+        }
+    }
+
+    #[test]
+    fn worklet_runtime_exceptions_are_reported_without_rejecting_add_module() {
+        for source in [
+            "throw new TypeError('author failure');",
+            "throw new SyntaxError('author failure');",
+            "throw {name:'AbortError',message:'author failure'};",
+            "throw 'author failure';",
+            "await Promise.reject(new TypeError('author failure'));",
+        ] {
+            let mut fixture = GraphFixture::new("script-src-elem 'self'", false, source);
+            let child = fixture
+                .runtime
+                .host_state
+                .borrow()
+                .worklet
+                .runtime
+                .clone()
+                .unwrap();
+            child.borrow_mut().eval("globalThis.runtimeErrors=[];globalThis.runtimeRejections=[];addEventListener('error',e=>{runtimeErrors.push(e.message);e.preventDefault()});addEventListener('unhandledrejection',e=>runtimeRejections.push(e.reason));").unwrap();
+            fixture.load();
+            assert!(
+                fixture
+                    .runtime
+                    .eval("workletResult==='loaded'")
+                    .unwrap()
+                    .to_boolean(),
+                "{source}"
+            );
+            assert!(child.borrow_mut().eval("runtimeErrors.length===1 && runtimeErrors[0]==='author failure' && runtimeRejections.length===0").unwrap().to_boolean(), "{source}");
+        }
+    }
+
+    #[test]
+    fn worklet_pending_evaluation_resolves_add_module_and_reports_later_rejection() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self'",
+            false,
+            "await new Promise((_, reject)=>{globalThis.rejectEvaluation=reject});",
+        );
+        fixture.load();
+        assert!(
+            fixture
+                .runtime
+                .eval("workletResult==='loaded'")
+                .unwrap()
+                .to_boolean()
+        );
+        let child = fixture
+            .runtime
+            .host_state
+            .borrow()
+            .worklet
+            .runtime
+            .clone()
+            .unwrap();
+        child.borrow_mut().eval("globalThis.runtimeErrors=[];addEventListener('error',e=>{runtimeErrors.push(e.message);e.preventDefault()});rejectEvaluation(new Error('late failure'));").unwrap();
+        fixture.runtime.run_until_idle().unwrap();
+        assert!(
+            child
+                .borrow_mut()
+                .eval("runtimeErrors.join(',')==='late failure'")
+                .unwrap()
+                .to_boolean()
+        );
+    }
+
+    #[test]
+    fn worklet_cached_fetch_failure_remains_abort_error_after_collection() {
+        let mut fixture =
+            GraphFixture::new("script-src-elem 'self'", false, "import './missing.js';");
+        fixture.load();
+        boa_gc::force_collect();
+        fixture.runtime.eval("globalThis.retry='pending';CSS.paintWorklet.addModule('/root.js').catch(e=>retry=e.name);").unwrap();
+        fixture.runtime.run_until_idle().unwrap();
+        assert!(
+            fixture
+                .runtime
+                .eval("retry==='AbortError'")
+                .unwrap()
+                .to_boolean()
+        );
+    }
+
+    #[test]
+    fn worklet_preparation_errors_ignore_mutated_error_prototypes_and_constructors() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self' data:",
+            false,
+            "import 'data:text/javascript,export%20%3D';",
+        );
+        let child = fixture
+            .runtime
+            .host_state
+            .borrow()
+            .worklet
+            .runtime
+            .clone()
+            .unwrap();
+        child.borrow_mut().eval("globalThis.errorGetterCalls=0;for(const key of ['cause','constructor'])Object.defineProperty(Error.prototype,key,{get(){errorGetterCalls++;throw new Error('must not read getter')}});").unwrap();
+        fixture.runtime.eval("globalThis.OriginalSyntaxError=SyntaxError;globalThis.SyntaxError=function(){throw new Error('must not call author constructor')};").unwrap();
+        fixture.load();
+        assert!(
+            fixture
+                .runtime
+                .eval("workletResult==='SyntaxError' && workletErrorIsNative && !workletErrorIsDom")
+                .unwrap()
+                .to_boolean()
+        );
+        assert!(
+            child
+                .borrow_mut()
+                .eval("errorGetterCalls===0")
+                .unwrap()
+                .to_boolean()
+        );
+    }
+
+    #[test]
+    fn worklet_fetch_failure_tags_are_released_with_the_document() {
+        let mut fixture =
+            GraphFixture::new("script-src-elem 'self'", false, "import './missing.js';");
+        fixture.load();
+        let child = fixture
+            .runtime
+            .host_state
+            .borrow()
+            .worklet
+            .runtime
+            .clone()
+            .unwrap();
+        let child = child.borrow();
+        let document_id = child.document().identity();
+        assert!(!child.module_loader.worklet_fetch_errors.borrow().is_empty());
+        child
+            .module_loader
+            .clear_csp_context_for_document(document_id);
+        assert!(child.module_loader.worklet_fetch_errors.borrow().is_empty());
     }
 
     #[test]
@@ -1520,7 +1837,7 @@ mod tests {
             .eval(
                 "globalThis.workletResult = 'pending'; \
                  CSS.paintWorklet.addModule('/blocked.js').then( \
-                   () => workletResult = 'loaded', error => workletResult = error.name);",
+                   () => workletResult = 'loaded', error => { workletResult = error.name; globalThis.workletErrorIsDom=error instanceof DOMException; globalThis.workletErrorIsNative=error instanceof Error; });",
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
@@ -1585,7 +1902,7 @@ mod tests {
             .eval(
                 "globalThis.workletResult = 'pending'; \
                  CSS.paintWorklet.addModule('/entry.js').then( \
-                   () => workletResult = 'loaded', error => workletResult = error.name);",
+                   () => workletResult = 'loaded', error => { workletResult = error.name; globalThis.workletErrorIsDom=error instanceof DOMException; globalThis.workletErrorIsNative=error instanceof Error; });",
             )
             .unwrap();
         runtime.run_until_idle().unwrap();
@@ -1668,7 +1985,7 @@ mod tests {
                      event.blockedURI, event.disposition])); \
                  new ReportingObserver(batch => workletReports.push(...batch)).observe(); \
                  CSS.paintWorklet.addModule('/entry.js').then( \
-                   () => workletResult = 'loaded', error => workletResult = error.name);",
+                   () => workletResult = 'loaded', error => { workletResult = error.name; globalThis.workletErrorIsDom=error instanceof DOMException; globalThis.workletErrorIsNative=error instanceof Error; });",
             )
             .unwrap();
         runtime.run_until_idle().unwrap();

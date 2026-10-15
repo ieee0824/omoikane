@@ -958,6 +958,9 @@ struct HttpModuleLoader {
     csp_contexts: RefCell<HashMap<(usize, String), ModuleGraphContext>>,
     csp_violations: RefCell<Vec<security_reporting::ModuleCspViolation>>,
     csp_violation_keys: RefCell<HashSet<ModuleViolationKey>>,
+    /// Exact host-created fetch failures, retained alongside cached module
+    /// errors until their Document is discarded. Author exceptions are never tagged.
+    worklet_fetch_errors: RefCell<HashMap<JsObject, (usize, boa_gc::Rooted<JsObject>)>>,
 }
 
 impl ModuleLoader for HttpModuleLoader {
@@ -1047,6 +1050,7 @@ impl ModuleLoader for HttpModuleLoader {
                     graph,
                     &resolved_string,
                     ModulePolicyStage::Request,
+                    context,
                 )?;
             }
 
@@ -1082,71 +1086,23 @@ impl ModuleLoader for HttpModuleLoader {
             let public_only = requires_public_fetch(&resolved, referrer_url.as_ref());
             let key = (module_document_id, resolved_string.clone());
             let wait_start = Instant::now();
-            let fetch = self.start_module_fetch(
-                module_document_id,
-                resolved_string.clone(),
-                public_only,
-                csp_context.as_ref().map(|(_, graph)| graph),
-            )?;
-            let result = fetch.clone().await;
-            // A retry may already have replaced a failed request while another
-            // waiter was suspended. Only remove this particular download.
-            let mut pending = self.pending.borrow_mut();
-            if pending
-                .get(&key)
-                .is_some_and(|current| current.same_request(&fetch))
-            {
-                pending.remove(&key);
-            }
-            drop(pending);
-            self.ensure_document_is_live(module_document_id)
-                .inspect_err(|_| self.report_import_load_failure())?;
-            self.ensure_worklet_graph_owner_is_live(csp_context.as_ref().map(|(_, graph)| graph))?;
-            if let Some((document_id, graph)) = csp_context.as_ref()
-                && !self.observe_module_fetch_checks(*document_id, graph, &fetch, &resolved_string)
-            {
-                self.report_import_load_failure();
-                return Err(JsNativeError::error()
-                    .with_message(format!("CSP blocked module redirect: {resolved_string}"))
-                    .into());
-            }
-            let fetched = result
-                .inspect_err(|_| self.report_import_load_failure())
-                .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
-            let response = &fetched.response;
-            if let Some(effective_url) = response.effective_url()
-                && let Some((document_id, graph)) = csp_context.as_ref()
-                && !self.module_csp_allows_response(
-                    *document_id,
-                    graph,
-                    effective_url,
-                    response.redirect_count(),
+            let fetched = self
+                .fetch_module_response(
+                    module_document_id,
                     &resolved_string,
+                    public_only,
+                    csp_context.as_ref(),
                 )
-            {
-                let blocked_uri = effective_url.to_string();
-                self.record_csp_violation(
-                    *document_id,
-                    blocked_uri.clone(),
-                    response.redirect_count(),
-                    &resolved_string,
-                    graph,
-                    ModulePolicyStage::Response,
-                );
-                self.report_import_load_failure();
-                return Err(JsNativeError::error()
-                    .with_message(format!("CSP blocked module redirect: {resolved_string}"))
-                    .into());
-            }
-            if response.status_code() != 200 {
-                self.report_import_load_failure();
-                return Err(JsNativeError::typ()
-                    .with_message(format!(
-                        "module request returned HTTP {}",
-                        response.status_code()
-                    ))
-                    .into());
-            }
+                .await
+                .map_err(|error| {
+                    self.tag_worklet_fetch_error(
+                        module_document_id,
+                        csp_context.as_ref().map(|(_, graph)| graph),
+                        error,
+                        context,
+                    )
+                })?;
+            let response = &fetched.response;
             // Other waiters may already have parsed this shared response.
             if let Some(module) = self.modules.borrow().get(&key) {
                 return Ok(module.clone());
@@ -1200,12 +1156,108 @@ impl ModuleLoader for HttpModuleLoader {
 }
 
 impl HttpModuleLoader {
+    async fn fetch_module_response(
+        &self,
+        module_document_id: usize,
+        resolved_string: &str,
+        public_only: bool,
+        csp_context: Option<&(usize, ModuleGraphContext)>,
+    ) -> JsResult<Arc<module_fetch::FetchedModule>> {
+        let key = (module_document_id, resolved_string.to_owned());
+        let fetch = self.start_module_fetch(
+            module_document_id,
+            resolved_string.to_owned(),
+            public_only,
+            csp_context.as_ref().map(|(_, graph)| graph),
+        )?;
+        let result = fetch.clone().await;
+        // A retry may already have replaced a failed request while another
+        // waiter was suspended. Only remove this particular download.
+        let mut pending = self.pending.borrow_mut();
+        if pending
+            .get(&key)
+            .is_some_and(|current| current.same_request(&fetch))
+        {
+            pending.remove(&key);
+        }
+        drop(pending);
+        self.ensure_document_is_live(module_document_id)
+            .inspect_err(|_| self.report_import_load_failure())?;
+        self.ensure_worklet_graph_owner_is_live(csp_context.as_ref().map(|(_, graph)| graph))?;
+        if let Some((document_id, graph)) = csp_context.as_ref()
+            && !self.observe_module_fetch_checks(*document_id, graph, &fetch, &resolved_string)
+        {
+            self.report_import_load_failure();
+            return Err(JsNativeError::error()
+                .with_message(format!("CSP blocked module redirect: {resolved_string}"))
+                .into());
+        }
+        let fetched = result
+            .inspect_err(|_| self.report_import_load_failure())
+            .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
+        let response = &fetched.response;
+        if let Some(effective_url) = response.effective_url()
+            && let Some((document_id, graph)) = csp_context.as_ref()
+            && !self.module_csp_allows_response(
+                *document_id,
+                graph,
+                effective_url,
+                response.redirect_count(),
+                &resolved_string,
+            )
+        {
+            let blocked_uri = effective_url.to_string();
+            self.record_csp_violation(
+                *document_id,
+                blocked_uri.clone(),
+                response.redirect_count(),
+                &resolved_string,
+                graph,
+                ModulePolicyStage::Response,
+            );
+            self.report_import_load_failure();
+            return Err(JsNativeError::error()
+                .with_message(format!("CSP blocked module redirect: {resolved_string}"))
+                .into());
+        }
+        if response.status_code() != 200 {
+            self.report_import_load_failure();
+            return Err(JsNativeError::typ()
+                .with_message(format!(
+                    "module request returned HTTP {}",
+                    response.status_code()
+                ))
+                .into());
+        }
+        Ok(fetched)
+    }
+
+    fn tag_worklet_fetch_error(
+        &self,
+        document_id: usize,
+        graph: Option<&ModuleGraphContext>,
+        error: JsError,
+        context: &AsyncContext<'_>,
+    ) -> JsError {
+        if !graph.is_some_and(|graph| graph.worklet_owner.is_some()) {
+            return error;
+        }
+        let value = error.to_opaque(&mut context.borrow_mut());
+        if let Some(object) = value.as_object() {
+            self.worklet_fetch_errors
+                .borrow_mut()
+                .insert(object.clone(), (document_id, boa_gc::Rooted::new(object)));
+        }
+        JsError::from_opaque(value)
+    }
+
     fn check_module_policy(
         &self,
         document_id: usize,
         graph: &ModuleGraphContext,
         reference: &str,
         stage: ModulePolicyStage,
+        context: &AsyncContext<'_>,
     ) -> JsResult<()> {
         self.observe_module_policy(document_id, graph, reference, 0, reference, stage);
         if graph.csp.allows_reference(ResourceType::Script, reference) {
@@ -1220,9 +1272,14 @@ impl HttpModuleLoader {
             stage,
         );
         self.report_import_load_failure();
-        Err(JsNativeError::error()
-            .with_message(format!("CSP blocked module import: {reference}"))
-            .into())
+        Err(self.tag_worklet_fetch_error(
+            document_id,
+            Some(graph),
+            JsNativeError::error()
+                .with_message(format!("CSP blocked module import: {reference}"))
+                .into(),
+            context,
+        ))
     }
 
     fn load_data_module(
@@ -1238,16 +1295,34 @@ impl HttpModuleLoader {
         url.set_fragment(None);
         let data = crate::http::parse_data_uri(url.as_str()).ok_or_else(|| {
             self.report_import_load_failure();
-            JsNativeError::typ().with_message("invalid data module URL")
+            self.tag_worklet_fetch_error(
+                document_id,
+                graph.as_ref(),
+                JsNativeError::typ()
+                    .with_message("invalid data module URL")
+                    .into(),
+                context,
+            )
         })?;
         if let Some(graph) = graph.as_ref() {
-            self.check_module_policy(document_id, graph, &reference, ModulePolicyStage::Response)?;
+            self.check_module_policy(
+                document_id,
+                graph,
+                &reference,
+                ModulePolicyStage::Response,
+                context,
+            )?;
         }
         if !is_javascript_mime_type(&data.mime_type) {
             self.report_import_load_failure();
-            return Err(JsNativeError::typ()
-                .with_message("data module is not JavaScript")
-                .into());
+            return Err(self.tag_worklet_fetch_error(
+                document_id,
+                graph.as_ref(),
+                JsNativeError::typ()
+                    .with_message("data module is not JavaScript")
+                    .into(),
+                context,
+            ));
         }
         self.parse_module_source(document_id, &reference, &data.data, realm, context, graph)
             .map(|(module, _)| module)
@@ -1430,6 +1505,9 @@ impl HttpModuleLoader {
                 true
             }
         });
+        self.worklet_fetch_errors
+            .borrow_mut()
+            .retain(|_, (owner, _)| *owner != document_id);
         self.csp_contexts
             .borrow_mut()
             .retain(|(context_document_id, _), _| *context_document_id != document_id);

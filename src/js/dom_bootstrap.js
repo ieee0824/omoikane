@@ -26005,6 +26005,7 @@ export let __omoikane_update_auxiliary_opener;
   // deterministic CSS.paintWorklet seam rather than invoking a renderer.
   // -------------------------------------------------------------------------
   const workletConstructionToken = {};
+  const workletErrorConstructors = { Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError };
   class WorkletGlobalScope {
     constructor() { throw new TypeError("Illegal constructor"); }
     get [Symbol.toStringTag]() { return "WorkletGlobalScope"; }
@@ -26049,6 +26050,10 @@ export let __omoikane_update_auxiliary_opener;
         if (!status || status.ok !== true) {
           const name = status && status.name ? String(status.name) : "OperationError";
           const message = status && status.message ? String(status.message) : "Worklet module failed";
+          if (status && status.javascript === true) {
+            const ErrorConstructor = workletErrorConstructors[name] || workletErrorConstructors.Error;
+            throw new ErrorConstructor(message);
+          }
           throw new DOMException(message, name);
         }
         return undefined;
