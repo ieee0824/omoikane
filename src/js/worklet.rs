@@ -31,6 +31,18 @@ struct ModuleFetchContext {
     cookie_context: crate::http::CookieRequestContext,
 }
 
+/// A redirect request checked during I/O and reported after releasing the HTTP client.
+struct WorkletPolicyCheck {
+    reference: String,
+    redirects: usize,
+    initial_url: String,
+}
+
+enum WorkletFetchError {
+    Network,
+    Policy,
+}
+
 impl State {
     pub(super) fn module_cookie_store(&self) -> Option<Arc<Mutex<crate::http::CookieJar>>> {
         self.module_fetch_context
@@ -143,49 +155,90 @@ fn fetch_worklet_module_source(
     base: Option<&crate::http::Url>,
     cookie_context: &crate::http::CookieRequestContext,
     origin: &CorsOrigin,
-) -> Option<(String, String)> {
-    match resolve_resource_ref(requested, base)? {
+    policy: &CspPolicy,
+    checks: &mut Vec<WorkletPolicyCheck>,
+) -> Result<(String, String), WorkletFetchError> {
+    match resolve_resource_ref(requested, base).ok_or(WorkletFetchError::Network)? {
         ResolvedResource::Data { .. } => fetch_script_resource_with_client_in_context(
             requested,
             base,
             Some(cookie_context),
             &mut state.http_client,
         )
-        .map(|(url, source, _, _)| (url, source)),
+        .map(|(url, source, _, _)| (url, source))
+        .ok_or(WorkletFetchError::Network),
         ResolvedResource::Url(initial) => {
-            let initial = initial.parse::<crate::http::Url>().ok()?;
+            let initial = initial
+                .parse::<crate::http::Url>()
+                .map_err(|_| WorkletFetchError::Network)?;
             let mut request = HttpRequest::new(Method::Get, initial.clone());
             if requires_public_fetch(&initial, base) {
                 request.require_public_ip();
             }
             cookie_context.apply(&mut request);
-            let response = crate::http::cors::fetch_with_timeout_restricting_redirects(
-                &mut state.http_client,
-                request,
-                origin,
-                RequestMode::Cors,
-                CredentialsMode::SameOrigin,
-                RedirectMode::Follow,
-                &mut PreflightCache::default(),
-                None,
-            )
-            .ok()?
-            .response;
+            let fetched = {
+                let mut check_redirect = |url: &crate::http::Url, redirects: usize| {
+                    let reference = url.to_string();
+                    checks.push(WorkletPolicyCheck {
+                        reference: reference.clone(),
+                        redirects,
+                        initial_url: initial.to_string(),
+                    });
+                    policy.allows_reference_after_redirects(
+                        ResourceType::Script,
+                        &reference,
+                        redirects,
+                    )
+                };
+                crate::http::cors::fetch_with_timeout_restricting_redirects_checked(
+                    &mut state.http_client,
+                    request,
+                    origin,
+                    RequestMode::Cors,
+                    CredentialsMode::SameOrigin,
+                    RedirectMode::Follow,
+                    &mut PreflightCache::default(),
+                    None,
+                    &mut check_redirect,
+                )
+            };
+            let response = fetched
+                .map_err(|error| match error {
+                    crate::http::cors::CorsError::RequestPolicy => WorkletFetchError::Policy,
+                    _ => WorkletFetchError::Network,
+                })?
+                .response;
+            let effective = response
+                .effective_url()
+                .map_or_else(|| initial.to_string(), ToString::to_string);
+            if !policy.allows_reference_after_redirects(
+                ResourceType::Script,
+                &effective,
+                response.redirect_count(),
+            ) {
+                if !checks.iter().any(|check| {
+                    check.reference == effective && check.redirects == response.redirect_count()
+                }) {
+                    checks.push(WorkletPolicyCheck {
+                        reference: effective,
+                        redirects: response.redirect_count(),
+                        initial_url: initial.to_string(),
+                    });
+                }
+                return Err(WorkletFetchError::Policy);
+            }
             if response.status_code() != 200 {
                 state.http_client.report_resource_failure();
-                return None;
+                return Err(WorkletFetchError::Network);
             }
             let source = match std::str::from_utf8(response.body()) {
                 Ok(source) => source.to_owned(),
                 Err(_) => {
                     state.http_client.report_resource_failure();
-                    return None;
+                    return Err(WorkletFetchError::Network);
                 }
             };
-            let effective = response
-                .effective_url()
-                .map_or_else(|| initial.to_string(), ToString::to_string);
-            Some((effective, source))
+            Ok((effective, source))
         }
     }
 }
@@ -200,6 +253,155 @@ fn create_worklet_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResul
     Ok(js_string!(id).into())
 }
 
+struct WorkletRuntimeConfig {
+    owner_url: String,
+    storage: StorageManager,
+    session_id: u64,
+    user_agent: String,
+    owner_document_id: usize,
+    owner_origin: Option<StorageOrigin>,
+    effective_url: String,
+    id: u64,
+}
+
+fn create_worklet_runtime(
+    owner_state: &Rc<RefCell<HostState>>,
+    config: WorkletRuntimeConfig,
+) -> Result<WorkletRuntimeHandle, JsValue> {
+    let mut runtime = JsRuntime::with_document_url_and_storage(
+        blank_html_document(),
+        &config.owner_url,
+        config.storage,
+        config.session_id,
+    )
+    .map_err(|error| worklet_status(false, "OperationError", &error.to_string(), false))?;
+    runtime.set_user_agent(config.user_agent);
+    let worklet_state = Rc::clone(&runtime.host_state);
+    {
+        let owner = owner_state.borrow();
+        let mut state = worklet_state.borrow_mut();
+        state.worklet.module_fetch_context = Some(ModuleFetchContext {
+            cookies: Arc::clone(&owner.cookie_store),
+            cookie_context: owner
+                .document_cookie_request_context(config.owner_document_id)
+                .for_worker_internal(),
+        });
+        let mut isolation = IsolationPolicy::default();
+        isolation.embedder = owner
+            .isolation_policy_for_document(config.owner_document_id)
+            .embedder;
+        let worklet_document_id = state.document.identity();
+        state
+            .document_isolation_policies
+            .insert(worklet_document_id, isolation);
+        state.worklet.owner = Some(Rc::clone(owner_state));
+        state.worklet.id = Some(config.id);
+        state.worklet.terminated = false;
+    }
+    runtime
+        .eval(&format!(
+            "__omoikane_install_worklet_global({:?}, {:?})",
+            config.effective_url, config.id
+        ))
+        .map_err(|error| worklet_status(false, "OperationError", &error.to_string(), false))?;
+    let runtime = Rc::new(RefCell::new(runtime));
+    {
+        let mut state = owner_state.borrow_mut();
+        state.worklet.runtime_origin = config.owner_origin;
+        state.worklet.runtime = Some(Rc::clone(&runtime));
+    }
+    Ok(runtime)
+}
+
+fn check_initial_worklet_policy(
+    owner_state: &Rc<RefCell<HostState>>,
+    document_id: usize,
+    resolved_url: &str,
+    source: Option<&security_reporting::CspSourceLocation>,
+) -> Result<CspPolicy, JsValue> {
+    let mut state = owner_state.borrow_mut();
+    let Some(document) = state.get_node(document_id) else {
+        return Err(worklet_status(
+            false,
+            "InvalidStateError",
+            "Worklet owner Document is no longer active",
+            false,
+        ));
+    };
+    let policy = state.csp_policy_for_document(&document);
+    if !state.csp_allows_response_for_document_with_source(
+        &document,
+        ResourceType::Script,
+        resolved_url,
+        0,
+        resolved_url,
+        source,
+    ) {
+        return Err(worklet_status(
+            false,
+            "AbortError",
+            "Worklet module blocked by Content Security Policy",
+            false,
+        ));
+    }
+    Ok(policy)
+}
+
+fn report_worklet_redirect_checks(
+    owner_state: &Rc<RefCell<HostState>>,
+    document_id: usize,
+    checks: Vec<WorkletPolicyCheck>,
+    source: Option<&security_reporting::CspSourceLocation>,
+) {
+    if checks.is_empty() {
+        return;
+    }
+    let mut state = owner_state.borrow_mut();
+    if let Some(document) = state.get_node(document_id) {
+        for check in checks {
+            state.csp_allows_response_for_document_with_source(
+                &document,
+                ResourceType::Script,
+                &check.reference,
+                check.redirects,
+                &check.initial_url,
+                source,
+            );
+        }
+    }
+}
+
+fn evaluate_worklet_module(
+    runtime_handle: &WorkletRuntimeHandle,
+    source: &str,
+    effective_url: &str,
+    resolved_url: String,
+) -> JsValue {
+    let evaluation = {
+        let mut runtime = runtime_handle.borrow_mut();
+        let document = runtime.document();
+        let (result, _, _) = runtime.eval_module_timed(
+            source,
+            effective_url,
+            document,
+            crate::http::cors::CredentialsMode::SameOrigin,
+        );
+        result
+    };
+    if let Err(error) = evaluation {
+        let message = error.to_string();
+        return worklet_status(false, worklet_error_name(&message), &message, false);
+    }
+    runtime_handle
+        .borrow()
+        .host_state
+        .borrow_mut()
+        .worklet
+        .modules
+        .insert(resolved_url);
+    worklet_status(true, "", "", false)
+}
+
 /// Loads and evaluates one Worklet module in the owner page's isolated
 /// WorkletGlobalScope. The JavaScript wrapper converts this status record into
 /// the asynchronous `addModule()` Promise lifecycle.
@@ -210,6 +412,7 @@ fn worklet_add_module_native(
 ) -> JsResult<JsValue> {
     let id = worker_id_argument(args, context)?;
     let requested_url = string_argument(args.get(1), "", context)?;
+    let source = security_reporting::capture_csp_source(context);
     with_host_state(|owner_state| {
         let (
             owner_url,
@@ -278,6 +481,15 @@ fn worklet_add_module_native(
                 ));
             }
         };
+        let policy = match check_initial_worklet_policy(
+            &owner_state,
+            owner_document_id,
+            &resolved_url,
+            source.as_ref(),
+        ) {
+            Ok(policy) => policy,
+            Err(status) => return Ok(status),
+        };
         // A module map hit is resolved entirely from the deterministic cache:
         // do not refetch a resource that has already executed successfully.
         // This also ensures a repeated `addModule()` call cannot observe a
@@ -299,6 +511,7 @@ fn worklet_add_module_native(
         }
         // Fetch before constructing the isolated realm. This keeps failed
         // addModule() calls side-effect free and makes retries deterministic.
+        let mut checks = Vec::new();
         let fetched = {
             let mut state = owner_state.borrow_mut();
             fetch_worklet_module_source(
@@ -307,11 +520,22 @@ fn worklet_add_module_native(
                 base_url.as_ref(),
                 &cookie_context,
                 &origin,
+                &policy,
+                &mut checks,
             )
         };
+        report_worklet_redirect_checks(&owner_state, owner_document_id, checks, source.as_ref());
         let (effective_url, source) = match fetched {
-            Some(value) => value,
-            None => {
+            Ok(value) => value,
+            Err(WorkletFetchError::Policy) => {
+                return Ok(worklet_status(
+                    false,
+                    "AbortError",
+                    "Worklet module blocked by Content Security Policy",
+                    false,
+                ));
+            }
+            Err(WorkletFetchError::Network) => {
                 return Ok(worklet_status(
                     false,
                     "TypeError",
@@ -323,62 +547,22 @@ fn worklet_add_module_native(
         let runtime_handle = if let Some(runtime) = owner_state.borrow().worklet.runtime.clone() {
             runtime
         } else {
-            let mut runtime = match JsRuntime::with_document_url_and_storage(
-                blank_html_document(),
-                &owner_url,
-                storage,
-                session_id,
+            match create_worklet_runtime(
+                &owner_state,
+                WorkletRuntimeConfig {
+                    owner_url,
+                    storage,
+                    session_id,
+                    user_agent,
+                    owner_document_id,
+                    owner_origin,
+                    effective_url: effective_url.clone(),
+                    id,
+                },
             ) {
                 Ok(runtime) => runtime,
-                Err(error) => {
-                    return Ok(worklet_status(
-                        false,
-                        "OperationError",
-                        &error.to_string(),
-                        false,
-                    ));
-                }
-            };
-            runtime.set_user_agent(user_agent);
-            let worklet_state = Rc::clone(&runtime.host_state);
-            {
-                let owner = owner_state.borrow();
-                let mut state = worklet_state.borrow_mut();
-                state.worklet.module_fetch_context = Some(ModuleFetchContext {
-                    cookies: Arc::clone(&owner.cookie_store),
-                    cookie_context: owner
-                        .document_cookie_request_context(owner_document_id)
-                        .for_worker_internal(),
-                });
-                let mut isolation = IsolationPolicy::default();
-                isolation.embedder = owner
-                    .isolation_policy_for_document(owner_document_id)
-                    .embedder;
-                let worklet_document_id = state.document.identity();
-                state
-                    .document_isolation_policies
-                    .insert(worklet_document_id, isolation);
-                state.worklet.owner = Some(Rc::clone(owner_state));
-                state.worklet.id = Some(id);
-                state.worklet.terminated = false;
+                Err(status) => return Ok(status),
             }
-            if let Err(error) = runtime.eval(&format!(
-                "__omoikane_install_worklet_global({effective_url:?}, {id:?})"
-            )) {
-                return Ok(worklet_status(
-                    false,
-                    "OperationError",
-                    &error.to_string(),
-                    false,
-                ));
-            }
-            let runtime = Rc::new(RefCell::new(runtime));
-            {
-                let mut state = owner_state.borrow_mut();
-                state.worklet.runtime_origin = owner_origin;
-                state.worklet.runtime = Some(Rc::clone(&runtime));
-            }
-            runtime
         };
 
         {
@@ -397,34 +581,12 @@ fn worklet_add_module_native(
             }
         }
 
-        let evaluation = {
-            let mut runtime = runtime_handle.borrow_mut();
-            let document = runtime.document();
-            let (result, _, _) = runtime.eval_module_timed(
-                &source,
-                &effective_url,
-                document,
-                crate::http::cors::CredentialsMode::SameOrigin,
-            );
-            result
-        };
-        if let Err(error) = evaluation {
-            let message = error.to_string();
-            return Ok(worklet_status(
-                false,
-                worklet_error_name(&message),
-                &message,
-                false,
-            ));
-        }
-        runtime_handle
-            .borrow()
-            .host_state
-            .borrow_mut()
-            .worklet
-            .modules
-            .insert(resolved_url);
-        Ok(worklet_status(true, "", "", false))
+        Ok(evaluate_worklet_module(
+            &runtime_handle,
+            &source,
+            &effective_url,
+            resolved_url,
+        ))
     })
 }
 
@@ -610,7 +772,221 @@ impl JsRuntime {
 mod tests {
     use super::*;
     use crate::http::{HttpParseError, HttpResponse, HttpTransport};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn owner_script_src_elem_blocks_worklet_before_request() {
+        struct CountingTransport(Arc<AtomicUsize>);
+
+        impl HttpTransport for CountingTransport {
+            fn send(
+                &self,
+                _: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<HttpResponse, HttpParseError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(HttpResponse::new(
+                    200,
+                    "OK",
+                    Vec::new(),
+                    b"registerPaint('blocked', class {});".to_vec(),
+                ))
+            }
+        }
+
+        let mut runtime = JsRuntime::with_document_and_url(
+            blank_html_document(),
+            "https://isolated.example.test/page",
+        )
+        .unwrap();
+        runtime.install_csp_policy(&["script-src-elem 'none'; worker-src *".into()]);
+        let requests = Arc::new(AtomicUsize::new(0));
+        runtime
+            .set_http_resource_transport(Some(Arc::new(CountingTransport(Arc::clone(&requests)))));
+        runtime
+            .eval(
+                "globalThis.workletResult = 'pending'; \
+                 CSS.paintWorklet.addModule('/blocked.js').then( \
+                   () => workletResult = 'loaded', error => workletResult = error.name);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            runtime
+                .eval("workletResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "AbortError"
+        );
+    }
+
+    #[test]
+    fn owner_csp_blocks_worklet_redirect_before_target_request() {
+        struct RedirectTransport(Arc<Mutex<Vec<String>>>);
+
+        impl HttpTransport for RedirectTransport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<HttpResponse, HttpParseError> {
+                self.0.lock().unwrap().push(request.url().to_string());
+                Ok(match request.url().path() {
+                    "/entry.js" => HttpResponse::new(
+                        302,
+                        "Found",
+                        vec![(
+                            "Location".into(),
+                            "https://other.example.test/blocked.js".into(),
+                        )],
+                        Vec::new(),
+                    ),
+                    "/blocked.js" => HttpResponse::new(
+                        200,
+                        "OK",
+                        vec![(
+                            "Access-Control-Allow-Origin".into(),
+                            "https://isolated.example.test".into(),
+                        )],
+                        b"registerPaint('blocked', class {});".to_vec(),
+                    ),
+                    path => panic!("unexpected Worklet module path: {path}"),
+                })
+            }
+        }
+
+        let mut runtime = JsRuntime::with_document_and_url(
+            blank_html_document(),
+            "https://isolated.example.test/page",
+        )
+        .unwrap();
+        runtime.install_csp_policy(&["script-src-elem 'self'".into()]);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .set_http_resource_transport(Some(Arc::new(RedirectTransport(Arc::clone(&requests)))));
+        runtime
+            .eval(
+                "globalThis.workletResult = 'pending'; \
+                 CSS.paintWorklet.addModule('/entry.js').then( \
+                   () => workletResult = 'loaded', error => workletResult = error.name);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec!["https://isolated.example.test/entry.js"]
+        );
+        assert_eq!(
+            runtime
+                .eval("workletResult")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "AbortError"
+        );
+    }
+
+    #[test]
+    fn owner_report_only_csp_allows_worklet_redirect_and_notifies_document() {
+        struct RedirectTransport(Arc<Mutex<Vec<String>>>);
+
+        impl HttpTransport for RedirectTransport {
+            fn send(
+                &self,
+                request: &HttpRequest,
+                _: Option<Duration>,
+            ) -> Result<HttpResponse, HttpParseError> {
+                self.0.lock().unwrap().push(request.url().to_string());
+                Ok(match request.url().path() {
+                    "/entry.js" => HttpResponse::new(
+                        302,
+                        "Found",
+                        vec![(
+                            "Location".into(),
+                            "https://other.example.test/module.js".into(),
+                        )],
+                        Vec::new(),
+                    ),
+                    "/module.js" => HttpResponse::new(
+                        200,
+                        "OK",
+                        vec![(
+                            "Access-Control-Allow-Origin".into(),
+                            "https://isolated.example.test".into(),
+                        )],
+                        b"registerPaint('allowed', class {});".to_vec(),
+                    ),
+                    "/reports" => HttpResponse::new(204, "No Content", Vec::new(), Vec::new()),
+                    path => panic!("unexpected Worklet module path: {path}"),
+                })
+            }
+        }
+
+        let mut runtime = JsRuntime::with_document_and_url(
+            blank_html_document(),
+            "https://isolated.example.test/page",
+        )
+        .unwrap();
+        runtime.install_document_response_headers(&[
+            (
+                "Content-Security-Policy-Report-Only".into(),
+                "script-src-elem 'self'; report-to observations".into(),
+            ),
+            (
+                "Reporting-Endpoints".into(),
+                "observations=\"https://isolated.example.test/reports\"".into(),
+            ),
+        ]);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .set_http_resource_transport(Some(Arc::new(RedirectTransport(Arc::clone(&requests)))));
+        runtime
+            .eval(
+                "globalThis.workletResult = 'pending'; globalThis.workletEvents = []; \
+                 globalThis.workletReports = []; \
+                 document.addEventListener('securitypolicyviolation', event => \
+                   workletEvents.push([event.target === document, event.effectiveDirective, \
+                     event.blockedURI, event.disposition])); \
+                 new ReportingObserver(batch => workletReports.push(...batch)).observe(); \
+                 CSS.paintWorklet.addModule('/entry.js').then( \
+                   () => workletResult = 'loaded', error => workletResult = error.name);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        security_reporting::wait_for_report_delivery(&mut runtime);
+
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![
+                "https://isolated.example.test/entry.js",
+                "https://other.example.test/module.js",
+                "https://isolated.example.test/reports",
+            ]
+        );
+        assert!(
+            runtime
+                .eval(
+                    "workletResult === 'loaded' && \
+                     JSON.stringify(workletEvents) === \
+                       '[[true,\"script-src-elem\",\"https://isolated.example.test/entry.js\",\"report\"]]' && \
+                     workletReports.length === 1 && \
+                     workletReports[0].body.effectiveDirective === 'script-src-elem' && \
+                     workletReports[0].body.disposition === 'report'"
+                )
+                .unwrap()
+                .to_boolean(),
+            "events: {:?}; reports: {:?}",
+            runtime.eval("JSON.stringify(workletEvents)").unwrap(),
+            runtime.eval("JSON.stringify(workletReports)").unwrap()
+        );
+    }
 
     #[test]
     fn worklet_cross_origin_redirect_uses_cors_without_credentials() {
@@ -759,6 +1135,7 @@ mod tests {
             "Cross-Origin-Embedder-Policy".into(),
             "require-corp".into(),
         )]);
+        runtime.install_csp_policy(&["worker-src 'none'; script-src-elem *".into()]);
         let cookie_store = Arc::clone(&runtime.host_state.borrow().cookie_store);
         cookie_store
             .lock()
