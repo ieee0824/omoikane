@@ -583,6 +583,8 @@
     {"path": "reporting/same-origin-report-credentials.https.sub.html", "server": "wptserve"},
     {"path": "reporting/cross-origin-report-no-credentials.https.sub.html", "server": "wptserve"},
     {"path": "html/cross-origin-opener-policy/reporting/document-reporting/reporting-redirect-with-same-origin-allow-popups.https.html", "server": "wptserve"},
+    {"path": "html/cross-origin-opener-policy/popup-same-origin-with-cross-origin.https.html", "server": "wptserve"},
+    {"path": "html/cross-origin-opener-policy/popup-unsafe-none-with-cross-origin.https.html", "server": "wptserve"},
     { "path": "cookiestore/cookieStore_get_set_basic.https.any.js" },
     { "path": "cookiestore/cookieStore_get_delete_basic.https.any.js" },
     { "path": "cookiestore/cookieStore_getAll_set_basic.https.any.js" },
