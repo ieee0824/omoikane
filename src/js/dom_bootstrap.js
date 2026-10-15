@@ -76,6 +76,8 @@ export let __omoikane_update_auxiliary_opener;
   const nativeWindowEventDocument = globalThis.__omoikane_window_event_document;
   const nativeWindowProxyGlobal = globalThis.__omoikane_window_proxy_global;
   const nativeAuxiliaryWindowProxyForId = globalThis.__omoikane_auxiliary_window_proxy_for_id;
+  const nativeReportAuxiliaryWindowAccess = globalThis.__omoikane_report_auxiliary_window_access;
+  const nativeReportMainWindowAccess = globalThis.__omoikane_report_main_window_access;
   const nativeCrossOriginAuxiliaryValue = globalThis.__omoikane_cross_origin_auxiliary_value;
   const nativeRetainedWindowGlobal = globalThis.__omoikane_retained_window_global;
   delete globalThis.__omoikane_retained_window_global;
@@ -83,6 +85,8 @@ export let __omoikane_update_auxiliary_opener;
   delete globalThis.__omoikane_window_event_document;
   delete globalThis.__omoikane_window_proxy_global;
   delete globalThis.__omoikane_auxiliary_window_proxy_for_id;
+  delete globalThis.__omoikane_report_auxiliary_window_access;
+  delete globalThis.__omoikane_report_main_window_access;
   delete globalThis.__omoikane_cross_origin_auxiliary_value;
   const nativeRegisterPlatformEventFactory = globalThis.__omoikane_register_platform_event_factory;
   delete globalThis.__omoikane_register_platform_event_factory;
@@ -235,7 +239,35 @@ export let __omoikane_update_auxiliary_opener;
   if (__omoikane_document_id !== browsingInput.topDocumentId) {
     browsingInput.removalMayAffectIframeVisibility = true;
   }
-  const topWindow = browsingInput.topWindow || (browsingInput.topWindow = globalThis);
+  let topWindow = browsingInput.topWindow || (browsingInput.topWindow = globalThis);
+  if (__omoikane_document_id === browsingInput.topDocumentId) {
+    globalThis.__omoikane_create_main_window_proxy = () => {
+      const backingWindow = globalThis;
+      delete backingWindow.__omoikane_create_main_window_proxy;
+      const reportableProperties = new Set([
+        "window", "self", "frames", "closed", "length", "top", "parent",
+        "opener", "location", "close", "focus", "blur", "postMessage",
+      ]);
+      let proxy;
+      proxy = new Proxy(backingWindow, {
+        get(target, property, receiver) {
+          if (reportableProperties.has(property)) nativeReportMainWindowAccess(property);
+          return Reflect.get(target, property,
+            windowHandlerReceiver(target, property, receiver, proxy));
+        },
+        set(target, property, value, receiver) {
+          return Reflect.set(target, property, value,
+            receiver === proxy ? target : receiver);
+        },
+      });
+      windowObjects.add(proxy);
+      nativeRegisterWindowProxy(proxy, 0, "main");
+      safeWeakSetAdd(registeredWindowProxies, proxy);
+      topWindow = proxy;
+      browsingInput.topWindow = proxy;
+      return proxy;
+    };
+  }
   const registeredWindowProxies = browsingInput.registeredWindowProxies ||
     (browsingInput.registeredWindowProxies = new WeakSet());
   const windowListenerStores = browsingInput.windowListenerStores ||
@@ -18149,6 +18181,10 @@ export let __omoikane_update_auxiliary_opener;
   };
   let __locationHref = String(__omoikane_location_href);
   const __loc = {};
+  Object.defineProperty(__loc, "toString", {
+    value() { return this.href; },
+    configurable: true,
+  });
   Object.defineProperty(__loc, "href", {
     enumerable: true,
     configurable: false,
@@ -25511,11 +25547,24 @@ export let __omoikane_update_auxiliary_opener;
       assign(value) { this.href = value; },
       replace(value) { this.href = value; },
       reload() { this.href = this.href; },
+      toString() { return this.href; },
     };
+    for (const part of ["protocol", "host", "hostname", "port", "pathname", "search", "hash", "origin"]) {
+      Object.defineProperty(location, part, {
+        enumerable: true,
+        get() { return new URL(location.href)[part]; },
+        ...(part === "origin" ? {} : { set(value) {
+          location.href = locationURLWithComponent(location.href, part, value);
+        } }),
+      });
+    }
     const handler = {
       ...auxiliaryWindowReflection(id, () => proxy),
       get(_target, property, receiver) {
         const state = access();
+        if (state !== "closed" && typeof property === "string") {
+          nativeReportAuxiliaryWindowAccess(id, property);
+        }
         if (property === "closed") return state === "closed";
         const target = state === "closed" ? null : nativeWindowProxyGlobal(proxy);
         if (target === null && isCrossOriginWindowFallbackKey(property)) return undefined;
@@ -28776,12 +28825,13 @@ export let __omoikane_update_auxiliary_opener;
       windowTarget: globalThis,
       reflectWindowTypes: types => { for (const type of types) WINDOW_REFLECTED_HANDLERS.add(type); },
       resolveTarget(receiver, type) {
-        if (receiver === globalThis) return receiver;
+        if (receiver === globalThis || receiver === topWindow) return globalThis;
         const id = getWrapperNodeId(wrapperNodeIds, receiver);
         if (id === undefined) throw new IntrinsicTypeError("Illegal invocation");
         const tag = internalNodeLocalName(receiver);
         if ((tag === "body" || tag === "frameset") && WINDOW_REFLECTED_HANDLERS.has(type)) {
-          return receiver.ownerDocument?.defaultView;
+          const window = receiver.ownerDocument?.defaultView;
+          return window === topWindow ? globalThis : window;
         }
         return receiver;
       },

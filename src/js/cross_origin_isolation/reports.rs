@@ -82,7 +82,7 @@ pub(in crate::js) fn coep_corp_body(
     })
 }
 
-fn policy_name(policy: OpenerPolicyValue) -> &'static str {
+pub(in crate::js) fn policy_name(policy: OpenerPolicyValue) -> &'static str {
     match policy {
         OpenerPolicyValue::UnsafeNone => "unsafe-none",
         OpenerPolicyValue::SameOriginAllowPopups => "same-origin-allow-popups",

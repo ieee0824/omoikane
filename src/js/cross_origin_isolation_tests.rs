@@ -27,6 +27,63 @@ fn isolated(runtime: &mut JsRuntime) -> bool {
         .unwrap()
 }
 
+#[test]
+fn location_stringifies_as_a_base_url_for_reporting_helpers() {
+    let mut runtime = runtime_for("https://isolated.example.test/page");
+    let result = runtime
+        .eval("new URL('/common/dispatcher/dispatcher.py', location).href")
+        .unwrap();
+    assert_eq!(
+        result.as_string().unwrap().to_std_string_escaped(),
+        "https://isolated.example.test/common/dispatcher/dispatcher.py"
+    );
+}
+
+#[test]
+fn popup_window_location_exposes_query_for_dispatcher_identity() {
+    struct PopupQueryTransport;
+
+    impl HttpTransport for PopupQueryTransport {
+        fn send(
+            &self,
+            request: &HttpRequest,
+            _: Option<Duration>,
+        ) -> Result<HttpResponse, HttpParseError> {
+            assert_eq!(request.url().path(), "/popup");
+            Ok(HttpResponse::new(
+                200,
+                "OK",
+                vec![("Content-Type".into(), "text/html".into())],
+                b"<body>popup</body>".to_vec(),
+            ))
+        }
+    }
+
+    let mut runtime = runtime_for("https://isolated.example.test/main");
+    runtime.set_http_resource_transport(Some(Arc::new(PopupQueryTransport)));
+    runtime
+        .eval("globalThis.popup = window.open('/popup?uuid=example')")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let popup_realm = runtime
+        .host_state
+        .borrow()
+        .auxiliary_contexts
+        .values()
+        .next()
+        .unwrap()
+        .realm
+        .clone()
+        .unwrap();
+    let previous = runtime.context.enter_realm(popup_realm);
+    let query = runtime.eval("window.location.search").unwrap();
+    runtime.context.enter_realm(previous);
+    assert_eq!(
+        query.as_string().unwrap().to_std_string_escaped(),
+        "?uuid=example"
+    );
+}
+
 struct IsolationTransport;
 
 impl HttpTransport for IsolationTransport {
@@ -1809,8 +1866,538 @@ fn report_only_coop_queues_a_report_without_cutting_the_popup_group() {
         .unwrap()
         .wait_for_pending();
     let sent = sent.lock().unwrap();
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0][0]["body"], observed[0]["body"]);
+    let reports = sent
+        .iter()
+        .flat_map(|batch| batch.as_array().unwrap().iter())
+        .collect::<Vec<_>>();
+    assert_eq!(reports.len(), 2);
+    assert!(
+        reports
+            .iter()
+            .any(|report| report["body"] == observed[0]["body"])
+    );
+    assert!(
+        reports
+            .iter()
+            .any(|report| { report["body"]["type"] == "navigation-to-response" })
+    );
+}
+
+#[test]
+fn redirect_report_only_coop_uses_the_redirects_url_and_endpoint() {
+    #[derive(Clone)]
+    struct RedirectReportingTransport(Arc<Mutex<Vec<(String, serde_json::Value)>>>, bool);
+
+    impl HttpTransport for RedirectReportingTransport {
+        fn send(
+            &self,
+            request: &HttpRequest,
+            _: Option<Duration>,
+        ) -> Result<HttpResponse, HttpParseError> {
+            match (request.method(), request.url().path()) {
+                (crate::http::Method::Get, "/popup-old") => Ok(HttpResponse::new(
+                    200,
+                    "OK",
+                    vec![("Content-Type".into(), "text/html".into())],
+                    b"<body>old popup</body>".to_vec(),
+                )),
+                (crate::http::Method::Get, "/hop") => Ok(HttpResponse::new(
+                    302,
+                    "Found",
+                    vec![
+                        ("Location".into(), "/final".into()),
+                        (
+                            "Cross-Origin-Opener-Policy-Report-Only".into(),
+                            if self.1 {
+                                "same-origin-allow-popups; report-to=\"coop\""
+                            } else {
+                                "same-origin; report-to=\"coop\""
+                            }
+                            .into(),
+                        ),
+                        ("Reporting-Endpoints".into(), "coop=\"/hop-report\"".into()),
+                    ],
+                    Vec::new(),
+                )),
+                (crate::http::Method::Get, "/final") => Ok(HttpResponse::new(
+                    200,
+                    "OK",
+                    if self.1 {
+                        vec![
+                            ("Content-Type".into(), "text/html".into()),
+                            (
+                                "Cross-Origin-Opener-Policy-Report-Only".into(),
+                                "same-origin; report-to=\"final\"".into(),
+                            ),
+                            (
+                                "Reporting-Endpoints".into(),
+                                "final=\"/final-report\"".into(),
+                            ),
+                        ]
+                    } else {
+                        vec![("Content-Type".into(), "text/html".into())]
+                    },
+                    b"<body>final popup</body>".to_vec(),
+                )),
+                (crate::http::Method::Post, "/hop-report" | "/final-report") => {
+                    self.0.lock().unwrap().push((
+                        request.url().path().to_string(),
+                        serde_json::from_slice(request.body().unwrap()).unwrap(),
+                    ));
+                    Ok(HttpResponse::new(204, "No Content", Vec::new(), Vec::new()))
+                }
+                (method, path) => panic!("unexpected COOP redirect request: {method:?} {path}"),
+            }
+        }
+    }
+
+    for access_reports in [false, true] {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = runtime_for("https://isolated.example.test/main");
+        runtime.set_http_resource_transport(Some(Arc::new(RedirectReportingTransport(
+            Arc::clone(&sent),
+            access_reports,
+        ))));
+        runtime
+            .eval("globalThis.popup = window.open('/popup-old', 'redirect-reporting');")
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+        let (popup_id, actual_group, virtual_group) = {
+            let state = runtime.host_state.borrow();
+            let (id, popup) = state
+                .auxiliary_contexts
+                .iter()
+                .find(|(_, entry)| entry.name == "redirect-reporting")
+                .unwrap();
+            (
+                *id,
+                state.document_group_ids[&popup.document.identity()],
+                popup.virtual_group_id,
+            )
+        };
+        runtime.eval("popup.location.href = '/hop';").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert!(runtime.take_task_errors().is_empty());
+        {
+            let state = runtime.host_state.borrow();
+            let popup = &state.auxiliary_contexts[&popup_id];
+            assert_eq!(
+                state.document_group_ids[&popup.document.identity()],
+                actual_group
+            );
+            assert_ne!(popup.virtual_group_id, virtual_group);
+            assert_ne!(popup.virtual_group_id, state.main_virtual_group_id);
+        }
+        assert!(
+            runtime
+                .eval("!popup.closed && popup.opener === window")
+                .unwrap()
+                .to_boolean()
+        );
+        if let Some(delivery) = runtime.host_state.borrow_mut().report_delivery.as_mut() {
+            delivery.wait_for_pending();
+        }
+        let sent = sent.lock().unwrap();
+        assert_eq!(
+            sent.iter()
+                .map(|(_, batch)| batch.as_array().unwrap().len())
+                .sum::<usize>(),
+            if access_reports { 5 } else { 2 },
+            "redirect transitions and window reads must report: {sent:?}"
+        );
+        assert_eq!(
+            sent.iter()
+                .filter(|(path, _)| path == "/hop-report")
+                .map(|(_, batch)| batch.as_array().unwrap().len())
+                .sum::<usize>(),
+            2
+        );
+        assert_eq!(
+            sent.iter()
+                .filter(|(path, _)| path == "/final-report")
+                .map(|(_, batch)| batch.as_array().unwrap().len())
+                .sum::<usize>(),
+            if access_reports { 3 } else { 0 }
+        );
+        assert!(
+            sent.iter()
+                .filter(|(path, _)| path == "/hop-report")
+                .all(|(_, report)| { report[0]["url"] == "https://isolated.example.test/hop" })
+        );
+        assert!(sent.iter().any(|(_, report)| {
+            report[0]["body"]["type"] == "navigation-to-response"
+                && report[0]["body"]["previousResponseURL"]
+                    == "https://isolated.example.test/popup-old"
+        }));
+        assert!(sent.iter().any(|(_, report)| {
+            report[0]["body"]["type"] == "navigation-from-response"
+                && report[0]["body"]["nextResponseURL"] == "https://isolated.example.test/final"
+        }));
+        if access_reports {
+            assert!(sent.iter().any(|(path, batch)| {
+                path == "/final-report"
+                    && batch.as_array().unwrap().iter().any(|report| {
+                        report["body"]["property"] == "closed"
+                            && report["body"]["type"] == "access-to-coop-page-from-opener"
+                            && report["body"]["openerURL"] == "https://isolated.example.test/main"
+                    })
+            }));
+            assert!(sent.iter().any(|(path, batch)| {
+                path == "/final-report"
+                    && batch
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|report| report["body"]["property"] == "opener")
+            }));
+        }
+    }
+}
+
+#[test]
+fn redirect_coop_reports_to_the_outgoing_documents_endpoint() {
+    #[derive(Clone)]
+    struct OldEndpointTransport(Arc<Mutex<Vec<serde_json::Value>>>);
+
+    impl HttpTransport for OldEndpointTransport {
+        fn send(
+            &self,
+            request: &HttpRequest,
+            _: Option<Duration>,
+        ) -> Result<HttpResponse, HttpParseError> {
+            match (request.method(), request.url().path()) {
+                (crate::http::Method::Get, "/old") => Ok(HttpResponse::new(
+                    200,
+                    "OK",
+                    vec![
+                        ("Content-Type".into(), "text/html".into()),
+                        (
+                            "Cross-Origin-Opener-Policy-Report-Only".into(),
+                            "same-origin; report-to=\"old\"".into(),
+                        ),
+                        ("Reporting-Endpoints".into(), "old=\"/old-report\"".into()),
+                    ],
+                    b"<body>old</body>".to_vec(),
+                )),
+                (crate::http::Method::Get, "/redirect") => Ok(HttpResponse::new(
+                    302,
+                    "Found",
+                    vec![("Location".into(), "/final".into())],
+                    Vec::new(),
+                )),
+                (crate::http::Method::Get, "/final") => Ok(HttpResponse::new(
+                    200,
+                    "OK",
+                    vec![("Content-Type".into(), "text/html".into())],
+                    b"<body>final</body>".to_vec(),
+                )),
+                (crate::http::Method::Post, "/old-report") => {
+                    self.0
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(request.body().unwrap()).unwrap());
+                    Ok(HttpResponse::new(204, "No Content", Vec::new(), Vec::new()))
+                }
+                (method, path) => panic!("unexpected old COOP endpoint request: {method:?} {path}"),
+            }
+        }
+    }
+
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = runtime_for("https://isolated.example.test/main");
+    runtime.set_http_resource_transport(Some(Arc::new(OldEndpointTransport(Arc::clone(&sent)))));
+    runtime
+        .eval("globalThis.popup = window.open('/old')")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let old_document_id = runtime
+        .host_state
+        .borrow()
+        .auxiliary_contexts
+        .values()
+        .next()
+        .unwrap()
+        .document
+        .identity();
+    runtime
+        .eval_in_document_realm(old_document_id, "location.href = '/redirect'")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(runtime.take_task_errors().is_empty());
+    if let Some(delivery) = runtime.host_state.borrow_mut().report_delivery.as_mut() {
+        delivery.wait_for_pending();
+    }
+    let sent = sent.lock().unwrap();
+    let reports = sent
+        .iter()
+        .flat_map(|batch| batch.as_array().unwrap().iter())
+        .collect::<Vec<_>>();
+    assert_eq!(reports.len(), 2);
+    assert!(
+        reports
+            .iter()
+            .all(|report| { report["url"] == "https://isolated.example.test/old" })
+    );
+    assert!(
+        reports
+            .iter()
+            .any(|report| { report["body"]["type"] == "navigation-to-response" })
+    );
+    assert!(reports.iter().any(|report| {
+        report["body"]["type"] == "navigation-from-response"
+            && report["body"]["nextResponseURL"] == "https://isolated.example.test/redirect"
+    }));
+}
+
+#[test]
+fn redirect_coop_hides_a_cross_origin_previous_response_url() {
+    let old_url = "https://first.example.test/old";
+    let hop_url = "https://second.example.test/hop";
+    let final_url = "https://second.example.test/final";
+    let old_origin = DocumentSecurityOrigin::Tuple(StorageOrigin::from_url(old_url).unwrap());
+    let final_origin = DocumentSecurityOrigin::Tuple(StorageOrigin::from_url(final_url).unwrap());
+    let redirect = NavigationRedirect {
+        url: hop_url.into(),
+        headers: vec![(
+            "Cross-Origin-Opener-Policy-Report-Only".into(),
+            "same-origin; report-to=\"coop\"".into(),
+        )],
+        request_referrer: old_url.into(),
+    };
+    let evaluation = coop_navigation_evaluation(
+        &OpenerPolicy::default(),
+        old_url,
+        Some(&old_origin),
+        &[redirect],
+        &OpenerPolicy::default(),
+        final_url,
+        old_url,
+        &final_origin,
+        false,
+    );
+    assert_eq!(evaluation.same_origin, [false, true]);
+    assert!(evaluation.report_only_switch);
+    assert!(!evaluation.enforce_switch);
+    let body = coop_navigation_to_body(
+        evaluation.responses[1].opener.report_only_value,
+        &evaluation.responses[0].url,
+        evaluation.same_origin[0],
+        &evaluation.responses[1].request_referrer,
+        Disposition::Reporting,
+    );
+    assert!(body["previousResponseURL"].is_null());
+}
+
+#[test]
+fn enforced_coop_switch_survives_later_redirect_responses() {
+    let origin = DocumentSecurityOrigin::Tuple(
+        StorageOrigin::from_url("https://isolated.example.test/old").unwrap(),
+    );
+    let redirects = [
+        NavigationRedirect {
+            url: "https://isolated.example.test/first".into(),
+            headers: vec![("Cross-Origin-Opener-Policy".into(), "same-origin".into())],
+            request_referrer: String::new(),
+        },
+        NavigationRedirect {
+            url: "https://isolated.example.test/second".into(),
+            headers: Vec::new(),
+            request_referrer: String::new(),
+        },
+    ];
+    let evaluation = coop_navigation_evaluation(
+        &OpenerPolicy::default(),
+        "https://isolated.example.test/old",
+        Some(&origin),
+        &redirects,
+        &OpenerPolicy::default(),
+        "https://isolated.example.test/final",
+        "",
+        &origin,
+        false,
+    );
+    assert_eq!(evaluation.decisions.len(), 3);
+    assert!(evaluation.decisions[0].enforce);
+    assert!(evaluation.enforce_switch);
+    assert_eq!(evaluation.responses[1].url, redirects[0].url);
+    assert_eq!(evaluation.responses[2].url, redirects[1].url);
+}
+
+#[test]
+fn initial_about_blank_coop_exception_does_not_apply_to_later_redirects() {
+    let origin = DocumentSecurityOrigin::Tuple(
+        StorageOrigin::from_url("https://isolated.example.test/first").unwrap(),
+    );
+    let redirects = [
+        NavigationRedirect {
+            url: "https://isolated.example.test/first".into(),
+            headers: vec![(
+                "Cross-Origin-Opener-Policy".into(),
+                "same-origin-allow-popups".into(),
+            )],
+            request_referrer: String::new(),
+        },
+        NavigationRedirect {
+            url: "https://isolated.example.test/second".into(),
+            headers: Vec::new(),
+            request_referrer: String::new(),
+        },
+    ];
+    let evaluation = coop_navigation_evaluation(
+        &OpenerPolicy::default(),
+        "about:blank",
+        Some(&origin),
+        &redirects,
+        &OpenerPolicy::default(),
+        "https://isolated.example.test/final",
+        "",
+        &origin,
+        true,
+    );
+    assert!(evaluation.decisions[0].enforce);
+    assert!(evaluation.decisions[1].enforce);
+}
+
+#[test]
+fn redirect_coop_without_reporting_endpoint_does_not_send_a_report() {
+    struct NoEndpointTransport;
+
+    impl HttpTransport for NoEndpointTransport {
+        fn send(
+            &self,
+            request: &HttpRequest,
+            _: Option<Duration>,
+        ) -> Result<HttpResponse, HttpParseError> {
+            let response = match (request.method(), request.url().path()) {
+                (crate::http::Method::Get, "/old") => HttpResponse::new(
+                    200,
+                    "OK",
+                    vec![("Content-Type".into(), "text/html".into())],
+                    b"<body>old</body>".to_vec(),
+                ),
+                (crate::http::Method::Get, "/hop") => HttpResponse::new(
+                    302,
+                    "Found",
+                    vec![
+                        ("Location".into(), "/final".into()),
+                        (
+                            "Cross-Origin-Opener-Policy-Report-Only".into(),
+                            "same-origin; report-to=\"missing\"".into(),
+                        ),
+                    ],
+                    Vec::new(),
+                ),
+                (crate::http::Method::Get, "/final") => HttpResponse::new(
+                    200,
+                    "OK",
+                    vec![("Content-Type".into(), "text/html".into())],
+                    b"<body>final</body>".to_vec(),
+                ),
+                (method, path) => panic!("unexpected report without endpoint: {method:?} {path}"),
+            };
+            Ok(response)
+        }
+    }
+
+    let mut runtime = runtime_for("https://isolated.example.test/main");
+    runtime.set_http_resource_transport(Some(Arc::new(NoEndpointTransport)));
+    runtime
+        .eval("globalThis.popup = window.open('/old')")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime.eval("popup.location.href = '/hop'").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(runtime.take_task_errors().is_empty());
+    if let Some(delivery) = runtime.host_state.borrow_mut().report_delivery.as_mut() {
+        delivery.wait_for_pending();
+    }
+}
+
+#[test]
+fn report_only_popup_access_to_its_opener_uses_virtual_group_ids() {
+    #[derive(Clone)]
+    struct AccessTransport(Arc<Mutex<Vec<(String, serde_json::Value)>>>);
+
+    impl HttpTransport for AccessTransport {
+        fn send(
+            &self,
+            request: &HttpRequest,
+            _: Option<Duration>,
+        ) -> Result<HttpResponse, HttpParseError> {
+            match (request.method(), request.url().path()) {
+                (crate::http::Method::Get, "/popup") => Ok(HttpResponse::new(
+                    200,
+                    "OK",
+                    vec![
+                        ("Content-Type".into(), "text/html".into()),
+                        (
+                            "Cross-Origin-Opener-Policy-Report-Only".into(),
+                            "same-origin; report-to=\"popup\"".into(),
+                        ),
+                        (
+                            "Reporting-Endpoints".into(),
+                            "popup=\"/popup-report\"".into(),
+                        ),
+                    ],
+                    b"<body>popup</body>".to_vec(),
+                )),
+                (crate::http::Method::Post, "/main-report" | "/popup-report") => {
+                    self.0.lock().unwrap().push((
+                        request.url().path().to_owned(),
+                        serde_json::from_slice(request.body().unwrap()).unwrap(),
+                    ));
+                    Ok(HttpResponse::new(204, "No Content", Vec::new(), Vec::new()))
+                }
+                (method, path) => panic!("unexpected opener access request: {method:?} {path}"),
+            }
+        }
+    }
+
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = runtime_for("https://isolated.example.test/main");
+    runtime.install_document_response_headers(&[
+        (
+            "Cross-Origin-Opener-Policy-Report-Only".into(),
+            "unsafe-none; report-to=\"main\"".into(),
+        ),
+        ("Reporting-Endpoints".into(), "main=\"/main-report\"".into()),
+    ]);
+    runtime.set_http_resource_transport(Some(Arc::new(AccessTransport(Arc::clone(&sent)))));
+    runtime.eval("window.open('/popup')").unwrap();
+    runtime.run_until_idle().unwrap();
+    let popup_id = {
+        let state = runtime.host_state.borrow();
+        let popup = state.auxiliary_contexts.values().next().unwrap();
+        assert_ne!(popup.virtual_group_id, state.main_virtual_group_id);
+        popup.document.identity()
+    };
+    runtime
+        .eval_in_document_realm(popup_id, "void opener.closed")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(runtime.take_task_errors().is_empty());
+    if let Some(delivery) = runtime.host_state.borrow_mut().report_delivery.as_mut() {
+        delivery.wait_for_pending();
+    }
+    let sent = sent.lock().unwrap();
+    let access_reports = sent
+        .iter()
+        .flat_map(|(path, batch)| {
+            batch
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(move |report| (path, report))
+        })
+        .filter(|(_, report)| report["body"]["property"] == "closed")
+        .collect::<Vec<_>>();
+    assert_eq!(access_reports.len(), 2, "{sent:?}");
+    assert!(access_reports.iter().any(|(path, report)| {
+        *path == "/popup-report" && report["body"]["type"] == "access-from-coop-page-to-opener"
+    }));
+    assert!(access_reports.iter().any(|(path, report)| {
+        *path == "/main-report" && report["body"]["type"] == "access-to-coop-page-from-openee"
+    }));
 }
 
 #[test]

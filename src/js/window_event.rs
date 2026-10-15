@@ -337,7 +337,13 @@ fn register_proxy_native(
         .first()
         .and_then(JsValue::as_object)
         .ok_or_else(|| JsNativeError::typ().with_message("WindowProxy must be an object"))?;
-    let target = if args.get(2).and_then(JsValue::as_boolean).unwrap_or(false) {
+    let target = if args
+        .get(2)
+        .and_then(JsValue::as_string)
+        .is_some_and(|kind| kind == js_string!("main"))
+    {
+        JsValue::null()
+    } else if args.get(2).and_then(JsValue::as_boolean).unwrap_or(false) {
         js_string!(parse_node_id(args.get(1), context)?.to_string()).into()
     } else {
         JsValue::new(parse_node_id(args.get(1), context)? as f64)
@@ -389,7 +395,9 @@ fn resolve_receiver_document_id_with_pending(
         &[receiver.clone().into()],
         context,
     )?;
-    let document_id = if let Some(frame) = target.as_number() {
+    let document_id = if target.is_null() {
+        with_host_state(|host| Ok(host.borrow().document.identity()))?
+    } else if let Some(frame) = target.as_number() {
         let frame = frame as usize;
         // A genuine WindowProxy can refer to the caller's own child Window
         // even when its embedding element belongs to a cross-origin parent.

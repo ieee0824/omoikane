@@ -18,7 +18,7 @@ mod headers;
 mod reports;
 pub(super) use reports::{
     Disposition, coep_corp_body, coep_inheritance_body, coop_navigation_from_body,
-    coop_navigation_to_body, report_envelope,
+    coop_navigation_to_body, policy_name, report_envelope, sanitize_report_url,
 };
 
 /// A parsed COOP value, including the internal value derived from COEP.
