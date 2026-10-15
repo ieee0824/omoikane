@@ -357,18 +357,26 @@ fn service_worker_checks_response_allowed_scope_and_mime_after_fetch() {
         &format!("{}/app/page", fixture.origin),
     )
     .unwrap();
-    runtime.eval(r#"
+    runtime
+        .eval(
+            r#"
       globalThis.results = {};
-      const check = (name, promise) => promise.then(
+      globalThis.check = (name, promise) => promise.then(
         () => results[name] = 'resolved', error => results[name] = error.name);
-      check('allowed', navigator.serviceWorker.register('/allowed/sw.js', {scope: '/'}));
-      check('narrowAllowed', navigator.serviceWorker.register('/narrow/sw.js', {scope: '/narrow/sub/page/'}));
-      check('defaultDenied', navigator.serviceWorker.register('/app/restricted.js', {scope: '/'}));
-      check('headerDenied', navigator.serviceWorker.register('/narrow/sw.js', {scope: '/narrow/'}));
-      check('invalidHeader', navigator.serviceWorker.register('/bad-allowed/sw.js', {scope: '/'}));
-      check('crossOriginHeader', navigator.serviceWorker.register('/cross-allowed/sw.js', {scope: '/'}));
-      check('mimeDenied', navigator.serviceWorker.register('/plain.js'));
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
+    for registration in [
+        "check('allowed', navigator.serviceWorker.register('/allowed/sw.js', {scope: '/'}))",
+        "check('narrowAllowed', navigator.serviceWorker.register('/narrow/sw.js', {scope: '/narrow/sub/page/'}))",
+        "check('defaultDenied', navigator.serviceWorker.register('/app/restricted.js', {scope: '/'}))",
+        "check('headerDenied', navigator.serviceWorker.register('/narrow/sw.js', {scope: '/narrow/'}))",
+        "check('invalidHeader', navigator.serviceWorker.register('/bad-allowed/sw.js', {scope: '/'}))",
+        "check('crossOriginHeader', navigator.serviceWorker.register('/cross-allowed/sw.js', {scope: '/'}))",
+        "check('mimeDenied', navigator.serviceWorker.register('/plain.js'))",
+    ] {
+        runtime.eval(registration).unwrap();
+    }
     runtime.run_until_idle().unwrap();
     assert_eq!(
         runtime
