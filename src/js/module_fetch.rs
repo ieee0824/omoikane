@@ -1,6 +1,7 @@
 //! Bounded HTTP workers for module graphs. Only HTTP data crosses threads;
 //! Boa module records, parsing, and evaluation stay on the owning JS thread.
 
+use super::csp::{CspPolicy, ResourceType};
 use crate::http::corp::EmbedderPolicyValue;
 use crate::http::cors::{self, CredentialsMode, Origin, PreflightCache, RedirectMode, RequestMode};
 use crate::http::{
@@ -27,6 +28,14 @@ type FetchResult = Result<Arc<FetchedModule>, Arc<str>>;
 struct FetchState {
     result: Option<FetchResult>,
     waiters: Vec<Waker>,
+    policy_checks: Vec<ModulePolicyCheck>,
+}
+
+/// A redirect checked on the HTTP thread and reported on the owning JS thread.
+#[derive(Debug)]
+pub(super) struct ModulePolicyCheck {
+    pub reference: String,
+    pub redirects: usize,
 }
 
 /// One download shared by all imports of a Document/URL pair. Every waiter
@@ -36,17 +45,27 @@ pub(super) struct ModuleFetch(Arc<Mutex<FetchState>>);
 
 impl ModuleFetch {
     fn complete(&self, result: FetchResult) {
+        self.complete_with_checks(result, Vec::new());
+    }
+
+    fn complete_with_checks(&self, result: FetchResult, checks: Vec<ModulePolicyCheck>) {
         let waiters = {
             let mut state = self.0.lock().unwrap();
             if state.result.is_some() {
                 return;
             }
             state.result = Some(result);
+            state.policy_checks = checks;
             std::mem::take(&mut state.waiters)
         };
         for waiter in waiters {
             waiter.wake();
         }
+    }
+
+    /// Consumes the checks once even when several graph edges share a download.
+    pub fn take_policy_checks(&self) -> Vec<ModulePolicyCheck> {
+        std::mem::take(&mut self.0.lock().unwrap().policy_checks)
     }
 
     pub fn same_request(&self, other: &Self) -> bool {
@@ -86,6 +105,7 @@ struct Request {
     public_only: bool,
     cookie_context: Option<CookieRequestContext>,
     isolation: Option<ModuleIsolation>,
+    policy: Option<CspPolicy>,
     fetch: ModuleFetch,
 }
 
@@ -101,6 +121,60 @@ pub(super) struct ModuleIsolation {
 pub(super) struct ModuleFetchPool {
     sender: mpsc::Sender<Request>,
     live: Arc<AtomicBool>,
+}
+
+fn download_module(
+    client: &mut Client,
+    cookies: &Arc<Mutex<CookieJar>>,
+    request: &Request,
+) -> (FetchResult, Vec<ModulePolicyCheck>) {
+    let started = Instant::now();
+    let mut checks = Vec::new();
+    let result = (|| {
+        let mut http =
+            HttpRequest::get(&request.url).map_err(|error| Arc::<str>::from(error.to_string()))?;
+        if request.public_only {
+            http.require_public_ip();
+        }
+        if let Some(context) = request.cookie_context.as_ref() {
+            context.apply(&mut http);
+        }
+        let response = if let Some(isolation) = request.isolation.as_ref() {
+            let mut check_redirect = |url: &crate::http::Url, redirects: usize| {
+                let Some(policy) = request.policy.as_ref() else {
+                    return true;
+                };
+                checks.push(ModulePolicyCheck {
+                    reference: url.to_string(),
+                    redirects,
+                });
+                policy.allows_url_after_redirects(ResourceType::Script, url, redirects)
+            };
+            cors::fetch_with_embedder_policy_checked(
+                client,
+                http,
+                &isolation.origin,
+                RequestMode::Cors,
+                isolation.credentials,
+                RedirectMode::Follow,
+                &mut PreflightCache::default(),
+                isolation.embedder,
+                None,
+                &mut check_redirect,
+            )
+            .map_err(|error| Arc::<str>::from(error.to_string()))?
+            .response
+        } else {
+            client
+                .send_with_shared_cookies(http, cookies)
+                .map_err(|error| Arc::<str>::from(error.to_string()))?
+        };
+        Ok(Arc::new(FetchedModule {
+            response,
+            elapsed: started.elapsed(),
+        }))
+    })();
+    (result, checks)
 }
 
 impl ModuleFetchPool {
@@ -151,41 +225,8 @@ impl ModuleFetchPool {
                         if request.fetch.is_complete() {
                             continue;
                         }
-                        let started = Instant::now();
-                        let result = (|| {
-                            let mut http = HttpRequest::get(&request.url)
-                                .map_err(|error| Arc::<str>::from(error.to_string()))?;
-                            if request.public_only {
-                                http.require_public_ip();
-                            }
-                            if let Some(context) = request.cookie_context.as_ref() {
-                                context.apply(&mut http);
-                            }
-                            let response = if let Some(isolation) = request.isolation.as_ref() {
-                                cors::fetch_with_embedder_policy(
-                                    &mut client,
-                                    http,
-                                    &isolation.origin,
-                                    RequestMode::Cors,
-                                    isolation.credentials,
-                                    RedirectMode::Follow,
-                                    &mut PreflightCache::default(),
-                                    isolation.embedder,
-                                    None,
-                                )
-                                .map_err(|error| Arc::<str>::from(error.to_string()))?
-                                .response
-                            } else {
-                                client
-                                    .send_with_shared_cookies(http, &cookies)
-                                    .map_err(|error| Arc::<str>::from(error.to_string()))?
-                            };
-                            Ok(Arc::new(FetchedModule {
-                                response,
-                                elapsed: started.elapsed(),
-                            }))
-                        })();
-                        request.fetch.complete(result);
+                        let (result, checks) = download_module(&mut client, &cookies, &request);
+                        request.fetch.complete_with_checks(result, checks);
                     }
                 })?;
         }
@@ -209,6 +250,29 @@ impl ModuleFetchPool {
         cookie_context: Option<CookieRequestContext>,
         isolation: Option<ModuleIsolation>,
     ) -> ModuleFetch {
+        self.enqueue_fetch(url, public_only, cookie_context, isolation, None)
+    }
+
+    /// Downloads with a graph policy snapshot checked before redirect I/O.
+    pub fn fetch_with_policy(
+        &self,
+        url: String,
+        public_only: bool,
+        cookie_context: Option<CookieRequestContext>,
+        isolation: ModuleIsolation,
+        policy: Option<CspPolicy>,
+    ) -> ModuleFetch {
+        self.enqueue_fetch(url, public_only, cookie_context, Some(isolation), policy)
+    }
+
+    fn enqueue_fetch(
+        &self,
+        url: String,
+        public_only: bool,
+        cookie_context: Option<CookieRequestContext>,
+        isolation: Option<ModuleIsolation>,
+        policy: Option<CspPolicy>,
+    ) -> ModuleFetch {
         let fetch = ModuleFetch::default();
         if self
             .sender
@@ -217,6 +281,7 @@ impl ModuleFetchPool {
                 public_only,
                 cookie_context,
                 isolation,
+                policy,
                 fetch: fetch.clone(),
             })
             .is_err()

@@ -31,7 +31,7 @@ struct ModuleFetchContext {
     cookie_context: crate::http::CookieRequestContext,
 }
 
-/// A redirect request checked during I/O and reported after releasing the HTTP client.
+/// A CSP request/response check reported after releasing the HTTP client.
 struct WorkletPolicyCheck {
     reference: String,
     redirects: usize,
@@ -43,7 +43,18 @@ enum WorkletFetchError {
     Policy,
 }
 
+/// Owner metadata retained by one Worklet module graph across async imports.
+#[derive(Debug, Clone)]
+pub(super) struct ModuleOwner {
+    pub(super) document_id: usize,
+    pub(super) source: Option<security_reporting::CspSourceLocation>,
+}
+
 impl State {
+    pub(super) fn owner_state(&self) -> Option<Rc<RefCell<HostState>>> {
+        self.owner.clone()
+    }
+
     pub(super) fn module_cookie_store(&self) -> Option<Arc<Mutex<crate::http::CookieJar>>> {
         self.module_fetch_context
             .as_ref()
@@ -211,20 +222,18 @@ fn fetch_worklet_module_source(
             let effective = response
                 .effective_url()
                 .map_or_else(|| initial.to_string(), ToString::to_string);
+            // Fetch reports request-stage and response-stage report-only
+            // violations separately, including when both check the same URL.
+            checks.push(WorkletPolicyCheck {
+                reference: effective.clone(),
+                redirects: response.redirect_count(),
+                initial_url: initial.to_string(),
+            });
             if !policy.allows_reference_after_redirects(
                 ResourceType::Script,
                 &effective,
                 response.redirect_count(),
             ) {
-                if !checks.iter().any(|check| {
-                    check.reference == effective && check.redirects == response.redirect_count()
-                }) {
-                    checks.push(WorkletPolicyCheck {
-                        reference: effective,
-                        redirects: response.redirect_count(),
-                        initial_url: initial.to_string(),
-                    });
-                }
                 return Err(WorkletFetchError::Policy);
             }
             if response.status_code() != 200 {
@@ -376,16 +385,13 @@ fn evaluate_worklet_module(
     source: &str,
     effective_url: &str,
     resolved_url: String,
+    graph: ModuleGraphContext,
 ) -> JsValue {
     let evaluation = {
         let mut runtime = runtime_handle.borrow_mut();
         let document = runtime.document();
-        let (result, _, _) = runtime.eval_module_timed(
-            source,
-            effective_url,
-            document,
-            crate::http::cors::CredentialsMode::SameOrigin,
-        );
+        let (result, _, _) =
+            runtime.eval_module_timed_with_context(source, effective_url, document, graph);
         result
     };
     if let Err(error) = evaluation {
@@ -412,7 +418,7 @@ fn worklet_add_module_native(
 ) -> JsResult<JsValue> {
     let id = worker_id_argument(args, context)?;
     let requested_url = string_argument(args.get(1), "", context)?;
-    let source = security_reporting::capture_csp_source(context);
+    let author_source = security_reporting::capture_csp_source(context);
     with_host_state(|owner_state| {
         let (
             owner_url,
@@ -485,7 +491,7 @@ fn worklet_add_module_native(
             &owner_state,
             owner_document_id,
             &resolved_url,
-            source.as_ref(),
+            author_source.as_ref(),
         ) {
             Ok(policy) => policy,
             Err(status) => return Ok(status),
@@ -524,7 +530,12 @@ fn worklet_add_module_native(
                 &mut checks,
             )
         };
-        report_worklet_redirect_checks(&owner_state, owner_document_id, checks, source.as_ref());
+        report_worklet_redirect_checks(
+            &owner_state,
+            owner_document_id,
+            checks,
+            author_source.as_ref(),
+        );
         let (effective_url, source) = match fetched {
             Ok(value) => value,
             Err(WorkletFetchError::Policy) => {
@@ -586,6 +597,14 @@ fn worklet_add_module_native(
             &source,
             &effective_url,
             resolved_url,
+            ModuleGraphContext {
+                csp: policy,
+                credentials: CredentialsMode::SameOrigin,
+                worklet_owner: Some(ModuleOwner {
+                    document_id: owner_document_id,
+                    source: author_source,
+                }),
+            },
         ))
     })
 }
@@ -774,6 +793,478 @@ mod tests {
     use crate::http::{HttpParseError, HttpResponse, HttpTransport};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    struct GraphTransport {
+        root_source: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        reports: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl HttpTransport for GraphTransport {
+        fn send(
+            &self,
+            request: &HttpRequest,
+            _: Option<Duration>,
+        ) -> Result<HttpResponse, HttpParseError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push(request.url().to_string());
+            let source = match request.url().path() {
+                "/bootstrap.js" => "registerPaint('bootstrap', class {});",
+                "/root.js" => &self.root_source,
+                "/parent-a.js" | "/parent-b.js" => "import 'https://other.example.test/import.js';",
+                "/import.js" => "export const imported = true;",
+                "/redirect.js" | "/redirect-a.js" | "/redirect-b.js" | "/missing-redirect.js" => {
+                    let target = if request.url().path() == "/missing-redirect.js" {
+                        "https://other.example.test/missing.js"
+                    } else {
+                        "https://other.example.test/import.js"
+                    };
+                    return Ok(HttpResponse::new(
+                        302,
+                        "Found",
+                        vec![("Location".into(), target.into())],
+                        Vec::new(),
+                    ));
+                }
+                "/missing.js" => {
+                    return Ok(HttpResponse::new(
+                        404,
+                        "Not Found",
+                        vec![("Access-Control-Allow-Origin".into(), "*".into())],
+                        Vec::new(),
+                    ));
+                }
+                "/roundtrip.js" | "/return.js" => {
+                    let target = if request.url().path() == "/roundtrip.js" {
+                        "https://other.example.test/return.js"
+                    } else {
+                        "https://isolated.example.test/import.js"
+                    };
+                    return Ok(HttpResponse::new(
+                        302,
+                        "Found",
+                        vec![
+                            ("Location".into(), target.into()),
+                            ("Access-Control-Allow-Origin".into(), "*".into()),
+                        ],
+                        Vec::new(),
+                    ));
+                }
+                "/reports" => {
+                    self.reports
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(request.body().unwrap()).unwrap());
+                    return Ok(HttpResponse::new(204, "No Content", Vec::new(), Vec::new()));
+                }
+                path => panic!("unexpected Worklet graph path: {path}"),
+            };
+            Ok(HttpResponse::new(
+                200,
+                "OK",
+                vec![("Access-Control-Allow-Origin".into(), "*".into())],
+                source.as_bytes().to_vec(),
+            ))
+        }
+    }
+
+    struct GraphFixture {
+        runtime: JsRuntime,
+        requests: Arc<Mutex<Vec<String>>>,
+        reports: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl GraphFixture {
+        fn new(policy: &str, report_only: bool, source: &str) -> Self {
+            let mut runtime = JsRuntime::with_document_and_url(
+                blank_html_document(),
+                "https://isolated.example.test/page",
+            )
+            .unwrap();
+            runtime.install_document_response_headers(&[
+                (
+                    if report_only {
+                        "Content-Security-Policy-Report-Only"
+                    } else {
+                        "Content-Security-Policy"
+                    }
+                    .into(),
+                    policy.into(),
+                ),
+                ("Reporting-Endpoints".into(), "graph=\"/reports\"".into()),
+            ]);
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let reports = Arc::new(Mutex::new(Vec::new()));
+            let transport = Arc::new(GraphTransport {
+                root_source: source.into(),
+                requests: Arc::clone(&requests),
+                reports: Arc::clone(&reports),
+            });
+            runtime.set_http_resource_transport(Some(transport.clone()));
+            runtime
+                .eval("CSS.paintWorklet.addModule('/bootstrap.js');")
+                .unwrap();
+            runtime.run_until_idle().unwrap();
+            let child = runtime.host_state.borrow().worklet.runtime.clone().unwrap();
+            {
+                let child = child.borrow();
+                let cookies = child.host_state.borrow().module_fetch_cookie_store();
+                *child.module_loader.fetch_pool.borrow_mut() =
+                    Some(ModuleFetchPool::new_for_test(cookies, transport).unwrap());
+            }
+            Self {
+                runtime,
+                requests,
+                reports,
+            }
+        }
+
+        fn load(&mut self) {
+            self.runtime
+                .eval(
+                    "globalThis.workletResult = 'pending'; globalThis.workletEvents = []; \
+                 globalThis.workletReports = []; \
+                 document.addEventListener('securitypolicyviolation', event => \
+                   workletEvents.push([event.target === document, event.effectiveDirective, \
+                     event.blockedURI, event.disposition])); \
+                 new ReportingObserver(batch => workletReports.push(...batch)).observe(); \
+                 CSS.paintWorklet.addModule('/root.js').then( \
+                   () => workletResult = 'loaded', error => workletResult = error.name);",
+                )
+                .unwrap();
+            self.runtime.run_until_idle().unwrap();
+            security_reporting::wait_for_report_delivery(&mut self.runtime);
+        }
+
+        fn assert_no_import_request(&self) {
+            assert!(
+                self.requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|url| { url != "https://other.example.test/import.js" })
+            );
+        }
+    }
+
+    #[test]
+    fn owner_csp_blocks_worklet_graph_import_before_request() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self'",
+            false,
+            "import 'https://other.example.test/import.js'; registerPaint('root', class {});",
+        );
+        fixture.load();
+        assert_eq!(
+            *fixture.requests.lock().unwrap(),
+            vec![
+                "https://isolated.example.test/bootstrap.js",
+                "https://isolated.example.test/root.js",
+            ]
+        );
+        assert!(
+            fixture
+                .runtime
+                .eval(
+                    "workletResult !== 'pending' && workletResult !== 'loaded' && \
+             workletEvents.length === 1 && workletEvents[0][0] && \
+             workletEvents[0][1] === 'script-src-elem' && workletEvents[0][3] === 'enforce'"
+                )
+                .unwrap()
+                .to_boolean()
+        );
+    }
+
+    #[test]
+    fn owner_csp_blocks_worklet_graph_redirect_before_target_request() {
+        let mut fixture =
+            GraphFixture::new("script-src-elem 'self'", false, "import './redirect.js';");
+        fixture.load();
+        fixture.assert_no_import_request();
+        assert_eq!(fixture.requests.lock().unwrap().len(), 3);
+        assert!(fixture.runtime.eval(
+            "workletResult !== 'pending' && workletResult !== 'loaded' && \
+             JSON.stringify(workletEvents) === \
+             '[[true,\"script-src-elem\",\"https://isolated.example.test/redirect.js\",\"enforce\"]]'"
+        ).unwrap().to_boolean());
+    }
+
+    #[test]
+    fn report_only_worklet_graph_redirect_notifies_owner_and_sends_initial_url() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self'; report-to graph",
+            true,
+            "import './redirect.js';",
+        );
+        fixture.load();
+        assert!(fixture.runtime.eval(
+            "workletResult === 'loaded' && \
+             workletEvents.length === 2 && workletEvents.every(event => \
+               JSON.stringify(event) === \
+               '[true,\"script-src-elem\",\"https://isolated.example.test/redirect.js\",\"report\"]') && \
+             workletReports.length === 2 && workletReports.every(report => \
+               report.body.blockedURL === 'https://isolated.example.test/redirect.js')"
+        ).unwrap().to_boolean());
+        let reports = fixture.reports.lock().unwrap();
+        assert_eq!(reports.len(), 2);
+        assert_eq!(
+            reports[0][0]["body"]["blockedURL"],
+            "https://isolated.example.test/redirect.js"
+        );
+        assert_eq!(reports[0][0]["body"]["disposition"], "report");
+    }
+
+    #[test]
+    fn report_only_worklet_graph_observes_intermediate_cross_origin_redirect() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self'; report-to graph",
+            true,
+            "import './roundtrip.js';",
+        );
+        fixture.load();
+        assert!(fixture.runtime.eval(
+            "workletResult === 'loaded' && \
+             JSON.stringify(workletEvents) === \
+             '[[true,\"script-src-elem\",\"https://isolated.example.test/roundtrip.js\",\"report\"]]' && \
+             workletReports.length === 1",
+        ).unwrap().to_boolean());
+        assert_eq!(
+            *fixture.requests.lock().unwrap(),
+            vec![
+                "https://isolated.example.test/bootstrap.js",
+                "https://isolated.example.test/root.js",
+                "https://isolated.example.test/roundtrip.js",
+                "https://other.example.test/return.js",
+                "https://isolated.example.test/import.js",
+                "https://isolated.example.test/reports",
+            ]
+        );
+        assert_eq!(fixture.reports.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn report_only_worklet_graph_reports_a_redirect_even_when_target_returns_404() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self'; report-to graph",
+            true,
+            "import './missing-redirect.js';",
+        );
+        fixture.load();
+        assert!(fixture.runtime.eval(
+            "workletResult !== 'pending' && workletResult !== 'loaded' && \
+             workletEvents.length === 2 && workletEvents.every(event => \
+               JSON.stringify(event) === \
+               '[true,\"script-src-elem\",\"https://isolated.example.test/missing-redirect.js\",\"report\"]') && \
+             workletReports.length === 2",
+        ).unwrap().to_boolean());
+        assert_eq!(fixture.reports.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn worker_src_does_not_block_worklet_graph_imports() {
+        let mut fixture = GraphFixture::new(
+            "worker-src 'none'; script-src-elem *",
+            false,
+            "import 'https://other.example.test/import.js';",
+        );
+        fixture.load();
+        assert!(
+            fixture
+                .runtime
+                .eval("workletResult === 'loaded' && workletEvents.length === 0")
+                .unwrap()
+                .to_boolean()
+        );
+        assert_eq!(fixture.requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn shared_worklet_graph_import_has_one_request_and_one_report_per_stage() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self'; report-to graph",
+            true,
+            "import './parent-a.js'; import './parent-b.js';",
+        );
+        fixture.load();
+        assert!(
+            fixture
+                .runtime
+                .eval(
+                    "workletResult === 'loaded' && workletEvents.length === 2 && \
+             workletEvents.every(event => event[0]) && workletReports.length === 2"
+                )
+                .unwrap()
+                .to_boolean()
+        );
+        assert_eq!(
+            fixture
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|url| { url.as_str() == "https://other.example.test/import.js" })
+                .count(),
+            1
+        );
+        assert_eq!(fixture.reports.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn distinct_worklet_requests_to_one_redirect_target_keep_both_owner_reports() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self'; report-to graph",
+            true,
+            "import './redirect-a.js'; import './redirect-b.js';",
+        );
+        fixture.load();
+        assert!(fixture.runtime.eval(
+            "workletResult === 'loaded' && workletEvents.length === 4 && \
+             workletEvents.every(event => event[0] && event[3] === 'report') && \
+             JSON.stringify(workletEvents.map(event => event[2]).sort()) === \
+             '[\"https://isolated.example.test/redirect-a.js\",\"https://isolated.example.test/redirect-a.js\",\"https://isolated.example.test/redirect-b.js\",\"https://isolated.example.test/redirect-b.js\"]' && \
+             workletReports.length === 4",
+        ).unwrap().to_boolean());
+        assert_eq!(fixture.reports.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn worklet_graph_violation_retains_the_author_call_site() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem 'self'; report-to graph",
+            false,
+            "import 'https://other.example.test/import.js';",
+        );
+        fixture
+            .runtime
+            .eval(
+                "globalThis.sourceEvents=[]; document.addEventListener('securitypolicyviolation', \
+             e => sourceEvents.push([e.sourceFile,e.lineNumber,e.columnNumber]));",
+            )
+            .unwrap();
+        let document_id = fixture.runtime.document().identity();
+        fixture
+            .runtime
+            .eval_script_in_document_realm(
+                document_id,
+                0,
+                "\nCSS.paintWorklet.addModule('/root.js').catch(()=>{});",
+                "https://isolated.example.test/caller.js",
+                "https://isolated.example.test/caller.js",
+                false,
+                (11, 1),
+                false,
+            )
+            .unwrap();
+        fixture.runtime.run_until_idle().unwrap();
+        security_reporting::wait_for_report_delivery(&mut fixture.runtime);
+        let observed = fixture
+            .runtime
+            .eval("JSON.stringify(sourceEvents)")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            observed,
+            // The method name `addModule` starts at column 18 of this call.
+            "[[\"https://isolated.example.test/caller.js\",12,18]]"
+        );
+        let reports = fixture.reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            reports[0][0]["body"]["sourceFile"],
+            "https://isolated.example.test/caller.js"
+        );
+        assert_eq!(reports[0][0]["body"]["lineNumber"], 12);
+        assert_eq!(reports[0][0]["body"]["columnNumber"], 18);
+    }
+
+    fn create_graph_owner_iframe(runtime: &mut JsRuntime) {
+        runtime
+            .eval(
+                "globalThis.graphFrame=document.createElement('iframe'); \
+             graphFrame.srcdoc=\"<meta http-equiv='Content-Security-Policy' \
+               content=\\\"script-src-elem 'self'\\\"><body></body>\"; \
+             document.body.appendChild(graphFrame);",
+            )
+            .unwrap();
+        runtime.run_until_idle().unwrap();
+    }
+
+    #[test]
+    fn worklet_graph_uses_iframe_policy_and_notifies_only_its_document() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem *",
+            false,
+            "import 'https://other.example.test/import.js';",
+        );
+        create_graph_owner_iframe(&mut fixture.runtime);
+        fixture
+            .runtime
+            .eval(
+                "globalThis.topEvents=0; \
+             document.addEventListener('securitypolicyviolation',()=>topEvents++); \
+             graphFrame.contentWindow.eval(\"globalThis.childEvents=[]; \
+               document.addEventListener('securitypolicyviolation',e=> \
+                 childEvents.push([e.target===document,e.effectiveDirective,e.disposition])); \
+               CSS.paintWorklet.addModule('/root.js').catch(()=>{});\");",
+            )
+            .unwrap();
+        fixture.runtime.run_until_idle().unwrap();
+        fixture.assert_no_import_request();
+        assert!(
+            fixture
+                .runtime
+                .eval(
+                    "topEvents===0 && JSON.stringify(graphFrame.contentWindow.childEvents) === \
+             '[[true,\"script-src-elem\",\"enforce\"]]'",
+                )
+                .unwrap()
+                .to_boolean()
+        );
+    }
+
+    #[test]
+    fn discarded_iframe_cannot_start_an_import_from_its_retained_worklet_graph() {
+        let mut fixture = GraphFixture::new(
+            "script-src-elem *",
+            false,
+            "globalThis.loadLater=()=>import('https://other.example.test/import.js');",
+        );
+        create_graph_owner_iframe(&mut fixture.runtime);
+        fixture
+            .runtime
+            .eval("graphFrame.contentWindow.eval(\"CSS.paintWorklet.addModule('/root.js');\");")
+            .unwrap();
+        fixture.runtime.run_until_idle().unwrap();
+        let child = fixture
+            .runtime
+            .host_state
+            .borrow()
+            .worklet
+            .runtime
+            .clone()
+            .unwrap();
+        fixture.runtime.eval("graphFrame.remove();").unwrap();
+        fixture.runtime.run_until_idle().unwrap();
+        let mut child = child.borrow_mut();
+        child
+            .eval(
+                "globalThis.laterResult='pending';loadLater().then( \
+             ()=>laterResult='loaded',error=>laterResult=error.name);",
+            )
+            .unwrap();
+        child.run_until_idle().unwrap();
+        fixture.assert_no_import_request();
+        assert!(
+            child
+                .eval("laterResult !== 'pending' && laterResult !== 'loaded'",)
+                .unwrap()
+                .to_boolean()
+        );
+    }
 
     #[test]
     fn owner_script_src_elem_blocks_worklet_before_request() {
@@ -968,17 +1459,19 @@ mod tests {
                 "https://isolated.example.test/entry.js",
                 "https://other.example.test/module.js",
                 "https://isolated.example.test/reports",
+                "https://isolated.example.test/reports",
             ]
         );
         assert!(
             runtime
                 .eval(
                     "workletResult === 'loaded' && \
-                     JSON.stringify(workletEvents) === \
-                       '[[true,\"script-src-elem\",\"https://isolated.example.test/entry.js\",\"report\"]]' && \
-                     workletReports.length === 1 && \
-                     workletReports[0].body.effectiveDirective === 'script-src-elem' && \
-                     workletReports[0].body.disposition === 'report'"
+                     workletEvents.length === 2 && workletEvents.every(event => \
+                       JSON.stringify(event) === \
+                       '[true,\"script-src-elem\",\"https://isolated.example.test/entry.js\",\"report\"]') && \
+                     workletReports.length === 2 && workletReports.every(report => \
+                       report.body.effectiveDirective === 'script-src-elem' && \
+                       report.body.disposition === 'report')"
                 )
                 .unwrap()
                 .to_boolean(),

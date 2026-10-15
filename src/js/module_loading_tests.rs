@@ -448,7 +448,7 @@ fn report_only_module_dependency_runs_and_reports_request_and_response() {
 }
 
 #[test]
-fn report_only_module_redirect_reports_disallowed_origin_without_blocking_execution() {
+fn report_only_module_redirect_reports_request_and_response_without_blocking_execution() {
     let transport = CspRedirectFixture::new("/dependency.js", "export const value = 73;");
     let mut runtime = runtime_with_module(
         CSP_REDIRECT_SOURCE,
@@ -471,11 +471,18 @@ fn report_only_module_redirect_reports_disallowed_origin_without_blocking_execut
         serde_json::json!([
             73,
             0,
-            [[
-                "csp-violation",
-                "report",
-                format!("{CSP_REDIRECT_SOURCE}/redirect.js")
-            ]]
+            [
+                [
+                    "csp-violation",
+                    "report",
+                    format!("{CSP_REDIRECT_SOURCE}/redirect.js")
+                ],
+                [
+                    "csp-violation",
+                    "report",
+                    format!("{CSP_REDIRECT_SOURCE}/redirect.js")
+                ],
+            ]
         ])
     );
     transport.assert_redirect_requests();
@@ -516,7 +523,7 @@ fn report_only_module_redirect_ignores_source_path_on_allowed_origin() {
 }
 
 #[test]
-fn csp_blocks_dependency_before_fetch_and_redirect_before_execution() {
+fn csp_blocks_dependency_and_redirect_target_before_fetch() {
     let transport = CspRedirectFixture::new("/blocked.js", "globalThis.blockedRan = true;");
     let policy = format!("script-src 'unsafe-inline' {CSP_REDIRECT_SOURCE}");
     let source = format!("import '{CSP_REDIRECT_TARGET}/blocked.js';");
@@ -547,7 +554,10 @@ fn csp_blocks_dependency_before_fetch_and_redirect_before_execution() {
             .as_boolean(),
         Some(true)
     );
-    transport.assert_redirect_requests();
+    assert_eq!(
+        *transport.requests.lock().unwrap(),
+        vec![(format!("{CSP_REDIRECT_SOURCE}/redirect.js"), false, None)]
+    );
 }
 
 #[test]

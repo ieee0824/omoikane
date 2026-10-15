@@ -875,6 +875,24 @@ fn evaluate_dom_bootstrap(
 struct ModuleGraphContext {
     csp: CspPolicy,
     credentials: CredentialsMode,
+    worklet_owner: Option<worklet::ModuleOwner>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct ModuleViolationKey {
+    document_id: usize,
+    owner_id: usize,
+    reference: String,
+    redirects: usize,
+    report_reference: String,
+    stage: ModulePolicyStage,
+}
+
+/// CSP reports request and response checks separately (CSP sections 4.1.1–4.1.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ModulePolicyStage {
+    Request,
+    Response,
 }
 
 #[derive(Debug, Default)]
@@ -894,7 +912,7 @@ struct HttpModuleLoader {
     /// module graphs.
     csp_contexts: RefCell<HashMap<(usize, String), ModuleGraphContext>>,
     csp_violations: RefCell<Vec<security_reporting::ModuleCspViolation>>,
-    csp_violation_keys: RefCell<HashSet<(usize, String)>>,
+    csp_violation_keys: RefCell<HashSet<ModuleViolationKey>>,
 }
 
 impl ModuleLoader for HttpModuleLoader {
@@ -979,18 +997,21 @@ impl ModuleLoader for HttpModuleLoader {
                                 ModuleGraphContext {
                                     csp,
                                     credentials: CredentialsMode::SameOrigin,
+                                    worklet_owner: None,
                                 },
                             )
                         })
                 });
 
+            self.ensure_worklet_graph_owner_is_live(csp_context.as_ref().map(|(_, graph)| graph))?;
             if let Some((document_id, graph)) = csp_context.as_ref() {
                 self.observe_module_policy(
                     *document_id,
-                    &graph.csp,
+                    graph,
                     &resolved_string,
                     0,
                     &resolved_string,
+                    ModulePolicyStage::Request,
                 );
             }
             if let Some((document_id, graph)) = csp_context.as_ref()
@@ -1001,6 +1022,8 @@ impl ModuleLoader for HttpModuleLoader {
                     resolved_string.clone(),
                     0,
                     &resolved_string,
+                    graph,
+                    ModulePolicyStage::Request,
                 );
                 self.report_import_load_failure();
                 return Err(JsNativeError::error()
@@ -1027,50 +1050,12 @@ impl ModuleLoader for HttpModuleLoader {
             let public_only = requires_public_fetch(&resolved, referrer_url.as_ref());
             let key = (module_document_id, resolved_string.clone());
             let wait_start = Instant::now();
-            let fetch = {
-                let mut pending = self.pending.borrow_mut();
-                if let Some(fetch) = pending.get(&key) {
-                    fetch.clone()
-                } else {
-                    let mut pool = self.fetch_pool.borrow_mut();
-                    if pool.is_none() {
-                        let cookies = self
-                            .owner
-                            .upgrade()
-                            .ok_or_else(|| {
-                                self.report_import_load_failure();
-                                JsNativeError::error().with_message("module owner was discarded")
-                            })?
-                            .borrow()
-                            .module_fetch_cookie_store();
-                        *pool = Some(ModuleFetchPool::new(cookies).map_err(|error| {
-                            self.report_import_load_failure();
-                            JsNativeError::typ().with_message(error.to_string())
-                        })?);
-                    }
-                    let isolation = self.owner.upgrade().map(|owner| {
-                        let mut isolation = owner
-                            .borrow()
-                            .module_fetch_isolation_for_document(module_document_id);
-                        isolation.credentials = csp_context
-                            .as_ref()
-                            .map_or(CredentialsMode::SameOrigin, |(_, graph)| graph.credentials);
-                        isolation
-                    });
-                    let fetch = pool.as_ref().unwrap().fetch_with_isolation(
-                        resolved_string.clone(),
-                        public_only,
-                        self.owner.upgrade().map(|owner| {
-                            owner
-                                .borrow()
-                                .module_fetch_cookie_context(module_document_id)
-                        }),
-                        isolation,
-                    );
-                    pending.insert(key.clone(), fetch.clone());
-                    fetch
-                }
-            };
+            let fetch = self.start_module_fetch(
+                module_document_id,
+                resolved_string.clone(),
+                public_only,
+                csp_context.as_ref().map(|(_, graph)| graph),
+            )?;
             let result = fetch.clone().await;
             // A retry may already have replaced a failed request while another
             // waiter was suspended. Only remove this particular download.
@@ -1084,24 +1069,24 @@ impl ModuleLoader for HttpModuleLoader {
             drop(pending);
             self.ensure_document_is_live(module_document_id)
                 .inspect_err(|_| self.report_import_load_failure())?;
+            self.ensure_worklet_graph_owner_is_live(csp_context.as_ref().map(|(_, graph)| graph))?;
+            if let Some((document_id, graph)) = csp_context.as_ref()
+                && !self.observe_module_fetch_checks(*document_id, graph, &fetch, &resolved_string)
+            {
+                self.report_import_load_failure();
+                return Err(JsNativeError::error()
+                    .with_message(format!("CSP blocked module redirect: {resolved_string}"))
+                    .into());
+            }
             let fetched = result
                 .inspect_err(|_| self.report_import_load_failure())
                 .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
             let response = &fetched.response;
-            if response.status_code() != 200 {
-                self.report_import_load_failure();
-                return Err(JsNativeError::typ()
-                    .with_message(format!(
-                        "module request returned HTTP {}",
-                        response.status_code()
-                    ))
-                    .into());
-            }
             if let Some(effective_url) = response.effective_url()
                 && let Some((document_id, graph)) = csp_context.as_ref()
                 && !self.module_csp_allows_response(
                     *document_id,
-                    &graph.csp,
+                    graph,
                     effective_url,
                     response.redirect_count(),
                     &resolved_string,
@@ -1113,10 +1098,21 @@ impl ModuleLoader for HttpModuleLoader {
                     blocked_uri.clone(),
                     response.redirect_count(),
                     &resolved_string,
+                    graph,
+                    ModulePolicyStage::Response,
                 );
                 self.report_import_load_failure();
                 return Err(JsNativeError::error()
                     .with_message(format!("CSP blocked module redirect: {resolved_string}"))
+                    .into());
+            }
+            if response.status_code() != 200 {
+                self.report_import_load_failure();
+                return Err(JsNativeError::typ()
+                    .with_message(format!(
+                        "module request returned HTTP {}",
+                        response.status_code()
+                    ))
                     .into());
             }
             // Other waiters may already have parsed this shared response.
@@ -1181,6 +1177,101 @@ impl ModuleLoader for HttpModuleLoader {
 }
 
 impl HttpModuleLoader {
+    fn start_module_fetch(
+        &self,
+        document_id: usize,
+        url: String,
+        public_only: bool,
+        graph: Option<&ModuleGraphContext>,
+    ) -> JsResult<ModuleFetch> {
+        let key = (document_id, url.clone());
+        let mut pending = self.pending.borrow_mut();
+        if let Some(fetch) = pending.get(&key) {
+            return Ok(fetch.clone());
+        }
+        let owner = self.owner.upgrade().ok_or_else(|| {
+            self.report_import_load_failure();
+            JsNativeError::error().with_message("module owner was discarded")
+        })?;
+        let mut pool = self.fetch_pool.borrow_mut();
+        if pool.is_none() {
+            let cookies = owner.borrow().module_fetch_cookie_store();
+            *pool = Some(ModuleFetchPool::new(cookies).map_err(|error| {
+                self.report_import_load_failure();
+                JsNativeError::typ().with_message(error.to_string())
+            })?);
+        }
+        let state = owner.borrow();
+        let mut isolation = state.module_fetch_isolation_for_document(document_id);
+        isolation.credentials =
+            graph.map_or(CredentialsMode::SameOrigin, |graph| graph.credentials);
+        let fetch = pool.as_ref().unwrap().fetch_with_policy(
+            url,
+            public_only,
+            Some(state.module_fetch_cookie_context(document_id)),
+            isolation,
+            graph.map(|graph| graph.csp.clone()),
+        );
+        pending.insert(key, fetch.clone());
+        Ok(fetch)
+    }
+
+    fn ensure_worklet_graph_owner_is_live(
+        &self,
+        graph: Option<&ModuleGraphContext>,
+    ) -> JsResult<()> {
+        let Some(target) = graph.and_then(|graph| graph.worklet_owner.as_ref()) else {
+            return Ok(());
+        };
+        let owner = self
+            .owner
+            .upgrade()
+            .and_then(|child| child.borrow().worklet.owner_state());
+        if owner.is_some_and(|owner| owner.borrow().document_is_active(target.document_id)) {
+            Ok(())
+        } else {
+            Err(JsNativeError::reference()
+                .with_message("Worklet module owner is no longer live")
+                .into())
+        }
+    }
+
+    fn observe_module_fetch_checks(
+        &self,
+        document_id: usize,
+        graph: &ModuleGraphContext,
+        fetch: &ModuleFetch,
+        report_reference: &str,
+    ) -> bool {
+        let mut allowed = true;
+        for check in fetch.take_policy_checks() {
+            self.observe_module_policy(
+                document_id,
+                graph,
+                &check.reference,
+                check.redirects,
+                report_reference,
+                ModulePolicyStage::Request,
+            );
+            if !graph.csp.allows_reference_after_redirects(
+                ResourceType::Script,
+                &check.reference,
+                check.redirects,
+            ) {
+                allowed = false;
+                self.record_csp_violation(
+                    document_id,
+                    check.reference,
+                    check.redirects,
+                    report_reference,
+                    graph,
+                    ModulePolicyStage::Request,
+                );
+            }
+        }
+        allowed
+    }
+
     fn report_import_load_failure(&self) {
         let destination = self.owner.upgrade().and_then(|owner| {
             owner
@@ -1218,16 +1309,11 @@ impl HttpModuleLoader {
         &self,
         document_id: usize,
         root_url: &str,
-        policy: CspPolicy,
-        credentials: CredentialsMode,
+        graph: ModuleGraphContext,
     ) {
-        self.csp_contexts.borrow_mut().insert(
-            (document_id, root_url.to_string()),
-            ModuleGraphContext {
-                csp: policy,
-                credentials,
-            },
-        );
+        self.csp_contexts
+            .borrow_mut()
+            .insert((document_id, root_url.to_string()), graph);
     }
 
     fn clear_csp_context_for_document(&self, document_id: usize) {
@@ -1250,7 +1336,7 @@ impl HttpModuleLoader {
             .retain(|violation| violation.document_id != document_id);
         self.csp_violation_keys
             .borrow_mut()
-            .retain(|(violation_document_id, _)| *violation_document_id != document_id);
+            .retain(|key| key.document_id != document_id);
     }
 
     fn record_csp_violation(
@@ -1259,20 +1345,50 @@ impl HttpModuleLoader {
         reference: String,
         redirects: usize,
         report_reference: &str,
+        graph: &ModuleGraphContext,
+        stage: ModulePolicyStage,
     ) {
         let mut violations = self.csp_violations.borrow_mut();
         if violations.len() >= MAX_CSP_VIOLATIONS {
             return;
         }
         let mut keys = self.csp_violation_keys.borrow_mut();
-        if !keys.insert((document_id, report_reference.to_owned())) {
+        if !keys.insert(ModuleViolationKey {
+            document_id,
+            owner_id: graph
+                .worklet_owner
+                .as_ref()
+                .map_or(document_id, |owner| owner.document_id),
+            reference: reference.clone(),
+            redirects,
+            report_reference: report_reference.to_owned(),
+            stage,
+        }) {
             return;
         }
+        let worklet =
+            graph
+                .worklet_owner
+                .as_ref()
+                .map(|owner| security_reporting::WorkletModuleViolation {
+                    owner: owner.clone(),
+                    report_only: graph.csp.report_only_policy_texts_after_redirects(
+                        ResourceType::Script,
+                        &reference,
+                        redirects,
+                    ),
+                    enforced: graph.csp.blocking_policy_texts_after_redirects(
+                        ResourceType::Script,
+                        &reference,
+                        redirects,
+                    ),
+                });
         violations.push(security_reporting::ModuleCspViolation {
             document_id,
             reference,
             redirects,
             report_reference: report_reference.to_owned(),
+            worklet,
         });
     }
 
@@ -8308,8 +8424,21 @@ impl JsRuntime {
         if violations.is_empty() {
             return;
         }
-        let mut state = self.host_state.borrow_mut();
+        let worklet_owner = self.host_state.borrow().worklet.owner_state();
         for violation in violations {
+            if let Some(target) = violation.worklet.as_ref() {
+                let document_id = target.owner.document_id;
+                if let Some(owner) = worklet_owner.as_ref() {
+                    let mut state = owner.borrow_mut();
+                    if state.document_is_active(document_id)
+                        && let Some(document) = state.get_node(document_id)
+                    {
+                        state.record_worklet_module_violation(&document, violation);
+                    }
+                }
+                continue;
+            }
+            let mut state = self.host_state.borrow_mut();
             // Module loading is the one CSP path that runs inside Boa's
             // ModuleLoader callback, so retain its blocked target here while
             // sharing the same per-document deduplication as native paths.
@@ -8685,8 +8814,11 @@ impl JsRuntime {
         self.module_loader.set_context_for_module_graph(
             document.identity(),
             url,
-            policy,
-            credentials,
+            ModuleGraphContext {
+                csp: policy,
+                credentials,
+                worklet_owner: None,
+            },
         );
         let source = source.to_owned();
         let url = url.to_owned();
@@ -9101,12 +9233,31 @@ impl JsRuntime {
         std::time::Duration,
     ) {
         let policy = self.host_state.borrow().csp_policy_for_document(&document);
-        self.module_loader.set_context_for_module_graph(
-            document.identity(),
+        self.eval_module_timed_with_context(
+            source,
             url,
-            policy,
-            credentials,
-        );
+            document,
+            ModuleGraphContext {
+                csp: policy,
+                credentials,
+                worklet_owner: None,
+            },
+        )
+    }
+
+    fn eval_module_timed_with_context(
+        &mut self,
+        source: &str,
+        url: &str,
+        document: NodeHandle,
+        graph: ModuleGraphContext,
+    ) -> (
+        Result<JsValue, JsEvaluationError>,
+        std::time::Duration,
+        std::time::Duration,
+    ) {
+        self.module_loader
+            .set_context_for_module_graph(document.identity(), url, graph);
         let parse_start = std::time::Instant::now();
         let module = match Module::parse(
             Source::from_reader(source.as_bytes(), Some(Path::new(url))),
