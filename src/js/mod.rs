@@ -822,6 +822,15 @@ fn evaluate_dom_bootstrap(
         module.link(context)?;
         complete(module.evaluate(context))?;
         let namespace = module.namespace(context);
+        let lifecycle =
+            namespace.get(js_string!("__omoikane_service_worker_lifecycle"), context)?;
+        let lifecycle = lifecycle.as_object().ok_or_else(|| {
+            JsNativeError::error().with_message("ServiceWorker lifecycle callbacks are unavailable")
+        })?;
+        host_state
+            .borrow_mut()
+            .service_worker_lifecycle_callbacks
+            .insert(document_id, lifecycle.clone());
         let dispatch = namespace.get(js_string!("__omoikane_cookie_change_dispatch"), context)?;
         let reset = namespace.get(js_string!("__omoikane_cookie_change_reset"), context)?;
         if dispatch.as_callable().is_some() && reset.as_callable().is_some() {
@@ -2115,6 +2124,8 @@ struct HostState {
     canonical_node_identity_resolver: Option<JsValue>,
     /// Bootstrap-private ReportingObserver dispatchers, one per Document Realm.
     report_observer_dispatchers: HashMap<usize, JsValue>,
+    /// Private bootstrap callbacks, keyed by their owning Document realm.
+    service_worker_lifecycle_callbacks: HashMap<usize, JsObject>,
     /// Default policy callbacks belong to the target Document's realm,
     /// including when an element is adopted or used through another realm.
     /// Slots are TrustedHTML, TrustedScript, and TrustedScriptURL.
@@ -2453,6 +2464,9 @@ unsafe impl Trace for HostState {
         }
         for dispatcher in self.report_observer_dispatchers.values() {
             unsafe { dispatcher.trace(tracer) };
+        }
+        for callbacks in self.service_worker_lifecycle_callbacks.values() {
+            unsafe { callbacks.trace(tracer) };
         }
         for callbacks in self.trusted_type_default_callbacks.values() {
             for callback in callbacks {
@@ -2986,6 +3000,7 @@ impl HostState {
             form_validation: form_validation::State::default(),
             canonical_node_identity_resolver: None,
             report_observer_dispatchers: HashMap::new(),
+            service_worker_lifecycle_callbacks: HashMap::new(),
             trusted_type_default_callbacks: HashMap::new(),
             trusted_script_text_approvals: HashMap::new(),
             current_window_events: HashMap::new(),
@@ -5611,6 +5626,7 @@ impl HostState {
         self.document_reporting.remove(&document_id);
         self.image_resources.remove(&document_id);
         self.report_observer_dispatchers.remove(&document_id);
+        self.service_worker_lifecycle_callbacks.remove(&document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
@@ -5741,6 +5757,7 @@ impl HostState {
         self.document_reporting.remove(&document_id);
         self.image_resources.remove(&document_id);
         self.report_observer_dispatchers.remove(&document_id);
+        self.service_worker_lifecycle_callbacks.remove(&document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
@@ -11604,6 +11621,7 @@ impl JsRuntime {
                         Task::WindowPostedMessage { .. } => "window-posted-message",
                         Task::BroadcastChannelMessage { .. } => "broadcast-channel",
                         Task::WorkerMessage { .. }
+                        | Task::ServiceWorkerLifecycle { .. }
                         | Task::WorkerOwnerMessage { .. }
                         | Task::WorkerError { .. }
                         | Task::SharedWorkerMessage { .. }
@@ -11778,6 +11796,11 @@ impl JsRuntime {
                 origin,
             } => self.run_broadcast_channel_message(channel_id, data, origin),
             Task::WorkerMessage { worker_id, data } => self.run_worker_message(worker_id, data),
+            Task::ServiceWorkerLifecycle {
+                worker_id,
+                installing,
+                failed,
+            } => self.run_service_worker_lifecycle(worker_id, installing, failed),
             Task::WorkerOwnerMessage {
                 worker_id,
                 owner,
@@ -11815,7 +11838,7 @@ impl JsRuntime {
     }
 
     fn run_worker_message(&mut self, worker_id: u64, data: String) -> JsResult<()> {
-        let owner_origin = host_state_origin(&self.host_state.borrow());
+        let default_origin = host_state_origin(&self.host_state.borrow());
         let entry = self.host_state.borrow_mut().workers.remove(&worker_id);
         let Some(entry) = entry else {
             return Ok(());
@@ -11828,6 +11851,7 @@ impl JsRuntime {
                 .remove(&worker_id);
             return Ok(());
         }
+        let owner_origin = service_worker_message_origin(&worker).unwrap_or(default_origin);
         let source = if worker.service_worker {
             "__omoikane_service_worker_client"
         } else {
@@ -11895,7 +11919,14 @@ impl JsRuntime {
         owner_realm: Option<Realm>,
         data: String,
     ) -> JsResult<()> {
-        let owner_origin = host_state_origin(&self.host_state.borrow());
+        let owner_origin = {
+            let state = self.host_state.borrow();
+            state
+                .workers
+                .get(&worker_id)
+                .and_then(|entry| service_worker_message_origin(&entry.borrow()))
+                .unwrap_or_else(|| host_state_origin(&state))
+        };
         let old_realm = owner_realm.map(|realm| self.context.enter_realm(realm));
         if let Err(error) = self.install_worker_owner_values(owner_object, data) {
             self.record_task_error(format!("[worker message setup] {error}"));
@@ -13650,6 +13681,22 @@ fn host_state_origin(state: &HostState) -> String {
         .unwrap_or_default()
 }
 
+fn service_worker_message_origin(worker: &WorkerRuntime) -> Option<String> {
+    if !worker.service_worker {
+        return None;
+    }
+    let state = worker.runtime.host_state.borrow();
+    Some(
+        match state
+            .document_security_origins
+            .get(&worker.runtime.document().identity())
+        {
+            Some(DocumentSecurityOrigin::Tuple(_)) => host_state_origin(&state),
+            _ => "null".to_owned(),
+        },
+    )
+}
+
 fn resolve_worker_url(
     requested: &str,
     owner_url: &str,
@@ -15076,6 +15123,11 @@ fn register_host_bindings(
             js_string!("__omoikane_start_service_worker"),
             3,
             NativeFunction::from_copy_closure(service_worker::start_service_worker_native),
+        ),
+        (
+            js_string!("__omoikane_service_worker_lifecycle_complete"),
+            2,
+            NativeFunction::from_copy_closure(service_worker::lifecycle_complete_native),
         ),
         (
             js_string!("__omoikane_dispatch_service_worker_activate"),

@@ -2,6 +2,7 @@ export let __omoikane_queue_reporting_api_report;
 export let __omoikane_cookie_change_dispatch;
 export let __omoikane_cookie_change_reset;
 export let __omoikane_update_auxiliary_opener;
+export const __omoikane_service_worker_lifecycle = {};
 
 (() => {
   // Capture intrinsic identities before author code can replace global Symbol.
@@ -18808,6 +18809,52 @@ export let __omoikane_update_auxiliary_opener;
     __omoikane_terminate_worker(worker.__id);
   }
 
+  function activateServiceWorker(container, record, worker) {
+    const registration = record.registration;
+    if (container._records.get(record.scope) !== record || registration.waiting !== worker) return;
+    terminateServiceWorker(registration.active);
+    if (container._records.get(record.scope) !== record || registration.waiting !== worker) return;
+    registration.active = worker;
+    registration.waiting = null;
+    worker.__setState("activating");
+    if (container._records.get(record.scope) !== record || registration.active !== worker) return;
+    if (!__omoikane_dispatch_service_worker_activate(worker.__id)) {
+      terminateServiceWorker(worker);
+      if (container._records.get(record.scope) === record && registration.active === worker) {
+        registration.active = null;
+        container.__updateController();
+      }
+    }
+  }
+
+  __omoikane_service_worker_lifecycle.complete = function(container, id, installing, failed) {
+    const worker = safeWeakMapGet(serviceWorkerMessageSources, container)?.get(String(id));
+    if (!worker || worker.__terminated) return;
+    const record = worker._record;
+    const registration = record.registration;
+    if (container._records.get(record.scope) !== record) return;
+    if (installing) {
+      if (registration.installing !== worker) return;
+      registration.installing = null;
+      if (failed) {
+        terminateServiceWorker(worker);
+        if (!registration.active) container._records.delete(record.scope);
+        return;
+      }
+      registration.waiting = worker;
+      worker.__setState("installed");
+      __omoikane_queue_dom_manipulation_task(() => activateServiceWorker(container, record, worker));
+    } else if (registration.active === worker && worker.state === "activating") {
+      // Activation waits for settlement, including rejected lifetime promises.
+      container.__updateController();
+      worker.__setState("activated");
+      if (!container._readyResolved && container.controller === worker) {
+        container._readyResolved = true;
+        container._readyResolve(registration);
+      }
+    }
+  };
+
   class ServiceWorkerRegistration extends ServiceWorkerEventTarget {
     constructor(record, container, token) {
       if (token !== serviceWorkerContainerConstructionToken) throw new TypeError("Illegal constructor");
@@ -18858,6 +18905,8 @@ export let __omoikane_update_auxiliary_opener;
       this._readyResolve = null;
       this.ready = new Promise(resolve => { this._readyResolve = resolve; });
       this._oncontrollerchange = null;
+      this._onmessage = null;
+      this._onmessageerror = null;
     }
     __validateRegistration(scriptURL, options) {
       const origin = serviceWorkerCurrentOrigin();
@@ -18932,40 +18981,6 @@ export let __omoikane_update_auxiliary_opener;
         const installing = record.worker;
         safeWeakMapGet(serviceWorkerMessageSources, this).set(String(workerId), installing);
         __omoikane_bind_worker_owner(workerId, this);
-        // Registration must resolve while `installing` is still visible. A
-        // later task allows callers to connect to that worker first.
-        __omoikane_queue_dom_manipulation_task(() => {
-          if (this._records.get(record.scope) !== record || record.worker !== installing) return;
-          registration.installing = null;
-          registration.waiting = installing;
-          installing.__setState("installed");
-          if (this._records.get(record.scope) !== record || registration.waiting !== installing) return;
-          __omoikane_queue_dom_manipulation_task(() => {
-            if (this._records.get(record.scope) !== record || registration.waiting !== installing) return;
-            terminateServiceWorker(registration.active);
-            if (this._records.get(record.scope) !== record || registration.waiting !== installing) return;
-            registration.active = installing;
-            registration.waiting = null;
-            installing.__setState("activating");
-            if (this._records.get(record.scope) !== record || registration.active !== installing) return;
-            const activated = __omoikane_dispatch_service_worker_activate(workerId);
-            if (this._records.get(record.scope) !== record || registration.active !== installing) return;
-            if (!activated) {
-              terminateServiceWorker(installing);
-              if (this._records.get(record.scope) === record && registration.active === installing) {
-                registration.active = null;
-                this.__updateController();
-              }
-              return;
-            }
-            this.__updateController();
-            installing.__setState("activated");
-            if (!this._readyResolved && this.controller === installing) {
-              this._readyResolved = true;
-              this._readyResolve(registration);
-            }
-          });
-        });
         return registration;
       });
     }
@@ -18999,6 +19014,18 @@ export let __omoikane_update_auxiliary_opener;
       queueMicrotask(() => this.dispatchEvent(new Event("controllerchange")));
     }
     get oncontrollerchange() { return this._oncontrollerchange; }
+    get onmessage() { return this._onmessage; }
+    set onmessage(callback) {
+      if (this._onmessage) this.removeEventListener("message", this._onmessage);
+      this._onmessage = typeof callback === "function" ? callback : null;
+      if (this._onmessage) this.addEventListener("message", this._onmessage);
+    }
+    get onmessageerror() { return this._onmessageerror; }
+    set onmessageerror(callback) {
+      if (this._onmessageerror) this.removeEventListener("messageerror", this._onmessageerror);
+      this._onmessageerror = typeof callback === "function" ? callback : null;
+      if (this._onmessageerror) this.addEventListener("messageerror", this._onmessageerror);
+    }
     set oncontrollerchange(callback) {
       if (this._oncontrollerchange) this.removeEventListener("controllerchange", this._oncontrollerchange);
       this._oncontrollerchange = typeof callback === "function" ? callback : null;
@@ -26071,11 +26098,83 @@ export let __omoikane_update_auxiliary_opener;
     };
   };
 
+  function installServiceWorkerLifetimeEvents() {
+    const states = new WeakMap();
+    const events = new Map();
+    const enqueue = queueMicrotask;
+    const resolve = Promise.resolve.bind(Promise);
+    const report = __omoikane_service_worker_lifecycle_complete;
+    function complete(event) {
+      const state = states.get(event);
+      if (state.dispatching || state.pending !== 0 || state.completed) return;
+      state.completed = true;
+      events.delete(state.phase);
+      state.promises.length = 0;
+      report(state.installing, state.failed);
+    }
+    class ExtendableEvent extends Event {
+      constructor(type, init = {}) {
+        if (arguments.length === 0) throw new TypeError("ExtendableEvent requires a type");
+        super(type, init);
+        states.set(this, { trusted: false, dispatching: false, pending: 0, failed: false, completed: false, promises: [] });
+      }
+      waitUntil(promise) {
+        const state = states.get(this);
+        if (!state) throw new TypeError("Illegal ExtendableEvent receiver");
+        if (arguments.length === 0) throw new TypeError("waitUntil requires a promise");
+        if (!state.trusted || (!state.dispatching && state.pending === 0)) {
+          throw new DOMException("The event is no longer active.", "InvalidStateError");
+        }
+        state.pending++;
+        const awaited = resolve(promise);
+        state.promises.push(awaited);
+        const settle = failed => enqueue(() => {
+          state.failed ||= failed;
+          state.pending--;
+          complete(this);
+        });
+        awaited.then(() => settle(false), () => settle(true));
+      }
+      get [Symbol.toStringTag]() { return "ExtendableEvent"; }
+    }
+    globalThis.ExtendableEvent = ExtendableEvent;
+    __omoikane_service_worker_lifecycle.dispatch = function(phase) {
+      const event = new ExtendableEvent(phase);
+      const state = states.get(event);
+      state.trusted = state.dispatching = true;
+      state.phase = phase;
+      state.installing = phase === "install";
+      event.isTrusted = true;
+      events.set(phase, event);
+      globalThis.dispatchEvent(event);
+    };
+    __omoikane_service_worker_lifecycle.finish = function(phase) {
+      const event = events.get(phase);
+      if (!event) return;
+      states.get(event).dispatching = false;
+      complete(event);
+    };
+    for (const type of ["install", "activate"]) {
+      let handler = null;
+      Object.defineProperty(globalThis, "on" + type, {
+        configurable: true,
+        enumerable: true,
+        get() { return handler; },
+        set(callback) {
+          if (handler) globalThis.removeEventListener(type, handler);
+          handler = typeof callback === "function" ? callback : null;
+          if (handler) globalThis.addEventListener(type, handler);
+        },
+      });
+    }
+  }
+
   globalThis.__omoikane_install_service_worker_global = function() {
     // The common Worker bootstrap supplies importScripts, a separate Trusted
     // Types factory, and the response CSP before the ServiceWorker script runs.
     try { delete globalThis.DedicatedWorkerGlobalScope; } catch (_) { globalThis.DedicatedWorkerGlobalScope = undefined; }
     globalThis.ServiceWorkerGlobalScope = Object;
+    installServiceWorkerLifetimeEvents();
     const sendToOwner = globalThis.postMessage;
     const client = Object.freeze({
       postMessage(message, options = undefined) {

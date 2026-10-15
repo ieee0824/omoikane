@@ -16,6 +16,9 @@ const SERVICE_WORKER_SOURCE: &str = r#"
       blocked,
       allowed: eval(policy.createScript('7')),
       isolated: typeof document === 'undefined' && typeof close === 'undefined' &&
+        typeof globalThis.__omoikane_service_worker_lifecycle === 'undefined' &&
+        typeof globalThis.__omoikane_service_worker_lifecycle_complete === 'undefined' &&
+        typeof globalThis.__omoikane_dispatch_service_worker_lifecycle === 'undefined' &&
         typeof DedicatedWorkerGlobalScope === 'undefined' &&
         typeof ServiceWorkerGlobalScope === 'function',
     });
@@ -33,6 +36,49 @@ const LIFECYCLE_WORKER_SOURCE: &str = r#"
 
 const CLOSE_ON_ACTIVATE_SOURCE: &str = r#"
   addEventListener('activate', () => terminateDuringActivate());
+"#;
+
+const ORIGIN_WORKER_SOURCE: &str = r#"
+  onmessage = event => event.source.postMessage({
+    incomingOrigin: event.origin, workerOrigin: location.origin,
+  });
+"#;
+
+const ORIGIN_FRAME_SOURCE: &str = r#"<script>
+  navigator.serviceWorker.onmessage = event => parent.postMessage({
+    incomingOrigin: event.data.incomingOrigin,
+    workerOrigin: event.data.workerOrigin,
+    outgoingOrigin: event.origin,
+    sameSource: event.source === globalThis.serviceOriginWorker,
+  }, '*');
+  navigator.serviceWorker.register('/app/origin.js').then(registration => {
+    globalThis.serviceOriginWorker = registration.installing;
+    serviceOriginWorker.postMessage('probe');
+  }, error => parent.postMessage({error: error.name}, '*'));
+</script>"#;
+
+const LIFETIME_WORKER_SOURCE: &str = r#"
+  const phase = location.pathname.includes('install-') ? 'install' : 'activate';
+  let lifecycleEvent;
+  let release;
+  self['on' + phase] = event => {
+    lifecycleEvent = event;
+    event.waitUntil(new Promise(resolve => { release = resolve; }));
+    const settled = Promise.resolve();
+    self.settledLifetimePromise = new WeakRef(settled);
+    event.waitUntil(settled);
+    if (location.pathname.includes('reject')) event.waitUntil(Promise.reject(new Error('lifetime failure')));
+  };
+  onmessage = event => {
+    let extension = 'allowed';
+    try { lifecycleEvent.waitUntil(Promise.resolve()); } catch (error) { extension = error.name; }
+    let synthetic = '';
+    try { new ExtendableEvent('install').waitUntil(Promise.resolve()); } catch (error) { synthetic = error.name; }
+    event.source.postMessage({ extension, synthetic, trusted: lifecycleEvent.isTrusted,
+      retained: !!self.settledLifetimePromise.deref(),
+      branded: lifecycleEvent instanceof ExtendableEvent });
+    if (event.data === 'release') release();
+  };
 "#;
 
 #[derive(Debug)]
@@ -84,6 +130,12 @@ impl ServiceWorkerFixture {
                     ),
                     "/app/worker.js" | "/app/worker-v2.js" => (LIFECYCLE_WORKER_SOURCE, "", ""),
                     "/app/close-on-activate.js" => (CLOSE_ON_ACTIVATE_SOURCE, "", ""),
+                    "/app/origin.js" => (ORIGIN_WORKER_SOURCE, "", ""),
+                    "/app/frame.html" => (ORIGIN_FRAME_SOURCE, "", ""),
+                    "/app/install-wait.js"
+                    | "/app/install-reject.js"
+                    | "/app/activate-wait.js"
+                    | "/app/activate-reject.js" => (LIFETIME_WORKER_SOURCE, "", ""),
                     "/allowed/sw.js" => ("", "", "/"),
                     "/narrow/sw.js" => ("", "", "/narrow/sub/"),
                     "/bad-allowed/sw.js" => ("", "", "http://["),
@@ -113,8 +165,13 @@ impl ServiceWorkerFixture {
                 } else {
                     format!("Service-Worker-Allowed: {allowed}\r\n")
                 };
+                let content_type = if path == "/app/frame.html" {
+                    "text/html"
+                } else {
+                    "text/javascript"
+                };
                 write!(stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\n{policy_header}{allowed_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{policy_header}{allowed_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 ).unwrap();
             }
@@ -577,4 +634,124 @@ fn service_worker_host_termination_during_activate_does_not_reborrow_or_mark_act
     assert!(runtime.host_state.borrow().workers.is_empty());
     drop(runtime);
     assert_eq!(fixture.finish(), vec!["/app/close-on-activate.js"]);
+}
+
+fn eval_str(runtime: &mut JsRuntime, source: &str) -> String {
+    runtime
+        .eval(source)
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped()
+}
+
+fn assert_lifetime_transition(path: &str, pending: &str, final_state: &str) {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval(&format!(
+            r#"
+      globalThis.lifetime = {{messages: [], ready: false}};
+      navigator.serviceWorker.ready.then(() => lifetime.ready = true);
+      navigator.serviceWorker.onmessage = event => lifetime.messages.push(event.data);
+      navigator.serviceWorker.register({path:?}).then(registration => {{
+        lifetime.registration = registration;
+        lifetime.worker = registration.installing;
+      }});
+    "#
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "lifetime.worker.state"), pending);
+    assert_eq!(
+        runtime.eval("lifetime.ready").unwrap().as_boolean(),
+        Some(false)
+    );
+    boa_gc::force_collect();
+    runtime
+        .eval("lifetime.worker.postMessage('probe')")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "lifetime.worker.state"), pending);
+    assert_eq!(runtime.eval(
+        "lifetime.messages.length === 1 && lifetime.messages[0].extension === 'allowed' && lifetime.messages[0].synthetic === 'InvalidStateError' && lifetime.messages[0].trusted && lifetime.messages[0].branded && lifetime.messages[0].retained"
+    ).unwrap().as_boolean(), Some(true), "messages: {}; task errors: {:?}",
+        eval_str(&mut runtime, "JSON.stringify(lifetime.messages)"), runtime.take_task_errors());
+    runtime
+        .eval("lifetime.worker.postMessage('release')")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "lifetime.worker.state"), final_state);
+    if final_state == "activated" {
+        assert_eq!(
+            runtime.eval("lifetime.ready").unwrap().as_boolean(),
+            Some(true)
+        );
+        runtime.eval("lifetime.worker.postMessage('late')").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(
+            eval_str(&mut runtime, "lifetime.messages.at(-1).extension"),
+            "InvalidStateError"
+        );
+    } else {
+        assert_eq!(runtime.eval(
+            "!lifetime.ready && lifetime.registration.active === null && navigator.serviceWorker.controller === null"
+        ).unwrap().as_boolean(), Some(true));
+    }
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec![path.to_owned()]);
+}
+
+#[test]
+fn service_worker_install_waits_for_lifetime_promises() {
+    assert_lifetime_transition("/app/install-wait.js", "installing", "activated");
+}
+
+#[test]
+fn service_worker_install_rejection_waits_for_all_lifetime_promises() {
+    assert_lifetime_transition("/app/install-reject.js", "installing", "redundant");
+}
+
+#[test]
+fn service_worker_activation_waits_for_lifetime_promises() {
+    assert_lifetime_transition("/app/activate-wait.js", "activating", "activated");
+}
+
+#[test]
+fn service_worker_activation_rejection_still_finishes_after_all_promises_settle() {
+    assert_lifetime_transition("/app/activate-reject.js", "activating", "activated");
+}
+
+#[test]
+fn service_worker_iframe_messages_use_the_client_origin_in_both_directions() {
+    let top = ServiceWorkerFixture::new();
+    let child = ServiceWorkerFixture::new();
+    let mut runtime =
+        JsRuntime::with_document_and_url(blank_html_document(), &format!("{}/page", top.origin))
+            .unwrap();
+    runtime.eval(&format!(r#"
+      globalThis.originReports = [];
+      addEventListener('message', event => originReports.push({{frameOrigin: event.origin, ...event.data}}));
+      const frame = document.createElement('iframe');
+      frame.src = {url:?}; document.body.appendChild(frame);
+    "#, url=format!("{}/app/frame.html", child.origin))).unwrap();
+    runtime.run_until_idle().unwrap();
+    let observed: serde_json::Value =
+        serde_json::from_str(&eval_str(&mut runtime, "JSON.stringify(originReports)")).unwrap();
+    assert_eq!(
+        observed,
+        serde_json::json!([{
+            "frameOrigin": child.origin, "incomingOrigin": child.origin,
+            "workerOrigin": child.origin, "outgoingOrigin": child.origin, "sameSource": true,
+        }]),
+        "task errors: {:?}",
+        runtime.take_task_errors()
+    );
+    drop(runtime);
+    assert_eq!(child.finish(), vec!["/app/frame.html", "/app/origin.js"]);
+    assert!(top.finish().is_empty());
 }

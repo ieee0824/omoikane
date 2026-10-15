@@ -88,8 +88,7 @@ fn start_service_worker(
     if !evaluated || runtime.is_terminated_worker() {
         return Ok(ServiceWorkerStartResult::LoadFailure);
     }
-    runtime.eval("self.dispatchEvent(new Event('install'))")?;
-    runtime.run_jobs()?;
+    dispatch_lifecycle(&mut runtime, "install")?;
     if runtime.is_terminated_worker() {
         return Ok(ServiceWorkerStartResult::LoadFailure);
     }
@@ -152,16 +151,7 @@ pub(super) fn dispatch_service_worker_activate_native(
             owner.borrow_mut().worker_owner_objects.remove(&id);
             return Ok(JsValue::from(false));
         }
-        let result = worker
-            .runtime
-            .eval("self.dispatchEvent(new Event('activate'))")
-            .and_then(|_| {
-                if worker.runtime.is_terminated_worker() {
-                    Ok(())
-                } else {
-                    worker.runtime.run_jobs()
-                }
-            });
+        let result = dispatch_lifecycle(&mut worker.runtime, "activate");
         let live = result.is_ok() && !worker.runtime.is_terminated_worker();
         let realm = worker
             .runtime
@@ -187,4 +177,107 @@ pub(super) fn dispatch_service_worker_activate_native(
         }
         Ok(JsValue::from(live))
     })
+}
+
+fn dispatch_lifecycle(runtime: &mut JsRuntime, phase: &str) -> JsResult<()> {
+    call_lifecycle_callback(runtime, "dispatch", &[js_string!(phase).into()])?;
+    runtime.run_jobs()?;
+    if !runtime.is_terminated_worker() {
+        call_lifecycle_callback(runtime, "finish", &[js_string!(phase).into()])?;
+        runtime.run_jobs()?;
+    }
+    Ok(())
+}
+
+fn call_lifecycle_callback(runtime: &mut JsRuntime, name: &str, args: &[JsValue]) -> JsResult<()> {
+    let document_id = runtime
+        .context
+        .realm()
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .map(|identity| identity.0)
+        .ok_or_else(|| {
+            JsNativeError::error().with_message("ServiceWorker realm has no identity")
+        })?;
+    let holder = runtime
+        .host_state
+        .borrow()
+        .service_worker_lifecycle_callbacks
+        .get(&document_id)
+        .cloned()
+        .ok_or_else(|| {
+            JsNativeError::error().with_message("ServiceWorker callbacks are unavailable")
+        })?;
+    runtime.with_active_host(|context| {
+        let helper = holder.get(js_string!(name), context)?;
+        let callable = helper.as_callable().ok_or_else(|| {
+            JsNativeError::typ().with_message("ServiceWorker lifecycle callback is unavailable")
+        })?;
+        callable
+            .call(&JsValue::undefined(), args, context)
+            .map(|_| ())
+    })
+}
+
+/// Transfers lifecycle completion to the owner without sharing realm values.
+pub(super) fn lifecycle_complete_native(
+    _: &JsValue,
+    args: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    let installing = args.first().is_some_and(JsValue::to_boolean);
+    let failed = args.get(1).is_some_and(JsValue::to_boolean);
+    with_host_state(|state| {
+        let state = state.borrow();
+        if !state.worker_terminated {
+            if let (Some(owner), Some(id)) = (&state.worker_owner, state.worker_id) {
+                owner
+                    .borrow_mut()
+                    .event_loop
+                    .enqueue_service_worker_lifecycle(id, installing, failed);
+            }
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+impl JsRuntime {
+    pub(super) fn run_service_worker_lifecycle(
+        &mut self,
+        id: u64,
+        installing: bool,
+        failed: bool,
+    ) -> JsResult<()> {
+        let (owner, realm) = {
+            let state = self.host_state.borrow();
+            let Some(owner) = state.worker_owner_objects.get(&id).cloned() else {
+                return Ok(());
+            };
+            let realm = state.workers.get(&id).and_then(|entry| {
+                entry
+                    .borrow()
+                    .runtime
+                    .host_state
+                    .borrow()
+                    .worker_owner_realm
+                    .clone()
+            });
+            (owner, realm)
+        };
+        let previous = realm.map(|realm| self.context.enter_realm(realm));
+        let result = call_lifecycle_callback(
+            self,
+            "complete",
+            &[
+                owner,
+                js_string!(id.to_string()).into(),
+                installing.into(),
+                failed.into(),
+            ],
+        );
+        if let Some(previous) = previous {
+            self.context.enter_realm(previous);
+        }
+        result
+    }
 }
