@@ -30,6 +30,7 @@ collect_pattern \
   "/css/css-color/parsing/color-valid-lab.html"
 collect_pattern "/css/css-logical/"
 collect_pattern "/reporting/" "/content-security-policy/securitypolicyviolation/constructor-required-fields.html"
+collect_pattern "/cookies/resources/"
 collect_pattern \
   "/permissions-policy/policy-extends-to-sandbox.html" \
   "/permissions-policy/resources/sandbox-self.html" \

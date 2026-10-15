@@ -223,6 +223,7 @@ unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tracer) {
         }
         TimerPayload::Source(_)
         | TimerPayload::ResourceLoad { .. }
+        | TimerPayload::ImageResourceEvent { .. }
         | TimerPayload::JavascriptDocumentLoad { .. }
         | TimerPayload::FormSubmission { .. }
         | TimerPayload::GeolocationTimeout { .. } => {}
@@ -319,6 +320,7 @@ impl EventLoop {
             TimerPayload::ResourceLoad { .. }
             | TimerPayload::JavascriptDocumentLoad { .. }
             | TimerPayload::FormSubmission { .. } => TaskSource::Networking,
+            TimerPayload::ImageResourceEvent { .. } => TaskSource::DomManipulation,
             TimerPayload::GeolocationTimeout { .. } => TaskSource::Geolocation,
             _ => TaskSource::Timer,
         };
@@ -343,6 +345,7 @@ impl EventLoop {
                     task,
                     Task::Timer {
                         payload: TimerPayload::ResourceLoad { node_id }
+                            | TimerPayload::ImageResourceEvent { node_id, .. }
                             | TimerPayload::FormSubmission { node_id, .. }
                             | TimerPayload::JavascriptDocumentLoad { iframe_id: node_id, .. },
                         ..

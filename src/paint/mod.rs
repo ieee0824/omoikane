@@ -1898,6 +1898,7 @@ fn render_document_with_url_internal(
 ) -> Result<Canvas, PaintError> {
     let mut timings = RenderTimings::default();
     let mut image_animation_time_ms = 0;
+    let mut document_runtime = None;
     let effective_base = stylesheet::extract_document_base_url(document, base_url);
     let mut resolver = StyleResolver::new();
     resolver.set_viewport(viewport.width, viewport.height);
@@ -1975,6 +1976,7 @@ fn render_document_with_url_internal(
             for error in runtime.take_task_errors() {
                 eprintln!("[omoikane][js-error] {error}");
             }
+            document_runtime = Some(runtime);
         } else {
             timings.javascript_runtime_init = runtime_init_start.elapsed();
             timings.javascript = javascript_start.elapsed();
@@ -2038,26 +2040,32 @@ fn render_document_with_url_internal(
     let layout_web_fonts = web_font_registry_opt.map(|_| Arc::clone(&web_font_registry));
     timings.fonts = fonts_start.elapsed();
 
-    let result = crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
-        crate::layout::with_image_base_url(effective_base, || {
-            crate::layout::with_image_animation_time(image_animation_time_ms, || {
-                let layout_start = Instant::now();
-                let mut layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
-                timings.layout = layout_start.elapsed();
-                apply_scroll_offsets(&mut layout, &mut resolver, viewport, scroll);
-                let paint_start = Instant::now();
-                let canvas = paint_layout_with_web_fonts(
-                    &layout,
-                    &mut resolver,
-                    viewport,
-                    all_fonts,
-                    web_font_registry_opt,
-                );
-                timings.paint = paint_start.elapsed();
-                Some(canvas)
+    let render = || {
+        crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
+            crate::layout::with_image_base_url(effective_base, || {
+                crate::layout::with_image_animation_time(image_animation_time_ms, || {
+                    let layout_start = Instant::now();
+                    let mut layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
+                    timings.layout = layout_start.elapsed();
+                    apply_scroll_offsets(&mut layout, &mut resolver, viewport, scroll);
+                    let paint_start = Instant::now();
+                    let canvas = paint_layout_with_web_fonts(
+                        &layout,
+                        &mut resolver,
+                        viewport,
+                        all_fonts,
+                        web_font_registry_opt,
+                    );
+                    timings.paint = paint_start.elapsed();
+                    Some(canvas)
+                })
             })
         })
-    });
+    };
+    let result = match document_runtime.as_mut() {
+        Some(runtime) => runtime.with_document_images(document.identity(), render),
+        None => render(),
+    };
     record_render_timings(&timings);
     result.ok_or(PaintError::InvalidImageBuffer)
 }

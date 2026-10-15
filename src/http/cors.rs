@@ -388,6 +388,40 @@ pub(crate) fn fetch_with_embedder_policy_reporting(
     )
 }
 
+/// Collects COEP reports while checking redirect targets before network I/O.
+/// The caller checks the initial URL and owns CSP reporting for each check.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fetch_with_embedder_policy_reporting_checked(
+    client: &mut Client,
+    request: HttpRequest,
+    origin: &Origin,
+    mode: RequestMode,
+    credentials: CredentialsMode,
+    redirect_mode: RedirectMode,
+    cache: &mut PreflightCache,
+    embedder_policy: super::corp::EmbedderPolicyValue,
+    report_only_embedder_policy: super::corp::EmbedderPolicyValue,
+    violations: &mut Vec<CorpViolation>,
+    timeout: Option<Duration>,
+    check_redirect: &mut dyn FnMut(&Url, usize) -> bool,
+) -> Result<FetchResponse, CorsError> {
+    fetch_with_policy(
+        client,
+        request,
+        origin,
+        mode,
+        credentials,
+        redirect_mode,
+        cache,
+        embedder_policy,
+        report_only_embedder_policy,
+        violations,
+        timeout,
+        false,
+        Some(check_redirect),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fetch_with_policy(
     client: &mut Client,

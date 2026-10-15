@@ -15585,6 +15585,18 @@ fn performance_navigation_and_resource_timing_entries_have_lifecycle_semantics()
     let mut runtime =
         JsRuntime::with_document_and_url(default_document(), "https://example.test/index.html")
             .unwrap();
+    runtime
+        .eval(
+            r#"
+        performance.setResourceTimingBufferSize(2);
+        globalThis.first = new Image();
+        first.src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+        const second = new Image(); second.src = first.src;
+        const third = new Image(); third.src = first.src;
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
     assert!(runtime
         .eval(
             r#"(() => {
@@ -15598,15 +15610,7 @@ fn performance_navigation_and_resource_timing_entries_have_lifecycle_semantics()
                       entry.redirectCount !== 0 || entry.toJSON().entryType !== "navigation" ||
                       entry.toJSON().type !== "navigate" ||
                       "navigationStart" in entry || "navigationStart" in entry.toJSON()) return false;
-                  performance.clearResourceTimings();
-                  performance.setResourceTimingBufferSize(2);
                   performance.mark("survivor");
-                  const first = new Image();
-                  first.src = "data:image/png;base64,AA==";
-                  const second = new Image();
-                  second.src = "data:image/png;base64,AA==";
-                  const third = new Image();
-                  third.src = "data:image/png;base64,AA==";
                   const resources = performance.getEntriesByType("resource");
                   const resourceStart = Object.getOwnPropertyDescriptor(first, "__resourceTimingStart");
                   const resourceRecorded = Object.getOwnPropertyDescriptor(first, "__resourceTimingRecorded");
@@ -15616,7 +15620,7 @@ fn performance_navigation_and_resource_timing_entries_have_lifecycle_semantics()
                     resources.every(resource => resource instanceof PerformanceResourceTiming &&
                       resource.initiatorType === "img" && resource.responseEnd >= resource.startTime &&
                       resource.toJSON().initiatorType === "img") &&
-                    performance.getEntriesByName("data:image/png;base64,AA==").length === 2;
+                    performance.getEntriesByName("data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==").length === 2;
                 })()"#,
         )
         .unwrap()
@@ -15814,27 +15818,33 @@ fn performance_resource_timing_fetch_completion_is_idempotent() {
 #[test]
 fn performance_resource_timing_buffer_count_resets_after_clear() {
     let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+    runtime.eval(r#"
+        performance.clearResourceTimings();
+        performance.setResourceTimingBufferSize(1);
+        performance.mark("before");
+        globalThis.imageSource = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+        new Image().src = imageSource;
+        new Image().src = imageSource;
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
     assert!(
         runtime
-            .eval(
-                r#"(() => {
-                  performance.clearResourceTimings();
-                  performance.setResourceTimingBufferSize(1);
-                  performance.mark("before");
-                  new Image().src = "data:image/png;base64,AA==";
-                  new Image().src = "data:image/png;base64,AA==";
-                  const full = performance.getEntriesByType("resource").length === 1;
-                  performance.clearResourceTimings();
-                  performance.mark("after");
-                  new Image().src = "data:image/png;base64,AA==";
-                  return full && performance.getEntriesByType("resource").length === 1 &&
-                    performance.getEntriesByType("mark").length === 2;
-                })()"#,
-            )
+            .eval("performance.getEntriesByType('resource').length === 1")
             .unwrap()
             .as_boolean()
             .unwrap()
     );
+    runtime
+        .eval(
+            r#"
+        performance.clearResourceTimings();
+        performance.mark("after");
+        new Image().src = imageSource;
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(runtime.eval("performance.getEntriesByType('resource').length === 1 && performance.getEntriesByType('mark').length === 2").unwrap().as_boolean().unwrap());
 }
 
 #[test]
@@ -15979,12 +15989,12 @@ fn performance_resource_timing_buffer_full_event_targets_performance() {
                       event.eventPhase === 2, event.type === "resourcetimingbufferfull",
                       event.composedPath().length === 1 && event.composedPath()[0] === performance];
                   };
-                  new Image().src = "data:image/png;base64,AA==";
-                  new Image().src = "data:image/png;base64,AA==";
+                  new Image().src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+                  new Image().src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
                 })()"#,
         )
         .unwrap();
-    runtime.run_jobs().unwrap();
+    runtime.run_until_idle().unwrap();
     assert!(runtime
         .eval("bufferFullState && bufferFullState[0] && bufferFullState[1] && bufferFullState[2] && bufferFullState[3] && bufferFullState[4]")
         .unwrap()
