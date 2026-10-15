@@ -14056,7 +14056,8 @@ export let __omoikane_update_auxiliary_opener;
       setAttributeWithApprovedString(this, attrName, prepared, prepared, guard);
     }
     get src() {
-      return this.getAttribute("src") || "";
+      const raw = this.getAttribute("src");
+      return raw === null ? "" : __omoikane_resolve_url(raw);
     }
     set src(value) {
       this.setAttribute("src", value);
