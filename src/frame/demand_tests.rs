@@ -60,6 +60,56 @@ fn scheduling_is_pure_and_anchors_timer_deadlines_across_os_wakeups() {
     );
 }
 
+#[test]
+fn wall_deadline_stays_anchored_to_wall_time_across_os_wakeups() {
+    let origin = Instant::now();
+    let mut scheduler = PlatformFrameScheduler::new(origin, Duration::from_millis(16));
+    scheduler.begin_frame(origin);
+    for elapsed_ms in [0, 200, 499, 999] {
+        let now = origin + Duration::from_millis(elapsed_ms);
+        let remaining = Duration::from_millis(1_000 - elapsed_ms);
+        assert_eq!(
+            scheduler.plan(now, demand(NextRendering::AfterWall(remaining))),
+            PlatformFramePlan::WaitUntil(origin + Duration::from_secs(1))
+        );
+    }
+    assert_eq!(
+        scheduler.plan(
+            origin + Duration::from_secs(1),
+            demand(NextRendering::AfterWall(Duration::ZERO))
+        ),
+        PlatformFramePlan::Redraw
+    );
+}
+
+#[test]
+fn mixed_deadlines_choose_the_earlier_absolute_deadline() {
+    let origin = Instant::now();
+    let mut scheduler = PlatformFrameScheduler::new(origin, Duration::from_millis(16));
+    scheduler.begin_frame(origin);
+    let now = origin + Duration::from_millis(500);
+    assert_eq!(
+        scheduler.plan(
+            now,
+            demand(NextRendering::AfterBoth {
+                page_delay: Duration::from_millis(600),
+                wall_delay: Duration::from_millis(500),
+            })
+        ),
+        PlatformFramePlan::WaitUntil(origin + Duration::from_millis(600))
+    );
+    assert_eq!(
+        scheduler.plan(
+            now,
+            demand(NextRendering::AfterBoth {
+                page_delay: Duration::from_millis(900),
+                wall_delay: Duration::from_millis(200),
+            })
+        ),
+        PlatformFramePlan::WaitUntil(origin + Duration::from_millis(700))
+    );
+}
+
 fn navigate(session: &mut CdpSession, html: &str) {
     let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
     session

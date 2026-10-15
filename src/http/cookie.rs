@@ -10,6 +10,9 @@ use std::time::{Duration, SystemTime};
 use super::request::Method;
 use super::{SchemefulSite, url::Url};
 
+mod changes;
+pub use changes::CookieChangeSubscription;
+
 /// The `SameSite` attribute of a cookie.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SameSite {
@@ -183,21 +186,20 @@ impl Cookie {
 
     /// Returns `true` if this cookie has expired relative to `now`.
     fn is_expired(&self, now: SystemTime) -> bool {
-        if let Some(max_age) = self.max_age {
-            if max_age <= 0 {
-                return true;
-            }
-
-            if let Ok(elapsed) = now.duration_since(self.received_at) {
-                return elapsed >= Duration::from_secs(max_age as u64);
-            }
-
-            return false;
+        if self.max_age.is_some_and(|max_age| max_age <= 0) {
+            return true;
         }
-        if let Some(expires) = self.expires {
-            return now > expires;
+        self.expiration_time().is_some_and(|expires| now >= expires)
+    }
+
+    fn expiration_time(&self) -> Option<SystemTime> {
+        match self.max_age {
+            Some(max_age) if max_age <= 0 => Some(self.received_at),
+            Some(max_age) => self
+                .received_at
+                .checked_add(Duration::from_secs(max_age as u64)),
+            None => self.expires,
         }
-        false
     }
 
     /// Returns `true` if this cookie should be sent with a request to `url`.
@@ -249,6 +251,7 @@ pub struct CookieJar {
     cookies: Vec<(Cookie, String)>, // (cookie, origin_domain)
     changes: VecDeque<RecordedCookieChange>,
     change_sequence: u64,
+    change_subscriptions: changes::ChangeSubscriptions,
 }
 
 #[derive(Debug, Clone)]
@@ -279,6 +282,7 @@ pub(crate) struct CookieStoreWrite {
     pub max_age: Option<i64>,
     pub same_site: SameSite,
     pub partitioned: bool,
+    pub deletion: bool,
 }
 
 impl CookieJar {
@@ -288,7 +292,17 @@ impl CookieJar {
             cookies: Vec::new(),
             changes: VecDeque::new(),
             change_sequence: 0,
+            change_subscriptions: changes::ChangeSubscriptions::default(),
         }
+    }
+
+    /// Subscribes a host event loop to future script-visible cookie mutations.
+    ///
+    /// Retain the returned subscription and acknowledge each wake with
+    /// [`CookieChangeSubscription::take_changed`]. The waker must schedule work
+    /// without synchronously re-entering this jar or its enclosing mutex.
+    pub fn subscribe_changes(&mut self, waker: std::task::Waker) -> CookieChangeSubscription {
+        self.change_subscriptions.subscribe(waker)
     }
 
     /// Parses a `Set-Cookie` header value and stores the cookie.
@@ -371,9 +385,6 @@ impl CookieJar {
         options.name = options.name.trim_matches([' ', '\t']).to_string();
         options.value = options.value.trim_matches([' ', '\t']).to_string();
         options.domain = options.domain.map(|domain| domain.to_ascii_lowercase());
-        if options.partitioned {
-            return Err("Partitioned cookies are not supported");
-        }
         if options.expires.is_some() && options.max_age.is_some() {
             return Err("expires and maxAge cannot both be set");
         }
@@ -425,6 +436,15 @@ impl CookieJar {
                 .any(|c| (c <= '\u{1f}' && c != '\t') || c == '\u{7f}')
         {
             return Err("Invalid cookie path");
+        }
+        if options.partitioned {
+            // There is no partitioned storage yet. Deleting from that empty
+            // namespace succeeds without touching an unpartitioned cookie.
+            return if options.deletion {
+                Ok(())
+            } else {
+                Err("Partitioned cookies are not supported")
+            };
         }
         let now = SystemTime::now();
         let cookie = Cookie {
@@ -522,6 +542,11 @@ impl CookieJar {
             return;
         }
 
+        // A write can race the scheduled expiry checkpoint. Remove expired
+        // records before replacement so their deletion is not lost.
+        let now = SystemTime::now();
+        self.evict_expired_at(now);
+
         if !secure_origin
             && !cookie.secure
             && self.cookies.iter().any(|(old, _)| {
@@ -575,11 +600,10 @@ impl CookieJar {
             !(c.name == name && c.domain == domain && c.path == path && c.host_only == host_only)
         });
 
-        let now = SystemTime::now();
         if cookie.is_expired(now) {
-            if let Some(old) = replaced.filter(|old| !old.is_expired(now)) {
-                self.record_change(old, true, individual_event);
-            }
+            // An immediately expired new cookie is itself an observable
+            // deletion, even when there was no previous cookie to replace.
+            self.record_change(cookie, true, individual_event);
         } else {
             let unchanged = replaced.as_ref().is_some_and(|old| {
                 !old.is_expired(now)
@@ -616,6 +640,7 @@ impl CookieJar {
         if self.changes.len() > 4096 {
             self.changes.pop_front();
         }
+        self.change_subscriptions.notify();
     }
 
     /// Returns the latest change sequence and changes visible at a script URL.
@@ -651,6 +676,38 @@ impl CookieJar {
     /// Returns the latest change cursor for a newly created CookieStore.
     pub(crate) fn change_sequence(&self) -> u64 {
         self.change_sequence
+    }
+
+    /// Evicts cookies expired at `now` and records their script-visible removals.
+    ///
+    /// This mutation is called at an event-loop checkpoint so expiration can
+    /// produce a Cookie Store change without another cookie read or write.
+    pub(crate) fn evict_expired_at(&mut self, now: SystemTime) -> usize {
+        let mut expired = Vec::new();
+        self.cookies.retain(|(cookie, _)| {
+            if cookie.is_expired(now) {
+                expired.push(cookie.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let count = expired.len();
+        for cookie in expired {
+            self.record_change(cookie, true, false);
+        }
+        count
+    }
+
+    /// Returns the time until the next stored cookie expires.
+    ///
+    /// A zero duration means an expired cookie is waiting to be evicted.
+    pub(crate) fn next_expiry_delay_at(&self, now: SystemTime) -> Option<Duration> {
+        self.cookies
+            .iter()
+            .filter_map(|(cookie, _)| cookie.expiration_time())
+            .map(|expires| expires.duration_since(now).unwrap_or_default())
+            .min()
     }
 
     /// Builds the `Cookie` header value for a request to `url`.
@@ -1354,13 +1411,78 @@ mod tests {
     }
 
     #[test]
+    fn expiration_evicts_once_and_reports_only_script_visible_deletions() {
+        let mut jar = CookieJar::new();
+        let url: Url = "https://example.com/".parse().unwrap();
+        jar.add_from_header_for_url("visible=one; Max-Age=2; Path=/", &url);
+        jar.add_from_header_for_url("hidden=secret; Max-Age=2; HttpOnly; Path=/", &url);
+        jar.add_from_header_for_url("later=two; Path=/", &url);
+        let start = jar.cookies[0].0.received_at;
+        for (cookie, _) in &mut jar.cookies {
+            cookie.received_at = start;
+        }
+        jar.cookies[2].0.expires = Some(start + Duration::from_secs(4));
+        let cursor = jar.change_sequence();
+
+        assert_eq!(
+            jar.next_expiry_delay_at(start),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(jar.evict_expired_at(start + Duration::from_secs(1)), 0);
+        assert_eq!(jar.evict_expired_at(start + Duration::from_secs(2)), 2);
+        assert_eq!(jar.len(), 1);
+        let (after_first, changes) = jar.script_visible_changes_since(cursor, &url, &url);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].name, "visible");
+        assert!(changes[0].deleted);
+        assert_eq!(changes[0].value, None);
+        assert_eq!(
+            jar.next_expiry_delay_at(start + Duration::from_secs(2)),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(jar.evict_expired_at(start + Duration::from_secs(2)), 0);
+        assert_eq!(jar.change_sequence(), after_first);
+
+        assert_eq!(jar.evict_expired_at(start + Duration::from_secs(4)), 1);
+        assert_eq!(
+            jar.next_expiry_delay_at(start + Duration::from_secs(4)),
+            None
+        );
+        let (_, changes) = jar.script_visible_changes_since(after_first, &url, &url);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].name, "later");
+        assert!(changes[0].deleted);
+    }
+
+    #[test]
+    fn replacement_after_expiration_keeps_the_deletion_event() {
+        let mut jar = CookieJar::new();
+        let url: Url = "https://example.com/".parse().unwrap();
+        jar.add_from_header_for_url("race=old; Max-Age=60; Path=/", &url);
+        jar.cookies[0].0.received_at = SystemTime::now() - Duration::from_secs(61);
+        let cursor = jar.change_sequence();
+
+        jar.add_from_header_for_url("race=new; Path=/", &url);
+
+        let (_, changes) = jar.script_visible_changes_since(cursor, &url, &url);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].name, "race");
+        assert!(changes[0].deleted);
+        assert_eq!(changes[1].name, "race");
+        assert_eq!(changes[1].value.as_deref(), Some("new"));
+        assert!(!changes[1].deleted);
+        assert_eq!(jar.cookie_header(&url), Some("race=new".to_string()));
+    }
+
+    #[test]
     fn replacement_preserves_creation_order_but_renews_max_age() {
         let mut jar = CookieJar::new();
         let url: Url = "https://example.com/".parse().unwrap();
         jar.add_from_header_for_url("session=old; Max-Age=3600", &url);
         let old_creation = SystemTime::now() - Duration::from_secs(7200);
+        // The original creation time can be old while the Max-Age clock is
+        // still current; replacing an expired cookie starts a new lifetime.
         jar.cookies[0].0.created_at = old_creation;
-        jar.cookies[0].0.received_at = old_creation;
 
         jar.add_from_header_for_url("session=new; Max-Age=3600", &url);
         assert_eq!(jar.cookie_header(&url), Some("session=new".to_string()));

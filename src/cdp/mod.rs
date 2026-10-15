@@ -288,6 +288,17 @@ pub(crate) enum PreparedPageNavigation {
 }
 
 impl CdpSession {
+    /// Wakes a host when the session's shared cookie jar changes, including
+    /// mutations from another runtime or an HTTP response. Retain the returned
+    /// subscription and acknowledge notifications before advancing page tasks.
+    /// The waker must only schedule work; it must not synchronously access the jar.
+    pub fn subscribe_cookie_changes(
+        &self,
+        waker: std::task::Waker,
+    ) -> crate::http::CookieChangeSubscription {
+        self.cookie_store.lock().unwrap().subscribe_changes(waker)
+    }
+
     /// Creates a new session with an empty `about:blank` document.
     pub fn new() -> Result<Self, CdpSessionError> {
         Self::with_storage_manager(StorageManager::new())

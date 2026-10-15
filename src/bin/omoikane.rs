@@ -155,6 +155,7 @@ struct FindUi {
 
 struct BrowserApp {
     session: CdpSession,
+    cookie_changes: Option<omoikane::http::CookieChangeSubscription>,
     initial_url: Option<String>,
     initial_navigation_error: Option<omoikane::cdp::JsonRpcError>,
     error_reporter: Option<Arc<ErrorReporter>>,
@@ -211,6 +212,7 @@ impl BrowserApp {
         let clock_document = session.document_generation();
         Ok(Self {
             session,
+            cookie_changes: None,
             initial_url: Some(url.into()),
             initial_navigation_error: None,
             error_reporter: None,
@@ -826,6 +828,17 @@ fn wheel_delta_css_pixels(delta: MouseScrollDelta, scale_factor: f64) -> (f64, f
 }
 
 impl ApplicationHandler for BrowserApp {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, (): ()) {
+        if self
+            .cookie_changes
+            .as_ref()
+            .is_some_and(|changes| changes.take_changed())
+        {
+            self.frame_scheduler
+                .request_rendering_opportunity(Instant::now());
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -1268,6 +1281,18 @@ mod tests {
     }
 }
 
+struct CookieStoreWake(winit::event_loop::EventLoopProxy<()>);
+
+impl std::task::Wake for CookieStoreWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let _ = self.0.send_event(());
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let url = std::env::args().nth(1).unwrap_or_else(|| {
         "data:text/html,<title>Omoikane</title><style>body{font:32px sans-serif;padding:2rem}</style><h1>Omoikane</h1><p>Pass a URL as the first argument.</p>".to_string()
@@ -1278,6 +1303,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let event_loop = EventLoop::new()?;
     let mut app = BrowserApp::new(&url)?;
+    app.cookie_changes = Some(app.session.subscribe_cookie_changes(std::task::Waker::from(
+        Arc::new(CookieStoreWake(event_loop.create_proxy())),
+    )));
     if let Some(reporter) = reporter {
         app.set_error_reporter(reporter);
     }

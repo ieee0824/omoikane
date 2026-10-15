@@ -600,13 +600,32 @@
     { "path": "cookiestore/cookieStore_get_set_creation_url.https.any.js" },
     { "path": "cookiestore/cookieStore_event_arguments.https.window.js" },
     { "path": "cookiestore/cookieStore_event_basic.https.window.js" },
-    { "path": "cookiestore/cookieStore_event_delete.https.window.js" },
+    {
+      "path": "cookiestore/cookieStore_event_delete.https.window.js",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "Pinned WPT expects no change event for deleting a cookie that does not exist, while Cookie Store API Standard section 7.4 classifies a newly-created immediately evicted cookie as deleted. The original WPT assertions remain unchanged; tests/cookie_store.rs verifies the current standard's deletion event.",
+        "issue": "https://github.com/ieee0824/omoikane/issues/1354",
+        "expires": "2026-11-15",
+        "failed_subtests": ["cookieStore does not fire change events for non-existing expired cookies"]
+      }
+    },
     { "path": "cookiestore/cookieStore_set_limit.https.any.js" },
     { "path": "cookiestore/cookieStore_special_names.https.any.js" },
     { "path": "cookiestore/cookieStore_getAll_multiple.https.any.js" },
     { "path": "cookiestore/cookieStore_get_set_ordering.https.any.js" },
     { "path": "cookiestore/cookieStore_event_overwrite.https.window.js" },
     { "path": "cookiestore/cookieStore_getAll_set_creation_url.https.any.js" },
+    {
+      "path": "cookiestore/cookieStore_set_maxAge.https.window.js",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "Pinned WPT expects no change event for maxAge:0, while Cookie Store API Standard section 7.4 classifies a newly-created immediately evicted cookie as deleted. The original WPT assertions remain unchanged; tests/cookie_store.rs verifies the current standard's deletion event.",
+        "issue": "https://github.com/ieee0824/omoikane/issues/1354",
+        "expires": "2026-11-15",
+        "failed_subtests": ["cookieStore.set with maxAge set to zero, cookie change event not dispatched"]
+      }
+    },
     { "path": "storage-access-api/idlharness.window.js" },
     { "path": "storage-access-api/requestStorageAccess-non-fully-active.sub.https.window.js" }
   ]

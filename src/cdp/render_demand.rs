@@ -11,6 +11,15 @@ pub enum NextRendering {
     EveryFrame,
     /// Offer an opportunity after this remaining page-time delay.
     After(Duration),
+    /// Offer an opportunity after this remaining wall-clock delay.
+    AfterWall(Duration),
+    /// Offer an opportunity at the earlier page-time or wall-clock deadline.
+    AfterBoth {
+        /// Remaining delay on the page's virtual clock.
+        page_delay: Duration,
+        /// Remaining delay on the wall clock.
+        wall_delay: Duration,
+    },
     /// Only external input, resize or navigation can create work.
     Idle,
 }
@@ -70,8 +79,9 @@ impl CdpSession {
 
     /// Queries current render needs without running jobs or mutating caches.
     /// `last_presented` must be the key captured after the last successful paint;
-    /// `None` requests an initial paint. Delays use the page's explicit virtual
-    /// clock, so hosts must account for elapsed real time when scheduling them.
+    /// `None` requests an initial paint. Timer delays use the page's virtual
+    /// clock; cookie expiration delays use wall time. Hosts must account for
+    /// elapsed real time when scheduling the next opportunity.
     pub fn render_demand(&self, last_presented: Option<&PaintStateKey>) -> RenderDemand {
         RenderDemand {
             needs_paint: last_presented != Some(&self.paint_state_key()),

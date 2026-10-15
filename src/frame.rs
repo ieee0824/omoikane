@@ -98,7 +98,9 @@ impl PlatformFrameScheduler {
 
     /// Selects the next host action without changing state or reading a clock.
     /// Timer delays are anchored to the last consumed page time, so repeated
-    /// OS wakeups cannot move the same timer's deadline into the future.
+    /// OS wakeups cannot move the same timer's deadline into the future. Wall
+    /// delays are measured from `now`, so fresh remaining delays do not move
+    /// cookie expiry deadlines into the past.
     pub fn plan(&self, now: Instant, demand: RenderDemand) -> PlatformFramePlan {
         if self.redraw_pending {
             return PlatformFramePlan::Wait;
@@ -112,6 +114,12 @@ impl PlatformFrameScheduler {
             NextRendering::After(delay) => {
                 self.origin + Duration::from_millis(self.last_elapsed_ms) + delay
             }
+            NextRendering::AfterWall(delay) => now + delay,
+            NextRendering::AfterBoth {
+                page_delay,
+                wall_delay,
+            } => (self.origin + Duration::from_millis(self.last_elapsed_ms) + page_delay)
+                .min(now + wall_delay),
         };
         if now >= deadline {
             PlatformFramePlan::Redraw
