@@ -15504,6 +15504,7 @@ fn nested_about_blank_iframe_inherits_its_owning_documents_opaque_origin() {
         "<html><body><iframe id='outer' src='data:text/html,%3Chtml%3E%3Cbody%3E%3C/body%3E%3C/html%3E'></iframe></body></html>",
     ).document();
     let mut runtime = JsRuntime::with_document_and_url(document, "https://example.com/").unwrap();
+    pump_zero_delay_tasks(&mut runtime);
 
     assert!(
         runtime
@@ -22708,13 +22709,18 @@ fn embedded_svg_documents_are_exposed_by_iframe_and_object() {
     let mut runtime =
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/index.html"))
             .unwrap();
+    runtime
+        .eval(
+            "var frame = document.createElement('iframe'); frame.src = '/asset.svg'; \
+             var object = document.createElement('object'); object.data = '/asset.svg'; \
+             document.body.appendChild(frame); document.body.appendChild(object);",
+        )
+        .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         runtime
             .eval(
-                r#"var frame = document.createElement('iframe'); frame.src = '/asset.svg';
-                       var object = document.createElement('object'); object.data = '/asset.svg';
-                       document.body.appendChild(frame); document.body.appendChild(object);
-                       [frame.getSVGDocument() === frame.contentDocument,
+                r#"[frame.getSVGDocument() === frame.contentDocument,
                         object.getSVGDocument() === object.contentDocument,
                         frame.getSVGDocument().documentElement instanceof frame.contentWindow.SVGSVGElement,
                         object.getSVGDocument().getElementsByTagName('text')[0] instanceof object.contentDocument.defaultView.SVGTextElement,
@@ -23719,6 +23725,7 @@ fn iframe_html_src_is_parsed_into_content_document() {
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         runtime
             .eval("document.getElementById('f').contentDocument.getElementsByTagName('p').length")
@@ -23749,6 +23756,7 @@ fn iframe_xml_src_preserves_case_namespace_entities_and_doctype() {
     let mut runtime =
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(eval_string_value(&mut runtime,
         "var d=document.getElementById('f').contentDocument,c=d.documentElement.childNodes[0]; [d.doctype.nodeType,d.doctype.nodeName,d.doctype.name,d.doctype.systemId,d.documentElement.tagName,d.documentElement.namespaceURI,d.documentElement.getAttribute('A'),c.localName].join('|')"
     ).as_deref(), Some("10|Root|Root|urn:test|Root|urn:root|<A|Child"));
@@ -24502,6 +24510,7 @@ fn iframe_relative_src_resolves_against_base_url() {
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/index.html"))
             .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -24536,6 +24545,7 @@ fn iframe_relative_src_honors_explicit_base_url_override() {
             .unwrap(),
     );
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -24568,15 +24578,22 @@ fn nested_srcdoc_inherits_owner_base_for_resources_and_history_urls() {
     let mut runtime =
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/top/parent.html"))
             .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
+
+    runtime
+        .eval(
+            r#"const outerDocument = document.getElementById('outer').contentDocument;
+               const middle = outerDocument.createElement('iframe');
+               middle.srcdoc = '<iframe id="leaf" src="asset.html"></iframe>';
+               outerDocument.body.appendChild(middle);"#,
+        )
+        .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
 
     assert_eq!(
         eval_string_value(
             &mut runtime,
             r#"(()=> {
-                  const outerDocument = document.getElementById('outer').contentDocument;
-                  const middle = outerDocument.createElement('iframe');
-                  middle.srcdoc = '<iframe id="leaf" src="asset.html"></iframe>';
-                  outerDocument.body.appendChild(middle);
                   const middleDocument = middle.contentDocument;
                   const leaf = middleDocument.getElementById('leaf');
                   const leafDocument = leaf.contentDocument;
@@ -24781,6 +24798,7 @@ fn iframe_changing_src_reloads_content_document() {
             .as_number(),
         Some(0.0)
     );
+    pump_zero_delay_tasks(&mut runtime);
 
     // Point src at the HTML resource; the next read reloads and parses it.
     runtime
@@ -25008,6 +25026,7 @@ fn retained_iframe_wrappers_never_alias_later_document_generations() {
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -25066,6 +25085,7 @@ fn outer_iframe_navigation_retires_saved_descendant_window_proxy() {
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -25110,6 +25130,7 @@ fn iframe_reload_discards_old_document_style_entry() {
     let mut runtime =
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
 
     // First load, then a computed-style query to actually build the
     // sub-document's resolver (not just seed a dirty placeholder).
@@ -25280,6 +25301,7 @@ fn iframe_content_window_is_stable_and_reflects_reload() {
         Some(0.0),
         "before load the sub-document has no <p>"
     );
+    pump_zero_delay_tasks(&mut runtime);
 
     // After a src change the stable window's document getter reflects the
     // freshly loaded sub-document.
@@ -25358,6 +25380,7 @@ fn iframe_location_navigation_resolves_relative_to_caller_document() {
     )
     .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -25413,6 +25436,7 @@ fn superseded_iframe_location_navigations_fetch_only_the_committed_resource() {
     )
     .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -25571,6 +25595,7 @@ fn discarding_parent_iframe_does_not_fetch_a_pending_child_navigation() {
         &format!("http://127.0.0.1:{outer_port}/parent.html"),
     )
     .unwrap();
+    runtime.run_timers(10, 1, 2);
 
     runtime
         .eval(
@@ -25995,6 +26020,7 @@ fn iframe_window_proxy_enforces_cross_origin_boundary_and_restores_access() {
         &format!("http://127.0.0.1:{same_origin_port}/parent.html"),
     )
     .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
 
     runtime
         .eval(
@@ -26207,15 +26233,24 @@ fn iframe_about_blank_query_and_fragment_inherit_creator_origin() {
     let doc = TreeBuilder::parse("<html><body></body></html>").document();
     let mut runtime =
         JsRuntime::with_document_and_url(doc, "https://example.test/parent.html").unwrap();
+    runtime
+        .eval(
+            "globalThis.frame = document.createElement('iframe'); \
+             frame.src = 'about:blank#fragment'; document.body.appendChild(frame); \
+             globalThis.proxy = frame.contentWindow;",
+        )
+        .unwrap();
+    assert_eq!(
+        eval_string_value(&mut runtime, "frame.contentDocument.URL").as_deref(),
+        Some("about:blank"),
+        "the initial Document must remain visible until its resource task"
+    );
+    pump_zero_delay_tasks(&mut runtime);
 
     assert_eq!(
         eval_string_value(
             &mut runtime,
             r#"(()=> {
-                  const frame = document.createElement('iframe');
-                  frame.src = 'about:blank#fragment';
-                  document.body.appendChild(frame);
-                  const proxy = frame.contentWindow;
                   const fragmentDocument = frame.contentDocument;
                   const fragmentURL = fragmentDocument.URL;
                   const fragmentVisible = proxy.document === fragmentDocument;
@@ -26289,6 +26324,7 @@ fn iframe_location_reload_and_history_preserve_proxy_and_entry_rules() {
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     runtime
         .eval(
             r#"globalThis.f = document.getElementById('f');
@@ -26511,6 +26547,7 @@ fn iframe_history_rebinds_state_entries_and_reload_uses_current_url() {
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -26701,12 +26738,28 @@ fn iframe_monotonic_id_exhaustion_fails_closed_without_partial_contexts() {
 
     let mut opaque_runtime = pending_frame_runtime("data:text/html,<p>opaque</p>");
     opaque_runtime.host_state.borrow_mut().next_opaque_origin_id = u64::MAX;
-    assert!(opaque_runtime.eval("frame.contentDocument").is_err());
+    assert_eq!(
+        eval_string_value(&mut opaque_runtime, "frame.contentDocument.URL").as_deref(),
+        Some("about:blank")
+    );
+    let (initial_document_id, context_id) = {
+        let state = opaque_runtime.host_state.borrow();
+        let frame_id = state.document.query_selector("iframe").unwrap().identity();
+        (
+            state.iframe_documents[&frame_id].document.identity(),
+            state.iframe_context_ids[&frame_id],
+        )
+    };
+    assert!(opaque_runtime.tick(0).is_err());
     {
         let state = opaque_runtime.host_state.borrow();
         assert_eq!(state.next_opaque_origin_id, u64::MAX);
-        assert!(state.iframe_documents.is_empty());
-        assert!(state.iframe_context_ids.is_empty());
+        let frame_id = state.document.query_selector("iframe").unwrap().identity();
+        assert_eq!(
+            state.iframe_documents[&frame_id].document.identity(),
+            initial_document_id
+        );
+        assert_eq!(state.iframe_context_ids[&frame_id], context_id);
     }
 
     let mut large_id_runtime = pending_frame_runtime("about:blank");
@@ -26861,6 +26914,7 @@ fn permanently_closed_window_location_cannot_navigate_reconnected_iframe() {
     let mut runtime =
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
 
     assert_eq!(
         eval_string_value(
@@ -26885,15 +26939,22 @@ fn permanently_closed_window_location_cannot_navigate_reconnected_iframe() {
                   const unchanged = frame.getAttribute('src') === originalSrc;
                   document.body.appendChild(frame);
                   const newWindow = frame.contentWindow;
+                  globalThis.reconnectedFrame = frame;
                   return [...errors, unchanged, oldWindow.closed,
-                    newWindow !== oldWindow, newWindow.document.URL,
-                    newWindow.document.getElementById('page').textContent].join('|');
+                    newWindow !== oldWindow, newWindow.document.URL].join('|');
                 })()"#
         ),
-        Some(format!(
-            "none|none|none|none|none|true|true|true|http://127.0.0.1:{port}/initial.html|initial"
-        )),
+        Some("none|none|none|none|none|true|true|true|about:blank".to_string()),
         "a detached WindowProxy and saved Location must never target the replacement context"
+    );
+    pump_zero_delay_tasks(&mut runtime);
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            "[reconnectedFrame.contentDocument.URL, reconnectedFrame.contentDocument.getElementById('page').textContent].join('|')"
+        ),
+        Some(format!("http://127.0.0.1:{port}/initial.html|initial")),
+        "the reconnected iframe must load its original src in a later task"
     );
 }
 
@@ -26980,6 +27041,7 @@ fn reloaded_iframe_default_view_follows_new_document() {
                  f.contentDocument;"
         ))
         .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
 
     // Reload with different content.
     runtime

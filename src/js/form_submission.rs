@@ -476,6 +476,7 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                         &frame,
                         Some(&request),
                         request.source_document_id,
+                        false,
                     )
                     .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
                 state.schedule_connected_resource_loads(&frame, true);

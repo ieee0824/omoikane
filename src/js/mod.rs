@@ -2560,6 +2560,9 @@ struct IframeDocument {
     loaded_attribute: &'static str,
     /// The resource attribute value used by the committed navigation.
     loaded_resource: String,
+    /// Whether this context's first queued resource task has run. A script may
+    /// create its initial about:blank Document before that task executes.
+    initial_resource_task_completed: bool,
     /// Origin represented by the embedding element's `src` policy. Location
     /// navigation retains it even when it commits a different Document origin.
     declared_src_origin: Option<DocumentSecurityOrigin>,
@@ -3484,8 +3487,8 @@ impl HostState {
         }
     }
 
-    /// Returns the embedded document for an iframe or object, loading it on the
-    /// first access and reloading it whenever its resource attribute changes.
+    /// Returns the active embedded document for an iframe or object. A queued
+    /// iframe navigation leaves the current document visible until its task.
     ///
     /// The returned document's whole node tree is registered so it can be
     /// traversed and mutated through the DOM primitives exactly like the
@@ -3495,7 +3498,27 @@ impl HostState {
     /// parsed as HTML or XML (including SVG) according to their content type;
     /// unsupported content types and load failures yield the empty skeleton.
     fn iframe_content_document(&mut self, iframe: &NodeHandle) -> Result<NodeHandle, JsHostError> {
-        self.iframe_document_with_submission(iframe, None, None)
+        let initial_blank = iframe.has_tag_name("iframe")
+            && !iframe.has_attribute("srcdoc")
+            && iframe
+                .get_attribute("src")
+                .is_some_and(|src| !src.trim().is_empty())
+            && self.pending_resource_loads.contains(&iframe.identity())
+            && !self
+                .pending_forced_iframe_navigations
+                .contains_key(&iframe.identity())
+            && self
+                .iframe_documents
+                .get(&iframe.identity())
+                .is_none_or(|entry| {
+                    !entry.initial_resource_task_completed
+                        && entry.loaded_attribute == "src"
+                        && entry.loaded_resource.is_empty()
+                });
+        if initial_blank && let Some(entry) = self.iframe_documents.get(&iframe.identity()) {
+            return Ok(entry.document.clone());
+        }
+        self.iframe_document_with_submission(iframe, None, None, initial_blank)
     }
 
     fn iframe_document_with_submission(
@@ -3503,6 +3526,7 @@ impl HostState {
         iframe: &NodeHandle,
         submission: Option<&form_submission::Submission>,
         submission_source_document_id: Option<usize>,
+        initial_blank: bool,
     ) -> Result<NodeHandle, JsHostError> {
         if !self.node_is_in_active_document(iframe) {
             return Err(JsHostError::InactiveIframeOwner);
@@ -3513,7 +3537,9 @@ impl HostState {
                 tag.is_some_and(|tag| tag.eq_ignore_ascii_case("iframe")),
             )
         });
-        let (resource_attribute, resource) = if is_iframe {
+        let (resource_attribute, resource) = if initial_blank {
+            ("src", String::new())
+        } else if is_iframe {
             if accepts_srcdoc && iframe.has_attribute("srcdoc") {
                 ("srcdoc", iframe.get_attribute("srcdoc").unwrap_or_default())
             } else {
@@ -3535,7 +3561,9 @@ impl HostState {
             )
         };
         let iframe_id = iframe.identity();
-        let force_navigation = self.pending_forced_iframe_navigations.remove(&iframe_id);
+        let force_navigation = (!initial_blank)
+            .then(|| self.pending_forced_iframe_navigations.remove(&iframe_id))
+            .flatten();
         let javascript_resource = submission.is_none()
             && resource_attribute == "src"
             && url::Url::parse(&resource).is_ok_and(|url| url.scheme() == "javascript");
@@ -3710,7 +3738,15 @@ impl HostState {
                 None => (None, self.new_opaque_security_origin()?),
             }
         };
-        let declared_src_origin = if submission.is_some()
+        let declared_src_origin = if initial_blank {
+            if sandbox.active && !sandbox.allow_same_origin {
+                Some(security_origin.clone())
+            } else {
+                self.document_security_origins
+                    .get(&owner_document_id)
+                    .cloned()
+            }
+        } else if submission.is_some()
             || matches!(&force_navigation, Some(ForcedIframeNavigation::Location))
         {
             self.iframe_documents
@@ -3842,6 +3878,7 @@ impl HostState {
                 realm: None,
                 loaded_attribute: resource_attribute,
                 loaded_resource: resource,
+                initial_resource_task_completed: false,
                 declared_src_origin,
                 submission: submission.cloned(),
                 initial_scripts: collect_script_elements(&document)
@@ -3865,10 +3902,16 @@ impl HostState {
         // initial about:blank navigations must enqueue load events even when no
         // script ever reads their contentDocument.
         self.schedule_connected_resource_loads(&document, false);
-        let visit_source = self.pending_iframe_visits.remove(&iframe_id);
-        self.pending_iframe_referrers.remove(&iframe_id);
-        if !javascript_resource {
-            self.pending_iframe_clients.remove(&iframe_id);
+        let visit_source = if initial_blank {
+            None
+        } else {
+            self.pending_iframe_visits.remove(&iframe_id)
+        };
+        if !initial_blank {
+            self.pending_iframe_referrers.remove(&iframe_id);
+            if !javascript_resource {
+                self.pending_iframe_clients.remove(&iframe_id);
+            }
         }
         if let (Some(visit_source), Some(committed_url)) = (visit_source, child_url.as_deref()) {
             let requested_url = resolve_url_reference(&navigation_url, resource_base.as_ref());
@@ -3991,6 +4034,7 @@ impl HostState {
                 realm: None,
                 loaded_attribute,
                 loaded_resource,
+                initial_resource_task_completed: true,
                 declared_src_origin,
                 submission: None,
                 initial_scripts,
@@ -11752,6 +11796,7 @@ impl JsRuntime {
                         &frame,
                         Some(&request),
                         Some(source_document_id),
+                        false,
                     );
                 if let Err(error) = loaded {
                     let mut state = self.host_state.borrow_mut();
@@ -11932,6 +11977,9 @@ impl JsRuntime {
                     .and_then(|owner| state.navigation_security_snapshot(owner.identity()))
             })?;
             state.pending_resource_loads.remove(&node_id);
+            if let Some(entry) = state.iframe_documents.get_mut(&node_id) {
+                entry.initial_resource_task_completed = true;
+            }
             state.pending_iframe_visits.remove(&node_id);
             state.pending_iframe_referrers.remove(&node_id);
             let same_origin = state.document_security_origins.get(&target_document_id)
@@ -12037,6 +12085,9 @@ impl JsRuntime {
                             .into());
                     }
                 };
+                if let Some(entry) = state.iframe_documents.get_mut(&node_id) {
+                    entry.initial_resource_task_completed = true;
+                }
                 if previous_document == Some(document.identity()) {
                     // This queued load became a no-op. A plain
                     // contentDocument read must not clear a later
