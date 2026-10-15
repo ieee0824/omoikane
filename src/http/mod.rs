@@ -8,6 +8,7 @@
 mod client;
 mod connection;
 mod cookie;
+pub(crate) mod corp;
 pub mod cors;
 mod data_uri;
 mod http2;

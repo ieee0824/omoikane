@@ -434,7 +434,12 @@ impl JsRuntime {
                 .as_ref()
                 .is_some_and(|src| resource_reference_was_redirected(src, &url, base.as_ref()));
             let _ = self.eval("__omoikane_set_current_script(null)");
-            let (result, _, _) = self.eval_module_timed(&source, &url, document.clone());
+            let (result, _, _) = self.eval_module_timed(
+                &source,
+                &url,
+                document.clone(),
+                module_script_credentials(script),
+            );
             let dispatched = self.with_active_host(|context| {
                 dispatch_script_event(
                     context,
@@ -598,26 +603,14 @@ fn script_source(
             return None;
         }
         let base = host.base_url_for_document(document.identity());
-        let cookie_context = host.document_cookie_request_context(document.identity());
-        let fetched = if prepared.kind == ScriptKind::Module {
-            fetch_script_resource_with_client_in_context(
-                src,
-                base.as_ref(),
-                Some(&cookie_context),
-                &mut host.http_client,
-            )
-            .map(|(url, source, redirects)| (url, source, redirects, false))
-        } else {
-            let origin = script_errors::document_fetch_origin(&host, document.identity());
-            script_errors::fetch_classic_source(
-                src,
-                base.as_ref(),
-                &origin,
-                prepared.node.get_attribute("crossorigin").as_deref(),
-                Some(&cookie_context),
-                &mut host.http_client,
-            )
-        };
+        let crossorigin = prepared.node.get_attribute("crossorigin");
+        // Module scripts always use CORS, including document.write entrypoints.
+        // The document-aware loader also applies COEP to each redirect hop.
+        let mode = crossorigin
+            .as_deref()
+            .or_else(|| (prepared.kind == ScriptKind::Module).then_some("anonymous"));
+        let fetched =
+            host.fetch_classic_source_for_document(document.identity(), src, base.as_ref(), mode);
         let Some((url, source, redirects, muted_errors)) = fetched else {
             return None;
         };

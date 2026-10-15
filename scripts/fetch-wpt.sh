@@ -257,6 +257,12 @@ collect_pattern \
   "/css/css-transitions/events-002.html"
 collect_pattern "/custom-elements/form-associated/" "/html/semantics/forms/form-submission-0/resources/targetted-form.js"
 collect_pattern "/common/blank.html" "/FileAPI/file/resources/echo-content-escaped.py"
+collect_pattern \
+  "/html/cross-origin-embedder-policy/meta-http-equiv.https.html" \
+  "/html/cross-origin-embedder-policy/non-initial-about-blank.https.html" \
+  "/html/cross-origin-embedder-policy/non-initial-about-blank.https.html.headers" \
+  "/html/cross-origin-embedder-policy/require-corp-about-blank.https.html" \
+  "/html/cross-origin-embedder-policy/require-corp-about-blank.https.html.headers"
 collect_pattern "/domxpath/"
 collect_pattern "/visual-viewport/"
 collect_pattern "/page-visibility/"

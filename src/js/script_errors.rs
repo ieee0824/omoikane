@@ -148,12 +148,15 @@ pub(super) fn fetch_classic_source(
     origin: &CorsOrigin,
     crossorigin: Option<&str>,
     cookie_context: Option<&crate::http::CookieRequestContext>,
+    embedder_policy: crate::http::corp::EmbedderPolicyValue,
+    report_only_embedder_policy: crate::http::corp::EmbedderPolicyValue,
     client: &mut Client,
+    violations: &mut Vec<crate::http::cors::CorpViolation>,
 ) -> Option<(String, String, usize, bool)> {
     let resource = resolve_resource_ref(src, base)?;
     let ResolvedResource::Url(url) = resource else {
         return fetch_script_resource_with_client_in_context(src, base, cookie_context, client)
-            .map(|(url, source, redirects)| (url, source, redirects, false));
+            .map(|(url, source, redirects, _)| (url, source, redirects, false));
     };
     let url = url.parse::<crate::http::Url>().ok()?;
     let mut request = HttpRequest::new(Method::Get, url.clone());
@@ -175,7 +178,7 @@ pub(super) fn fetch_classic_source(
         Some(_) => CredentialsMode::SameOrigin,
         None => CredentialsMode::Include,
     };
-    let fetched = crate::http::cors::fetch(
+    let fetched = crate::http::cors::fetch_with_embedder_policy_reporting(
         client,
         request,
         origin,
@@ -183,6 +186,10 @@ pub(super) fn fetch_classic_source(
         credentials,
         RedirectMode::Follow,
         &mut PreflightCache::default(),
+        embedder_policy,
+        report_only_embedder_policy,
+        violations,
+        None,
     )
     .ok()?;
     let muted = fetched.response_type == ResponseType::Opaque;

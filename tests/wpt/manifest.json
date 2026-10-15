@@ -498,6 +498,31 @@
     { "path": "css/css-transforms/parsing/scale-parsing-valid.html" },
     { "path": "css/css-transforms/parsing/scale-parsing-invalid.html" },
     { "path": "css/css-transforms/parsing/scale-parsing-computed.html" },
+    {
+      "path": "html/cross-origin-embedder-policy/meta-http-equiv.https.html",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "Reading iframe.contentDocument immediately after appending an iframe synchronously commits its src navigation, so the initial about:blank Document is not observable. The meta COEP policy remains ignored; the failure is the iframe task boundary tracked in #1362.",
+        "issue": "https://github.com/ieee0824/omoikane/issues/1362",
+        "expires": "2026-11-13",
+        "failed_subtests": [
+          "<meta http-equiv=\"Cross-Origin-Embedder-Policy\" content=\"require-corp\"> top-level: navigating a frame to \"none\" should not fail"
+        ]
+      }
+    },
+    { "path": "html/cross-origin-embedder-policy/non-initial-about-blank.https.html" },
+    {
+      "path": "html/cross-origin-embedder-policy/require-corp-about-blank.https.html",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "Reading iframe.contentWindow.location before the queued child navigation synchronously commits the COEP-blocked response, exposing its cross-origin error Document too early. The iframe task boundary is tracked in #1362; the first two COEP inheritance subtests pass.",
+        "issue": "https://github.com/ieee0824/omoikane/issues/1362",
+        "expires": "2026-11-13",
+        "failed_subtests": [
+          "A(B(C)) A=require-corp, B=about:blank, C=no-require-corp => C can't load"
+        ]
+      }
+    },
     {"path": "html/webappapis/scripting/processing-model-2/addEventListener.html"},
     {"path": "html/webappapis/scripting/processing-model-2/runtime-error-in-setTimeout.html"},
     {"path": "html/webappapis/scripting/processing-model-2/runtime-error.html"},

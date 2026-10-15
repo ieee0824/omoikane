@@ -14,6 +14,7 @@ use crate::font::{
     ShapingDirection, WebFontCandidate, grapheme_spacing_boundaries, is_zero_advance_character,
     load_default_text_fonts_shared, select_text_font, shape_text_with_fallback_candidates,
 };
+use crate::http::cors::{self, CredentialsMode, PreflightCache, RedirectMode, RequestMode};
 use crate::http::{HttpRequest, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
 
@@ -1934,8 +1935,8 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
     // Use shared HTTP client for connection reuse and cookie sharing
     let mut request = HttpRequest::get(url).ok()?;
     let context = IMAGE_COOKIE_CONTEXT.with(|cell| cell.borrow().clone());
-    if let Some((_, cookie_context, _)) = context.as_ref() {
-        cookie_context.apply(&mut request);
+    if let Some(context) = context.as_ref() {
+        context.cookie_context.apply(&mut request);
     } else if let Some(site) = IMAGE_BASE_URL.with(|cell| cell.borrow().clone()) {
         request.set_cookie_context(site, false);
     }
@@ -1946,7 +1947,27 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
     let response = HTTP_CLIENT.with(|client| {
         let mut client = client.borrow_mut();
         match context {
-            Some((store, _, _)) => client.send_with_shared_cookies(request, &store).ok(),
+            Some(context) => {
+                client.set_shared_cookie_store(Arc::clone(&context.store));
+                let mut violations = Vec::new();
+                let fetched = cors::fetch_with_embedder_policy_reporting(
+                    &mut client,
+                    request,
+                    &context.origin,
+                    RequestMode::NoCors,
+                    CredentialsMode::Include,
+                    RedirectMode::Follow,
+                    &mut PreflightCache::default(),
+                    context.embedder_policy,
+                    context.report_only_embedder_policy,
+                    &mut violations,
+                    None,
+                );
+                context.coep_reports.borrow_mut().extend(violations);
+                let response = fetched.ok().map(|fetched| fetched.response);
+                client.clear_shared_cookie_store();
+                response
+            }
             None => client.send(request).ok(),
         }
     })?;
@@ -3807,13 +3828,128 @@ fn measure_text_width_with_fallback(
 #[cfg(test)]
 mod image_url_tests {
     use super::*;
-    use crate::http::{CookieJar, CookieRequestContext};
+    use crate::http::corp::EmbedderPolicyValue;
+    use crate::http::cors::Origin as CorsOrigin;
+    use crate::http::{
+        Client, CookieJar, CookieRequestContext, HttpParseError, HttpResponse, HttpTransport,
+    };
     use crate::test_support::http_fixture::{
         ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
         read_request_headers,
     };
     use std::io::Write;
     use std::sync::Mutex;
+    use std::time::Duration;
+
+    struct ImageTransport {
+        body: Vec<u8>,
+        requests: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    }
+
+    impl HttpTransport for ImageTransport {
+        fn send(
+            &self,
+            request: &HttpRequest,
+            _: Option<Duration>,
+        ) -> Result<HttpResponse, HttpParseError> {
+            self.requests.lock().unwrap().push((
+                request.url().to_string(),
+                request.header("cookie").map(str::to_owned),
+            ));
+            let headers = if request.url().path() == "/opted-in.png" {
+                vec![("Cross-Origin-Resource-Policy".into(), "cross-origin".into())]
+            } else {
+                Vec::new()
+            };
+            Ok(HttpResponse::new(200, "OK", headers, self.body.clone()))
+        }
+    }
+
+    struct ImageClientGuard(Client);
+
+    impl Drop for ImageClientGuard {
+        fn drop(&mut self) {
+            HTTP_CLIENT.with(|client| {
+                client.replace(std::mem::replace(&mut self.0, Client::new()));
+            });
+        }
+    }
+
+    #[test]
+    fn document_image_fetch_enforces_coep_and_credentialless_cookies() {
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[255, 0, 0, 255])
+                .unwrap();
+        }
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut client = Client::new();
+        client.set_transport(Some(Arc::new(ImageTransport {
+            body: png,
+            requests: Arc::clone(&requests),
+        })));
+        let _guard = ImageClientGuard(HTTP_CLIENT.with(|cell| cell.replace(client)));
+        let store = Arc::new(Mutex::new(CookieJar::new()));
+        store
+            .lock()
+            .unwrap()
+            .add_from_header("session=value", "resource.example.test");
+        let document: Url = "http://source.example.test/page".parse().unwrap();
+        let origin = CorsOrigin::from_url(&document);
+        let blocked = "http://resource.example.test/blocked.png";
+        let allowed = "http://resource.example.test/opted-in.png";
+
+        super::super::with_image_cookie_store_reporting(
+            Arc::clone(&store),
+            CookieRequestContext::new(Some(document.clone()), None, false),
+            1,
+            origin.clone(),
+            EmbedderPolicyValue::RequireCorp,
+            EmbedderPolicyValue::UnsafeNone,
+            || {
+                assert!(fetch_image_uncached(blocked).is_none());
+                assert!(fetch_image_uncached(allowed).is_some());
+            },
+        );
+        super::super::with_image_cookie_store_reporting(
+            Arc::clone(&store),
+            CookieRequestContext::new(Some(document.clone()), None, false),
+            1,
+            origin.clone(),
+            EmbedderPolicyValue::Credentialless,
+            EmbedderPolicyValue::UnsafeNone,
+            || assert!(fetch_image_uncached(blocked).is_some()),
+        );
+        let (loaded, reports) = super::super::with_image_cookie_store_reporting(
+            Arc::clone(&store),
+            CookieRequestContext::new(Some(document), None, false),
+            1,
+            origin,
+            EmbedderPolicyValue::UnsafeNone,
+            EmbedderPolicyValue::RequireCorp,
+            || fetch_image_uncached(blocked).is_some(),
+        );
+        assert!(loaded);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].blocked_url, blocked);
+        assert!(reports[0].report_only);
+        assert!(!reports[0].enforced);
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            [
+                (blocked.to_string(), Some("session=value".to_string())),
+                (allowed.to_string(), Some("session=value".to_string())),
+                (blocked.to_string(), None),
+                (blocked.to_string(), Some("session=value".to_string())),
+            ]
+        );
+    }
 
     #[test]
     fn canonical_reference_uses_only_the_explicit_base() {

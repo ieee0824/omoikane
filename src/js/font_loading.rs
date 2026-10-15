@@ -501,11 +501,7 @@ fn fetch_font_bytes(
     reference: &str,
 ) -> JsResult<Vec<u8>> {
     let mut url = reference.parse::<crate::http::Url>().map_err(error)?;
-    let origin = state
-        .base_url_for_document(document.identity())
-        .as_ref()
-        .map(CorsOrigin::from_url)
-        .unwrap_or_else(CorsOrigin::opaque);
+    let origin = script_errors::document_fetch_origin(state, document.identity());
     // Pre-request checks run once per network hop. Redirects retain the
     // original reporting URL while their destination is checked without its
     // path, as required by CSP's URL matching algorithm.

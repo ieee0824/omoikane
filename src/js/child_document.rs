@@ -20,6 +20,10 @@ pub(super) struct LoadedChildDocument {
     /// `about:srcdoc`, `data:` URLs, fetch failures) and for GET responses
     /// whose content type is not rendered.
     pub(super) security_headers: Vec<(String, String)>,
+    /// HTTP response fields retained for COOP, COEP and Permissions Policy.
+    pub(super) response_headers: Vec<(String, String)>,
+    /// Redirect responses in request order, checked before their next hop.
+    pub(super) redirects: Vec<NavigationRedirect>,
     /// URL committed for the document: the response's effective URL (keeping
     /// the requested fragment), the `data:` URL itself, `about:blank` or
     /// `about:srcdoc`.
@@ -37,6 +41,8 @@ impl LoadedChildDocument {
             response_status: 200,
             final_request_referrer: None,
             security_headers: Vec::new(),
+            response_headers: Vec::new(),
+            redirects: Vec::new(),
             url: Some(url),
         }
     }
@@ -48,6 +54,8 @@ impl LoadedChildDocument {
             response_status: 200,
             final_request_referrer: None,
             security_headers: Vec::new(),
+            response_headers: Vec::new(),
+            redirects: Vec::new(),
             url: Some("about:srcdoc".to_owned()),
         }
     }
@@ -59,9 +67,18 @@ impl LoadedChildDocument {
             response_status: 0,
             final_request_referrer: None,
             security_headers: Vec::new(),
+            response_headers: Vec::new(),
+            redirects: Vec::new(),
             url: None,
         }
     }
+}
+
+/// One HTTP redirect's URL and policy fields, before its target is requested.
+#[derive(Debug)]
+pub(super) struct NavigationRedirect {
+    pub(super) url: String,
+    pub(super) headers: Vec<(String, String)>,
 }
 
 /// Bytes obtained for a child document before parsing.
@@ -77,6 +94,10 @@ pub(super) struct FetchedChildResource {
     pub(super) body: Vec<u8>,
     /// See [`LoadedChildDocument::security_headers`].
     pub(super) security_headers: Vec<(String, String)>,
+    /// All response fields, including COOP and COEP isolation policy.
+    pub(super) response_headers: Vec<(String, String)>,
+    /// Redirect responses preceding the final resource.
+    pub(super) redirects: Vec<NavigationRedirect>,
     /// The response's effective URL (keeping the requested fragment) or the
     /// `data:` URL itself.
     pub(super) effective_url: String,
@@ -93,6 +114,8 @@ impl FetchedChildResource {
                 response_status: self.response_status,
                 final_request_referrer: Some(self.final_request_referrer),
                 security_headers: self.security_headers,
+                response_headers: self.response_headers,
+                redirects: self.redirects,
                 url: Some(self.effective_url),
             },
             None => LoadedChildDocument {
@@ -100,6 +123,8 @@ impl FetchedChildResource {
                 response_status: self.response_status,
                 final_request_referrer: Some(self.final_request_referrer),
                 security_headers: Vec::new(),
+                response_headers: self.response_headers,
+                redirects: self.redirects,
                 url: Some(self.effective_url),
             },
         }

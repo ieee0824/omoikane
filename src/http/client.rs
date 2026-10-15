@@ -209,6 +209,11 @@ impl Client {
         self.fork_for_reporting()
     }
 
+    /// Returns to the client's own cookie jar after a document-scoped fetch.
+    pub(crate) fn clear_shared_cookie_store(&mut self) {
+        self.shared_cookie_store = None;
+    }
+
     /// Sends a GET request to `url`, following redirects and managing cookies.
     pub fn get(&mut self, url: &str) -> Result<HttpResponse, HttpParseError> {
         let request = HttpRequest::get(url).map_err(|e| {
@@ -236,7 +241,9 @@ impl Client {
     /// [`Client::set_max_redirects`].
     pub fn send(&mut self, request: HttpRequest) -> Result<HttpResponse, HttpParseError> {
         let shared = self.shared_cookie_store.clone();
-        let result = self.send_with_cookie_store(request, shared.as_deref());
+        let result = self
+            .send_with_cookie_store(request, shared.as_deref(), None)
+            .map(|response| response.expect("an unobserved request cannot be blocked"));
         if let Err(error) = &result {
             self.report_failure(error);
         }
@@ -250,7 +257,25 @@ impl Client {
         request: HttpRequest,
         cookies: &Mutex<CookieJar>,
     ) -> Result<HttpResponse, HttpParseError> {
-        let result = self.send_with_cookie_store(request, Some(cookies));
+        let result = self
+            .send_with_cookie_store(request, Some(cookies), None)
+            .map(|response| response.expect("an unobserved request cannot be blocked"));
+        if let Err(error) = &result {
+            self.report_failure(error);
+        }
+        result
+    }
+
+    /// Follows a navigation while exposing each response before its redirect
+    /// target is requested. Returning false from `observe` stops the load.
+    /// Cookie, referrer, authorization and redirect handling match [`Self::send`].
+    pub(crate) fn send_observing_navigation(
+        &mut self,
+        request: HttpRequest,
+        observe: &mut dyn FnMut(&HttpRequest, &HttpResponse) -> bool,
+    ) -> Result<Option<HttpResponse>, HttpParseError> {
+        let shared = self.shared_cookie_store.clone();
+        let result = self.send_with_cookie_store(request, shared.as_deref(), Some(observe));
         if let Err(error) = &result {
             self.report_failure(error);
         }
@@ -261,7 +286,8 @@ impl Client {
         &mut self,
         mut request: HttpRequest,
         shared_cookies: Option<&Mutex<CookieJar>>,
-    ) -> Result<HttpResponse, HttpParseError> {
+        mut observe: Option<&mut dyn FnMut(&HttpRequest, &HttpResponse) -> bool>,
+    ) -> Result<Option<HttpResponse>, HttpParseError> {
         if request.site_for_cookies().is_none() {
             request.set_cookie_context(request.url().clone(), request.is_top_level_navigation());
         }
@@ -326,12 +352,18 @@ impl Client {
                 }
             }
 
+            if let Some(observe) = observe.as_mut()
+                && !observe(&request, &response)
+            {
+                return Ok(None);
+            }
+
             // Check for redirect
             if !is_redirect(response.status_code()) {
                 response.set_effective_url(request.url().clone());
                 response.set_redirect_count((self.max_redirects - redirects_remaining) as usize);
                 response.set_final_request_referrer(request.header("Referer"));
-                return Ok(response);
+                return Ok(Some(response));
             }
 
             if redirects_remaining == 0 {

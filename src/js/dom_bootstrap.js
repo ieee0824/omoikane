@@ -1,6 +1,7 @@
 export let __omoikane_queue_reporting_api_report;
 export let __omoikane_cookie_change_dispatch;
 export let __omoikane_cookie_change_reset;
+export let __omoikane_update_auxiliary_opener;
 
 (() => {
   // Capture intrinsic identities before author code can replace global Symbol.
@@ -74,11 +75,15 @@ export let __omoikane_cookie_change_reset;
   const nativeDocumentWindow = globalThis.__omoikane_document_window;
   const nativeWindowEventDocument = globalThis.__omoikane_window_event_document;
   const nativeWindowProxyGlobal = globalThis.__omoikane_window_proxy_global;
+  const nativeAuxiliaryWindowProxyForId = globalThis.__omoikane_auxiliary_window_proxy_for_id;
+  const nativeCrossOriginAuxiliaryValue = globalThis.__omoikane_cross_origin_auxiliary_value;
   const nativeRetainedWindowGlobal = globalThis.__omoikane_retained_window_global;
   delete globalThis.__omoikane_retained_window_global;
   delete globalThis.__omoikane_document_window;
   delete globalThis.__omoikane_window_event_document;
   delete globalThis.__omoikane_window_proxy_global;
+  delete globalThis.__omoikane_auxiliary_window_proxy_for_id;
+  delete globalThis.__omoikane_cross_origin_auxiliary_value;
   const nativeRegisterPlatformEventFactory = globalThis.__omoikane_register_platform_event_factory;
   delete globalThis.__omoikane_register_platform_event_factory;
   const nativePlatformInterfaceBrand = globalThis.__omoikane_platform_interface_brand;
@@ -121,6 +126,7 @@ export let __omoikane_cookie_change_reset;
   const nativeClipboardPermission = globalThis.__omoikane_clipboard_permission;
   const nativeGeolocationPermission = globalThis.__omoikane_geolocation_permission;
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
+  const nativeCrossOriginIsolated = globalThis.__omoikane_cross_origin_isolated;
   const nativeStorageManager = globalThis.__omoikane_storage_manager;
   const nativeCookieStoreAvailable = globalThis.__omoikane_cookie_store_available;
   const nativeCookieStoreQuery = globalThis.__omoikane_cookie_store_query;
@@ -311,6 +317,7 @@ export let __omoikane_cookie_change_reset;
   delete globalThis.__omoikane_clipboard_permission;
   delete globalThis.__omoikane_geolocation_permission;
   delete globalThis.__omoikane_is_secure_context;
+  delete globalThis.__omoikane_cross_origin_isolated;
   delete globalThis.__omoikane_storage_manager;
   delete globalThis.__omoikane_cookie_store_available;
   delete globalThis.__omoikane_cookie_store_query;
@@ -1172,6 +1179,28 @@ export let __omoikane_cookie_change_reset;
       throw new TypeError("Illegal constructor");
     }
   }
+  // The browsing-context opener is separate from an author's own `opener`
+  // property. A named-window reuse updates this slot without replacing that
+  // property; deleting the override reveals the current relation again.
+  let browsingOpener = null;
+  __omoikane_update_auxiliary_opener = value => { browsingOpener = value; };
+  Object.defineProperty(Window.prototype, "opener", {
+    configurable: true,
+    enumerable: true,
+    get() { return browsingOpener; },
+    set(value) {
+      if (value === null) {
+        if (globalThis.__omoikane_auxiliary_context_id !== undefined) {
+          __omoikane_clear_auxiliary_opener(__omoikane_auxiliary_context_id);
+        }
+        browsingOpener = null;
+      } else {
+        Object.defineProperty(this, "opener", {
+          configurable: true, enumerable: true, writable: true, value,
+        });
+      }
+    },
+  });
   Object.defineProperty(Window.prototype, windowProxyToStringTag, {
     configurable: true,
     value: "Window",
@@ -18203,6 +18232,12 @@ export let __omoikane_cookie_change_reset;
       case "javascript:":
         scheduleWindowNavigation(kind, candidate.href);
         return;
+      case "about:":
+        if (/^about:blank(?:[?#]|$)/i.test(candidate.href)) {
+          scheduleWindowNavigation(kind, candidate.href);
+          return;
+        }
+        throw new DOMException("Unsupported navigation URL scheme", "SecurityError");
       case "http:":
       case "https:":
         break;
@@ -19604,6 +19639,11 @@ export let __omoikane_cookie_change_reset;
     configurable: true,
     enumerable: true,
     get() { return nativeIsSecureContext(); },
+  });
+  Object.defineProperty(globalThis, "crossOriginIsolated", {
+    configurable: true,
+    enumerable: true,
+    get() { return nativeCrossOriginIsolated(); },
   });
   if (globalThis.TextEncoder === undefined) {
     globalThis.TextEncoder = class TextEncoder {
@@ -25278,7 +25318,9 @@ export let __omoikane_cookie_change_reset;
     if (kind === "self") return windowForDocument(globalThis.document) || globalThis;
     if (kind === "parent") return globalThis.parent;
     if (kind === "opener") return globalThis.opener;
-    if (kind === "auxiliary") return auxiliaryWindowProxy(iframeId);
+    if (kind === "auxiliary") {
+      return nativeAuxiliaryWindowProxyForId(iframeId) || auxiliaryWindowProxy(iframeId);
+    }
     if (kind === "iframe") {
       const iframe = wrapNode(iframeId);
       return iframe ? iframe.contentWindow : null;
@@ -25315,12 +25357,113 @@ export let __omoikane_cookie_change_reset;
       message, targetOriginOrOptions, transfer);
   };
 
+  // The auxiliary Proxy can have been created in another Window's Realm. A
+  // cross-origin read must construct every exposed function, object and error
+  // in the Realm of the script reading it.
+  const crossOriginAuxiliaryValues = new WeakMap();
+  function crossOriginAuxiliaryError() {
+    throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+  }
+  function crossOriginAuxiliaryLocation(id) {
+    const navigate = value => __omoikane_navigate_auxiliary_window(id, String(value));
+    const replace = value => navigate(value);
+    return new Proxy(Object.create(null), {
+      get(_target, property) {
+        if (property === "replace") return replace;
+        if (isCrossOriginWindowFallbackKey(property)) return undefined;
+        return crossOriginAuxiliaryError();
+      },
+      set(_target, property, value) {
+        if (property !== "href") return crossOriginAuxiliaryError();
+        navigate(value);
+        return true;
+      },
+      getOwnPropertyDescriptor(_target, property) {
+        if (isCrossOriginWindowFallbackKey(property)) return crossOriginWindowFallbackDescriptor();
+        if (property === "replace") {
+          return { value: replace, writable: false, enumerable: false, configurable: true };
+        }
+        if (property === "href") {
+          return {
+            get: crossOriginAuxiliaryError,
+            set: navigate,
+            enumerable: false,
+            configurable: true,
+          };
+        }
+        return crossOriginAuxiliaryError();
+      },
+      ownKeys() { return ["href", "replace"]; },
+      getPrototypeOf() { return null; },
+      defineProperty() { return crossOriginAuxiliaryError(); },
+      deleteProperty() { return crossOriginAuxiliaryError(); },
+      setPrototypeOf() { return crossOriginAuxiliaryError(); },
+      preventExtensions() { return crossOriginAuxiliaryError(); },
+    });
+  }
+  globalThis.__omoikane_cross_origin_auxiliary_factory = function(id, property, descriptor, proxy) {
+    if (property === "__error__") return crossOriginAuxiliaryError();
+    if (property === "__type_error__") {
+      throw new TypeError("WindowProxy cannot be made non-extensible");
+    }
+    if (isCrossOriginWindowFallbackKey(property)) {
+      return descriptor ? crossOriginWindowFallbackDescriptor() : undefined;
+    }
+    let values = crossOriginAuxiliaryValues.get(proxy);
+    if (!values) {
+      values = new Map();
+      crossOriginAuxiliaryValues.set(proxy, values);
+    }
+    if (!values.has(property)) {
+      if (property === "postMessage") {
+        values.set(property, function(message, targetOriginOrOptions = "/", transfer = undefined) {
+          __omoikane_window_post_message("popup", id, null,
+            message, targetOriginOrOptions, transfer);
+        });
+      } else if (property === "close") {
+        values.set(property, () => __omoikane_close_auxiliary_window(id));
+      } else if (property === "location") {
+        values.set(property, crossOriginAuxiliaryLocation(id));
+      }
+    }
+    let value;
+    if (property === "closed") {
+      value = __omoikane_auxiliary_window_state(id) === "closed";
+    } else if (property === "window" || property === "self" || property === "frames" ||
+               property === "parent" || property === "top") {
+      value = proxy;
+    } else if (property === "opener") {
+      value = null;
+    } else if (values.has(property)) {
+      value = values.get(property);
+    } else {
+      return crossOriginAuxiliaryError();
+    }
+    if (!descriptor) return value;
+    if (property === "location") {
+      return {
+        get: () => value,
+        set: next => { value.href = next; },
+        enumerable: false,
+        configurable: true,
+      };
+    }
+    if (property === "closed" || property === "window" || property === "self" ||
+        property === "frames" || property === "parent" || property === "top" ||
+        property === "opener") {
+      return { get: () => value, enumerable: false, configurable: true };
+    }
+    return { value, writable: false, enumerable: false, configurable: true };
+  };
+
   const auxiliaryWindowProxies = new Map();
-  function auxiliaryWindowReflection(getProxy) {
+  function auxiliaryWindowReflection(id, getProxy) {
+    const crossOriginValue = (property, descriptor = false) =>
+      nativeCrossOriginAuxiliaryValue(id, property, descriptor, getProxy());
     return {
       defineProperty(_target, property, descriptor) {
         const window = nativeWindowProxyGlobal(getProxy());
-        if (window === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        if (window === null) return crossOriginValue("__error__");
         if (descriptor.configurable === false ||
             (descriptor.configurable !== true && !safeGetOwnPropertyDescriptor(window, property))) {
           throw new TypeError("WindowProxy does not support non-configurable properties");
@@ -25329,21 +25472,18 @@ export let __omoikane_cookie_change_reset;
       },
       deleteProperty(_target, property) {
         const window = nativeWindowProxyGlobal(getProxy());
-        if (window === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        if (window === null) return crossOriginValue("__error__");
         return Reflect.deleteProperty(window, property);
       },
       getOwnPropertyDescriptor(_target, property) {
         const window = nativeWindowProxyGlobal(getProxy());
-        if (window === null) {
-          if (isCrossOriginWindowFallbackKey(property)) return crossOriginWindowFallbackDescriptor();
-          throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
-        }
+        if (window === null) return crossOriginValue(property, true);
         const descriptor = safeGetOwnPropertyDescriptor(window, property);
         return descriptor ? { ...descriptor, configurable: true } : undefined;
       },
       ownKeys() {
         const window = nativeWindowProxyGlobal(getProxy());
-        if (window === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        if (window === null) return crossOriginValue("__error__");
         return Reflect.ownKeys(window);
       },
       getPrototypeOf() {
@@ -25352,10 +25492,10 @@ export let __omoikane_cookie_change_reset;
       },
       setPrototypeOf(_target, prototype) {
         const window = nativeWindowProxyGlobal(getProxy());
-        if (window === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        if (window === null) return crossOriginValue("__error__");
         return Reflect.setPrototypeOf(window, prototype);
       },
-      preventExtensions() { throw new TypeError("WindowProxy cannot be made non-extensible"); },
+      preventExtensions() { return crossOriginValue("__type_error__"); },
     };
   }
   function auxiliaryWindowProxy(id) {
@@ -25375,13 +25515,16 @@ export let __omoikane_cookie_change_reset;
       reload() { this.href = this.href; },
     };
     const handler = {
-      ...auxiliaryWindowReflection(() => proxy),
+      ...auxiliaryWindowReflection(id, () => proxy),
       get(_target, property, receiver) {
         const state = access();
         if (property === "closed") return state === "closed";
-        if (property === "close") return () => __omoikane_close_auxiliary_window(id);
         const target = state === "closed" ? null : nativeWindowProxyGlobal(proxy);
         if (target === null && isCrossOriginWindowFallbackKey(property)) return undefined;
+        if (target === null) {
+          return nativeCrossOriginAuxiliaryValue(id, property, false, proxy);
+        }
+        if (property === "close") return () => __omoikane_close_auxiliary_window(id);
         if (property === windowProxyToStringTag) return "Window";
         if (property === "location") return target !== null && state === "cross" ? target.location : location;
         if (property === "window" || property === "self" || property === "frames" ||
@@ -25390,20 +25533,20 @@ export let __omoikane_cookie_change_reset;
           __omoikane_window_post_message("popup", id, null,
             message, targetOriginOrOptions, transfer);
         };
-        if (state === "closed") return undefined;
-        if (target === null) {
-          if (property === "opener") return null;
-          throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
-        }
         return Reflect.get(target, property, windowHandlerReceiver(target, property, receiver, proxy));
       },
       set(_target, property, value, receiver) {
         if (property === "location") {
-          location.href = value;
+          const target = nativeWindowProxyGlobal(proxy);
+          if (target === null) {
+            nativeCrossOriginAuxiliaryValue(id, "location", false, proxy).href = value;
+          } else {
+            location.href = value;
+          }
           return true;
         }
         const target = nativeWindowProxyGlobal(proxy);
-        if (target === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        if (target === null) return nativeCrossOriginAuxiliaryValue(id, "__error__", false, proxy);
         return Reflect.set(target, property, value, windowSetReceiver(target, property, receiver, proxy));
       },
     };
@@ -25448,8 +25591,7 @@ export let __omoikane_cookie_change_reset;
         searchWindow = parentWindow;
       }
     }
-    const id = __omoikane_open_auxiliary_window(url, targetName);
-    return auxiliaryWindowProxy(id);
+    return __omoikane_open_auxiliary_window(url, targetName, auxiliaryWindowProxy);
   };
   if (globalThis.__omoikane_auxiliary_context_id !== undefined) {
     Object.defineProperty(globalThis, "closed", {
@@ -25728,6 +25870,11 @@ export let __omoikane_cookie_change_reset;
       configurable: true,
       enumerable: true,
       get() { return nativeIsSecureContext(); },
+    });
+    Object.defineProperty(globalThis, "crossOriginIsolated", {
+      configurable: true,
+      enumerable: true,
+      get() { return nativeCrossOriginIsolated(); },
     });
     Object.defineProperty(globalThis, "_listeners", {
       configurable: true,
@@ -28544,7 +28691,9 @@ export let __omoikane_cookie_change_reset;
   validationReady = true;
   formStateDocument = globalThis.document;
   nativeRegisterIframeNavigation(internalNodeId(globalThis.document), (frameId, documentId, kind, value, extra, committedURL, eventState) => {
-    if (kind === "auxiliary-window") return auxiliaryWindowProxy(frameId);
+    if (kind === "auxiliary-window") {
+      return nativeAuxiliaryWindowProxyForId(frameId) || auxiliaryWindowProxy(frameId);
+    }
     const frame = wrapNode(frameId);
     if (kind === "window") return safeApply(iframeContentWindowGetter, frame, []);
     if (kind === "prepare") return frame.__prepareResourceNavigation();

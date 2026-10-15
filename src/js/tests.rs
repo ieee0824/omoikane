@@ -30,6 +30,12 @@ fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
     request
 }
 
+/// Gives HTTP fixture tests a Document whose security origin matches its URL.
+/// Setting only the resource base leaves the default localhost origin intact.
+fn runtime_at_document_url(url: &str) -> JsRuntime {
+    JsRuntime::with_document_and_url(default_document(), url).unwrap()
+}
+
 fn sample_document() -> NodeHandle {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
@@ -318,19 +324,44 @@ fn worklet_module_cache_errors_and_teardown_are_deterministic() {
 }
 
 #[test]
-fn worklet_rejects_cross_origin_and_insecure_modules() {
+fn worklet_rejects_cors_denied_and_insecure_modules() {
+    struct NoCorsWorkletTransport;
+
+    impl crate::http::HttpTransport for NoCorsWorkletTransport {
+        fn send(
+            &self,
+            _: &crate::http::HttpRequest,
+            _: Option<std::time::Duration>,
+        ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+            Ok(crate::http::HttpResponse::new(
+                200,
+                "OK",
+                Vec::new(),
+                b"registerPaint('denied', class {});".to_vec(),
+            ))
+        }
+    }
+
     let mut cross_origin = JsRuntime::with_document_and_url(
         default_document(),
         "https://worklet.example.test/page.html",
     )
     .unwrap();
+    cross_origin.set_http_resource_transport(Some(std::sync::Arc::new(NoCorsWorkletTransport)));
     cross_origin
         .eval(
             "globalThis.workletError = ''; CSS.paintWorklet.addModule('https://other.example.test/module.js').catch(error => workletError = error.name);",
         )
         .unwrap();
     cross_origin.run_jobs().unwrap();
-    assert_eq!(eval_str(&mut cross_origin, "workletError"), "SecurityError");
+    assert_eq!(eval_str(&mut cross_origin, "workletError"), "TypeError");
+    assert_eq!(
+        cross_origin
+            .eval("CSS.paintWorklet.moduleCount")
+            .unwrap()
+            .as_number(),
+        Some(0.0)
+    );
 
     let mut insecure = JsRuntime::with_document_and_url(
         default_document(),
@@ -2885,6 +2916,7 @@ fn synchronous_document_and_module_dialog_attempts_do_not_leak_state() {
         "alert('module script')",
         "https://example.test/a.js",
         runtime.document(),
+        crate::http::cors::CredentialsMode::SameOrigin,
     );
     assert!(module_result.is_err());
     assert_eq!(runtime.pending_javascript_dialog(), None);
@@ -3921,13 +3953,21 @@ fn iframe_navigation_drops_old_focus_and_selection_state() {
                     oldDocument.hasFocus(),
                     oldDocument.getSelection().rangeCount,
                 ];
-                // Keep the replacement same-origin so its new Document is
-                // observable while checking that the old selection is gone.
-                frame.src = "about:blank";
                 globalThis.__issue558NavigationState = state;
                 return state.before.join("/");
             })()"#,
     );
+    // Deliver the old Document's selection event while it is still active.
+    // Navigation and DOM task queues need not choose the same relative order.
+    runtime.tick(0).unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "__issue558NavigationState.oldEvents"),
+        "1"
+    );
+    // Keep the replacement same-origin so its new Document remains observable.
+    runtime
+        .eval("__issue558NavigationState.frame.src = 'about:blank'")
+        .unwrap();
     runtime.tick(0).unwrap();
     let after_navigation = eval_str(
         &mut runtime,
@@ -3961,8 +4001,8 @@ fn iframe_navigation_drops_old_focus_and_selection_state() {
         // Navigation keeps the iframe as the top document's active
         // element, while the old child Document loses system focus and
         // the replacement starts with its viewport/body active.
-        // The old selectionchange may still be delivered to the retired
-        // Document, but it must never reach the replacement.
+        // The previously delivered selectionchange remains on the old
+        // Document; navigation must not generate one on the replacement.
         "true/false/false/true/false/0/|1|0"
     );
     // A queued selectionchange from the retired document may complete on
@@ -5501,8 +5541,7 @@ fn fetch_preserves_binary_response_bytes() {
         stream.write_all(&served).unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(
             r#"globalThis.binaryResult = {};
@@ -6324,8 +6363,7 @@ fn implements_fetch_api() {
         stream.write_all(response).unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             "globalThis.fetchResult = ''; fetch('http://127.0.0.1:{}/').then(r => r.text()).then(t => {{ globalThis.fetchResult = t; }});",
@@ -6366,8 +6404,7 @@ fn fetch_body_presence_distinguishes_empty_streams_from_null_bodies() {
         }
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.bodyPresenceResult = null;
@@ -6422,8 +6459,7 @@ fn fetch_sends_method_headers_and_body_and_exposes_response_metadata() {
         stream.write_all(body).unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.fetchMetadata = null;
@@ -6486,8 +6522,7 @@ fn fetch_reports_redirected_final_url() {
             .unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.redirectResult = null;
@@ -6523,8 +6558,7 @@ fn fetch_does_not_report_url_parser_normalization_as_a_redirect() {
             .unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.normalizedResponse = null; fetch("http://127.0.0.1:{}").then(response => normalizedResponse = response);"#,
@@ -6646,8 +6680,7 @@ fn cross_origin_fetch_checks_origin_and_filters_response_headers() {
             .unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url("http://origin.test/page".parse().unwrap());
+    let mut runtime = runtime_at_document_url("http://origin.test/page");
     runtime
         .eval(&format!(
             r#"globalThis.corsResult = null;
@@ -6713,8 +6746,7 @@ fn no_cors_is_opaque_and_xhr_cors_failure_fires_error() {
         }
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url("http://origin.test/page".parse().unwrap());
+    let mut runtime = runtime_at_document_url("http://origin.test/page");
     runtime
         .eval(&format!(
             r#"globalThis.opaqueResult = null;
@@ -6761,8 +6793,7 @@ fn cors_preflight_is_validated_and_cached() {
         }
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url("http://origin.test/page".parse().unwrap());
+    let mut runtime = runtime_at_document_url("http://origin.test/page");
     runtime
         .eval(&format!(
             r#"globalThis.preflightBodies = [];
@@ -6854,8 +6885,7 @@ fn fetch_redirect_modes_follow_error_and_manual() {
         }
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url("http://origin.test/page".parse().unwrap());
+    let mut runtime = runtime_at_document_url("http://origin.test/page");
     runtime
         .eval(&format!(
             r#"globalThis.redirectModes = {{}};
@@ -6953,8 +6983,7 @@ fn xml_http_request_get_completes_and_abort_suppresses_completion() {
         stream.write_all(response).unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.xhrEvents = []; const xhr = new XMLHttpRequest(); xhr.onload = () => xhrEvents.push("load"); xhr.onloadend = () => xhrEvents.push("loadend"); xhr.open("GET", "http://127.0.0.1:{}/"); xhr.send(); globalThis.xhr = xhr;"#,
@@ -7017,8 +7046,7 @@ fn xml_http_request_sends_request_and_exposes_states_and_response_headers() {
         stream.write_all(body).unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.xhrStates = [];
@@ -7068,8 +7096,7 @@ fn xml_http_request_reports_download_and_upload_progress_events() {
             .unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.downloadEvents = [];
@@ -7125,8 +7152,7 @@ fn xml_http_request_timeout_is_exclusive_and_finishes_with_loadend() {
         let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nlate");
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.timeoutEvents = [];
@@ -7300,8 +7326,7 @@ fn xml_http_request_http_binary_response_type_preserves_bytes() {
         stream.write_all(&body).unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.httpBinary = null;
@@ -14776,10 +14801,11 @@ fn inline_module_resolves_relative_import_against_document_url() {
         stream.write_all(body).unwrap();
     });
 
-    let mut runtime = runtime_from_html(
-        r#"<script type="module">import { answer } from './dep.js'; globalThis.answer = answer;</script>"#,
-    );
     let base: crate::http::Url = format!("http://{address}/app/index.html").parse().unwrap();
+    let document = crate::html::TreeBuilder::parse(
+        r#"<script type="module">import { answer } from './dep.js'; globalThis.answer = answer;</script>"#,
+    ).document();
+    let mut runtime = JsRuntime::with_document_and_url(document, &base.to_string()).unwrap();
     let errors = runtime.execute_document_scripts(Some(&base));
     handle.join();
 
@@ -30816,12 +30842,14 @@ fn window_message_ports_survive_collection_during_source_resolution() {
     // and collects before the receiver's argument list reaches the VM stack.
     let ports = runtime.eval("[{marker: 42}]").unwrap();
     let document_id = runtime.host_state.borrow().document.identity();
+    let source_group_id = runtime.host_state.borrow().document_group_ids[&document_id];
     runtime
         .run_window_posted_message(
             document_id,
             None,
             None,
             document_id,
+            source_group_id,
             None,
             None,
             None,

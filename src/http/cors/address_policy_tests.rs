@@ -66,6 +66,48 @@ fn report_request(url: &str, public_only: bool) -> HttpRequest {
 }
 
 #[test]
+fn cors_redirect_taint_serializes_origin_as_null_and_checks_the_final_response() {
+    const OWNER: &str = "https://app.test";
+    for allow_null in [false, true] {
+        let transport = RecordingTransport::new(vec![
+            response(302, Some("https://first.test/step")),
+            response(302, Some("https://second.test/final")),
+            HttpResponse::new(
+                200,
+                "Fixture",
+                vec![(
+                    "Access-Control-Allow-Origin".into(),
+                    if allow_null { "null" } else { OWNER }.into(),
+                )],
+                Vec::new(),
+            ),
+        ]);
+        let mut client = Client::new();
+        client.set_transport(Some(transport.clone()));
+        let result = fetch_with_timeout(
+            &mut client,
+            HttpRequest::get("https://app.test/start").unwrap(),
+            &Origin::from_url(&"https://app.test/document".parse().unwrap()),
+            RequestMode::Cors,
+            CredentialsMode::SameOrigin,
+            RedirectMode::Follow,
+            &mut PreflightCache::default(),
+            None,
+        );
+        assert_eq!(
+            result.is_ok(),
+            allow_null,
+            "allow_null={allow_null}: {result:?}"
+        );
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].0.header("Origin"), None);
+        assert_eq!(requests[1].0.header("Origin"), Some(OWNER));
+        assert_eq!(requests[2].0.header("Origin"), Some("null"));
+    }
+}
+
+#[test]
 fn preflights_inherit_the_actual_requests_address_restriction() {
     for public_only in [false, true] {
         let transport = RecordingTransport::new(vec![response(204, None), response(200, None)]);
@@ -110,6 +152,7 @@ fn opted_in_redirects_restrict_foreign_origins_and_keep_the_restriction() {
             response(307, Some("https://collector.test/receive")),
             response(204, None),
             response(307, Some("https://app.test/final")),
+            response(204, None),
             response(200, None),
         ]);
         let mut client = Client::new();
@@ -161,9 +204,12 @@ fn opted_in_redirects_restrict_foreign_origins_and_keep_the_restriction() {
                     true
                 ),
                 (Method::Post, "https://collector.test/receive".into(), true),
+                (Method::Options, "https://app.test/final".into(), true),
                 (Method::Post, "https://app.test/final".into(), true),
             ]
         );
+        assert_eq!(requests[4].0.header("Origin"), Some("null"));
+        assert_eq!(requests[5].0.header("Origin"), Some("null"));
         assert!(
             requests
                 .iter()

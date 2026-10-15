@@ -493,7 +493,7 @@ fn create_shared_worker_for_owner_state(
         )
     };
     let worker_url = resolve_worker_url(requested_url, &owner_url, base_url.as_ref())?;
-    let allowed = {
+    let mut allowed = {
         let mut state = owner_state.borrow_mut();
         let document = state.get_node(document_id).ok_or_else(|| {
             JsNativeError::error().with_message("SharedWorker owner document was discarded")
@@ -515,9 +515,19 @@ fn create_shared_worker_for_owner_state(
         name: name.to_string(),
     };
     let entry = if let Some(existing) = shared_worker_entry_for_key(&key) {
+        if allowed {
+            let worker_secure = {
+                let runtime = Rc::clone(&existing.borrow().runtime);
+                let runtime = runtime.borrow();
+                let state = runtime.host_state.borrow();
+                document_is_secure_context(&state, state.document.identity())
+            };
+            allowed =
+                worker_secure == document_is_secure_context(&owner_state.borrow(), document_id);
+        }
         if allowed && cookie_context.has_cross_site_ancestry() {
-            // A later first-party connection must not re-enable cookies after
-            // any cross-site ancestor has reached this shared global.
+            // A denied connection must not change an existing worker's cookie
+            // context; an accepted cross-site ancestor permanently restricts it.
             let runtime = Rc::clone(&existing.borrow().runtime);
             let host = Rc::clone(&runtime.borrow().host_state);
             host.borrow_mut().restrict_worker_cookie_context();
@@ -577,18 +587,32 @@ fn create_shared_worker_runtime(
     loaded: Option<worker_loading::LoadedWorkerScript>,
     creator_policy: CspPolicy,
 ) -> JsResult<SharedWorkerRuntime> {
-    let (storage, session_id, user_agent, error_destination) = {
+    let (storage, session_id, user_agent, error_destination, creator_isolation, secure_context) = {
         let state = owner_state.borrow();
         (
             state.storage_manager.clone(),
             state.storage_session_id,
             state.navigator_user_agent.clone(),
             state.error_reporter.clone(),
+            state.isolation_policy_for_document(owner_document_id),
+            document_is_secure_context(&state, owner_document_id),
         )
     };
     let worker_url = loaded
         .as_ref()
         .map_or(key.url.as_str(), |loaded| loaded.effective_url.as_str());
+    let is_data_worker = worker_url
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"));
+    let isolation = if is_data_worker {
+        creator_isolation
+    } else {
+        loaded
+            .as_ref()
+            .map_or_else(IsolationPolicy::default, |script| {
+                IsolationPolicy::from_response_headers(&script.response_headers, secure_context)
+            })
+    };
     let shared_id = next_shared_worker_id();
     let mut runtime = JsRuntime::with_document_url_and_storage(
         blank_html_document(),
@@ -604,6 +628,15 @@ fn create_shared_worker_runtime(
         let owner = owner_state.borrow();
         let mut state = runtime.host_state.borrow_mut();
         state.inherit_worker_cookie_session(&owner, owner_document_id);
+        let document_id = state.document.identity();
+        state.secure_context_override = Some(secure_context);
+        state
+            .document_isolation_policies
+            .insert(document_id, isolation.clone());
+        state.document_isolated_capabilities.insert(
+            document_id,
+            secure_context && isolation.embedder.value.is_isolation_compatible(),
+        );
         state.shared_worker.id = Some(shared_id);
         state.shared_worker.error_destination = error_destination.clone();
     }

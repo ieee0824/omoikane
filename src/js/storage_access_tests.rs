@@ -1137,11 +1137,22 @@ fn third_party_worker_and_worklet_loads_follow_owner_document_access() {
 
     let requests = transport.requests.lock().unwrap();
     assert!(
-        requests
-            .iter()
-            .all(|(_, path, _)| !path.starts_with("/foreign-")),
+        requests.iter().all(|(_, path, _)| !matches!(
+            path.as_str(),
+            "/foreign-worker.js" | "/foreign-shared.js"
+        )),
         "a child cannot fetch a worker script from the top Document's origin"
     );
+    // Worklet modules use CORS rather than the classic Worker's same-origin
+    // constructor restriction. A denied CORS request still goes to the network,
+    // but must not carry the child Document's cookies or execute the module.
+    let foreign_worklet: Vec<_> = requests
+        .iter()
+        .filter(|(_, path, _)| path == "/foreign-worklet.js")
+        .collect();
+    assert_eq!(foreign_worklet.len(), 1);
+    assert_eq!(foreign_worklet[0].0, Method::Get);
+    assert_eq!(foreign_worklet[0].2, None);
     for resource in ["worker.js", "shared.js", "worklet.js"] {
         assert_eq!(
             requests

@@ -728,6 +728,31 @@ fn font_requests_enforce_cors_and_send_the_creation_documents_origin() {
 }
 
 #[test]
+fn sandboxed_child_font_request_uses_opaque_origin() {
+    let (origin, worker) = serve_font(true);
+    let mut runtime = JsRuntime::with_document_and_url(
+        TreeBuilder::parse("<!doctype html><body></body>").document(),
+        "http://127.0.0.1:1/",
+    )
+    .unwrap();
+    let source =
+        format!("<script>new FontFace('Opaque', 'url({origin}/font.ttf)').load()</script>");
+    runtime
+        .eval(&format!(
+            "const frame = document.createElement('iframe'); frame.setAttribute('sandbox', 'allow-scripts'); frame.srcdoc = {}; document.body.appendChild(frame);",
+            serde_json::to_string(&source).unwrap()
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let request = worker.join();
+    assert!(
+        request.to_ascii_lowercase().contains("origin: null\r\n"),
+        "{request}"
+    );
+    assert!(runtime.take_task_errors().is_empty());
+}
+
+#[test]
 fn font_url_keeps_the_base_used_at_construction() {
     let (origin, worker) = serve_font(false);
     let document = TreeBuilder::parse(

@@ -100,6 +100,9 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                     return Ok(JsValue::undefined());
                 }
             }
+            let navigation_initiator = navigates
+                .then(|| navigation_client_document_id(context))
+                .flatten();
             with_host_state(|host| {
                 let (frame, callback, document_url, event_state) = {
                     let mut state = host.borrow_mut();
@@ -154,9 +157,10 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 forwarded.push(event_state.map_or_else(JsValue::null, JsValue::from));
                 let (previous_active, source) = if navigates {
                     let mut state = host.borrow_mut();
-                    let source = state.visit_source_for_document(document);
+                    let request_client = navigation_initiator.unwrap_or(document);
+                    let source = state.visit_source_for_document(request_client);
                     state.pending_iframe_visits.remove(&frame);
-                    state.capture_iframe_referrer_source(frame, document);
+                    state.capture_iframe_referrer_source(frame, request_client);
                     if let Some(source) = &source {
                         state.pending_iframe_visits.insert(frame, source.clone());
                     }

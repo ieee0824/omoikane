@@ -75,6 +75,10 @@ pub struct CallFrame<H = Rooted<CodeBlock>, E = EnvironmentStack, R = Realm, A =
     /// \[\[Realm\]\]
     pub(crate) realm: R,
 
+    /// The frame's execution Realm, independent of the caller Realm swapped
+    /// into `realm` by the VM and of inherited `[[ScriptOrModule]]` metadata.
+    pub(crate) execution_realm: R,
+
     // SAFETY: Nothing in `CallFrameFlags` requires tracing, so this is safe.
     pub(crate) flags: CallFrameFlags,
 }
@@ -86,11 +90,22 @@ unsafe impl<H: Trace, E: Trace, R: Trace, A: Trace> Trace for CallFrame<H, E, R,
         mark(&this.active_runnable);
         mark(&this.environments);
         mark(&this.realm);
+        mark(&this.execution_realm);
     });
 }
 
 pub(crate) type SuspendedCallFrame =
     CallFrame<GcEdge<CodeBlock>, EnvironmentStackEdges, RealmEdge, ActiveRunnableEdge>;
+
+impl<H, E, A> CallFrame<H, E, Realm, A> {
+    /// Returns the Realm selected for execution when this frame was created.
+    /// Unlike the saved caller Realm or `[[ScriptOrModule]]` Realm, this stays
+    /// accurate when a native cross-Realm call temporarily changes the VM Realm.
+    #[must_use]
+    pub const fn execution_realm(&self) -> &Realm {
+        &self.execution_realm
+    }
+}
 
 /// ---- `CallFrame` public API ----
 impl<H, E, R, A> CallFrame<H, E, R, A>
@@ -185,6 +200,7 @@ impl CallFrame {
             loop_iteration_count: 0,
             active_runnable,
             environments,
+            execution_realm: realm.clone(),
             realm,
             flags: CallFrameFlags::empty(),
         }
@@ -203,6 +219,7 @@ impl CallFrame {
             active_runnable,
             environments,
             realm,
+            execution_realm,
             flags,
         } = self;
 
@@ -218,6 +235,7 @@ impl CallFrame {
             active_runnable: active_runnable.map(|runnable| runnable.to_edge()),
             environments: environments.to_edges(),
             realm: realm.to_edge(),
+            execution_realm: execution_realm.to_edge(),
             flags,
         }
     }
@@ -323,6 +341,7 @@ impl SuspendedCallFrame {
             active_runnable,
             environments,
             realm,
+            execution_realm,
             flags,
         } = self;
 
@@ -338,6 +357,7 @@ impl SuspendedCallFrame {
             active_runnable: active_runnable.map(|runnable| runnable.to_rooted()),
             environments: environments.to_rooted(),
             realm: realm.to_rooted(),
+            execution_realm: execution_realm.to_rooted(),
             flags,
         }
     }

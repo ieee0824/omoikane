@@ -59,6 +59,8 @@ fn child_snapshot(
     );
     let cookies = Arc::clone(&state.cookie_store);
     let cookie_context = state.document_cookie_request_context(id);
+    let origin = script_errors::document_fetch_origin(state, id);
+    let embedder = state.isolation_policy_for_document(id).embedder;
     let time = state.event_loop.rendering_time_ms() as u64;
     let resolver = state
         .document_styles
@@ -75,21 +77,30 @@ fn child_snapshot(
         .resolver
         .as_mut()
         .ok_or(crate::paint::PaintError::InvalidImageBuffer)?;
-    let canvas = crate::layout::with_image_cookie_store(cookies, cookie_context, id, || {
-        crate::layout::with_image_base_url(base, || {
-            crate::layout::with_image_animation_time(time, || {
-                crate::paint::paint_layout_with_document_snapshots(
-                    &layout,
-                    resolver,
-                    viewport,
-                    crate::paint::text::load_text_fonts(),
-                    Some(&entry.web_fonts),
-                    visited,
-                    &children,
-                )
+    let (canvas, image_reports) = crate::layout::with_image_cookie_store_reporting(
+        cookies,
+        cookie_context,
+        id,
+        origin,
+        embedder.value.into(),
+        embedder.report_only_value.into(),
+        || {
+            crate::layout::with_image_base_url(base, || {
+                crate::layout::with_image_animation_time(time, || {
+                    crate::paint::paint_layout_with_document_snapshots(
+                        &layout,
+                        resolver,
+                        viewport,
+                        crate::paint::text::load_text_fonts(),
+                        Some(&entry.web_fonts),
+                        visited,
+                        &children,
+                    )
+                })
             })
-        })
-    });
+        },
+    );
+    state.queue_coep_corp_violations(id, "image", image_reports);
     Ok(Some(canvas.into_image()))
 }
 

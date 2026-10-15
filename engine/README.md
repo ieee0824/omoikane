@@ -70,9 +70,14 @@ host call and consumed by its first matching hook, so `script-src 'unsafe-inline
 can authorize an event handler without authorizing page `eval` or `Function`.
 
 For `javascript:` navigation, the embedding marks its private bootstrap module
-through `Module::parse_with_host_defined` and reads a call frame's own script or
-module Realm through `CallFrame::script_or_module_realm`. The navigation client
-is the closest author script or module frame, so a child assigning
+through `Module::parse_with_host_defined` and reads each frame's execution Realm
+through `Context::stack_trace_with_realms`. Each frame retains its execution
+Realm separately from the saved caller Realm and `[[ScriptOrModule]]`, which
+indirect eval can inherit from another Realm. This also handles native calls
+that temporarily enter another Realm without pushing a VM frame.
+Script/module host metadata still identifies
+the private bootstrap frames to skip. The navigation client is the closest
+author frame's execution Realm, so a child assigning
 `top.location.href` uses the child's Trusted Types policy, while a top-level
 author function called by the child uses the top-level policy. The browser's
 navigation regressions cover both directions, plus `eval` and Function calls;

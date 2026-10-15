@@ -355,6 +355,14 @@ impl CspPolicy {
         inherited
     }
 
+    /// Keeps inherited directives while giving an opaque Document no tuple
+    /// origin for `'self'` matching.
+    pub(crate) fn inherited_for_opaque_document(&self) -> Self {
+        let mut inherited = self.inherited_for_new_global();
+        inherited.base_url = None;
+        inherited
+    }
+
     /// Adds response report-only policies without affecting enforcement.
     pub(crate) fn with_report_only_headers(mut self, headers: &[String]) -> Self {
         self.report_only
