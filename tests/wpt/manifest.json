@@ -548,6 +548,7 @@
     {"path": "trusted-types/navigate-to-javascript-url-003.html"},
     {"path": "trusted-types/navigate-to-javascript-url-004.html"},
     {"path": "trusted-types/navigate-to-javascript-url-005.html"},
+    {"path": "trusted-types/navigate-to-javascript-url-006.sub.html", "server": "wptserve"},
     {"path": "trusted-types/navigate-to-javascript-url-008.html"},
     {"path": "trusted-types/navigate-to-javascript-url-csp-headers.html"},
     {"path": "trusted-types/TrustedTypePolicyFactory-createPolicy-unenforced.html"},

@@ -314,8 +314,17 @@ fn actual_status_with_allowed_exceptions(
 }
 
 pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
+    run_case_with_transport(base_url, path, None)
+}
+
+pub(super) fn run_case_with_transport(
+    base_url: &str,
+    path: &str,
+    transport: Option<std::sync::Arc<dyn omoikane::http::HttpTransport>>,
+) -> CaseExecution {
     let url = format!("{}/{}", base_url, path);
     let mut client = Client::new();
+    client.set_transport(transport.clone());
     let response = client
         .get(&url)
         .unwrap_or_else(|error| panic!("GET {url}: {error}"));
@@ -355,7 +364,11 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
     // Static `.headers` fixtures govern the Document and its script resources.
     // Apply them before parser scripts run, including report-only CSP cases.
     runtime.install_document_response_headers(response.headers());
-    if path.ends_with("/allow-crossorigin.html") || path.ends_with("/disallow-crossorigin.html") {
+    if let Some(transport) = transport {
+        runtime.set_http_resource_transport(Some(transport));
+    } else if path.ends_with("/allow-crossorigin.html")
+        || path.ends_with("/disallow-crossorigin.html")
+    {
         runtime.set_http_resource_transport(Some(super::cross_origin::transport(base_url)));
     }
     // The bootstrap itself creates a large graph of host API constructors.

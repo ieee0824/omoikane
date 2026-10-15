@@ -130,13 +130,7 @@ fn serve(mut stream: TcpStream, root: &Path, secondary_port: u16) {
         // Omoikane exposes the real constructor but has no WebAssembly.Memory.
         // Adapt constructor discovery, retaining actual shared buffers and all
         // original test assertions (including transfer/detachment assertions).
-        let body = br#"
-const createBuffer = (type, length, opts) => {
-  if (type === "ArrayBuffer") return new ArrayBuffer(length, opts);
-  if (type === "SharedArrayBuffer") return new SharedArrayBuffer(length, opts);
-  throw new Error("type has to be ArrayBuffer or SharedArrayBuffer");
-};
-"#;
+        let body = include_bytes!("sab.js");
         respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
         return;
     }
@@ -144,18 +138,7 @@ const createBuffer = (type, length, opts) => {
         // This runner consumes result callbacks rather than the interactive
         // HTML report. Disable that report before tests start so its DOM-heavy
         // rendering cannot consume a page callback's execution budget.
-        let body = br#"
-setup({output:false});
-globalThis.__wpt_results = [];
-globalThis.__wpt_harness_status = -1;
-globalThis.__wpt_complete = false;
-globalThis.__wpt_allow_uncaught_exception = false;
-if (typeof add_start_callback === 'function') {
-  add_start_callback(properties => { globalThis.__wpt_allow_uncaught_exception = properties.allow_uncaught_exception === true; });
-}
-add_result_callback(test => globalThis.__wpt_results.push({name:String(test.name),status:Number(test.status),message:String(test.message||"")}));
-add_completion_callback((tests,status) => { globalThis.__wpt_harness_status=Number(status.status); globalThis.__wpt_harness_message=String(status.message||""); globalThis.__wpt_complete=true; });
-"#;
+        let body = include_bytes!("testharnessreport.js");
         respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
         return;
     }
