@@ -79,6 +79,8 @@ impl LoadedChildDocument {
 pub(super) struct NavigationRedirect {
     pub(super) url: String,
     pub(super) headers: Vec<(String, String)>,
+    /// Referer sent with the request that produced this response.
+    pub(super) request_referrer: String,
 }
 
 /// Bytes obtained for a child document before parsing.

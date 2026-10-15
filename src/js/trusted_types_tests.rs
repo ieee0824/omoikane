@@ -1439,6 +1439,26 @@ fn script_and_frame_sinks_require_the_matching_native_brand() {
 }
 
 #[test]
+fn default_policy_script_src_reflects_an_absolute_url_without_changing_the_attribute() {
+    let mut runtime = make_runtime("<body>");
+    runtime.install_response_security_headers(&[(
+        "Content-Security-Policy".into(),
+        "require-trusted-types-for 'script'".into(),
+    )]);
+    assert_js_true(
+        &mut runtime,
+        r#"
+        trustedTypes.createPolicy('default', { createScriptURL: value => value });
+        const script = document.createElement('script');
+        script.setAttribute('src', null);
+        script.getAttribute('src') === 'null' &&
+          script.src === 'https://example.test/null' &&
+          window.location.toString() === 'https://example.test/page'
+        "#,
+    );
+}
+
+#[test]
 fn html_fragment_and_document_write_sinks_reject_before_mutation() {
     let mut runtime = make_runtime("<body><div id=target><i id=original>old</i></div>");
     runtime.install_response_security_headers(&[(

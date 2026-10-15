@@ -63,7 +63,7 @@ use child_document::{FetchedChildResource, LoadedChildDocument, NavigationRedire
 use cross_origin_isolation::{
     Disposition, GroupSwitchDecision, IsolationPolicy, OpenerPolicy, OpenerPolicyValue,
     coep_corp_body, coep_inheritance_body, coop_navigation_from_body, coop_navigation_to_body,
-    report_envelope,
+    policy_name, report_envelope, sanitize_report_url,
 };
 mod compression_stream;
 #[cfg(test)]
@@ -2366,6 +2366,9 @@ struct HostState {
     document_group_ids: HashMap<usize, u64>,
     retired_document_group_ids: HashMap<usize, u64>,
     next_document_group_id: u64,
+    /// Report-only COOP partitions access reporting without severing proxies.
+    main_virtual_group_id: u64,
+    next_virtual_group_id: u64,
     /// Origin metadata for retained, retired Documents. It is released with
     /// their JS wrapper leases, so old same-origin wrappers remain usable.
     retired_document_security_origins: HashMap<usize, DocumentSecurityOrigin>,
@@ -2589,6 +2592,10 @@ enum ForcedIframeNavigation {
 #[derive(Debug)]
 struct AuxiliaryContext {
     name: String,
+    /// Report-only COOP can change this while the actual group stays intact.
+    virtual_group_id: u64,
+    /// First navigation response URL, retained for COOP access reports.
+    initial_url: Option<String>,
     /// Stable WindowProxy for the current browsing-context group. It outlives
     /// the creator Document and changes only when COOP moves to another group.
     window_proxy: Option<JsValue>,
@@ -2624,8 +2631,6 @@ struct DocumentPolicySnapshot {
 struct PreparedAuxiliaryNavigation {
     context_id: u64,
     old_document_id: usize,
-    old_document_url: String,
-    old_policy: OpenerPolicy,
     opener_detached: bool,
     loaded: LoadedChildDocument,
     document_url: String,
@@ -2636,8 +2641,7 @@ struct PreparedAuxiliaryNavigation {
     policy: IsolationPolicy,
     group_id: u64,
     group_switch: bool,
-    comparison: GroupSwitchDecision,
-    same_origin: bool,
+    coop_evaluation: CoopNavigationEvaluation,
     referrer_source: NavigationReferrerSource,
     client_security: NavigationSecuritySnapshot,
     reports_allowed: bool,
@@ -2653,42 +2657,122 @@ enum DocumentSecurityOrigin {
     Opaque(u64),
 }
 
-/// COOP evaluates every navigation response, including redirects. A switch
-/// requested by any hop remains required even if the final policy matches the
-/// original document again.
-fn coop_group_switch_across_redirects(
+/// One response's COOP and reporting endpoint state in a navigation chain.
+struct CoopNavigationResponse {
+    url: String,
+    origin: Option<DocumentSecurityOrigin>,
+    opener: OpenerPolicy,
+    request_referrer: String,
+    /// Present only for an intermediate response without a Document.
+    endpoints: Option<BTreeMap<String, String>>,
+}
+
+/// Per-response decisions and their cumulative result across a navigation.
+struct CoopNavigationEvaluation {
+    responses: Vec<CoopNavigationResponse>,
+    decisions: Vec<GroupSwitchDecision>,
+    same_origin: Vec<bool>,
+    enforce_switch: bool,
+    report_only_switch: bool,
+}
+
+fn is_coop_reportable_window_property(property: &str) -> bool {
+    matches!(
+        property,
+        "window"
+            | "self"
+            | "frames"
+            | "closed"
+            | "length"
+            | "top"
+            | "parent"
+            | "opener"
+            | "location"
+            | "close"
+            | "focus"
+            | "blur"
+            | "postMessage"
+    )
+}
+
+/// Evaluates every navigation response, retaining the policy and URL at each
+/// hop so reports can use that response's own endpoint and origin.
+fn coop_navigation_evaluation(
     initial_policy: &OpenerPolicy,
+    initial_url: &str,
     initial_origin: Option<&DocumentSecurityOrigin>,
     redirects: &[NavigationRedirect],
     final_policy: &OpenerPolicy,
+    final_url: &str,
+    final_request_referrer: &str,
     final_origin: &DocumentSecurityOrigin,
     initial_about_blank: bool,
-) -> bool {
-    let mut previous_policy = initial_policy.clone();
-    let mut previous_origin = initial_origin.cloned();
-    let mut switch = false;
+) -> CoopNavigationEvaluation {
+    let mut responses = Vec::with_capacity(redirects.len() + 2);
+    responses.push(CoopNavigationResponse {
+        url: initial_url.to_owned(),
+        origin: initial_origin.cloned(),
+        opener: initial_policy.clone(),
+        request_referrer: String::new(),
+        endpoints: None,
+    });
     for redirect in redirects {
-        let next_policy = IsolationPolicy::from_response_headers(
-            &redirect.headers,
-            is_secure_context_url(&redirect.url),
-        )
-        .opener;
-        let next_origin = StorageOrigin::from_url(&redirect.url).map(DocumentSecurityOrigin::Tuple);
-        let same_origin = previous_origin
-            .as_ref()
-            .zip(next_origin.as_ref())
-            .is_some_and(|(previous, next)| previous == next);
-        switch |= previous_policy
-            .compare_navigation(&next_policy, same_origin, initial_about_blank)
-            .enforce;
-        previous_policy = next_policy;
-        previous_origin = next_origin;
+        let endpoint_fields = redirect
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("reporting-endpoints"))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        responses.push(CoopNavigationResponse {
+            url: redirect.url.clone(),
+            origin: StorageOrigin::from_url(&redirect.url).map(DocumentSecurityOrigin::Tuple),
+            opener: IsolationPolicy::from_response_headers(
+                &redirect.headers,
+                is_secure_context_url(&redirect.url),
+            )
+            .opener,
+            request_referrer: redirect.request_referrer.clone(),
+            endpoints: Some(security_reporting::parse_reporting_endpoints(
+                &endpoint_fields,
+                &redirect.url,
+            )),
+        });
     }
-    let same_origin = previous_origin.as_ref() == Some(final_origin);
-    switch
-        || previous_policy
-            .compare_navigation(final_policy, same_origin, initial_about_blank)
-            .enforce
+    responses.push(CoopNavigationResponse {
+        url: final_url.to_owned(),
+        origin: Some(final_origin.clone()),
+        opener: final_policy.clone(),
+        request_referrer: final_request_referrer.to_owned(),
+        endpoints: None,
+    });
+    let mut decisions = Vec::with_capacity(responses.len() - 1);
+    let mut same_origin = Vec::with_capacity(responses.len() - 1);
+    let mut enforce_switch = false;
+    let mut report_only_switch = false;
+    for (index, pair) in responses.windows(2).enumerate() {
+        let same = pair[0]
+            .origin
+            .as_ref()
+            .zip(pair[1].origin.as_ref())
+            .is_some_and(|(previous, next)| previous == next);
+        let decision = pair[0].opener.compare_navigation(
+            &pair[1].opener,
+            same,
+            initial_about_blank && index == 0,
+        );
+        enforce_switch |= decision.enforce;
+        report_only_switch |= decision.report_only;
+        same_origin.push(same);
+        decisions.push(decision);
+    }
+    CoopNavigationEvaluation {
+        responses,
+        decisions,
+        same_origin,
+        enforce_switch,
+        report_only_switch,
+    }
 }
 
 /// Sandbox policy captured when an iframe navigation creates its Document.
@@ -3045,6 +3129,8 @@ impl HostState {
             document_group_ids: HashMap::from([(document.identity(), 1)]),
             retired_document_group_ids: HashMap::new(),
             next_document_group_id: 2,
+            main_virtual_group_id: 1,
+            next_virtual_group_id: 2,
             retired_document_security_origins: HashMap::new(),
             next_opaque_origin_id: 2,
             document_csp: HashMap::from([(document.identity(), initial_csp)]),
@@ -4151,6 +4237,202 @@ impl HostState {
         });
     }
 
+    /// A redirect response has no Document or observer, but its own URL and
+    /// Reporting-Endpoints header still own COOP network reports.
+    fn queue_redirect_coop_report(
+        &mut self,
+        navigation_document_id: usize,
+        response: &CoopNavigationResponse,
+        group: &str,
+        body: serde_json::Value,
+    ) {
+        let Some(endpoint) = response
+            .endpoints
+            .as_ref()
+            .and_then(|endpoints| endpoints.get(group))
+        else {
+            return;
+        };
+        let envelope = report_envelope(
+            "coop",
+            &sanitize_report_url(&response.url),
+            &self.navigator_user_agent,
+            body,
+        );
+        let response_group = format!("redirect:{group}:{}", response.url);
+        self.queue_modern_report_to_endpoint(
+            navigation_document_id,
+            u64::MAX,
+            &response_group,
+            endpoint,
+            envelope,
+        );
+    }
+
+    /// A retained popup proxy remains scriptable after a report-only cut, but
+    /// cross-context reads must use the virtual group to decide COOP reports.
+    fn queue_auxiliary_window_access_report(
+        &mut self,
+        caller_document_id: usize,
+        auxiliary_id: u64,
+        property: &str,
+        source: Option<&security_reporting::CspSourceLocation>,
+    ) {
+        if !is_coop_reportable_window_property(property) {
+            return;
+        }
+        let Some(entry) = self.auxiliary_contexts.get(&auxiliary_id) else {
+            return;
+        };
+        let accessed_id = entry.document.identity();
+        let Some(caller_top_id) = self.top_level_document_for_popup_creator(caller_document_id)
+        else {
+            return;
+        };
+        if caller_top_id == accessed_id
+            || self.virtual_group_for_document(caller_document_id) == Some(entry.virtual_group_id)
+        {
+            return;
+        }
+        let opener_top_id = entry
+            .opener_document_id
+            .and_then(|id| self.top_level_document_for_popup_creator(id));
+        if opener_top_id != Some(caller_top_id) {
+            return;
+        }
+        let opener_policy = self.isolation_policy_for_document(caller_top_id).opener;
+        let accessed_policy = self.isolation_policy_for_document(accessed_id).opener;
+        let opener_origin = self.document_security_origins.get(&caller_top_id);
+        let accessed_origin = self.document_security_origins.get(&accessed_id);
+        let same_origin = opener_origin.is_some() && opener_origin == accessed_origin;
+        let opener_url = self
+            .document_urls
+            .get(&caller_top_id)
+            .cloned()
+            .unwrap_or_default();
+        let accessed_url = entry.document_url.clone();
+        let initial_url = entry.initial_url.clone().unwrap_or_default();
+        let accessed_referrer = self
+            .document_reporting
+            .get(&accessed_id)
+            .map_or_else(String::new, |metadata| metadata.referrer.clone());
+        if let Some(group) = accessed_policy.report_only_reporting_endpoint.as_deref() {
+            self.queue_isolation_report(
+                accessed_id,
+                "coop",
+                group,
+                serde_json::json!({
+                    "type": "access-to-coop-page-from-opener",
+                    "disposition": "reporting",
+                    "effectivePolicy": policy_name(accessed_policy.report_only_value),
+                    "property": property,
+                    "openerURL": same_origin.then(|| sanitize_report_url(&opener_url)),
+                    "referrer": sanitize_report_url(&accessed_referrer),
+                }),
+            );
+        }
+        if let Some(group) = opener_policy.report_only_reporting_endpoint.as_deref() {
+            self.queue_isolation_report(
+                caller_top_id,
+                "coop",
+                group,
+                serde_json::json!({
+                    "type": "access-from-coop-page-to-openee",
+                    "disposition": "reporting",
+                    "effectivePolicy": policy_name(opener_policy.report_only_value),
+                    "property": property,
+                    "openeeURL": same_origin.then(|| sanitize_report_url(&accessed_url)),
+                    "initialPopupURL": same_origin.then(|| sanitize_report_url(&initial_url)),
+                    "sourceFile": source.map(|location| sanitize_report_url(&location.source_file)),
+                    "lineNumber": source.map(|location| location.line_number),
+                    "columnNumber": source.map(|location| location.column_number),
+                }),
+            );
+        }
+    }
+
+    /// The top WindowProxy observes accesses made by an opened window after
+    /// a virtual COOP split, without changing the actual scripting group.
+    fn queue_main_window_access_report(
+        &mut self,
+        caller_document_id: usize,
+        property: &str,
+        source: Option<&security_reporting::CspSourceLocation>,
+    ) {
+        if !is_coop_reportable_window_property(property) {
+            return;
+        }
+        let Some(caller_top_id) = self.top_level_document_for_popup_creator(caller_document_id)
+        else {
+            return;
+        };
+        let main_id = self.document.identity();
+        let Some(popup) = self
+            .auxiliary_contexts
+            .values()
+            .find(|entry| entry.document.identity() == caller_top_id)
+        else {
+            return;
+        };
+        if popup.virtual_group_id == self.main_virtual_group_id
+            || popup
+                .opener_document_id
+                .and_then(|id| self.top_level_document_for_popup_creator(id))
+                != Some(main_id)
+        {
+            return;
+        }
+        let popup_policy = self.isolation_policy_for_document(caller_top_id).opener;
+        let main_policy = self.isolation_policy_for_document(main_id).opener;
+        let same_origin = self.document_security_origins.get(&caller_top_id).is_some()
+            && self.document_security_origins.get(&caller_top_id)
+                == self.document_security_origins.get(&main_id);
+        let main_url = self
+            .document_urls
+            .get(&main_id)
+            .cloned()
+            .unwrap_or_default();
+        let popup_url = popup.document_url.clone();
+        let initial_url = popup.initial_url.clone().unwrap_or_default();
+        let popup_referrer = self
+            .document_reporting
+            .get(&caller_top_id)
+            .map_or_else(String::new, |metadata| metadata.referrer.clone());
+        if let Some(group) = popup_policy.report_only_reporting_endpoint.as_deref() {
+            self.queue_isolation_report(
+                caller_top_id,
+                "coop",
+                group,
+                serde_json::json!({
+                    "type": "access-from-coop-page-to-opener",
+                    "disposition": "reporting",
+                    "effectivePolicy": policy_name(popup_policy.report_only_value),
+                    "property": property,
+                    "openerURL": same_origin.then(|| sanitize_report_url(&main_url)),
+                    "referrer": sanitize_report_url(&popup_referrer),
+                    "sourceFile": source.map(|location| sanitize_report_url(&location.source_file)),
+                    "lineNumber": source.map(|location| location.line_number),
+                    "columnNumber": source.map(|location| location.column_number),
+                }),
+            );
+        }
+        if let Some(group) = main_policy.report_only_reporting_endpoint.as_deref() {
+            self.queue_isolation_report(
+                main_id,
+                "coop",
+                group,
+                serde_json::json!({
+                    "type": "access-to-coop-page-from-openee",
+                    "disposition": "reporting",
+                    "effectivePolicy": policy_name(main_policy.report_only_value),
+                    "property": property,
+                    "openeeURL": same_origin.then(|| sanitize_report_url(&popup_url)),
+                    "initialPopupURL": same_origin.then(|| sanitize_report_url(&initial_url)),
+                }),
+            );
+        }
+    }
+
     fn queue_coep_corp_violations(
         &mut self,
         document_id: usize,
@@ -4299,14 +4581,16 @@ impl HostState {
     fn auxiliary_response_isolation(
         &mut self,
         current_id: usize,
+        current_url: &str,
         next_origin: &DocumentSecurityOrigin,
         inherited_policy: &IsolationPolicy,
         response_headers: &[(String, String)],
         redirects: &[NavigationRedirect],
         document_url: &str,
+        final_request_referrer: &str,
         inherits_policy: bool,
         initial_about_blank: bool,
-    ) -> Result<(IsolationPolicy, u64, bool, GroupSwitchDecision, bool), JsHostError> {
+    ) -> Result<(IsolationPolicy, u64, bool, CoopNavigationEvaluation), JsHostError> {
         let current = self.isolation_policy_for_document(current_id);
         let response = if inherits_policy {
             IsolationPolicy {
@@ -4319,22 +4603,18 @@ impl HostState {
                 is_secure_context_url(document_url),
             )
         };
-        let same_origin = self
-            .document_security_origins
-            .get(&current_id)
-            .is_some_and(|old| old == next_origin);
-        let comparison =
-            current
-                .opener
-                .compare_navigation(&response.opener, same_origin, initial_about_blank);
-        let group_switch = coop_group_switch_across_redirects(
+        let coop_evaluation = coop_navigation_evaluation(
             &current.opener,
+            current_url,
             self.document_security_origins.get(&current_id),
             redirects,
             &response.opener,
+            document_url,
+            final_request_referrer,
             next_origin,
             initial_about_blank,
         );
+        let group_switch = coop_evaluation.enforce_switch;
         let group_id = if group_switch {
             take_monotonic_id(&mut self.next_document_group_id, "browsing context group")?
         } else {
@@ -4343,7 +4623,7 @@ impl HostState {
                 .copied()
                 .unwrap_or(1)
         };
-        Ok((response, group_id, group_switch, comparison, same_origin))
+        Ok((response, group_id, group_switch, coop_evaluation))
     }
 
     fn isolated_top_level_capability(&self, document_id: usize, policy: &IsolationPolicy) -> bool {
@@ -4381,6 +4661,17 @@ impl HostState {
             current = owner_document_for_node(&frame)?.identity();
         }
         None
+    }
+
+    fn virtual_group_for_document(&self, document_id: usize) -> Option<u64> {
+        let top_level = self.top_level_document_for_popup_creator(document_id)?;
+        if top_level == self.document.identity() {
+            return Some(self.main_virtual_group_id);
+        }
+        self.auxiliary_contexts
+            .values()
+            .find(|entry| entry.document.identity() == top_level)
+            .map(|entry| entry.virtual_group_id)
     }
 
     /// Creates the initial, creator-origin `about:blank` Document of a popup.
@@ -4449,6 +4740,9 @@ impl HostState {
             .get(&opener_document_id)
             .copied()
             .unwrap_or(1);
+        let virtual_group_id = self
+            .virtual_group_for_document(opener_document_id)
+            .unwrap_or(self.main_virtual_group_id);
         self.register_tree(&document);
         self.document_origins.insert(document_id, origin);
         self.document_security_origins
@@ -4495,6 +4789,8 @@ impl HostState {
             id,
             AuxiliaryContext {
                 name: name.to_owned(),
+                virtual_group_id,
+                initial_url: None,
                 window_proxy: None,
                 opener_document_id: Some(opener_document_id),
                 opener_detached: false,
@@ -4546,13 +4842,12 @@ impl HostState {
         let initial_about_blank = entry.initial_about_blank;
         let opener_detached = entry.opener_detached;
         let old_document_url = self.report_url_for_document(old_document_id);
-        let old_policy = self.isolation_policy_for_document(old_document_id).opener;
         let group_id = self
             .document_group_ids
             .get(&old_document_id)
             .copied()
             .unwrap_or(1);
-        let reports_allowed = !initial_about_blank && self.top_level_group_size(group_id) > 1;
+        let reports_allowed = self.top_level_group_size(group_id) > 1;
         let base = client.base_url.clone();
         let loaded = self.load_iframe_document_for_initiator(
             requested,
@@ -4583,22 +4878,21 @@ impl HostState {
                 None => self.new_opaque_security_origin()?,
             }
         };
-        let (policy, group_id, group_switch, comparison, same_origin) = self
-            .auxiliary_response_isolation(
-                old_document_id,
-                &security_origin,
-                &client.isolation,
-                &loaded.response_headers,
-                &loaded.redirects,
-                &document_url,
-                inherits_policy,
-                initial_about_blank,
-            )?;
+        let (policy, group_id, group_switch, coop_evaluation) = self.auxiliary_response_isolation(
+            old_document_id,
+            &old_document_url,
+            &security_origin,
+            &client.isolation,
+            &loaded.response_headers,
+            &loaded.redirects,
+            &document_url,
+            loaded.final_request_referrer.as_deref().unwrap_or_default(),
+            inherits_policy,
+            initial_about_blank,
+        )?;
         let prepared = PreparedAuxiliaryNavigation {
             context_id: id,
             old_document_id,
-            old_document_url,
-            old_policy,
             opener_detached,
             loaded,
             document_url,
@@ -4609,8 +4903,7 @@ impl HostState {
             policy,
             group_id,
             group_switch,
-            comparison,
-            same_origin,
+            coop_evaluation,
             referrer_source: source.clone(),
             client_security: client.clone(),
             reports_allowed,
@@ -4623,38 +4916,73 @@ impl HostState {
         if !prepared.reports_allowed {
             return;
         }
-        let policy = &prepared.old_policy;
-        let is_navigation_source =
-            prepared.referrer_source.document_id == Some(prepared.old_document_id);
-        if prepared.comparison.enforce
-            && let Some(group) = policy.reporting_endpoint.as_deref()
-        {
-            self.queue_isolation_report(
-                prepared.old_document_id,
-                "coop",
-                group,
-                coop_navigation_from_body(
-                    policy.value,
-                    &prepared.document_url,
-                    prepared.same_origin,
-                    is_navigation_source,
-                    Disposition::Enforce,
-                ),
-            );
+        for (index, decision) in prepared.coop_evaluation.decisions.iter().enumerate() {
+            if decision.enforce {
+                self.queue_coop_transition_reports(prepared, index, Disposition::Enforce);
+            }
+            if decision.report_only {
+                self.queue_coop_transition_reports(prepared, index, Disposition::Reporting);
+            }
         }
-        if prepared.comparison.report_only
-            && let Some(group) = policy.report_only_reporting_endpoint.as_deref()
-        {
-            self.queue_isolation_report(
+    }
+
+    fn queue_coop_transition_reports(
+        &mut self,
+        prepared: &PreparedAuxiliaryNavigation,
+        index: usize,
+        disposition: Disposition,
+    ) {
+        let evaluation = &prepared.coop_evaluation;
+        let previous = &evaluation.responses[index];
+        let next = &evaluation.responses[index + 1];
+        let same_origin = evaluation.same_origin[index];
+        let outgoing_group = match disposition {
+            Disposition::Enforce => previous.opener.reporting_endpoint.as_deref(),
+            Disposition::Reporting => previous.opener.report_only_reporting_endpoint.as_deref(),
+        };
+        if let Some(group) = outgoing_group {
+            let policy = match disposition {
+                Disposition::Enforce => previous.opener.value,
+                Disposition::Reporting => previous.opener.report_only_value,
+            };
+            let body = coop_navigation_from_body(
+                policy,
+                &next.url,
+                same_origin,
+                index != 0
+                    || prepared.referrer_source.document_id == Some(prepared.old_document_id),
+                disposition,
+            );
+            if index == 0 {
+                self.queue_isolation_report(prepared.old_document_id, "coop", group, body);
+            } else {
+                self.queue_redirect_coop_report(prepared.old_document_id, previous, group, body);
+            }
+        }
+        // The final response gets a Document and can notify its own observer
+        // after commit. Intermediate responses have only network endpoints.
+        if index + 1 == evaluation.decisions.len() {
+            return;
+        }
+        let incoming_group = match disposition {
+            Disposition::Enforce => next.opener.reporting_endpoint.as_deref(),
+            Disposition::Reporting => next.opener.report_only_reporting_endpoint.as_deref(),
+        };
+        if let Some(group) = incoming_group {
+            let policy = match disposition {
+                Disposition::Enforce => next.opener.value,
+                Disposition::Reporting => next.opener.report_only_value,
+            };
+            self.queue_redirect_coop_report(
                 prepared.old_document_id,
-                "coop",
+                next,
                 group,
-                coop_navigation_from_body(
-                    policy.report_only_value,
-                    &prepared.document_url,
-                    prepared.same_origin,
-                    is_navigation_source,
-                    Disposition::Reporting,
+                coop_navigation_to_body(
+                    policy,
+                    &previous.url,
+                    same_origin,
+                    &next.request_referrer,
+                    disposition,
                 ),
             );
         }
@@ -4668,7 +4996,6 @@ impl HostState {
         let PreparedAuxiliaryNavigation {
             context_id,
             old_document_id,
-            old_document_url,
             opener_detached,
             loaded,
             document_url,
@@ -4679,8 +5006,7 @@ impl HostState {
             policy,
             group_id,
             group_switch,
-            comparison,
-            same_origin,
+            coop_evaluation,
             referrer_source,
             client_security,
             reports_allowed,
@@ -4728,6 +5054,14 @@ impl HostState {
         };
         let permissions_policy = DocumentPolicy::from_response_headers(&headers);
         let inherited_features = PolicyFeature::ALL.into_iter().collect();
+        let new_virtual_group_id = if group_switch || coop_evaluation.report_only_switch {
+            Some(take_monotonic_id(
+                &mut self.next_virtual_group_id,
+                "virtual browsing context group",
+            )?)
+        } else {
+            None
+        };
         self.register_tree(&document);
         self.update_document_target(&document, &document_url);
         let entry = self
@@ -4738,6 +5072,17 @@ impl HostState {
         let _old_realm = entry.realm.take();
         if group_switch {
             entry.window_proxy = None;
+        }
+        if let Some(virtual_group_id) = new_virtual_group_id {
+            entry.virtual_group_id = virtual_group_id;
+        }
+        if entry.initial_url.is_none() {
+            entry.initial_url = Some(
+                coop_evaluation
+                    .responses
+                    .get(1)
+                    .map_or_else(|| document_url.clone(), |response| response.url.clone()),
+            );
         }
         entry.document_url = document_url.clone();
         entry.initial_about_blank = false;
@@ -4786,12 +5131,13 @@ impl HostState {
         );
         self.web_lock_clients
             .insert(document_id, self.storage_manager.create_web_lock_client());
+        let last_transition = coop_evaluation.decisions.len() - 1;
         self.queue_coop_navigation_to_reports(
             document_id,
-            &old_document_url,
+            &coop_evaluation.responses[last_transition].url,
             &policy.opener,
-            comparison,
-            same_origin,
+            coop_evaluation.decisions[last_transition],
+            coop_evaluation.same_origin[last_transition],
             reports_allowed,
         );
         Ok(document_id)
@@ -5120,6 +5466,7 @@ impl HostState {
                     redirects.push(NavigationRedirect {
                         url: request.url().to_string(),
                         headers: response.headers().to_vec(),
+                        request_referrer: request.header("Referer").unwrap_or_default().to_owned(),
                     });
                     true
                 });
@@ -7571,6 +7918,7 @@ impl JsRuntime {
         {
             let _host = activate_host_state(Rc::clone(&runtime.host_state));
             evaluate_dom_bootstrap(&mut runtime.context, &runtime.host_state, &bindings)?;
+            install_main_window_proxy(&mut runtime.context)?;
         }
         // DOM bootstrap is runtime initialization rather than page code. Apply
         // the caller's budget only after it has completed so a deliberately
@@ -8953,6 +9301,10 @@ impl JsRuntime {
         state.next_document_group_id = state
             .next_document_group_id
             .max(old_state.next_document_group_id);
+        state.main_virtual_group_id = old_state.main_virtual_group_id;
+        state.next_virtual_group_id = state
+            .next_virtual_group_id
+            .max(old_state.next_virtual_group_id);
         if let (Some(previous), Some(current)) = (
             old_state.document_reporting.get(&old_id),
             state.document_reporting.get_mut(&new_id),
@@ -13966,6 +14318,24 @@ fn ensure_auxiliary_window_proxy(
 /// Finishes the host's Window initialization before evaluating author scripts.
 /// Bootstrap closures retain the private backing Window for internal slots;
 /// the Realm and the public Window aliases expose the stable WindowProxy.
+fn install_main_window_proxy(context: &mut Context) -> JsResult<()> {
+    let global = context.global_object();
+    let factory = global
+        .get(js_string!("__omoikane_create_main_window_proxy"), context)?
+        .as_callable()
+        .ok_or_else(|| JsNativeError::typ().with_message("main WindowProxy factory unavailable"))?;
+    let proxy = factory
+        .call(&JsValue::undefined(), &[], context)?
+        .as_object()
+        .ok_or_else(|| {
+            JsNativeError::typ().with_message("main WindowProxy factory returned no object")
+        })?;
+    for name in ["globalThis", "window", "self", "frames", "parent", "top"] {
+        global.set(js_string!(name), proxy.clone(), true, context)?;
+    }
+    context.set_global_this(proxy)
+}
+
 fn install_browsing_context_global_this(
     context: &mut Context,
     host_state: &Rc<RefCell<HostState>>,
@@ -14657,6 +15027,16 @@ fn register_host_bindings(
             js_string!("__omoikane_auxiliary_window_state"),
             1,
             NativeFunction::from_copy_closure(auxiliary_window_state_native),
+        ),
+        (
+            js_string!("__omoikane_report_auxiliary_window_access"),
+            2,
+            NativeFunction::from_copy_closure(report_auxiliary_window_access_native),
+        ),
+        (
+            js_string!("__omoikane_report_main_window_access"),
+            1,
+            NativeFunction::from_copy_closure(report_main_window_access_native),
         ),
         (
             js_string!("__omoikane_auxiliary_window_proxy_for_id"),
@@ -21062,6 +21442,51 @@ fn auxiliary_window_state_native(
         } else {
             "cross"
         })))
+    })
+}
+
+fn report_auxiliary_window_access_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = parse_node_id(args.first(), context)? as u64;
+    let Some(property) = args.get(1).and_then(JsValue::as_string) else {
+        return Ok(JsValue::undefined());
+    };
+    let property = property.to_std_string_escaped();
+    let Some(caller) = author_script_document_id(context) else {
+        return Ok(JsValue::undefined());
+    };
+    let source = security_reporting::capture_csp_source(context);
+    with_host_state(|host| {
+        host.borrow_mut().queue_auxiliary_window_access_report(
+            caller,
+            id,
+            &property,
+            source.as_ref(),
+        );
+        Ok(JsValue::undefined())
+    })
+}
+
+fn report_main_window_access_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(property) = args.first().and_then(JsValue::as_string) else {
+        return Ok(JsValue::undefined());
+    };
+    let property = property.to_std_string_escaped();
+    let Some(caller) = author_script_document_id(context) else {
+        return Ok(JsValue::undefined());
+    };
+    let source = security_reporting::capture_csp_source(context);
+    with_host_state(|host| {
+        host.borrow_mut()
+            .queue_main_window_access_report(caller, &property, source.as_ref());
+        Ok(JsValue::undefined())
     })
 }
 

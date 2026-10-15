@@ -609,7 +609,6 @@ impl HostState {
         group: &str,
         report: serde_json::Value,
     ) {
-        self.drain_report_completions();
         let Some(endpoint) = self
             .document_csp
             .get(&document_id)
@@ -617,6 +616,24 @@ impl HostState {
         else {
             return;
         };
+        let revision = self
+            .document_reporting
+            .get(&document_id)
+            .map_or(0, |metadata| metadata.endpoint_revision);
+        self.queue_modern_report_to_endpoint(document_id, revision, group, &endpoint, report);
+    }
+
+    /// Queues a report for an explicitly captured response endpoint. Redirect
+    /// responses have no Document or CSP container in which to store it.
+    pub(super) fn queue_modern_report_to_endpoint(
+        &mut self,
+        document_id: usize,
+        revision: u64,
+        group: &str,
+        endpoint: &str,
+        report: serde_json::Value,
+    ) {
+        self.drain_report_completions();
         let Ok(url) = endpoint.parse::<crate::http::Url>() else {
             return;
         };
@@ -638,12 +655,9 @@ impl HostState {
         }
         let endpoint = report_delivery::EndpointKey {
             document_id,
-            revision: self
-                .document_reporting
-                .get(&document_id)
-                .map_or(0, |metadata| metadata.endpoint_revision),
+            revision,
             group: group.to_owned(),
-            url: endpoint,
+            url: endpoint.to_owned(),
         };
         let client = self.http_client.fork_for_reporting();
         self.queue_report(report_delivery::ReportRequest::Modern {
