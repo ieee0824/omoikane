@@ -1,12 +1,24 @@
-// Testdriver requests are executed by the host runner between page jobs.
+// Reporting commands execute through the opt-in native automation binding.
+// Input and window commands are driven by the host runner between page jobs.
 globalThis.__wpt_window_commands = [];
-globalThis.__wpt_reporting_commands = [];
+let wptReportingComplete = false;
+if (typeof add_completion_callback === "function") {
+  add_completion_callback(() => { wptReportingComplete = true; });
+}
 test_driver_internal.generate_test_report = (message, context = null) => new Promise((resolve, reject) => {
+  // The host stops accepting automation commands when testharness completes.
+  // Leave late commands pending, as the previous host-driven queue did.
+  if (wptReportingComplete) return;
   if (context !== null && context !== globalThis) {
     reject(new Error('Reports in another browsing context are unsupported'));
     return;
   }
-  __wpt_reporting_commands.push({message: String(message), resolve, reject});
+  try {
+    globalThis.__omoikane_automation_generate_test_report(String(message));
+    resolve();
+  } catch (error) {
+    reject(error);
+  }
 });
 test_driver_internal.minimize_window = () => new Promise(resolve => {
   __wpt_window_commands.push({hidden: true, resolve});

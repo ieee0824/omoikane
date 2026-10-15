@@ -594,6 +594,7 @@
     {"path": "reporting/nestedReport.html"},
     {"path": "reporting/order.html"},
     {"path": "reporting/generateTestReport.html"},
+    {"path": "reporting/generateTestReport-honors-endpoint.https.sub.html", "server": "wptserve"},
     { "path": "cookiestore/cookieStore_get_set_basic.https.any.js" },
     { "path": "cookiestore/cookieStore_get_delete_basic.https.any.js" },
     { "path": "cookiestore/cookieStore_getAll_set_basic.https.any.js" },

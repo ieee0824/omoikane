@@ -6,9 +6,6 @@ pub(super) const VENDOR_SCRIPT: &str = include_str!("testdriver_vendor.js");
 /// Executes one WebDriver tick without manufacturing page selection state.
 /// The caller advances the virtual clock and rendering after the input tick.
 pub(super) fn drive_action_tick(runtime: &mut JsRuntime, errors: &mut Vec<String>) -> Option<u64> {
-    if drive_reporting_command(runtime, errors) {
-        return Some(0);
-    }
     let pending = runtime
         .eval("Array.isArray(globalThis.__wpt_action_commands) && __wpt_action_commands.length > 0")
         .ok()
@@ -24,34 +21,6 @@ pub(super) fn drive_action_tick(runtime: &mut JsRuntime, errors: &mut Vec<String
             None
         }
     }
-}
-
-/// Runs WebDriver's report generation command through the actual runtime API.
-fn drive_reporting_command(runtime: &mut JsRuntime, errors: &mut Vec<String>) -> bool {
-    let pending = runtime
-        .eval("Array.isArray(globalThis.__wpt_reporting_commands) && __wpt_reporting_commands.length > 0")
-        .ok()
-        .and_then(|value| value.as_boolean())
-        .unwrap_or(false);
-    if !pending {
-        return false;
-    }
-    let result = (|| {
-        let message = runtime.eval("__wpt_reporting_commands[0].message")?;
-        let message = message
-            .as_string()
-            .map(|value| value.to_std_string_escaped())
-            .unwrap_or_default();
-        runtime.generate_test_report(&message)?;
-        runtime.eval("__wpt_reporting_commands.shift().resolve()")?;
-        Ok::<_, boa_engine::JsError>(())
-    })();
-    if let Err(error) = result {
-        errors.push(format!("reporting testdriver: {error}"));
-        let _ = runtime
-            .eval("__wpt_reporting_commands.shift().reject(new Error('Report generation failed'))");
-    }
-    true
 }
 
 #[cfg(test)]

@@ -361,6 +361,11 @@ pub(super) fn run_case_with_transport(
         &url,
     )
     .expect("create WPT runtime");
+    // Yield to testharness and the host even when a page keeps queuing tasks.
+    runtime.set_task_pump_limit(std::num::NonZeroUsize::new(128));
+    runtime
+        .enable_reporting_automation()
+        .expect("enable WPT report generation");
     // Static `.headers` fixtures govern the Document and its script resources.
     // Apply them before parser scripts run, including report-only CSP cases.
     runtime.install_document_response_headers(response.headers());
