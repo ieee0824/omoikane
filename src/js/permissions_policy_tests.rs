@@ -383,6 +383,7 @@ fn iframe_src_history_traversal_recomputes_declared_origin_for_embedding_navigat
     )
     .unwrap();
     let frame = runtime.document().query_selector("iframe").unwrap();
+    runtime.run_until_idle().unwrap();
     let initial_data = runtime
         .host_state
         .borrow_mut()
@@ -524,6 +525,7 @@ fn location_history_restores_its_declared_origin_after_an_embedding_navigation()
     )
     .unwrap();
     let frame = runtime.document().query_selector("iframe").unwrap();
+    runtime.run_until_idle().unwrap();
     let initial = runtime
         .host_state
         .borrow_mut()
@@ -597,6 +599,7 @@ fn iframe_allow_delegates_without_parent_header_but_explicit_header_can_restrict
                 .install_response_security_headers(&[("Permissions-Policy".into(), header.into())]);
         }
         let frame = runtime.document().query_selector("iframe").unwrap();
+        runtime.run_until_idle().unwrap();
         let child = runtime
             .host_state
             .borrow_mut()

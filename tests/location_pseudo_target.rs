@@ -179,6 +179,7 @@ fn cross_origin_iframe_fragment_navigation_keeps_document_inaccessible() {
     .document();
     let mut runtime =
         JsRuntime::with_document_and_url(document, "https://example.test/page").unwrap();
+    runtime.run_until_idle().unwrap();
     let result = runtime
         .eval(&format!(
             r#"(() => {{
@@ -222,6 +223,7 @@ fn iframe_initial_url_fragment_selects_its_own_target() {
     .document();
     let mut runtime =
         JsRuntime::with_document_and_url(document, &format!("http://{address}/page")).unwrap();
+    runtime.run_until_idle().unwrap();
     let result = runtime
         .eval(
             r#"(() => {
