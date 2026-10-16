@@ -25476,14 +25476,49 @@ export const __omoikane_service_worker_lifecycle = {};
       data, origin, source, ports: receivedPorts,
     }));
   };
-  globalThis.__omoikane_cross_origin_window = function(documentId) {
-    const facade = Object.create(null);
-    facade.postMessage = function(message, targetOriginOrOptions = "/", transfer = undefined) {
+  globalThis.__omoikane_cross_origin_window = function(documentId, parentWindow, topWindow) {
+    const postMessage = function(message, targetOriginOrOptions = "/", transfer = undefined) {
       __omoikane_window_post_message("document", documentId, null,
         message, targetOriginOrOptions, transfer);
     };
-    facade.closed = false;
-    facade.window = facade.self = facade.frames = facade;
+    let facade;
+    const value = property => {
+      if (property === "window" || property === "self" || property === "frames") return facade;
+      if (property === "parent") return parentWindow === undefined ? facade : parentWindow;
+      if (property === "top") return topWindow === undefined ? facade : topWindow;
+      if (property === "closed") return false;
+      if (property === "opener") return null;
+      if (property === "postMessage") return postMessage;
+      if (isCrossOriginWindowFallbackKey(property)) return undefined;
+      return crossOriginAuxiliaryError();
+    };
+    const exposed = new Set(["window", "self", "frames", "parent", "top",
+      "closed", "opener", "postMessage"]);
+    facade = new Proxy(Object.create(null), {
+      get(_target, property) { return value(property); },
+      has(_target, property) {
+        if (exposed.has(property)) return true;
+        if (isCrossOriginWindowFallbackKey(property)) return true;
+        return crossOriginAuxiliaryError();
+      },
+      getOwnPropertyDescriptor(_target, property) {
+        if (exposed.has(property)) {
+          return { get: () => value(property), enumerable: false, configurable: true };
+        }
+        if (isCrossOriginWindowFallbackKey(property)) return crossOriginWindowFallbackDescriptor();
+        return crossOriginAuxiliaryError();
+      },
+      ownKeys() {
+        return [...exposed, "then", windowProxyToStringTag,
+          windowProxyHasInstance, windowProxyIsConcatSpreadable];
+      },
+      getPrototypeOf() { return null; },
+      set() { return crossOriginAuxiliaryError(); },
+      defineProperty() { return crossOriginAuxiliaryError(); },
+      deleteProperty() { return crossOriginAuxiliaryError(); },
+      setPrototypeOf() { return crossOriginAuxiliaryError(); },
+      preventExtensions() { return crossOriginAuxiliaryError(); },
+    });
     return facade;
   };
   globalThis.postMessage = function(message, targetOriginOrOptions = "/", transfer = undefined) {

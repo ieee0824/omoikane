@@ -25826,6 +25826,208 @@ fn cross_origin_iframe_document_events_reach_its_own_window_listeners() {
 }
 
 #[test]
+fn cross_origin_child_can_traverse_safe_window_ancestors() {
+    use crate::html::TreeBuilder;
+    let (port, _server) = spawn_static_http_server(
+        "text/html",
+        r#"<html><body><script>
+          let denied = false;
+          try { void parent.document; } catch (error) { denied = error.name === 'SecurityError'; }
+          document.documentElement.setAttribute('data-ancestors', [
+            parent === top,
+            parent.parent === parent,
+            parent.top === parent,
+            parent.self === parent,
+            denied,
+            parent.then === undefined,
+            Object.getOwnPropertyDescriptor(parent, 'then').value === undefined,
+            Reflect.ownKeys(parent).includes('then'),
+            Object.getOwnPropertyDescriptor(parent, Symbol.toStringTag).value === undefined,
+          ].join('|'));
+        </script></body></html>"#,
+    );
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe id='child' src='http://127.0.0.1:{port}/child.html'></iframe></body></html>"
+    ))
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "http://other-origin.test/page").unwrap();
+    pump_zero_delay_tasks(&mut runtime);
+    pump_zero_delay_tasks(&mut runtime);
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    let state = runtime.host_state.borrow();
+    let frame = state.document.query_selector("#child").unwrap();
+    let child = &state.iframe_documents[&frame.identity()].document;
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-ancestors")
+            .as_deref(),
+        Some("true|true|true|true|true|true|true|true|true")
+    );
+}
+
+#[test]
+fn sandboxed_child_keeps_parent_opaque_even_at_the_same_url_origin() {
+    use crate::html::TreeBuilder;
+    let (port, _server) = spawn_static_http_server(
+        "text/html",
+        r#"<html><body><script>
+          let denied = false;
+          try { void parent.document; } catch (error) { denied = error.name === 'SecurityError'; }
+          document.documentElement.setAttribute('data-ancestors', [
+            parent === top, parent.parent === parent, parent.top === parent, denied,
+          ].join('|'));
+        </script></body></html>"#,
+    );
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe id='child' sandbox='allow-scripts' src='http://127.0.0.1:{port}/child.html'></iframe></body></html>"
+    ))
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, &format!("http://127.0.0.1:{port}/page"))
+            .unwrap();
+    for _ in 0..2 {
+        pump_zero_delay_tasks(&mut runtime);
+    }
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    let state = runtime.host_state.borrow();
+    let frame = state.document.query_selector("#child").unwrap();
+    let child = &state.iframe_documents[&frame.identity()].document;
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-ancestors")
+            .as_deref(),
+        Some("true|true|true|true")
+    );
+}
+
+#[test]
+fn srcdoc_child_inherits_opaque_parent_window_access() {
+    use crate::html::TreeBuilder;
+    let document = TreeBuilder::parse(
+        r#"<html><body><iframe id="child" srcdoc="<script>
+          document.documentElement.setAttribute('data-parent',
+            parent === top && parent.document === top.document && parent.document !== document);
+        </script>"></iframe></body></html>"#,
+    )
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "data:text/html,<p>opaque</p>").unwrap();
+    runtime.run_until_idle().unwrap();
+    let state = runtime.host_state.borrow();
+    let frame = state.document.query_selector("#child").unwrap();
+    let child = &state.iframe_documents[&frame.identity()].document;
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-parent")
+            .as_deref(),
+        Some("true")
+    );
+}
+
+#[test]
+fn aba_and_abb_grandchildren_keep_ancestor_identity() {
+    use crate::html::TreeBuilder;
+    let (top_port, _top_server) = spawn_static_http_server(
+        "text/html",
+        r#"<html><body><script>
+          let denied = false;
+          try { void parent.document; } catch (error) { denied = error.name === 'SecurityError'; }
+          document.documentElement.setAttribute('data-ancestors', [
+            parent !== top,
+            parent.parent === top,
+            parent.top === top,
+            top.parent === top,
+            (() => { try { return top.document.URL.includes('/main'); } catch (_) { return false; } })(),
+            denied,
+          ].join('|'));
+        </script></body></html>"#,
+    );
+    let (middle_port, _middle_server) = spawn_static_http_server(
+        "text/html",
+        r#"<html><body><script>
+          if (location.pathname.includes('same-origin-grandchild')) {
+            let denied = false;
+            try { void top.document; } catch (error) { denied = error.name === 'SecurityError'; }
+            document.documentElement.setAttribute('data-ancestors', [
+              parent !== top,
+              parent.parent === top,
+              parent.top === top,
+              top === parent.top,
+              parent.document !== document,
+              denied,
+            ].join('|'));
+          }
+        </script></body></html>"#,
+    );
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe id='middle' src='http://127.0.0.1:{middle_port}/middle.html'></iframe></body></html>"
+    ))
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, &format!("http://127.0.0.1:{top_port}/main"))
+            .unwrap();
+    for _ in 0..2 {
+        pump_zero_delay_tasks(&mut runtime);
+    }
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    let (middle_id, middle_document_id) = {
+        let state = runtime.host_state.borrow();
+        let middle = state.document.query_selector("#middle").unwrap();
+        (
+            middle.identity(),
+            state.iframe_documents[&middle.identity()]
+                .document
+                .identity(),
+        )
+    };
+    runtime
+        .ensure_iframe_realm(middle_id, middle_document_id)
+        .unwrap();
+    runtime
+        .eval_in_document_realm(
+            middle_document_id,
+            &format!(
+                "const grandchild=document.createElement('iframe');grandchild.id='grandchild';grandchild.src='http://127.0.0.1:{top_port}/grandchild.html';document.body.appendChild(grandchild);const sameOriginGrandchild=document.createElement('iframe');sameOriginGrandchild.id='sameOriginGrandchild';sameOriginGrandchild.src='http://127.0.0.1:{middle_port}/same-origin-grandchild.html';document.body.appendChild(sameOriginGrandchild);"
+            ),
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    let state = runtime.host_state.borrow();
+    let middle = state.document.query_selector("#middle").unwrap();
+    let middle_document = &state.iframe_documents[&middle.identity()].document;
+    let grandchild = middle_document.query_selector("#grandchild").unwrap();
+    let grandchild_document = &state.iframe_documents[&grandchild.identity()].document;
+    assert_eq!(
+        grandchild_document
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-ancestors")
+            .as_deref(),
+        Some("true|true|true|true|true|true")
+    );
+    let same_origin_grandchild = middle_document
+        .query_selector("#sameOriginGrandchild")
+        .unwrap();
+    let same_origin_document = &state.iframe_documents[&same_origin_grandchild.identity()].document;
+    assert_eq!(
+        same_origin_document
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-ancestors")
+            .as_deref(),
+        Some("true|true|true|true|true|true")
+    );
+}
+
+#[test]
 fn cross_origin_iframe_scripts_cannot_reach_host_bindings() {
     use crate::html::TreeBuilder;
     let (port, _port_server) = spawn_static_http_server(
