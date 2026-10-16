@@ -334,6 +334,44 @@ fn font_policy_is_independent_of_connect_policy_and_errors_are_task_delivered() 
     }
 }
 
+#[test]
+fn delayed_font_violation_keeps_load_call_source_position() {
+    let document = TreeBuilder::parse("<!doctype html><body></body>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+    runtime.install_csp_policy(&["font-src 'none'; report-to fonts".into()]);
+    runtime.eval("globalThis.fontSourceEvents=[];globalThis.fontSourceReports=[];\
+        document.addEventListener('securitypolicyviolation',event=>fontSourceEvents.push(event));\
+        new ReportingObserver(batch=>fontSourceReports.push(...batch),{types:['csp-violation']}).observe();\
+        globalThis.delayedFace=new FontFace('Delayed','url(https://example.test/font.ttf)');").unwrap();
+    let (evaluated, ..) = runtime.eval_safe_timed_source(
+        "const pending = delayedFace.load(); pending.catch(()=>{});",
+        Some("https://private.test/effective.js"),
+        Some("https://example.test/requested.js#fragment"),
+        (23, 4),
+        false,
+    );
+    evaluated.unwrap();
+    let (unrelated, ..) = runtime.eval_safe_timed_source(
+        "globalThis.unrelatedFontSourceCall=true;",
+        Some("https://other.test/effective.js"),
+        Some("https://other.test/requested.js"),
+        (91, 1),
+        false,
+    );
+    unrelated.unwrap();
+    runtime.run_until_idle().unwrap();
+    let observed = eval_json(
+        &mut runtime,
+        "[fontSourceEvents.map(e=>[e.sourceFile,e.lineNumber,e.columnNumber]),fontSourceReports.map(r=>[r.body.sourceFile,r.body.lineNumber,r.body.columnNumber])]",
+    );
+    assert_eq!(observed[0].as_array().map(Vec::len), Some(1), "{observed}");
+    assert_eq!(observed[1], observed[0]);
+    assert_eq!(observed[0][0][0], "https://example.test/requested.js");
+    assert_eq!(observed[0][0][1], 23);
+    assert!(observed[0][0][2].as_u64().is_some_and(|column| column > 0));
+}
+
 fn observe_font_csp(runtime: &mut JsRuntime) {
     runtime
         .eval(

@@ -352,8 +352,16 @@ fn service_worker_rejects_encoded_separators_and_module_type_before_fetch() {
 #[test]
 fn service_worker_checks_response_allowed_scope_and_mime_after_fetch() {
     let fixture = ServiceWorkerFixture::new();
-    let mut runtime = JsRuntime::with_document_and_url(
+    // This test starts several workers through the fixture's HTTP server. Its
+    // assertions cover response policy, not the page's five-second wall-clock limit.
+    // Match the fixture's own request deadline so CI scheduling cannot abort
+    // a registration before the server's timeout does.
+    let mut runtime = JsRuntime::with_document_sandbox_and_url(
         blank_html_document(),
+        SandboxConfig {
+            timeout: ACCEPT_TIMEOUT,
+            ..SandboxConfig::default()
+        },
         &format!("{}/app/page", fixture.origin),
     )
     .unwrap();
