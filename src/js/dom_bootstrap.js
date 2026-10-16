@@ -22924,12 +22924,15 @@ export const __omoikane_service_worker_lifecycle = {};
   // The host has deterministic permission state for the APIs that already
   // exist in this runtime (Notifications, Geolocation, and Async Clipboard).
   // Keep PermissionStatus objects in this realm and fan out host transitions
-  // through a small weak registry, so no Boa object crosses a runtime boundary
-  // and stale statuses do not keep a document alive after teardown.
+  // through a small weak registry, so no Boa object crosses a runtime boundary.
+  // Statuses with change listeners remain reachable until those listeners are
+  // removed or the document tears down.
   // -------------------------------------------------------------------------
   const permissionsConstructionToken = {};
   const permissionStatusEntries = new Map();
+  const permissionStatusNames = new WeakMap();
   const permissionStatusUsesWeakRefs = typeof WeakRef === "function";
+  const observedPermissionStatuses = new Set();
   let permissionLifecycleActive = true;
   const supportedPermissionNames = Object.freeze([
     "notifications", "geolocation", "clipboard-read", "clipboard-write", "persistent-storage",
@@ -22982,9 +22985,10 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function registerPermissionStatus(status) {
-    const entries = permissionStatusEntries.get(status.__permissionName) || [];
+    const name = permissionStatusNames.get(status);
+    const entries = permissionStatusEntries.get(name) || [];
     entries.push(permissionStatusUsesWeakRefs ? new WeakRef(status) : status);
-    permissionStatusEntries.set(status.__permissionName, entries);
+    permissionStatusEntries.set(name, entries);
   }
 
   function notifyPermissionStatuses(name, state) {
@@ -23006,15 +23010,37 @@ export const __omoikane_service_worker_lifecycle = {};
       if (!supportedPermissionNames.includes(name)) {
         throw new TypeError("Illegal constructor");
       }
-      this.__permissionName = name;
+      permissionStatusNames.set(this, name);
       this.__state = state;
       this.__active = true;
       this.__onchange = null;
+    }
+    get name() {
+      const name = permissionStatusNames.get(this);
+      if (name === undefined) throw new TypeError("Illegal invocation");
+      return name;
     }
     get state() { return this.__state; }
     get onchange() { return this.__onchange; }
     set onchange(callback) {
       this.__onchange = typeof callback === "function" ? callback : null;
+      this.__syncObserverRetention();
+    }
+    addEventListener(type, callback, options) {
+      super.addEventListener(type, callback, options);
+      this.__syncObserverRetention();
+    }
+    removeEventListener(type, callback, options) {
+      super.removeEventListener(type, callback, options);
+      this.__syncObserverRetention();
+    }
+    __syncObserverRetention() {
+      const hasListeners = (this._listeners.get("change") || []).some(entry => !entry.removed);
+      if (this.__active && (this.__onchange || hasListeners)) {
+        observedPermissionStatuses.add(this);
+      } else {
+        observedPermissionStatuses.delete(this);
+      }
     }
     __setState(state) {
       if (!this.__active || state === this.__state) return;
@@ -23027,6 +23053,7 @@ export const __omoikane_service_worker_lifecycle = {};
       this.__active = false;
       this.__onchange = null;
       clearListeners(this._listeners);
+      observedPermissionStatuses.delete(this);
     }
     get [Symbol.toStringTag]() { return "PermissionStatus"; }
   }
