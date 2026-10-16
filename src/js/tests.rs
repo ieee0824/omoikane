@@ -639,19 +639,19 @@ fn shared_worker_port_close_drops_future_messages() {
 
 #[test]
 fn service_worker_registration_scopes_lifecycle_and_controller_selection() {
+    let fixture = super::service_worker_tests::ServiceWorkerFixture::new();
     let mut runtime = JsRuntime::with_document_and_url(
         default_document(),
-        "https://service-worker.example.test/app/index.html",
+        &format!("{}/app/index.html", fixture.origin),
     )
     .unwrap();
     runtime
         .eval(
             r#"globalThis.swProbe = { scope: '', state: '', found: false, controller: false, changes: 0, invalid: '', updateFound: 0, updateUndefined: false, replaced: false };
                    navigator.serviceWorker.oncontrollerchange = () => swProbe.changes++;
-                   navigator.serviceWorker.register('/worker.js', { scope: '/app/' }).then(registration => {
+                   navigator.serviceWorker.register('/app/worker.js', { scope: '/app/' }).then(registration => {
                      swProbe.scope = registration.scope;
-                     swProbe.state = registration.active.state;
-                     swProbe.controller = navigator.serviceWorker.controller === registration.active;
+                     swProbe.state = registration.installing.state;
                      globalThis.swRegistration = registration;
                      registration.onupdatefound = () => swProbe.updateFound++;
                      registration.update().then(value => { swProbe.updateUndefined = value === undefined; });
@@ -664,17 +664,21 @@ fn service_worker_registration_scopes_lifecycle_and_controller_selection() {
     assert_eq!(
         eval_str(
             &mut runtime,
-            "[swProbe.scope, swProbe.state, swProbe.found, swProbe.controller, swProbe.changes, swProbe.invalid].join('|')"
+            "[swProbe.scope, swRegistration.active.state, swProbe.found, navigator.serviceWorker.controller === swRegistration.active, swProbe.changes, swProbe.invalid].join('|')"
         ),
-        "https://service-worker.example.test/app/|activated|true|true|1|SecurityError",
+        format!(
+            "{}/app/|activated|true|true|1|SecurityError",
+            fixture.origin
+        ),
     );
     assert_eq!(
         eval_str(&mut runtime, "String(swProbe.updateUndefined)"),
         "true"
     );
+    assert_eq!(eval_str(&mut runtime, "swProbe.state"), "installing");
     runtime
         .eval(
-            "navigator.serviceWorker.register('/worker-v2.js', { scope: '/app/' }).then(registration => { swProbe.replaced = registration === swRegistration; });",
+            "navigator.serviceWorker.register('/app/worker-v2.js', { scope: '/app/' }).then(registration => { swProbe.replaced = registration === swRegistration; });",
         )
         .unwrap();
     runtime.run_until_idle().unwrap();
@@ -696,6 +700,11 @@ fn service_worker_registration_scopes_lifecycle_and_controller_selection() {
         ),
         "true|true"
     );
+    drop(runtime);
+    assert_eq!(
+        fixture.finish(),
+        vec!["/app/worker.js".to_owned(), "/app/worker-v2.js".to_owned()]
+    );
 }
 
 #[test]
@@ -713,18 +722,18 @@ fn service_worker_register_rejects_insecure_and_opaque_origins() {
     insecure.run_until_idle().unwrap();
     assert_eq!(eval_str(&mut insecure, "result"), "SecurityError");
 
-    // A secure URL with an opaque origin is useful for exercising the
-    // origin gate independently of the secure-context gate.  Location's
-    // origin slot is mutable in this model, so mirror the platform's
-    // opaque-origin serialization (`"null"`) directly.
-    let mut opaque = JsRuntime::with_document_and_url(
-        default_document(),
-        "https://service-worker-opaque.example.test/",
-    )
-    .unwrap();
+    // Use a real opaque origin and override only the secure-context input
+    // so this checks the origin gate independently of the secure-context gate.
+    let mut opaque =
+        JsRuntime::with_document_and_url(default_document(), "data:text/html,").unwrap();
+    opaque.host_state.borrow_mut().secure_context_override = Some(true);
+    assert_eq!(
+        opaque.eval("isSecureContext").unwrap().as_boolean(),
+        Some(true)
+    );
     opaque
         .eval(
-            "location.origin = 'null'; globalThis.result = 'pending'; navigator.serviceWorker.register('data:text/javascript,').then(() => result = 'resolved', error => result = error.name);",
+            "globalThis.result = 'pending'; navigator.serviceWorker.register('https://service-worker-opaque.example.test/worker.js').then(() => result = 'resolved', error => result = error.name);",
         )
         .unwrap();
     opaque.run_until_idle().unwrap();

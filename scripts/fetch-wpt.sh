@@ -86,6 +86,8 @@ collect_pattern \
   "/trusted-types/block-string-assignment-to-Element-setHTMLUnsafe.html" \
   "/trusted-types/block-string-assignment-to-ShadowRoot-setHTMLUnsafe.html" \
   "/trusted-types/ServiceWorkerContainer-register.https.html" \
+  "/trusted-types/ServiceWorker-eval.https.html" \
+  "/trusted-types/ServiceWorker-importScripts.https.html" \
   "/trusted-types/TrustedType-AttributeNodes.html" \
   "/trusted-types/block-string-assignment-to-attribute-via-attribute-node.html" \
   "/trusted-types/block-string-assignment-to-ShadowRoot-innerHTML.html" \

@@ -1659,7 +1659,12 @@ fn report_only_script_url_allows_assignment_and_reports() {
 
 #[test]
 fn service_worker_registration_requires_trusted_script_url() {
-    let mut runtime = make_runtime("<body>");
+    let fixture = super::service_worker_tests::ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        TreeBuilder::parse("<body>").document(),
+        &format!("{}/page", fixture.origin),
+    )
+    .unwrap();
     runtime.install_response_security_headers(&[(
         "Content-Security-Policy".into(),
         "require-trusted-types-for 'script'".into(),
@@ -1668,11 +1673,11 @@ fn service_worker_registration_requires_trusted_script_url() {
         &mut runtime,
         r#"
         globalThis.registrationResults = [];
-        navigator.serviceWorker.register('/blocked.js').then(
+        navigator.serviceWorker.register('/sw.js').then(
           () => registrationResults.push('unexpected'),
           error => registrationResults.push(error instanceof TypeError ? 'blocked' : error.name));
         const policy = trustedTypes.createPolicy('workers', {createScriptURL: s => s});
-        navigator.serviceWorker.register(policy.createScriptURL('/allowed.js')).then(
+        navigator.serviceWorker.register(policy.createScriptURL('/sw.js')).then(
           () => registrationResults.push('allowed'),
           error => registrationResults.push(error.name));
         true
@@ -1683,6 +1688,8 @@ fn service_worker_registration_requires_trusted_script_url() {
         &mut runtime,
         "registrationResults.includes('blocked') && registrationResults.includes('allowed') && registrationResults.length === 2",
     );
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec!["/sw.js".to_owned()]);
 }
 
 #[test]

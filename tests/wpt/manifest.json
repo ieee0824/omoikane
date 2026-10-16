@@ -574,6 +574,8 @@
     {"path": "trusted-types/block-string-assignment-to-Element-setHTMLUnsafe.html"},
     {"path": "trusted-types/block-string-assignment-to-ShadowRoot-setHTMLUnsafe.html"},
     {"path": "trusted-types/ServiceWorkerContainer-register.https.html"},
+    {"path": "trusted-types/ServiceWorker-eval.https.html", "server": "wptserve"},
+    {"path": "trusted-types/ServiceWorker-importScripts.https.html", "server": "wptserve"},
     {"path": "trusted-types/TrustedType-AttributeNodes.html"},
     {"path": "trusted-types/block-string-assignment-to-attribute-via-attribute-node.html"},
     {"path": "trusted-types/block-string-assignment-to-ShadowRoot-innerHTML.html"},

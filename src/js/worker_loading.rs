@@ -14,10 +14,20 @@ pub(super) struct LoadedWorkerScript {
     pub(super) source: String,
     /// Final HTTP status, or the synthetic data-response status 200.
     pub(super) response_status: u16,
+    /// Final response Content-Type, needed by strict ServiceWorker startup.
+    pub(super) content_type: Option<String>,
+    /// Initial ServiceWorker script response's maximum-scope override.
+    pub(super) service_worker_allowed: Option<String>,
     /// Final response CSP, report-only CSP, and Reporting-Endpoints headers.
     pub(super) security_headers: Vec<(String, String)>,
     /// Complete final response headers for COOP/COEP policy inheritance.
     pub(super) response_headers: Vec<(String, String)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkerScriptFetchKind {
+    Regular,
+    Service,
 }
 
 /// One redirect request or final response checked against the creator's CSP.
@@ -59,9 +69,52 @@ pub(super) fn load_worker_script_with_policy(
     client: &mut Client,
     policy: &CspPolicy,
 ) -> WorkerLoadResult {
+    load_worker_script_with_kind(
+        requested,
+        base,
+        cookie_context,
+        client,
+        policy,
+        WorkerScriptFetchKind::Regular,
+    )
+}
+
+/// Loads the top-level ServiceWorker script without following redirects.
+pub(super) fn load_service_worker_script_with_policy(
+    requested: &str,
+    base: Option<&crate::http::Url>,
+    cookie_context: Option<&crate::http::CookieRequestContext>,
+    client: &mut Client,
+    policy: &CspPolicy,
+) -> WorkerLoadResult {
+    load_worker_script_with_kind(
+        requested,
+        base,
+        cookie_context,
+        client,
+        policy,
+        WorkerScriptFetchKind::Service,
+    )
+}
+
+fn load_worker_script_with_kind(
+    requested: &str,
+    base: Option<&crate::http::Url>,
+    cookie_context: Option<&crate::http::CookieRequestContext>,
+    client: &mut Client,
+    policy: &CspPolicy,
+    kind: WorkerScriptFetchKind,
+) -> WorkerLoadResult {
     let mut checks = Vec::new();
-    let loaded =
-        load_worker_script_checked(requested, base, cookie_context, client, policy, &mut checks);
+    let loaded = load_worker_script_checked(
+        requested,
+        base,
+        cookie_context,
+        client,
+        policy,
+        kind,
+        &mut checks,
+    );
     WorkerLoadResult { loaded, checks }
 }
 
@@ -71,6 +124,7 @@ fn load_worker_script_checked(
     cookie_context: Option<&crate::http::CookieRequestContext>,
     client: &mut Client,
     policy: &CspPolicy,
+    kind: WorkerScriptFetchKind,
     checks: &mut Vec<WorkerPolicyCheck>,
 ) -> Option<LoadedWorkerScript> {
     match resolve_resource_ref(requested, base)? {
@@ -86,13 +140,21 @@ fn load_worker_script_checked(
                 effective_url: requested.to_owned(),
                 source: String::from_utf8(data).ok()?,
                 response_status: 200,
+                content_type: Some(mime_type),
+                service_worker_allowed: None,
                 security_headers: Vec::new(),
                 response_headers: Vec::new(),
             })
         }
-        ResolvedResource::Url(_) => {
-            load_http_worker_script(requested, base, cookie_context, client, policy, checks)
-        }
+        ResolvedResource::Url(_) => load_http_worker_script(
+            requested,
+            base,
+            cookie_context,
+            client,
+            policy,
+            kind,
+            checks,
+        ),
     }
 }
 
@@ -117,6 +179,7 @@ fn load_http_worker_script(
     cookie_context: Option<&crate::http::CookieRequestContext>,
     client: &mut Client,
     policy: &CspPolicy,
+    kind: WorkerScriptFetchKind,
     checks: &mut Vec<WorkerPolicyCheck>,
 ) -> Option<LoadedWorkerScript> {
     // The transport URL omits fragments; retain a standard URL alongside it
@@ -141,6 +204,9 @@ fn load_http_worker_script(
         }
         let transport_url = current.as_str().parse::<crate::http::Url>().ok()?;
         let mut request = HttpRequest::new(Method::Get, transport_url.clone());
+        if kind == WorkerScriptFetchKind::Service {
+            request.set_header("Service-Worker", "script");
+        }
         if requires_public_fetch(&transport_url, base) {
             request.require_public_ip();
         }
@@ -151,6 +217,10 @@ fn load_http_worker_script(
         }
         let response = client.send_once_with_timeout(request, true, None).ok()?;
         if matches!(response.status_code(), 301 | 302 | 303 | 307 | 308) {
+            if kind == WorkerScriptFetchKind::Service {
+                client.report_resource_failure();
+                return None;
+            }
             let next = response
                 .header("location")
                 .and_then(|location| worker_redirect_url(&current, location));
@@ -189,6 +259,8 @@ fn load_http_worker_script(
             effective_url: current.to_string(),
             source,
             response_status: response.status_code(),
+            content_type: response.header("content-type").map(str::to_owned),
+            service_worker_allowed: response.header("service-worker-allowed").map(str::to_owned),
             security_headers: child_document::response_security_headers(&response),
             response_headers: response.headers().to_vec(),
         });

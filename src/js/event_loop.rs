@@ -112,6 +112,12 @@ pub(crate) enum Task {
         worker_id: u64,
         data: String,
     },
+    /// Completion of all lifetime promises for a ServiceWorker lifecycle event.
+    ServiceWorkerLifecycle {
+        worker_id: u64,
+        installing: bool,
+        failed: bool,
+    },
     /// A message sent from a dedicated worker back to its owner page.
     WorkerOwnerMessage {
         worker_id: u64,
@@ -250,6 +256,7 @@ unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
         | Task::AuxiliaryNavigate { .. }
         | Task::BroadcastChannelMessage { .. }
         | Task::WorkerMessage { .. }
+        | Task::ServiceWorkerLifecycle { .. }
         | Task::SharedWorkerMessage { .. }
         | Task::WorkerError { owner: None, .. } => {}
     }
@@ -508,6 +515,22 @@ impl EventLoop {
         self.enqueue(
             TaskSource::PostedMessage,
             Task::WorkerMessage { worker_id, data },
+        );
+    }
+
+    pub(crate) fn enqueue_service_worker_lifecycle(
+        &mut self,
+        worker_id: u64,
+        installing: bool,
+        failed: bool,
+    ) {
+        self.enqueue(
+            TaskSource::DomManipulation,
+            Task::ServiceWorkerLifecycle {
+                worker_id,
+                installing,
+                failed,
+            },
         );
     }
 

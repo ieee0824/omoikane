@@ -589,10 +589,13 @@
       "id": "workers.service-worker",
       "area": "workers",
       "description": "Service worker container is exposed",
-      "setup": "globalThis.__serviceWorkerSurface = { done: false }; navigator.serviceWorker.register('/surface-worker.js', { scope: '/surface/' }).then(registration => navigator.serviceWorker.getRegistration('/surface/page.html').then(found => { __serviceWorkerSurface.done = found === registration && registration.active && registration.active.state === 'activated'; }), () => { __serviceWorkerSurface.done = false; })",
+      "setup": "globalThis.__serviceWorkerSurface = { done: false }; navigator.serviceWorker.register(\"/surface-worker.js\", { scope: \"/surface/\" }).then(async registration => { const worker = registration.installing; if (worker) await new Promise(resolve => worker.addEventListener(\"statechange\", () => { if (worker.state === \"activated\") resolve(); })); const found = await navigator.serviceWorker.getRegistration(\"/surface/page.html\"); __serviceWorkerSurface.done = found === registration && registration.active && registration.active.state === \"activated\"; }, () => { __serviceWorkerSurface.done = false; })",
       "run_tasks": true,
       "probe": "navigator.serviceWorker && typeof navigator.serviceWorker.register === 'function' && __serviceWorkerSurface.done === true",
-      "baseline_supported": true
+      "baseline_supported": true,
+      "http_scripts": {
+        "/surface-worker.js": "/* ServiceWorker surface fixture. */"
+      }
     },
     {
       "id": "workers.worklet",
