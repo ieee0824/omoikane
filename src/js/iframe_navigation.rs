@@ -23,6 +23,85 @@ impl State {
     }
 }
 
+impl HostState {
+    /// Loads one navigation and retains an eligible origin through same-origin
+    /// redirects. Network I/O finishes before any old Document is retired.
+    pub(super) fn load_iframe_navigation_resource(
+        &mut self,
+        iframe: usize,
+        owner: usize,
+        attribute: &str,
+        resource: &str,
+        base: Option<&crate::http::Url>,
+        submission: Option<&form_submission::Submission>,
+        submission_source: Option<usize>,
+        source: &NavigationReferrerSource,
+        javascript: bool,
+    ) -> Result<(LoadedChildDocument, Option<StorageOrigin>), JsHostError> {
+        let form_source = source
+            .document_id
+            .or(submission_source)
+            .or_else(|| submission.and_then(|request| request.source_document_id))
+            .filter(|id| self.document_is_active(*id))
+            .unwrap_or(owner);
+        let initiator = if submission.is_some() {
+            Some(form_source)
+        } else {
+            source.document_id
+        };
+        let grant_source = (attribute != "srcdoc" && !javascript)
+            .then(|| self.storage_access_navigation_source(iframe, initiator))
+            .flatten();
+        let origin = grant_source.and_then(|id| self.document_origins.get(&id).cloned().flatten());
+        // Fetch uses the navigation's actual source client. The reserved
+        // environment's activation below additionally requires a self-navigation.
+        let request_context = self.document_cookie_request_context(
+            initiator
+                .filter(|id| self.document_is_active(*id))
+                .unwrap_or(owner),
+        );
+        let cookie_context = self
+            .document_cookie_request_context(owner)
+            .for_navigation(Some(&request_context));
+        let loaded = if let Some(request) = submission {
+            self.load_iframe_form_submission_with_cookie_context(
+                request,
+                &cookie_context,
+                owner,
+                &source.url,
+                source.policy,
+            )?
+        } else if attribute == "srcdoc" {
+            LoadedChildDocument::srcdoc(resource)
+        } else if javascript {
+            LoadedChildDocument::about_blank("about:blank".to_owned())
+        } else {
+            self.load_iframe_document_with_cookie_context(
+                resource,
+                base,
+                Some(&cookie_context),
+                Some(owner),
+                false,
+                &source.url,
+                source.policy,
+            )
+        };
+        let inherited = origin.filter(|origin| {
+            loaded
+                .url
+                .as_deref()
+                .and_then(StorageOrigin::from_url)
+                .as_ref()
+                == Some(origin)
+                && loaded
+                    .redirects
+                    .iter()
+                    .all(|hop| StorageOrigin::from_url(&hop.url).as_ref() == Some(origin))
+        });
+        Ok((loaded, inherited))
+    }
+}
+
 pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {
     register_private_builtin_callable(
         context,
@@ -60,7 +139,10 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 .get(1)
                 .and_then(JsValue::as_string)
                 .is_some_and(|kind| {
-                    matches!(kind.to_std_string_escaped().as_str(), "assign" | "replace")
+                    matches!(
+                        kind.to_std_string_escaped().as_str(),
+                        "assign" | "replace" | "reload"
+                    )
                 });
             if navigates {
                 let destination = args

@@ -23153,7 +23153,7 @@ fn connected_iframe_set_attribute_src_renavigates_and_fires_load() {
 }
 
 #[test]
-fn connected_iframe_set_attribute_src_with_whitespace_only_change_is_noop() {
+fn connected_iframe_src_whitespace_reassignment_loads_a_fresh_document() {
     use crate::html::TreeBuilder;
     let (port, _port_server) = spawn_static_http_server(
         "text/html",
@@ -23177,6 +23177,9 @@ fn connected_iframe_set_attribute_src_with_whitespace_only_change_is_noop() {
     assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
 
     runtime
+        .eval("globalThis.oldFrameDocument=document.getElementById('f').contentDocument")
+        .unwrap();
+    runtime
         .eval(&format!(
             "document.getElementById('f').setAttribute('src', '  {url}  ');"
         ))
@@ -23184,8 +23187,15 @@ fn connected_iframe_set_attribute_src_with_whitespace_only_change_is_noop() {
     pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         runtime.eval("loads").unwrap().as_number(),
-        Some(1.0),
-        "whitespace-only src changes must not enqueue a new iframe navigation"
+        Some(2.0),
+        "setting src navigates even when its parsed URL is unchanged"
+    );
+    assert_eq!(
+        runtime
+            .eval("document.getElementById('f').contentDocument !== oldFrameDocument")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
     );
 }
 
@@ -25545,17 +25555,21 @@ fn superseded_iframe_location_navigations_fetch_only_the_committed_resource() {
         Some(format!("http://127.0.0.1:{port}/frame/final.html")),
     );
     runtime.run_until_idle().unwrap();
-    assert_eq!(
-        runtime.host_state.borrow().iframe_documents[&iframe_id]
-            .document
-            .identity(),
-        committed_document,
-        "returning to the loaded resource must leave its Document active"
+    let reloaded_document = runtime.host_state.borrow().iframe_documents[&iframe_id]
+        .document
+        .identity();
+    assert_ne!(
+        reloaded_document, committed_document,
+        "setting src again replaces the active Document even at the same URL"
     );
     assert_eq!(
         requests.lock().unwrap().as_slice(),
-        ["/frame/child.html", "/frame/final.html"],
-        "a queued load that returns to the active resource must not fetch"
+        [
+            "/frame/child.html",
+            "/frame/final.html",
+            "/frame/final.html"
+        ],
+        "the superseded resource is skipped, while the final src assignment reloads"
     );
 
     let settled_url = format!("http://127.0.0.1:{port}/frame/final.html#settled");
@@ -25572,14 +25586,18 @@ fn superseded_iframe_location_navigations_fetch_only_the_committed_resource() {
     let settled_entry = &state.iframe_documents[&iframe_id];
     assert_eq!(
         settled_entry.document.identity(),
-        committed_document,
-        "a fragment navigation after the no-op task must stay in the active Document"
+        reloaded_document,
+        "a fragment navigation must stay in the newly active Document"
     );
     assert_eq!(settled_entry.document_url, settled_url);
     assert_eq!(
         requests.lock().unwrap().as_slice(),
-        ["/frame/child.html", "/frame/final.html"],
-        "settling the pending state must avoid a follow-up resource fetch"
+        [
+            "/frame/child.html",
+            "/frame/final.html",
+            "/frame/final.html"
+        ],
+        "the fragment navigation must avoid a follow-up resource fetch"
     );
 }
 

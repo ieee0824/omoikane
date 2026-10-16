@@ -65,6 +65,48 @@ impl JsRuntime {
 }
 
 impl HostState {
+    /// Identifies a live, activated Document navigating its own iframe.
+    pub(super) fn storage_access_navigation_source(
+        &self,
+        iframe: usize,
+        initiator: Option<usize>,
+    ) -> Option<usize> {
+        let document = self.iframe_documents.get(&iframe)?.document.identity();
+        (initiator == Some(document)
+            && self.storage_access_active_documents.contains(&document)
+            && self.storage_access_allows_document_cookies(document))
+        .then_some(document)
+    }
+
+    /// Restores activation only after the replacement's origin and policy exist.
+    pub(super) fn inherit_storage_access_navigation(
+        &mut self,
+        document: usize,
+        origin: Option<StorageOrigin>,
+    ) {
+        let Some(origin) = origin else { return };
+        if self
+            .document_origins
+            .get(&document)
+            .and_then(Option::as_ref)
+            != Some(&origin)
+            || !document_is_secure_context(self, document)
+            || !self.feature_enabled_in_document(document, PolicyFeature::StorageAccess)
+        {
+            return;
+        }
+        let Some(context) = self.storage_access_context(document) else {
+            return;
+        };
+        if context.sandbox_allows_request
+            && self
+                .storage_access_grants
+                .contains(&(context.top_level_site, context.embedded_site))
+        {
+            self.storage_access_active_documents.insert(document);
+        }
+    }
+
     pub(super) fn set_storage_access_permission(
         &mut self,
         document_id: usize,

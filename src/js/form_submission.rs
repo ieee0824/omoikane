@@ -8,7 +8,8 @@ pub(super) struct Submission {
     pub method: String,
     pub body: Option<Vec<u8>>,
     pub content_type: Option<String>,
-    /// Original form owner's Document; replay reevaluates its current access.
+    /// Original form owner retained for submission provenance. Reload authority
+    /// comes from the current navigation initiator, not this historic identity.
     pub source_document_id: Option<usize>,
 }
 
@@ -269,29 +270,30 @@ impl HostState {
         submission: &Submission,
         source_document_id: usize,
     ) -> Result<LoadedChildDocument, JsHostError> {
-        self.load_iframe_form_submission_with_referrer(
+        let cookie_context = self.document_cookie_request_context(source_document_id);
+        self.load_iframe_form_submission_with_cookie_context(
             submission,
-            source_document_id,
+            &cookie_context,
             source_document_id,
             "",
             security_reporting::ReferrerPolicy::default(),
         )
     }
 
-    pub(super) fn load_iframe_form_submission_with_referrer(
+    pub(super) fn load_iframe_form_submission_with_cookie_context(
         &mut self,
         submission: &Submission,
-        source_document_id: usize,
+        cookie_context: &crate::http::CookieRequestContext,
         container_document_id: usize,
         source_url: &str,
         policy: security_reporting::ReferrerPolicy,
     ) -> Result<LoadedChildDocument, JsHostError> {
         if submission.method.eq_ignore_ascii_case("GET") {
             let site = self.location_href.parse::<crate::http::Url>().ok();
-            return Ok(self.load_iframe_document_for_initiator(
+            return Ok(self.load_iframe_document_with_cookie_context(
                 &submission.url,
                 site.as_ref(),
-                Some(source_document_id),
+                Some(cookie_context),
                 Some(container_document_id),
                 false,
                 source_url,
@@ -303,7 +305,7 @@ impl HostState {
         if !source_url.is_empty() {
             request.set_referrer_source(source_url.to_owned(), policy);
         }
-        self.set_document_cookie_request_context(source_document_id, &mut request);
+        cookie_context.apply(&mut request);
         if let Some(body) = &submission.body {
             request.set_body(body.clone());
         }
@@ -471,7 +473,9 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                     .event_loop
                     .cancel_resource_loads_for_nodes(&HashSet::from([id]));
                 state.pending_resource_loads.remove(&id);
-                state.capture_iframe_referrer_source(id, source_document);
+                if state.active_child_navigation_frame != Some(id) {
+                    state.capture_iframe_referrer_source(id, source_document);
+                }
                 state
                     .iframe_document_with_submission(
                         &frame,

@@ -10723,9 +10723,11 @@ export const __omoikane_service_worker_lifecycle = {};
           const currentURL = currentDocument ? currentDocument.URL :
             (pendingLocationURL ??
               (historyIndex < 0 ? nativeIframeDocumentURL(iframe.__id) : historyEntries[historyIndex].href));
-          if (currentURL === destination) return;
-          if (pendingLocationURL === null && currentURL &&
+          // Only a destination with a fragment can navigate within this
+          // Document. Assigning the current URL without one still reloads it.
+          if (destination.includes("#") && pendingLocationURL === null && currentURL &&
               currentURL.split("#", 1)[0] === destination.split("#", 1)[0]) {
+            if (currentURL === destination) return;
             captureActiveHistory();
             nativeCommitIframeFragment(iframe.__id, destination);
             const entry = { ...historyEntries[historyIndex], href: destination,
@@ -11192,15 +11194,12 @@ export const __omoikane_service_worker_lifecycle = {};
       const attribute = asciiLowercase(attrName);
       const prepared = trustedAttributeValue(this, attribute, null, value,
         nativeNodeNamespaceURI(internalNodeId(this)) !== HTML_NAMESPACE);
-      const normalized = prepared;
       let changesResource = false;
       if (attribute === "src" || (attribute === "srcdoc" && internalNodeLocalName(this) === "iframe")) {
         this.__prepareResourceNavigation();
-        const previous = this.getAttribute(attribute);
-        changesResource = attribute === "srcdoc"
-          ? previous !== normalized
-          : !hasFrameSrcdoc(this) &&
-            (previous ?? "").trim() !== normalized.trim();
+        // Setting an effective frame resource attribute starts a navigation
+        // even when its value, or the URL after trimming, is unchanged.
+        changesResource = attribute === "srcdoc" || !hasFrameSrcdoc(this);
         if (changesResource && this.isConnected) {
           dispatchIframeNavigationDeparture(this);
         }
