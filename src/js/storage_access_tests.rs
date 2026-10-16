@@ -201,6 +201,218 @@ fn child_attribute(document: &NodeHandle, attribute: &str) -> Option<String> {
         .and_then(|html| html.get_attribute(attribute))
 }
 
+fn automated_third_party_frame() -> (JsRuntime, NodeHandle) {
+    let mut runtime = runtime_at("https://top.test/");
+    runtime.enable_test_automation().unwrap();
+    runtime.set_http_resource_transport(Some(Arc::new(StorageAccessTransport)));
+    runtime.eval("const f = document.createElement('iframe'); f.src = 'https://third.test/frame'; document.body.appendChild(f)").unwrap();
+    runtime.tick(0).unwrap();
+    let child = child_document(&runtime);
+    runtime
+        .eval_in_document_realm(child.identity(), "globalThis.test_driver_internal = {}")
+        .unwrap();
+    runtime
+        .eval_in_document_realm(
+            child.identity(),
+            include_str!("../../tests/wpt_smoke/testdriver_vendor.js"),
+        )
+        .unwrap();
+    runtime.eval_in_document_realm(child.identity(), r#"
+        const button = document.createElement('button');
+        button.style.cssText = 'display:block;width:100px;height:40px';
+        button.textContent = 'Click';
+        document.body.appendChild(button);
+        const observedInput = [];
+        for (const type of ['mousemove','mousedown','mouseup','click']) {
+          document.addEventListener(type, event => {
+            observedInput.push([type, event.target === button]);
+            document.documentElement.setAttribute('data-input', JSON.stringify(observedInput));
+          });
+        }
+        button.addEventListener('click', () => document.requestStorageAccess().then(
+          () => document.documentElement.setAttribute('data-result', 'granted'),
+          error => document.documentElement.setAttribute('data-result', error.name)));
+        function queueClick() {
+          const rect = button.getBoundingClientRect();
+          document.documentElement.setAttribute('data-rect', JSON.stringify(rect));
+          return test_driver_internal.click(button, {x: rect.left + rect.width/2, y: rect.top + rect.height/2})
+            .catch(error => document.documentElement.setAttribute('data-error', String(error)));
+        }
+    "#).unwrap();
+    (runtime, child)
+}
+
+#[test]
+fn test_automation_bindings_are_absent_from_ordinary_pages() {
+    let mut runtime = runtime_at("https://top.test/");
+    assert_eq!(runtime.eval("['__omoikane_automation_register_driver', '__omoikane_automation_set_permission', '__omoikane_automation_delete_all_cookies'].every(name => !(name in globalThis))").unwrap().as_boolean(), Some(true));
+    assert_eq!(runtime.advance_test_automation().unwrap(), None);
+}
+
+#[test]
+fn test_automation_child_click_requires_the_host_trusted_input_scope() {
+    let (mut runtime, child) = automated_third_party_frame();
+    runtime.eval_in_document_realm(child.identity(), "queueClick(); __wpt_advance_action_tick(); __wpt_advance_action_tick(); __wpt_advance_action_tick();").unwrap();
+    assert_eq!(
+        child_result(&child).as_deref(),
+        Some("NotAllowedError"),
+        "input={:?}, rect={:?}, error={:?}",
+        child_attribute(&child, "data-input"),
+        child_attribute(&child, "data-rect"),
+        child_attribute(&child, "data-error")
+    );
+    runtime
+        .eval_in_document_realm(child.identity(), "queueClick()")
+        .unwrap();
+    for _ in 0..3 {
+        assert_eq!(runtime.advance_test_automation().unwrap(), Some(0));
+    }
+    assert_eq!(child_result(&child).as_deref(), Some("granted"));
+    assert_eq!(runtime.advance_test_automation().unwrap(), None);
+    assert!(!runtime.host_state.borrow().trusted_storage_access_input);
+}
+
+#[test]
+fn test_automation_permission_denial_and_revocation_control_real_storage_access() {
+    let (mut runtime, child) = automated_third_party_frame();
+    runtime
+        .eval_in_document_realm(
+            child.identity(),
+            r#"
+        let storagePermission;
+        const permissionChanges = [];
+        navigator.permissions.query({name:'storage-access'}).then(status => {
+          storagePermission = status;
+          permissionChanges.push(status.state);
+          status.onchange = () => permissionChanges.push(status.state);
+        });
+    "#,
+        )
+        .unwrap();
+    runtime.eval_in_document_realm(child.identity(), "test_driver_internal.set_permission({descriptor:{name:'storage-access'},state:'denied'}); queueClick()").unwrap();
+    for _ in 0..3 {
+        runtime.advance_test_automation().unwrap();
+    }
+    assert_eq!(child_result(&child).as_deref(), Some("NotAllowedError"));
+    runtime.eval_in_document_realm(child.identity(), "__omoikane_permission_changed('storage-access', 'granted'); document.documentElement.setAttribute('data-permission', storagePermission.state)").unwrap();
+    assert_eq!(
+        child_attribute(&child, "data-permission").as_deref(),
+        Some("prompt")
+    );
+    runtime.eval_in_document_realm(child.identity(), r#"
+        test_driver_internal.set_permission({descriptor:{name:'storage-access'},state:'granted'}).then(() =>
+          document.requestStorageAccess()).then(() => {
+            document.cookie = 'allowed=1; Secure; SameSite=None; Path=/';
+            document.documentElement.setAttribute('data-result', document.cookie);
+          });
+    "#).unwrap();
+    assert_eq!(child_result(&child).as_deref(), Some("allowed=1"));
+    runtime.eval_in_document_realm(child.identity(), r#"
+        test_driver_internal.set_permission({descriptor:{name:'storage-access'},state:'prompt'}).then(() =>
+          Promise.all([document.hasStorageAccess(), document.requestStorageAccess().then(() => 'granted', e => e.name)]))
+          .then(([has, result]) => document.documentElement.setAttribute('data-result', [has, result, document.cookie].join('|')));
+    "#).unwrap();
+    assert_eq!(
+        child_result(&child).as_deref(),
+        Some("false|NotAllowedError|")
+    );
+    runtime.eval_in_document_realm(child.identity(), r#"
+        test_driver_internal.set_permission({descriptor:{name:'storage-access'},state:'granted'}).then(() =>
+          test_driver_internal.delete_all_cookies()).then(() =>
+          document.documentElement.setAttribute('data-result', document.cookie));
+    "#).unwrap();
+    assert_eq!(child_result(&child).as_deref(), Some(""));
+    runtime.eval_in_document_realm(child.identity(), "document.documentElement.setAttribute('data-permission', JSON.stringify([storagePermission.state, permissionChanges]))").unwrap();
+    assert_eq!(
+        child_attribute(&child, "data-permission").as_deref(),
+        Some(r#"["granted",["prompt","granted","prompt","granted"]]"#)
+    );
+    assert_eq!(
+        runtime
+            .host_state
+            .borrow()
+            .cookie_store
+            .lock()
+            .unwrap()
+            .cookie_header(&"https://third.test/".parse().unwrap()),
+        None
+    );
+}
+
+#[test]
+fn test_automation_keeps_a_replaced_driver_alive_through_its_pending_tick() {
+    let mut runtime = runtime_at("https://top.test/");
+    runtime.enable_test_automation().unwrap();
+    runtime.eval("const frame=document.createElement('iframe'); frame.id='automation-frame'; frame.srcdoc='<html><body></body></html>'; document.body.appendChild(frame)").unwrap();
+    runtime.tick(0).unwrap();
+    let child = iframe_document_by_id(&runtime, "automation-frame");
+    let realm = runtime
+        .realm_for_document(child.identity())
+        .unwrap()
+        .unwrap();
+    let previous = runtime.context.enter_realm(realm);
+    runtime
+        .context
+        .register_global_builtin_callable(
+            js_string!("collectAutomationGarbage"),
+            0,
+            NativeFunction::from_copy_closure(|_, _, _| {
+                boa_gc::force_collect();
+                Ok(JsValue::undefined())
+            }),
+        )
+        .unwrap();
+    runtime.context.enter_realm(previous);
+    runtime.eval_in_document_realm(child.identity(), r#"
+        const replacementDriver = () => null;
+        function collectAfterPoll() {
+          collectAutomationGarbage();
+          const survived = driverWeak.deref() !== undefined;
+          parent.document.documentElement.setAttribute('data-driver-root', survived ? 'alive' : 'lost');
+          // Retire the document if collection exposed the missing root, so
+          // the host skips its obsolete callback instead of dereferencing it.
+          if (!survived) parent.document.getElementById('automation-frame').remove();
+        }
+        function registerAndWatch(driver) {
+          globalThis.driverWeak = new WeakRef(driver);
+          __omoikane_automation_register_driver(driver);
+        }
+        registerAndWatch(function(execute) {
+          if (!execute) {
+            __omoikane_automation_register_driver(replacementDriver);
+            queueMicrotask(collectAfterPoll);
+            return false;
+          }
+          parent.document.documentElement.setAttribute('data-driver-executed', 'true');
+          return 0;
+        });
+    "#).unwrap();
+    runtime.context.clear_kept_objects();
+    let duration = runtime.advance_test_automation().unwrap();
+    let html = runtime.document().query_selector("html").unwrap();
+    assert_eq!(
+        html.get_attribute("data-driver-root").as_deref(),
+        Some("alive")
+    );
+    assert_eq!(
+        html.get_attribute("data-driver-executed").as_deref(),
+        Some("true")
+    );
+    assert_eq!(duration, Some(0));
+    assert_eq!(runtime.advance_test_automation().unwrap(), None);
+}
+
+#[test]
+fn test_automation_does_not_drive_retired_child_documents() {
+    let (mut runtime, child) = automated_third_party_frame();
+    runtime
+        .eval_in_document_realm(child.identity(), "queueClick()")
+        .unwrap();
+    runtime.eval("f.remove()").unwrap();
+    assert_eq!(runtime.advance_test_automation().unwrap(), None);
+    assert_eq!(child_result(&child), None);
+}
+
 fn iframe_document_by_id(runtime: &JsRuntime, id: &str) -> NodeHandle {
     let state = runtime.host_state.borrow();
     state

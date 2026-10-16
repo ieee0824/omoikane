@@ -6,10 +6,12 @@ use super::*;
 pub(super) struct State {
     shared: Option<JsObject>,
     dispatchers: HashMap<usize, JsValue>,
+    pub(super) automation: automation::State,
 }
 
 impl State {
     pub(super) unsafe fn trace(&self, tracer: &mut Tracer) {
+        unsafe { self.automation.trace(tracer) };
         if let Some(shared) = &self.shared {
             unsafe { shared.trace(tracer) };
         }
@@ -20,6 +22,7 @@ impl State {
 
     pub(super) fn retire_document(&mut self, document: usize) {
         self.dispatchers.remove(&document);
+        self.automation.retire_document(document);
     }
 }
 

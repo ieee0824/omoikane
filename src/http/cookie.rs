@@ -626,6 +626,23 @@ impl CookieJar {
         }
     }
 
+    /// Deletes cookies associated with a WebDriver document address, including
+    /// HttpOnly cookies, while preserving cookies for other domains and paths.
+    pub(crate) fn delete_associated_cookies(&mut self, url: &Url, now: SystemTime) {
+        let mut deleted = Vec::new();
+        self.cookies.retain(|(cookie, _)| {
+            if !cookie.is_expired(now) && cookie.matches_url(url) {
+                deleted.push(cookie.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for cookie in deleted {
+            self.record_change(cookie, true, false);
+        }
+    }
+
     fn record_change(&mut self, cookie: Cookie, deleted: bool, individual_event: bool) {
         if cookie.http_only {
             return;
@@ -1161,6 +1178,34 @@ mod tests {
 
         let url: Url = "http://example.com/page".parse().unwrap();
         assert_eq!(jar.cookie_header(&url), Some("session=abc".to_string()));
+    }
+
+    #[test]
+    fn webdriver_deletion_includes_httponly_but_preserves_unrelated_cookies() {
+        let url: Url = "https://example.com/path/page".parse().unwrap();
+        let other: Url = "https://other.test/path/page".parse().unwrap();
+        let mut jar = CookieJar::new();
+        for cookie in [
+            "visible=1; Secure; SameSite=None; Path=/",
+            "hidden=1; Secure; HttpOnly; Path=/",
+            "otherpath=1; Secure; Path=/elsewhere",
+        ] {
+            jar.add_from_header_for_url(cookie, &url);
+        }
+        jar.add_from_header_for_url("otherhost=1; Secure; Path=/", &other);
+        let cursor = jar.change_sequence();
+        jar.delete_associated_cookies(&url, SystemTime::now());
+        assert_eq!(jar.cookie_header(&url), None);
+        assert_eq!(jar.cookie_header(&other).as_deref(), Some("otherhost=1"));
+        assert_eq!(
+            jar.cookie_header(&"https://example.com/elsewhere/page".parse().unwrap())
+                .as_deref(),
+            Some("otherpath=1")
+        );
+        let (_, changes) = jar.script_visible_changes_since(cursor, &url, &url);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].name, "visible");
+        assert!(changes[0].deleted);
     }
 
     #[test]

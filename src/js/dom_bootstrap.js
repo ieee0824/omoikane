@@ -138,6 +138,7 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeCookieStoreMutate = globalThis.__omoikane_cookie_store_mutate;
   const nativeCookieStoreChanges = globalThis.__omoikane_cookie_store_changes;
   const nativeStorageAccessState = globalThis.__omoikane_storage_access_state;
+  const nativeStorageAccessPermission = globalThis.__omoikane_storage_access_permission;
   const nativeStorageAccessRequest = globalThis.__omoikane_storage_access_request;
   const nativeWebLocks = globalThis.__omoikane_web_locks;
   // Worklet lifecycle bindings are private implementation hooks. Keep them in
@@ -359,6 +360,7 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_cookie_store_mutate;
   delete globalThis.__omoikane_cookie_store_changes;
   delete globalThis.__omoikane_storage_access_state;
+  delete globalThis.__omoikane_storage_access_permission;
   delete globalThis.__omoikane_storage_access_request;
   delete globalThis.__omoikane_web_locks;
   delete globalThis.__omoikane_create_worklet;
@@ -22864,7 +22866,7 @@ export const __omoikane_service_worker_lifecycle = {};
   let permissionLifecycleActive = true;
   const supportedPermissionNames = Object.freeze([
     "notifications", "geolocation", "clipboard-read", "clipboard-write", "persistent-storage",
-    "accelerometer", "gyroscope", "magnetometer",
+    "accelerometer", "gyroscope", "magnetometer", "storage-access",
   ]);
 
   function permissionDescriptorName(descriptor) {
@@ -22880,6 +22882,9 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function permissionStateFor(name) {
+    if (name === "storage-access") {
+      return String(nativeStorageAccessPermission(__omoikane_document_id));
+    }
     // No platform sensor provider is installed, so motion permission cannot
     // be granted. This is also the state reported by Permissions.query.
     if (["accelerometer", "gyroscope", "magnetometer"].includes(name)) return "denied";

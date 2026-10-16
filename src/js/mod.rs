@@ -98,6 +98,7 @@ mod form_state;
 mod form_submission;
 mod geolocation;
 pub use geolocation::GeolocationPositionData;
+mod automation;
 #[cfg(test)]
 mod cross_origin_focus_tests;
 mod form_validation;
@@ -2356,6 +2357,7 @@ struct HostState {
     document_origins: HashMap<usize, Option<StorageOrigin>>,
     /// Permission is scoped to the top-level and embedded sites for this session.
     storage_access_grants: HashSet<(crate::http::SchemefulSite, crate::http::SchemefulSite)>,
+    storage_access_denials: HashSet<(crate::http::SchemefulSite, crate::http::SchemefulSite)>,
     /// Activation is document-local even when another frame has the same permission key.
     storage_access_active_documents: HashSet<usize>,
     /// Set only by the embedder while it dispatches a real activation input.
@@ -3127,6 +3129,7 @@ impl HostState {
             web_lock_clients,
             document_origins,
             storage_access_grants: HashSet::new(),
+            storage_access_denials: HashSet::new(),
             storage_access_active_documents: HashSet::new(),
             trusted_storage_access_input: false,
             page_hidden: false,
@@ -14737,6 +14740,8 @@ fn register_host_bindings(
     font_loading::register(context, host_state, &mut bindings)?;
     pointer_lock::register(context, &mut bindings)?;
     input_bridge::register(context, &mut bindings)?;
+    let automation_enabled = host_state.borrow().input_bridge.automation.enabled();
+    automation::register(context, automation_enabled)?;
     media_environment::register(context, host_state, &mut bindings)?;
     form_state::register(context, &mut bindings)?;
     iframe_navigation::register(context, &mut bindings)?;
@@ -14948,6 +14953,11 @@ fn register_host_bindings(
             js_string!("__omoikane_storage_access_state"),
             1,
             NativeFunction::from_copy_closure(storage_access::storage_access_state_native),
+        ),
+        (
+            js_string!("__omoikane_storage_access_permission"),
+            1,
+            NativeFunction::from_copy_closure(storage_access::permission_state_native),
         ),
         (
             js_string!("__omoikane_storage_access_request"),

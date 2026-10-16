@@ -6,16 +6,8 @@ pub(super) const VENDOR_SCRIPT: &str = include_str!("testdriver_vendor.js");
 /// Executes one WebDriver tick without manufacturing page selection state.
 /// The caller advances the virtual clock and rendering after the input tick.
 pub(super) fn drive_action_tick(runtime: &mut JsRuntime, errors: &mut Vec<String>) -> Option<u64> {
-    let pending = runtime
-        .eval("Array.isArray(globalThis.__wpt_action_commands) && __wpt_action_commands.length > 0")
-        .ok()
-        .and_then(|value| value.as_boolean())
-        .unwrap_or(false);
-    if !pending {
-        return None;
-    }
-    match runtime.eval("__wpt_advance_action_tick()") {
-        Ok(value) => value.as_number().map(|duration| duration as u64),
+    match runtime.advance_test_automation() {
+        Ok(duration) => duration,
         Err(error) => {
             errors.push(format!("action testdriver: {error}"));
             None
@@ -34,6 +26,7 @@ mod tests {
             "<!doctype html><style>#target {display:block;width:100px;height:40px}</style><button id=target>tap</button>",
         ).document();
         let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.enable_test_automation().unwrap();
         runtime
             .eval("globalThis.test_driver_internal = {}")
             .unwrap();
@@ -77,6 +70,7 @@ mod tests {
     #[test]
     fn unsupported_sources_reject_without_synthesizing_events() {
         let mut runtime = JsRuntime::new().unwrap();
+        runtime.enable_test_automation().unwrap();
         runtime
             .eval("globalThis.test_driver_internal = {}")
             .unwrap();
