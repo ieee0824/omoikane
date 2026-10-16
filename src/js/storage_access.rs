@@ -27,6 +27,13 @@ struct StorageAccessContext {
     sandbox_allows_request: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum StorageAccessPermission {
+    Prompt,
+    Granted,
+    Denied,
+}
+
 struct TrustedStorageAccessInputGuard {
     host: Rc<RefCell<HostState>>,
     previous: bool,
@@ -58,6 +65,29 @@ impl JsRuntime {
 }
 
 impl HostState {
+    pub(super) fn set_storage_access_permission(
+        &mut self,
+        document_id: usize,
+        permission: StorageAccessPermission,
+    ) -> JsResult<()> {
+        let context = self
+            .storage_access_context(document_id)
+            .ok_or_else(|| JsNativeError::typ().with_message("No active storage-access context"))?;
+        let key = (context.top_level_site, context.embedded_site);
+        self.storage_access_grants.remove(&key);
+        self.storage_access_denials.remove(&key);
+        match permission {
+            StorageAccessPermission::Prompt => {}
+            StorageAccessPermission::Granted => {
+                self.storage_access_grants.insert(key);
+            }
+            StorageAccessPermission::Denied => {
+                self.storage_access_denials.insert(key);
+            }
+        }
+        Ok(())
+    }
+
     /// Resolves every iframe ancestor, so an A → B → A frame stays third-party.
     fn storage_access_context(&self, document_id: usize) -> Option<StorageAccessContext> {
         if !self.document_is_active(document_id) {
@@ -283,6 +313,9 @@ impl HostState {
             self.storage_access_active_documents.insert(document_id);
             return StorageAccessStatus::Granted;
         }
+        if self.storage_access_denials.contains(&key) {
+            return StorageAccessStatus::Blocked;
+        }
         if !user_activation {
             return StorageAccessStatus::Blocked;
         }
@@ -311,6 +344,70 @@ pub(super) fn storage_access_state_native(
     })
 }
 
+/// Storage Access deliberately hides a denied permission as prompt.
+pub(super) fn permission_state_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document)?;
+    let granted = with_host_state(|host| {
+        let state = host.borrow();
+        Ok(state.storage_access_context(document).is_some_and(|site| {
+            document_is_secure_context(&state, document)
+                && state.feature_enabled_in_document(document, PolicyFeature::StorageAccess)
+                && state
+                    .storage_access_grants
+                    .contains(&(site.top_level_site, site.embedded_site))
+        }))
+    })?;
+    Ok(js_string!(if granted { "granted" } else { "prompt" }).into())
+}
+
+/// Recomputes live PermissionStatus objects in each active Window Realm.
+pub(super) fn notify_permission_changes(context: &mut Context) {
+    let Ok(realms) = with_host_state(|host| {
+        let state = host.borrow();
+        let mut realms = Vec::new();
+        if let Some(realm) = &state.main_realm {
+            realms.push(realm.clone());
+        }
+        realms.extend(
+            state
+                .iframe_documents
+                .values()
+                .filter_map(|entry| entry.realm.clone()),
+        );
+        realms.extend(
+            state
+                .auxiliary_contexts
+                .values()
+                .filter_map(|entry| entry.realm.clone()),
+        );
+        Ok(realms)
+    }) else {
+        return;
+    };
+    for realm in realms {
+        let previous = context.enter_realm(realm);
+        let _ = (|| -> JsResult<()> {
+            let callback = context
+                .global_object()
+                .get(js_string!("__omoikane_permission_changed"), context)?;
+            if let Some(callable) = callback.as_callable() {
+                callable.call(
+                    &JsValue::undefined(),
+                    &[js_string!("storage-access").into()],
+                    context,
+                )?;
+            }
+            Ok(())
+        })();
+        context.enter_realm(previous);
+    }
+}
+
 pub(super) fn storage_access_request_native(
     _this: &JsValue,
     args: &[JsValue],
@@ -325,11 +422,13 @@ pub(super) fn storage_access_request_native(
     }
     ensure_same_origin_document(context, document_id)?;
     let dispatcher_activation = args.get(1).is_some_and(JsValue::to_boolean);
-    with_host_state(|host| {
+    let result = with_host_state(|host| {
         let user_activation = dispatcher_activation && host.borrow().trusted_storage_access_input;
         let status = host
             .borrow_mut()
             .request_storage_access(document_id, user_activation);
         Ok(JsValue::from(js_string!(status.as_str())))
-    })
+    })?;
+    notify_permission_changes(context);
+    Ok(result)
 }
