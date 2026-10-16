@@ -65,8 +65,10 @@ pub(super) fn flush(node_id: usize, context: &mut Context) -> JsResult<()> {
                 {
                     return None;
                 }
+                // A Document has no ownerDocument, but its validation callback
+                // belongs to that Document's Realm, including inside an iframe.
                 let document =
-                    owner_document_for_node(&node).unwrap_or_else(|| state.document.clone());
+                    document_root_for_node(&node).or_else(|| state.node_lifetime_owner(node_id))?;
                 let callback = state
                     .form_validation
                     .callbacks
