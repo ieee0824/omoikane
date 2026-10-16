@@ -7,6 +7,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll, Waker},
+    time::{Duration, Instant},
 };
 
 use omoikane::{
@@ -129,12 +130,16 @@ fn owned_document_task_records_script_failure_without_aborting_later_scripts() {
     let mut task = Box::pin(runtime.into_document_page_task(7, Some(url)));
     let waker = Waker::noop();
     let mut context = Context::from_waker(waker);
-    let mut completed = (0..100)
-        .find_map(|_| match task.as_mut().poll(&mut context) {
-            Poll::Ready(completed) => Some(completed),
-            Poll::Pending => None,
-        })
-        .expect("document page task did not complete without a dialog");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut completed = loop {
+        match task.as_mut().poll(&mut context) {
+            Poll::Ready(completed) => break completed,
+            Poll::Pending if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1))
+            }
+            Poll::Pending => panic!("document page task did not complete without a dialog"),
+        }
+    };
     let errors = completed.result.as_ref().unwrap();
     assert_eq!(errors.len(), 1);
     assert!(

@@ -299,6 +299,7 @@ const DOM_CONTENT_LOADED_SCRIPT: &str = concat!(
     "__omoikane_performance_navigation_event('domContentLoadedEnd'); } catch (_) { void 0; }",
 );
 const LOAD_SCRIPT: &str = concat!(
+    "__omoikane_flush_parser_autofocus(); ",
     "document.__readyState = 'complete'; ",
     "__omoikane_dispatch_lifecycle_event('readystatechange'); ",
     "try { if (typeof __omoikane_performance_navigation_event === 'function') ",
@@ -12897,7 +12898,7 @@ impl JsRuntime {
 
     /// Dispatches a resource-load timer's `load` event: refreshes any
     /// iframe window names, fires an iframe window `load` listener when one
-    /// is wired (or an inline `body`/`frameset` `onload` needs a realm), and
+    /// is wired (or inline load/autofocus needs a realm), and
     /// dispatches the node's own resource-timing `load` event.
     fn dispatch_resource_load_event(
         &mut self,
@@ -12916,9 +12917,9 @@ impl JsRuntime {
                 })
                 .and_then(|_| state.iframe_documents.get(&node_id))
                 .and_then(|entry| {
-                    // A Window load listener requires a live Realm. An inline
-                    // body/frameset onload attribute is the one exception: it
-                    // needs a Realm to be wired before dispatch.
+                    // A Window load listener requires a live Realm. Inline
+                    // body/frameset load and parser autofocus need one even
+                    // when the child document contains no script.
                     let has_inline_load = || {
                         ["body", "frameset"].iter().any(|tag| {
                             entry
@@ -12927,8 +12928,10 @@ impl JsRuntime {
                                 .is_some_and(|node| node.get_attribute("onload").is_some())
                         })
                     };
-                    (entry.realm.is_some() || has_inline_load())
-                        .then_some(entry.document.identity())
+                    (entry.realm.is_some()
+                        || has_inline_load()
+                        || entry.document.query_selector("[autofocus]").is_some())
+                    .then_some(entry.document.identity())
                 })
         };
         if let Some(document_id) = child_document_id {
