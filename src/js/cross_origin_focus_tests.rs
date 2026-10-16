@@ -58,6 +58,51 @@ fn attribute(document: &NodeHandle, name: &str) -> Option<String> {
 const INPUT_PAGE: &str =
     "<html><body><script>globalThis.frameReady=true</script><input id=target></body></html>";
 
+const AUTOFOCUS_PAGE: &str = "<html><body><input autofocus \
+    onfocus=\"document.documentElement.setAttribute('data-autofocus', 'fired')\"></body></html>";
+
+#[test]
+fn delegated_cross_origin_parser_autofocus_focuses_child() {
+    let mut runtime = runtime(&[("https://child.test/child", AUTOFOCUS_PAGE)]);
+    let child = frame_document(&runtime, &runtime.document(), "#child");
+    assert_eq!(
+        attribute(&child, "data-autofocus").as_deref(),
+        Some("fired")
+    );
+    eval_document(
+        &mut runtime,
+        &child,
+        "document.documentElement.setAttribute('data-focused', \
+         String(document.activeElement === document.querySelector('input') && document.hasFocus()))",
+    );
+    assert_eq!(attribute(&child, "data-focused").as_deref(), Some("true"));
+}
+
+#[test]
+fn cross_origin_parser_autofocus_respects_default_policy() {
+    let document = crate::html::TreeBuilder::parse(
+        "<html><body><iframe id=child src='https://child.test/child'></iframe></body></html>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document_and_url(document, "https://top.test/page").unwrap();
+    runtime.set_http_resource_transport(Some(Arc::new(FocusPages(HashMap::from([(
+        "https://child.test/child".to_owned(),
+        AUTOFOCUS_PAGE.to_owned(),
+    )])))));
+    for _ in 0..8 {
+        runtime.tick(0).unwrap();
+    }
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    let child = frame_document(&runtime, &runtime.document(), "#child");
+    assert_eq!(attribute(&child, "data-autofocus"), None);
+    eval_document(
+        &mut runtime,
+        &child,
+        "document.documentElement.setAttribute('data-focused', String(document.hasFocus()))",
+    );
+    assert_eq!(attribute(&child, "data-focused").as_deref(), Some("false"));
+}
+
 #[test]
 fn cross_origin_focus_requires_delegation_or_user_activation() {
     let document = crate::html::TreeBuilder::parse(

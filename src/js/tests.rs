@@ -31690,14 +31690,16 @@ fn initial_owned_document_task_mutes_cross_origin_script_reports() {
     let base = format!("http://{address}/").parse().unwrap();
     let mut task = Box::pin(runtime.into_document_page_task(1, Some(base)));
     let mut context = FutureContext::from_waker(Waker::noop());
-    let mut completed = None;
-    for _ in 0..100 {
-        if let Poll::Ready(result) = task.as_mut().poll(&mut context) {
-            completed = Some(result);
-            break;
+    let deadline = std::time::Instant::now() + ACCEPT_TIMEOUT + READ_TIMEOUT;
+    let completed = loop {
+        match task.as_mut().poll(&mut context) {
+            Poll::Ready(result) => break result,
+            Poll::Pending if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Poll::Pending => panic!("page task must complete before the HTTP fixture timeout"),
         }
-    }
-    let completed = completed.expect("page task must complete");
+    };
     assert_eq!(completed.result.unwrap().len(), 1);
     let mut runtime = completed.runtime;
     server.join();

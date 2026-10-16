@@ -3118,6 +3118,25 @@ export const __omoikane_service_worker_lifecycle = {};
     focusAcrossDocuments(focusDocument, null, true);
   }
 
+  const parserAutofocusProcessedDocuments = new WeakSet();
+  globalThis.__omoikane_flush_parser_autofocus = function() {
+    const doc = focusDocument;
+    if (parserAutofocusProcessedDocuments.has(doc)) return;
+    parserAutofocusProcessedDocuments.add(doc);
+    const focused = focusedDocumentId();
+    if (focusDocumentCommand(focused, "snapshot") !== null) return;
+    const pending = [doc];
+    while (pending.length) {
+      const node = pending.pop();
+      if (internalNodeType(node) === 1 && node.hasAttribute("autofocus") && canBeFocused(node)) {
+        node.focus();
+        return;
+      }
+      const children = internalChildNodes(node);
+      for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
+    }
+  };
+
   // No focus event is cancelable, and all four are composed so they cross
   // shadow boundaries. Bubbling differs per event — `focusin` and `focusout`
   // bubble, `focus` and `blur` do not — so each caller passes it in.
