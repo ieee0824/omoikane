@@ -98,6 +98,8 @@ mod form_state;
 mod form_submission;
 mod geolocation;
 pub use geolocation::GeolocationPositionData;
+#[cfg(test)]
+mod cross_origin_focus_tests;
 mod form_validation;
 #[cfg(test)]
 mod fullscreen_tests;
@@ -8278,12 +8280,15 @@ impl JsRuntime {
     /// load/error listeners attached by a child from being looked up through
     /// the parent's wrapper cache.
     fn eval_in_document_realm(&mut self, document_id: usize, source: &str) -> JsResult<()> {
-        let realm = self.existing_realm_for_document(document_id);
+        let active = self.host_state.borrow().document_is_active(document_id);
+        let realm = if active {
+            self.realm_for_document(document_id)?
+        } else {
+            self.existing_realm_for_document(document_id)
+        };
         let Some(realm) = realm else {
-            // A child Document that has not run page code yet has no child
-            // Realm. Its DOM wrappers can still be owned by the caller Realm
-            // (for example when a parent script moves an iframe into that
-            // document), so keep the historical caller-Realm dispatch path.
+            // Inert Documents have no browsing-context Realm; their wrappers
+            // remain owned by the caller that created or adopted the nodes.
             self.eval(source)?;
             self.run_jobs()?;
             return Ok(());
@@ -14067,10 +14072,85 @@ fn iframe_ancestor_windows(
     Ok(windows)
 }
 
+/// Owned browsing-context identities needed to initialize scriptless ancestors.
+enum PendingOwnerRealm {
+    Iframe { frame: usize, document: usize },
+    Auxiliary(u64),
+}
+
+/// Snapshots missing owners without retaining a HostState borrow during bootstrap.
+fn pending_owner_realms(
+    state: &HostState,
+    child: usize,
+    mut owner: usize,
+) -> JsResult<Vec<PendingOwnerRealm>> {
+    let mut visited = HashSet::from([child]);
+    let mut pending = Vec::new();
+    while owner != state.document.identity() {
+        if !visited.insert(owner) {
+            return Err(JsNativeError::reference()
+                .with_message("cyclic iframe owner chain")
+                .into());
+        }
+        if let Some((&frame, entry)) = state
+            .iframe_documents
+            .iter()
+            .find(|(_, entry)| entry.document.identity() == owner)
+        {
+            if entry.realm.is_some() {
+                break;
+            }
+            pending.push(PendingOwnerRealm::Iframe {
+                frame,
+                document: owner,
+            });
+            let Some(parent) = state
+                .get_node(frame)
+                .and_then(|node| owner_document_for_node(&node))
+            else {
+                break;
+            };
+            owner = parent.identity();
+        } else {
+            if let Some((&id, _)) = state
+                .auxiliary_contexts
+                .iter()
+                .find(|(_, entry)| entry.document.identity() == owner && entry.realm.is_none())
+            {
+                pending.push(PendingOwnerRealm::Auxiliary(id));
+            }
+            break;
+        }
+    }
+    pending.reverse();
+    Ok(pending)
+}
+
+/// Prepares owners from outermost to innermost so ancestry depth does not
+/// accumulate recursive Rust calls, even without any author scripts.
+fn ensure_iframe_owner_realm(
+    context: &mut Context,
+    host_state: &Rc<RefCell<HostState>>,
+    child: usize,
+    owner: usize,
+) -> JsResult<()> {
+    let pending = pending_owner_realms(&host_state.borrow(), child, owner)?;
+    for owner in pending {
+        match owner {
+            PendingOwnerRealm::Iframe { frame, document } => {
+                ensure_iframe_realm(context, host_state, frame, document)?;
+            }
+            PendingOwnerRealm::Auxiliary(id) => {
+                ensure_auxiliary_realm(context, host_state, id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Initializes the iframe Realm for both script execution and synchronous
 /// same-origin WindowProxy access. Bootstrap itself queues no Promise jobs;
-/// callers retain their existing microtask checkpoint instead of running the
-/// parent's pending jobs during a nested property lookup.
+/// callers retain their existing microtask checkpoint.
 fn ensure_iframe_realm(
     context: &mut Context,
     host_state: &Rc<RefCell<HostState>>,
@@ -14092,6 +14172,10 @@ fn ensure_iframe_realm(
         same_origin,
         owner_document_id,
     } = iframe_realm_settings(host_state, iframe_id, document_id)?;
+    // Even scriptless owners provide the child's WindowProxy and input bridge.
+    // Initialize ancestors first; named-property discovery must not bootstrap
+    // descendants while their owner is still being initialized.
+    ensure_iframe_owner_realm(context, host_state, document_id, owner_document_id)?;
 
     let caller_global = context.global_object();
     let top = caller_global.get(js_string!("top"), context)?;
@@ -14102,10 +14186,9 @@ fn ensure_iframe_realm(
     };
     // A nested same-origin frame's `parent` is the owning browsing
     // context's global, not always the top-level global. Capture that
-    // Realm's global before entering the new child Realm. The owning
-    // Realm already exists whenever a nested frame is created by its
-    // parent script; if it does not, retain the top-level fallback so a
-    // detached/host-created frame still has a usable parent object.
+    // Realm's global before entering the new child Realm.
+    // Active owners were initialized above. Retain the top-level fallback
+    // for detached/host-created contexts without an active owner Realm.
     let parent_global =
         if same_origin && owner_document_id != host_state.borrow().document.identity() {
             let owner_realm = host_state
@@ -15943,6 +16026,11 @@ fn register_host_bindings(
             js_string!("__omoikane_document_owner_iframe"),
             1,
             NativeFunction::from_copy_closure(document_owner_iframe_native),
+        ),
+        (
+            js_string!("__omoikane_focus_chain"),
+            1,
+            NativeFunction::from_copy_closure(input_bridge::focus_chain_native),
         ),
         (
             js_string!("__omoikane_document_url"),

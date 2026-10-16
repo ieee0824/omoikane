@@ -220,6 +220,8 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeExitPointerLock = globalThis.__omoikane_exit_pointer_lock;
   const nativePointerLockRemoving = globalThis.__omoikane_pointer_lock_removing;
   const nativeForwardInput = globalThis.__omoikane_forward_input;
+  const nativeFocusChain = globalThis.__omoikane_focus_chain;
+  delete globalThis.__omoikane_focus_chain;
   const nativeCaretHitTest = globalThis.__omoikane_caret_hit_test;
   delete globalThis.__omoikane_caret_hit_test;
   const nativeSetUserActionTarget = globalThis.__omoikane_set_user_action_target;
@@ -2968,55 +2970,136 @@ export const __omoikane_service_worker_lifecycle = {};
     return isDocumentNode(root) ? root.body || root.documentElement || null : null;
   }
 
-  // `doc` and its ancestor documents, innermost first, each paired with the
-  // iframe element hosting it (`null` for the top-level document).
-  //
-  // Returns `null` when the walk does not reach the top-level document, which
-  // means `doc` has no browsing context: a document created by
-  // `createHTMLDocument`, or one whose frame was removed or reloaded.
-  function documentChain(doc) {
-    const chain = [];
-    let current = doc;
-    while (isDocumentNode(current)) {
-      if (current.__id === browsingInput.topDocumentId) {
-        chain.push({ document: current, frame: null });
-        return chain;
-      }
-      const frameId = __omoikane_document_owner_iframe(current.__id);
-      const frame = (frameId === null || frameId === undefined) ? null : wrapNode(frameId);
-      if (!frame) return null;
-      chain.push({ document: current, frame });
-      current = frame.ownerDocument;
-    }
-    return null;
+  // Focus crosses origin boundaries using identities and realm-local commands.
+  // No ancestor Document or iframe wrapper is exposed to a foreign Realm.
+  function documentFocusChain(id) {
+    const chain = nativeFocusChain(id);
+    return chain === null ? null : JSON.parse(chain);
   }
 
-  // The focused document followed by its ancestor documents, up to the
-  // top-level one. A focused document that is no longer reachable (its iframe
-  // was reloaded or removed) hands focus back to the top-level document.
-  function focusChainDocuments() {
+  function focusChainIds() {
     if (browsingInput.focusedDocumentId === NO_FOCUSED_DOCUMENT) return [];
-    const top = wrapNode(browsingInput.topDocumentId);
-    if (browsingInput.focusedDocumentId === null || browsingInput.focusedDocumentId === browsingInput.topDocumentId) {
-      return [top];
+    const id = browsingInput.focusedDocumentId ?? browsingInput.topDocumentId;
+    const chain = documentFocusChain(id);
+    if (chain) return chain;
+    browsingInput.focusedDocumentId = null;
+    return documentFocusChain(browsingInput.topDocumentId) || [];
+  }
+
+  function focusedDocumentId() {
+    return focusChainIds()[0]?.[0] ?? null;
+  }
+
+  function focusDocumentCommand(id, kind, args = []) {
+    if (id === null) return null;
+    if (id === __omoikane_document_id) return safeApply(focusDocumentCommands[kind], undefined, args);
+    return nativeForwardInput(id, "focus", [kind, ...args]);
+  }
+
+  const focusDocumentCommands = {
+    snapshot() {
+      const node = focusedElementOf(focusDocument);
+      return node ? internalNodeId(node) : null;
+    },
+    clear() { focusDocument.__focusedElementId = null; },
+    blurElement(relatedId) {
+      const node = focusedElementOf(focusDocument);
+      focusDocument.__focusedElementId = null;
+      nativeSetUserActionTarget("focus", null, false);
+      if (node) {
+        const related = wrapNode(relatedId);
+        fireFocusEvent(node, "blur", related, false);
+        fireFocusEvent(node, "focusout", related, true);
+        commitTextControlChange(node);
+      }
+    },
+    windowEvent(type) {
+      fireFocusEvent(focusDocument, type, null, false);
+      const view = focusDocument.defaultView;
+      if (view) fireFocusEvent(view, type, null, false);
+    },
+    frame(id) {
+      const frame = wrapNode(id);
+      if (frame?.isConnected && internalOwnerDocument(frame) === focusDocument) focusDocument.__focusedElementId = id;
+    },
+    pointerAppearance() {
+      const node = focusedElementOf(focusDocument);
+      if (node && !isTextControl(node) && !isEditingHost(node)) {
+        nativeSetUserActionTarget("focus", internalNodeId(node), false);
+        browsingInput.focusVisibleCurrent = false;
+      }
+    },
+    commit(id, previousId, previousVisible, preventScroll) {
+      const node = wrapNode(id);
+      if (internalOwnerDocument(node) !== focusDocument || !canBeFocused(node)) return;
+      focusDocument.__focusedElementId = id;
+      browsingInput.focusedDocumentId = __omoikane_document_id;
+      const visible = browsingInput.focusVisibleKeyboard || isTextControl(node) || isEditingHost(node) ||
+        (!browsingInput.pointerFocusInProgress && previousVisible);
+      nativeSetUserActionTarget("focus", id, visible);
+      browsingInput.focusVisibleCurrent = visible;
+      __omoikane_set_content_visibility_focus(id);
+      if (!preventScroll) {
+        const view = focusDocument.defaultView;
+        const rect = node.getBoundingClientRect();
+        if (view && rect.bottom > view.innerHeight) view.scrollBy(0, rect.top);
+        else if (view && rect.top < 0) view.scrollBy(0, rect.top);
+      }
+      beginTextControlFocus(node);
+      const previous = wrapNode(previousId);
+      fireFocusEvent(node, "focus", previous, false);
+      fireFocusEvent(node, "focusin", previous, true);
+    },
+  };
+
+  function focusElementAcrossDocuments(node, preventScroll) {
+    if (!canBeFocused(node)) return;
+    const doc = internalOwnerDocument(node);
+    const docId = internalNodeId(doc);
+    if (!documentFocusChain(docId)) return;
+    const previousChain = focusChainIds();
+    const previousDocId = previousChain[0]?.[0] ?? null;
+    const previousId = focusDocumentCommand(previousDocId, "snapshot");
+    const id = internalNodeId(node);
+    if (previousDocId === docId && previousId === id) return;
+    const previousVisible = previousId !== null && browsingInput.focusVisibleCurrent;
+    const crossesDocuments = previousDocId !== docId;
+    const generation = (browsingInput.focusGeneration || 0) + 1;
+    browsingInput.focusGeneration = generation;
+    const current = () => browsingInput.focusGeneration === generation && canBeFocused(node) &&
+      internalNodeId(internalOwnerDocument(node)) === docId && documentFocusChain(docId) !== null;
+    focusDocumentCommand(previousDocId, "blurElement", [crossesDocuments ? null : id]);
+    // Nested focus from a blur handler wins over this interrupted transition.
+    if (!current()) return;
+    if (crossesDocuments) {
+      const chain = documentFocusChain(docId);
+      for (const [previous] of previousChain) {
+        if (!chain.some(entry => entry[0] === previous)) focusDocumentCommand(previous, "clear");
+      }
+      browsingInput.focusedDocumentId = NO_FOCUSED_DOCUMENT;
+      focusDocumentCommand(previousDocId, "windowEvent", ["blur"]);
+      if (!current()) return;
+      for (const [, parent, frame] of documentFocusChain(docId)) {
+        if (parent !== null) focusDocumentCommand(parent, "frame", [frame]);
+      }
+      browsingInput.focusedDocumentId = docId;
+      focusDocumentCommand(docId, "windowEvent", ["focus"]);
+      if (!current()) return;
     }
-    const chain = documentChain(wrapNode(browsingInput.focusedDocumentId));
-    if (!chain) {
-      browsingInput.focusedDocumentId = null;
-      return [top];
-    }
-    return chain.map(entry => entry.document);
+    focusDocumentCommand(docId, "commit", [id, crossesDocuments ? null : previousId, previousVisible, preventScroll]);
   }
 
   // No focus event is cancelable, and all four are composed so they cross
   // shadow boundaries. Bubbling differs per event — `focusin` and `focusout`
   // bubble, `focus` and `blur` do not — so each caller passes it in.
   function fireFocusEvent(target, type, relatedTarget, bubbles) {
-    target.dispatchEvent(new FocusEvent(type, {
+    const event = new FocusEvent(type, {
       bubbles,
       composed: true,
       relatedTarget,
-    }));
+    });
+    event.isTrusted = true;
+    target.dispatchEvent(event);
   }
 
   // Boa 0.21 exposes WeakMap/WeakRef (but not FinalizationRegistry), so the
@@ -4851,86 +4934,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
 
     focus(options) {
-      if (!canBeFocused(this)) return;
-      const doc = this.ownerDocument;
-      if (!(isDocumentNode(doc))) return;
-      const chain = documentChain(doc);
-      // A document with no browsing context cannot hold system focus.
-      if (!chain) return;
-
-      const previousChain = focusChainDocuments();
-      const previousDocument = previousChain[0];
-      const previous = focusedElementOf(previousDocument);
-      if (previousDocument === doc && previous === this) return;
-      const previousVisible = previous !== null && browsingInput.focusVisibleCurrent;
-      // A move across documents hides relatedTarget, because the element on the
-      // other side belongs to a different tree.
-      const crossesDocuments = previousDocument !== doc;
-      const related = crossesDocuments ? null : this;
-
-      // The spec takes focus away from the old element *before* dispatching
-      // blur, so the active element is the viewport fallback for that pair.
-      previousDocument.__focusedElementId = null;
-      nativeSetUserActionTarget("focus", null, false);
-      if (previous) {
-        fireFocusEvent(previous, "blur", related, false);
-        fireFocusEvent(previous, "focusout", related, true);
-        commitTextControlChange(previous);
-      }
-      // A blur/focusout handler may have focused another element. That nested
-      // focus transition wins; resuming this one would leave :focus-within and
-      // activeElement pointing at different targets.
-      const redirectedDocument = focusChainDocuments()[0];
-      if (redirectedDocument && focusedElementOf(redirectedDocument)) return;
-
-      if (crossesDocuments) {
-        // Documents dropping out of the chain lose their focused element; the
-        // ones that stay are pointed at the frame below them further down, so
-        // `parent.document.activeElement` follows the focus inwards.
-        for (const document of previousChain) {
-          if (!chain.some(entry => entry.document === document)) {
-            document.__focusedElementId = null;
-          }
-        }
-        // Each handler must observe the state its own event announces, so focus
-        // leaves the old context before its `blur` pair and the new chain is
-        // installed before the `focus` pair. Neither pair has a bubbling
-        // counterpart, unlike the element events.
-        browsingInput.focusedDocumentId = NO_FOCUSED_DOCUMENT;
-        fireFocusEvent(previousDocument, "blur", null, false);
-        const previousWindow = previousDocument.defaultView;
-        if (previousWindow) fireFocusEvent(previousWindow, "blur", null, false);
-
-        for (const entry of chain) {
-          if (entry.frame) {
-            entry.frame.ownerDocument.__focusedElementId = entry.frame.__id;
-          }
-        }
-        browsingInput.focusedDocumentId = doc.__id;
-        fireFocusEvent(doc, "focus", null, false);
-        const nextWindow = doc.defaultView;
-        if (nextWindow) fireFocusEvent(nextWindow, "focus", null, false);
-      }
-
-      doc.__focusedElementId = this.__id;
-      browsingInput.focusedDocumentId = doc.__id;
-      const focusVisible = browsingInput.focusVisibleKeyboard || isTextControl(this) ||
-        isEditingHost(this) ||
-        (!browsingInput.pointerFocusInProgress && previousVisible);
-      nativeSetUserActionTarget(
-        "focus", this.__id, focusVisible,
-      );
-      browsingInput.focusVisibleCurrent = focusVisible;
-      __omoikane_set_content_visibility_focus(this.__id);
-      if (!options?.preventScroll) {
-        const view = doc.defaultView;
-        const rect = this.getBoundingClientRect();
-        if (view && rect.bottom > view.innerHeight) view.scrollBy(0, rect.top);
-        else if (view && rect.top < 0) view.scrollBy(0, rect.top);
-      }
-      beginTextControlFocus(this);
-      fireFocusEvent(this, "focus", crossesDocuments ? null : previous, false);
-      fireFocusEvent(this, "focusin", crossesDocuments ? null : previous, true);
+      focusElementAcrossDocuments(this, Boolean(options?.preventScroll));
     }
 
     // Runs the unfocusing steps: focus returns to the document's viewport and
@@ -4941,6 +4945,7 @@ export const __omoikane_service_worker_lifecycle = {};
       const doc = this.nodeType === 1 ? this.ownerDocument : null;
       if (!(isDocumentNode(doc))) return;
       if (focusedElementOf(doc) !== this) return;
+      browsingInput.focusGeneration = (browsingInput.focusGeneration || 0) + 1;
       doc.__focusedElementId = null;
       __omoikane_set_content_visibility_focus(null);
       nativeSetUserActionTarget("focus", null, false);
@@ -8456,7 +8461,8 @@ export const __omoikane_service_worker_lifecycle = {};
     // including one created by `createHTMLDocument`, which has no browsing
     // context at all.
     hasFocus() {
-      return focusChainDocuments().includes(this);
+      if (!isDocumentNode(this)) throw new TypeError("Illegal invocation");
+      return focusChainIds().some(entry => entry[0] === internalNodeId(this));
     }
 
     getElementsByName(name) {
@@ -17341,6 +17347,7 @@ export const __omoikane_service_worker_lifecycle = {};
   globalThis.AnimationEvent = Event;
   globalThis.TransitionEvent = TransitionEvent;
   globalThis.document = wrapNode(__omoikane_document_id);
+  const focusDocument = globalThis.document;
   // The embedding runtime supplies the owner iframe id only while creating a
   // child browsing-context Realm. Resolve it through this Realm's wrapper
   // cache, then remove the bootstrap-only slot before page code runs. A
@@ -17432,7 +17439,7 @@ export const __omoikane_service_worker_lifecycle = {};
           names.add(name);
         }
         if (name && (tag === "iframe" || tag === "frame") && !firstFrameNames.has(name)) {
-          firstFrameNames.set(name, child.contentDocument !== null);
+          firstFrameNames.set(name, nativeIframeContentDocument(internalNodeId(child)) !== null);
         }
         visit(child);
       }
@@ -17860,11 +17867,7 @@ export const __omoikane_service_worker_lifecycle = {};
     if (type === "mousedown") {
       browsingInput.focusVisibleKeyboard = false;
       nativeSetUserActionTarget("active", target instanceof Element ? target.__id : null, false);
-      const focused = focusedElementOf(focusChainDocuments()[0] || document);
-      if (focused && !isTextControl(focused) && !isEditingHost(focused)) {
-        nativeSetUserActionTarget("focus", focused.__id, false);
-        browsingInput.focusVisibleCurrent = false;
-      }
+      focusDocumentCommand(focusedDocumentId(), "pointerAppearance");
     } else if (type === "mouseup") {
       nativeSetUserActionTarget("active", null, false);
     }
@@ -18006,9 +18009,10 @@ export const __omoikane_service_worker_lifecycle = {};
     return 1 | performScrollBoundaryDefault(target, init.deltaX, init.deltaY);
   };
   globalThis.__omoikane_dispatch_keyboard_input = function(type, init) {
-    const focusedDocument = focusChainDocuments()[0] || document;
-    const forwarded = nativeForwardInput(internalNodeId(focusedDocument), "keyboard", [type, init]);
+    const focusedId = focusedDocumentId() ?? __omoikane_document_id;
+    const forwarded = nativeForwardInput(focusedId, "keyboard", [type, init]);
     if (forwarded !== undefined) return forwarded;
+    const focusedDocument = document;
     if (type === "keydown" && !["Shift", "Control", "Alt", "Meta"].includes(String(init && init.key || ""))) {
       browsingInput.focusVisibleKeyboard = true;
       const focused = focusedElementOf(focusedDocument);
@@ -18044,9 +18048,10 @@ export const __omoikane_service_worker_lifecycle = {};
   globalThis.__omoikane_dispatch_composition_input = function dispatchCompositionInput(
     action, text, selectionStart = 0, selectionEnd = selectionStart,
   ) {
-    const focusedDocument = focusChainDocuments()[0] || document;
-    const forwarded = nativeForwardInput(internalNodeId(focusedDocument), "composition", [action, text, selectionStart, selectionEnd]);
+    const focusedId = focusedDocumentId() ?? __omoikane_document_id;
+    const forwarded = nativeForwardInput(focusedId, "composition", [action, text, selectionStart, selectionEnd]);
     if (forwarded !== undefined) return forwarded;
+    const focusedDocument = document;
     const target = focusedElementOf(focusedDocument);
     const control = isTextControl(target) && !target.readOnly && !target.__isDisabledControl()
       ? target : null;
@@ -28971,6 +28976,7 @@ export const __omoikane_service_worker_lifecycle = {};
   globalThis.IntersectionObserver = IntersectionObserver;
   globalThis.IntersectionObserverEntry = IntersectionObserverEntry;
   const inputDispatchers = {
+    focus: (kind, ...args) => safeApply(focusDocumentCommands[kind], undefined, args),
     mouse: globalThis.__omoikane_dispatch_mouse_input,
     wheel: globalThis.__omoikane_dispatch_wheel_input,
     touch: globalThis.__omoikane_dispatch_touch_input,
