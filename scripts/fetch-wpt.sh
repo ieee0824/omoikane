@@ -33,6 +33,8 @@ collect_pattern "/reporting/" "/content-security-policy/securitypolicyviolation/
 collect_pattern "/cookies/resources/"
 collect_pattern \
   "/permissions-policy/policy-extends-to-sandbox.html" \
+  "/permissions-policy/navigate-to-blob.sub.html" \
+  "/permissions-policy/resources/navigate-to-blob.html" \
   "/permissions-policy/resources/sandbox-self.html" \
   "/permissions-policy/resources/sandbox-self.html.headers" \
   "/permissions-policy/resources/nested-sandbox.html" \
