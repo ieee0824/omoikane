@@ -13988,6 +13988,85 @@ fn iframe_realm_settings(
     })
 }
 
+/// Resolves the owner-to-top Window chain before entering a new child Realm.
+/// Same-origin ancestors keep their WindowProxy; cross-origin ancestors are
+/// represented by a child-Realm facade when the chain is installed.
+fn iframe_ancestor_windows(
+    context: &mut Context,
+    host_state: &Rc<RefCell<HostState>>,
+    document_id: usize,
+    owner_document_id: usize,
+) -> JsResult<Vec<(usize, Option<JsValue>)>> {
+    let ancestors = {
+        let state = host_state.borrow();
+        let mut current = owner_document_id;
+        let mut ancestors = Vec::new();
+        for _ in 0..=state.iframe_documents.len() {
+            let frame_id = state
+                .iframe_documents
+                .iter()
+                .find(|(_, entry)| entry.document.identity() == current)
+                .map(|(&id, _)| id);
+            ancestors.push(current);
+            let Some(frame_id) = frame_id else { break };
+            let Some(owner) = state
+                .get_node(frame_id)
+                .and_then(|frame| owner_document_for_node(&frame))
+            else {
+                break;
+            };
+            current = owner.identity();
+        }
+        ancestors.reverse();
+        ancestors
+    };
+    let child_origin = host_state
+        .borrow()
+        .document_security_origins
+        .get(&document_id)
+        .cloned();
+    let mut windows = Vec::with_capacity(ancestors.len());
+    for ancestor_id in ancestors {
+        let state = host_state.borrow();
+        let same_origin = child_origin.as_ref().is_some_and(|origin| {
+            state.document_security_origins.get(&ancestor_id) == Some(origin)
+        });
+        let realm = if ancestor_id == state.document.identity() {
+            state.main_realm.clone()
+        } else {
+            state
+                .iframe_documents
+                .values()
+                .find(|entry| entry.document.identity() == ancestor_id)
+                .and_then(|entry| entry.realm.clone())
+                .or_else(|| {
+                    state
+                        .auxiliary_contexts
+                        .values()
+                        .find(|entry| entry.document.identity() == ancestor_id)
+                        .and_then(|entry| entry.realm.clone())
+                })
+        };
+        drop(state);
+        if !same_origin {
+            windows.push((ancestor_id, None));
+            continue;
+        }
+        let realm = match realm {
+            Some(realm) => realm,
+            None => {
+                windows.push((ancestor_id, None));
+                continue;
+            }
+        };
+        let old_realm = context.enter_realm(realm);
+        let global: JsValue = context.global_this().into();
+        context.enter_realm(old_realm);
+        windows.push((ancestor_id, Some(global)));
+    }
+    Ok(windows)
+}
+
 /// Initializes the iframe Realm for both script execution and synchronous
 /// same-origin WindowProxy access. Bootstrap itself queues no Promise jobs;
 /// callers retain their existing microtask checkpoint instead of running the
@@ -14046,6 +14125,11 @@ fn ensure_iframe_realm(
         } else {
             top_global.clone()
         };
+    let cross_origin_ancestors = if same_origin {
+        Vec::new()
+    } else {
+        iframe_ancestor_windows(context, host_state, document_id, owner_document_id)?
+    };
     let realm = context.create_realm()?;
     realm
         .host_defined_mut()
@@ -14089,25 +14173,48 @@ fn ensure_iframe_realm(
             let factory = factory.as_callable().ok_or_else(|| {
                 JsNativeError::typ().with_message("cross-origin Window proxy is unavailable")
             })?;
-            let create = |document_id, context: &mut Context| {
+            let create = |document_id,
+                          parent: Option<JsValue>,
+                          top: Option<JsValue>,
+                          context: &mut Context| {
                 factory.call(
                     &JsValue::undefined(),
-                    &[JsValue::from(document_id as f64)],
+                    &[
+                        JsValue::from(document_id as f64),
+                        parent.unwrap_or_else(JsValue::undefined),
+                        top.unwrap_or_else(JsValue::undefined),
+                    ],
                     context,
                 )
             };
-            let parent = create(owner_document_id, context)?;
-            let top_document_id = host_state.borrow().document.identity();
-            let top = if top_document_id == owner_document_id {
-                parent.clone()
-            } else {
-                create(top_document_id, context)?
-            };
-            (parent, top)
+            let mut parent = None;
+            let mut top = None;
+            for (ancestor_id, same_origin_window) in &cross_origin_ancestors {
+                let window = match same_origin_window {
+                    Some(window) => window.clone(),
+                    None => create(*ancestor_id, parent.clone(), top.clone(), context)?,
+                };
+                if top.is_none() {
+                    top = Some(window.clone());
+                }
+                parent = Some(window);
+            }
+            (
+                parent.unwrap_or(parent_global),
+                top.unwrap_or_else(|| top_global.clone()),
+            )
         };
         let global = context.global_object();
         global.set(js_string!("parent"), parent.clone(), true, context)?;
-        global.set(js_string!("top"), top, true, context)?;
+        if same_origin && owner_document_id != host_state.borrow().document.identity() {
+            // A nested same-origin child's view of a cross-origin top must
+            // come through its parent WindowProxy in the author's Realm.
+            context.eval(Source::from_bytes(
+                "Object.defineProperty(globalThis, 'top', { configurable: true, get: (() => { const parentWindow = globalThis.parent; return () => parentWindow.top; })() })",
+            ))?;
+        } else {
+            global.set(js_string!("top"), top, true, context)?;
+        }
         context.eval(Source::from_bytes(
             "__omoikane_install_window_named_properties()",
         ))?;

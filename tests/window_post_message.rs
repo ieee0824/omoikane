@@ -148,8 +148,11 @@ fn opaque_iframe_can_reply_without_exposing_parent_document() {
     let document = TreeBuilder::parse(
         r#"<html><body><iframe id="child" sandbox="allow-scripts" srcdoc="<script>
             addEventListener('message', event => {
+                let parentDocumentBlocked = false;
+                try { void parent.document; }
+                catch (error) { parentDocumentBlocked = error.name === 'SecurityError'; }
                 parent.postMessage({ data: event.data, sourceIsParent: event.source === parent,
-                    parentDocumentHidden: parent.document === undefined }, '*');
+                    parentDocumentBlocked }, '*');
             });
         </script>"></iframe></body></html>"#,
     )
@@ -164,7 +167,7 @@ fn opaque_iframe_can_reply_without_exposing_parent_document() {
             addEventListener('message', event => replies.push({
                 data: event.data.data,
                 sourceIsParent: event.data.sourceIsParent,
-                parentDocumentHidden: event.data.parentDocumentHidden,
+                parentDocumentBlocked: event.data.parentDocumentBlocked,
                 sourceIsChild: event.source === child,
                 origin: event.origin,
             }));
@@ -176,7 +179,7 @@ fn opaque_iframe_can_reply_without_exposing_parent_document() {
     let replies = runtime.eval("JSON.stringify(replies)").unwrap();
     assert!(runtime
         .eval(
-            "replies.length === 1 && replies[0].data === 'opaque' && replies[0].sourceIsParent && replies[0].parentDocumentHidden && replies[0].sourceIsChild && replies[0].origin === 'null'"
+            "replies.length === 1 && replies[0].data === 'opaque' && replies[0].sourceIsParent && replies[0].parentDocumentBlocked && replies[0].sourceIsChild && replies[0].origin === 'null'"
         )
         .unwrap()
         .to_boolean(), "{replies:?}");
