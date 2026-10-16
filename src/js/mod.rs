@@ -96,6 +96,7 @@ mod font_loading;
 mod font_loading_tests;
 mod form_state;
 mod form_submission;
+mod frame_policy;
 mod geolocation;
 pub use geolocation::GeolocationPositionData;
 mod automation;
@@ -12352,6 +12353,8 @@ impl JsRuntime {
                     .iframe_documents
                     .get(&iframe_id)
                     .is_some_and(|entry| entry.document.identity() == document_id)
+                    // A queued navigation supersedes this document's load.
+                    && !state.pending_resource_loads.contains(&iframe_id)
                     && state
                         .get_node(iframe_id)
                         .is_some_and(|frame| state.node_is_in_active_document(&frame))
