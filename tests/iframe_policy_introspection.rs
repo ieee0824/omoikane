@@ -1,6 +1,10 @@
 //! Frame policy introspection describes the container without fetching a child.
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
+use std::sync::Mutex;
+
+// Both stress tests create 80 realms; keep their resource use independent.
+static REALM_STRESS_MUTEX: Mutex<()> = Mutex::new(());
 
 fn runtime() -> JsRuntime {
     let document = TreeBuilder::parse("<!doctype html><body></body>").document();
@@ -40,6 +44,9 @@ fn frame_policy_is_stable_and_tracks_attribute_changes_before_navigation() {
 
 #[test]
 fn many_sibling_iframe_realms_do_not_exhaust_the_vm_value_stack() {
+    let _serial = REALM_STRESS_MUTEX
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let mut runtime = runtime();
     runtime
         .eval(
@@ -54,12 +61,16 @@ fn many_sibling_iframe_realms_do_not_exhaust_the_vm_value_stack() {
         )
         .unwrap();
     runtime.run_until_idle().unwrap();
-    assert!(runtime.take_task_errors().is_empty());
+    let errors = runtime.take_task_errors();
+    assert!(errors.is_empty(), "iframe task errors: {errors:?}");
     assert_eq!(runtime.eval("loaded").unwrap().as_number(), Some(80.0));
 }
 
 #[test]
 fn caught_script_errors_do_not_poison_later_iframe_realm_initialization() {
+    let _serial = REALM_STRESS_MUTEX
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let mut runtime = runtime();
     runtime
         .eval(
@@ -82,7 +93,8 @@ fn caught_script_errors_do_not_poison_later_iframe_realm_initialization() {
         )
         .unwrap();
     runtime.run_until_idle().unwrap();
-    assert!(runtime.take_task_errors().is_empty());
+    let errors = runtime.take_task_errors();
+    assert!(errors.is_empty(), "iframe task errors: {errors:?}");
     assert_eq!(runtime.eval("caught").unwrap().as_number(), Some(80.0));
     assert_eq!(runtime.eval("loaded").unwrap().as_number(), Some(80.0));
 }
