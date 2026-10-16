@@ -273,6 +273,34 @@ fn test_automation_child_click_requires_the_host_trusted_input_scope() {
 }
 
 #[test]
+fn storage_access_permission_change_listener_survives_garbage_collection() {
+    let (mut runtime, child) = automated_third_party_frame();
+    runtime
+        .eval_in_document_realm(
+            child.identity(),
+            r#"
+        navigator.permissions.query({name: 'storage-access'}).then(status => {
+          status.addEventListener('change', event => {
+            document.documentElement.setAttribute('data-observed', event.target.state);
+          });
+        });
+    "#,
+        )
+        .unwrap();
+    boa_gc::force_collect();
+    runtime
+        .eval_in_document_realm(
+            child.identity(),
+            "test_driver_internal.set_permission({descriptor:{name:'storage-access'},state:'granted'})",
+        )
+        .unwrap();
+    assert_eq!(
+        child_attribute(&child, "data-observed").as_deref(),
+        Some("granted")
+    );
+}
+
+#[test]
 fn test_automation_permission_denial_and_revocation_control_real_storage_access() {
     let (mut runtime, child) = automated_third_party_frame();
     runtime
