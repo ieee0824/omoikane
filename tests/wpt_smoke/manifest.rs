@@ -134,7 +134,7 @@ fn manifest_validation_accepts_valid_known_failure() {
 #[test]
 fn fixture_server_profile_preserves_legacy_defaults_and_rejects_unknown_backends() {
     let manifest: Manifest = serde_json::from_str(
-        r#"{"tests":[{"path":"legacy.html"},{"path":"secure.sub.html","server":"wptserve"}]}"#,
+        r#"{"tests":[{"path":"legacy.html"},{"path":"secure.sub.html","server":"wptserve"},{"path":"insecure.sub.html","server":"wptserve-http"}]}"#,
     )
     .unwrap();
     assert_eq!(
@@ -144,6 +144,10 @@ fn fixture_server_profile_preserves_legacy_defaults_and_rejects_unknown_backends
     assert_eq!(
         manifest.tests[1].server,
         super::model::FixtureServer::Wptserve
+    );
+    assert_eq!(
+        manifest.tests[2].server,
+        super::model::FixtureServer::WptserveHttp
     );
     assert!(
         serde_json::from_str::<Manifest>(

@@ -73,7 +73,7 @@ impl CaseServers {
             || manifest
                 .tests
                 .iter()
-                .any(|case| case.server == FixtureServer::Wptserve);
+                .any(|case| case.server != FixtureServer::Static);
         let upstream = needs_upstream.then(|| {
             upstream::UpstreamServer::start(&root).expect("start pinned upstream WPT server")
         });
@@ -88,10 +88,10 @@ impl CaseServers {
         if let Some(upstream) = self
             .upstream
             .as_ref()
-            .filter(|_| case.server == FixtureServer::Wptserve || self.force_upstream)
+            .filter(|_| case.server != FixtureServer::Static || self.force_upstream)
         {
             run_case_with_transport(
-                &upstream.base_url,
+                upstream.case_base_url(case.server),
                 &case.path,
                 Some(std::sync::Arc::clone(&upstream.transport)),
             )

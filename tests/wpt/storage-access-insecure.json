@@ -1,0 +1,12 @@
+{
+  "tests": [
+    {
+      "path": "storage-access-api/hasStorageAccess-insecure.sub.window.js",
+      "server": "wptserve-http"
+    },
+    {
+      "path": "storage-access-api/requestStorageAccess-insecure.sub.window.js",
+      "server": "wptserve-http"
+    }
+  ]
+}

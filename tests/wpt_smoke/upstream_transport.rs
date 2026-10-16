@@ -210,6 +210,55 @@ mod tests {
     }
 
     #[test]
+    fn upstream_http_primary_preserves_origin_templates_and_response_headers() {
+        let Some(root) = pinned_root() else {
+            return;
+        };
+        let server = UpstreamServer::start(&root).unwrap();
+        let base = server.case_base_url(super::super::model::FixtureServer::WptserveHttp);
+        let origin: omoikane::http::Url = base.parse().unwrap();
+        assert_eq!(origin.scheme(), "http");
+        assert_eq!(origin.host(), "web-platform.test");
+        assert_eq!(origin.port(), server.description.http_ports[0]);
+        assert_eq!(
+            server.case_base_url(super::super::model::FixtureServer::Wptserve),
+            server.base_url
+        );
+        assert_eq!(
+            server.case_base_url(super::super::model::FixtureServer::Static),
+            server.base_url
+        );
+        let response = server.transport.send(&HttpRequest::get(&format!(
+            "{base}/storage-access-api/hasStorageAccess-insecure.sub.window.js?pipe=header(X-Omoikane-HTTP,true)"
+        )).unwrap(), None).unwrap();
+        assert_eq!(response.status_code(), 200);
+        assert_eq!(response.header("X-Omoikane-HTTP"), Some("true"));
+        let source = std::str::from_utf8(response.body()).unwrap();
+        assert!(source.contains(&format!("http://www.web-platform.test:{}", origin.port())));
+        assert!(!source.contains("{{"));
+        let document = omoikane::html::TreeBuilder::parse("<!doctype html>").document();
+        let mut runtime = omoikane::js::JsRuntime::with_document_sandbox_and_url(
+            document,
+            omoikane::js::SandboxConfig::default(),
+            base,
+        )
+        .unwrap();
+        assert_eq!(
+            runtime.eval("isSecureContext").unwrap().as_boolean(),
+            Some(false)
+        );
+        assert_eq!(
+            runtime
+                .eval("location.protocol + '//' + location.host")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            base
+        );
+    }
+
+    #[test]
     fn upstream_tls_validates_templates_headers_and_shared_python_state() {
         let Some(root) = pinned_root() else {
             return;
