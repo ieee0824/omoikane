@@ -316,8 +316,9 @@ impl HostState {
             return Ok(LoadedChildDocument::fetch_failed());
         };
         let mime_type = response.header("Content-Type").unwrap_or("");
-        let document = child_document::parse_child_document(mime_type, response.body())
-            .unwrap_or_else(blank_html_document);
+        let document =
+            child_document::parse_child_response(mime_type, response.body(), response.headers())
+                .unwrap_or_else(blank_html_document);
         let url = response
             .effective_url()
             .map_or_else(|| submission.url.clone(), ToString::to_string);
