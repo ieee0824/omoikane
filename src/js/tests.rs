@@ -25826,6 +25826,57 @@ fn cross_origin_iframe_document_events_reach_its_own_window_listeners() {
 }
 
 #[test]
+fn cross_origin_child_can_create_and_hit_test_its_own_button() {
+    use crate::html::TreeBuilder;
+    let (port, _server) = spawn_static_http_server(
+        "text/html",
+        r#"<html><body><script>
+          const button = document.createElement('button');
+          button.style.cssText = 'display:block;width:100px;height:40px';
+          button.innerHTML = 'Click<br>here';
+          document.body.appendChild(button);
+          const rect = button.getBoundingClientRect();
+          const x = (rect.left + rect.right) / 2;
+          const y = (rect.top + rect.bottom) / 2;
+          const hits = document.elementsFromPoint(x, y);
+          const detached = document.createElement('input');
+          detached.required = true;
+          let denied = false;
+          try { parent.document.elementsFromPoint(x, y); }
+          catch (error) { denied = error.name === 'SecurityError'; }
+          document.documentElement.setAttribute('data-result', [
+            rect.width > 0 && rect.height > 0,
+            document.elementFromPoint(x, y) === button,
+            hits[0] === button,
+            hits.every(node => node.ownerDocument === document),
+            detached.matches(':invalid'),
+            denied,
+          ].join('|'));
+        </script></body></html>"#,
+    );
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe id='child' src='http://127.0.0.1:{port}/child.html'></iframe></body></html>"
+    ))
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "http://other-origin.test/page").unwrap();
+    pump_zero_delay_tasks(&mut runtime);
+    pump_zero_delay_tasks(&mut runtime);
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    let state = runtime.host_state.borrow();
+    let frame = state.document.query_selector("#child").unwrap();
+    let child = &state.iframe_documents[&frame.identity()].document;
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-result")
+            .as_deref(),
+        Some("true|true|true|true|true|true")
+    );
+}
+
+#[test]
 fn cross_origin_child_can_traverse_safe_window_ancestors() {
     use crate::html::TreeBuilder;
     let (port, _server) = spawn_static_http_server(
