@@ -34,6 +34,9 @@ collect_pattern "/cookies/resources/"
 collect_pattern \
   "/permissions-policy/policy-extends-to-sandbox.html" \
   "/permissions-policy/navigate-to-blob.sub.html" \
+  "/permissions-policy/experimental-features/focus-without-user-activation-disabled.html" \
+  "/permissions-policy/experimental-features/resources/common.js" \
+  "/permissions-policy/experimental-features/resources/focus-without-user-activation-iframe-tentative.html" \
   "/permissions-policy/resources/navigate-to-blob.html" \
   "/permissions-policy/resources/sandbox-self.html" \
   "/permissions-policy/resources/sandbox-self.html.headers" \

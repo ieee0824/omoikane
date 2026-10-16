@@ -83,12 +83,76 @@ fn cross_origin_focus_requires_delegation_or_user_activation() {
          String(document.permissionsPolicy.allowsFeature('focus-without-user-activation'))); \
          target.focus(); \
          document.documentElement.setAttribute('data-denied', String(document.activeElement===target)); \
+         window.focus(); \
+         document.documentElement.setAttribute('data-window-denied', String(document.hasFocus())); \
          __omoikane_dispatch_mouse_input(target.__id,'mousedown',{},true); \
          document.documentElement.setAttribute('data-activated', String(document.activeElement===target))",
     );
     assert_eq!(attribute(&child, "data-policy").as_deref(), Some("false"));
     assert_eq!(attribute(&child, "data-denied").as_deref(), Some("false"));
+    assert_eq!(
+        attribute(&child, "data-window-denied").as_deref(),
+        Some("false")
+    );
     assert_eq!(attribute(&child, "data-activated").as_deref(), Some("true"));
+}
+
+#[test]
+fn window_focus_switches_between_top_and_cross_origin_frame() {
+    let mut runtime = runtime(&[("https://child.test/child", INPUT_PAGE)]);
+    let child = frame_document(&runtime, &runtime.document(), "#child");
+    eval_document(
+        &mut runtime,
+        &child,
+        "globalThis.windowFocusEvents=0; window.addEventListener('focus',()=>windowFocusEvents++); \
+         document.getElementById('target').focus()",
+    );
+    assert_eq!(
+        runtime
+            .eval("window.focus(); document.hasFocus() && document.activeElement===document.body")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    eval_document(
+        &mut runtime,
+        &child,
+        "document.documentElement.setAttribute('data-unfocused', String(document.hasFocus()))",
+    );
+    assert_eq!(
+        attribute(&child, "data-unfocused").as_deref(),
+        Some("false")
+    );
+    assert_eq!(
+        runtime
+            .eval(
+                "document.getElementById('child').contentWindow.focus(); \
+                document.activeElement.id==='child' && document.hasFocus()"
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    eval_document(
+        &mut runtime,
+        &child,
+        "document.documentElement.setAttribute('data-refocused', [document.hasFocus(), \
+         document.activeElement===document.body,windowFocusEvents].join('|'))",
+    );
+    assert_eq!(
+        attribute(&child, "data-refocused").as_deref(),
+        Some("true|true|2")
+    );
+    assert_eq!(
+        runtime
+            .eval(
+                "(()=>{try{Window.prototype.focus.call({});return false} \
+                   catch(error){return error.name==='TypeError'}})()"
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
 }
 
 #[test]
