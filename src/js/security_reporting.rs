@@ -4754,6 +4754,29 @@ mod tests {
     }
 
     #[test]
+    fn adopted_script_csp_event_bubbles_in_destination_document() {
+        let document = crate::html::TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime.install_csp_policy(&["script-src 'none'; report-to observations".into()]);
+        runtime.eval("globalThis.frame=document.createElement('iframe');frame.srcdoc='<body></body>';document.body.appendChild(frame);").unwrap();
+        runtime.run_until_idle().unwrap();
+        runtime.eval("globalThis.adoptedEvents=[];globalThis.adoptedReports=[];\
+            const child=frame.contentDocument;\
+            child.addEventListener('securitypolicyviolation',event=>adoptedEvents.push([event.target===adoptedScript,event.effectiveDirective]));\
+            new frame.contentWindow.ReportingObserver(batch=>adoptedReports.push(...batch.map(report=>report.body.effectiveDirective))).observe();\
+            globalThis.adoptedScript=document.createElement('script');\
+            adoptedScript.src='https://blocked.test/script.js';\
+            document.body.appendChild(adoptedScript);child.body.appendChild(adoptedScript);").unwrap();
+        runtime.run_until_idle().unwrap();
+        let observed = runtime.eval("JSON.stringify([adoptedEvents,adoptedReports,frame.contentDocument.cspViolations.length])").unwrap().as_string().unwrap().to_std_string_escaped();
+        assert_eq!(
+            observed,
+            r#"[[[true,"script-src-elem"]],["script-src-elem"],1]"#
+        );
+    }
+
+    #[test]
     fn legacy_report_uri_matches_dynamic_script_event_source() {
         struct Transport(Arc<Mutex<Vec<serde_json::Value>>>);
         impl crate::http::HttpTransport for Transport {
