@@ -57,6 +57,58 @@ fn iframe_blob_document_executes_with_the_creators_origin() {
 }
 
 #[test]
+fn revoked_blob_url_cannot_supply_a_later_iframe_document() {
+    let document = TreeBuilder::parse("<!doctype html><body></body>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://owner.test:8443/page").unwrap();
+    runtime
+        .eval(
+            r#"
+            globalThis.blobMessages = [];
+            addEventListener('message', event => blobMessages.push(event.data));
+            globalThis.blobUrl = URL.createObjectURL(new Blob([
+              '<script>parent.postMessage("loaded", "*")</script>'
+            ], {type:'text/html'}));
+            const first = document.createElement('iframe');
+            first.src = blobUrl;
+            document.body.appendChild(first);
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        runtime
+            .eval("JSON.stringify(blobMessages)")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        r#"["loaded"]"#
+    );
+    runtime
+        .eval(
+            r#"
+            URL.revokeObjectURL(blobUrl);
+            const second = document.createElement('iframe');
+            second.src = blobUrl;
+            document.body.appendChild(second);
+            "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(runtime.take_task_errors().is_empty());
+    assert_eq!(
+        runtime
+            .eval("JSON.stringify(blobMessages)")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        r#"["loaded"]"#
+    );
+}
+
+#[test]
 fn child_location_replace_loads_a_blob_document() {
     let document = TreeBuilder::parse("<!doctype html><body></body>").document();
     let mut runtime =
