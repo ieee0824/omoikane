@@ -122,6 +122,8 @@ mod module_loading_tests;
 mod node_lifetime;
 mod pointer_lock;
 mod report_delivery;
+#[cfg(test)]
+mod window_viewport_tests;
 pub use pointer_lock::PointerLockTransition;
 mod permissions_policy;
 use permissions_policy::{DocumentPolicy, PolicyFeature};
@@ -8843,23 +8845,22 @@ impl JsRuntime {
             {
                 state.queue_visual_viewport_scroll(document_id);
             }
-            // Every document shares this viewport for `vw`/`vh` resolution, so
-            // invalidate all cached resolvers (and the main layout tree).
+            // Child iframe dimensions can depend on the host viewport, so
+            // invalidate cached resolvers as well as the main layout tree.
             state.mark_all_document_styles_dirty();
             let (scroll_x, scroll_y) = state.window_scroll;
             if (scroll_x, scroll_y) != (0.0, 0.0) {
                 state.set_window_scroll(scroll_x, scroll_y);
             }
         }
-        // `window.innerWidth`/`innerHeight` are CSSOM integers, so round to the
-        // nearest pixel. For integer viewports this exactly matches the `vw`/`vh`
-        // resolution (which divides the same dimension by 100). `width`/`height`
-        // are already finite and non-negative, so the round/cast cannot overflow.
+        // innerWidth/innerHeight read the native layout viewport through their
+        // replaceable accessors. Synchronize the outer-window data properties
+        // without overwriting any page replacement of the inner attributes.
+        // Dimensions are finite and non-negative before rounding.
         let w = width.round() as i64;
         let h = height.round() as i64;
         let sync = format!(
-            "globalThis.innerWidth = {w}; globalThis.innerHeight = {h}; \
-             globalThis.outerWidth = {w}; globalThis.outerHeight = {h}; \
+            "globalThis.outerWidth = {w}; globalThis.outerHeight = {h}; \
              if (typeof globalThis.__omoikane_layout_observers_changed === 'function') \
              globalThis.__omoikane_layout_observers_changed();"
         );
@@ -15891,6 +15892,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_element_scroll_native),
         ),
         (
+            js_string!("__omoikane_window_viewport_dimension"),
+            1,
+            NativeFunction::from_copy_closure(window_viewport_dimension_native),
+        ),
+        (
             js_string!("__omoikane_visual_viewport_state"),
             0,
             NativeFunction::from_copy_closure(visual_viewport_state_native),
@@ -18644,6 +18650,40 @@ fn context_document_id(context: &Context, state: &HostState) -> usize {
         .get::<ModuleDocumentId>()
         .map(|document| document.0)
         .unwrap_or_else(|| state.document.identity())
+}
+
+/// Reads the calling Window's layout viewport, including scrollbar space.
+/// Layout may be flushed to resolve the owning iframe's current content box.
+fn window_viewport_dimension_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let height = args.first().is_some_and(JsValue::to_boolean);
+    with_host_state(|host| {
+        let mut state = host.borrow_mut();
+        let document_id = context_document_id(context, &state);
+        if !state.document_is_active(document_id) {
+            return Ok(JsValue::from(0));
+        }
+        let document = if document_id == state.document.identity() {
+            Some(state.document.clone())
+        } else {
+            state
+                .get_node(document_id)
+                .filter(|node| node.node_type() == NodeType::Document)
+        };
+        let Some(document) = document else {
+            return Ok(JsValue::from(0));
+        };
+        let viewport = state.viewport_for_document(&document);
+        let dimension = if height {
+            viewport.height
+        } else {
+            viewport.width
+        };
+        Ok(JsValue::from(f64::from(dimension).round()))
+    })
 }
 
 /// Returns the visual viewport for the Window Realm making the call.
