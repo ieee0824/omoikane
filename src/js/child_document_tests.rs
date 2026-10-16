@@ -10,6 +10,56 @@ use std::time::Duration;
 const CSP: &str = "default-src 'none'";
 
 #[test]
+fn unknown_response_html_signatures_require_exact_boundaries() {
+    use super::child_document::parse_child_response;
+    for source in [
+        "\t\n\x0c\r <!dOcTyPe hTmL><p>ok</p>",
+        "<ScRiPt >void 0</ScRiPt>",
+        "<!-- >comment--><p>ok</p>",
+        "<h1>heading</h1>",
+    ] {
+        assert!(
+            parse_child_response("", source.as_bytes(), &[])
+                .unwrap()
+                .is_html_document()
+        );
+    }
+    for source in [
+        "<scripture>",
+        "<script/>",
+        "<script\t>",
+        "<html",
+        "\x0b<html>",
+        "<!--comment-->",
+    ] {
+        assert!(
+            parse_child_response("", source.as_bytes(), &[]).is_none(),
+            "{source:?}"
+        );
+    }
+    let outside_header = format!("{}<html>", " ".repeat(1445));
+    assert!(parse_child_response("", outside_header.as_bytes(), &[]).is_none());
+    let truncated = format!("{}<html>", " ".repeat(1440));
+    assert!(parse_child_response("", truncated.as_bytes(), &[]).is_none());
+}
+
+#[test]
+fn unknown_response_sniffing_respects_headers_and_transport_encoding() {
+    use super::child_document::parse_child_response;
+    let body = b"<p id=x>\xe9</p>";
+    let document =
+        parse_child_response("application/unknown; charset=windows-1252", body, &[]).unwrap();
+    assert_eq!(text_of(&document, "#x").as_deref(), Some("é"));
+    let no_sniff = [("X-Content-Type-Options".into(), "NoSniff, other".into())];
+    assert!(parse_child_response("", body, &no_sniff).is_none());
+    assert!(parse_child_response("text/html", body, &no_sniff).is_some());
+    let xml = parse_child_response("", b"<?xml version='1.0'?><root/>", &[]).unwrap();
+    assert!(!xml.is_html_document());
+    assert_eq!(xml.document_content_type().as_deref(), Some("text/xml"));
+    assert!(parse_child_response("", b"<?XML version='1.0'?><root/>", &[]).is_none());
+}
+
+#[test]
 fn child_response_keeps_permissions_policy_header() {
     let response = crate::http::HttpResponse::new(
         200,

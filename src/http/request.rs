@@ -111,6 +111,13 @@ impl CookieRequestContext {
         }
     }
 
+    /// Keeps the container's cookie site and ancestry, copying only an eligible
+    /// navigating Document's activated origin. No source means no activation.
+    pub(crate) fn for_navigation(mut self, source: Option<&Self>) -> Self {
+        self.granted_origin = source.and_then(|source| source.granted_origin.clone());
+        self
+    }
+
     /// Keeps the creator's site and ancestry for a Worker while dropping its
     /// Document-only Storage Access grant. An unknown creator site fails closed.
     pub(crate) fn for_worker_internal(mut self) -> Self {

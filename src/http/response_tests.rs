@@ -226,3 +226,72 @@ fn invalid_header_no_colon() {
     let result = HttpResponse::parse(&mut &raw[..]);
     assert!(result.is_err());
 }
+
+#[test]
+fn browser_transport_skips_non_field_lines_and_keeps_policies_and_body() {
+    // The original WPT header pipe emits LF/CR/FF within its CSP value.
+    // Firefox accepts the first field line and ignores the non-field remainder.
+    let raw = b"HTTP/1.1 200 OK\r\nContent-Security-Policy: connect-src 'none'\r\nContent-Security-Policy: require-trusted-types-for 'script'\t'script'\n'script'\x0c'script'\r'script' 'script'\r\nContent-Length: 4\r\n\r\ntest";
+    assert!(matches!(
+        HttpResponse::parse(&mut &raw[..]),
+        Err(HttpParseError::InvalidHeader)
+    ));
+    for response in [
+        HttpResponse::parse_for_browser(&mut &raw[..]).unwrap(),
+        HttpResponse::parse_for_method(&mut &raw[..], Method::Get).unwrap(),
+    ] {
+        assert_eq!(response.status_code(), 200);
+        assert_eq!(response.body(), b"test");
+        assert_eq!(
+            response.headers(),
+            &[
+                (
+                    "Content-Security-Policy".into(),
+                    "connect-src 'none'".into()
+                ),
+                (
+                    "Content-Security-Policy".into(),
+                    "require-trusted-types-for 'script'\t'script'".into()
+                ),
+                ("Content-Length".into(), "4".into()),
+            ]
+        );
+    }
+}
+
+#[test]
+fn browser_header_recovery_keeps_framing_and_size_validation() {
+    let conflicting =
+        b"HTTP/1.1 200 OK\r\nnon-field line\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\nabc";
+    assert!(matches!(
+        HttpResponse::parse_for_browser(&mut &conflicting[..]),
+        Err(HttpParseError::InvalidHeader)
+    ));
+    let bad_chunk = b"HTTP/1.1 200 OK\r\nnon-field line\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabcXX0\r\n\r\n";
+    assert!(matches!(
+        HttpResponse::parse_for_browser(&mut &bad_chunk[..]),
+        Err(HttpParseError::InvalidChunkSize)
+    ));
+    let large = b"HTTP/1.1 200 OK\r\nnon-field line\r\nContent-Length: 128\r\n\r\n";
+    assert!(matches!(
+        HttpResponse::parse_for_browser_with_limit(&mut &large[..], 16),
+        Err(HttpParseError::BodyTooLarge)
+    ));
+    let truncated = b"HTTP/1.1 200 OK\r\nnon-field line\r\n";
+    assert!(matches!(
+        HttpResponse::parse_for_browser(&mut &truncated[..]),
+        Err(HttpParseError::InvalidHeader)
+    ));
+
+    let compressed = gzip_bytes(&[b'a'; 128]);
+    let mut raw = format!(
+        "HTTP/1.1 200 OK\r\nnon-field line\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+        compressed.len()
+    )
+    .into_bytes();
+    raw.extend_from_slice(&compressed);
+    assert!(matches!(
+        HttpResponse::parse_for_browser_with_limit(&mut &raw[..], 64),
+        Err(HttpParseError::BodyTooLarge)
+    ));
+}

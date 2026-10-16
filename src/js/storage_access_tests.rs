@@ -2210,7 +2210,7 @@ fn third_party_iframe_forms_use_their_source_documents_access() {
 }
 
 #[test]
-fn iframe_form_history_replay_reevaluates_the_original_document_access() {
+fn iframe_form_history_replay_uses_the_current_documents_activation() {
     let mut runtime = runtime_at("https://top.test/");
     let transport = Arc::new(ResourceCookieTransport::default());
     runtime.set_http_resource_transport(Some(transport.clone()));
@@ -2250,6 +2250,8 @@ fn iframe_form_history_replay_reevaluates_the_original_document_access() {
         .unwrap();
     runtime.run_until_idle().unwrap();
 
+    let current_sink = iframe_document_by_id(&runtime, "sink");
+    activate_storage_access(&mut runtime, &current_sink);
     runtime
         .eval("document.getElementById('source').remove()")
         .unwrap();
@@ -2257,6 +2259,20 @@ fn iframe_form_history_replay_reevaluates_the_original_document_access() {
     let second_sink = iframe_document_by_id(&runtime, "sink");
     runtime
         .eval_in_document_realm(second_sink.identity(), "location.reload()")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+
+    let third_sink = iframe_document_by_id(&runtime, "sink");
+    runtime
+        .host_state
+        .borrow_mut()
+        .set_storage_access_permission(
+            third_sink.identity(),
+            super::storage_access::StorageAccessPermission::Denied,
+        )
+        .unwrap();
+    runtime
+        .eval_in_document_realm(third_sink.identity(), "location.reload()")
         .unwrap();
     runtime.run_until_idle().unwrap();
 
@@ -2268,15 +2284,22 @@ fn iframe_form_history_replay_reevaluates_the_original_document_access() {
         .collect();
     assert_eq!(
         replayed.len(),
-        3,
-        "initial, active-source replay and retired-source replay"
+        4,
+        "initial, inactive-target, activated-target after source retirement, revoked-target"
     );
-    assert!(replayed[0].is_some_and(|cookie| cookie.contains("session=pre")));
-    assert!(replayed[1].is_some_and(|cookie| cookie.contains("session=pre")));
+    assert!(
+        replayed[0].is_some_and(|cookie| cookie.contains("session=pre")),
+        "the initial form request uses its activated source client"
+    );
     assert_eq!(
-        replayed[2], None,
-        "retired source Document cannot retain access"
+        replayed[1], None,
+        "the target cannot reuse the initial source's activation when reloading itself"
     );
+    assert!(
+        replayed[2].is_some_and(|cookie| cookie.contains("session=pre")),
+        "the activated target keeps its own access after the original source retires"
+    );
+    assert_eq!(replayed[3], None, "a revoked target cannot retain access");
 }
 
 #[test]

@@ -335,18 +335,29 @@ fn iframe_listener_registered_before_child_script_survives_realm_creation() {
 }
 
 #[test]
-fn unchanged_iframe_srcdoc_does_not_depart() {
+fn same_srcdoc_assignment_replaces_the_document_and_departs() {
     let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            "globalThis.frame = document.createElement('iframe'); \
+         frame.srcdoc = '<p>old</p>'; document.body.appendChild(frame);",
+        )
+        .unwrap();
+    runtime.run_timers(5_000, 10, 2_000);
+    runtime
+        .eval(
+            "globalThis.oldDocument = frame.contentDocument; \
+         globalThis.departures = 0; \
+         oldDocument.addEventListener('visibilitychange', () => departures++); \
+         frame.srcdoc = '<p>old</p>';",
+        )
+        .unwrap();
+    runtime.run_timers(5_000, 10, 2_000);
     assert!(
         runtime
             .eval(
-                "const frame = document.createElement('iframe'); \
-             frame.srcdoc = '<p>old</p>'; document.body.appendChild(frame); \
-             const oldDocument = frame.contentDocument; \
-             let departures = 0; \
-             oldDocument.addEventListener('visibilitychange', () => departures++); \
-             frame.srcdoc = '<p>old</p>'; \
-             departures === 0 && frame.contentDocument === oldDocument;",
+                "departures === 1 && frame.contentDocument !== oldDocument && \
+                 oldDocument.visibilityState === 'hidden';",
             )
             .unwrap()
             .to_boolean()

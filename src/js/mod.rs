@@ -148,6 +148,7 @@ mod service_worker;
 mod service_worker_tests;
 mod shared_worker;
 use shared_worker::terminate_shared_worker_connections;
+mod task_diagnostics;
 mod text_selection;
 mod text_stream;
 mod web_locks;
@@ -3553,8 +3554,8 @@ impl HostState {
     ///   its load until it is later connected, so `about:blank`/`src` set on a
     ///   freestanding element never fires prematurely;
     ///   Images instead use their active owner Document, including detached images;
-    /// - the resource actually **changed** — setting the attribute to the value
-    ///   already loaded is a no-op navigation.
+    /// - the resource actually **changed**, except for frames: writing their
+    ///   effective resource attribute navigates even when its value is unchanged.
     ///
     /// The `pending_resource_loads` guard collapses a change that races an
     /// already-queued load (e.g. "set `src`, then append") into a single task.
@@ -3590,26 +3591,33 @@ impl HostState {
         } else {
             resource_attr
         };
-        if self
-            .iframe_documents
-            .get(&node.identity())
-            .is_some_and(|entry| {
-                entry.loaded_attribute == effective_attribute
-                    && node.with_attribute(effective_attribute, |resource| {
-                        let resource = resource.unwrap_or_default();
-                        if effective_attribute == "srcdoc" {
-                            entry.loaded_resource == resource
-                        } else {
-                            entry.loaded_resource == resource.trim()
-                        }
-                    })
-            })
+        // A src write cannot navigate an iframe while srcdoc takes precedence.
+        if accepts_srcdoc && effective_attribute == "srcdoc" && resource_attr == "src" {
+            return;
+        }
+        if !is_iframe
+            && self
+                .iframe_documents
+                .get(&node.identity())
+                .is_some_and(|entry| {
+                    entry.loaded_attribute == effective_attribute
+                        && node.with_attribute(effective_attribute, |resource| {
+                            let resource = resource.unwrap_or_default();
+                            if effective_attribute == "srcdoc" {
+                                entry.loaded_resource == resource
+                            } else {
+                                entry.loaded_resource == resource.trim()
+                            }
+                        })
+                })
         {
             return;
         }
         // A later attribute navigation supersedes a pending form navigation.
         if is_iframe {
             self.note_iframe_navigation_source(node);
+            self.pending_forced_iframe_navigations
+                .insert(node.identity(), ForcedIframeNavigation::Refresh);
         }
         self.event_loop
             .cancel_resource_loads_for_nodes(&HashSet::from([node.identity()]));
@@ -3759,8 +3767,6 @@ impl HostState {
             submission.is_some(),
         );
         let initiator_document_id = source.document_id;
-        let source_url = source.url;
-        let request_policy = source.policy;
         let initial_about_blank = !self.iframe_documents.contains_key(&iframe_id)
             && submission.is_none()
             && (navigation_url.is_empty() || javascript_resource);
@@ -3777,32 +3783,17 @@ impl HostState {
                 .filter(|id| self.document_is_active(*id))
                 .unwrap_or(owner_document_id)
         };
-        let mut loaded = if let Some(request) = submission {
-            self.load_iframe_form_submission_with_referrer(
-                request,
-                submission_source_document_id
-                    .or(request.source_document_id)
-                    .filter(|document_id| self.document_is_active(*document_id))
-                    .unwrap_or(owner_document_id),
-                owner_document_id,
-                &source_url,
-                request_policy,
-            )?
-        } else if resource_attribute == "srcdoc" {
-            LoadedChildDocument::srcdoc(&resource)
-        } else if javascript_resource {
-            LoadedChildDocument::about_blank("about:blank".to_owned())
-        } else {
-            self.load_iframe_document_for_initiator(
-                &resource,
-                resource_base.as_ref(),
-                Some(owner_document_id),
-                Some(owner_document_id),
-                false,
-                &source_url,
-                request_policy,
-            )
-        };
+        let (mut loaded, storage_access_origin) = self.load_iframe_navigation_resource(
+            iframe_id,
+            owner_document_id,
+            resource_attribute,
+            &resource,
+            resource_base.as_ref(),
+            submission,
+            submission_source_document_id,
+            &source,
+            javascript_resource,
+        )?;
         let reported_url = resolve_url_reference(&navigation_url, resource_base.as_ref());
         let (isolation, blocked) = self.child_response_isolation(
             owner_document_id,
@@ -3841,8 +3832,8 @@ impl HostState {
         let referrer = security_reporting::loaded_document_referrer(
             final_request_referrer.as_deref(),
             child_url.as_deref(),
-            &source_url,
-            request_policy,
+            &source.url,
+            source.policy,
             creator_url,
         );
         let child_base_url = if inherits_creator_origin {
@@ -4036,6 +4027,7 @@ impl HostState {
                 javascript_replacement: false,
             },
         );
+        self.inherit_storage_access_navigation(document.identity(), storage_access_origin);
         let isolated =
             self.isolated_child_capability(owner_document_id, document.identity(), &isolation);
         self.document_isolated_capabilities
@@ -5382,6 +5374,30 @@ impl HostState {
         source_url: &str,
         policy: security_reporting::ReferrerPolicy,
     ) -> LoadedChildDocument {
+        let cookie_context =
+            initiator_document_id.map(|document| self.document_cookie_request_context(document));
+        self.load_iframe_document_with_cookie_context(
+            src,
+            base_url,
+            cookie_context.as_ref(),
+            container_document_id,
+            top_level_navigation,
+            source_url,
+            policy,
+        )
+    }
+
+    /// Fetches with owned cookie policy captured before replacing a Document.
+    fn load_iframe_document_with_cookie_context(
+        &mut self,
+        src: &str,
+        base_url: Option<&crate::http::Url>,
+        cookie_context: Option<&crate::http::CookieRequestContext>,
+        container_document_id: Option<usize>,
+        top_level_navigation: bool,
+        source_url: &str,
+        policy: security_reporting::ReferrerPolicy,
+    ) -> LoadedChildDocument {
         if src.is_empty() || matches_about_blank_url(src) {
             let url = if src.is_empty() { "about:blank" } else { src };
             return LoadedChildDocument::about_blank(url.to_owned());
@@ -5389,7 +5405,7 @@ impl HostState {
         self.fetch_child_resource(
             src,
             base_url,
-            initiator_document_id,
+            cookie_context,
             container_document_id,
             top_level_navigation,
             source_url,
@@ -5413,7 +5429,7 @@ impl HostState {
         &mut self,
         src: &str,
         base_url: Option<&crate::http::Url>,
-        initiator_document_id: Option<usize>,
+        cookie_context: Option<&crate::http::CookieRequestContext>,
         container_document_id: Option<usize>,
         top_level_navigation: bool,
         source_url: &str,
@@ -5438,8 +5454,8 @@ impl HostState {
         if !source_url.is_empty() {
             request.set_referrer_source(source_url.to_owned(), policy);
         }
-        if let Some(document_id) = initiator_document_id {
-            self.set_document_cookie_request_context(document_id, &mut request);
+        if let Some(cookie_context) = cookie_context {
+            cookie_context.apply(&mut request);
         } else if let Ok(site) = self.location_href.parse::<crate::http::Url>() {
             request.set_cookie_context(site, top_level_navigation);
         }
@@ -10714,9 +10730,18 @@ impl JsRuntime {
         let previous = self.context.enter_realm(realm);
         let result = (|| -> JsResult<()> {
             self.run_auxiliary_classic_scripts(document_id, scripts)?;
+            // A parser script may close or navigate its own browsing context.
+            // Its old Window must receive no later lifecycle events.
+            if !self.host_state.borrow().document_is_active(document_id) {
+                return Ok(());
+            }
             self.eval(
-                "document.__readyState = 'complete'; document.dispatchEvent(new Event('DOMContentLoaded')); window.dispatchEvent(new Event('load'));",
+                "document.__readyState = 'complete'; document.dispatchEvent(new Event('DOMContentLoaded'));",
             )?;
+            self.run_jobs()?;
+            if self.host_state.borrow().document_is_active(document_id) {
+                self.eval("window.dispatchEvent(new Event('load'));")?;
+            }
             self.run_jobs()
         })();
         if let Err(error) = &result
@@ -10747,6 +10772,9 @@ impl JsRuntime {
             .cloned()
             .unwrap_or_default();
         for script in scripts {
+            if !self.host_state.borrow().document_is_active(document_id) {
+                break;
+            }
             let attributes = script.attributes().unwrap_or_default();
             if !is_executable_classic_script_type(attributes.get("type").map(String::as_str)) {
                 continue;
@@ -11614,8 +11642,8 @@ impl JsRuntime {
     /// bounds the total number of tasks executed (so a callback that
     /// continuously schedules timers or posted messages cannot explode).
     ///
-    /// Unlike [`tick`](Self::tick), individual callback errors are swallowed so
-    /// that one throwing timer does not halt the remaining pipeline work.
+    /// Unlike [`tick`](Self::tick), individual callback errors are retained by
+    /// [`take_task_errors`](Self::take_task_errors) without halting later work.
     ///
     /// Returns the number of timer tasks that were actually executed.
     pub fn run_timers(&mut self, max_virtual_ms: u64, step_ms: u64, max_tasks: usize) -> usize {
@@ -11665,9 +11693,8 @@ impl JsRuntime {
                     _ => None,
                 };
                 {
-                    // Swallow per-task JS errors: a single failing timer must
-                    // not abort the whole pump during rendering. Diagnostics
-                    // remain available on demand for complex app bootstraps.
+                    // Keep failures before draining jobs, while allowing the
+                    // remaining rendering pipeline tasks to continue.
                     let task_kind = match &task {
                         Task::Timer { payload, .. } => payload.kind(),
                         Task::Geolocation { .. } => "geolocation",
@@ -11688,19 +11715,11 @@ impl JsRuntime {
                     let callback_start = std::time::Instant::now();
                     let callback_result = self.run_task(task);
                     let callback_elapsed = callback_start.elapsed();
-                    if let Err(error) = callback_result
-                        && std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some()
-                    {
-                        eprintln!("[omoikane][timer-error] {error}");
-                    }
+                    self.record_host_task_result(task_kind, "callback", callback_result);
                     let jobs_start = std::time::Instant::now();
                     let jobs_result = self.run_jobs_for_document(task_document_id);
                     let jobs_elapsed = jobs_start.elapsed();
-                    if let Err(error) = jobs_result
-                        && std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some()
-                    {
-                        eprintln!("[omoikane][timer-job-error] {error}");
-                    }
+                    self.record_host_task_result(task_kind, "jobs", jobs_result);
                     if std::env::var_os("OMOIKANE_LOG_TIMERS").is_some() {
                         eprintln!(
                             "[omoikane][timer] task={} kind={} callback_ms={:.3} jobs_ms={:.3}",
@@ -16779,6 +16798,27 @@ fn storage_arguments(
     })
 }
 
+/// HTTP(S) Documents with an opaque origin reject both cookie operations.
+/// Non-HTTP and inactive Documents remain cookie-averse instead.
+fn ensure_document_cookie_origin(context: &mut Context, document: usize) -> JsResult<()> {
+    let opaque = with_host_state(|host| {
+        let state = host.borrow();
+        Ok(state.document_is_active(document)
+            && state
+                .document_urls
+                .get(&document)
+                .is_some_and(|url| url.parse::<crate::http::Url>().is_ok())
+            && matches!(
+                state.document_security_origins.get(&document),
+                Some(DocumentSecurityOrigin::Opaque(_))
+            ))
+    })?;
+    if opaque {
+        return Err(cross_origin_access_error(context)?);
+    }
+    Ok(())
+}
+
 fn document_cookie_get_native(
     _this: &JsValue,
     args: &[JsValue],
@@ -16786,6 +16826,7 @@ fn document_cookie_get_native(
 ) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_document(context, document_id)?;
+    ensure_document_cookie_origin(context, document_id)?;
     with_host_state(|state| {
         let state = state.borrow();
         let visible = state.storage_access_allows_document_cookies(document_id);
@@ -16818,6 +16859,7 @@ fn document_cookie_set_native(
 ) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_document(context, document_id)?;
+    ensure_document_cookie_origin(context, document_id)?;
     let value = args
         .get(1)
         .cloned()
@@ -24793,6 +24835,7 @@ fn remove_attribute_native(
                 None
             }
         });
+        let resource_attr = resource_attr.filter(|_| node.has_attribute(&name));
         let removed_name =
             name.eq_ignore_ascii_case("name") && node.get_attribute("name").is_some();
         node.remove_attribute(&name);
@@ -24871,6 +24914,7 @@ fn remove_attribute_ns_native(
                 }
             })
         });
+        let resource_attr = resource_attr.filter(|_| node.has_attribute(&qualified_name));
         let removed_name = qualified_name == "name" && node.get_attribute("name").is_some();
         node.remove_xml_attribute_ns(namespace.as_deref(), &local_name);
         if removed_name {
