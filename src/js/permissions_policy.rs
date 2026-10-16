@@ -2,8 +2,8 @@
 
 use super::{
     BootstrapBindings, Context, DocumentSecurityOrigin, JsNativeError, JsResult, JsValue,
-    NativeFunction, Node, NodeType, StorageOrigin, ensure_same_origin_document, parse_node_id,
-    register_private_builtin_callable, with_host_state,
+    NativeFunction, Node, NodeType, StorageOrigin, ensure_same_origin_document,
+    owner_document_for_node, parse_node_id, register_private_builtin_callable, with_host_state,
 };
 use base64::Engine;
 use std::collections::HashMap;
@@ -571,6 +571,11 @@ pub(super) fn container_allows(
 fn parse_container_expression(token: &str) -> Option<OriginExpression> {
     // PP §9.3 parses an iframe allow URL, then stores its serialized origin as
     // a source expression. Its path, query, and default-port spelling disappear.
+    // Subdomain and port wildcards are valid in response headers, but not in
+    // the iframe allow attribute's URL syntax.
+    if token.contains('*') {
+        return None;
+    }
     if !token.contains("://") {
         return parse_origin_expression(token);
     }
@@ -589,12 +594,6 @@ fn parse_container_expression(token: &str) -> Option<OriginExpression> {
         {
             return parse_origin_expression(&url.origin().ascii_serialization());
         }
-    }
-    // Preserve the existing `allow` extensions for wildcard host/port tokens
-    // which cannot be parsed as ordinary URLs, also dropping their URL path.
-    if authority.contains('*') {
-        let scheme = token.split_once("://")?.0;
-        return parse_origin_expression(&format!("{scheme}://{authority}"));
     }
     None
 }
@@ -770,7 +769,26 @@ fn parse_wildcard_origin(origin: &str) -> Option<OriginExpression> {
 
 fn policy_query_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let document_id = parse_node_id(args.first(), context)?;
-    ensure_same_origin_document(context, document_id)?;
+    let owner = with_host_state(|host| {
+        let state = host.borrow();
+        state
+            .get_node(document_id)
+            .and_then(|node| {
+                if node.node_type() == NodeType::Document {
+                    Some(document_id)
+                } else {
+                    owner_document_for_node(&node)
+                        .or_else(|| state.node_lifetime_owner(document_id))
+                        .map(|owner| owner.identity())
+                }
+            })
+            .ok_or_else(|| {
+                JsNativeError::typ()
+                    .with_message("Policy owner is unavailable")
+                    .into()
+            })
+    })?;
+    ensure_same_origin_document(context, owner)?;
     let operation = args
         .get(1)
         .cloned()
@@ -798,6 +816,18 @@ fn policy_query_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         .map(DocumentSecurityOrigin::Tuple);
     let result = with_host_state(|state| {
         let state = state.borrow();
+        if let Some(frame) = state
+            .get_node(document_id)
+            .filter(|node| node.has_tag_name("iframe"))
+        {
+            let policy = state.frame_policy(&frame)?;
+            let target = if explicit_origin.is_some() {
+                parsed_origin.as_ref()
+            } else {
+                Some(&policy.origin)
+            };
+            return policy.query(&operation, feature, target);
+        }
         if !state.document_is_active(document_id)
             || state
                 .get_node(document_id)
@@ -1296,7 +1326,7 @@ mod tests {
             &owner,
             Some(&declared)
         ));
-        assert!(container_allows(
+        assert!(!container_allows(
             PolicyFeature::Fullscreen,
             Some("fullscreen https://*.example.com:*"),
             false,
@@ -1349,7 +1379,7 @@ mod tests {
             &owner,
             None
         ));
-        assert!(container_allows(
+        assert!(!container_allows(
             PolicyFeature::Geolocation,
             Some("geolocation https://*"),
             false,
@@ -1392,7 +1422,7 @@ mod tests {
         let grandchild = DocumentSecurityOrigin::Tuple(
             StorageOrigin::from_url("https://sub.child.test/").unwrap(),
         );
-        assert!(container_allows(
+        assert!(!container_allows(
             PolicyFeature::Geolocation,
             Some("geolocation https://*.child.test/maps"),
             false,

@@ -24,6 +24,32 @@ use futures_lite::future;
 use indoc::indoc;
 use std::{cell::Cell, future::Future, path::Path, rc::Rc};
 
+#[test]
+fn linking_source_modules_releases_temporary_vm_stack_values() {
+    let mut context = Context::default();
+    let initial_stack = context.vm.stack.stack.len();
+    let initial_frames = context.vm.frames.len();
+
+    for _ in 0..80 {
+        let module = Module::parse(
+            Source::from_bytes("export const answer = 42;"),
+            None,
+            &mut context,
+        )
+        .unwrap();
+        assert!(module.load(&mut context).state().as_fulfilled().is_some());
+        module.link(&mut context).unwrap();
+        assert_eq!(context.vm.stack.stack.len(), initial_stack);
+        assert_eq!(context.vm.frames.len(), initial_frames);
+
+        let evaluation = module.evaluate(&mut context);
+        context.run_jobs().unwrap();
+        assert!(evaluation.state().as_fulfilled().is_some());
+        assert_eq!(context.vm.stack.stack.len(), initial_stack);
+        assert_eq!(context.vm.frames.len(), initial_frames);
+    }
+}
+
 #[derive(Debug, boa_gc::Trace, boa_gc::Finalize, crate::JsData)]
 struct AuthoredScriptMetadata;
 

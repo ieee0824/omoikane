@@ -7884,7 +7884,7 @@ export const __omoikane_service_worker_lifecycle = {};
 
   const policyConstructionToken = {};
   const policyOwnerIds = new WeakMap();
-  const documentPolicyObjects = new WeakMap();
+  const nodePolicyObjects = new WeakMap();
   function policyOwnerId(policy) {
     const documentId = safeWeakMapGet(policyOwnerIds, policy);
     if (documentId === undefined) throw new TypeError("Illegal invocation");
@@ -8186,10 +8186,10 @@ export const __omoikane_service_worker_lifecycle = {};
 
     get permissionsPolicy() {
       if (internalNodeType(this) !== 9) throw new TypeError("Illegal invocation");
-      let policy = safeWeakMapGet(documentPolicyObjects, this);
+      let policy = safeWeakMapGet(nodePolicyObjects, this);
       if (!policy) {
         policy = new PermissionsPolicy(policyConstructionToken, internalNodeId(this));
-        safeWeakMapSet(documentPolicyObjects, this, policy);
+        safeWeakMapSet(nodePolicyObjects, this, policy);
       }
       return policy;
     }
@@ -10388,6 +10388,19 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLIFrameElement extends HTMLElement {
+    get permissionsPolicy() {
+      if (internalNodeLocalName(this) !== "iframe" ||
+          nativeNodeNamespaceURI(internalNodeId(this)) !== HTML_NAMESPACE) {
+        throw new TypeError("Illegal invocation");
+      }
+      let policy = safeWeakMapGet(nodePolicyObjects, this);
+      if (!policy) {
+        policy = new PermissionsPolicy(policyConstructionToken, internalNodeId(this));
+        safeWeakMapSet(nodePolicyObjects, this, policy);
+      }
+      return policy;
+    }
+    get featurePolicy() { return this.permissionsPolicy; }
     get width() { return this.getAttribute("width") ?? ""; }
     set width(value) { this.setAttribute("width", String(value)); }
     get height() { return this.getAttribute("height") ?? ""; }
@@ -11236,7 +11249,7 @@ export const __omoikane_service_worker_lifecycle = {};
   // distinct interface or iframe-only sandbox/srcdoc attributes.
   class HTMLFrameElement extends HTMLElement {}
   for (const name of Object.getOwnPropertyNames(HTMLIFrameElement.prototype)) {
-    if (["constructor", "sandbox", "srcdoc", "allow", "allowFullscreen", "width", "height"].includes(name)) continue;
+    if (["constructor", "sandbox", "srcdoc", "allow", "allowFullscreen", "width", "height", "permissionsPolicy", "featurePolicy"].includes(name)) continue;
     Object.defineProperty(HTMLFrameElement.prototype, name,
       Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, name));
   }
