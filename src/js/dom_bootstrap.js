@@ -20026,8 +20026,19 @@ export const __omoikane_service_worker_lifecycle = {};
       defaultValue === undefined ? "" : String(defaultValue),
     );
   };
-  globalThis.innerWidth = 1280;
-  globalThis.innerHeight = 720;
+  const nativeWindowViewportDimension = globalThis.__omoikane_window_viewport_dimension;
+  delete globalThis.__omoikane_window_viewport_dimension;
+  // Each Window reads its own layout viewport. Replaceable attributes can be
+  // shadowed by page code without changing the browser's viewport state.
+  for (const [name, height] of [["innerWidth", false], ["innerHeight", true]]) {
+    safeDefineProperty(globalThis, name, {
+      configurable: true, enumerable: true,
+      get() { return nativeWindowViewportDimension(height); },
+      set(value) {
+        safeDefineProperty(this, name, {value, configurable:true, enumerable:true, writable:true});
+      },
+    });
+  }
   globalThis.outerWidth = 1280;
   globalThis.outerHeight = 720;
   globalThis.screenX = 0;
