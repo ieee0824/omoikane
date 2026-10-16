@@ -15568,7 +15568,7 @@ fn nested_about_blank_iframe_inherits_its_owning_documents_opaque_origin() {
     {
         let mut state = runtime.host_state.borrow_mut();
         state.register_tree(&nested);
-        state.schedule_connected_resource_loads(&nested, true);
+        state.schedule_connected_resource_loads(&nested, true, None);
     }
     runtime.run_until_idle().unwrap();
 

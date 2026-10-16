@@ -1364,9 +1364,10 @@ impl HttpModuleLoader {
     ) -> JsResult<(Module, Duration)> {
         let source = String::from_utf8_lossy(bytes);
         let started = Instant::now();
-        let module = Module::parse(
+        let module = Module::parse_with_host_defined(
             Source::from_reader(source.as_bytes(), Some(Path::new(reference))),
             Some(realm),
+            security_reporting::module_csp_metadata(reference),
             &mut context.borrow_mut(),
         )
         .inspect_err(|_| self.report_import_load_failure())?;
@@ -2314,6 +2315,8 @@ struct HostState {
     /// Resource elements that already have a queued load task. This prevents a
     /// move within one connected document from producing duplicate events.
     pending_resource_loads: HashSet<usize>,
+    /// Owned author location for a queued, dynamically inserted script request.
+    pending_script_csp_sources: HashMap<usize, security_reporting::CspSourceLocation>,
     /// Iframes whose next resource load must replace the active Document even
     /// when the effective `src`/`srcdoc` did not change. Location navigation
     /// preserves the element's declared `src` origin despite our internal
@@ -3101,6 +3104,7 @@ impl HostState {
             browsing_context_names: HashMap::new(),
             discarded_node_ids: Vec::new(),
             pending_resource_loads: HashSet::new(),
+            pending_script_csp_sources: HashMap::new(),
             pending_forced_iframe_navigations: HashMap::new(),
             pending_iframe_visits: HashMap::new(),
             pending_iframe_referrers: HashMap::new(),
@@ -3470,11 +3474,21 @@ impl HostState {
 
     /// Queue loads for iframe and data-bearing object descendants when a
     /// detached subtree first becomes connected to a document.
-    fn schedule_connected_resource_loads(&mut self, root: &NodeHandle, include_scripts: bool) {
+    fn schedule_connected_resource_loads(
+        &mut self,
+        root: &NodeHandle,
+        include_scripts: bool,
+        source: Option<&security_reporting::CspSourceLocation>,
+    ) {
         if !self.node_is_in_active_document(root) {
             return;
         }
-        fn visit(state: &mut HostState, node: &NodeHandle, include_scripts: bool) {
+        fn visit(
+            state: &mut HostState,
+            node: &NodeHandle,
+            include_scripts: bool,
+            source: Option<&security_reporting::CspSourceLocation>,
+        ) {
             let tag = node.tag_name().unwrap_or_default();
             let style_has_import = tag.eq_ignore_ascii_case("style")
                 && !crate::paint::stylesheet::extract_import_directives(&collect_text_content(
@@ -3496,6 +3510,13 @@ impl HostState {
                         .attributes()
                         .is_some_and(|attrs| attrs.contains_key("data")));
             if is_resource && state.pending_resource_loads.insert(node.identity()) {
+                if tag.eq_ignore_ascii_case("script") {
+                    if let Some(source) = source {
+                        state
+                            .pending_script_csp_sources
+                            .insert(node.identity(), source.clone());
+                    }
+                }
                 if is_nested_frame_tag(&tag) {
                     state.note_iframe_navigation_source(node);
                 }
@@ -3504,13 +3525,13 @@ impl HostState {
                 });
             }
             for child in node.child_nodes() {
-                visit(state, &child, include_scripts);
+                visit(state, &child, include_scripts, source);
             }
             if let Some(root) = node.shadow_root() {
-                visit(state, &root, include_scripts);
+                visit(state, &root, include_scripts, source);
             }
         }
-        visit(self, root, include_scripts);
+        visit(self, root, include_scripts, source);
     }
 
     /// Queue a fresh navigation for a single resource element whose resource
@@ -3534,6 +3555,7 @@ impl HostState {
         &mut self,
         node: &NodeHandle,
         resource_attr: &str,
+        source: Option<&security_reporting::CspSourceLocation>,
     ) {
         let active_image = node.has_tag_name("img")
             && self
@@ -3586,6 +3608,14 @@ impl HostState {
             .cancel_resource_loads_for_nodes(&HashSet::from([node.identity()]));
         self.pending_resource_loads.remove(&node.identity());
         if self.pending_resource_loads.insert(node.identity()) {
+            if is_html_script_node(node) {
+                if let Some(source) = source {
+                    self.pending_script_csp_sources
+                        .insert(node.identity(), source.clone());
+                } else {
+                    self.pending_script_csp_sources.remove(&node.identity());
+                }
+            }
             self.event_loop.enqueue_timer(TimerPayload::ResourceLoad {
                 node_id: node.identity(),
             });
@@ -4006,7 +4036,7 @@ impl HostState {
         // A parsed child Document can itself contain connected iframes. Their
         // initial about:blank navigations must enqueue load events even when no
         // script ever reads their contentDocument.
-        self.schedule_connected_resource_loads(&document, false);
+        self.schedule_connected_resource_loads(&document, false, None);
         let visit_source = if initial_blank {
             None
         } else {
@@ -4147,7 +4177,7 @@ impl HostState {
                 javascript_replacement: true,
             },
         );
-        self.schedule_connected_resource_loads(&document, false);
+        self.schedule_connected_resource_loads(&document, false, None);
         let owner_document_id = owner_document_for_node(&frame).map(|owner| owner.identity());
         self.event_loop.enqueue_timer_for_document(
             TimerPayload::JavascriptDocumentLoad {
@@ -5244,7 +5274,7 @@ impl HostState {
         );
         self.web_lock_clients
             .insert(document_id, self.storage_manager.create_web_lock_client());
-        self.schedule_connected_resource_loads(&document, false);
+        self.schedule_connected_resource_loads(&document, false, None);
         drop(old_document);
         Some(document_id)
     }
@@ -5660,6 +5690,8 @@ impl HostState {
         }
         self.pending_resource_loads
             .retain(|id| !tree_ids.contains(id));
+        self.pending_script_csp_sources
+            .retain(|id, _| !tree_ids.contains(id));
         self.pending_forced_iframe_navigations
             .retain(|id, _| !tree_ids.contains(id));
         self.pending_iframe_referrers
@@ -5792,6 +5824,8 @@ impl HostState {
 
         self.pending_resource_loads
             .retain(|node_id| !tree_ids.contains(node_id));
+        self.pending_script_csp_sources
+            .retain(|node_id, _| !tree_ids.contains(node_id));
         self.pending_iframe_referrers
             .retain(|id, _| !tree_ids.contains(id));
         self.pending_iframe_clients
@@ -5840,6 +5874,8 @@ impl HostState {
         });
         self.pending_resource_loads
             .retain(|node_id| !subtree_ids.contains(node_id));
+        self.pending_script_csp_sources
+            .retain(|node_id, _| !subtree_ids.contains(node_id));
         self.pending_forced_iframe_navigations
             .retain(|node_id, _| !subtree_ids.contains(node_id));
         self.pending_iframe_visits
@@ -7955,7 +7991,7 @@ impl JsRuntime {
         runtime
             .host_state
             .borrow_mut()
-            .schedule_connected_resource_loads(&document, false);
+            .schedule_connected_resource_loads(&document, false, None);
         Ok(runtime)
     }
 
@@ -9452,9 +9488,10 @@ impl JsRuntime {
         let future = ActiveHostFuture::new(
             async move {
                 let mut context = self.context.enter_runtime_deadline(deadline);
-                let module = Module::parse(
+                let module = Module::parse_with_host_defined(
                     Source::from_reader(source.as_bytes(), Some(Path::new(&url))),
                     None,
+                    security_reporting::module_csp_metadata(&url),
                     &mut context,
                 )?;
                 let _module_document = activate_module_document(&module_host_state, document_id);
@@ -9882,9 +9919,10 @@ impl JsRuntime {
         self.module_loader
             .set_context_for_module_graph(document.identity(), url, graph);
         let parse_start = std::time::Instant::now();
-        let module = match Module::parse(
+        let module = match Module::parse_with_host_defined(
             Source::from_reader(source.as_bytes(), Some(Path::new(url))),
             None,
+            security_reporting::module_csp_metadata(url),
             &mut self.context,
         ) {
             Ok(module) => module,
@@ -10825,6 +10863,11 @@ impl JsRuntime {
         {
             return self.run_written_script(node_id);
         }
+        let csp_source = self
+            .host_state
+            .borrow_mut()
+            .pending_script_csp_sources
+            .remove(&node_id);
         let Some((script_node, src, kind, base_url, document_id)) = ({
             let mut state = self.host_state.borrow_mut();
             state.pending_resource_loads.remove(&node_id);
@@ -10877,7 +10920,12 @@ impl JsRuntime {
         if !self
             .host_state
             .borrow_mut()
-            .csp_allows_script_for_node(&script_node, &src, request)
+            .csp_allows_script_for_node_with_source(
+                &script_node,
+                &src,
+                request,
+                csp_source.as_ref(),
+            )
         {
             return Ok(());
         }
@@ -10918,12 +10966,13 @@ impl JsRuntime {
         if !self
             .host_state
             .borrow_mut()
-            .csp_allows_response_for_script_node(
+            .csp_allows_response_for_script_node_with_source(
                 &script_node,
                 &effective_url,
                 redirect_count,
                 &resource_reference_timing_name(&src, base_url.as_ref()),
                 request,
+                csp_source.as_ref(),
             )
         {
             let dispatch = dispatch_resource_timing_script(
@@ -12246,6 +12295,10 @@ impl JsRuntime {
         let Some((should_dispatch, initial_scripts, dynamic_script, resource_document_id)) =
             self.gather_resource_load_dispatch_state(node_id)?
         else {
+            self.host_state
+                .borrow_mut()
+                .pending_script_csp_sources
+                .remove(&node_id);
             return Ok(());
         };
         let dispatch_document_id = dynamic_script
@@ -12287,6 +12340,11 @@ impl JsRuntime {
             );
             dispatch_load = updated_load;
             dispatch_timing = updated_timing;
+        } else {
+            self.host_state
+                .borrow_mut()
+                .pending_script_csp_sources
+                .remove(&node_id);
         }
         if dispatch_load {
             self.dispatch_resource_load_event(node_id, dispatch_document_id, dispatch_timing);
@@ -12610,6 +12668,11 @@ impl JsRuntime {
         parser_inserted: bool,
     ) -> (bool, Option<(String, bool, f64)>) {
         let (script_node, src, kind, base_url, document_id) = dynamic_script;
+        let csp_source = self
+            .host_state
+            .borrow_mut()
+            .pending_script_csp_sources
+            .remove(&node_id);
         let nonce = script_node.get_attribute("nonce");
         let request = csp::ScriptRequest {
             nonce: nonce.as_deref(),
@@ -12638,11 +12701,16 @@ impl JsRuntime {
             );
             self.record_error_from(&src, dispatched);
             dispatch_load = false;
-        } else if !self.host_state.borrow_mut().csp_allows_script_for_node(
-            &script_node,
-            &src,
-            request,
-        ) {
+        } else if !self
+            .host_state
+            .borrow_mut()
+            .csp_allows_script_for_node_with_source(
+                &script_node,
+                &src,
+                request,
+                csp_source.as_ref(),
+            )
+        {
             if log_scripts {
                 eprintln!("[omoikane][script] blocked dynamic {src} by CSP");
             }
@@ -12705,12 +12773,13 @@ impl JsRuntime {
                     if !self
                         .host_state
                         .borrow_mut()
-                        .csp_allows_response_for_script_node(
+                        .csp_allows_response_for_script_node_with_source(
                             &script_node,
                             &effective_url,
                             redirect_count,
                             &resource_reference_timing_name(&src, base_url.as_ref()),
                             request,
+                            csp_source.as_ref(),
                         ) =>
                 {
                     let redirected =
@@ -19219,6 +19288,7 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
     ensure_same_origin_node(context, parent_id)?;
     let child_id = parse_node_id(args.get(1), context)?;
     ensure_same_origin_node(context, child_id)?;
+    let csp_source = security_reporting::capture_csp_source(context);
     with_host_state(|state| {
         let (parent, child) = {
             let borrowed = state.borrow();
@@ -19262,7 +19332,11 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             // move; iframe/object navigation applies to every insertion.
             if target_document.is_some() {
                 state.apply_connected_referrer_metas(&child);
-                state.schedule_connected_resource_loads(&child, source_document != target_document);
+                state.schedule_connected_resource_loads(
+                    &child,
+                    source_document != target_document,
+                    csp_source.as_ref(),
+                );
             }
         }
         Ok(JsValue::from(child.identity() as f64))
@@ -20436,6 +20510,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
     let is_name_attribute = name.eq_ignore_ascii_case("name");
     let is_style_attribute = name.eq_ignore_ascii_case("style");
     let is_meta_referrer_attribute = is_name_attribute || name.eq_ignore_ascii_case("content");
+    let csp_source = security_reporting::capture_csp_source(context);
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -20480,7 +20555,11 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         if let Some(resource_attr) = resource_attr {
             state
                 .borrow_mut()
-                .schedule_resource_load_on_attribute_change(&node, resource_attr);
+                .schedule_resource_load_on_attribute_change(
+                    &node,
+                    resource_attr,
+                    csp_source.as_ref(),
+                );
         }
         Ok(JsValue::undefined())
     })
@@ -20523,6 +20602,7 @@ fn set_attribute_ns_native(
     let is_meta_referrer_attribute = namespace.is_none()
         && (qualified_name.eq_ignore_ascii_case("name")
             || qualified_name.eq_ignore_ascii_case("content"));
+    let csp_source = security_reporting::capture_csp_source(context);
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -20569,7 +20649,11 @@ fn set_attribute_ns_native(
         if let Some(Some(resource_attr)) = resource_attr {
             state
                 .borrow_mut()
-                .schedule_resource_load_on_attribute_change(&node, resource_attr);
+                .schedule_resource_load_on_attribute_change(
+                    &node,
+                    resource_attr,
+                    csp_source.as_ref(),
+                );
         }
         Ok(JsValue::undefined())
     })
@@ -23639,6 +23723,7 @@ fn compile_inline_handler_native(
         .and_then(JsValue::as_string)
         .ok_or_else(|| JsNativeError::typ().with_message("handler source must be a string"))?
         .to_std_string_escaped();
+    let csp_source = security_reporting::capture_csp_source(context);
     let (document_id, realm, blocked, reported) =
         inline_handler_security_context(id, &name, &source, context.realm())?;
     if !blocked.is_empty() || !reported.is_empty() {
@@ -23650,8 +23735,16 @@ fn compile_inline_handler_native(
                 blocked.clone(),
                 "enforce",
                 &source,
+                csp_source.as_ref(),
             );
-            state.queue_inline_handler_violation(document_id, id, reported, "report", &source);
+            state.queue_inline_handler_violation(
+                document_id,
+                id,
+                reported,
+                "report",
+                &source,
+                csp_source.as_ref(),
+            );
             Ok(())
         })?;
     }
@@ -23896,6 +23989,7 @@ fn insert_before_native_impl(
         ensure_same_origin_node(context, id)?;
         Some(id)
     };
+    let csp_source = security_reporting::capture_csp_source(context);
     with_host_state(|state| {
         let ref_node = ref_id.and_then(|id| state.borrow().get_node(id));
         let (parent, new_node) = {
@@ -23947,6 +24041,7 @@ fn insert_before_native_impl(
                 state.schedule_connected_resource_loads(
                     &new_node,
                     source_document != target_document,
+                    csp_source.as_ref(),
                 );
             }
         }
@@ -24432,6 +24527,7 @@ fn remove_attribute_native(
         .to_string(context)?
         .to_std_string_escaped();
     let is_style_attribute = name.eq_ignore_ascii_case("style");
+    let csp_source = security_reporting::capture_csp_source(context);
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -24471,7 +24567,11 @@ fn remove_attribute_native(
         if let Some(resource_attr) = resource_attr {
             state
                 .borrow_mut()
-                .schedule_resource_load_on_attribute_change(&node, resource_attr);
+                .schedule_resource_load_on_attribute_change(
+                    &node,
+                    resource_attr,
+                    csp_source.as_ref(),
+                );
         }
         Ok(JsValue::undefined())
     })
@@ -24503,6 +24603,7 @@ fn remove_attribute_ns_native(
         .to_string(context)?
         .to_std_string_escaped();
     let is_style_attribute = namespace.is_none() && qualified_name == "style";
+    let csp_source = security_reporting::capture_csp_source(context);
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -24541,7 +24642,11 @@ fn remove_attribute_ns_native(
         if let Some(Some(resource_attr)) = resource_attr {
             state
                 .borrow_mut()
-                .schedule_resource_load_on_attribute_change(&node, resource_attr);
+                .schedule_resource_load_on_attribute_change(
+                    &node,
+                    resource_attr,
+                    csp_source.as_ref(),
+                );
         }
         Ok(JsValue::undefined())
     })
@@ -25688,7 +25793,7 @@ fn iframe_force_navigation_native(
         state
             .pending_forced_iframe_navigations
             .insert(iframe_id, navigation);
-        state.schedule_connected_resource_loads(&iframe, true);
+        state.schedule_connected_resource_loads(&iframe, true, None);
         Ok(JsValue::from(true))
     })
 }

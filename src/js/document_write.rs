@@ -170,7 +170,7 @@ pub(super) fn write(
                 }
                 host.apply_connected_referrer_meta(node);
                 if matches!(node.tag_name().as_deref(), Some("iframe" | "object")) {
-                    host.schedule_connected_resource_loads(node, false);
+                    host.schedule_connected_resource_loads(node, false, None);
                 }
             }
             host.mark_document_style_dirty(&document);

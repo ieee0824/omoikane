@@ -186,7 +186,7 @@ pub(super) fn sync_stylesheets(
         // Existing document rendering loads CSS fonts before layout. Retain
         // that behavior, but keep the resource in the document's face registry
         // so JS and subsequent style rebuilds reuse the same parsed font.
-        let _ = load_face(state, document, id);
+        let _ = load_face(state, document, id, None);
         current.push((key, id));
     }
     state.font_loading.css.insert(document.identity(), current);
@@ -448,6 +448,7 @@ fn font_bytes(
     document: &NodeHandle,
     source: &str,
     base: Option<&crate::http::Url>,
+    csp_source: Option<&security_reporting::CspSourceLocation>,
 ) -> JsResult<Vec<u8>> {
     let is_data = source
         .get(..5)
@@ -462,12 +463,13 @@ fn font_bytes(
             .to_string()
     };
     let bytes = if is_data {
-        if !state.csp_allows_response_for_document(
+        if !state.csp_allows_response_for_document_with_source(
             document,
             ResourceType::Font,
             &reference,
             0,
             &reference,
+            csp_source,
         ) {
             return Err(error("font blocked by font-src"));
         }
@@ -476,18 +478,19 @@ fn font_bytes(
             .data;
         // A successful data fetch still has a response. CSP's font-src
         // post-request check applies to that response as it does to HTTP.
-        if !state.csp_allows_response_for_document(
+        if !state.csp_allows_response_for_document_with_source(
             document,
             ResourceType::Font,
             &reference,
             0,
             &reference,
+            csp_source,
         ) {
             return Err(error("font response blocked by font-src"));
         }
         bytes
     } else {
-        fetch_font_bytes(state, document, &reference)?
+        fetch_font_bytes(state, document, &reference, csp_source)?
     };
     if bytes.len() > 10_000_000 {
         return Err(error("font exceeds the decoded font size limit"));
@@ -499,6 +502,7 @@ fn fetch_font_bytes(
     state: &mut HostState,
     document: &NodeHandle,
     reference: &str,
+    csp_source: Option<&security_reporting::CspSourceLocation>,
 ) -> JsResult<Vec<u8>> {
     let mut url = reference.parse::<crate::http::Url>().map_err(error)?;
     let origin = script_errors::document_fetch_origin(state, document.identity());
@@ -508,12 +512,13 @@ fn fetch_font_bytes(
     let mut redirects = 0;
     let mut crossed_origin = false;
     let response = loop {
-        if !state.csp_allows_response_for_document(
+        if !state.csp_allows_response_for_document_with_source(
             document,
             ResourceType::Font,
             &url.to_string(),
             redirects,
             reference,
+            csp_source,
         ) {
             return Err(error("font request blocked by font-src"));
         }
@@ -551,12 +556,13 @@ fn fetch_font_bytes(
         redirects += 1;
     };
     let response_url = response.effective_url().unwrap_or(&url).to_string();
-    if !state.csp_allows_response_for_document(
+    if !state.csp_allows_response_for_document_with_source(
         document,
         ResourceType::Font,
         &response_url,
         redirects,
         reference,
+        csp_source,
     ) {
         return Err(error("font response blocked by font-src"));
     }
@@ -566,7 +572,12 @@ fn fetch_font_bytes(
     Ok(response.body().to_vec())
 }
 
-fn load_face(state: &mut HostState, document: &NodeHandle, id: u64) -> JsResult<()> {
+fn load_face(
+    state: &mut HostState,
+    document: &NodeHandle,
+    id: u64,
+    csp_source: Option<&security_reporting::CspSourceLocation>,
+) -> JsResult<()> {
     if let Some(failure) = state
         .font_loading
         .faces
@@ -575,7 +586,7 @@ fn load_face(state: &mut HostState, document: &NodeHandle, id: u64) -> JsResult<
     {
         return Err(error(failure));
     }
-    let result = load_face_data(state, document, id);
+    let result = load_face_data(state, document, id, csp_source);
     if let Err(failure) = &result
         && let Some(face) = state.font_loading.faces.get_mut(&id)
     {
@@ -585,7 +596,12 @@ fn load_face(state: &mut HostState, document: &NodeHandle, id: u64) -> JsResult<
     result
 }
 
-fn load_face_data(state: &mut HostState, document: &NodeHandle, id: u64) -> JsResult<()> {
+fn load_face_data(
+    state: &mut HostState,
+    document: &NodeHandle,
+    id: u64,
+    csp_source: Option<&security_reporting::CspSourceLocation>,
+) -> JsResult<()> {
     let face = state
         .font_loading
         .faces
@@ -605,7 +621,7 @@ fn load_face_data(state: &mut HostState, document: &NodeHandle, id: u64) -> JsRe
             let candidate = if kind == "local" {
                 crate::font::load_system_font(&source).map_err(error)
             } else {
-                font_bytes(state, document, &source, base.as_ref())
+                font_bytes(state, document, &source, base.as_ref(), csp_source)
                     .and_then(|bytes| Font::load_from_bytes(bytes).map_err(error))
             };
             if let Ok(font) = candidate {
@@ -637,6 +653,10 @@ pub(super) fn native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
                 .into())
         });
     }
+    if operation == "capture-source" {
+        let source = security_reporting::capture_csp_source(context);
+        return Ok(js_string!(serde_json::to_string(&source).map_err(error)?.as_str()).into());
+    }
     let payload = string_argument(args.get(1), "{}", context)?;
     let payload: serde_json::Value = serde_json::from_str(&payload).map_err(error)?;
     if operation == "parse-source" || operation == "parse-font" {
@@ -649,6 +669,11 @@ pub(super) fn native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         return Ok(js_string!(result.to_string().as_str()).into());
     }
     let bytes = body_bytes_argument(args.get(2), context)?;
+    let csp_source = if operation == "load" {
+        csp_source_location_argument(args, 3, context)?
+    } else {
+        None
+    };
     with_host_state(|host| {
         let mut state = host.borrow_mut();
         let document = state.csp_document_for_context(context)?;
@@ -738,7 +763,7 @@ pub(super) fn native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
                 let owner = state
                     .get_node(owner_id)
                     .ok_or_else(|| error("font document is no longer live"))?;
-                load_face(&mut state, &owner, id)?;
+                load_face(&mut state, &owner, id, csp_source.as_ref())?;
             }
             "add" => {
                 let members = state.font_loading.members.entry(document_id).or_default();

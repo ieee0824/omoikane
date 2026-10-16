@@ -523,9 +523,10 @@ fn evaluate_worklet_module(
     runtime
         .module_loader
         .set_context_for_module_graph(document.identity(), effective_url, graph);
-    let module = match Module::parse(
+    let module = match Module::parse_with_host_defined(
         Source::from_reader(source.as_bytes(), Some(Path::new(effective_url))),
         None,
+        security_reporting::module_csp_metadata(&resolved_url),
         &mut runtime.context,
     ) {
         Ok(module) => module,
