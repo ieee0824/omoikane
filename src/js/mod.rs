@@ -148,6 +148,7 @@ mod service_worker;
 mod service_worker_tests;
 mod shared_worker;
 use shared_worker::terminate_shared_worker_connections;
+mod task_diagnostics;
 mod text_selection;
 mod text_stream;
 mod web_locks;
@@ -11626,8 +11627,8 @@ impl JsRuntime {
     /// bounds the total number of tasks executed (so a callback that
     /// continuously schedules timers or posted messages cannot explode).
     ///
-    /// Unlike [`tick`](Self::tick), individual callback errors are swallowed so
-    /// that one throwing timer does not halt the remaining pipeline work.
+    /// Unlike [`tick`](Self::tick), individual callback errors are retained by
+    /// [`take_task_errors`](Self::take_task_errors) without halting later work.
     ///
     /// Returns the number of timer tasks that were actually executed.
     pub fn run_timers(&mut self, max_virtual_ms: u64, step_ms: u64, max_tasks: usize) -> usize {
@@ -11677,9 +11678,8 @@ impl JsRuntime {
                     _ => None,
                 };
                 {
-                    // Swallow per-task JS errors: a single failing timer must
-                    // not abort the whole pump during rendering. Diagnostics
-                    // remain available on demand for complex app bootstraps.
+                    // Keep failures before draining jobs, while allowing the
+                    // remaining rendering pipeline tasks to continue.
                     let task_kind = match &task {
                         Task::Timer { payload, .. } => payload.kind(),
                         Task::Geolocation { .. } => "geolocation",
@@ -11700,19 +11700,11 @@ impl JsRuntime {
                     let callback_start = std::time::Instant::now();
                     let callback_result = self.run_task(task);
                     let callback_elapsed = callback_start.elapsed();
-                    if let Err(error) = callback_result
-                        && std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some()
-                    {
-                        eprintln!("[omoikane][timer-error] {error}");
-                    }
+                    self.record_host_task_result(task_kind, "callback", callback_result);
                     let jobs_start = std::time::Instant::now();
                     let jobs_result = self.run_jobs_for_document(task_document_id);
                     let jobs_elapsed = jobs_start.elapsed();
-                    if let Err(error) = jobs_result
-                        && std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some()
-                    {
-                        eprintln!("[omoikane][timer-job-error] {error}");
-                    }
+                    self.record_host_task_result(task_kind, "jobs", jobs_result);
                     if std::env::var_os("OMOIKANE_LOG_TIMERS").is_some() {
                         eprintln!(
                             "[omoikane][timer] task={} kind={} callback_ms={:.3} jobs_ms={:.3}",
