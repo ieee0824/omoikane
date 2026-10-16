@@ -15,14 +15,16 @@ pub(super) enum PolicyFeature {
     Geolocation,
     CrossOriginIsolated,
     StorageAccess,
+    FocusWithoutUserActivation,
 }
 
 impl PolicyFeature {
-    pub(super) const ALL: [Self; 4] = [
+    pub(super) const ALL: [Self; 5] = [
         Self::Fullscreen,
         Self::Geolocation,
         Self::CrossOriginIsolated,
         Self::StorageAccess,
+        Self::FocusWithoutUserActivation,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -31,6 +33,7 @@ impl PolicyFeature {
             Self::Geolocation => "geolocation",
             Self::CrossOriginIsolated => "cross-origin-isolated",
             Self::StorageAccess => "storage-access",
+            Self::FocusWithoutUserActivation => "focus-without-user-activation",
         }
     }
 

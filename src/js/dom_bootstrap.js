@@ -3059,6 +3059,8 @@ export const __omoikane_service_worker_lifecycle = {};
     const doc = internalOwnerDocument(node);
     const docId = internalNodeId(doc);
     if (!documentFocusChain(docId)) return;
+    if (!nativePermissionsPolicyQuery(docId, "allowsFeature", "focus-without-user-activation") &&
+        !fullscreenTransientActivation) return;
     const previousChain = focusChainIds();
     const previousDocId = previousChain[0]?.[0] ?? null;
     const previousId = focusDocumentCommand(previousDocId, "snapshot");

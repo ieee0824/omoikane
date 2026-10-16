@@ -59,6 +59,74 @@ const INPUT_PAGE: &str =
     "<html><body><script>globalThis.frameReady=true</script><input id=target></body></html>";
 
 #[test]
+fn cross_origin_focus_requires_delegation_or_user_activation() {
+    let document = crate::html::TreeBuilder::parse(
+        "<html><body><button id=old>old</button><iframe id=child src='https://child.test/child'></iframe></body></html>",
+    ).document();
+    let mut runtime = JsRuntime::with_document_and_url(document, "https://top.test/page").unwrap();
+    runtime.set_http_resource_transport(Some(Arc::new(FocusPages(HashMap::from([(
+        "https://child.test/child".to_owned(),
+        INPUT_PAGE.to_owned(),
+    )])))));
+    for _ in 0..8 {
+        runtime.tick(0).unwrap();
+    }
+    let child = frame_document(&runtime, &runtime.document(), "#child");
+    runtime
+        .eval("document.getElementById('old').focus()")
+        .unwrap();
+    eval_document(
+        &mut runtime,
+        &child,
+        "const target=document.getElementById('target'); \
+         document.documentElement.setAttribute('data-policy', \
+         String(document.permissionsPolicy.allowsFeature('focus-without-user-activation'))); \
+         target.focus(); \
+         document.documentElement.setAttribute('data-denied', String(document.activeElement===target)); \
+         __omoikane_dispatch_mouse_input(target.__id,'mousedown',{},true); \
+         document.documentElement.setAttribute('data-activated', String(document.activeElement===target))",
+    );
+    assert_eq!(attribute(&child, "data-policy").as_deref(), Some("false"));
+    assert_eq!(attribute(&child, "data-denied").as_deref(), Some("false"));
+    assert_eq!(attribute(&child, "data-activated").as_deref(), Some("true"));
+}
+
+#[test]
+fn response_policy_blocks_script_focus_but_allows_user_input() {
+    let mut runtime = runtime(&[]);
+    runtime.install_response_security_headers(&[(
+        "Permissions-Policy".into(),
+        "focus-without-user-activation=()".into(),
+    )]);
+    assert_eq!(
+        runtime.eval("!document.permissionsPolicy.allowsFeature('focus-without-user-activation') && \
+            document.permissionsPolicy.getAllowlistForFeature('focus-without-user-activation').length === 0")
+            .unwrap().as_boolean(),
+        Some(true)
+    );
+    assert_eq!(
+        runtime
+            .eval(
+                "const old=document.getElementById('old'); old.focus(); \
+            document.activeElement===old"
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(false)
+    );
+    assert_eq!(
+        runtime
+            .eval(
+                "__omoikane_dispatch_mouse_input(old.__id,'mousedown',{},true); \
+            document.activeElement===old"
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
 fn cross_origin_child_focus_updates_its_own_and_parent_active_elements() {
     let mut runtime = runtime(&[("https://child.test/child", INPUT_PAGE)]);
     let child = frame_document(&runtime, &runtime.document(), "#child");
