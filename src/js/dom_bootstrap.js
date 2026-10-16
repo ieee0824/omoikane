@@ -22929,6 +22929,7 @@ export const __omoikane_service_worker_lifecycle = {};
   // -------------------------------------------------------------------------
   const permissionsConstructionToken = {};
   const permissionStatusEntries = new Map();
+  const permissionStatusNames = new WeakMap();
   const permissionStatusUsesWeakRefs = typeof WeakRef === "function";
   let permissionLifecycleActive = true;
   const supportedPermissionNames = Object.freeze([
@@ -22982,9 +22983,10 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function registerPermissionStatus(status) {
-    const entries = permissionStatusEntries.get(status.__permissionName) || [];
+    const name = permissionStatusNames.get(status);
+    const entries = permissionStatusEntries.get(name) || [];
     entries.push(permissionStatusUsesWeakRefs ? new WeakRef(status) : status);
-    permissionStatusEntries.set(status.__permissionName, entries);
+    permissionStatusEntries.set(name, entries);
   }
 
   function notifyPermissionStatuses(name, state) {
@@ -23006,10 +23008,15 @@ export const __omoikane_service_worker_lifecycle = {};
       if (!supportedPermissionNames.includes(name)) {
         throw new TypeError("Illegal constructor");
       }
-      this.__permissionName = name;
+      permissionStatusNames.set(this, name);
       this.__state = state;
       this.__active = true;
       this.__onchange = null;
+    }
+    get name() {
+      const name = permissionStatusNames.get(this);
+      if (name === undefined) throw new TypeError("Illegal invocation");
+      return name;
     }
     get state() { return this.__state; }
     get onchange() { return this.__onchange; }

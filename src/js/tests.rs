@@ -16859,6 +16859,32 @@ fn notifications_model_permission_and_task_queued_lifecycle() {
 }
 
 #[test]
+fn permission_status_reports_queried_name() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            "globalThis.permissionNames = []; \
+             Promise.all(['notifications', 'storage-access'].map(name => \
+               navigator.permissions.query({ name }))).then(statuses => { \
+                 permissionNames = statuses.map(status => status.name); \
+               });",
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "permissionNames.join('|')"),
+        "notifications|storage-access"
+    );
+    assert_eq!(
+        runtime
+            .eval("Object.getOwnPropertyDescriptor(PermissionStatus.prototype, 'name').set === undefined")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
 fn permissions_query_maps_existing_states_and_notifies_lifecycle_changes() {
     let mut runtime = JsRuntime::new().unwrap();
     assert_eq!(
