@@ -110,13 +110,13 @@ impl UpstreamTransport {
             let mut tls = rustls::StreamOwned::new(session, stream);
             tls.write_all(&request.serialize())
                 .map_err(HttpParseError::Io)?;
-            HttpResponse::parse(&mut tls)
+            HttpResponse::parse_for_browser(&mut tls)
         } else {
             let mut stream = stream;
             stream
                 .write_all(&request.serialize())
                 .map_err(HttpParseError::Io)?;
-            HttpResponse::parse(&mut stream)
+            HttpResponse::parse_for_browser(&mut stream)
         }
     }
 }

@@ -41,6 +41,12 @@ pub struct HttpResponse {
     final_request_referrer: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum HeaderLineHandling {
+    Strict,
+    SkipNonFieldLines,
+}
+
 impl HttpResponse {
     pub(crate) fn new(
         status_code: u16,
@@ -136,20 +142,52 @@ impl HttpResponse {
         reader: &mut impl Read,
         max_body_bytes: usize,
     ) -> Result<Self, HttpParseError> {
-        Self::parse_for_method_with_limit(reader, Method::Get, max_body_bytes)
+        Self::parse_for_method_with_limit(
+            reader,
+            Method::Get,
+            max_body_bytes,
+            HeaderLineHandling::Strict,
+        )
+    }
+
+    /// Parses a browser response, ignoring received lines without a field colon.
+    ///
+    /// Valid fields, including repeated policies, retain their order. Body
+    /// framing errors and buffered/decoded size limits remain enforced.
+    pub fn parse_for_browser(reader: &mut impl Read) -> Result<Self, HttpParseError> {
+        Self::parse_for_browser_with_limit(reader, response_body_limit())
+    }
+
+    /// Parses a browser response with an explicit buffered/decoded body limit.
+    pub fn parse_for_browser_with_limit(
+        reader: &mut impl Read,
+        max_body_bytes: usize,
+    ) -> Result<Self, HttpParseError> {
+        Self::parse_for_method_with_limit(
+            reader,
+            Method::Get,
+            max_body_bytes,
+            HeaderLineHandling::SkipNonFieldLines,
+        )
     }
 
     pub(crate) fn parse_for_method(
         reader: &mut impl Read,
         method: Method,
     ) -> Result<Self, HttpParseError> {
-        Self::parse_for_method_with_limit(reader, method, response_body_limit())
+        Self::parse_for_method_with_limit(
+            reader,
+            method,
+            response_body_limit(),
+            HeaderLineHandling::SkipNonFieldLines,
+        )
     }
 
     fn parse_for_method_with_limit(
         reader: &mut impl Read,
         method: Method,
         max_body_bytes: usize,
+        header_lines: HeaderLineHandling,
     ) -> Result<Self, HttpParseError> {
         let mut buf_reader = io::BufReader::new(reader);
         for _ in 0..16 {
@@ -173,6 +211,11 @@ impl HttpResponse {
                 let trimmed = line.trim_end_matches(['\r', '\n']);
                 if trimmed.is_empty() {
                     break;
+                }
+                if matches!(header_lines, HeaderLineHandling::SkipNonFieldLines)
+                    && !trimmed.contains(':')
+                {
+                    continue;
                 }
                 let (name, value) = parse_header_line(trimmed)?;
                 headers.push((name, value));
