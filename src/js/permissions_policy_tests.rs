@@ -38,8 +38,8 @@ fn document_policy_object_reports_the_same_header_rules_as_fullscreen() {
         ),
         json!({
             "same": true,
-            "features": ["fullscreen", "geolocation", "cross-origin-isolated", "storage-access"],
-            "allowed": ["fullscreen", "storage-access"],
+            "features": ["fullscreen", "geolocation", "cross-origin-isolated", "storage-access", "focus-without-user-activation"],
+            "allowed": ["fullscreen", "storage-access", "focus-without-user-activation"],
             "self": true,
             "child": true,
             "other": false,
@@ -75,7 +75,12 @@ fn document_policy_object_reports_the_same_header_rules_as_fullscreen() {
         json!([
             false,
             false,
-            ["geolocation", "cross-origin-isolated", "storage-access"],
+            [
+                "geolocation",
+                "cross-origin-isolated",
+                "storage-access",
+                "focus-without-user-activation"
+            ],
             ["*"]
         ])
     );
@@ -95,7 +100,12 @@ fn document_policy_object_reports_the_same_header_rules_as_fullscreen() {
         json!([
             false,
             true,
-            ["geolocation", "cross-origin-isolated", "storage-access"],
+            [
+                "geolocation",
+                "cross-origin-isolated",
+                "storage-access",
+                "focus-without-user-activation"
+            ],
             []
         ])
     );
