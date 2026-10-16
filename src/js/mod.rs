@@ -3867,7 +3867,10 @@ impl HostState {
                 },
             )
         } else {
-            match child_url.as_deref().and_then(StorageOrigin::from_url) {
+            match child_url
+                .as_deref()
+                .and_then(StorageOrigin::from_document_url)
+            {
                 Some(origin) => (Some(origin.clone()), DocumentSecurityOrigin::Tuple(origin)),
                 None => (None, self.new_opaque_security_origin()?),
             }
@@ -4917,7 +4920,7 @@ impl HostState {
         let storage_origin = if inherits_origin {
             client.storage_origin.clone()
         } else {
-            StorageOrigin::from_url(&document_url)
+            StorageOrigin::from_document_url(&document_url)
         };
         let security_origin = if inherits_origin {
             client.security_origin.clone()
@@ -5436,6 +5439,25 @@ impl HostState {
         source_url: &str,
         policy: security_reporting::ReferrerPolicy,
     ) -> Option<FetchedChildResource> {
+        if src
+            .get(..5)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("blob:"))
+        {
+            let url = url::Url::parse(src).ok()?;
+            let mut lookup_url = url.clone();
+            lookup_url.set_fragment(None);
+            let entry = crate::data::lookup_blob_url(lookup_url.as_str())?;
+            return Some(FetchedChildResource {
+                mime_type: entry.media_type,
+                body: entry.bytes.as_ref().clone(),
+                response_status: 200,
+                final_request_referrer: String::new(),
+                security_headers: Vec::new(),
+                response_headers: Vec::new(),
+                redirects: Vec::new(),
+                effective_url: url.to_string(),
+            });
+        }
         let url = match resolve_resource_ref(src, base_url)? {
             ResolvedResource::Data { mime_type, data } => {
                 return Some(FetchedChildResource {
@@ -6095,7 +6117,7 @@ impl HostState {
             // the declared URL origin for its container policy.
             return Some(child_origin.clone());
         }
-        StorageOrigin::from_url(&url).map(DocumentSecurityOrigin::Tuple)
+        StorageOrigin::from_document_url(&url).map(DocumentSecurityOrigin::Tuple)
     }
 
     fn inherited_permissions_for_iframe(

@@ -29,6 +29,16 @@ impl StorageOrigin {
         })
     }
 
+    /// Returns the origin of a navigated Document, including a `blob:` URL's
+    /// embedded origin. Other non-HTTP URLs remain opaque.
+    pub(crate) fn from_document_url(url: &str) -> Option<Self> {
+        let parsed = url::Url::parse(url).ok()?;
+        if parsed.scheme() == "blob" {
+            return Self::from_url(&parsed.origin().ascii_serialization());
+        }
+        Self::from_url(url)
+    }
+
     pub(crate) fn serialize(&self) -> String {
         format!("{}://{}:{}", self.scheme, self.host, self.port)
     }

@@ -27039,7 +27039,10 @@ export const __omoikane_service_worker_lifecycle = {};
     if (!(object instanceof Blob)) {
       throw new TypeError("createObjectURL requires a Blob");
     }
-    const origin = (globalThis.location && globalThis.location.origin) || "null";
+    // about:blank and srcdoc can inherit an origin that differs from their
+    // URL's `null` origin. Use the Document's security origin instead.
+    const documentOrigin = __omoikane_storage_origin(__omoikane_document_id);
+    const origin = documentOrigin === null ? "null" : new URL(documentOrigin).origin;
     const url = "blob:" + origin + "/" + crypto.randomUUID();
     objectUrls.set(url, object);
     __omoikane_register_object_url(url, object.__bytes, object.type);

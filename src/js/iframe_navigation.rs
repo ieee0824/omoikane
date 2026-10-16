@@ -90,7 +90,7 @@ impl HostState {
             loaded
                 .url
                 .as_deref()
-                .and_then(StorageOrigin::from_url)
+                .and_then(StorageOrigin::from_document_url)
                 .as_ref()
                 == Some(origin)
                 && loaded
