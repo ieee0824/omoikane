@@ -1,4 +1,5 @@
 //! Lifecycle of the pinned upstream wptserve HTTP/HTTPS fixture process.
+use super::model::FixtureServer;
 use super::upstream_transport::{self, Description};
 use omoikane::http::HttpTransport;
 use std::{
@@ -16,6 +17,7 @@ use std::{
 
 pub(super) struct UpstreamServer {
     pub(super) base_url: String,
+    http_base_url: String,
     pub(super) transport: Arc<dyn HttpTransport>,
     pub(super) description: Arc<Description>,
     _process: ServerProcess,
@@ -102,17 +104,33 @@ impl ServerProcess {
 }
 
 impl UpstreamServer {
+    pub(super) fn case_base_url(&self, server: FixtureServer) -> &str {
+        if server == FixtureServer::WptserveHttp {
+            &self.http_base_url
+        } else {
+            &self.base_url
+        }
+    }
+
     pub(super) fn start(root: &Path) -> io::Result<Self> {
         let mut process = ServerProcess::start(root)?;
         let description = Arc::new(process.description()?);
         let base_url = description.base_url.clone();
+        let origin: omoikane::http::Url = base_url.parse().map_err(io::Error::other)?;
+        let port = description
+            .http_ports
+            .first()
+            .filter(|port| **port != 0)
+            .ok_or_else(|| io::Error::other("missing upstream HTTP port"))?;
+        let http_base_url = format!("http://{}:{port}", origin.host());
         let transport = upstream_transport::transport(Arc::clone(&description))?;
         eprintln!(
-            "WPT upstream HTTPS: {base_url}; evidence {}",
+            "WPT upstream HTTPS: {base_url}; HTTP: {http_base_url}; evidence {}",
             process.directory.display()
         );
         Ok(Self {
             base_url,
+            http_base_url,
             transport,
             description,
             _process: process,

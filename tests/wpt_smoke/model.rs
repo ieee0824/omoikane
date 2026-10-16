@@ -21,6 +21,8 @@ pub(super) enum FixtureServer {
     #[default]
     Static,
     Wptserve,
+    /// Real upstream HTTP on a non-loopback host, for insecure-context tests.
+    WptserveHttp,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

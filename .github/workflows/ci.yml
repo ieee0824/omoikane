@@ -247,6 +247,14 @@ jobs:
           WPT_REPORT: .artifacts/wpt/report.json
           WPT_JUNIT: .artifacts/wpt/junit.xml
         run: cargo test --locked --test wpt_smoke -- --nocapture
+      - name: Run Storage Access insecure-context WPTs over upstream HTTP
+        env:
+          WPT_ROOT: .cache/wpt
+          WPT_REQUIRED: "1"
+          WPT_MANIFEST: tests/wpt/storage-access-insecure.json
+          WPT_REPORT: .artifacts/wpt/storage-access-insecure-report.json
+          WPT_JUNIT: .artifacts/wpt/storage-access-insecure-junit.xml
+        run: cargo test --locked --test wpt_smoke selected_wpt_testharness_cases_match_expectations -- --exact --nocapture
       - name: Run individual transform reftests
         env:
           WPT_ROOT: .cache/wpt

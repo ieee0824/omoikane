@@ -63,8 +63,16 @@ testdriver adapter and SharedArrayBuffer discovery hook across both backends.
 Server metadata and logs are retained under `.artifacts/wptserve/` in the worktree.
 
 Set `WPT_UPSTREAM=1` to use this backend for every selected case. It provides HTTP
-and HTTPS, not WebSocket/WebTransport servers. Run its TLS, origin-scope and
-shared-state checks explicitly with a fetched checkout:
+and HTTPS, not WebSocket/WebTransport servers.
+
+The default upstream primary origin is HTTPS. Cases marked
+`"server": "wptserve-http"` explicitly use upstream HTTP on `web-platform.test`,
+including when `WPT_UPSTREAM=1` is set. This preserves a non-loopback, insecure
+origin while routing network connections to the local fixture server. Use
+`WPT_MANIFEST=tests/wpt/storage-access-insecure.json` to run the original Storage
+Access insecure-context cases on that origin.
+
+Run its TLS, origin-scope and shared-state checks explicitly with a fetched checkout:
 
 ```sh
 WPT_ROOT=target/wpt WPT_REQUIRED=1 cargo test --locked --test wpt_smoke upstream_transport::tests::
