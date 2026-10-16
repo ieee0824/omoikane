@@ -10714,9 +10714,18 @@ impl JsRuntime {
         let previous = self.context.enter_realm(realm);
         let result = (|| -> JsResult<()> {
             self.run_auxiliary_classic_scripts(document_id, scripts)?;
+            // A parser script may close or navigate its own browsing context.
+            // Its old Window must receive no later lifecycle events.
+            if !self.host_state.borrow().document_is_active(document_id) {
+                return Ok(());
+            }
             self.eval(
-                "document.__readyState = 'complete'; document.dispatchEvent(new Event('DOMContentLoaded')); window.dispatchEvent(new Event('load'));",
+                "document.__readyState = 'complete'; document.dispatchEvent(new Event('DOMContentLoaded'));",
             )?;
+            self.run_jobs()?;
+            if self.host_state.borrow().document_is_active(document_id) {
+                self.eval("window.dispatchEvent(new Event('load'));")?;
+            }
             self.run_jobs()
         })();
         if let Err(error) = &result
@@ -10747,6 +10756,9 @@ impl JsRuntime {
             .cloned()
             .unwrap_or_default();
         for script in scripts {
+            if !self.host_state.borrow().document_is_active(document_id) {
+                break;
+            }
             let attributes = script.attributes().unwrap_or_default();
             if !is_executable_classic_script_type(attributes.get("type").map(String::as_str)) {
                 continue;
