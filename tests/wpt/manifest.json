@@ -527,6 +527,7 @@
     {"path": "content-security-policy/unsafe-hashes/javascript_src_allowed-href_blank-script-src-elem.html"},
     {"path": "permissions-policy/policy-extends-to-sandbox.html"},
     {"path": "permissions-policy/navigate-to-blob.sub.html", "server": "wptserve-http"},
+    {"path": "permissions-policy/experimental-features/focus-without-user-activation-disabled.html", "server": "wptserve-http"},
     {"path": "html/semantics/embedded-content/the-iframe-element/iframe-allow.html"},
     {"path": "trusted-types/Window-TrustedTypes.html"},
     {"path": "trusted-types/DedicatedWorker-eval.html"},

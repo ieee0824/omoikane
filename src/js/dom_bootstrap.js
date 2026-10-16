@@ -1215,6 +1215,19 @@ export const __omoikane_service_worker_lifecycle = {};
     constructor() {
       throw new TypeError("Illegal constructor");
     }
+
+    focus() {
+      if (this !== focusDocument.defaultView && !windowObjects.has(this)) {
+        throw new TypeError("Illegal invocation");
+      }
+      focusWindowAcrossDocuments();
+    }
+
+    blur() {
+      if (this !== focusDocument.defaultView && !windowObjects.has(this)) {
+        throw new TypeError("Illegal invocation");
+      }
+    }
   }
   // The browsing-context opener is separate from an author's own `opener`
   // property. A named-window reuse updates this slot without replacing that
@@ -3007,6 +3020,7 @@ export const __omoikane_service_worker_lifecycle = {};
     blurElement(relatedId) {
       const node = focusedElementOf(focusDocument);
       focusDocument.__focusedElementId = null;
+      __omoikane_set_content_visibility_focus(null);
       nativeSetUserActionTarget("focus", null, false);
       if (node) {
         const related = wrapNode(relatedId);
@@ -3031,6 +3045,7 @@ export const __omoikane_service_worker_lifecycle = {};
         browsingInput.focusVisibleCurrent = false;
       }
     },
+    focusWindow() { focusWindowAcrossDocuments(); },
     commit(id, previousId, previousVisible, preventScroll) {
       const node = wrapNode(id);
       if (internalOwnerDocument(node) !== focusDocument || !canBeFocused(node)) return;
@@ -3054,9 +3069,7 @@ export const __omoikane_service_worker_lifecycle = {};
     },
   };
 
-  function focusElementAcrossDocuments(node, preventScroll) {
-    if (!canBeFocused(node)) return;
-    const doc = internalOwnerDocument(node);
+  function focusAcrossDocuments(doc, node, preventScroll) {
     const docId = internalNodeId(doc);
     if (!documentFocusChain(docId)) return;
     if (!nativePermissionsPolicyQuery(docId, "allowsFeature", "focus-without-user-activation") &&
@@ -3064,14 +3077,15 @@ export const __omoikane_service_worker_lifecycle = {};
     const previousChain = focusChainIds();
     const previousDocId = previousChain[0]?.[0] ?? null;
     const previousId = focusDocumentCommand(previousDocId, "snapshot");
-    const id = internalNodeId(node);
+    const id = node === null ? null : internalNodeId(node);
     if (previousDocId === docId && previousId === id) return;
     const previousVisible = previousId !== null && browsingInput.focusVisibleCurrent;
     const crossesDocuments = previousDocId !== docId;
     const generation = (browsingInput.focusGeneration || 0) + 1;
     browsingInput.focusGeneration = generation;
-    const current = () => browsingInput.focusGeneration === generation && canBeFocused(node) &&
-      internalNodeId(internalOwnerDocument(node)) === docId && documentFocusChain(docId) !== null;
+    const current = () => browsingInput.focusGeneration === generation &&
+      (node === null || (canBeFocused(node) && internalNodeId(internalOwnerDocument(node)) === docId)) &&
+      documentFocusChain(docId) !== null;
     focusDocumentCommand(previousDocId, "blurElement", [crossesDocuments ? null : id]);
     // Nested focus from a blur handler wins over this interrupted transition.
     if (!current()) return;
@@ -3086,11 +3100,22 @@ export const __omoikane_service_worker_lifecycle = {};
       for (const [, parent, frame] of documentFocusChain(docId)) {
         if (parent !== null) focusDocumentCommand(parent, "frame", [frame]);
       }
+      if (node === null) focusDocumentCommand(docId, "blurElement", [null]);
       browsingInput.focusedDocumentId = docId;
       focusDocumentCommand(docId, "windowEvent", ["focus"]);
       if (!current()) return;
     }
-    focusDocumentCommand(docId, "commit", [id, crossesDocuments ? null : previousId, previousVisible, preventScroll]);
+    if (id !== null) {
+      focusDocumentCommand(docId, "commit", [id, crossesDocuments ? null : previousId, previousVisible, preventScroll]);
+    }
+  }
+
+  function focusElementAcrossDocuments(node, preventScroll) {
+    if (canBeFocused(node)) focusAcrossDocuments(internalOwnerDocument(node), node, preventScroll);
+  }
+
+  function focusWindowAcrossDocuments() {
+    focusAcrossDocuments(focusDocument, null, true);
   }
 
   // No focus event is cancelable, and all four are composed so they cross
@@ -11018,7 +11043,16 @@ export const __omoikane_service_worker_lifecycle = {};
               return document ? document.querySelectorAll("iframe, frame").length : 0;
             }
             if (property === "location") return window !== null && (access === "cross" || access === "closed") ? window.location : locationFacade;
-            if (property === "close" || property === "focus" || property === "blur") return () => {};
+            if (property === "focus" && window !== null && access !== "closed") {
+              return Reflect.get(window, property, windowHandlerReceiver(window, property, receiver, proxy));
+            }
+            if (property === "focus") return () => {
+              refresh();
+              if (access === "closed") return;
+              const documentId = nativeExistingIframeDocument(iframe.__id);
+              if (documentId !== null) focusDocumentCommand(documentId, "focusWindow");
+            };
+            if (property === "close" || property === "blur") return () => {};
             if (property === "postMessage") return postMessage;
             if (access === "closed") {
               if (property === "frameElement") return null;
@@ -23422,6 +23456,14 @@ export const __omoikane_service_worker_lifecycle = {};
   Object.setPrototypeOf(Window.prototype, EventTarget.prototype);
   Object.setPrototypeOf(Window, EventTarget);
   Object.setPrototypeOf(globalThis, Window.prototype);
+  // Child WindowProxies replace globalThis after bootstrap. Keep the backing
+  // Window's focus methods in its own Realm for proxy forwarding.
+  Object.defineProperty(globalThis, "focus", {
+    configurable: true, writable: true, value: Window.prototype.focus,
+  });
+  Object.defineProperty(globalThis, "blur", {
+    configurable: true, writable: true, value: Window.prototype.blur,
+  });
   // XMLHttpRequestUpload is declared beside XMLHttpRequest so the latter can
   // construct it before this general EventTarget definition is reached.  Link
   // the prototype chain once EventTarget is initialized so standard brand
