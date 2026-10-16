@@ -31575,15 +31575,19 @@ fn async_dynamic_non_cors_script_mutes_exception_and_rejection() {
     {
         let mut future = Box::pin(runtime.run_until_idle_async());
         let mut context = FutureContext::from_waker(Waker::noop());
-        let mut completed = false;
-        for _ in 0..100 {
-            if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
-                result.unwrap();
-                completed = true;
-                break;
+        let deadline = std::time::Instant::now() + ACCEPT_TIMEOUT + READ_TIMEOUT;
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(result) => {
+                    result.unwrap();
+                    break;
+                }
+                Poll::Pending if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Poll::Pending => panic!("async task must complete before the HTTP fixture timeout"),
             }
         }
-        assert!(completed, "async task must complete");
     }
     runtime.run_until_idle().unwrap();
     server.join();

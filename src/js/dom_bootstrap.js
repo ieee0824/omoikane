@@ -2554,13 +2554,32 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
+  // A node keeps one JS wrapper when it moves between browsing-context
+  // Realms. Its constructor belongs to the old Realm, so instanceof the
+  // current Realm's Node cannot identify it during event propagation.
+  function isEventNode(node) {
+    if (node instanceof Node) return true;
+    if (node === null || (typeof node !== "object" && typeof node !== "function")) return false;
+    try {
+      const id = internalNodeId(node);
+      return id !== undefined && cachedNode(id) === node;
+    } catch (_) {
+      return false;
+    }
+  }
+  function isEventShadowRoot(node) {
+    if (node instanceof Node) return node instanceof ShadowRoot;
+    return isEventNode(node) && internalNodeType(node) === 11 &&
+      nativeShadowHost(internalNodeId(node)) !== null;
+  }
+
   function shadowRootsContaining(node) {
-    if (!(node instanceof Node)) return [];
+    if (!isEventNode(node)) return [];
     const roots = [];
     let current = node;
     while (current) {
       const root = nodeRoot(current);
-      if (!(root instanceof ShadowRoot)) break;
+      if (!isEventShadowRoot(root)) break;
       if (root.mode === "closed") roots.push(root);
       current = root.host;
     }
@@ -2568,11 +2587,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function isNodeInsideShadowRoot(node, root) {
-    if (!(node instanceof Node)) return false;
+    if (!isEventNode(node)) return false;
     for (let current = node; current;) {
       if (current === root) return true;
       current = current.parentNode ||
-        (current instanceof ShadowRoot ? current.host : null);
+        (isEventShadowRoot(current) ? current.host : null);
     }
     return false;
   }
@@ -2583,9 +2602,9 @@ export const __omoikane_service_worker_lifecycle = {};
   // because their tree root remains the outer document.
   function retargetNode(node, against) {
     let target = node;
-    while (target instanceof Node) {
+    while (isEventNode(target)) {
       const root = nodeRoot(target);
-      if (!(root instanceof ShadowRoot)) return target;
+      if (!isEventShadowRoot(root)) return target;
       if (isNodeInsideShadowRoot(against, root)) return target;
       target = root.host;
     }
@@ -2629,12 +2648,12 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function eventParent(node, event, originalRoot) {
-    if (!(node instanceof Node) || !isLiveNode(node)) return null;
+    if (!isEventNode(node) || !isLiveNode(node)) return null;
     const assignedSlotId = internalAssignedSlot(node.__id);
     if (assignedSlotId !== null && assignedSlotId !== undefined) {
       return wrapNode(assignedSlotId);
     }
-    if (node instanceof ShadowRoot) {
+    if (isEventShadowRoot(node)) {
       // A non-composed event only stops at the shadow root in which it was
       // dispatched. Events from slotted light-DOM nodes still leave the root.
       return event.composed || originalRoot !== node ? node.host : null;
@@ -2644,9 +2663,9 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function buildEventPath(target, event) {
-    if (target instanceof Node && !isLiveNode(target)) return [];
+    if (isEventNode(target) && !isLiveNode(target)) return [];
     const path = [];
-    const originalRoot = target instanceof Node ? nodeRoot(target) : null;
+    const originalRoot = isEventNode(target) ? nodeRoot(target) : null;
     let current = target;
     while (current) {
       const entry = {
@@ -2663,7 +2682,7 @@ export const __omoikane_service_worker_lifecycle = {};
       if (entry.relatedTarget !== null && entry.relatedTarget === entry.target) break;
       path.push(entry);
       const parent = eventParent(current, event, originalRoot);
-      if (parent && current instanceof ShadowRoot &&
+      if (parent && isEventShadowRoot(current) &&
           retargetNode(target, parent) === parent) {
         // Capturing and bubbling listeners on a host are invoked as AT_TARGET
         // when an event crosses out of its shadow root.
