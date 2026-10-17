@@ -635,6 +635,82 @@
     { "path": "storage-access-api/idlharness.window.js" },
     { "path": "storage-access-api/storage-access-permission.sub.https.window.js", "server": "wptserve" },
     { "path": "storage-access-api/requestStorageAccess-web-socket.sub.https.window.js", "server": "wptserve" },
-    { "path": "storage-access-api/requestStorageAccess-non-fully-active.sub.https.window.js" }
+    { "path": "storage-access-api/requestStorageAccess-non-fully-active.sub.https.window.js" },
+    {"path": "cookiestore/cookieListItem_attributes.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/cookieStoreManager_getSubscriptions_empty.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/cookieStoreManager_getSubscriptions_multiple.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/cookieStoreManager_getSubscriptions_single.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/cookieStore_delete_arguments.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/cookieStore_delete_basic.https.any.serviceworker.html", "server": "wptserve"},
+    {
+      "path": "cookiestore/cookieStore_getAll_arguments.https.any.serviceworker.html",
+      "server": "wptserve",
+      "known_failure": {
+        "status": "FAIL",
+        "issue": "#1354",
+        "reason": "Pinned ServiceWorker WPT permits same-origin alternate query URLs; the current Cookie Store getAll(options) algorithm requires the creation URL excluding fragments. Whitespace-name cases now pass.",
+        "failed_subtests": [
+          "cookieStore.getAll with absolute url in options",
+          "cookieStore.getAll with relative url in options",
+          "cookieStore.getAll with same-origin url path in options",
+          "cookieStore.getAll with absolute url with fragment in options"
+        ]
+      }
+    },
+    {"path": "cookiestore/cookieStore_getAll_multiple.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/cookieStore_getAll_set_basic.https.any.serviceworker.html", "server": "wptserve"},
+    {
+      "path": "cookiestore/cookieStore_get_arguments.https.any.serviceworker.html",
+      "server": "wptserve",
+      "known_failure": {
+        "status": "FAIL",
+        "issue": "#1354",
+        "reason": "Pinned ServiceWorker WPT permits same-origin alternate query URLs; the current Cookie Store get(options) algorithm requires the creation URL excluding fragments. Whitespace-name cases now pass.",
+        "failed_subtests": [
+          "cookieStore.get with absolute url in options",
+          "cookieStore.get with relative url in options",
+          "cookieStore.get with same-origin url path in options",
+          "cookieStore.get with absolute url with fragment in options"
+        ]
+      }
+    },
+    {"path": "cookiestore/cookieStore_get_delete_basic.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/cookieStore_get_set_basic.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/cookieStore_get_set_ordering.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/cookieStore_set_arguments.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/cookieStore_set_limit.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/cookieStore_special_names.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/cookieStore_subscribe_arguments.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/encoding.https.any.serviceworker.html", "server": "wptserve"},
+    {
+      "path": "cookiestore/serviceworker_cookiechange_eventhandler_already_expired.https.any.serviceworker.html",
+      "server": "wptserve",
+      "known_failure": {
+        "status": "FAIL",
+        "issue": "#1354",
+        "reason": "The current observable-changes algorithm reports an immediately evicted newly-created cookie as deleted, unlike this pinned expectation. The second subtest also requires unimplemented partitioned cookie storage.",
+        "failed_subtests": [
+          "Cookie Store API: cookiechange event in ServiceWorker with already-expired cookie.",
+          "Cookie Store API: cookiechange event in ServiceWorker with already-expired cookie. 1"
+        ]
+      }
+    },
+    {"path": "cookiestore/serviceworker_cookiechange_eventhandler_mismatched_subscription.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/serviceworker_cookiechange_eventhandler_multiple_subscriptions.https.any.serviceworker.html", "server": "wptserve"},
+    {
+      "path": "cookiestore/serviceworker_cookiechange_eventhandler_no_change.https.any.serviceworker.html",
+      "server": "wptserve",
+      "known_failure": {
+        "status": "FAIL",
+        "issue": "#1354",
+        "reason": "Unpartitioned no-change notification passes. The second subtest requires partitioned cookie storage, still tracked in #1354.",
+        "failed_subtests": [
+          "Cookie Store API: cookiechange event in ServiceWorker with already-expired cookie. 1"
+        ]
+      }
+    },
+    {"path": "cookiestore/serviceworker_cookiechange_eventhandler_overlapping_subscriptions.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/serviceworker_cookiechange_eventhandler_single_subscription.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/serviceworker_oncookiechange_eventhandler_single_subscription.https.any.serviceworker.html", "server": "wptserve"}
   ]
 }

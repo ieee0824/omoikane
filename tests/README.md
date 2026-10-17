@@ -72,6 +72,13 @@ origin while routing network connections to the local fixture server. Use
 `WPT_MANIFEST=tests/wpt/storage-access-insecure.json` to run the original Storage
 Access insecure-context cases on that origin.
 
+Cookie Store `.any.serviceworker.html` cases use the pinned upstream Service
+Worker wrappers and execute in the worker global. All 25 variants run in the
+default manifest, with exact subtest expectations for four tracked failures.
+See [Cookie Store Service Worker WPT](../docs/wpt/cookie-store-serviceworker.md)
+for results, remaining scope, and a manifest that retains PASS expectations for
+every original case.
+
 Run its TLS, origin-scope and shared-state checks explicitly with a fetched checkout:
 
 ```sh

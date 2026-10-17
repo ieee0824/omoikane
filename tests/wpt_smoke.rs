@@ -139,6 +139,7 @@ fn selected_wpt_testharness_cases_match_expectations() {
     let mut results = Vec::new();
     let mut mismatches = Vec::new();
     for case in manifest.tests {
+        eprintln!("WPT START {}", case.path);
         let CaseExecution {
             actual,
             script_errors: errors,

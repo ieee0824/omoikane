@@ -17,6 +17,126 @@ struct Mutation {
     deletion: bool,
 }
 
+#[derive(serde::Deserialize)]
+struct SubscriptionEntry {
+    name: Option<String>,
+    url: String,
+}
+
+/// Reads or updates cookie subscriptions for a same-origin Service Worker registration.
+pub(super) fn subscriptions_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
+    let scope = string_argument(args.get(1), "", context)?;
+    let operation = string_argument(args.get(2), "", context)?;
+    let entries = string_argument(args.get(3), "[]", context)?;
+    let entries: Vec<SubscriptionEntry> = serde_json::from_str(&entries)
+        .map_err(|_| JsNativeError::typ().with_message("Invalid cookie subscriptions"))?;
+    let scope_url = url::Url::parse(&scope).map_err(|_| {
+        JsNativeError::typ().with_message("Invalid Service Worker registration scope")
+    })?;
+    if entries.iter().any(|entry| {
+        url::Url::parse(&entry.url)
+            .map(|url| !url.as_str().starts_with(scope_url.as_str()))
+            .unwrap_or(true)
+    }) {
+        return Err(JsNativeError::typ()
+            .with_message("Cookie subscription URL is outside scope")
+            .into());
+    }
+    with_host_state(|host| {
+        let state = host.borrow();
+        if !document_is_secure_context(&state, document_id) {
+            return Err(JsNativeError::typ()
+                .with_message("Cookie subscriptions require a secure context")
+                .into());
+        }
+        let scope_origin = StorageOrigin::from_url(&scope);
+        if scope_origin.is_none()
+            || scope_origin.as_ref()
+                != state
+                    .document_origins
+                    .get(&document_id)
+                    .and_then(Option::as_ref)
+            || state
+                .worker_service_worker_scope
+                .as_ref()
+                .is_some_and(|worker_scope| worker_scope != &scope)
+        {
+            return Err(JsNativeError::typ()
+                .with_message("Invalid Service Worker registration scope")
+                .into());
+        }
+        let worker_scope = state.worker_service_worker_scope.is_some();
+        let top_level_site = state
+            .worker_service_worker_top_level_site
+            .clone()
+            .or_else(|| state.storage_access_top_level_site(document_id))
+            .or_else(|| {
+                scope
+                    .parse::<crate::http::Url>()
+                    .ok()
+                    .map(|url| crate::http::SchemefulSite::from_url(&url))
+            })
+            .ok_or_else(|| JsNativeError::typ().with_message("Top-level site is unavailable"))?;
+        let jar = state.cookie_store.clone();
+        drop(state);
+        let mut jar = jar.lock().unwrap();
+        if !worker_scope && !jar.has_service_worker_scope(&scope, &top_level_site) {
+            return Err(JsNativeError::typ()
+                .with_message("Service Worker registration is unavailable")
+                .into());
+        }
+        match operation.as_str() {
+            "subscribe" | "unsubscribe" => {
+                let entries = entries
+                    .into_iter()
+                    .map(|entry| crate::http::CookieStoreSubscription {
+                        name: entry.name,
+                        url: entry.url,
+                    })
+                    .collect();
+                jar.update_service_worker_subscriptions(
+                    &scope,
+                    &top_level_site,
+                    entries,
+                    operation == "subscribe",
+                );
+                Ok(JsValue::undefined())
+            }
+            "get" => {
+                let items = jar
+                    .service_worker_subscriptions(&scope, &top_level_site)
+                    .into_iter()
+                    .map(|entry| match entry.name {
+                        Some(name) => serde_json::json!({"name": name, "url": entry.url}),
+                        None => serde_json::json!({"url": entry.url}),
+                    })
+                    .collect::<Vec<_>>();
+                Ok(JsValue::from(js_string!(
+                    serde_json::to_string(&items).expect("subscriptions are serializable")
+                )))
+            }
+            "clear" => {
+                if worker_scope {
+                    return Err(JsNativeError::typ()
+                        .with_message("Only the registration owner can unregister")
+                        .into());
+                }
+                jar.clear_service_worker_subscriptions(&scope, &top_level_site);
+                Ok(JsValue::undefined())
+            }
+            _ => Err(JsNativeError::typ()
+                .with_message("Invalid cookie subscription operation")
+                .into()),
+        }
+    })
+}
+
 fn expiry_time(milliseconds: f64) -> Option<SystemTime> {
     if !milliseconds.is_finite() || milliseconds.abs() > u64::MAX as f64 {
         return None;
@@ -275,45 +395,89 @@ pub(super) fn changes_native(
         } else {
             (jar.change_sequence(), Vec::new())
         };
-        let mut events = Vec::new();
-        let mut batch_changed = Vec::new();
-        let mut batch_deleted = Vec::new();
-        for crate::http::CookieStoreChange {
-            name,
-            value,
-            deleted: removed,
-            individual_event,
-        } in changes
-        {
-            if individual_event {
-                if !batch_changed.is_empty() || !batch_deleted.is_empty() {
-                    events.push(serde_json::json!({
-                        "changed": std::mem::take(&mut batch_changed),
-                        "deleted": std::mem::take(&mut batch_deleted),
-                    }));
-                }
-                if removed {
-                    events.push(serde_json::json!({
-                        "changed": [], "deleted": [{ "name": name }],
-                    }));
-                } else {
-                    events.push(serde_json::json!({
-                        "changed": [{ "name": name, "value": value }], "deleted": [],
-                    }));
-                }
-            } else if removed {
-                batch_deleted.push(serde_json::json!({ "name": name }));
-            } else {
-                batch_changed.push(serde_json::json!({ "name": name, "value": value }));
-            }
-        }
-        if !batch_changed.is_empty() || !batch_deleted.is_empty() {
-            events.push(serde_json::json!({
-                "changed": batch_changed,
-                "deleted": batch_deleted,
-            }));
-        }
-        let payload = serde_json::json!({ "cursor": next, "events": events });
-        Ok(JsValue::from(js_string!(payload.to_string())))
+        Ok(encode_cookie_changes(next, changes))
     })
+}
+
+/// Reads changes matching the current Service Worker registration's subscriptions.
+pub(super) fn subscribed_changes_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
+    let cursor = args
+        .get(1)
+        .and_then(JsValue::as_number)
+        .map(|value| value as u64);
+    with_host_state(|host| {
+        let state = host.borrow();
+        let scope = state.worker_service_worker_scope.as_ref().ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("Cookie change subscription requires a Service Worker")
+        })?;
+        let top_level_site = state
+            .worker_service_worker_top_level_site
+            .as_ref()
+            .ok_or_else(|| JsNativeError::typ().with_message("Top-level site is unavailable"))?;
+        let script_url = state.document_base_urls.get(&document_id).ok_or_else(|| {
+            JsNativeError::typ().with_message("Service Worker URL is unavailable")
+        })?;
+        let jar = state.cookie_store.lock().unwrap();
+        let next = jar.change_sequence();
+        if !cookie_access_allowed(&state, document_id) {
+            return Ok(encode_cookie_changes(next, Vec::new()));
+        }
+        let site = state.storage_access_cookie_site_for_document(document_id, script_url);
+        let (next, changes) = if let Some(cursor) = cursor {
+            jar.service_worker_changes_since(cursor, scope, top_level_site, &site)
+        } else {
+            (next, Vec::new())
+        };
+        Ok(encode_cookie_changes(next, changes))
+    })
+}
+
+fn encode_cookie_changes(next: u64, changes: Vec<crate::http::CookieStoreChange>) -> JsValue {
+    let mut events = Vec::new();
+    let mut batch_changed = Vec::new();
+    let mut batch_deleted = Vec::new();
+    for crate::http::CookieStoreChange {
+        name,
+        value,
+        deleted: removed,
+        individual_event,
+    } in changes
+    {
+        if individual_event {
+            if !batch_changed.is_empty() || !batch_deleted.is_empty() {
+                events.push(serde_json::json!({
+                    "changed": std::mem::take(&mut batch_changed),
+                    "deleted": std::mem::take(&mut batch_deleted),
+                }));
+            }
+            if removed {
+                events.push(serde_json::json!({
+                    "changed": [], "deleted": [{ "name": name }],
+                }));
+            } else {
+                events.push(serde_json::json!({
+                    "changed": [{ "name": name, "value": value }], "deleted": [],
+                }));
+            }
+        } else if removed {
+            batch_deleted.push(serde_json::json!({ "name": name }));
+        } else {
+            batch_changed.push(serde_json::json!({ "name": name, "value": value }));
+        }
+    }
+    if !batch_changed.is_empty() || !batch_deleted.is_empty() {
+        events.push(serde_json::json!({
+            "changed": batch_changed,
+            "deleted": batch_deleted,
+        }));
+    }
+    let payload = serde_json::json!({ "cursor": next, "events": events });
+    JsValue::from(js_string!(payload.to_string()))
 }

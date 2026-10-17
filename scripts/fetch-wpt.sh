@@ -12,6 +12,9 @@ if [[ ! -d "$destination/.git" ]]; then
 fi
 # Execute original sub/py fixtures over verified TLS for the HTTPS runner.
 collect_pattern "/tools/localpaths.py" "/tools/wptserve/" "/tools/third_party/" "/tools/certs/"
+collect_pattern "/tools/serve/" "/tools/manifest/" "/tools/gitignore/"
+collect_pattern "/tools/metadata/"
+collect_pattern "/service-workers/service-worker/resources/test-helpers.sub.js"
 collect_pattern "/common/security-features/" "/trusted-types/navigate-to-javascript-url-006.sub.html"
 collect_pattern "/content-security-policy/generic/"
 collect_pattern "/content-security-policy/gen/top.meta/script-src-self/worklet-paint*.https.html*" "/content-security-policy/gen/top.meta/worker-src-none/worklet-paint*.https.html*"

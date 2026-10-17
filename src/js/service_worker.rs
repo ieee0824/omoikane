@@ -68,7 +68,23 @@ fn start_service_worker(
         return Ok(error);
     }
 
-    runtime.eval("__omoikane_install_service_worker_global()")?;
+    let Ok(scope_url) = scope.parse::<crate::http::Url>() else {
+        return Ok(ServiceWorkerStartResult::LoadFailure);
+    };
+    let top_level_site = owner
+        .borrow()
+        .storage_access_top_level_site(document_id)
+        .unwrap_or_else(|| crate::http::SchemefulSite::from_url(&scope_url));
+
+    {
+        let mut state = runtime.host_state.borrow_mut();
+        state.worker_service_worker_scope = Some(scope.to_owned());
+        state.worker_service_worker_top_level_site = Some(top_level_site.clone());
+    }
+    let encoded_scope = serde_json::to_string(scope).expect("scope URLs are serializable");
+    runtime.eval(&format!(
+        "__omoikane_install_service_worker_global({encoded_scope})"
+    ))?;
     let evaluated =
         runtime.with_active_host(
             |context| match script_errors::evaluate_worker_initial_script(
@@ -103,6 +119,12 @@ fn start_service_worker(
         service_worker: true,
         terminated: false,
     }));
+    owner
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .register_service_worker_scope(scope, &top_level_site);
     owner.borrow_mut().workers.insert(id, entry);
     Ok(ServiceWorkerStartResult::Started(id))
 }
