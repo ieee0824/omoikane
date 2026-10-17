@@ -5671,6 +5671,7 @@ impl HostState {
         self.form_state.retire_document(document_id);
         self.iframe_navigation.retire_document(document_id);
         self.form_validation.retire_document(document_id);
+        self.worklet.retire_document(document_id);
         if self.fullscreen_elements.contains_key(&document_id) {
             self.fully_exit_fullscreen(false);
         }
@@ -5800,6 +5801,7 @@ impl HostState {
             .retire_document(previous.document.identity());
         self.form_validation
             .retire_document(previous.document.identity());
+        self.worklet.retire_document(previous.document.identity());
         if self
             .fullscreen_elements
             .contains_key(&previous.document.identity())
@@ -14450,6 +14452,7 @@ fn ensure_iframe_realm(
             .borrow_mut()
             .form_validation
             .retire_document(document_id);
+        host_state.borrow_mut().worklet.retire_document(document_id);
         return Err(error);
     }
 

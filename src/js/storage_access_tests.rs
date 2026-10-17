@@ -2264,7 +2264,7 @@ fn shared_worker_registry_partitions_first_and_third_party_owners() {
 }
 
 #[test]
-fn worklet_does_not_reuse_a_different_origin_runtime() {
+fn worklet_different_origin_document_gets_an_independent_runtime() {
     let mut runtime = runtime_at("https://top.test/");
     let transport = Arc::new(ResourceCookieTransport::default());
     runtime.set_http_resource_transport(Some(transport.clone()));
@@ -2284,22 +2284,19 @@ fn worklet_does_not_reuse_a_different_origin_runtime() {
         .eval_in_document_realm(
             child.identity(),
             "CSS.paintWorklet.addModule('https://third.test/child-worklet.js') \
-             .catch(error => document.documentElement.setAttribute('data-error', error.name))",
+             .then(() => document.documentElement.setAttribute('data-result', String(CSS.paintWorklet.moduleCount)), error => document.documentElement.setAttribute('data-result', error.name))",
         )
         .unwrap();
     runtime.run_until_idle().unwrap();
-    assert_eq!(
-        child_attribute(&child, "data-error").as_deref(),
-        Some("SecurityError")
-    );
+    assert_eq!(child_attribute(&child, "data-result").as_deref(), Some("1"));
     assert!(
         transport
             .requests
             .lock()
             .unwrap()
             .iter()
-            .all(|(_, path, _)| path != "/child-worklet.js"),
-        "different-origin module bytes cannot enter an existing WorkletGlobalScope"
+            .any(|(_, path, _)| path == "/child-worklet.js"),
+        "the child module executes in its own WorkletGlobalScope"
     );
 }
 

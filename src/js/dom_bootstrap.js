@@ -26722,13 +26722,14 @@ export const __omoikane_service_worker_lifecycle = {};
       if (options !== undefined && (options === null || typeof options !== "object")) {
         return Promise.reject(new TypeError("Worklet.addModule options must be an object"));
       }
-      if (options && options.credentials !== undefined &&
-          !["omit", "same-origin", "include"].includes(String(options.credentials))) {
+      const credentialsValue = options ? options.credentials : undefined;
+      const credentials = credentialsValue === undefined ? "same-origin" : String(credentialsValue);
+      if (!["omit", "same-origin", "include"].includes(credentials)) {
         return Promise.reject(new TypeError("Unsupported Worklet credentials mode"));
       }
       let status;
       try {
-        status = JSON.parse(nativeWorkletAddModule(this.__id, String(url)));
+        status = JSON.parse(nativeWorkletAddModule(this.__id, String(url), credentials));
       } catch (error) {
         return Promise.reject(error);
       }
