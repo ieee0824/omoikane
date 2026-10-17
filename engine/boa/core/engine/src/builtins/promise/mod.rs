@@ -295,6 +295,10 @@ impl PromiseCapability {
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-newpromisecapability
     pub(crate) fn new(c: &JsObject, context: &mut Context) -> JsResult<Self> {
+        // A species getter may return a fresh constructor with no heap owner.
+        // Keep it alive through the allocations before Construct installs it
+        // in the VM's traced calling convention.
+        let _constructor_root = c.clone().root();
         #[derive(Debug, Clone, Trace, Finalize)]
         struct RejectResolve {
             reject: JsValue,
@@ -573,6 +577,7 @@ impl Promise {
 
         // 3. Let promiseCapability be ? NewPromiseCapability(C).
         let promise_capability = PromiseCapability::new(&c, context)?;
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 4. Let status be Completion(Call(callbackfn, undefined, args)).
         let status = callback.call(&JsValue::undefined(), callback_args, context);
@@ -1586,6 +1591,7 @@ impl Promise {
 
         // 2. Let promiseCapability be ? NewPromiseCapability(C).
         let promise_capability = PromiseCapability::new(c, context)?;
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 3. Perform ? Call(promiseCapability.[[Reject]], undefined, « r »).
         promise_capability
@@ -1656,6 +1662,7 @@ impl Promise {
 
         // 2. Let promiseCapability be ? NewPromiseCapability(C).
         let promise_capability = PromiseCapability::new(&c.clone(), context)?;
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 3. Perform ? Call(promiseCapability.[[Resolve]], undefined, « x »).
         promise_capability
@@ -1957,6 +1964,10 @@ impl Promise {
         result_capability: Option<PromiseCapability>,
         context: &mut Context,
     ) {
+        // Host callbacks may collect before the reactions are attached or queued.
+        let _result_capability_roots = result_capability
+            .as_ref()
+            .map(PromiseCapability::root_handles);
         // 1. Assert: IsPromise(promise) is true.
 
         // 2. If resultCapability is not present, then

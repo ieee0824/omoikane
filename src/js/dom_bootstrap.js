@@ -135,6 +135,8 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeStorageManager = globalThis.__omoikane_storage_manager;
   const nativeCookieStoreAvailable = globalThis.__omoikane_cookie_store_available;
   const nativeCookieStoreQuery = globalThis.__omoikane_cookie_store_query;
+  const nativeCookieStoreSubscriptions = globalThis.__omoikane_cookie_store_subscriptions;
+  const nativeCookieStoreSubscribedChanges = globalThis.__omoikane_cookie_store_subscribed_changes;
   const nativeCookieStoreMutate = globalThis.__omoikane_cookie_store_mutate;
   const nativeCookieStoreChanges = globalThis.__omoikane_cookie_store_changes;
   const nativeStorageAccessState = globalThis.__omoikane_storage_access_state;
@@ -18814,7 +18816,52 @@ export const __omoikane_service_worker_lifecycle = {};
   // Fetch interception remains outside this core.
   // -------------------------------------------------------------------------
   const serviceWorkerConstructionToken = {};
+  const serviceWorkerSelfMessageTargets = new WeakMap();
   const serviceWorkerContainerConstructionToken = {};
+  const serviceWorkerRegistrationCookies = new WeakMap();
+  const cookieStoreManagerOwners = new WeakMap();
+  const cookieStoreManagerToken = {};
+  class CookieStoreManager {
+    constructor(scope, token) {
+      if (token !== cookieStoreManagerToken) throw new TypeError("Illegal constructor");
+      cookieStoreManagerOwners.set(this, scope);
+    }
+    static normalize(entries, scope) {
+      if (entries == null || (typeof entries !== "object" && typeof entries !== "function") ||
+          typeof entries[Symbol.iterator] !== "function") {
+        throw new TypeError("Cookie subscriptions must be iterable");
+      }
+      const base = typeof document === "undefined" ? location.href : document.baseURI;
+      return Array.from(entries, entry => {
+        if (entry != null && typeof entry !== "object" && typeof entry !== "function") {
+          throw new TypeError("Cookie subscription must be a dictionary");
+        }
+        entry ??= {};
+        const url = entry.url === undefined ? new URL(scope) : new URL(String(entry.url), base);
+        if (!url.href.startsWith(scope)) throw new TypeError("Cookie subscription URL is outside scope");
+        return {name: entry.name === undefined ? null : String(entry.name), url: url.href};
+      });
+    }
+    subscribe(entries) { return this.__update("subscribe", entries); }
+    unsubscribe(entries) { return this.__update("unsubscribe", entries); }
+    __update(operation, entries) {
+      if (!cookieStoreManagerOwners.has(this)) return Promise.reject(new TypeError("Illegal invocation"));
+      return Promise.resolve().then(() => {
+        const scope = cookieStoreManagerOwners.get(this);
+        const normalized = CookieStoreManager.normalize(entries, scope);
+        nativeCookieStoreSubscriptions(__omoikane_document_id, scope, operation, JSON.stringify(normalized));
+      });
+    }
+    getSubscriptions() {
+      if (!cookieStoreManagerOwners.has(this)) return Promise.reject(new TypeError("Illegal invocation"));
+      return Promise.resolve().then(() => JSON.parse(String(nativeCookieStoreSubscriptions(
+        __omoikane_document_id, cookieStoreManagerOwners.get(this), "get", "[]"))));
+    }
+    get [Symbol.toStringTag]() { return "CookieStoreManager"; }
+  }
+  if (nativeCookieStoreAvailable(__omoikane_document_id)) {
+    globalThis.CookieStoreManager = CookieStoreManager;
+  }
   const serviceWorkerContainerOwnerDocuments = browsingInput.serviceWorkerContainerOwnerDocuments ||
     (browsingInput.serviceWorkerContainerOwnerDocuments = new WeakMap());
   const serviceWorkerMessageSources = browsingInput.serviceWorkerMessageSources ||
@@ -18881,6 +18928,13 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     postMessage(message, options = undefined) {
       if (this.__terminated) throw new DOMException("Service worker is stopped.", "InvalidStateError");
+      const selfTarget = serviceWorkerSelfMessageTargets.get(this);
+      if (selfTarget) {
+        const ports = [];
+        const wire = encodeWorkerMessage(message, options, ports);
+        __omoikane_enqueue_posted_message(selfTarget, {wire, ports});
+        return;
+      }
       const data = __omoikane_encode_worker_message(message, options);
       __omoikane_worker_post_message(this.__id, data);
     }
@@ -18959,7 +19013,9 @@ export const __omoikane_service_worker_lifecycle = {};
       this.waiting = null;
       this.active = null;
       this._onupdatefound = null;
+      serviceWorkerRegistrationCookies.set(this, new CookieStoreManager(record.scope, cookieStoreManagerToken));
     }
+    get cookies() { return serviceWorkerRegistrationCookies.get(this); }
     update() {
       return Promise.resolve(undefined);
     }
@@ -18967,6 +19023,7 @@ export const __omoikane_service_worker_lifecycle = {};
       return Promise.resolve().then(() => {
         if (this._container._records.get(this.scope) !== this._record) return false;
         this._container._records.delete(this.scope);
+        nativeCookieStoreSubscriptions(__omoikane_document_id, this.scope, "clear", "[]");
         for (const worker of new Set([this.installing, this.waiting, this.active])) {
           terminateServiceWorker(worker);
         }
@@ -23527,6 +23584,7 @@ export const __omoikane_service_worker_lifecycle = {};
   const cookieStoreCreationURL = document.URL;
   let serviceWorkerCookieStoreClass = null;
   let serviceWorkerCookieStore = null;
+  let serviceWorkerCookieChangeDispatcher = null;
   const cookieStoreAvailable = (() => {
     try { return nativeCookieStoreAvailable(__omoikane_document_id) === true; }
     catch (_) { return false; }
@@ -23556,7 +23614,8 @@ export const __omoikane_service_worker_lifecycle = {};
     return Promise.resolve().then(() => {
       const result = nativeCookieStoreQuery(cookieStoreOwners.get(store), cookieStoreCreationURL);
       if (result === null) throw new DOMException("Opaque origins cannot access cookies", "SecurityError");
-      const name = cookieStoreQueryName(options, requireOptions);
+      const requestedName = cookieStoreQueryName(options, requireOptions);
+      const name = requestedName === null ? null : requestedName.replace(/^[\t ]+|[\t ]+$/g, "");
       const items = JSON.parse(String(result));
       return name === null ? items : items.filter(cookie => cookie.name === name);
     });
@@ -23664,6 +23723,10 @@ export const __omoikane_service_worker_lifecycle = {};
       if (initial !== null) cookieChangeCursor = parseCookieChanges(String(initial)).cursor;
     };
     __omoikane_cookie_change_dispatch = () => {
+      if (serviceWorkerCookieChangeDispatcher !== null) {
+        serviceWorkerCookieChangeDispatcher();
+        return;
+      }
       const encoded = nativeCookieStoreChanges(__omoikane_document_id, cookieStoreCreationURL, cookieChangeCursor);
       if (encoded === null) return;
       const changes = parseCookieChanges(String(encoded));
@@ -26150,6 +26213,7 @@ export const __omoikane_service_worker_lifecycle = {};
     try { delete globalThis.cookieStore; } catch (_) { globalThis.cookieStore = undefined; }
     try { delete globalThis.CookieStore; } catch (_) { globalThis.CookieStore = undefined; }
     try { delete globalThis.CookieChangeEvent; } catch (_) { globalThis.CookieChangeEvent = undefined; }
+    try { delete globalThis.CookieStoreManager; } catch (_) { globalThis.CookieStoreManager = undefined; }
     try { delete globalThis.length; } catch (_) {}
     try { delete globalThis.open; } catch (_) { globalThis.open = undefined; }
     try { delete globalThis.customElements; } catch (_) { globalThis.customElements = undefined; }
@@ -26280,7 +26344,7 @@ export const __omoikane_service_worker_lifecycle = {};
     };
   };
 
-  function installServiceWorkerLifetimeEvents() {
+  function installServiceWorkerLifetimeEvents(registration, worker) {
     const states = new WeakMap();
     const events = new Map();
     const enqueue = queueMicrotask;
@@ -26290,9 +26354,18 @@ export const __omoikane_service_worker_lifecycle = {};
       const state = states.get(event);
       if (state.dispatching || state.pending !== 0 || state.completed) return;
       state.completed = true;
-      events.delete(state.phase);
       state.promises.length = 0;
-      report(state.installing, state.failed);
+      if (state.phase !== undefined) {
+        events.delete(state.phase);
+        if (state.installing) {
+          registration.installing = null;
+          registration.waiting = state.failed ? null : worker;
+          worker.__setState(state.failed ? "redundant" : "installed");
+        } else {
+          worker.__setState("activated");
+        }
+        report(state.installing, state.failed);
+      }
     }
     class ExtendableEvent extends Event {
       constructor(type, init = {}) {
@@ -26320,7 +26393,41 @@ export const __omoikane_service_worker_lifecycle = {};
       get [Symbol.toStringTag]() { return "ExtendableEvent"; }
     }
     globalThis.ExtendableEvent = ExtendableEvent;
+    const cookieChangeData = new WeakMap();
+    class ExtendableCookieChangeEvent extends ExtendableEvent {
+      constructor(type, init = {}) {
+        super(type, init);
+        const item = cookie => Object.freeze({
+          name: String(cookie.name),
+          ...(cookie.value === undefined ? {} : {value: String(cookie.value)}),
+        });
+        cookieChangeData.set(this, {
+          changed: Object.freeze(Array.from(init.changed ?? [], item)),
+          deleted: Object.freeze(Array.from(init.deleted ?? [], item)),
+        });
+      }
+      get changed() { return cookieChangeData.get(this)?.changed; }
+      get deleted() { return cookieChangeData.get(this)?.deleted; }
+      get [Symbol.toStringTag]() { return "ExtendableCookieChangeEvent"; }
+    }
+    globalThis.ExtendableCookieChangeEvent = ExtendableCookieChangeEvent;
+    __omoikane_service_worker_lifecycle.cookiechange = function(data) {
+      const event = new ExtendableCookieChangeEvent("cookiechange", data);
+      const state = states.get(event);
+      state.trusted = state.dispatching = true;
+      event.isTrusted = true;
+      try { globalThis.dispatchEvent(event); }
+      finally {
+        state.dispatching = false;
+        complete(event);
+      }
+    };
     __omoikane_service_worker_lifecycle.dispatch = function(phase) {
+      if (phase === "activate") {
+        registration.waiting = null;
+        registration.active = worker;
+        worker.__setState("activating");
+      }
       const event = new ExtendableEvent(phase);
       const state = states.get(event);
       state.trusted = state.dispatching = true;
@@ -26336,7 +26443,7 @@ export const __omoikane_service_worker_lifecycle = {};
       states.get(event).dispatching = false;
       complete(event);
     };
-    for (const type of ["install", "activate"]) {
+    for (const type of ["install", "activate", "cookiechange"]) {
       let handler = null;
       Object.defineProperty(globalThis, "on" + type, {
         configurable: true,
@@ -26351,11 +26458,38 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
-  globalThis.__omoikane_install_service_worker_global = function() {
+  globalThis.__omoikane_install_service_worker_global = function(scope) {
     // The common Worker bootstrap supplies importScripts, a separate Trusted
     // Types factory, and the response CSP before the ServiceWorker script runs.
     try { delete globalThis.DedicatedWorkerGlobalScope; } catch (_) { globalThis.DedicatedWorkerGlobalScope = undefined; }
     globalThis.ServiceWorkerGlobalScope = Object;
+    globalThis.CookieStoreManager = CookieStoreManager;
+    const record = {scope: String(scope), scriptURL: location.href, worker: null};
+    const worker = new ServiceWorker(record, "installing", null, serviceWorkerConstructionToken);
+    record.worker = worker;
+    serviceWorkerSelfMessageTargets.set(worker, {
+      _acceptMessage(packet) {
+        const ports = receiveTransferredMessagePorts(packet.ports);
+        let data;
+        try { data = decodeWorkerMessage(packet.wire, ports); }
+        catch (_) {
+          globalThis.dispatchEvent(new MessageEvent("messageerror", {
+            data: null, origin: location.origin, source: worker, ports,
+          }));
+          return;
+        }
+        globalThis.dispatchEvent(new MessageEvent("message", {
+          data, origin: location.origin, source: worker, ports,
+        }));
+      },
+    });
+    const registration = new ServiceWorkerRegistration(
+      record,
+      null,
+      serviceWorkerContainerConstructionToken,
+    );
+    record.registration = registration;
+    globalThis.registration = registration;
     if (serviceWorkerCookieStore !== null) {
       // ServiceWorkers expose CookieStore without the Window-only onchange
       // attribute or Window change event dispatch.
@@ -26367,9 +26501,19 @@ export const __omoikane_service_worker_lifecycle = {};
         value: serviceWorkerCookieStore,
         writable: false,
       });
-      __omoikane_cookie_change_dispatch = () => {};
     }
-    installServiceWorkerLifetimeEvents();
+    installServiceWorkerLifetimeEvents(registration, worker);
+    let cookieChangeCursor = 0;
+    const initial = nativeCookieStoreSubscribedChanges(__omoikane_document_id, null);
+    cookieChangeCursor = JSON.parse(String(initial)).cursor;
+    serviceWorkerCookieChangeDispatcher = () => {
+      const encoded = nativeCookieStoreSubscribedChanges(__omoikane_document_id, cookieChangeCursor);
+      const changes = JSON.parse(String(encoded));
+      cookieChangeCursor = changes.cursor;
+      for (const event of changes.events) {
+        __omoikane_service_worker_lifecycle.cookiechange(event);
+      }
+    };
     const sendToOwner = globalThis.postMessage;
     const client = Object.freeze({
       postMessage(message, options = undefined) {

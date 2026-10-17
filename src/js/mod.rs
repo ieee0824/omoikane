@@ -2427,6 +2427,10 @@ struct HostState {
     worker_owner: Option<Rc<RefCell<HostState>>>,
     /// Owned request policy inherited by a Worker's synthetic main Document.
     worker_cookie_request_context: Option<crate::http::CookieRequestContext>,
+    /// Registration scope associated with this ServiceWorker global.
+    worker_service_worker_scope: Option<String>,
+    /// Top-level site inherited from the registering Document.
+    worker_service_worker_top_level_site: Option<crate::http::SchemefulSite>,
     worker_id: Option<u64>,
     worker_terminated: bool,
     worker_owner_bound: bool,
@@ -3179,6 +3183,8 @@ impl HostState {
             next_worker_id: 1,
             worker_owner: None,
             worker_cookie_request_context: None,
+            worker_service_worker_scope: None,
+            worker_service_worker_top_level_site: None,
             worker_id: None,
             worker_terminated: false,
             worker_owner_bound: false,
@@ -14996,6 +15002,16 @@ fn register_host_bindings(
             js_string!("__omoikane_cookie_store_changes"),
             3,
             NativeFunction::from_copy_closure(cookie_store::changes_native),
+        ),
+        (
+            js_string!("__omoikane_cookie_store_subscriptions"),
+            4,
+            NativeFunction::from_copy_closure(cookie_store::subscriptions_native),
+        ),
+        (
+            js_string!("__omoikane_cookie_store_subscribed_changes"),
+            2,
+            NativeFunction::from_copy_closure(cookie_store::subscribed_changes_native),
         ),
         (
             js_string!("__omoikane_storage_access_state"),

@@ -31,7 +31,7 @@ use http_fixture::{
 
 use omoikane::html::TreeBuilder;
 use omoikane::http::{Client, Url};
-use omoikane::js::JsRuntime;
+use omoikane::js::{JsRuntime, SandboxConfig};
 
 const EVALS_PER_GC: usize = 512;
 
@@ -361,8 +361,15 @@ pub fn run_acid3(base_url: &str, mode: DriveMode) -> Acid3Run {
     let base: Url = acid3_url.parse().expect("parse base url");
     // Keep the tuple origin aligned with the fetched page: setting only a
     // resource base later leaves the Document opaque and hides child Documents.
-    let mut runtime =
-        JsRuntime::with_document_and_url(document, &acid3_url).expect("create runtime");
+    // Acid3's test 26 takes almost five seconds on a busy CI runner. Give this
+    // conformance harness a bounded per-evaluation budget without changing
+    // the normal page sandbox or any score and error assertions.
+    let sandbox = SandboxConfig {
+        timeout: Duration::from_secs(15),
+        ..SandboxConfig::default()
+    };
+    let mut runtime = JsRuntime::with_document_sandbox_and_url(document, sandbox, &acid3_url)
+        .expect("create runtime");
     acid3_debug_log(&format!("mode={mode:?} after runtime create"));
 
     // 3. Execute all inline / external <script>s (fires DOMContentLoaded).
