@@ -44,6 +44,25 @@ const ORIGIN_WORKER_SOURCE: &str = r#"
   });
 "#;
 
+const COOKIE_STORE_WORKER_SOURCE: &str = r#"
+  addEventListener('message', async event => {
+    const available = typeof cookieStore === 'object' && cookieStore instanceof CookieStore;
+    if (!available) {
+      event.source.postMessage({available: false});
+      return;
+    }
+    const seed = await cookieStore.get('seed');
+    await cookieStore.set({name: 'from-worker', value: 'yes', path: '/'});
+    const written = await cookieStore.get('from-worker');
+    event.source.postMessage({
+      available, seed: seed?.value, written: written?.value,
+      noDocument: typeof document === 'undefined',
+      noWindowChangeHandler: !('onchange' in cookieStore) &&
+        typeof CookieChangeEvent === 'undefined',
+    });
+  });
+"#;
+
 const ORIGIN_FRAME_SOURCE: &str = r#"<script>
   navigator.serviceWorker.onmessage = event => parent.postMessage({
     incomingOrigin: event.data.incomingOrigin,
@@ -131,6 +150,7 @@ impl ServiceWorkerFixture {
                     "/app/worker.js" | "/app/worker-v2.js" => (LIFECYCLE_WORKER_SOURCE, "", ""),
                     "/app/close-on-activate.js" => (CLOSE_ON_ACTIVATE_SOURCE, "", ""),
                     "/app/origin.js" => (ORIGIN_WORKER_SOURCE, "", ""),
+                    "/app/cookie-store.js" => (COOKIE_STORE_WORKER_SOURCE, "", ""),
                     "/app/frame.html" => (ORIGIN_FRAME_SOURCE, "", ""),
                     "/app/install-wait.js"
                     | "/app/install-reject.js"
@@ -248,6 +268,109 @@ fn service_worker_executes_with_response_csp_and_replies_from_client() {
     );
     drop(runtime);
     assert_eq!(fixture.finish(), vec!["/app/sw.js".to_owned()]);
+}
+
+#[test]
+fn service_worker_cookie_store_reads_and_writes_shared_jar_without_document() {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval(
+            r#"
+      globalThis.observed = {error: '', message: null, pageCookie: null};
+      navigator.serviceWorker.addEventListener('message', event => {
+        observed.message = event.data;
+        cookieStore.get('from-worker').then(cookie => observed.pageCookie = cookie?.value);
+      });
+      cookieStore.set({name: 'seed', value: 'page', path: '/'}).then(() =>
+        navigator.serviceWorker.register('/app/cookie-store.js')
+      ).then(registration => registration.installing.postMessage('probe'),
+        error => observed.error = error.name);
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"observed.error === '' && observed.message?.available &&
+                  observed.message.seed === 'page' &&
+                  observed.message.written === 'yes' &&
+                  observed.message.noDocument &&
+                  observed.message.noWindowChangeHandler && observed.pageCookie === 'yes'"#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true),
+        "state: {:?}; task errors: {:?}",
+        runtime.eval("JSON.stringify(observed)"),
+        runtime.take_task_errors(),
+    );
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec!["/app/cookie-store.js".to_owned()]);
+}
+
+#[test]
+fn service_worker_cookie_store_does_not_inherit_cross_site_document_access() {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval("cookieStore.set({name: 'seed', value: 'page', path: '/'})")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    // Model the creator's cross-site ancestry on the request context that a
+    // Worker inherits. The synthetic Worker document itself has no iframe.
+    let inherited_context =
+        crate::http::CookieRequestContext::new(Some(fixture.origin.parse().unwrap()), None, true);
+    runtime
+        .host_state
+        .borrow_mut()
+        .worker_cookie_request_context = Some(inherited_context);
+    runtime
+        .eval(
+            r#"
+      globalThis.observed = {error: '', message: null, pageCookie: null};
+      navigator.serviceWorker.addEventListener('message', event => observed.message = event.data);
+      navigator.serviceWorker.register('/app/cookie-store.js').then(
+        registration => registration.installing.postMessage('probe'),
+        error => observed.error = error.name);
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .host_state
+        .borrow_mut()
+        .worker_cookie_request_context = None;
+    runtime
+        .eval("cookieStore.get('from-worker').then(cookie => observed.pageCookie = cookie?.value)")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"observed.error === '' && observed.message?.available &&
+                  observed.message.seed === undefined &&
+                  observed.message.written === undefined &&
+                  observed.pageCookie === undefined"#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true),
+        "state: {:?}; task errors: {:?}",
+        runtime.eval("JSON.stringify(observed)"),
+        runtime.take_task_errors(),
+    );
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec!["/app/cookie-store.js".to_owned()]);
 }
 
 #[test]

@@ -29,6 +29,21 @@ fn expiry_time(milliseconds: f64) -> Option<SystemTime> {
     }
 }
 
+fn cookie_access_allowed(state: &HostState, document_id: usize) -> bool {
+    // The synthetic document in a Worker has no parent browsing context. Use
+    // the inherited request context so a cross-site owner cannot lend its
+    // Document-only Storage Access grant to the ServiceWorker's CookieStore.
+    if document_id == state.document.identity()
+        && state
+            .worker_cookie_request_context
+            .as_ref()
+            .is_some_and(crate::http::CookieRequestContext::has_cross_site_ancestry)
+    {
+        return false;
+    }
+    state.storage_access_allows_document_cookies(document_id)
+}
+
 /// Reports secure-context exposure for the calling document's CookieStore.
 pub(super) fn available_native(
     _this: &JsValue,
@@ -90,7 +105,7 @@ pub(super) fn query_native(
                 .with_message("Cookie Store document origin changed")
                 .into());
         }
-        if !state.storage_access_allows_document_cookies(document_id) {
+        if !cookie_access_allowed(&state, document_id) {
             return Ok(JsValue::from(js_string!("[]")));
         }
         let site = state.storage_access_cookie_site_for_document(document_id, &url);
@@ -177,7 +192,7 @@ pub(super) fn mutate_native(
                 .with_message("Cookie Store document origin changed")
                 .into());
         }
-        if !state.storage_access_allows_document_cookies(document_id) {
+        if !cookie_access_allowed(&state, document_id) {
             return Ok(JsValue::undefined());
         }
         let site = state.storage_access_cookie_site_for_document(document_id, &url);
@@ -247,7 +262,7 @@ pub(super) fn changes_native(
                 .with_message("Cookie Store document origin changed")
                 .into());
         }
-        if !state.storage_access_allows_document_cookies(document_id) {
+        if !cookie_access_allowed(&state, document_id) {
             let next = state.cookie_store.lock().unwrap().change_sequence();
             return Ok(JsValue::from(js_string!(format!(
                 "{{\"cursor\":{next},\"events\":[]}}"

@@ -23525,6 +23525,8 @@ export const __omoikane_service_worker_lifecycle = {};
   const cookieStoreOwners = new WeakMap();
   const cookieStoreToken = {};
   const cookieStoreCreationURL = document.URL;
+  let serviceWorkerCookieStoreClass = null;
+  let serviceWorkerCookieStore = null;
   const cookieStoreAvailable = (() => {
     try { return nativeCookieStoreAvailable(__omoikane_document_id) === true; }
     catch (_) { return false; }
@@ -23641,6 +23643,8 @@ export const __omoikane_service_worker_lifecycle = {};
     globalThis.CookieChangeEvent = CookieChangeEvent;
     globalThis.CookieStore = CookieStore;
     const activeCookieStore = new CookieStore(cookieStoreToken);
+    serviceWorkerCookieStoreClass = CookieStore;
+    serviceWorkerCookieStore = activeCookieStore;
     Object.defineProperty(globalThis, "cookieStore", {
       configurable: true,
       enumerable: true,
@@ -26351,6 +26355,19 @@ export const __omoikane_service_worker_lifecycle = {};
     // Types factory, and the response CSP before the ServiceWorker script runs.
     try { delete globalThis.DedicatedWorkerGlobalScope; } catch (_) { globalThis.DedicatedWorkerGlobalScope = undefined; }
     globalThis.ServiceWorkerGlobalScope = Object;
+    if (serviceWorkerCookieStore !== null) {
+      // ServiceWorkers expose CookieStore without the Window-only onchange
+      // attribute or Window change event dispatch.
+      delete serviceWorkerCookieStoreClass.prototype.onchange;
+      globalThis.CookieStore = serviceWorkerCookieStoreClass;
+      Object.defineProperty(globalThis, "cookieStore", {
+        configurable: true,
+        enumerable: true,
+        value: serviceWorkerCookieStore,
+        writable: false,
+      });
+      __omoikane_cookie_change_dispatch = () => {};
+    }
     installServiceWorkerLifetimeEvents();
     const sendToOwner = globalThis.postMessage;
     const client = Object.freeze({
