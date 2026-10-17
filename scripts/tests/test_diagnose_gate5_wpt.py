@@ -161,7 +161,23 @@ class DiagnosticTests(unittest.TestCase):
         target.GetTriple.return_value = "arm64-apple-macosx"
         target.Launch.return_value = process
         process.GetState.return_value, process.GetProcessID.return_value = 5, 123
-        process.__iter__.return_value = iter([])
+        frame, thread, register, group, module = (MagicMock() for _ in range(5))
+        frame.__str__.return_value = "mock stack JsObject::invoke"
+        register.GetName.return_value = "pc"
+        register.GetValue.return_value = "0x103315918"
+        group.GetName.return_value = "general"
+        group.__iter__.side_effect = lambda: iter([register])
+        frame.GetRegisters.return_value = [group]
+        thread.GetThreadID.return_value = 2
+        thread.GetName.return_value = "worker"
+        thread.GetStopDescription.return_value = "EXC_BAD_ACCESS"
+        thread.GetStopReason.return_value = 5
+        thread.GetNumFrames.return_value = 1
+        thread.GetFrameAtIndex.return_value = frame
+        process.__iter__.side_effect = lambda: iter([thread])
+        module.GetFileSpec.return_value = "wpt_smoke image"
+        module.GetObjectFileHeaderAddress.return_value.GetLoadAddress.return_value = 0x1000
+        target.modules = [module]
         output = self.root / "lldb"
         environment = dict(self.normal_environment, OMOIKANE_LLDB_OUTPUT=str(output),
                            OMOIKANE_LLDB_BINARY_SHA256=hashlib.sha256(self.binary.read_bytes()).hexdigest())
@@ -180,18 +196,13 @@ class DiagnosticTests(unittest.TestCase):
         self.assertIn("RUST_TEST_THREADS=7", entries)
         launch.SetLaunchFlags.assert_called_once_with(1)
         launch.AddDuplicateFileAction.assert_called_once_with(1, 2)
-        commands = [call.args[0] for call in debugger.GetCommandInterpreter.return_value.HandleCommand.call_args_list]
-        self.assertEqual(commands, ["process status", "thread list", "thread backtrace all", "register read", "image list -o -f"])
-        lldb.SBExecutionContext.assert_called_once_with(process)
-        for call in debugger.GetCommandInterpreter.return_value.HandleCommand.call_args_list:
-            self.assertIs(call.args[1], execution)
-            self.assertIs(call.args[2], command_result)
+        debugger.GetCommandInterpreter.assert_not_called()
         process.Kill.assert_called_once()
         process.Continue.assert_not_called()
         self.assertTrue(json.loads((output / "process.json").read_text())["binary_unchanged"])
 
 
-    def test_lldb_commands_use_launched_process_inside_prelaunch_script_context(self):
+    def test_lldb_direct_api_ignores_prelaunch_command_context(self):
         import hashlib
         lldb = types.SimpleNamespace(eLaunchFlagDisableASLR=2, eStateExited=10,
                                     eStateStopped=5, eStateCrashed=8)
@@ -220,23 +231,30 @@ class DiagnosticTests(unittest.TestCase):
         target.GetTriple.return_value = "arm64-apple-macosx"
         target.Launch.return_value = process
         process.GetState.return_value, process.GetProcessID.return_value = 5, 64633
-        process.__iter__.return_value = iter([])
-        expected = {"process status": "Process 64633 stopped",
-                    "thread list": "* thread #2: EXC_BAD_ACCESS",
-                    "thread backtrace all": "thread #2: frame #0 JsObject::invoke",
-                    "register read": "pc = 0x103315918",
-                    "image list -o -f": "wpt_smoke image"}
+        frame, thread, register, group, module = (MagicMock() for _ in range(5))
+        frame.__str__.return_value = "mock stack JsObject::invoke"
+        register.GetName.return_value = "pc"
+        register.GetValue.return_value = "0x103315918"
+        group.GetName.return_value = "general"
+        group.__iter__.side_effect = lambda: iter([register])
+        frame.GetRegisters.return_value = [group]
+        thread.GetThreadID.return_value = 2
+        thread.GetName.return_value = "worker"
+        thread.GetStopDescription.return_value = "EXC_BAD_ACCESS"
+        thread.GetStopReason.return_value = 5
+        thread.GetNumFrames.return_value = 1
+        thread.GetFrameAtIndex.return_value = frame
+        process.__iter__.side_effect = lambda: iter([thread])
+        module.GetFileSpec.return_value = "wpt_smoke image"
+        module.GetObjectFileHeaderAddress.return_value.GetLoadAddress.return_value = 0x1000
+        target.modules = [module]
+        expected = ["process 64633 state=5", "thread 2", "EXC_BAD_ACCESS",
+                    "JsObject::invoke", "pc = 0x103315918", "wpt_smoke image"]
 
         def interpret(command, *arguments):
-            if len(arguments) == 1:
-                result, active = arguments[0], None
-            else:
-                context, result = arguments
-                active = context.process
-            if active is process or command == "image list -o -f":
-                result.output = expected[command] + "\n"
-            else:
-                result.error = "error: Command requires a current process.\n"
+            # Actual Darwin failure: passing SBExecutionContext(process) still
+            # fails for frame commands because no selected thread/frame exists.
+            arguments[-1].error = "error: Command requires a process which is currently stopped."
 
         debugger.GetCommandInterpreter.return_value.HandleCommand.side_effect = interpret
         output = self.root / "lldb-prelaunch-context"
@@ -246,13 +264,14 @@ class DiagnosticTests(unittest.TestCase):
         def kill():
             saved = (output / "native-stack.log").read_text()
             self.assertNotIn("Command requires a current process", saved)
-            for text in expected.values():
+            for text in expected:
                 self.assertIn(text, saved)
             return "success"
 
         process.Kill.side_effect = kill
         with patch.dict(sys.modules, {"lldb": lldb}), patch.dict(os.environ, environment):
             capture.capture(debugger)
+        debugger.GetCommandInterpreter.assert_not_called()
         process.Continue.assert_not_called()
         process.Kill.assert_called_once()
         self.assertTrue(json.loads((output / "process.json").read_text())["completed"])

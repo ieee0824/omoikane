@@ -6,6 +6,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      macos_wpt_diagnostics:
+        description: Run an additional Apple Silicon WPT AddressSanitizer diagnostic
+        type: boolean
+        default: false
   workflow_call:
 
 permissions:
@@ -73,4 +78,36 @@ jobs:
         with:
           name: jit-native-${{ matrix.target }}
           path: .artifacts/jit-native/
+          if-no-files-found: error
+
+  macos-wpt-asan:
+    if: github.event_name == 'workflow_dispatch' && inputs.macos_wpt_diagnostics
+    name: Diagnostic WPT ASan (aarch64-apple-darwin)
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify diagnostic command and failure evidence handling
+        run: python3 -m unittest discover -s scripts/tests -p test_diagnose_macos_wpt_asan.py
+      - name: Run independent WPT ASan diagnostic
+        run: >-
+          python3 scripts/diagnose-macos-wpt-asan.py
+          .artifacts/macos-wpt-asan
+          --target-dir "${{ runner.temp }}/omoikane-wpt-asan"
+      - name: Upload diagnostic evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-wpt-asan-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            .artifacts/macos-wpt-asan/
+            .artifacts/wptserve/
           if-no-files-found: error
