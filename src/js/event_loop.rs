@@ -111,12 +111,19 @@ pub(crate) enum Task {
     WorkerMessage {
         worker_id: u64,
         data: String,
+        ports: JsValue,
     },
     /// Completion of all lifetime promises for a ServiceWorker lifecycle event.
     ServiceWorkerLifecycle {
         worker_id: u64,
         installing: bool,
         failed: bool,
+    },
+    /// Registration operations cross runtimes using only owned identifiers.
+    ServiceWorkerRegistrationRequest {
+        worker_id: u64,
+        request: String,
+        operation: String,
     },
     /// A message sent from a dedicated worker back to its owner page.
     WorkerOwnerMessage {
@@ -128,6 +135,7 @@ pub(crate) enum Task {
         /// iframe.
         realm: Option<Realm>,
         data: String,
+        ports: JsValue,
     },
     /// A message sent from a page-owned `SharedWorkerPort` to the shared
     /// worker runtime.  The endpoint is identified by a process-local id;
@@ -244,7 +252,11 @@ unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
             unsafe { data.trace(tracer) };
         }
         Task::WindowPostedMessage { ports, .. } => unsafe { ports.trace(tracer) },
-        Task::WorkerOwnerMessage { owner, .. } => unsafe { owner.trace(tracer) },
+        Task::WorkerMessage { ports, .. } => unsafe { ports.trace(tracer) },
+        Task::WorkerOwnerMessage { owner, ports, .. } => {
+            unsafe { owner.trace(tracer) };
+            unsafe { ports.trace(tracer) };
+        }
         Task::SharedWorkerOwnerMessage { port, .. } => unsafe { port.trace(tracer) },
         Task::WorkerError {
             owner: Some(owner), ..
@@ -255,8 +267,8 @@ unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
         | Task::Navigation { .. }
         | Task::AuxiliaryNavigate { .. }
         | Task::BroadcastChannelMessage { .. }
-        | Task::WorkerMessage { .. }
         | Task::ServiceWorkerLifecycle { .. }
+        | Task::ServiceWorkerRegistrationRequest { .. }
         | Task::SharedWorkerMessage { .. }
         | Task::WorkerError { owner: None, .. } => {}
     }
@@ -511,10 +523,30 @@ impl EventLoop {
         );
     }
 
-    pub(crate) fn enqueue_worker_message(&mut self, worker_id: u64, data: String) {
+    pub(crate) fn enqueue_worker_message(&mut self, worker_id: u64, data: String, ports: JsValue) {
         self.enqueue(
             TaskSource::PostedMessage,
-            Task::WorkerMessage { worker_id, data },
+            Task::WorkerMessage {
+                worker_id,
+                data,
+                ports,
+            },
+        );
+    }
+
+    pub(crate) fn enqueue_service_worker_registration_request(
+        &mut self,
+        worker_id: u64,
+        request: String,
+        operation: String,
+    ) {
+        self.enqueue(
+            TaskSource::DomManipulation,
+            Task::ServiceWorkerRegistrationRequest {
+                worker_id,
+                request,
+                operation,
+            },
         );
     }
 
@@ -540,6 +572,7 @@ impl EventLoop {
         owner: JsValue,
         realm: Option<Realm>,
         data: String,
+        ports: JsValue,
     ) {
         self.enqueue(
             TaskSource::PostedMessage,
@@ -548,6 +581,7 @@ impl EventLoop {
                 owner,
                 realm,
                 data,
+                ports,
             },
         );
     }

@@ -10,25 +10,44 @@ import the original testharness and META scripts, and forward results using
 are unchanged. `scripts/fetch-wpt.sh` includes the wrapper dependencies.
 
 At revision `dc97e7bed3096ac9e0e591ab5fa22e7fb8844ead`, the 25 Cookie Store
-`.any.js` files declaring `serviceworker` produce **21 PASS / 4 FAIL** after the
-subscription/lifecycle fixes (2026-10-17). Every harness completes with status 0;
-there are no script errors. The initial run was 19 PASS / 6 FAIL and exposed
-missing-name serialization, registration lifecycle, and query-name normalization
-bugs. These were fixed without modifying WPT.
+`.any.js` files declaring `serviceworker` and two original HTML cases produce
+**24 PASS / 3 FAIL** after the update, partitioned storage, and subscription
+history fixes (2026-10-17). Every harness completes with status 0; there are no
+script errors. This is the result for these 27 Service Worker cases, not the
+entire upstream Cookie Store directory.
 
-The default CI manifest runs all 25 variants. Four new known-failure entries
-name the exact failing subtests, so an additional failure or an unexpected pass
-requires review. They do not establish completion of #1354.
+The default CI manifest runs all 27 cases. Three known-failure entries name the
+exact failing subtests, so an additional failure or unexpected pass requires
+review. The diagnostic manifest keeps all original PASS expectations and
+therefore exits with a test failure for the remaining specification differences.
 
-| Remaining case | Evidence and remaining work |
+The original `serviceworker_cookieStore_cross_origin.https.sub.html` passes
+through transferred MessagePorts and the owning Worker event loops. It
+previously failed with `DataCloneError` before the cookie assertions.
+
+The original `serviceworker_cookieStore_subscriptions_reset.https.html` passes
+both its unregister/re-register and update subtests. Updates refetch the worker
+and its classic imports, compare sources, retain subscriptions across a new
+worker version, and preserve the active worker when updating fails. Native
+regressions also check that stale registration generations cannot modify a new
+registration through retained Window or Worker objects.
+
+The unpartitioned and partitioned no-change subtests both pass. A newly added
+subscription records its starting change sequence, so deletions made by cleanup
+while unsubscribed are not replayed after re-subscription. Duplicate subscribe
+calls preserve already-pending changes. Partitioned cookie identity, filtering,
+and mutation use the top-level site independently of Storage Access grants.
+
+| Remaining case | Measured difference from the current normative algorithm |
 | --- | --- |
-| `cookieStore_get_arguments` | Four alternate-URL assertions fail. The pinned Worker test allows other same-origin paths; the current [get(options) algorithm](https://cookiestore.spec.whatwg.org/#dom-cookiestore-get) requires the creation URL, excluding fragments. The whitespace-name assertion passes. |
-| `cookieStore_getAll_arguments` | The same four alternate-URL assertions disagree with the current [getAll(options) algorithm](https://cookiestore.spec.whatwg.org/#dom-cookiestore-getall). The whitespace-name assertion passes. |
-| `serviceworker_cookiechange_eventhandler_already_expired` | The first assertion expects no deletion for a newly created, immediately expired cookie; the current [observable-changes algorithm](https://cookiestore.spec.whatwg.org/#observable-changes) describes it as deleted. The second subtest requires partitioned cookie storage, which is not implemented. |
-| `serviceworker_cookiechange_eventhandler_no_change` | The unpartitioned subtest passes. The partitioned subtest fails because partitioned cookie storage is not implemented. |
+| `cookieStore_get_arguments` | Four alternate-URL assertions fail. The pinned Worker test allows other same-origin paths; [get(options)](https://cookiestore.spec.whatwg.org/#dom-cookiestore-get) step 6.2 instead requires the creation URL, excluding fragments. The non-normative introduction still describes broader Worker URL access. |
+| `cookieStore_getAll_arguments` | The same four assertions disagree with [getAll(options)](https://cookiestore.spec.whatwg.org/#dom-cookiestore-getall) step 5.2. |
+| `serviceworker_cookiechange_eventhandler_already_expired` | Both unpartitioned and partitioned subtests expect no deletion for a newly created, immediately expired cookie. The [observable-changes algorithm](https://cookiestore.spec.whatwg.org/#observable-changes) instead describes it as deleted. |
 
-To rerun all original cases with PASS expectations, including the unfinished
-ones (this currently exits with a test failure):
+The normative algorithms were checked on 2026-10-17. These differences remain
+visible as original WPT failures; they are not counted as passing assertions.
+
+To rerun all original cases with PASS expectations:
 
 ```sh
 WPT_ROOT=target/wpt scripts/fetch-wpt.sh
@@ -39,5 +58,4 @@ WPT_ROOT=target/wpt WPT_REQUIRED=1 \
 ```
 
 Use the repository's dedicated `CARGO_TARGET_DIR` and space guard when compiling.
-Partitioned storage and its event filtering remain required work; a green
-default CI run does not mean all original Cookie Store WPT cases pass.
+A green default CI run does not mean all original Cookie Store WPT cases pass.

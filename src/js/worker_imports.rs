@@ -1,6 +1,37 @@
 //! Synchronous classic-worker script imports with owned fetched sources.
 use super::*;
 
+/// Owned script response retained by a ServiceWorker version.
+#[derive(Clone)]
+pub(super) struct ScriptResource {
+    pub(super) filename: String,
+    pub(super) source: String,
+    pub(super) muted_errors: bool,
+}
+
+/// Refetches classic imports without executing author code.
+pub(super) fn refetch_service_worker_imports(
+    state: &mut HostState,
+    previous: &BTreeMap<String, ScriptResource>,
+) -> BTreeMap<String, Option<ScriptResource>> {
+    let base = state.base_url.clone();
+    let origin = script_errors::document_fetch_origin(state, state.document.identity());
+    let mut resources = BTreeMap::new();
+    for requested in previous.keys() {
+        let resource = fetch_import_source(state, requested, base.as_ref(), &origin, None).map(
+            |(filename, source, muted_errors)| ScriptResource {
+                filename,
+                source,
+                muted_errors,
+            },
+        );
+        // A bad response is ignored for byte comparison, but retained so a
+        // newly installed worker cannot refetch a different response later.
+        resources.insert(requested.clone(), resource);
+    }
+    resources
+}
+
 pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {
     register_private_callable(
         context,
@@ -29,12 +60,49 @@ fn import_scripts(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
         let origin = script_errors::document_fetch_origin(&state, document_id);
         let mut sources = Vec::with_capacity(urls.len());
         for url in urls {
-            let Some((filename, source, muted_errors)) =
-                fetch_import_source(&mut state, &url, base.as_ref(), &origin, location.as_ref())
-            else {
-                return Ok(None);
-            };
             let requested_url = resource_reference_timing_name(&url, base.as_ref());
+            let cached = state
+                .service_worker_imports
+                .get(&requested_url)
+                .cloned()
+                .map(Some)
+                .or_else(|| {
+                    state
+                        .service_worker_import_cache
+                        .get(&requested_url)
+                        .cloned()
+                });
+            let resource = if let Some(cached) = cached {
+                let Some(resource) = cached else {
+                    return Ok(None);
+                };
+                resource
+            } else {
+                let Some((filename, source, muted_errors)) = fetch_import_source(
+                    &mut state,
+                    &url,
+                    base.as_ref(),
+                    &origin,
+                    location.as_ref(),
+                ) else {
+                    return Ok(None);
+                };
+                ScriptResource {
+                    filename,
+                    source,
+                    muted_errors,
+                }
+            };
+            if state.worker_service_worker_scope.is_some() {
+                state
+                    .service_worker_imports
+                    .insert(requested_url.clone(), resource.clone());
+            }
+            let ScriptResource {
+                filename,
+                source,
+                muted_errors,
+            } = resource;
             sources.push((filename, source, muted_errors, requested_url));
         }
         Ok(Some(sources))

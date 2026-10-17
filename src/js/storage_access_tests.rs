@@ -2264,7 +2264,7 @@ fn shared_worker_registry_partitions_first_and_third_party_owners() {
 }
 
 #[test]
-fn worklet_does_not_reuse_a_different_origin_runtime() {
+fn worklet_different_origin_document_gets_an_independent_runtime() {
     let mut runtime = runtime_at("https://top.test/");
     let transport = Arc::new(ResourceCookieTransport::default());
     runtime.set_http_resource_transport(Some(transport.clone()));
@@ -2284,22 +2284,19 @@ fn worklet_does_not_reuse_a_different_origin_runtime() {
         .eval_in_document_realm(
             child.identity(),
             "CSS.paintWorklet.addModule('https://third.test/child-worklet.js') \
-             .catch(error => document.documentElement.setAttribute('data-error', error.name))",
+             .then(() => document.documentElement.setAttribute('data-result', String(CSS.paintWorklet.moduleCount)), error => document.documentElement.setAttribute('data-result', error.name))",
         )
         .unwrap();
     runtime.run_until_idle().unwrap();
-    assert_eq!(
-        child_attribute(&child, "data-error").as_deref(),
-        Some("SecurityError")
-    );
+    assert_eq!(child_attribute(&child, "data-result").as_deref(), Some("1"));
     assert!(
         transport
             .requests
             .lock()
             .unwrap()
             .iter()
-            .all(|(_, path, _)| path != "/child-worklet.js"),
-        "different-origin module bytes cannot enter an existing WorkletGlobalScope"
+            .any(|(_, path, _)| path == "/child-worklet.js"),
+        "the child module executes in its own WorkletGlobalScope"
     );
 }
 
@@ -2688,4 +2685,91 @@ fn sandbox_token_controls_storage_access_request() {
             .unwrap();
         assert_eq!(child_result(&child).as_deref(), Some(expected));
     }
+}
+
+#[test]
+fn partitioned_cookie_store_works_before_and_after_storage_access_grant() {
+    let mut runtime = runtime_at("https://top.test/");
+    runtime.set_http_resource_transport(Some(Arc::new(StorageAccessTransport)));
+    runtime.eval("const f = document.createElement('iframe'); f.src = 'https://third.test/frame'; document.body.appendChild(f)").unwrap();
+    runtime.tick(0).unwrap();
+    let child = child_document(&runtime);
+    runtime.eval_in_document_realm(child.identity(), r#"
+        document.cookie = 'fromDocument=one; Secure; SameSite=None; Partitioned; Path=/';
+        cookieStore.set({ name: 'fromStore', value: 'two', partitioned: true, sameSite: 'none' })
+          .then(() => cookieStore.getAll())
+          .then(cookies => document.documentElement.setAttribute('data-result',
+            cookies.map(cookie => cookie.name + '=' + cookie.value).join('; ') + '|' + document.cookie));
+    "#).unwrap();
+    assert_eq!(
+        child_result(&child).as_deref(),
+        Some("fromDocument=one; fromStore=two|fromDocument=one; fromStore=two")
+    );
+    activate_storage_access(&mut runtime, &child);
+    runtime
+        .eval_in_document_realm(
+            child.identity(),
+            r#"
+        document.cookie = 'plain=three; Secure; SameSite=None; Path=/';
+        cookieStore.getAll().then(cookies => document.documentElement.setAttribute('data-result',
+          cookies.map(cookie => cookie.name + '=' + cookie.value).join('; ')));
+    "#,
+        )
+        .unwrap();
+    assert_eq!(
+        child_result(&child).as_deref(),
+        Some("fromDocument=one; fromStore=two; plain=three")
+    );
+    let jar = runtime.host_state.borrow().cookie_store.clone();
+    let url = "https://third.test/frame".parse().unwrap();
+    let other = crate::http::CookieAccessContext {
+        top_level_site: Some(crate::http::SchemefulSite::from_url(
+            &"https://other.test/".parse().unwrap(),
+        )),
+        unpartitioned: true,
+    };
+    assert_eq!(
+        jar.lock()
+            .unwrap()
+            .document_cookie_with_access(&url, &url, &other),
+        "plain=three"
+    );
+}
+
+#[test]
+fn partitioned_cookie_context_keeps_real_top_level_in_cross_site_ancestry() {
+    let mut runtime = runtime_at("https://top.test/");
+    runtime.set_http_resource_transport(Some(Arc::new(StorageAccessTransport)));
+    runtime.eval("const f = document.createElement('iframe'); f.id='middle'; f.src = 'https://third.test/frame'; document.body.appendChild(f)").unwrap();
+    runtime.tick(0).unwrap();
+    let middle = iframe_document_by_id(&runtime, "middle");
+    runtime.eval_in_document_realm(middle.identity(), "const inner=document.createElement('iframe'); inner.id='inner'; inner.src='https://top.test/frame'; document.body.appendChild(inner)").unwrap();
+    runtime.tick(0).unwrap();
+    let inner = iframe_document_by_id(&runtime, "inner");
+    runtime
+        .eval_in_document_realm(
+            inner.identity(),
+            "document.cookie = 'nested=one; Secure; Partitioned; SameSite=None; Path=/'",
+        )
+        .unwrap();
+    assert_eq!(
+        runtime
+            .eval("document.cookie")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "nested=one"
+    );
+    let state = runtime.host_state.borrow();
+    let context = state.document_cookie_request_context(inner.identity());
+    let mut request = HttpRequest::get("https://top.test/resource").unwrap();
+    context.apply(&mut request);
+    let access = request.cookie_access_context(false);
+    assert_eq!(
+        access.top_level_site,
+        Some(crate::http::SchemefulSite::from_url(
+            &"https://top.test/".parse().unwrap()
+        ))
+    );
 }
