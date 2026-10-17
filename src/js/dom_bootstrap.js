@@ -23542,7 +23542,8 @@ export const __omoikane_service_worker_lifecycle = {};
       throw new TypeError("CookieStore.get requires a name or URL");
     }
     if (options.url !== undefined) {
-      const requested = new URL(String(options.url), document.baseURI);
+      const base = typeof document === "undefined" ? cookieStoreCreationURL : document.baseURI;
+      const requested = new URL(String(options.url), base);
       const current = new URL(cookieStoreCreationURL);
       if (requested.href.split("#")[0] !== current.href.split("#")[0]) {
         throw new TypeError("CookieStore URL must match the document URL");

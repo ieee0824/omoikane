@@ -52,10 +52,22 @@ const COOKIE_STORE_WORKER_SOURCE: &str = r#"
       return;
     }
     const seed = await cookieStore.get('seed');
+    let byURL = null;
+    let allByURL = [];
+    let urlError = '';
+    try {
+      byURL = await cookieStore.get({name: 'seed', url: location.href});
+      allByURL = await cookieStore.getAll({url: location.href});
+    } catch (error) { urlError = error.name; }
+    let mismatchedURLRejected = false;
+    try { await cookieStore.get({name: 'seed', url: '/app/other'}); }
+    catch (error) { mismatchedURLRejected = error instanceof TypeError; }
     await cookieStore.set({name: 'from-worker', value: 'yes', path: '/'});
     const written = await cookieStore.get('from-worker');
     event.source.postMessage({
       available, seed: seed?.value, written: written?.value,
+      byURL: byURL?.value, allByURL: allByURL.some(cookie => cookie.name === 'seed'),
+      mismatchedURLRejected, urlError,
       noDocument: typeof document === 'undefined',
       noWindowChangeHandler: !('onchange' in cookieStore) &&
         typeof CookieChangeEvent === 'undefined',
@@ -299,6 +311,10 @@ fn service_worker_cookie_store_reads_and_writes_shared_jar_without_document() {
             .eval(
                 r#"observed.error === '' && observed.message?.available &&
                   observed.message.seed === 'page' &&
+                  observed.message.byURL === 'page' &&
+                  observed.message.allByURL &&
+                  observed.message.mismatchedURLRejected &&
+                  observed.message.urlError === '' &&
                   observed.message.written === 'yes' &&
                   observed.message.noDocument &&
                   observed.message.noWindowChangeHandler && observed.pageCookie === 'yes'"#,
