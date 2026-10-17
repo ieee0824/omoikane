@@ -42,6 +42,12 @@ build artifacts separate when verifying lockfile updates; the default target
 directories already provide this separation. Apply the root repository's
 capacity guard to each directory.
 
+Boa's `gen-icu4x-data` development tool uses a local copy of
+`icu_provider_source` 2.0.1 under `boa/vendor/icu_provider_source/` so its ZIP
+reader can use fixed `zip` 9. The copy's [provenance and local change](boa/vendor/icu_provider_source/OMOIKANE.md)
+are recorded there. The nested `Cargo.lock` must be updated with this patch;
+the browser's root lockfile does not include this development tool.
+
 The original `boa/.github/workflows/` files are retained as history, but GitHub
 does not execute nested workflows. Omoikane's root workflows must exercise the
 engine alongside browser compatibility and release gates. Source placement and

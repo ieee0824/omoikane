@@ -154,6 +154,17 @@ impl CookieRequestContext {
         request.set_storage_access_eligible(eligible);
         request.set_cross_site_ancestry(self.cross_site_ancestry);
     }
+
+    /// Applies a WebSocket handshake's cookie policy. The WebSocket service
+    /// may use a different port from the initiating Document on the same host.
+    pub(crate) fn apply_websocket(&self, request: &mut HttpRequest) {
+        self.apply(request);
+        if self.granted_origin.as_ref().is_some_and(|origin| {
+            origin.scheme() == request.url().scheme() && origin.host() == request.url().host()
+        }) {
+            request.set_storage_access_eligible(true);
+        }
+    }
 }
 
 impl HttpRequest {

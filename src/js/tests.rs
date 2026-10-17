@@ -3272,6 +3272,51 @@ fn webgl_canvas_context_state_resources_and_loss_boundary() {
 }
 
 #[test]
+fn websocket_handshake_sends_first_party_document_cookie() {
+    let listener = bind_loopback().unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+        let key = request
+            .lines()
+            .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+            .unwrap();
+        write!(stream, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", crate::cdp::websocket_accept_key(key)).unwrap();
+        request
+    });
+    let mut runtime = JsRuntime::new().unwrap();
+    let document_url: crate::http::Url = format!("http://{address}/page").parse().unwrap();
+    runtime.set_base_url(document_url.clone());
+    runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .add_from_header_for_url("session=allowed; SameSite=Lax; Path=/", &document_url);
+    assert_eq!(
+        runtime
+            .host_state
+            .borrow()
+            .cookie_store
+            .lock()
+            .unwrap()
+            .cookie_header(&document_url)
+            .as_deref(),
+        Some("session=allowed")
+    );
+    runtime
+        .eval(&format!(
+            "globalThis.socket = new WebSocket('ws://{address}/socket')"
+        ))
+        .unwrap();
+    let request = server.join();
+    assert!(request.contains("Origin: http://127.0.0.1:"));
+    assert!(request.contains("Cookie: session=allowed\r\n"), "{request}");
+}
+
+#[test]
 fn websocket_api_echo_close_and_networking_task_order() {
     let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();

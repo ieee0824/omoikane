@@ -1,4 +1,27 @@
-use super::request::{HttpRequest, Method, default_user_agent};
+use super::request::{CookieRequestContext, HttpRequest, Method, default_user_agent};
+
+#[test]
+fn websocket_grant_covers_same_host_on_separate_secure_port_only() {
+    let site = "https://top.test/".parse().unwrap();
+    let origin = "https://embedded.test:8443/".parse().unwrap();
+    let context = CookieRequestContext::new(Some(site), Some(origin), true);
+    let mut websocket = HttpRequest::get("https://embedded.test:9443/echo-cookie").unwrap();
+    context.apply_websocket(&mut websocket);
+    assert!(websocket.storage_access_eligible());
+    assert!(websocket.has_cross_site_ancestry());
+
+    for url in [
+        "http://embedded.test:9443/echo-cookie",
+        "https://other.test:9443/echo-cookie",
+    ] {
+        let mut request = HttpRequest::get(url).unwrap();
+        context.apply_websocket(&mut request);
+        assert!(!request.storage_access_eligible(), "{url}");
+    }
+    let mut worker = HttpRequest::get("https://embedded.test:9443/echo-cookie").unwrap();
+    context.for_worker_internal().apply_websocket(&mut worker);
+    assert!(!worker.storage_access_eligible());
+}
 
 #[test]
 fn get_request_serialization() {

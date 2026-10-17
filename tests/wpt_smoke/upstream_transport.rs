@@ -1,6 +1,8 @@
 //! Fixture-only origin routing over real HTTP/TLS with the pinned WPT CA.
 use base64::Engine;
-use omoikane::http::{HttpParseError, HttpRequest, HttpResponse, HttpTransport};
+use omoikane::http::{
+    HttpParseError, HttpRequest, HttpResponse, HttpTransport, Url, WebSocketRoute,
+};
 use rustls::pki_types::{CertificateDer, ServerName};
 use serde::Deserialize;
 use std::{
@@ -18,6 +20,7 @@ pub(super) struct Description {
     pub(super) base_url: String,
     pub(super) http_ports: Vec<u16>,
     pub(super) https_ports: Vec<u16>,
+    pub(super) wss_ports: Vec<u16>,
     pub(super) hosts: Vec<String>,
     pub(super) ca_certificate: PathBuf,
 }
@@ -37,6 +40,7 @@ pub(super) fn transport(description: Arc<Description>) -> io::Result<Arc<dyn Htt
             .http_ports
             .iter()
             .chain(&description.https_ports)
+            .chain(&description.wss_ports)
             .any(|port| *port == 0)
     {
         return Err(invalid("invalid WPT fixture origins"));
@@ -122,6 +126,22 @@ impl UpstreamTransport {
 }
 
 impl HttpTransport for UpstreamTransport {
+    fn websocket_route(&self, url: &Url) -> Result<Option<WebSocketRoute>, HttpParseError> {
+        if url.scheme() != "https"
+            || !self.description.hosts.iter().any(|host| host == url.host())
+            || !self.description.wss_ports.contains(&url.port())
+        {
+            return Err(HttpParseError::Io(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "destination outside configured WPT WebSocket origins",
+            )));
+        }
+        Ok(Some(WebSocketRoute {
+            endpoint: SocketAddr::from((Ipv4Addr::LOCALHOST, url.port())),
+            tls_config: Some(Arc::clone(&self.tls)),
+        }))
+    }
+
     fn send(
         &self,
         request: &HttpRequest,
@@ -190,6 +210,7 @@ mod tests {
             base_url: "https://web-platform.test:8443".into(),
             http_ports: vec![8000],
             https_ports: vec![8443],
+            wss_ports: vec![9443],
             hosts: vec!["web-platform.test".into()],
             ca_certificate: "unused".into(),
         });
@@ -202,6 +223,20 @@ mod tests {
             let error = transport
                 .send(&HttpRequest::get(url).unwrap(), None)
                 .unwrap_err();
+            assert!(
+                matches!(error, HttpParseError::Io(error) if error.kind()==io::ErrorKind::PermissionDenied),
+                "{url}"
+            );
+        }
+        for url in [
+            "https://outside.invalid:9443/echo-cookie",
+            "http://web-platform.test:9443/echo-cookie",
+            "https://web-platform.test:8443/echo-cookie",
+        ] {
+            let error = transport
+                .websocket_route(&url.parse().unwrap())
+                .err()
+                .unwrap();
             assert!(
                 matches!(error, HttpParseError::Io(error) if error.kind()==io::ErrorKind::PermissionDenied),
                 "{url}"

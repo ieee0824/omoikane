@@ -11,13 +11,14 @@ use crate::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
 };
 use std::fmt;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Maximum number of redirects to follow before aborting.
 const DEFAULT_MAX_REDIRECTS: u32 = 10;
 
-fn unpartitioned_cookie_access_allowed(request: &HttpRequest) -> bool {
+pub(crate) fn unpartitioned_cookie_access_allowed(request: &HttpRequest) -> bool {
     if request.is_top_level_navigation() {
         return true;
     }
@@ -39,6 +40,21 @@ pub trait HttpTransport: Send + Sync {
         request: &HttpRequest,
         timeout: Option<Duration>,
     ) -> Result<HttpResponse, HttpParseError>;
+
+    /// Resolves a WebSocket handshake URL when this transport also handles
+    /// WebSocket connections. The URL uses `http:` or `https:` as appropriate.
+    /// Returning `None` keeps the default WebSocket connection behavior.
+    fn websocket_route(&self, _url: &Url) -> Result<Option<WebSocketRoute>, HttpParseError> {
+        Ok(None)
+    }
+}
+
+/// The endpoint and TLS trust policy chosen by an explicit transport.
+pub struct WebSocketRoute {
+    /// Peer address to dial; the original URL still supplies Host and TLS SNI.
+    pub endpoint: SocketAddr,
+    /// Trust roots for a secure WebSocket, if different from the default roots.
+    pub tls_config: Option<Arc<rustls::ClientConfig>>,
 }
 
 /// A high-level HTTP client that automatically manages cookies and follows
@@ -99,6 +115,11 @@ impl Client {
     pub fn set_transport(&mut self, transport: Option<Arc<dyn HttpTransport>>) {
         self.connections = connection::ConnectionPool::default();
         self.transport = transport;
+    }
+
+    /// Returns the explicitly configured transport, if any.
+    pub(crate) fn transport(&self) -> Option<&Arc<dyn HttpTransport>> {
+        self.transport.as_ref()
     }
 
     /// Sends sanitized transport and redirect failures to the optional reporter.
