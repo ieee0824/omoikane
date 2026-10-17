@@ -18816,6 +18816,7 @@ export const __omoikane_service_worker_lifecycle = {};
   // Fetch interception remains outside this core.
   // -------------------------------------------------------------------------
   const serviceWorkerConstructionToken = {};
+  const serviceWorkerSelfMessageTargets = new WeakMap();
   const serviceWorkerContainerConstructionToken = {};
   const serviceWorkerRegistrationCookies = new WeakMap();
   const cookieStoreManagerOwners = new WeakMap();
@@ -18826,11 +18827,16 @@ export const __omoikane_service_worker_lifecycle = {};
       cookieStoreManagerOwners.set(this, scope);
     }
     static normalize(entries, scope) {
+      if (entries == null || (typeof entries !== "object" && typeof entries !== "function") ||
+          typeof entries[Symbol.iterator] !== "function") {
+        throw new TypeError("Cookie subscriptions must be iterable");
+      }
       const base = typeof document === "undefined" ? location.href : document.baseURI;
       return Array.from(entries, entry => {
-        if (entry === null || typeof entry !== "object") {
+        if (entry != null && typeof entry !== "object" && typeof entry !== "function") {
           throw new TypeError("Cookie subscription must be a dictionary");
         }
+        entry ??= {};
         const url = entry.url === undefined ? new URL(scope) : new URL(String(entry.url), base);
         if (!url.href.startsWith(scope)) throw new TypeError("Cookie subscription URL is outside scope");
         return {name: entry.name === undefined ? null : String(entry.name), url: url.href};
@@ -18922,6 +18928,13 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     postMessage(message, options = undefined) {
       if (this.__terminated) throw new DOMException("Service worker is stopped.", "InvalidStateError");
+      const selfTarget = serviceWorkerSelfMessageTargets.get(this);
+      if (selfTarget) {
+        const ports = [];
+        const wire = encodeWorkerMessage(message, options, ports);
+        __omoikane_enqueue_posted_message(selfTarget, {wire, ports});
+        return;
+      }
       const data = __omoikane_encode_worker_message(message, options);
       __omoikane_worker_post_message(this.__id, data);
     }
@@ -23601,7 +23614,8 @@ export const __omoikane_service_worker_lifecycle = {};
     return Promise.resolve().then(() => {
       const result = nativeCookieStoreQuery(cookieStoreOwners.get(store), cookieStoreCreationURL);
       if (result === null) throw new DOMException("Opaque origins cannot access cookies", "SecurityError");
-      const name = cookieStoreQueryName(options, requireOptions);
+      const requestedName = cookieStoreQueryName(options, requireOptions);
+      const name = requestedName === null ? null : requestedName.replace(/^[\t ]+|[\t ]+$/g, "");
       const items = JSON.parse(String(result));
       return name === null ? items : items.filter(cookie => cookie.name === name);
     });
@@ -26330,7 +26344,7 @@ export const __omoikane_service_worker_lifecycle = {};
     };
   };
 
-  function installServiceWorkerLifetimeEvents() {
+  function installServiceWorkerLifetimeEvents(registration, worker) {
     const states = new WeakMap();
     const events = new Map();
     const enqueue = queueMicrotask;
@@ -26343,6 +26357,13 @@ export const __omoikane_service_worker_lifecycle = {};
       state.promises.length = 0;
       if (state.phase !== undefined) {
         events.delete(state.phase);
+        if (state.installing) {
+          registration.installing = null;
+          registration.waiting = state.failed ? null : worker;
+          worker.__setState(state.failed ? "redundant" : "installed");
+        } else {
+          worker.__setState("activated");
+        }
         report(state.installing, state.failed);
       }
     }
@@ -26402,6 +26423,11 @@ export const __omoikane_service_worker_lifecycle = {};
       }
     };
     __omoikane_service_worker_lifecycle.dispatch = function(phase) {
+      if (phase === "activate") {
+        registration.waiting = null;
+        registration.active = worker;
+        worker.__setState("activating");
+      }
       const event = new ExtendableEvent(phase);
       const state = states.get(event);
       state.trusted = state.dispatching = true;
@@ -26438,11 +26464,32 @@ export const __omoikane_service_worker_lifecycle = {};
     try { delete globalThis.DedicatedWorkerGlobalScope; } catch (_) { globalThis.DedicatedWorkerGlobalScope = undefined; }
     globalThis.ServiceWorkerGlobalScope = Object;
     globalThis.CookieStoreManager = CookieStoreManager;
-    globalThis.registration = new ServiceWorkerRegistration(
-      {scope: String(scope), scriptURL: location.href, worker: null},
+    const record = {scope: String(scope), scriptURL: location.href, worker: null};
+    const worker = new ServiceWorker(record, "installing", null, serviceWorkerConstructionToken);
+    record.worker = worker;
+    serviceWorkerSelfMessageTargets.set(worker, {
+      _acceptMessage(packet) {
+        const ports = receiveTransferredMessagePorts(packet.ports);
+        let data;
+        try { data = decodeWorkerMessage(packet.wire, ports); }
+        catch (_) {
+          globalThis.dispatchEvent(new MessageEvent("messageerror", {
+            data: null, origin: location.origin, source: worker, ports,
+          }));
+          return;
+        }
+        globalThis.dispatchEvent(new MessageEvent("message", {
+          data, origin: location.origin, source: worker, ports,
+        }));
+      },
+    });
+    const registration = new ServiceWorkerRegistration(
+      record,
       null,
       serviceWorkerContainerConstructionToken,
     );
+    record.registration = registration;
+    globalThis.registration = registration;
     if (serviceWorkerCookieStore !== null) {
       // ServiceWorkers expose CookieStore without the Window-only onchange
       // attribute or Window change event dispatch.
@@ -26455,7 +26502,7 @@ export const __omoikane_service_worker_lifecycle = {};
         writable: false,
       });
     }
-    installServiceWorkerLifetimeEvents();
+    installServiceWorkerLifetimeEvents(registration, worker);
     let cookieChangeCursor = 0;
     const initial = nativeCookieStoreSubscribedChanges(__omoikane_document_id, null);
     cookieChangeCursor = JSON.parse(String(initial)).cursor;

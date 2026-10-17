@@ -51,6 +51,16 @@ def adapter_routes(handlers):
     return routes
 
 
+def generated_worker_routes():
+    # Use the pinned upstream wrappers, including META dependencies and the
+    # testharness worker-message protocol, without rewriting the original tests.
+    from serve.serve import ServiceWorkersHandler, ClassicWorkerHandler
+    return [
+        ("GET", "*.any.serviceworker.html", ServiceWorkersHandler()),
+        ("GET", "*.any.worker.js", ClassicWorkerHandler()),
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
@@ -90,7 +100,8 @@ def main():
                     instance = server.WebTestHttpd(
                         host="127.0.0.1", port=port, doc_root=str(root),
                         handler_cls=ClosingHttpHandler,
-                        routes=adapter_routes(handlers) + routes.routes,
+                        routes=(adapter_routes(handlers)
+                                + generated_worker_routes() + routes.routes),
                         rewrites=[("GET", "/resources/WebIDLParser.js", "/resources/webidl2/lib/webidl2.js")],
                         config=settings, use_ssl=scheme == "https",
                         key_file=settings.ssl_config["key_path"],

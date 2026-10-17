@@ -63,7 +63,7 @@ const COOKIE_STORE_WORKER_SOURCE: &str = r#"
     try { await cookieStore.get({name: 'seed', url: '/app/other'}); }
     catch (error) { mismatchedURLRejected = error instanceof TypeError; }
     await cookieStore.set({name: 'from-worker', value: 'yes', path: '/'});
-    const written = await cookieStore.get('from-worker');
+    const written = await cookieStore.get(' from-worker \t');
     event.source.postMessage({
       available, seed: seed?.value, written: written?.value,
       byURL: byURL?.value, allByURL: allByURL.some(cookie => cookie.name === 'seed'),
@@ -76,7 +76,23 @@ const COOKIE_STORE_WORKER_SOURCE: &str = r#"
 "#;
 
 const COOKIE_SUBSCRIPTIONS_WORKER_SOURCE: &str = r#"
+  const lifecycle = [];
+  addEventListener('install', () => lifecycle.push(registration.installing?.state));
+  addEventListener('activate', () => lifecycle.push(registration.active?.state));
   addEventListener('message', async event => {
+    if (event.data?.self) {
+      selfClient.postMessage({lifecycle, active: registration.active?.state,
+        installing: registration.installing, waiting: registration.waiting,
+        selfSource: event.source === registration.active, value: event.data.value});
+      return;
+    }
+    if (event.data === 'lifecycle') {
+      globalThis.selfClient = event.source;
+      const message = {self: true, value: 'cloned'};
+      ServiceWorker.prototype.postMessage.call(registration.active, message);
+      message.value = 'mutated';
+      return;
+    }
     try {
       const before = await registration.cookies.getSubscriptions();
       await registration.cookies.subscribe([{name: 'worker', url: '/app/page'}]);
@@ -390,6 +406,12 @@ fn service_worker_cookie_subscriptions_share_registration_between_window_and_wor
         observed.sameManager = registration.cookies === registration.cookies;
         observed.readOnlyManager = !Object.getOwnPropertyDescriptor(
           ServiceWorkerRegistration.prototype, 'cookies').set;
+        await registration.cookies.subscribe([{}]);
+        const defaults = await registration.cookies.getSubscriptions();
+        observed.omittedName = defaults.length === 1 && !('name' in defaults[0]);
+        await registration.cookies.unsubscribe(defaults);
+        try { await registration.cookies.subscribe({name: 'invalid'}); }
+        catch (error) { observed.nonIterableRejected = error instanceof TypeError; }
         await registration.cookies.subscribe(new Set([{name: 'page', url: '/app/page'}]));
         observed.before = await registration.cookies.getSubscriptions();
         try { await registration.cookies.subscribe([{url: '/outside'}]); }
@@ -405,6 +427,7 @@ fn service_worker_cookie_subscriptions_share_registration_between_window_and_wor
             .eval(
                 r#"observed.error === '' && observed.managerType && observed.sameManager &&
                    observed.readOnlyManager && observed.outsideScopeRejected &&
+                   observed.omittedName && observed.nonIterableRejected &&
                    observed.before?.length === 1 && observed.before[0].name === 'page' &&
                    observed.message?.managerType && observed.message?.sameManager &&
                    observed.message.before?.length === 1 &&
@@ -421,6 +444,40 @@ fn service_worker_cookie_subscriptions_share_registration_between_window_and_wor
         runtime.eval("JSON.stringify(observed)"),
         runtime.take_task_errors(),
     );
+    drop(runtime);
+    assert_eq!(
+        fixture.finish(),
+        vec!["/app/cookie-subscriptions.js".to_owned()]
+    );
+}
+
+#[test]
+fn service_worker_registration_tracks_local_lifecycle_and_self_messages() {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime.eval(r#"
+      globalThis.observed = null;
+      navigator.serviceWorker.onmessage = event => globalThis.observed = event.data;
+      navigator.serviceWorker.register('/app/cookie-subscriptions.js');
+      navigator.serviceWorker.ready.then(registration => registration.active.postMessage('lifecycle'));
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    let errors = runtime.take_task_errors();
+    assert!(errors.is_empty(), "task errors: {errors:?}");
+    assert_eq!(
+        runtime
+            .eval(r#"JSON.stringify(observed)"#)
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        r#"{"lifecycle":["installing","activating"],"active":"activated","installing":null,"waiting":null,"selfSource":true,"value":"cloned"}"#
+    );
+    assert!(runtime.take_task_errors().is_empty());
     drop(runtime);
     assert_eq!(
         fixture.finish(),

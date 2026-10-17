@@ -112,7 +112,10 @@ pub(super) fn subscriptions_native(
                 let items = jar
                     .service_worker_subscriptions(&scope, &top_level_site)
                     .into_iter()
-                    .map(|entry| serde_json::json!({"name": entry.name, "url": entry.url}))
+                    .map(|entry| match entry.name {
+                        Some(name) => serde_json::json!({"name": name, "url": entry.url}),
+                        None => serde_json::json!({"url": entry.url}),
+                    })
                     .collect::<Vec<_>>();
                 Ok(JsValue::from(js_string!(
                     serde_json::to_string(&items).expect("subscriptions are serializable")
