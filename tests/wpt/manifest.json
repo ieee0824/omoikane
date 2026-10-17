@@ -634,6 +634,7 @@
     },
     { "path": "storage-access-api/idlharness.window.js" },
     { "path": "storage-access-api/storage-access-permission.sub.https.window.js", "server": "wptserve" },
+    { "path": "storage-access-api/requestStorageAccess-web-socket.sub.https.window.js", "server": "wptserve" },
     { "path": "storage-access-api/requestStorageAccess-non-fully-active.sub.https.window.js" }
   ]
 }

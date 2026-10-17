@@ -23,8 +23,9 @@ mod request_tests;
 #[cfg(test)]
 mod response_tests;
 
-pub use client::{Client, HttpTransport};
-pub(crate) use connection::is_public_ip;
+pub(crate) use client::unpartitioned_cookie_access_allowed;
+pub use client::{Client, HttpTransport, WebSocketRoute};
+pub(crate) use connection::{is_public_ip, websocket_tls_config};
 pub use connection::{send, send_with_options};
 pub use cookie::{Cookie, CookieChangeSubscription, CookieJar, SameSite};
 pub(crate) use cookie::{CookieStoreChange, CookieStoreWrite};

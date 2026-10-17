@@ -9001,7 +9001,8 @@ impl JsRuntime {
     /// The transport owns connection policy; URL, cookie, redirect and CORS
     /// processing still run normally. New Workers, Worklets and module-fetch
     /// pools inherit this transport when created. Existing child runtimes and
-    /// pools retain their clients; WebSocket connections use their own clients.
+    /// pools retain their clients. WebSocket connections use the transport's
+    /// WebSocket route when one is configured.
     /// `None` restores the default transport.
     pub fn set_http_resource_transport(
         &mut self,
@@ -22914,18 +22915,48 @@ fn websocket_connect_native(
                 .into());
         }
         let origin = state
-            .base_url
-            .as_ref()
-            .map(|url| format!("{}://{}", url.scheme(), url.authority()));
+            .cors_origin_for_document(document.identity())
+            .serialize();
+        let handshake_url = crate::realtime::websocket_http_url(&url).map_err(|error| {
+            JsError::from(JsNativeError::error().with_message(error.to_string()))
+        })?;
+        let mut request = HttpRequest::new(Method::Get, handshake_url);
+        state
+            .document_cookie_request_context(document.identity())
+            .apply_websocket(&mut request);
+        let cookie = if crate::http::unpartitioned_cookie_access_allowed(&request) {
+            state
+                .cookie_store
+                .lock()
+                .unwrap()
+                .cookie_header_for_request(
+                    request.url(),
+                    request.site_for_cookies().unwrap_or(request.url()),
+                    request.is_top_level_navigation(),
+                    request.method(),
+                )
+        } else {
+            None
+        };
         let address_policy = websocket_address_policy(
             &url,
             state.base_url_for_document(document.identity()).as_ref(),
         );
-        let client = crate::realtime::WebSocketClient::connect_with_policy(
+        let route = state
+            .http_client
+            .transport()
+            .map(|transport| transport.websocket_route(request.url()))
+            .transpose()
+            .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?
+            .flatten();
+        let client = crate::realtime::WebSocketClient::connect_with_route(
             &url,
             &protocols,
-            origin.as_deref(),
+            Some(&origin),
+            cookie.as_deref(),
             address_policy,
+            route.as_ref().map(|route| route.endpoint),
+            route.and_then(|route| route.tls_config),
         )
         .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
         let protocol = client.protocol().to_string();

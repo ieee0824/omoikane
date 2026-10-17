@@ -1,4 +1,226 @@
 use super::*;
+use crate::test_support::http_fixture::{
+    ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+    read_request_headers_from,
+};
+use std::io::Write;
+
+struct StorageWebSocketTransport {
+    endpoint: std::net::SocketAddr,
+    tls: Arc<rustls::ClientConfig>,
+}
+
+impl crate::http::HttpTransport for StorageWebSocketTransport {
+    fn send(
+        &self,
+        request: &HttpRequest,
+        timeout: Option<Duration>,
+    ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+        if request.url().path() == "/worker.js" {
+            return Ok(crate::http::HttpResponse::new(
+                200,
+                "OK",
+                vec![("Content-Type".into(), "text/javascript".into())],
+                format!(
+                    "new WebSocket('wss://third.test:{}/echo-cookie')",
+                    self.endpoint.port()
+                )
+                .into_bytes(),
+            ));
+        }
+        crate::http::HttpTransport::send(&StorageAccessTransport, request, timeout)
+    }
+
+    fn websocket_route(
+        &self,
+        url: &crate::http::Url,
+    ) -> Result<Option<crate::http::WebSocketRoute>, crate::http::HttpParseError> {
+        if url.scheme() != "https"
+            || url.host() != "third.test"
+            || url.port() != self.endpoint.port()
+        {
+            return Err(crate::http::HttpParseError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "unexpected WebSocket test origin",
+            )));
+        }
+        Ok(Some(crate::http::WebSocketRoute {
+            endpoint: self.endpoint,
+            tls_config: Some(Arc::clone(&self.tls)),
+        }))
+    }
+}
+
+fn storage_websocket_fixture(
+    expected_requests: usize,
+) -> (
+    std::net::SocketAddr,
+    Arc<rustls::ClientConfig>,
+    FixtureWorker<Vec<String>>,
+) {
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    let params = rcgen::CertificateParams::new(vec!["third.test".to_owned()]).unwrap();
+    let key_pair = rcgen::KeyPair::generate().unwrap();
+    let certificate = params.self_signed(&key_pair).unwrap().der().clone();
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+    let server_tls = Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate.clone()], key)
+            .unwrap(),
+    );
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certificate).unwrap();
+    let client_tls = Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    let listener = bind_loopback().unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut requests = Vec::new();
+        for _ in 0..expected_requests {
+            let tcp = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let mut stream = rustls::StreamOwned::new(
+                rustls::ServerConnection::new(Arc::clone(&server_tls)).unwrap(),
+                tcp,
+            );
+            let request =
+                read_request_headers_from(&mut stream, READ_TIMEOUT, |stream, remaining| {
+                    stream.sock.set_read_timeout(Some(remaining))
+                })
+                .unwrap();
+            let key = request
+                .lines()
+                .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+                .unwrap();
+            write!(stream, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", crate::cdp::websocket_accept_key(key)).unwrap();
+            stream.flush().unwrap();
+            requests.push(request);
+        }
+        requests
+    });
+    (endpoint, client_tls, server)
+}
+
+#[test]
+fn iframe_websocket_handshake_tracks_storage_access_grant_and_revoke() {
+    let (endpoint, client_tls, server) = storage_websocket_fixture(3);
+    let mut runtime = runtime_at("https://top.test/");
+    runtime.set_http_resource_transport(Some(Arc::new(StorageWebSocketTransport {
+        endpoint,
+        tls: client_tls,
+    })));
+    {
+        let state = runtime.host_state.borrow();
+        let mut jar = state.cookie_store.lock().unwrap();
+        let origin = "https://third.test/".parse().unwrap();
+        for header in [
+            "session=pre; Path=/; Secure; SameSite=None",
+            "hidden=secret; Path=/; Secure; HttpOnly; SameSite=None",
+            "wrong_path=no; Path=/other; Secure; SameSite=None",
+            "strict=no; Path=/; Secure; SameSite=Strict",
+            "expired=old; Path=/; Secure; SameSite=None; Max-Age=0",
+        ] {
+            jar.add_from_header_for_url(header, &origin);
+        }
+        jar.add_from_header_for_url(
+            "other_domain=no; Path=/; Secure; SameSite=None",
+            &"https://other.test/".parse().unwrap(),
+        );
+    }
+    runtime
+        .eval("const frame = document.createElement('iframe'); frame.src = 'https://third.test/frame'; document.body.appendChild(frame)")
+        .unwrap();
+    runtime.tick(0).unwrap();
+    let child = child_document(&runtime);
+    let connect = format!(
+        "new WebSocket('wss://third.test:{}/echo-cookie')",
+        endpoint.port()
+    );
+    runtime
+        .eval_in_document_realm(child.identity(), &connect)
+        .unwrap();
+    activate_storage_access(&mut runtime, &child);
+    runtime
+        .eval_in_document_realm(child.identity(), &connect)
+        .unwrap();
+    runtime
+        .host_state
+        .borrow_mut()
+        .set_storage_access_permission(
+            child.identity(),
+            super::storage_access::StorageAccessPermission::Denied,
+        )
+        .unwrap();
+    runtime
+        .eval_in_document_realm(child.identity(), &connect)
+        .unwrap();
+
+    let requests = server.join();
+    assert_eq!(requests.len(), 3);
+    for request in &requests {
+        assert!(
+            request.contains("Origin: https://third.test\r\n"),
+            "{request}"
+        );
+    }
+    assert!(!requests[0].contains("\r\nCookie: "));
+    assert!(
+        requests[1].contains("Cookie: session=pre"),
+        "{}",
+        requests[1]
+    );
+    assert!(requests[1].contains("hidden=secret"), "{}", requests[1]);
+    for excluded in [
+        "wrong_path=no",
+        "strict=no",
+        "expired=old",
+        "other_domain=no",
+    ] {
+        assert!(!requests[1].contains(excluded), "{}", requests[1]);
+    }
+    assert!(!requests[2].contains("\r\nCookie: "));
+}
+
+#[test]
+fn dedicated_worker_websocket_does_not_inherit_document_storage_access() {
+    let (endpoint, client_tls, server) = storage_websocket_fixture(1);
+    let mut runtime = runtime_at("https://top.test/");
+    runtime.set_http_resource_transport(Some(Arc::new(StorageWebSocketTransport {
+        endpoint,
+        tls: client_tls,
+    })));
+    runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .add_from_header_for_url(
+            "session=pre; Path=/; Secure; SameSite=None",
+            &"https://third.test/".parse().unwrap(),
+        );
+    runtime
+        .eval("const frame = document.createElement('iframe'); frame.src = 'https://third.test/frame'; document.body.appendChild(frame)")
+        .unwrap();
+    runtime.tick(0).unwrap();
+    let child = child_document(&runtime);
+    activate_storage_access(&mut runtime, &child);
+    runtime
+        .eval_in_document_realm(
+            child.identity(),
+            "globalThis.worker = new Worker('https://third.test/worker.js')",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+
+    let requests = server.join();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("Origin: https://third.test\r\n"));
+    assert!(!requests[0].contains("\r\nCookie: "));
+}
 
 struct StorageAccessTransport;
 

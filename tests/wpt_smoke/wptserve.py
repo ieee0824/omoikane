@@ -16,7 +16,7 @@ def configuration(root, config):
         doc_root=str(root), subdomains={"www", "www1", "www2"},
         alternate_hosts={"alt": "not-web-platform.test"},
         ports={"http": ["auto", "auto"], "https": ["auto", "auto"],
-               "ws": [0], "wss": [0]},
+               "ws": [0], "wss": ["auto"]},
         ssl={"type": "pregenerated", "encrypt_after_connect": False,
              "pregenerated": {
                  "host_key_path": str(certificates / "web-platform.test.key"),
@@ -62,6 +62,7 @@ def main():
     sys.path[:0] = [str(root), str(root / "tools")]
     import localpaths  # noqa: F401: pinned vendored dependency paths
     from wptserve import config, handlers, routes, server, stash
+    import websocket_cookie
     class ClosingHttpHandler(server.Http1WebTestRequestHandler):
         def finish(self):
             super().finish()
@@ -77,7 +78,13 @@ def main():
 
     with stash.StashServer(), configuration(root, config) as settings:
         servers = []
+        websocket_server = None
         try:
+            websocket_server = websocket_cookie.start(
+                settings.ports["wss"][0],
+                settings.ssl_config["cert_path"],
+                settings.ssl_config["key_path"],
+            )
             for scheme in ("http", "https"):
                 for port in settings.ports[scheme]:
                     instance = server.WebTestHttpd(
@@ -95,6 +102,7 @@ def main():
                 "base_url": f"https://web-platform.test:{settings.ports['https'][0]}",
                 "http_ports": settings.ports["http"],
                 "https_ports": settings.ports["https"],
+                "wss_ports": settings.ports["wss"],
                 "hosts": sorted(settings.domains_set),
                 "ca_certificate": settings.ssl_config["ca_cert_path"],
             }
@@ -109,6 +117,9 @@ def main():
         finally:
             for instance in reversed(servers):
                 instance.stop()
+            if websocket_server is not None:
+                websocket_server.shutdown()
+                websocket_server.server_close()
 
 
 if __name__ == "__main__":
