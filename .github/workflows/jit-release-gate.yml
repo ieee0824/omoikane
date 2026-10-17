@@ -140,6 +140,22 @@ jobs:
           name: ${{ matrix.archive }}
           path: .artifacts/jit-gate5/${{ matrix.target }}/package/${{ matrix.archive }}
           if-no-files-found: error
+      - name: Retain WPT server startup logs
+        if: always() && matrix.kind == 'suite'
+        env:
+          GATE_TARGET: ${{ matrix.target }}
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import shutil
+          source = Path(".artifacts/wptserve")
+          destination = Path(".artifacts/jit-gate5") / os.environ["GATE_TARGET"] / "suite/wptserve"
+          for log in source.glob("*/server.log"):
+              target = destination / log.relative_to(source)
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(log, target)
+          PYTHON
       - name: Retain execution, benchmark and failure evidence
         if: always()
         uses: actions/upload-artifact@v4

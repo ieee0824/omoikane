@@ -30,9 +30,9 @@ def main():
     save = lambda: proof.write_text(json.dumps(report, indent=2) + "\n")
     save()
     assert result["status"] == "failed"
-    match = re.search(r"process didn't exit successfully: `([^`]+)` \(signal: 11, SIGSEGV", raw)
+    match = re.search(r"process didn't exit successfully: `([^`]+)` \(signal: (?:11, SIGSEGV|6, SIGABRT)", raw)
     if sys.platform != "darwin" or not match:
-        report.update(completed=True, not_run_reason="not a recorded Mac SIGSEGV")
+        report.update(completed=True, not_run_reason="not a recorded Mac SIGSEGV or SIGABRT")
         save()
         return 0
     command = match.group(1).split()

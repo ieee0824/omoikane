@@ -82,6 +82,17 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(proof["original_result"]["status"], "failed")
         self.assertTrue(proof["debugger_result_is_not_gate_result"])
 
+    def test_sigabrt_replays_and_preserves_failed_suite(self):
+        log = self.suite / "full-suite.log"
+        log.write_text(log.read_text().replace("11, SIGSEGV", "6, SIGABRT"))
+        before = log.read_bytes()
+        result, launch = self.run_diagnostic(
+            replay=lambda *args, **kwargs: types.SimpleNamespace(returncode=0))
+        self.assertEqual(result, 0)
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(log.read_bytes(), before)
+        self.assertEqual(json.loads((self.suite / "result.json").read_text())["status"], "failed")
+
     def test_unset_test_threads_stays_unset(self):
         self.normal_environment["RUST_TEST_THREADS"] = None
         self.save("suite-environment.json", self.normal_environment)
@@ -95,7 +106,7 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(result, 0)
         launch.assert_not_called()
         proof = json.loads((self.suite / "crash-diagnostic/inputs.json").read_text())
-        self.assertEqual(proof["not_run_reason"], "not a recorded Mac SIGSEGV")
+        self.assertEqual(proof["not_run_reason"], "not a recorded Mac SIGSEGV or SIGABRT")
 
     def test_non_signal_failure_does_not_launch_lldb(self):
         (self.suite / "full-suite.log").write_text("RuntimeLimit: exceeded maximum runtime limit\n")
