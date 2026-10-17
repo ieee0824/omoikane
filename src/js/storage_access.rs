@@ -222,6 +222,14 @@ impl HostState {
         document_id: usize,
         fallback: &crate::http::Url,
     ) -> crate::http::Url {
+        if document_id == self.document.identity()
+            && let Some(context) = &self.worker_cookie_request_context
+        {
+            return context
+                .cookie_site()
+                .cloned()
+                .unwrap_or_else(|| fallback.clone());
+        }
         self.storage_access_context(document_id)
             .map_or_else(|| fallback.clone(), |context| context.cookie_site)
     }
@@ -233,6 +241,26 @@ impl HostState {
     ) -> Option<crate::http::SchemefulSite> {
         self.storage_access_context(document_id)
             .map(|context| context.top_level_site)
+    }
+
+    /// Selects a cookie partition without changing it when Storage Access is granted.
+    pub(super) fn cookie_access_context_for_document(
+        &self,
+        document_id: usize,
+        unpartitioned: bool,
+    ) -> crate::http::CookieAccessContext {
+        let top_level_site = if document_id == self.document.identity() {
+            self.worker_cookie_request_context
+                .as_ref()
+                .map(crate::http::CookieRequestContext::top_level_site)
+                .unwrap_or_else(|| self.storage_access_top_level_site(document_id))
+        } else {
+            self.storage_access_top_level_site(document_id)
+        };
+        crate::http::CookieAccessContext {
+            top_level_site,
+            unpartitioned,
+        }
     }
 
     /// Captures policy once so asynchronous resource loaders do not retain DOM state.
@@ -270,6 +298,7 @@ impl HostState {
             .flatten()
             .and_then(|origin| origin.serialize().parse().ok());
         crate::http::CookieRequestContext::new(site, granted_origin, cross_site_ancestry)
+            .with_top_level_site(context.map(|context| context.top_level_site))
     }
 
     /// Shares the creator's browsing session with a Worker, without inheriting

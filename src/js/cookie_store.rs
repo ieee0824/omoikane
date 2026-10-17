@@ -14,7 +14,6 @@ struct Mutation {
     max_age: Option<i64>,
     same_site: String,
     partitioned: bool,
-    deletion: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -34,6 +33,9 @@ pub(super) fn subscriptions_native(
     let scope = string_argument(args.get(1), "", context)?;
     let operation = string_argument(args.get(2), "", context)?;
     let entries = string_argument(args.get(3), "[]", context)?;
+    let expected_id = string_argument(args.get(4), "", context)?
+        .parse::<u64>()
+        .ok();
     let entries: Vec<SubscriptionEntry> = serde_json::from_str(&entries)
         .map_err(|_| JsNativeError::typ().with_message("Invalid cookie subscriptions"))?;
     let scope_url = url::Url::parse(&scope).map_err(|_| {
@@ -72,6 +74,7 @@ pub(super) fn subscriptions_native(
                 .into());
         }
         let worker_scope = state.worker_service_worker_scope.is_some();
+        let worker_registration_id = state.worker_service_worker_registration_id;
         let top_level_site = state
             .worker_service_worker_top_level_site
             .clone()
@@ -86,12 +89,17 @@ pub(super) fn subscriptions_native(
         let jar = state.cookie_store.clone();
         drop(state);
         let mut jar = jar.lock().unwrap();
-        if !worker_scope && !jar.has_service_worker_scope(&scope, &top_level_site) {
+        let current_id = jar.service_worker_registration_id(&scope, &top_level_site);
+        if current_id.is_none()
+            || (worker_scope && worker_registration_id != current_id)
+            || (operation != "identity" && expected_id != current_id)
+        {
             return Err(JsNativeError::typ()
                 .with_message("Service Worker registration is unavailable")
                 .into());
         }
         match operation.as_str() {
+            "identity" => Ok(JsValue::from(js_string!(current_id.unwrap().to_string()))),
             "subscribe" | "unsubscribe" => {
                 let entries = entries
                     .into_iter()
@@ -225,15 +233,16 @@ pub(super) fn query_native(
                 .with_message("Cookie Store document origin changed")
                 .into());
         }
-        if !cookie_access_allowed(&state, document_id) {
-            return Ok(JsValue::from(js_string!("[]")));
-        }
+        let access = state.cookie_access_context_for_document(
+            document_id,
+            cookie_access_allowed(&state, document_id),
+        );
         let site = state.storage_access_cookie_site_for_document(document_id, &url);
         let pairs = state
             .cookie_store
             .lock()
             .unwrap()
-            .script_visible_cookie_pairs(&url, &site);
+            .script_visible_cookie_pairs_with_access(&url, &site, &access);
         let items = pairs
             .into_iter()
             .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
@@ -312,9 +321,10 @@ pub(super) fn mutate_native(
                 .with_message("Cookie Store document origin changed")
                 .into());
         }
-        if !cookie_access_allowed(&state, document_id) {
-            return Ok(JsValue::undefined());
-        }
+        let access = state.cookie_access_context_for_document(
+            document_id,
+            cookie_access_allowed(&state, document_id),
+        );
         let site = state.storage_access_cookie_site_for_document(document_id, &url);
         let options = crate::http::CookieStoreWrite {
             name: mutation.name,
@@ -325,13 +335,12 @@ pub(super) fn mutate_native(
             max_age: mutation.max_age,
             same_site,
             partitioned: mutation.partitioned,
-            deletion: mutation.deletion,
         };
         state
             .cookie_store
             .lock()
             .unwrap()
-            .set_from_cookie_store(options, &url, &site)
+            .set_from_cookie_store_with_access(options, &url, &site, &access)
             .map_err(|reason| JsNativeError::typ().with_message(reason))?;
         Ok(JsValue::undefined())
     })
@@ -382,16 +391,14 @@ pub(super) fn changes_native(
                 .with_message("Cookie Store document origin changed")
                 .into());
         }
-        if !cookie_access_allowed(&state, document_id) {
-            let next = state.cookie_store.lock().unwrap().change_sequence();
-            return Ok(JsValue::from(js_string!(format!(
-                "{{\"cursor\":{next},\"events\":[]}}"
-            ))));
-        }
+        let access = state.cookie_access_context_for_document(
+            document_id,
+            cookie_access_allowed(&state, document_id),
+        );
         let site = state.storage_access_cookie_site_for_document(document_id, &url);
         let jar = state.cookie_store.lock().unwrap();
         let (next, changes) = if let Some(cursor) = cursor {
-            jar.script_visible_changes_since(cursor, &url, &site)
+            jar.script_visible_changes_since_with_access(cursor, &url, &site, &access)
         } else {
             (jar.change_sequence(), Vec::new())
         };
@@ -426,12 +433,23 @@ pub(super) fn subscribed_changes_native(
         })?;
         let jar = state.cookie_store.lock().unwrap();
         let next = jar.change_sequence();
-        if !cookie_access_allowed(&state, document_id) {
+        if state.worker_service_worker_registration_id.is_none()
+            || state.worker_service_worker_registration_id
+                != jar.service_worker_registration_id(scope, top_level_site)
+        {
             return Ok(encode_cookie_changes(next, Vec::new()));
         }
+
+        let unpartitioned = cookie_access_allowed(&state, document_id);
         let site = state.storage_access_cookie_site_for_document(document_id, script_url);
         let (next, changes) = if let Some(cursor) = cursor {
-            jar.service_worker_changes_since(cursor, scope, top_level_site, &site)
+            jar.service_worker_changes_since_with_access(
+                cursor,
+                scope,
+                top_level_site,
+                &site,
+                unpartitioned,
+            )
         } else {
             (next, Vec::new())
         };

@@ -79,6 +79,7 @@ pub struct HttpRequest {
     body: Option<Vec<u8>>,
     require_public_ip: bool,
     site_for_cookies: Option<Url>,
+    cookie_top_level_site: Option<super::SchemefulSite>,
     top_level_navigation: bool,
     referrer_source: Option<(String, ReferrerPolicy)>,
     storage_access_eligible: bool,
@@ -94,6 +95,7 @@ pub struct HttpRequest {
 pub(crate) struct CookieRequestContext {
     site_for_cookies: Option<Url>,
     granted_origin: Option<Url>,
+    top_level_site: Option<super::SchemefulSite>,
     cross_site_ancestry: bool,
 }
 
@@ -104,11 +106,30 @@ impl CookieRequestContext {
         granted_origin: Option<Url>,
         cross_site_ancestry: bool,
     ) -> Self {
+        let top_level_site = site_for_cookies
+            .as_ref()
+            .map(super::SchemefulSite::from_url);
         Self {
+            top_level_site,
             site_for_cookies,
             granted_origin,
             cross_site_ancestry,
         }
+    }
+
+    /// Overrides the real top-level site independently of cross-site cookie ancestry.
+    pub(crate) fn with_top_level_site(mut self, site: Option<super::SchemefulSite>) -> Self {
+        self.top_level_site = site;
+        self
+    }
+
+    /// Returns the inherited SameSite context, separately from the partition key.
+    pub(crate) fn cookie_site(&self) -> Option<&Url> {
+        self.site_for_cookies.as_ref()
+    }
+
+    pub(crate) fn top_level_site(&self) -> Option<super::SchemefulSite> {
+        self.top_level_site.clone()
     }
 
     /// Keeps the container's cookie site and ancestry, copying only an eligible
@@ -151,6 +172,7 @@ impl CookieRequestContext {
                 .unwrap_or_else(|| request.url().clone()),
             false,
         );
+        request.cookie_top_level_site = self.top_level_site.clone();
         request.set_storage_access_eligible(eligible);
         request.set_cross_site_ancestry(self.cross_site_ancestry);
     }
@@ -181,6 +203,7 @@ impl HttpRequest {
             body: None,
             require_public_ip: false,
             site_for_cookies: None,
+            cookie_top_level_site: None,
             top_level_navigation: true,
             referrer_source: None,
             storage_access_eligible: false,
@@ -240,6 +263,7 @@ impl HttpRequest {
 
     /// Sets the initiating site and whether this request navigates the top-level context.
     pub fn set_cookie_context(&mut self, site_for_cookies: Url, top_level_navigation: bool) {
+        self.cookie_top_level_site = Some(super::SchemefulSite::from_url(&site_for_cookies));
         self.site_for_cookies = Some(site_for_cookies);
         self.top_level_navigation = top_level_navigation;
     }
@@ -247,6 +271,22 @@ impl HttpRequest {
     /// Returns the initiating site used for `SameSite` cookie selection.
     pub fn site_for_cookies(&self) -> Option<&Url> {
         self.site_for_cookies.as_ref()
+    }
+
+    /// Preserves the partition namespace when constructing a redirect request.
+    pub(crate) fn copy_cookie_partition_from(&mut self, source: &Self) {
+        self.cookie_top_level_site = source.cookie_top_level_site.clone();
+    }
+
+    pub(crate) fn cookie_access_context(&self, unpartitioned: bool) -> super::CookieAccessContext {
+        super::CookieAccessContext {
+            top_level_site: if self.top_level_navigation {
+                Some(super::SchemefulSite::from_url(&self.url))
+            } else {
+                self.cookie_top_level_site.clone()
+            },
+            unpartitioned,
+        }
     }
 
     /// Returns whether this request navigates the top-level browsing context.

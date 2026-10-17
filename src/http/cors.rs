@@ -596,6 +596,7 @@ fn redirected_request(
     }
     if let Some(site) = request.site_for_cookies() {
         next.set_cookie_context(site.clone(), request.is_top_level_navigation());
+        next.copy_cookie_partition_from(request);
     }
     next.set_storage_access_eligible(
         previous_origin == next_origin && request.storage_access_eligible(),
