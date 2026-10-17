@@ -1,7 +1,8 @@
 //! Frame policy introspection describes the container without fetching a child.
 use omoikane::html::TreeBuilder;
-use omoikane::js::JsRuntime;
+use omoikane::js::{JsRuntime, SandboxConfig};
 use std::sync::Mutex;
+use std::time::Duration;
 
 // Both stress tests create 80 realms; keep their resource use independent.
 static REALM_STRESS_MUTEX: Mutex<()> = Mutex::new(());
@@ -9,6 +10,18 @@ static REALM_STRESS_MUTEX: Mutex<()> = Mutex::new(());
 fn runtime() -> JsRuntime {
     let document = TreeBuilder::parse("<!doctype html><body></body>").document();
     JsRuntime::with_document_and_url(document, "https://owner.test/page").unwrap()
+}
+
+fn stress_runtime() -> JsRuntime {
+    let document = TreeBuilder::parse("<!doctype html><body></body>").document();
+    // These tests exercise 80 realm initializations, not the page's 5-second
+    // execution limit. CI contention has exceeded that limit twice during a
+    // child script, so give each evaluation a bounded stress-test deadline.
+    let sandbox = SandboxConfig {
+        timeout: Duration::from_secs(20),
+        ..SandboxConfig::default()
+    };
+    JsRuntime::with_document_sandbox_and_url(document, sandbox, "https://owner.test/page").unwrap()
 }
 
 #[test]
@@ -47,7 +60,7 @@ fn many_sibling_iframe_realms_do_not_exhaust_the_vm_value_stack() {
     let _serial = REALM_STRESS_MUTEX
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut runtime = runtime();
+    let mut runtime = stress_runtime();
     runtime
         .eval(
             r#"
@@ -71,7 +84,7 @@ fn caught_script_errors_do_not_poison_later_iframe_realm_initialization() {
     let _serial = REALM_STRESS_MUTEX
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut runtime = runtime();
+    let mut runtime = stress_runtime();
     runtime
         .eval(
             r#"
