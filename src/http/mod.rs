@@ -27,6 +27,7 @@ pub(crate) use client::unpartitioned_cookie_access_allowed;
 pub use client::{Client, HttpTransport, WebSocketRoute};
 pub(crate) use connection::{is_public_ip, websocket_tls_config};
 pub use connection::{send, send_with_options};
+pub(crate) use cookie::CookieStoreSubscription;
 pub use cookie::{Cookie, CookieChangeSubscription, CookieJar, SameSite};
 pub(crate) use cookie::{CookieStoreChange, CookieStoreWrite};
 pub(crate) use data_uri::percent_decode_bytes;

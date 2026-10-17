@@ -75,6 +75,46 @@ const COOKIE_STORE_WORKER_SOURCE: &str = r#"
   });
 "#;
 
+const COOKIE_SUBSCRIPTIONS_WORKER_SOURCE: &str = r#"
+  addEventListener('message', async event => {
+    try {
+      const before = await registration.cookies.getSubscriptions();
+      await registration.cookies.subscribe([{name: 'worker', url: '/app/page'}]);
+      const after = await registration.cookies.getSubscriptions();
+      await registration.cookies.unsubscribe([{name: 'page', url: '/app/page'}]);
+      const remaining = await registration.cookies.getSubscriptions();
+      event.source.postMessage({
+        before, after, remaining,
+        sameManager: registration.cookies === registration.cookies,
+        managerType: registration.cookies instanceof CookieStoreManager,
+      });
+    } catch (error) {
+      event.source.postMessage({error: error.name});
+    }
+  });
+"#;
+
+const COOKIE_CHANGE_WORKER_SOURCE: &str = r#"
+  let client = null;
+  addEventListener('message', async event => {
+    client = event.source;
+    await registration.cookies.subscribe([
+      {name: 'watched', url: '/app/page'},
+      {name: 'watched', url: '/app/'},
+    ]);
+    oncookiechange = change => {
+      change.waitUntil(Promise.resolve());
+      client.postMessage({
+        changed: change.changed.map(cookie => [cookie.name, cookie.value]),
+        deleted: change.deleted.map(cookie => cookie.name),
+        extendable: change instanceof ExtendableCookieChangeEvent &&
+          change instanceof ExtendableEvent && change.isTrusted,
+      });
+    };
+    client.postMessage({armed: true});
+  });
+"#;
+
 const ORIGIN_FRAME_SOURCE: &str = r#"<script>
   navigator.serviceWorker.onmessage = event => parent.postMessage({
     incomingOrigin: event.data.incomingOrigin,
@@ -163,6 +203,8 @@ impl ServiceWorkerFixture {
                     "/app/close-on-activate.js" => (CLOSE_ON_ACTIVATE_SOURCE, "", ""),
                     "/app/origin.js" => (ORIGIN_WORKER_SOURCE, "", ""),
                     "/app/cookie-store.js" => (COOKIE_STORE_WORKER_SOURCE, "", ""),
+                    "/app/cookie-subscriptions.js" => (COOKIE_SUBSCRIPTIONS_WORKER_SOURCE, "", ""),
+                    "/app/cookie-change.js" => (COOKIE_CHANGE_WORKER_SOURCE, "", ""),
                     "/app/frame.html" => (ORIGIN_FRAME_SOURCE, "", ""),
                     "/app/install-wait.js"
                     | "/app/install-reject.js"
@@ -328,6 +370,107 @@ fn service_worker_cookie_store_reads_and_writes_shared_jar_without_document() {
     );
     drop(runtime);
     assert_eq!(fixture.finish(), vec!["/app/cookie-store.js".to_owned()]);
+}
+
+#[test]
+fn service_worker_cookie_subscriptions_share_registration_between_window_and_worker() {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval(
+            r#"
+      globalThis.observed = {error: '', message: null, before: null, after: null};
+      navigator.serviceWorker.addEventListener('message', event => observed.message = event.data);
+      navigator.serviceWorker.register('/app/cookie-subscriptions.js').then(async registration => {
+        observed.managerType = registration.cookies instanceof CookieStoreManager;
+        observed.sameManager = registration.cookies === registration.cookies;
+        observed.readOnlyManager = !Object.getOwnPropertyDescriptor(
+          ServiceWorkerRegistration.prototype, 'cookies').set;
+        await registration.cookies.subscribe(new Set([{name: 'page', url: '/app/page'}]));
+        observed.before = await registration.cookies.getSubscriptions();
+        try { await registration.cookies.subscribe([{url: '/outside'}]); }
+        catch (error) { observed.outsideScopeRejected = error instanceof TypeError; }
+        registration.installing.postMessage('probe');
+      }).catch(error => observed.error = error.name);
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"observed.error === '' && observed.managerType && observed.sameManager &&
+                   observed.readOnlyManager && observed.outsideScopeRejected &&
+                   observed.before?.length === 1 && observed.before[0].name === 'page' &&
+                   observed.message?.managerType && observed.message?.sameManager &&
+                   observed.message.before?.length === 1 &&
+                   observed.message.before[0].name === 'page' &&
+                   observed.message.after?.length === 2 &&
+                   observed.message.after[1].name === 'worker' &&
+                   observed.message.remaining?.length === 1 &&
+                   observed.message.remaining[0].name === 'worker'"#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true),
+        "state: {:?}; task errors: {:?}",
+        runtime.eval("JSON.stringify(observed)"),
+        runtime.take_task_errors(),
+    );
+    drop(runtime);
+    assert_eq!(
+        fixture.finish(),
+        vec!["/app/cookie-subscriptions.js".to_owned()]
+    );
+}
+
+#[test]
+fn service_worker_cookiechange_only_fires_for_subscribed_cookies() {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval(
+            r#"
+      globalThis.observed = {error: '', messages: []};
+      navigator.serviceWorker.addEventListener('message', event => {
+        observed.messages.push(event.data);
+        if (event.data.armed) {
+          cookieStore.set('untracked', 'skip').then(() => cookieStore.set('watched', 'yes'));
+        }
+      });
+      navigator.serviceWorker.register('/app/cookie-change.js').then(
+        registration => registration.installing.postMessage('arm'),
+        error => observed.error = error.name);
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"observed.error === '' && observed.messages.length === 2 &&
+                   observed.messages[0].armed && observed.messages[1].extendable &&
+                   JSON.stringify(observed.messages[1].changed) ===
+                     JSON.stringify([['watched', 'yes']]) &&
+                   observed.messages[1].deleted.length === 0"#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true),
+        "state: {:?}; task errors: {:?}",
+        runtime.eval("JSON.stringify(observed)"),
+        runtime.take_task_errors(),
+    );
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec!["/app/cookie-change.js".to_owned()]);
 }
 
 #[test]

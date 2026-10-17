@@ -3,7 +3,7 @@
 //! Provides [`Cookie`] for individual cookies parsed from `Set-Cookie` headers,
 //! and [`CookieJar`] for storing and retrieving cookies across requests.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
@@ -249,9 +249,17 @@ impl Cookie {
 #[derive(Debug, Clone)]
 pub struct CookieJar {
     cookies: Vec<(Cookie, String)>, // (cookie, origin_domain)
+    service_worker_subscriptions: HashMap<(String, SchemefulSite), Vec<CookieStoreSubscription>>,
     changes: VecDeque<RecordedCookieChange>,
     change_sequence: u64,
     change_subscriptions: changes::ChangeSubscriptions,
+}
+
+/// A cookie change subscription owned by a Service Worker registration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CookieStoreSubscription {
+    pub name: Option<String>,
+    pub url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -290,10 +298,77 @@ impl CookieJar {
     pub fn new() -> Self {
         Self {
             cookies: Vec::new(),
+            service_worker_subscriptions: HashMap::new(),
             changes: VecDeque::new(),
             change_sequence: 0,
             change_subscriptions: changes::ChangeSubscriptions::default(),
         }
+    }
+
+    /// Returns a registration's subscribed cookie names and request URLs.
+    pub(crate) fn service_worker_subscriptions(
+        &self,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+    ) -> Vec<CookieStoreSubscription> {
+        self.service_worker_subscriptions
+            .get(&(scope.to_owned(), top_level_site.clone()))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Records a successfully started registration without replacing its subscriptions.
+    pub(crate) fn register_service_worker_scope(
+        &mut self,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+    ) {
+        self.service_worker_subscriptions
+            .entry((scope.to_owned(), top_level_site.clone()))
+            .or_default();
+    }
+
+    /// Reports whether the scope has a live registration in this jar.
+    pub(crate) fn has_service_worker_scope(
+        &self,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+    ) -> bool {
+        self.service_worker_subscriptions
+            .contains_key(&(scope.to_owned(), top_level_site.clone()))
+    }
+
+    /// Adds or removes subscriptions for an existing registration scope.
+    pub(crate) fn update_service_worker_subscriptions(
+        &mut self,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+        entries: Vec<CookieStoreSubscription>,
+        subscribe: bool,
+    ) {
+        let subscriptions = self
+            .service_worker_subscriptions
+            .entry((scope.to_owned(), top_level_site.clone()))
+            .or_default();
+        for entry in entries {
+            if subscribe {
+                if !subscriptions.contains(&entry) {
+                    subscriptions.push(entry);
+                }
+            } else {
+                subscriptions.retain(|current| current != &entry);
+            }
+        }
+    }
+
+    /// Removes all subscriptions when a registration is unregistered.
+    pub(crate) fn clear_service_worker_subscriptions(
+        &mut self,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+    ) {
+        self.service_worker_subscriptions
+            .remove(&(scope.to_owned(), top_level_site.clone()));
     }
 
     /// Subscribes a host event loop to future script-visible cookie mutations.
@@ -690,6 +765,46 @@ impl CookieJar {
         (self.change_sequence, changes)
     }
 
+    /// Returns each change at most once when it matches a registration's subscriptions.
+    pub(crate) fn service_worker_changes_since(
+        &self,
+        sequence: u64,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+        site_for_cookies: &Url,
+    ) -> (u64, Vec<CookieStoreChange>) {
+        let subscriptions = self
+            .service_worker_subscriptions
+            .get(&(scope.to_owned(), top_level_site.clone()))
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.url.parse::<Url>().ok().map(|url| (entry, url)))
+            .collect::<Vec<_>>();
+        let changes = self
+            .changes
+            .iter()
+            .filter(|change| change.sequence > sequence)
+            .filter(|change| {
+                subscriptions.iter().any(|(subscription, url)| {
+                    subscription
+                        .name
+                        .as_ref()
+                        .is_none_or(|name| name == &change.cookie.name)
+                        && change.cookie.matches_url(url)
+                        && (same_site(url, site_for_cookies)
+                            || change.cookie.same_site == SameSite::None)
+                })
+            })
+            .map(|change| CookieStoreChange {
+                name: change.cookie.name.clone(),
+                value: (!change.deleted).then(|| change.cookie.value.clone()),
+                deleted: change.deleted,
+                individual_event: change.individual_event,
+            })
+            .collect();
+        (self.change_sequence, changes)
+    }
+
     /// Returns the latest change cursor for a newly created CookieStore.
     pub(crate) fn change_sequence(&self) -> u64 {
         self.change_sequence
@@ -1027,6 +1142,29 @@ fn is_leap_year(y: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_worker_cookie_subscriptions_are_partitioned_by_top_level_site() {
+        let mut jar = CookieJar::new();
+        let scope = "https://worker.example/app/";
+        let site_a = SchemefulSite::from_url(&"https://a.example/".parse().unwrap());
+        let site_b = SchemefulSite::from_url(&"https://b.example/".parse().unwrap());
+        jar.register_service_worker_scope(scope, &site_a);
+        jar.register_service_worker_scope(scope, &site_b);
+        jar.update_service_worker_subscriptions(
+            scope,
+            &site_a,
+            vec![CookieStoreSubscription {
+                name: Some("session".to_owned()),
+                url: "https://worker.example/app/page".to_owned(),
+            }],
+            true,
+        );
+        assert_eq!(jar.service_worker_subscriptions(scope, &site_a).len(), 1);
+        assert!(jar.service_worker_subscriptions(scope, &site_b).is_empty());
+        jar.clear_service_worker_subscriptions(scope, &site_a);
+        assert!(jar.has_service_worker_scope(scope, &site_b));
+    }
 
     // --- Cookie::parse tests ---
 
