@@ -688,7 +688,7 @@
       "known_failure": {
         "status": "FAIL",
         "issue": "#1354",
-        "reason": "The current observable-changes algorithm reports an immediately evicted newly-created cookie as deleted, unlike this pinned expectation. The second subtest also requires unimplemented partitioned cookie storage.",
+        "reason": "The current observable-changes algorithm reports an immediately evicted newly-created cookie as deleted, unlike this pinned expectation, for both unpartitioned and partitioned cookies.",
         "failed_subtests": [
           "Cookie Store API: cookiechange event in ServiceWorker with already-expired cookie.",
           "Cookie Store API: cookiechange event in ServiceWorker with already-expired cookie. 1"
@@ -697,21 +697,11 @@
     },
     {"path": "cookiestore/serviceworker_cookiechange_eventhandler_mismatched_subscription.https.any.serviceworker.html", "server": "wptserve"},
     {"path": "cookiestore/serviceworker_cookiechange_eventhandler_multiple_subscriptions.https.any.serviceworker.html", "server": "wptserve"},
-    {
-      "path": "cookiestore/serviceworker_cookiechange_eventhandler_no_change.https.any.serviceworker.html",
-      "server": "wptserve",
-      "known_failure": {
-        "status": "FAIL",
-        "issue": "#1354",
-        "reason": "Unpartitioned no-change notification passes. The second subtest requires partitioned cookie storage, still tracked in #1354.",
-        "failed_subtests": [
-          "Cookie Store API: cookiechange event in ServiceWorker with already-expired cookie. 1"
-        ]
-      }
-    },
+    {"path": "cookiestore/serviceworker_cookiechange_eventhandler_no_change.https.any.serviceworker.html", "server": "wptserve"},
     {"path": "cookiestore/serviceworker_cookiechange_eventhandler_overlapping_subscriptions.https.any.serviceworker.html", "server": "wptserve"},
     {"path": "cookiestore/serviceworker_cookiechange_eventhandler_single_subscription.https.any.serviceworker.html", "server": "wptserve"},
     {"path": "cookiestore/serviceworker_oncookiechange_eventhandler_single_subscription.https.any.serviceworker.html", "server": "wptserve"},
-    {"path": "cookiestore/serviceworker_cookieStore_cross_origin.https.sub.html", "server": "wptserve"}
+    {"path": "cookiestore/serviceworker_cookieStore_cross_origin.https.sub.html", "server": "wptserve"},
+    {"path": "cookiestore/serviceworker_cookieStore_subscriptions_reset.https.html", "server": "wptserve"}
   ]
 }

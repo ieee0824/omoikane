@@ -2435,6 +2435,13 @@ struct HostState {
     worker_cookie_request_context: Option<crate::http::CookieRequestContext>,
     /// Registration scope associated with this ServiceWorker global.
     worker_service_worker_scope: Option<String>,
+    /// Main-script bytes and imported resources owned by this worker version.
+    service_worker_main_source: Option<String>,
+    service_worker_imports: BTreeMap<String, worker_imports::ScriptResource>,
+    /// Responses fetched by an update job, consumed without a second request.
+    service_worker_import_cache: BTreeMap<String, Option<worker_imports::ScriptResource>>,
+    /// Identity of the registration, retained across worker script updates.
+    worker_service_worker_registration_id: Option<u64>,
     /// Top-level site inherited from the registering Document.
     worker_service_worker_top_level_site: Option<crate::http::SchemefulSite>,
     worker_id: Option<u64>,
@@ -3190,6 +3197,10 @@ impl HostState {
             worker_owner: None,
             worker_cookie_request_context: None,
             worker_service_worker_scope: None,
+            service_worker_main_source: None,
+            service_worker_imports: BTreeMap::new(),
+            service_worker_import_cache: BTreeMap::new(),
+            worker_service_worker_registration_id: None,
             worker_service_worker_top_level_site: None,
             worker_id: None,
             worker_terminated: false,
@@ -11744,6 +11755,7 @@ impl JsRuntime {
                         Task::BroadcastChannelMessage { .. } => "broadcast-channel",
                         Task::WorkerMessage { .. }
                         | Task::ServiceWorkerLifecycle { .. }
+                        | Task::ServiceWorkerRegistrationRequest { .. }
                         | Task::WorkerOwnerMessage { .. }
                         | Task::WorkerError { .. }
                         | Task::SharedWorkerMessage { .. }
@@ -11914,6 +11926,11 @@ impl JsRuntime {
                 data,
                 ports,
             } => self.run_worker_message(worker_id, data, ports),
+            Task::ServiceWorkerRegistrationRequest {
+                worker_id,
+                request,
+                operation,
+            } => self.run_service_worker_registration_request(worker_id, request, operation),
             Task::ServiceWorkerLifecycle {
                 worker_id,
                 installing,
@@ -15058,7 +15075,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_cookie_store_subscriptions"),
-            4,
+            5,
             NativeFunction::from_copy_closure(cookie_store::subscriptions_native),
         ),
         (
@@ -15513,6 +15530,16 @@ fn register_host_bindings(
             js_string!("__omoikane_start_service_worker"),
             3,
             NativeFunction::from_copy_closure(service_worker::start_service_worker_native),
+        ),
+        (
+            js_string!("__omoikane_service_worker_registration_request"),
+            2,
+            NativeFunction::from_copy_closure(service_worker::registration_request_native),
+        ),
+        (
+            js_string!("__omoikane_service_worker_registration_response"),
+            4,
+            NativeFunction::from_copy_closure(service_worker::registration_response_native),
         ),
         (
             js_string!("__omoikane_service_worker_lifecycle_complete"),
@@ -16935,20 +16962,17 @@ fn document_cookie_get_native(
             .document_urls
             .get(&document_id)
             .and_then(|url| url.parse::<crate::http::Url>().ok());
-        let text = if visible {
-            document_url
-                .map(|url| {
-                    let site = state.storage_access_cookie_site_for_document(document_id, &url);
-                    state
-                        .cookie_store
-                        .lock()
-                        .unwrap()
-                        .document_cookie(&url, &site)
-                })
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let text = document_url
+            .map(|url| {
+                let site = state.storage_access_cookie_site_for_document(document_id, &url);
+                let access = state.cookie_access_context_for_document(document_id, visible);
+                state
+                    .cookie_store
+                    .lock()
+                    .unwrap()
+                    .document_cookie_with_access(&url, &site, &access)
+            })
+            .unwrap_or_default();
         Ok(JsValue::from(js_string!(text)))
     })
 }
@@ -16969,20 +16993,21 @@ fn document_cookie_set_native(
         .to_std_string_escaped();
     with_host_state(|state| {
         let state = state.borrow();
-        if !state.storage_access_allows_document_cookies(document_id) {
-            return Ok(JsValue::undefined());
-        }
         if let Some(url) = state
             .document_urls
             .get(&document_id)
             .and_then(|url| url.parse::<crate::http::Url>().ok())
         {
+            let access = state.cookie_access_context_for_document(
+                document_id,
+                state.storage_access_allows_document_cookies(document_id),
+            );
             let site = state.storage_access_cookie_site_for_document(document_id, &url);
             state
                 .cookie_store
                 .lock()
                 .unwrap()
-                .add_from_document(&value, &url, &site);
+                .add_from_document_with_access(&value, &url, &site, &access);
         }
         Ok(JsValue::undefined())
     })
@@ -23006,20 +23031,19 @@ fn websocket_connect_native(
         state
             .document_cookie_request_context(document.identity())
             .apply_websocket(&mut request);
-        let cookie = if crate::http::unpartitioned_cookie_access_allowed(&request) {
-            state
-                .cookie_store
-                .lock()
-                .unwrap()
-                .cookie_header_for_request(
-                    request.url(),
-                    request.site_for_cookies().unwrap_or(request.url()),
-                    request.is_top_level_navigation(),
-                    request.method(),
-                )
-        } else {
-            None
-        };
+        let access = request
+            .cookie_access_context(crate::http::unpartitioned_cookie_access_allowed(&request));
+        let cookie = state
+            .cookie_store
+            .lock()
+            .unwrap()
+            .cookie_header_for_request_with_access(
+                request.url(),
+                request.site_for_cookies().unwrap_or(request.url()),
+                request.is_top_level_navigation(),
+                request.method(),
+                &access,
+            );
         let address_policy = websocket_address_policy(
             &url,
             state.base_url_for_document(document.identity()).as_ref(),

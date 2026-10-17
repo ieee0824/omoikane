@@ -119,6 +119,12 @@ pub(crate) enum Task {
         installing: bool,
         failed: bool,
     },
+    /// Registration operations cross runtimes using only owned identifiers.
+    ServiceWorkerRegistrationRequest {
+        worker_id: u64,
+        request: String,
+        operation: String,
+    },
     /// A message sent from a dedicated worker back to its owner page.
     WorkerOwnerMessage {
         worker_id: u64,
@@ -262,6 +268,7 @@ unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
         | Task::AuxiliaryNavigate { .. }
         | Task::BroadcastChannelMessage { .. }
         | Task::ServiceWorkerLifecycle { .. }
+        | Task::ServiceWorkerRegistrationRequest { .. }
         | Task::SharedWorkerMessage { .. }
         | Task::WorkerError { owner: None, .. } => {}
     }
@@ -523,6 +530,22 @@ impl EventLoop {
                 worker_id,
                 data,
                 ports,
+            },
+        );
+    }
+
+    pub(crate) fn enqueue_service_worker_registration_request(
+        &mut self,
+        worker_id: u64,
+        request: String,
+        operation: String,
+    ) {
+        self.enqueue(
+            TaskSource::DomManipulation,
+            Task::ServiceWorkerRegistrationRequest {
+                worker_id,
+                request,
+                operation,
             },
         );
     }

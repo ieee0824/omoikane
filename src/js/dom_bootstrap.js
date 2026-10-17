@@ -18824,7 +18824,8 @@ export const __omoikane_service_worker_lifecycle = {};
   class CookieStoreManager {
     constructor(scope, token) {
       if (token !== cookieStoreManagerToken) throw new TypeError("Illegal constructor");
-      cookieStoreManagerOwners.set(this, scope);
+      const id = String(nativeCookieStoreSubscriptions(__omoikane_document_id, scope, "identity", "[]"));
+      cookieStoreManagerOwners.set(this, {scope, id});
     }
     static normalize(entries, scope) {
       if (entries == null || (typeof entries !== "object" && typeof entries !== "function") ||
@@ -18847,17 +18848,25 @@ export const __omoikane_service_worker_lifecycle = {};
     __update(operation, entries) {
       if (!cookieStoreManagerOwners.has(this)) return Promise.reject(new TypeError("Illegal invocation"));
       return Promise.resolve().then(() => {
-        const scope = cookieStoreManagerOwners.get(this);
+        const {scope, id} = cookieStoreManagerOwners.get(this);
         const normalized = CookieStoreManager.normalize(entries, scope);
-        nativeCookieStoreSubscriptions(__omoikane_document_id, scope, operation, JSON.stringify(normalized));
+        nativeCookieStoreSubscriptions(__omoikane_document_id, scope, operation, JSON.stringify(normalized), id);
       });
     }
     getSubscriptions() {
       if (!cookieStoreManagerOwners.has(this)) return Promise.reject(new TypeError("Illegal invocation"));
-      return Promise.resolve().then(() => JSON.parse(String(nativeCookieStoreSubscriptions(
-        __omoikane_document_id, cookieStoreManagerOwners.get(this), "get", "[]"))));
+      return Promise.resolve().then(() => {
+        const {scope, id} = cookieStoreManagerOwners.get(this);
+        return JSON.parse(String(nativeCookieStoreSubscriptions(
+          __omoikane_document_id, scope, "get", "[]", id)));
+      });
     }
     get [Symbol.toStringTag]() { return "CookieStoreManager"; }
+  }
+  function clearServiceWorkerCookieSubscriptions(registration) {
+    const manager = safeWeakMapGet(serviceWorkerRegistrationCookies, registration);
+    const {scope, id} = safeWeakMapGet(cookieStoreManagerOwners, manager);
+    nativeCookieStoreSubscriptions(__omoikane_document_id, scope, "clear", "[]", id);
   }
   if (nativeCookieStoreAvailable(__omoikane_document_id)) {
     globalThis.CookieStoreManager = CookieStoreManager;
@@ -18986,7 +18995,10 @@ export const __omoikane_service_worker_lifecycle = {};
       registration.installing = null;
       if (failed) {
         terminateServiceWorker(worker);
-        if (!registration.active) container._records.delete(record.scope);
+        if (!registration.active) {
+          clearServiceWorkerCookieSubscriptions(registration);
+          container._records.delete(record.scope);
+        }
         return;
       }
       registration.waiting = worker;
@@ -19003,6 +19015,55 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   };
 
+  const serviceWorkerRegistrationRequests = new Map();
+  let nextServiceWorkerRegistrationRequest = 1;
+  function requestServiceWorkerRegistration(registration, operation) {
+    if (operation === "update" && registration.installing) {
+      return Promise.reject(new DOMException("An installing worker cannot update its registration.", "InvalidStateError"));
+    }
+    const id = String(nextServiceWorkerRegistrationRequest++);
+    return new Promise((resolve, reject) => {
+      serviceWorkerRegistrationRequests.set(id, {resolve, reject, registration, operation});
+      if (!__omoikane_service_worker_registration_request(id, operation)) {
+        serviceWorkerRegistrationRequests.delete(id);
+        reject(new DOMException("The registration is unavailable.", "InvalidStateError"));
+      }
+    });
+  }
+  __omoikane_service_worker_lifecycle.registrationResponse = function(id, result, error) {
+    const pending = serviceWorkerRegistrationRequests.get(id);
+    if (!pending) return;
+    serviceWorkerRegistrationRequests.delete(id);
+    if (error) pending.reject(error === "TypeError" ? new TypeError(result) : new DOMException(result, error));
+    else pending.resolve(pending.operation === "update" ? pending.registration : result === "true");
+  };
+  __omoikane_service_worker_lifecycle.registrationRequest = function(container, id, request, operation) {
+    const worker = safeWeakMapGet(serviceWorkerMessageSources, container)?.get(String(id));
+    const registration = worker?._record.registration;
+    const respond = (result, error = "") => __omoikane_service_worker_registration_response(id, request, String(result), error);
+    if (!registration) { respond("The registration is unavailable.", "InvalidStateError"); return; }
+    const promise = operation === "update" ? registration.update() : unregisterServiceWorkerRegistration(registration, worker);
+    promise.then(result => respond(operation === "update" ? "" : result), error => respond(error.message, error.name));
+  };
+  function unregisterServiceWorkerRegistration(registration, preservedWorker = null) {
+    return Promise.resolve().then(() => {
+      const container = registration._container;
+      if (container._records.get(registration.scope) !== registration._record) return false;
+      container._records.delete(registration.scope);
+      clearServiceWorkerCookieSubscriptions(registration);
+      for (const worker of new Set([registration.installing, registration.waiting, registration.active])) {
+        // The calling worker must remain live long enough to settle its own
+        // unregister promise and any lifetime event which awaits it.
+        if (worker !== preservedWorker) terminateServiceWorker(worker);
+      }
+      registration.installing = null;
+      registration.waiting = null;
+      registration.active = null;
+      container.__updateController();
+      return true;
+    });
+  }
+
   class ServiceWorkerRegistration extends ServiceWorkerEventTarget {
     constructor(record, container, token) {
       if (token !== serviceWorkerContainerConstructionToken) throw new TypeError("Illegal constructor");
@@ -19018,22 +19079,47 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     get cookies() { return serviceWorkerRegistrationCookies.get(this); }
     update() {
-      return Promise.resolve(undefined);
+      if (!this._container) return requestServiceWorkerRegistration(this, "update");
+      if (this._container._records.get(this.scope) !== this._record) {
+        return Promise.reject(new DOMException("The registration has no newest worker.", "InvalidStateError"));
+      }
+      if (this._updatePromise) return this._updatePromise;
+      const newest = this.installing || this.waiting || this.active;
+      if (!newest) return Promise.reject(new DOMException("The registration has no newest worker.", "InvalidStateError"));
+      const operation = Promise.resolve().then(() => {
+        if (this._container._records.get(this.scope) !== this._record) {
+          throw new DOMException("The registration has been unregistered.", "InvalidStateError");
+        }
+        const container = this._container;
+        const documentId = safeWeakMapGet(serviceWorkerContainerOwnerDocuments, container);
+        let installing = null;
+        // Queue before native install completion, but dispatch after the update
+        // promise settles so callers can observe the new installation.
+        __omoikane_queue_dom_manipulation_task(() => {
+          if (installing && this.installing === installing) this.dispatchEvent(new Event("updatefound"));
+        });
+        const id = __omoikane_start_service_worker(this._record.scriptURL, this.scope, documentId, newest.__id);
+        if (id === "stale") throw new DOMException("The registration is no longer current.", "InvalidStateError");
+        if (id === "unchanged") return this;
+        if (id === "security") throw new DOMException("Service worker response disallows its MIME type or scope.", "SecurityError");
+        if (id === null) throw new TypeError("Service worker script could not be fetched or evaluated.");
+        terminateServiceWorker(this.installing);
+        terminateServiceWorker(this.waiting);
+        installing = new ServiceWorker(this._record, "installing", id, serviceWorkerConstructionToken);
+        this._record.worker = installing;
+        this.installing = installing;
+        this.waiting = null;
+        safeWeakMapGet(serviceWorkerMessageSources, container).set(String(id), installing);
+        __omoikane_bind_worker_owner(id, container);
+        return this;
+      });
+      this._updatePromise = operation;
+      operation.then(() => { this._updatePromise = null; }, () => { this._updatePromise = null; });
+      return operation;
     }
     unregister() {
-      return Promise.resolve().then(() => {
-        if (this._container._records.get(this.scope) !== this._record) return false;
-        this._container._records.delete(this.scope);
-        nativeCookieStoreSubscriptions(__omoikane_document_id, this.scope, "clear", "[]");
-        for (const worker of new Set([this.installing, this.waiting, this.active])) {
-          terminateServiceWorker(worker);
-        }
-        this.installing = null;
-        this.waiting = null;
-        this.active = null;
-        this._container.__updateController();
-        return true;
-      });
+      if (!this._container) return requestServiceWorkerRegistration(this, "unregister");
+      return unregisterServiceWorkerRegistration(this);
     }
     get onupdatefound() { return this._onupdatefound; }
     set onupdatefound(callback) {

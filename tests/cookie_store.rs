@@ -265,7 +265,7 @@ fn set_rejects_invalid_fields_and_expires_cookies() {
                 () => cookieStore.set({name:'x', value:'1', domain:'.example.test'}),
                 () => cookieStore.set({name:'x', value:'1', path:'relative'}),
                 () => cookieStore.set({name:'x', value:'1', expires:Date.now()+1000, maxAge:3}),
-                () => cookieStore.set({name:'x', value:'1', partitioned:true}),
+                () => cookieStore.set({name:'x', value:'1', partitioned:true, path:'relative'}),
                 () => cookieStore.set({name:'__Host-x', value:'1', path:'/inside'}),
                 () => cookieStore.set({name:'__Http-x', value:'1'}),
               ];
@@ -300,25 +300,29 @@ fn partitioned_delete_succeeds_without_touching_unpartitioned_cookie() {
             r#"
             globalThis.partitionedDeleteResult = null;
             (async () => {
+              const values = async () => (await cookieStore.getAll('session'))
+                .map(cookie => cookie.value).sort().join('|');
               await cookieStore.set('session', 'unpartitioned');
-              const deleted = await cookieStore.delete({name:'session', partitioned:true});
-              const afterPartitionedDelete = await cookieStore.get('session');
-              const rejectedSet = await cookieStore.set({name:'session', value:'other', partitioned:true})
-                .then(() => false, error => error instanceof TypeError);
-              const rejectedZeroAgeSet = await cookieStore.set({name:'session', value:'other', partitioned:true, maxAge:0})
-                .then(() => false, error => error instanceof TypeError);
+              const absentDelete = await cookieStore.delete({name:'session', partitioned:true});
+              const afterMissingDelete = await values();
+              const partitionedSet = await cookieStore.set({name:'session', value:'partitioned', partitioned:true});
+              const withBoth = await values();
+              const existingDelete = await cookieStore.delete({name:'session', partitioned:true});
+              const afterPartitionedDelete = await values();
+              await cookieStore.set({name:'session', value:'expiring-partition', partitioned:true});
+              const zeroAgeSet = await cookieStore.set({name:'session', value:'gone', partitioned:true, maxAge:0});
+              const afterZeroAge = await values();
               const rejectedInvalidDelete = await cookieStore.delete({name:'session', partitioned:true, path:'relative'})
                 .then(() => false, error => error instanceof TypeError);
-              const stillPresent = await cookieStore.get('session');
+              await cookieStore.set({name:'session', value:'remaining-partition', partitioned:true});
               await cookieStore.delete('session');
+              const afterOrdinaryDelete = await values();
+              await cookieStore.delete({name:'session', partitioned:true});
               partitionedDeleteResult = {
-                deleted,
-                afterPartitionedDelete: afterPartitionedDelete?.value,
-                rejectedSet,
-                rejectedZeroAgeSet,
-                rejectedInvalidDelete,
-                stillPresent: stillPresent?.value,
-                afterOrdinaryDelete: await cookieStore.get('session'),
+                absentDelete, afterMissingDelete, partitionedSet, withBoth,
+                existingDelete, afterPartitionedDelete, zeroAgeSet, afterZeroAge,
+                rejectedInvalidDelete, afterOrdinaryDelete,
+                afterFinalDelete: await cookieStore.get('session'),
               };
             })().catch(error => partitionedDeleteResult = error.name + ':' + error.message);
             "#,
@@ -328,12 +332,24 @@ fn partitioned_delete_succeeds_without_touching_unpartitioned_cookie() {
     assert!(
         runtime
             .eval(
-                "partitionedDeleteResult?.deleted === undefined && partitionedDeleteResult?.afterPartitionedDelete === 'unpartitioned' && partitionedDeleteResult?.rejectedSet === true && partitionedDeleteResult?.rejectedZeroAgeSet === true && partitionedDeleteResult?.rejectedInvalidDelete === true && partitionedDeleteResult?.stillPresent === 'unpartitioned' && partitionedDeleteResult?.afterOrdinaryDelete === null"
+                r#"partitionedDeleteResult?.absentDelete === undefined &&
+                   partitionedDeleteResult.afterMissingDelete === 'unpartitioned' &&
+                   partitionedDeleteResult.partitionedSet === undefined &&
+                   partitionedDeleteResult.withBoth === 'partitioned|unpartitioned' &&
+                   partitionedDeleteResult.existingDelete === undefined &&
+                   partitionedDeleteResult.afterPartitionedDelete === 'unpartitioned' &&
+                   partitionedDeleteResult.zeroAgeSet === undefined &&
+                   partitionedDeleteResult.afterZeroAge === 'unpartitioned' &&
+                   partitionedDeleteResult.rejectedInvalidDelete === true &&
+                   partitionedDeleteResult.afterOrdinaryDelete === 'remaining-partition' &&
+                   partitionedDeleteResult.afterFinalDelete === null"#
             )
             .unwrap()
             .to_boolean(),
         "result: {:?}; task errors: {:?}",
-        runtime.eval("JSON.stringify(partitionedDeleteResult)").unwrap(),
+        runtime
+            .eval("JSON.stringify(partitionedDeleteResult)")
+            .unwrap(),
         runtime.take_task_errors()
     );
 }

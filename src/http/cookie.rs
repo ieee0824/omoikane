@@ -11,6 +11,8 @@ use super::request::Method;
 use super::{SchemefulSite, url::Url};
 
 mod changes;
+#[cfg(test)]
+mod partitioned_tests;
 pub use changes::CookieChangeSubscription;
 
 /// The `SameSite` attribute of a cookie.
@@ -52,6 +54,8 @@ pub struct Cookie {
     secure: bool,
     http_only: bool,
     same_site: SameSite,
+    partitioned: bool,
+    partition_key: Option<SchemefulSite>,
 }
 
 impl Cookie {
@@ -84,6 +88,8 @@ impl Cookie {
             secure: false,
             http_only: false,
             same_site: SameSite::Lax,
+            partitioned: false,
+            partition_key: None,
         };
 
         // Parse attributes
@@ -98,6 +104,7 @@ impl Cookie {
                     let attr_name = attr_name.trim();
                     let attr_value = attr_value.trim();
                     match attr_name.to_ascii_lowercase().as_str() {
+                        "partitioned" => cookie.partitioned = true,
                         "domain" => {
                             let d = attr_value.strip_prefix('.').unwrap_or(attr_value);
                             cookie.domain = Some(d.to_ascii_lowercase());
@@ -125,6 +132,7 @@ impl Cookie {
                     match attr.to_ascii_lowercase().as_str() {
                         "secure" => cookie.secure = true,
                         "httponly" => cookie.http_only = true,
+                        "partitioned" => cookie.partitioned = true,
                         _ => {}
                     }
                 }
@@ -249,10 +257,50 @@ impl Cookie {
 #[derive(Debug, Clone)]
 pub struct CookieJar {
     cookies: Vec<(Cookie, String)>, // (cookie, origin_domain)
-    service_worker_subscriptions: HashMap<(String, SchemefulSite), Vec<CookieStoreSubscription>>,
+    service_worker_subscriptions: HashMap<(String, SchemefulSite), RegistrationCookieSubscriptions>,
+    next_service_worker_registration_id: u64,
     changes: VecDeque<RecordedCookieChange>,
     change_sequence: u64,
     change_subscriptions: changes::ChangeSubscriptions,
+}
+
+/// Subscription ownership survives worker updates, but not unregister/re-register.
+#[derive(Debug, Clone)]
+struct RegistrationCookieSubscriptions {
+    id: u64,
+    entries: Vec<ActiveCookieSubscription>,
+}
+
+/// A newly added subscription observes only mutations after it was installed.
+#[derive(Debug, Clone)]
+struct ActiveCookieSubscription {
+    entry: CookieStoreSubscription,
+    after_sequence: u64,
+}
+
+/// Cookie namespace and unpartitioned-storage permission of an environment.
+/// The top-level site is independent of SameSite and Storage Access grants.
+#[derive(Debug, Clone)]
+pub(crate) struct CookieAccessContext {
+    pub top_level_site: Option<SchemefulSite>,
+    pub unpartitioned: bool,
+}
+
+impl CookieAccessContext {
+    pub(crate) fn first_party(url: &Url) -> Self {
+        Self {
+            top_level_site: Some(SchemefulSite::from_url(url)),
+            unpartitioned: true,
+        }
+    }
+
+    fn permits(&self, cookie: &Cookie) -> bool {
+        if cookie.partitioned {
+            self.top_level_site.is_some() && cookie.partition_key == self.top_level_site
+        } else {
+            self.unpartitioned
+        }
+    }
 }
 
 /// A cookie change subscription owned by a Service Worker registration.
@@ -290,7 +338,6 @@ pub(crate) struct CookieStoreWrite {
     pub max_age: Option<i64>,
     pub same_site: SameSite,
     pub partitioned: bool,
-    pub deletion: bool,
 }
 
 impl CookieJar {
@@ -299,6 +346,7 @@ impl CookieJar {
         Self {
             cookies: Vec::new(),
             service_worker_subscriptions: HashMap::new(),
+            next_service_worker_registration_id: 1,
             changes: VecDeque::new(),
             change_sequence: 0,
             change_subscriptions: changes::ChangeSubscriptions::default(),
@@ -313,19 +361,49 @@ impl CookieJar {
     ) -> Vec<CookieStoreSubscription> {
         self.service_worker_subscriptions
             .get(&(scope.to_owned(), top_level_site.clone()))
-            .cloned()
+            .map(|registration| {
+                registration
+                    .entries
+                    .iter()
+                    .map(|subscription| subscription.entry.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
-    /// Records a successfully started registration without replacing its subscriptions.
+    /// Reserves a registration identity before script evaluation; updates retain it.
     pub(crate) fn register_service_worker_scope(
         &mut self,
         scope: &str,
         top_level_site: &SchemefulSite,
-    ) {
+    ) -> u64 {
+        let key = (scope.to_owned(), top_level_site.clone());
+        if let Some(registration) = self.service_worker_subscriptions.get(&key) {
+            return registration.id;
+        }
+        let id = self.next_service_worker_registration_id;
+        self.next_service_worker_registration_id = id
+            .checked_add(1)
+            .expect("Service Worker registration identity exhausted");
+        self.service_worker_subscriptions.insert(
+            key,
+            RegistrationCookieSubscriptions {
+                id,
+                entries: Vec::new(),
+            },
+        );
+        id
+    }
+
+    /// Returns the current registration generation for a scope and storage partition.
+    pub(crate) fn service_worker_registration_id(
+        &self,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+    ) -> Option<u64> {
         self.service_worker_subscriptions
-            .entry((scope.to_owned(), top_level_site.clone()))
-            .or_default();
+            .get(&(scope.to_owned(), top_level_site.clone()))
+            .map(|registration| registration.id)
     }
 
     /// Reports whether the scope has a live registration in this jar.
@@ -334,11 +412,11 @@ impl CookieJar {
         scope: &str,
         top_level_site: &SchemefulSite,
     ) -> bool {
-        self.service_worker_subscriptions
-            .contains_key(&(scope.to_owned(), top_level_site.clone()))
+        self.service_worker_registration_id(scope, top_level_site)
+            .is_some()
     }
 
-    /// Adds or removes subscriptions for an existing registration scope.
+    /// Adds or removes subscriptions without resurrecting an unregistered scope.
     pub(crate) fn update_service_worker_subscriptions(
         &mut self,
         scope: &str,
@@ -346,22 +424,28 @@ impl CookieJar {
         entries: Vec<CookieStoreSubscription>,
         subscribe: bool,
     ) {
-        let subscriptions = self
+        let Some(registration) = self
             .service_worker_subscriptions
-            .entry((scope.to_owned(), top_level_site.clone()))
-            .or_default();
+            .get_mut(&(scope.to_owned(), top_level_site.clone()))
+        else {
+            return;
+        };
+        let subscriptions = &mut registration.entries;
         for entry in entries {
             if subscribe {
-                if !subscriptions.contains(&entry) {
-                    subscriptions.push(entry);
+                if !subscriptions.iter().any(|current| current.entry == entry) {
+                    subscriptions.push(ActiveCookieSubscription {
+                        entry,
+                        after_sequence: self.change_sequence,
+                    });
                 }
             } else {
-                subscriptions.retain(|current| current != &entry);
+                subscriptions.retain(|current| current.entry != entry);
             }
         }
     }
 
-    /// Removes all subscriptions when a registration is unregistered.
+    /// Removes the registration identity and its subscriptions together.
     pub(crate) fn clear_service_worker_subscriptions(
         &mut self,
         scope: &str,
@@ -393,7 +477,14 @@ impl CookieJar {
 
     /// Parses a `Set-Cookie` header value and stores the cookie for `origin_url`.
     pub fn add_from_header_for_url(&mut self, header_value: &str, origin_url: &Url) {
-        self.add_with_context(header_value, origin_url, origin_url, true, true);
+        self.add_with_context(
+            header_value,
+            origin_url,
+            origin_url,
+            true,
+            true,
+            &CookieAccessContext::first_party(origin_url),
+        );
     }
 
     /// Stores a response cookie with the request's site and navigation context.
@@ -404,18 +495,55 @@ impl CookieJar {
         site_for_cookies: &Url,
         top_level_navigation: bool,
     ) {
+        self.add_from_header_for_request_with_access(
+            header_value,
+            origin_url,
+            site_for_cookies,
+            top_level_navigation,
+            &CookieAccessContext::first_party(if top_level_navigation {
+                origin_url
+            } else {
+                site_for_cookies
+            }),
+        )
+    }
+
+    pub(crate) fn add_from_header_for_request_with_access(
+        &mut self,
+        header_value: &str,
+        origin_url: &Url,
+        site_for_cookies: &Url,
+        top_level_navigation: bool,
+        access: &CookieAccessContext,
+    ) {
         self.add_with_context(
             header_value,
             origin_url,
             site_for_cookies,
             top_level_navigation,
             true,
+            access,
         );
     }
 
     /// Stores a cookie set by `document.cookie`, without HTTP-only privileges.
     pub fn add_from_document(&mut self, value: &str, document_url: &Url, site_for_cookies: &Url) {
-        self.add_with_context(value, document_url, site_for_cookies, false, false);
+        self.add_from_document_with_access(
+            value,
+            document_url,
+            site_for_cookies,
+            &CookieAccessContext::first_party(site_for_cookies),
+        )
+    }
+
+    pub(crate) fn add_from_document_with_access(
+        &mut self,
+        value: &str,
+        document_url: &Url,
+        site_for_cookies: &Url,
+        access: &CookieAccessContext,
+    ) {
+        self.add_with_context(value, document_url, site_for_cookies, false, false, access);
     }
 
     fn add_with_context(
@@ -425,6 +553,7 @@ impl CookieJar {
         site_for_cookies: &Url,
         top_level_navigation: bool,
         from_http: bool,
+        access: &CookieAccessContext,
     ) {
         if let Some(cookie) = Cookie::parse(header_value) {
             let explicit_root_path = header_value.split(';').skip(1).any(|attribute| {
@@ -443,6 +572,7 @@ impl CookieJar {
                 from_http,
                 explicit_root_path,
                 !from_http,
+                access,
             );
         }
     }
@@ -451,11 +581,12 @@ impl CookieJar {
     /// `document.cookie`. Invalid API inputs fail; cookie policy rejections
     /// (including an HttpOnly collision) follow the HTTP storage model and
     /// leave the jar unchanged.
-    pub(crate) fn set_from_cookie_store(
+    pub(crate) fn set_from_cookie_store_with_access(
         &mut self,
         mut options: CookieStoreWrite,
         url: &Url,
         site_for_cookies: &Url,
+        access: &CookieAccessContext,
     ) -> Result<(), &'static str> {
         options.name = options.name.trim_matches([' ', '\t']).to_string();
         options.value = options.value.trim_matches([' ', '\t']).to_string();
@@ -512,15 +643,6 @@ impl CookieJar {
         {
             return Err("Invalid cookie path");
         }
-        if options.partitioned {
-            // There is no partitioned storage yet. Deleting from that empty
-            // namespace succeeds without touching an unpartitioned cookie.
-            return if options.deletion {
-                Ok(())
-            } else {
-                Err("Partitioned cookies are not supported")
-            };
-        }
         let now = SystemTime::now();
         let cookie = Cookie {
             name: options.name,
@@ -535,6 +657,8 @@ impl CookieJar {
             secure: true,
             http_only: false,
             same_site: options.same_site,
+            partitioned: options.partitioned,
+            partition_key: None,
         };
         let explicit_root_path = cookie.path.as_deref() == Some("/");
         self.store_cookie(
@@ -545,6 +669,7 @@ impl CookieJar {
             false,
             explicit_root_path,
             true,
+            access,
         );
         Ok(())
     }
@@ -558,64 +683,21 @@ impl CookieJar {
         from_http: bool,
         explicit_root_path: bool,
         individual_event: bool,
+        access: &CookieAccessContext,
     ) {
+        if !prepare_cookie_for_storage(
+            &mut cookie,
+            origin_url,
+            site_for_cookies,
+            top_level_navigation,
+            from_http,
+            explicit_root_path,
+            access,
+        ) {
+            return;
+        }
         let origin_domain = origin_url.host().to_ascii_lowercase();
-
-        if let Some(domain) = &cookie.domain {
-            if domain.is_empty() || !domain_matches(&origin_domain, domain) {
-                return;
-            }
-            if is_public_suffix(domain) {
-                if domain != &origin_domain {
-                    return;
-                }
-                cookie.host_only = true;
-            } else {
-                cookie.host_only = false;
-            }
-        } else {
-            cookie.host_only = true;
-        }
-        if cookie.host_only {
-            cookie.domain = Some(origin_domain.clone());
-        }
-
-        if cookie
-            .path
-            .as_deref()
-            .is_none_or(|path| !path.starts_with('/'))
-        {
-            cookie.path = Some(default_path(origin_url.path()));
-        }
-
         let secure_origin = secure_cookie_transport(origin_url);
-        if cookie.secure && !secure_origin {
-            return;
-        }
-        if !from_http && cookie.http_only {
-            return;
-        }
-        if cookie.same_site == SameSite::None && !cookie.secure {
-            return;
-        }
-        if !same_site(origin_url, site_for_cookies)
-            && cookie.same_site != SameSite::None
-            && (!from_http || !top_level_navigation)
-        {
-            return;
-        }
-        let lower_name = cookie.name.to_ascii_lowercase();
-        if lower_name.starts_with("__secure-") && !cookie.secure {
-            return;
-        }
-        if lower_name.starts_with("__host-")
-            && (!cookie.secure
-                || !cookie.host_only
-                || cookie.path.as_deref() != Some("/")
-                || !explicit_root_path)
-        {
-            return;
-        }
 
         // A write can race the scheduled expiry checkpoint. Remove expired
         // records before replacement so their deletion is not lost.
@@ -625,7 +707,8 @@ impl CookieJar {
         if !secure_origin
             && !cookie.secure
             && self.cookies.iter().any(|(old, _)| {
-                old.secure
+                old.partition_key == cookie.partition_key
+                    && old.secure
                     && old.name == cookie.name
                     && old
                         .domain
@@ -650,7 +733,11 @@ impl CookieJar {
         let host_only = cookie.host_only;
         if !from_http
             && self.cookies.iter().any(|(old, _)| {
-                old.http_only && old.name == name && old.domain == domain && old.path == path
+                old.partition_key == cookie.partition_key
+                    && old.http_only
+                    && old.name == name
+                    && old.domain == domain
+                    && old.path == path
             })
         {
             return;
@@ -659,7 +746,8 @@ impl CookieJar {
             .cookies
             .iter()
             .find(|(old, _)| {
-                old.name == name
+                old.partition_key == cookie.partition_key
+                    && old.name == name
                     && old.domain == domain
                     && old.path == path
                     && old.host_only == host_only
@@ -672,7 +760,11 @@ impl CookieJar {
             cookie.created_at = old.created_at;
         }
         self.cookies.retain(|(c, _)| {
-            !(c.name == name && c.domain == domain && c.path == path && c.host_only == host_only)
+            !(c.partition_key == cookie.partition_key
+                && c.name == name
+                && c.domain == domain
+                && c.path == path
+                && c.host_only == host_only)
         });
 
         if cookie.is_expired(now) {
@@ -704,9 +796,10 @@ impl CookieJar {
     /// Deletes cookies associated with a WebDriver document address, including
     /// HttpOnly cookies, while preserving cookies for other domains and paths.
     pub(crate) fn delete_associated_cookies(&mut self, url: &Url, now: SystemTime) {
+        let access = CookieAccessContext::first_party(url);
         let mut deleted = Vec::new();
         self.cookies.retain(|(cookie, _)| {
-            if !cookie.is_expired(now) && cookie.matches_url(url) {
+            if access.permits(cookie) && !cookie.is_expired(now) && cookie.matches_url(url) {
                 deleted.push(cookie.clone());
                 false
             } else {
@@ -738,11 +831,27 @@ impl CookieJar {
     /// Returns the latest change sequence and changes visible at a script URL.
     /// A new browsing context starts from `change_sequence()` so old writes
     /// are not replayed as events.
+    #[cfg(test)]
     pub(crate) fn script_visible_changes_since(
         &self,
         sequence: u64,
         url: &Url,
         site_for_cookies: &Url,
+    ) -> (u64, Vec<CookieStoreChange>) {
+        self.script_visible_changes_since_with_access(
+            sequence,
+            url,
+            site_for_cookies,
+            &CookieAccessContext::first_party(site_for_cookies),
+        )
+    }
+
+    pub(crate) fn script_visible_changes_since_with_access(
+        &self,
+        sequence: u64,
+        url: &Url,
+        site_for_cookies: &Url,
+        access: &CookieAccessContext,
     ) -> (u64, Vec<CookieStoreChange>) {
         let same_site = same_site(url, site_for_cookies);
         let changes = self
@@ -751,7 +860,8 @@ impl CookieJar {
             .filter(|change| change.sequence > sequence)
             .filter(|change| {
                 let cookie = &change.cookie;
-                !cookie.http_only
+                access.permits(cookie)
+                    && !cookie.http_only
                     && cookie.matches_url(url)
                     && (same_site || cookie.same_site == SameSite::None)
             })
@@ -766,34 +876,49 @@ impl CookieJar {
     }
 
     /// Returns each change at most once when it matches a registration's subscriptions.
-    pub(crate) fn service_worker_changes_since(
+    pub(crate) fn service_worker_changes_since_with_access(
         &self,
         sequence: u64,
         scope: &str,
         top_level_site: &SchemefulSite,
         site_for_cookies: &Url,
+        unpartitioned: bool,
     ) -> (u64, Vec<CookieStoreChange>) {
+        let access = CookieAccessContext {
+            top_level_site: Some(top_level_site.clone()),
+            unpartitioned,
+        };
         let subscriptions = self
             .service_worker_subscriptions
             .get(&(scope.to_owned(), top_level_site.clone()))
             .into_iter()
-            .flatten()
-            .filter_map(|entry| entry.url.parse::<Url>().ok().map(|url| (entry, url)))
+            .flat_map(|registration| registration.entries.iter())
+            .filter_map(|subscription| {
+                subscription
+                    .entry
+                    .url
+                    .parse::<Url>()
+                    .ok()
+                    .map(|url| (subscription, url))
+            })
             .collect::<Vec<_>>();
         let changes = self
             .changes
             .iter()
             .filter(|change| change.sequence > sequence)
             .filter(|change| {
-                subscriptions.iter().any(|(subscription, url)| {
-                    subscription
-                        .name
-                        .as_ref()
-                        .is_none_or(|name| name == &change.cookie.name)
-                        && change.cookie.matches_url(url)
-                        && (same_site(url, site_for_cookies)
-                            || change.cookie.same_site == SameSite::None)
-                })
+                access.permits(&change.cookie)
+                    && subscriptions.iter().any(|(subscription, url)| {
+                        change.sequence > subscription.after_sequence
+                            && subscription
+                                .entry
+                                .name
+                                .as_ref()
+                                .is_none_or(|name| name == &change.cookie.name)
+                            && change.cookie.matches_url(url)
+                            && (same_site(url, site_for_cookies)
+                                || change.cookie.same_site == SameSite::None)
+                    })
             })
             .map(|change| CookieStoreChange {
                 name: change.cookie.name.clone(),
@@ -859,12 +984,53 @@ impl CookieJar {
         top_level_navigation: bool,
         method: Method,
     ) -> Option<String> {
-        self.cookie_string(url, site_for_cookies, top_level_navigation, method, false)
+        self.cookie_header_for_request_with_access(
+            url,
+            site_for_cookies,
+            top_level_navigation,
+            method,
+            &CookieAccessContext::first_party(if top_level_navigation {
+                url
+            } else {
+                site_for_cookies
+            }),
+        )
+    }
+
+    pub(crate) fn cookie_header_for_request_with_access(
+        &self,
+        url: &Url,
+        site_for_cookies: &Url,
+        top_level_navigation: bool,
+        method: Method,
+        access: &CookieAccessContext,
+    ) -> Option<String> {
+        self.cookie_string(
+            url,
+            site_for_cookies,
+            top_level_navigation,
+            method,
+            false,
+            access,
+        )
     }
 
     /// Returns the cookies visible to script for this document.
     pub fn document_cookie(&self, url: &Url, site_for_cookies: &Url) -> String {
-        self.cookie_string(url, site_for_cookies, false, Method::Get, true)
+        self.document_cookie_with_access(
+            url,
+            site_for_cookies,
+            &CookieAccessContext::first_party(site_for_cookies),
+        )
+    }
+
+    pub(crate) fn document_cookie_with_access(
+        &self,
+        url: &Url,
+        site_for_cookies: &Url,
+        access: &CookieAccessContext,
+    ) -> String {
+        self.cookie_string(url, site_for_cookies, false, Method::Get, true, access)
             .unwrap_or_default()
     }
 
@@ -872,12 +1038,26 @@ impl CookieJar {
     ///
     /// The same URL, site, expiry, and HttpOnly checks as `document.cookie`
     /// apply.
+    #[cfg(test)]
     pub(crate) fn script_visible_cookie_pairs(
         &self,
         url: &Url,
         site_for_cookies: &Url,
     ) -> Vec<(String, String)> {
-        self.matching_cookies(url, site_for_cookies, false, Method::Get, true)
+        self.script_visible_cookie_pairs_with_access(
+            url,
+            site_for_cookies,
+            &CookieAccessContext::first_party(site_for_cookies),
+        )
+    }
+
+    pub(crate) fn script_visible_cookie_pairs_with_access(
+        &self,
+        url: &Url,
+        site_for_cookies: &Url,
+        access: &CookieAccessContext,
+    ) -> Vec<(String, String)> {
+        self.matching_cookies(url, site_for_cookies, false, Method::Get, true, access)
             .into_iter()
             .map(|cookie| (cookie.name.clone(), cookie.value.clone()))
             .collect()
@@ -890,6 +1070,7 @@ impl CookieJar {
         top_level_navigation: bool,
         method: Method,
         non_http: bool,
+        access: &CookieAccessContext,
     ) -> Option<String> {
         let pairs: Vec<String> = self
             .matching_cookies(
@@ -898,6 +1079,7 @@ impl CookieJar {
                 top_level_navigation,
                 method,
                 non_http,
+                access,
             )
             .into_iter()
             .map(|cookie| format!("{}={}", cookie.name, cookie.value))
@@ -917,6 +1099,7 @@ impl CookieJar {
         top_level_navigation: bool,
         method: Method,
         non_http: bool,
+        access: &CookieAccessContext,
     ) -> Vec<&Cookie> {
         let now = SystemTime::now();
         let same_site = same_site(url, site_for_cookies);
@@ -926,7 +1109,8 @@ impl CookieJar {
             .cookies
             .iter()
             .filter(|(c, _)| {
-                !c.is_expired(now)
+                access.permits(c)
+                    && !c.is_expired(now)
                     && c.matches_url(url)
                     && (!non_http || !c.http_only)
                     && (same_site
@@ -955,6 +1139,85 @@ impl CookieJar {
     pub fn is_empty(&self) -> bool {
         self.cookies.is_empty()
     }
+}
+
+/// Normalizes scope and applies cookie creation policy before mutating the jar.
+fn prepare_cookie_for_storage(
+    cookie: &mut Cookie,
+    origin_url: &Url,
+    site_for_cookies: &Url,
+    top_level_navigation: bool,
+    from_http: bool,
+    explicit_root_path: bool,
+    access: &CookieAccessContext,
+) -> bool {
+    if cookie.partitioned {
+        if !cookie.secure || access.top_level_site.is_none() {
+            return false;
+        }
+        cookie.partition_key = access.top_level_site.clone();
+    } else if !access.unpartitioned {
+        return false;
+    }
+    let origin_domain = origin_url.host().to_ascii_lowercase();
+
+    if let Some(domain) = &cookie.domain {
+        if domain.is_empty() || !domain_matches(&origin_domain, domain) {
+            return false;
+        }
+        if is_public_suffix(domain) {
+            if domain != &origin_domain {
+                return false;
+            }
+            cookie.host_only = true;
+        } else {
+            cookie.host_only = false;
+        }
+    } else {
+        cookie.host_only = true;
+    }
+    if cookie.host_only {
+        cookie.domain = Some(origin_domain.clone());
+    }
+
+    if cookie
+        .path
+        .as_deref()
+        .is_none_or(|path| !path.starts_with('/'))
+    {
+        cookie.path = Some(default_path(origin_url.path()));
+    }
+
+    let secure_origin = secure_cookie_transport(origin_url);
+    if cookie.secure && !secure_origin {
+        return false;
+    }
+    if !from_http && cookie.http_only {
+        return false;
+    }
+    if cookie.same_site == SameSite::None && !cookie.secure {
+        return false;
+    }
+    if !same_site(origin_url, site_for_cookies)
+        && cookie.same_site != SameSite::None
+        && (!from_http || !top_level_navigation)
+    {
+        return false;
+    }
+    let lower_name = cookie.name.to_ascii_lowercase();
+    if lower_name.starts_with("__secure-") && !cookie.secure {
+        return false;
+    }
+    if lower_name.starts_with("__host-")
+        && (!cookie.secure
+            || !cookie.host_only
+            || cookie.path.as_deref() != Some("/")
+            || !explicit_root_path)
+    {
+        return false;
+    }
+
+    true
 }
 
 impl Default for CookieJar {

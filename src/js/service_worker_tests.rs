@@ -222,62 +222,11 @@ impl ServiceWorkerFixture {
                     path: path.clone(),
                     headers,
                 });
-                let (body, policy, allowed) = match path.as_str() {
-                    "/sw.js" | "/app/sw.js" => (
-                        SERVICE_WORKER_SOURCE,
-                        "require-trusted-types-for 'script'",
-                        "",
-                    ),
-                    "/app/worker.js" | "/app/worker-v2.js" => (LIFECYCLE_WORKER_SOURCE, "", ""),
-                    "/app/close-on-activate.js" => (CLOSE_ON_ACTIVATE_SOURCE, "", ""),
-                    "/app/origin.js" => (ORIGIN_WORKER_SOURCE, "", ""),
-                    "/app/message-port.js" => (MESSAGE_PORT_WORKER_SOURCE, "", ""),
-                    "/app/cookie-store.js" => (COOKIE_STORE_WORKER_SOURCE, "", ""),
-                    "/app/cookie-subscriptions.js" => (COOKIE_SUBSCRIPTIONS_WORKER_SOURCE, "", ""),
-                    "/app/cookie-change.js" => (COOKIE_CHANGE_WORKER_SOURCE, "", ""),
-                    "/app/frame.html" => (ORIGIN_FRAME_SOURCE, "", ""),
-                    "/app/install-wait.js"
-                    | "/app/install-reject.js"
-                    | "/app/activate-wait.js"
-                    | "/app/activate-reject.js" => (LIFETIME_WORKER_SOURCE, "", ""),
-                    "/allowed/sw.js" => ("", "", "/"),
-                    "/narrow/sw.js" => ("", "", "/narrow/sub/"),
-                    "/bad-allowed/sw.js" => ("", "", "http://["),
-                    "/cross-allowed/sw.js" => ("", "", "https://other.example.test/"),
-                    "/app/restricted.js" | "/target.js" => ("", "", ""),
-                    "/syntax.js" | "/app/syntax.js" => ("function (", "", ""),
-                    "/redirect.js" => {
-                        stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /target.js\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-                        continue;
-                    }
-                    "/plain.js" => {
-                        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-                        continue;
-                    }
-                    _ => {
-                        stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-                        continue;
-                    }
-                };
-                let policy_header = if policy.is_empty() {
-                    String::new()
-                } else {
-                    format!("Content-Security-Policy: {policy}\r\n")
-                };
-                let allowed_header = if allowed.is_empty() {
-                    String::new()
-                } else {
-                    format!("Service-Worker-Allowed: {allowed}\r\n")
-                };
-                let content_type = if path == "/app/frame.html" {
-                    "text/html"
-                } else {
-                    "text/javascript"
-                };
-                write!(stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{policy_header}{allowed_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                ).unwrap();
+                let version = requests
+                    .iter()
+                    .filter(|request| request.path == path)
+                    .count();
+                respond_service_worker_fixture(&mut stream, &path, version);
             }
             requests
         });
@@ -299,6 +248,141 @@ impl ServiceWorkerFixture {
         self.stopped.store(true, Ordering::Release);
         self.worker.take().unwrap().join()
     }
+}
+
+fn respond_service_worker_fixture(stream: &mut std::net::TcpStream, path: &str, version: usize) {
+    let updating_source =
+        format!("onmessage = event => event.source.postMessage({{version: {version}}});");
+    let registration_source = format!(
+        r#"
+        const version = {version};
+        onmessage = async event => {{
+            try {{
+                const result = await registration[event.data]();
+                event.source.postMessage({{result: event.data === 'update' ? result === registration : result, version}});
+            }} catch (error) {{ event.source.postMessage({{error: error.name}}); }}
+        }};
+    "#
+    );
+    let (body, policy, allowed) = match path {
+        "/app/stale-registration.js" => (
+            r#"
+            onmessage = async event => {
+                try {
+                    if (event.data === 'unregister') await registration.unregister();
+                    else await registration.cookies.subscribe([{name: 'ghost'}]);
+                    event.source.postMessage('resolved');
+                } catch (error) { event.source.postMessage(error.name); }
+            };
+        "#,
+            "",
+            "",
+        ),
+        "/app/registration.js" => (registration_source.as_str(), "", ""),
+        "/app/disappearing.js" if version > 1 => {
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            return;
+        }
+        "/app/disappearing.js" => ("", "", ""),
+        "/app/importing-missing.js" => ("importScripts('disappearing.js');", "", ""),
+        "/app/importing-changed-and-missing.js" => (
+            "importScripts('changing-import.js', 'disappearing.js');",
+            "",
+            "",
+        ),
+        "/app/update-network.js" if version > 1 => {
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            return;
+        }
+        "/app/update-mime.js" if version > 1 => {
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            return;
+        }
+        "/app/update-scope.js" if version > 1 => ("", "", "/app/sub/"),
+        "/app/update-network.js" | "/app/update-mime.js" | "/app/update-scope.js" => ("", "", ""),
+        "/app/update-syntax.js" if version > 1 => ("function (", "", ""),
+        "/app/update-reject.js" if version > 1 => (
+            "oninstall = event => event.waitUntil(Promise.reject(new Error('install failed')));",
+            "",
+            "",
+        ),
+        "/app/update-wait.js" if version > 1 => (
+            "let release; oninstall = event => event.waitUntil(new Promise(resolve => release = resolve)); onmessage = () => release();",
+            "",
+            "",
+        ),
+        "/app/update-syntax.js" | "/app/update-reject.js" | "/app/update-wait.js" => ("", "", ""),
+        "/app/updating.js" | "/app/changing-import.js" => (updating_source.as_str(), "", ""),
+        "/app/importing-change.js" => ("importScripts('changing-import.js');", "", ""),
+        "/app/importing-stable.js" => ("importScripts('worker.js');", "", ""),
+        "/sw.js" | "/app/sw.js" => (
+            SERVICE_WORKER_SOURCE,
+            "require-trusted-types-for 'script'",
+            "",
+        ),
+        "/app/worker.js" | "/app/worker-v2.js" => (LIFECYCLE_WORKER_SOURCE, "", ""),
+        "/app/close-on-activate.js" => (CLOSE_ON_ACTIVATE_SOURCE, "", ""),
+        "/app/origin.js" => (ORIGIN_WORKER_SOURCE, "", ""),
+        "/app/message-port.js" => (MESSAGE_PORT_WORKER_SOURCE, "", ""),
+        "/app/cookie-store.js" => (COOKIE_STORE_WORKER_SOURCE, "", ""),
+        "/app/cookie-subscriptions.js" => (COOKIE_SUBSCRIPTIONS_WORKER_SOURCE, "", ""),
+        "/app/cookie-change.js" => (COOKIE_CHANGE_WORKER_SOURCE, "", ""),
+        "/app/frame.html" => (ORIGIN_FRAME_SOURCE, "", ""),
+        "/app/empty-frame.html" => ("<!doctype html><body>child</body>", "", ""),
+        "/app/install-wait.js"
+        | "/app/install-reject.js"
+        | "/app/activate-wait.js"
+        | "/app/activate-reject.js" => (LIFETIME_WORKER_SOURCE, "", ""),
+        "/allowed/sw.js" => ("", "", "/"),
+        "/narrow/sw.js" => ("", "", "/narrow/sub/"),
+        "/bad-allowed/sw.js" => ("", "", "http://["),
+        "/cross-allowed/sw.js" => ("", "", "https://other.example.test/"),
+        "/app/restricted.js" | "/target.js" => ("", "", ""),
+        "/syntax.js" | "/app/syntax.js" => ("function (", "", ""),
+        "/redirect.js" => {
+            stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /target.js\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            return;
+        }
+        "/plain.js" => {
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            return;
+        }
+        _ => {
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            return;
+        }
+    };
+    let policy_header = if policy.is_empty() {
+        String::new()
+    } else {
+        format!("Content-Security-Policy: {policy}\r\n")
+    };
+    let allowed_header = if allowed.is_empty() {
+        String::new()
+    } else {
+        format!("Service-Worker-Allowed: {allowed}\r\n")
+    };
+    let content_type = if path.ends_with(".html") {
+        "text/html"
+    } else {
+        "text/javascript"
+    };
+    write!(stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{policy_header}{allowed_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    ).unwrap();
 }
 
 impl Drop for ServiceWorkerFixture {
@@ -497,6 +581,468 @@ fn service_worker_registration_tracks_local_lifecycle_and_self_messages() {
         fixture.finish(),
         vec!["/app/cookie-subscriptions.js".to_owned()]
     );
+}
+
+#[test]
+fn service_worker_update_refetches_changed_script_and_retains_cookie_subscriptions() {
+    assert_service_worker_update("/app/updating.js", true, None);
+}
+
+#[test]
+fn service_worker_update_refetches_unchanged_script_without_reinstalling() {
+    assert_service_worker_update("/app/worker.js", false, None);
+}
+
+#[test]
+fn service_worker_update_detects_changed_import_with_unchanged_main() {
+    assert_service_worker_update(
+        "/app/importing-change.js",
+        true,
+        Some("/app/changing-import.js"),
+    );
+}
+
+#[test]
+fn service_worker_update_preserves_worker_when_main_and_import_are_unchanged() {
+    assert_service_worker_update("/app/importing-stable.js", false, Some("/app/worker.js"));
+}
+
+#[test]
+fn service_worker_update_ignores_bad_old_import_when_other_resources_are_unchanged() {
+    assert_service_worker_update(
+        "/app/importing-missing.js",
+        false,
+        Some("/app/disappearing.js"),
+    );
+}
+
+#[test]
+fn service_worker_update_reuses_bad_import_response_when_another_import_changed() {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval(
+            r#"
+        globalThis.outcome = 'pending';
+        navigator.serviceWorker.register('/app/importing-changed-and-missing.js');
+        navigator.serviceWorker.ready.then(async registration => {
+            globalThis.reg = registration;
+            globalThis.old = registration.active;
+            try { await registration.update(); outcome = 'resolved'; }
+            catch (error) { outcome = error.name; }
+        });
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "outcome"), "TypeError");
+    assert_eq!(
+        runtime
+            .eval("reg.active === old && old.state === 'activated'")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert!(runtime.take_task_errors().is_empty());
+    drop(runtime);
+    assert_eq!(
+        fixture.finish(),
+        vec![
+            "/app/importing-changed-and-missing.js",
+            "/app/changing-import.js",
+            "/app/disappearing.js",
+            "/app/importing-changed-and-missing.js",
+            "/app/changing-import.js",
+            "/app/disappearing.js"
+        ]
+    );
+}
+
+#[test]
+fn service_worker_global_update_settles_in_calling_realm() {
+    assert_service_worker_global_registration("update");
+}
+
+#[test]
+fn service_worker_global_unregister_settles_before_worker_retirement() {
+    assert_service_worker_global_registration("unregister");
+}
+
+fn assert_service_worker_global_registration(operation: &str) {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval(&format!(
+            r#"
+        globalThis.reply = null;
+        navigator.serviceWorker.onmessage = event => reply = event.data;
+        navigator.serviceWorker.register('/app/registration.js');
+        navigator.serviceWorker.ready.then(registration => {{
+            globalThis.reg = registration;
+            globalThis.old = registration.active;
+            registration.active.postMessage({operation:?});
+        }});
+    "#
+        ))
+        .unwrap();
+    boa_gc::force_collect();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "JSON.stringify(reply)"),
+        r#"{"result":true,"version":1}"#
+    );
+    if operation == "update" {
+        assert_eq!(
+            runtime
+                .eval("reg.active !== old && reg.active.state === 'activated'")
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+    } else {
+        runtime.eval("navigator.serviceWorker.getRegistrations().then(items => globalThis.count = items.length);").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("count").unwrap().as_number(), Some(0.0));
+    }
+    assert!(runtime.take_task_errors().is_empty());
+    drop(runtime);
+    assert_eq!(
+        fixture.finish(),
+        vec!["/app/registration.js".to_owned(); if operation == "update" { 2 } else { 1 }]
+    );
+}
+
+#[test]
+fn service_worker_stale_document_update_rejects_before_fetch_after_reregistration() {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime.eval(r#"
+        navigator.serviceWorker.register('/app/updating.js').then(registration => globalThis.first = registration);
+        const frame = document.createElement('iframe');
+        frame.src = '/app/empty-frame.html';
+        document.body.appendChild(frame);
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    let child = runtime
+        .host_state
+        .borrow()
+        .iframe_documents
+        .values()
+        .next()
+        .unwrap()
+        .document
+        .clone();
+    runtime.eval_in_document_realm(child.identity(), "navigator.serviceWorker.register('/app/updating.js').then(registration => globalThis.oldRegistration = registration);").unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime.eval(r#"
+        first.unregister().then(() => navigator.serviceWorker.register('/app/worker.js')).then(async registration => {
+            globalThis.replacement = registration;
+            await registration.cookies.subscribe([{name: 'kept'}]);
+        });
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime.eval_in_document_realm(child.identity(), "globalThis.outcome = 'pending'; oldRegistration.update().then(() => outcome = 'resolved', error => outcome = error.name);").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "frame.contentWindow.outcome"),
+        "InvalidStateError"
+    );
+    runtime.eval("replacement.cookies.getSubscriptions().then(items => globalThis.names = items.map(item => item.name).join(','));").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "names"), "kept");
+    assert_eq!(
+        eval_str(&mut runtime, "replacement.active.state"),
+        "activated"
+    );
+    assert!(runtime.take_task_errors().is_empty());
+    drop(runtime);
+    assert_eq!(
+        fixture.finish(),
+        vec![
+            "/app/updating.js",
+            "/app/empty-frame.html",
+            "/app/updating.js",
+            "/app/worker.js"
+        ]
+    );
+}
+
+#[test]
+fn service_worker_failed_initial_start_rolls_back_reserved_registration() {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime.eval("navigator.serviceWorker.register('/app/syntax.js').catch(error => globalThis.failure = error.name);").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "failure"), "TypeError");
+    let scope = format!("{}/app/", fixture.origin);
+    let top = crate::http::SchemefulSite::from_url(&scope.parse().unwrap());
+    assert!(
+        runtime
+            .host_state
+            .borrow()
+            .cookie_store
+            .lock()
+            .unwrap()
+            .service_worker_registration_id(&scope, &top)
+            .is_none()
+    );
+    assert!(runtime.take_task_errors().is_empty());
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec!["/app/syntax.js"]);
+}
+
+#[test]
+fn service_worker_old_registration_cannot_change_replacement_subscriptions() {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval(
+            r#"
+        globalThis.reply = '';
+        navigator.serviceWorker.onmessage = event => reply = event.data;
+        navigator.serviceWorker.register('/app/stale-registration.js');
+        navigator.serviceWorker.ready.then(registration => {
+            globalThis.oldRegistration = registration;
+            globalThis.oldWorker = registration.active;
+            oldWorker.postMessage('unregister');
+        });
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "reply"), "resolved");
+    runtime.eval("navigator.serviceWorker.register('/app/worker.js').then(registration => globalThis.replacement = registration);").unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval(
+            r#"
+        oldWorker.postMessage('subscribe');
+        globalThis.oldManagerOutcome = 'pending';
+        oldRegistration.cookies.subscribe([{name: 'window-ghost'}]).then(
+            () => oldManagerOutcome = 'resolved', error => oldManagerOutcome = error.name);
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "reply"), "TypeError");
+    assert_eq!(eval_str(&mut runtime, "oldManagerOutcome"), "TypeError");
+    runtime.eval("replacement.cookies.getSubscriptions().then(items => globalThis.names = items.map(item => item.name).join(','));").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "names"), "");
+    assert!(runtime.take_task_errors().is_empty());
+    drop(runtime);
+    assert_eq!(
+        fixture.finish(),
+        vec!["/app/stale-registration.js", "/app/worker.js"]
+    );
+}
+
+#[test]
+fn service_worker_update_network_failure_retains_active_and_subscriptions() {
+    assert_service_worker_update_failure("/app/update-network.js", "TypeError");
+}
+
+#[test]
+fn service_worker_update_mime_failure_retains_active_and_subscriptions() {
+    assert_service_worker_update_failure("/app/update-mime.js", "SecurityError");
+}
+
+#[test]
+fn service_worker_update_scope_failure_retains_active_and_subscriptions() {
+    assert_service_worker_update_failure("/app/update-scope.js", "SecurityError");
+}
+
+#[test]
+fn service_worker_update_parse_failure_retains_active_and_subscriptions() {
+    assert_service_worker_update_failure("/app/update-syntax.js", "TypeError");
+}
+
+#[test]
+fn service_worker_update_install_rejection_retains_active_and_subscriptions() {
+    assert_service_worker_update_failure("/app/update-reject.js", "resolved");
+}
+
+fn assert_service_worker_update_failure(path: &str, outcome: &str) {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval(&format!(
+            r#"
+        globalThis.outcome = 'pending';
+        navigator.serviceWorker.register({path:?});
+        navigator.serviceWorker.ready.then(async registration => {{
+            globalThis.reg = registration;
+            globalThis.old = registration.active;
+            await registration.cookies.subscribe([{{name: 'kept'}}]);
+            try {{ await registration.update(); outcome = 'resolved'; }}
+            catch (error) {{ outcome = error.name; }}
+        }});
+    "#
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "outcome"), outcome);
+    assert_eq!(runtime.eval("reg.active === old && old.state === 'activated' && reg.installing === null && reg.waiting === null").unwrap().as_boolean(), Some(true));
+    runtime.eval("reg.cookies.getSubscriptions().then(items => globalThis.saved = items.map(item => item.name).join(','));").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "saved"), "kept");
+    assert!(runtime.take_task_errors().is_empty());
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec![path.to_owned(), path.to_owned()]);
+}
+
+#[test]
+fn service_worker_update_waits_for_install_and_coalesces_concurrent_calls() {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval(
+            r#"
+        globalThis.updates = 0;
+        navigator.serviceWorker.register('/app/update-wait.js');
+        navigator.serviceWorker.ready.then(async registration => {
+            globalThis.reg = registration;
+            globalThis.old = registration.active;
+            await Promise.all([registration.update(), registration.update()]);
+            registration.onupdatefound = () => updates++;
+        });
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        runtime
+            .eval("reg.active === old && reg.installing.state === 'installing' && updates === 1")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    runtime
+        .eval("reg.installing.postMessage('release');")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(runtime.eval("reg.active !== old && reg.active.state === 'activated' && old.state === 'redundant'").unwrap().as_boolean(), Some(true));
+    assert!(runtime.take_task_errors().is_empty());
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec!["/app/update-wait.js".to_owned(); 2]);
+}
+
+#[test]
+fn service_worker_update_rejects_after_unregister() {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval(
+            r#"
+      globalThis.updateOutcome = 'pending';
+      navigator.serviceWorker.register('/app/worker.js');
+      navigator.serviceWorker.ready.then(async registration => {
+        await registration.unregister();
+        try {
+          await registration.update();
+          updateOutcome = 'resolved';
+        } catch (error) {
+          updateOutcome = error.name;
+        }
+      });
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "updateOutcome"), "InvalidStateError");
+    assert!(runtime.take_task_errors().is_empty());
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec!["/app/worker.js".to_owned()]);
+}
+
+fn assert_service_worker_update(path: &str, changed: bool, import: Option<&str>) {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval(&format!(
+            r#"
+      globalThis.updates = 0;
+      globalThis.updateError = '';
+      navigator.serviceWorker.register({path:?});
+      navigator.serviceWorker.ready.then(async registration => {{
+        globalThis.registrationUnderTest = registration;
+        globalThis.previousWorker = registration.active;
+        await registration.cookies.subscribe([{{name: 'kept'}}]);
+        registration.onupdatefound = () => updates++;
+        await registration.update();
+      }}).catch(error => updateError = error.name + ': ' + error.message);
+    "#
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "updateError"), "");
+    assert_eq!(
+        runtime
+            .eval("registrationUnderTest.active !== previousWorker")
+            .unwrap()
+            .as_boolean(),
+        Some(changed)
+    );
+    assert_eq!(
+        runtime.eval("updates").unwrap().as_number(),
+        Some(if changed { 1.0 } else { 0.0 })
+    );
+    assert_eq!(
+        eval_str(&mut runtime, "registrationUnderTest.active.state"),
+        "activated"
+    );
+    runtime.eval("registrationUnderTest.cookies.getSubscriptions().then(items => globalThis.savedNames = items.map(item => item.name).join(','));").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "savedNames"), "kept");
+    if changed {
+        runtime.eval("navigator.serviceWorker.onmessage = event => globalThis.newVersion = event.data.version; registrationUnderTest.active.postMessage('version');").unwrap();
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.eval("newVersion").unwrap().as_number(), Some(2.0));
+    }
+    assert!(runtime.take_task_errors().is_empty());
+    drop(runtime);
+    let mut expected = vec![path.to_owned()];
+    if let Some(import) = import {
+        expected.push(import.to_owned());
+    }
+    expected.extend(expected.clone());
+    assert_eq!(fixture.finish(), expected);
 }
 
 #[test]

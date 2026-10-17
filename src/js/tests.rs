@@ -647,14 +647,14 @@ fn service_worker_registration_scopes_lifecycle_and_controller_selection() {
     .unwrap();
     runtime
         .eval(
-            r#"globalThis.swProbe = { scope: '', state: '', found: false, controller: false, changes: 0, invalid: '', updateFound: 0, updateUndefined: false, replaced: false };
+            r#"globalThis.swProbe = { scope: '', state: '', found: false, controller: false, changes: 0, invalid: '', updateFound: 0, updateRegistration: false, replaced: false };
                    navigator.serviceWorker.oncontrollerchange = () => swProbe.changes++;
                    navigator.serviceWorker.register('/app/worker.js', { scope: '/app/' }).then(registration => {
                      swProbe.scope = registration.scope;
                      swProbe.state = registration.installing.state;
                      globalThis.swRegistration = registration;
                      registration.onupdatefound = () => swProbe.updateFound++;
-                     registration.update().then(value => { swProbe.updateUndefined = value === undefined; });
+                     registration.update().then(value => { swProbe.updateRegistration = value === registration; });
                      navigator.serviceWorker.getRegistration('/app/page.html').then(found => { swProbe.found = found === registration; });
                    });
                    navigator.serviceWorker.register('https://other.example.test/worker.js').catch(error => { swProbe.invalid = error.name; });"#,
@@ -672,7 +672,7 @@ fn service_worker_registration_scopes_lifecycle_and_controller_selection() {
         ),
     );
     assert_eq!(
-        eval_str(&mut runtime, "String(swProbe.updateUndefined)"),
+        eval_str(&mut runtime, "String(swProbe.updateRegistration)"),
         "true"
     );
     assert_eq!(eval_str(&mut runtime, "swProbe.state"), "installing");
@@ -703,7 +703,11 @@ fn service_worker_registration_scopes_lifecycle_and_controller_selection() {
     drop(runtime);
     assert_eq!(
         fixture.finish(),
-        vec!["/app/worker.js".to_owned(), "/app/worker-v2.js".to_owned()]
+        vec![
+            "/app/worker.js".to_owned(),
+            "/app/worker.js".to_owned(),
+            "/app/worker-v2.js".to_owned()
+        ]
     );
 }
 
