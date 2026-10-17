@@ -99,6 +99,14 @@
     {
       "path": "cookiestore/serviceworker_oncookiechange_eventhandler_single_subscription.https.any.serviceworker.html",
       "server": "wptserve"
+    },
+    {
+      "path": "cookiestore/serviceworker_cookieStore_cross_origin.https.sub.html",
+      "server": "wptserve"
+    },
+    {
+      "path": "cookiestore/serviceworker_cookieStore_subscriptions_reset.https.html",
+      "server": "wptserve"
     }
   ]
 }

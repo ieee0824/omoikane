@@ -18935,8 +18935,9 @@ export const __omoikane_service_worker_lifecycle = {};
         __omoikane_enqueue_posted_message(selfTarget, {wire, ports});
         return;
       }
-      const data = __omoikane_encode_worker_message(message, options);
-      __omoikane_worker_post_message(this.__id, data);
+      const ports = [];
+      const data = encodeWorkerMessage(message, options, ports);
+      __omoikane_worker_post_message(this.__id, data, ports);
     }
     get onstatechange() { return this._onstatechange; }
     set onstatechange(callback) {
@@ -25524,6 +25525,16 @@ export const __omoikane_service_worker_lifecycle = {};
 
   globalThis.__omoikane_encode_worker_message = encodeWorkerMessage;
   globalThis.__omoikane_decode_worker_message = decodeWorkerMessage;
+  globalThis.__omoikane_receive_worker_message = function(wire, origin, source, transferred, target = globalThis) {
+    const ports = receiveTransferredMessagePorts(transferred || []);
+    let data;
+    try { data = decodeWorkerMessage(wire, ports); }
+    catch (_) {
+      target.dispatchEvent(new MessageEvent("messageerror", {origin, source, ports}));
+      return;
+    }
+    target.dispatchEvent(new MessageEvent("message", {data, origin, source, ports}));
+  };
 
   const messagePortConstructionToken = {};
   class MessagePort extends EventTarget {
@@ -25562,6 +25573,16 @@ export const __omoikane_service_worker_lifecycle = {};
       if (this._closed) return;
       if (!this._started) { this._pendingMessages.push(data); return; }
       __omoikane_enqueue_posted_message(this, data);
+    }
+    _transferPendingMessages() {
+      // Serialize queued local clones in their source Realm before another
+      // runtime adopts this endpoint. Its receiver must build local objects.
+      return this._pendingMessages.map(packet => {
+        if (!packet.direct) return packet;
+        const ports = [];
+        const wire = encodeWorkerMessage(packet.data, {transfer: packet.ports}, ports);
+        return {direct: false, wire, ports};
+      });
     }
     _acceptMessage(packet) {
       if (this._closed) return;
@@ -25619,7 +25640,7 @@ export const __omoikane_service_worker_lifecycle = {};
       const oldPort = ports[index];
       const port = new MessagePort(messagePortConstructionToken);
       port._entangled = oldPort._entangled;
-      port._pendingMessages = oldPort._pendingMessages;
+      port._pendingMessages = oldPort._transferPendingMessages();
       if (port._entangled) port._entangled._entangled = port;
       oldPort._entangled = null;
       oldPort._pendingMessages = [];
@@ -26176,8 +26197,9 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     postMessage(message, options = undefined) {
       if (this.__terminated) return;
-      const data = __omoikane_encode_worker_message(message, options);
-      __omoikane_worker_post_message(this.__id, data);
+      const ports = [];
+      const data = encodeWorkerMessage(message, options, ports);
+      __omoikane_worker_post_message(this.__id, data, ports);
     }
     terminate() {
       if (this.__terminated) return;
@@ -26336,8 +26358,9 @@ export const __omoikane_service_worker_lifecycle = {};
       },
     });
     globalThis.postMessage = function(message, options = undefined) {
-      const data = __omoikane_encode_worker_message(message, options);
-      __omoikane_worker_owner_post_message(workerId, data);
+      const ports = [];
+      const data = encodeWorkerMessage(message, options, ports);
+      __omoikane_worker_owner_post_message(workerId, data, ports);
     };
     globalThis.close = function() {
       __omoikane_worker_close();

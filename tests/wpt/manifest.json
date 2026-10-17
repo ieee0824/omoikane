@@ -711,6 +711,7 @@
     },
     {"path": "cookiestore/serviceworker_cookiechange_eventhandler_overlapping_subscriptions.https.any.serviceworker.html", "server": "wptserve"},
     {"path": "cookiestore/serviceworker_cookiechange_eventhandler_single_subscription.https.any.serviceworker.html", "server": "wptserve"},
-    {"path": "cookiestore/serviceworker_oncookiechange_eventhandler_single_subscription.https.any.serviceworker.html", "server": "wptserve"}
+    {"path": "cookiestore/serviceworker_oncookiechange_eventhandler_single_subscription.https.any.serviceworker.html", "server": "wptserve"},
+    {"path": "cookiestore/serviceworker_cookieStore_cross_origin.https.sub.html", "server": "wptserve"}
   ]
 }

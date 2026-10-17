@@ -20,6 +20,19 @@ The default CI manifest runs all 25 variants. Four new known-failure entries
 name the exact failing subtests, so an additional failure or an unexpected pass
 requires review. They do not establish completion of #1354.
 
+Two additional original HTML cases were measured on 2026-10-17. The
+`serviceworker_cookieStore_cross_origin.https.sub.html` case now passes after
+connecting transferred MessagePorts to the Worker message tasks and their
+owning event loops. It previously failed with `DataCloneError` before the cookie
+assertions. This case also runs in the default CI manifest.
+
+`serviceworker_cookieStore_subscriptions_reset.https.html` passes its unregister
+and re-register subtest, but its update subtest remains unfinished (harness
+status 2): `ServiceWorkerRegistration.update()` does not yet run the update
+lifecycle. This remains required work under #1354. The diagnostic manifest
+below includes both HTML cases as well as the 25 generated variants, all with
+their original PASS expectations.
+
 | Remaining case | Evidence and remaining work |
 | --- | --- |
 | `cookieStore_get_arguments` | Four alternate-URL assertions fail. The pinned Worker test allows other same-origin paths; the current [get(options) algorithm](https://cookiestore.spec.whatwg.org/#dom-cookiestore-get) requires the creation URL, excluding fragments. The whitespace-name assertion passes. |
