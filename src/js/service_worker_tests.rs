@@ -44,6 +44,19 @@ const ORIGIN_WORKER_SOURCE: &str = r#"
   });
 "#;
 
+const MESSAGE_PORT_WORKER_SOURCE: &str = r#"
+  onmessage = event => {
+    const port = event.ports[0];
+    port.onmessage = reply => port.postMessage({
+      value: reply.data.value,
+      samePort: event.data.port === port,
+      localPort: port instanceof MessagePort,
+      localData: Object.getPrototypeOf(reply.data) === Object.prototype,
+    });
+    port.postMessage({ready: true});
+  };
+"#;
+
 const COOKIE_STORE_WORKER_SOURCE: &str = r#"
   addEventListener('message', async event => {
     const available = typeof cookieStore === 'object' && cookieStore instanceof CookieStore;
@@ -218,6 +231,7 @@ impl ServiceWorkerFixture {
                     "/app/worker.js" | "/app/worker-v2.js" => (LIFECYCLE_WORKER_SOURCE, "", ""),
                     "/app/close-on-activate.js" => (CLOSE_ON_ACTIVATE_SOURCE, "", ""),
                     "/app/origin.js" => (ORIGIN_WORKER_SOURCE, "", ""),
+                    "/app/message-port.js" => (MESSAGE_PORT_WORKER_SOURCE, "", ""),
                     "/app/cookie-store.js" => (COOKIE_STORE_WORKER_SOURCE, "", ""),
                     "/app/cookie-subscriptions.js" => (COOKIE_SUBSCRIPTIONS_WORKER_SOURCE, "", ""),
                     "/app/cookie-change.js" => (COOKIE_CHANGE_WORKER_SOURCE, "", ""),
@@ -483,6 +497,135 @@ fn service_worker_registration_tracks_local_lifecycle_and_self_messages() {
         fixture.finish(),
         vec!["/app/cookie-subscriptions.js".to_owned()]
     );
+}
+
+#[test]
+fn service_worker_transferred_message_port_delivers_bidirectional_cloned_messages() {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval(
+            r#"
+      globalThis.observed = [];
+      globalThis.transferError = '';
+      navigator.serviceWorker.register('/app/message-port.js');
+      navigator.serviceWorker.ready.then(registration => {
+        const channel = new MessageChannel();
+        globalThis.keptPort = channel.port1;
+        channel.port1.onmessage = event => {
+          observed.push(event.data);
+          if (event.data.ready) {
+            const data = {value: 'cloned'};
+            channel.port1.postMessage(data);
+            data.value = 'mutated';
+          }
+        };
+        registration.active.postMessage({port: channel.port2}, [channel.port2]);
+        channel.port2.postMessage({value: 'detached'});
+      }).catch(error => { transferError = error.name + ': ' + error.message; });
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let errors = runtime.take_task_errors();
+    assert!(errors.is_empty(), "task errors: {errors:?}");
+    assert_eq!(
+        runtime
+            .eval("transferError")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        ""
+    );
+    assert_eq!(
+        runtime
+            .eval("JSON.stringify(observed)")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        r#"[{"ready":true},{"value":"cloned","samePort":true,"localPort":true,"localData":true}]"#
+    );
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec!["/app/message-port.js".to_owned()]);
+}
+
+#[test]
+fn service_worker_message_port_preserves_queued_messages_in_receiver_realm() {
+    let fixture = ServiceWorkerFixture::new();
+    let mut runtime = JsRuntime::with_document_and_url(
+        blank_html_document(),
+        &format!("{}/app/page", fixture.origin),
+    )
+    .unwrap();
+    runtime
+        .eval(
+            r#"
+      globalThis.observed = [];
+      navigator.serviceWorker.register('/app/message-port.js');
+      navigator.serviceWorker.ready.then(registration => {
+        const channel = new MessageChannel();
+        globalThis.keptPort = channel.port1;
+        channel.port1.onmessage = event => observed.push(event.data);
+        const data = {value: 'queued'};
+        channel.port1.postMessage(data);
+        data.value = 'mutated';
+        registration.active.postMessage({port: channel.port2}, [channel.port2]);
+      });
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(runtime.eval(r#"observed.length === 2 && observed.some(item => item.ready) &&
+      observed.some(item => item.value === 'queued' && item.samePort && item.localPort && item.localData)"#)
+      .unwrap().as_boolean().unwrap());
+    assert!(runtime.take_task_errors().is_empty());
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec!["/app/message-port.js".to_owned()]);
+}
+
+#[test]
+fn dedicated_worker_startup_message_port_survives_gc_and_receives_replies() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"
+      globalThis.observed = [];
+      const source = encodeURIComponent(`
+        const channel = new MessageChannel();
+        channel.port1.onmessage = event => channel.port1.postMessage({value: event.data.value});
+        postMessage({port: channel.port2}, [channel.port2]);
+        channel.port2.postMessage({value: 'detached'});
+      `);
+      globalThis.worker = new Worker('data:text/javascript,' + source);
+      worker.onmessage = event => {
+        globalThis.receivedPort = event.ports[0];
+        observed.push({localPort: receivedPort instanceof MessagePort,
+          samePort: event.data.port === receivedPort});
+        receivedPort.onmessage = reply => observed.push(reply.data);
+      };
+    "#,
+        )
+        .unwrap();
+    boa_gc::force_collect();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "JSON.stringify(observed)"),
+        r#"[{"localPort":true,"samePort":true}]"#
+    );
+    runtime.eval("const payload = {value: 'cloned'}; receivedPort.postMessage(payload); payload.value = 'mutated';").unwrap();
+    boa_gc::force_collect();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "JSON.stringify(observed)"),
+        r#"[{"localPort":true,"samePort":true},{"value":"cloned"}]"#
+    );
+    assert!(runtime.take_task_errors().is_empty());
 }
 
 #[test]

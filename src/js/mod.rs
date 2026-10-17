@@ -664,6 +664,12 @@ struct BrowserBootstrapModule;
 #[derive(Debug, Clone, Trace, Finalize, boa_engine::JsData)]
 struct ModuleDocumentOrigin(#[unsafe_ignore_trace] DocumentSecurityOrigin);
 
+// Private Realm bindings must route port deliveries to their owning runtime,
+// even when another runtime invokes the endpoint's JavaScript method.
+// A weak host reference contains no GC edges and cannot retain a dead runtime.
+#[derive(Trace, Finalize)]
+struct PostedMessageOwner(#[unsafe_ignore_trace] Weak<RefCell<HostState>>);
+
 fn realm_origin_snapshot(
     host_state: &Rc<RefCell<HostState>>,
     document_id: usize,
@@ -2438,7 +2444,7 @@ struct HostState {
     /// Realm of the page-side Worker object. Dedicated worker runtimes use
     /// this when queueing messages back to an iframe owner.
     worker_owner_realm: Option<Realm>,
-    worker_startup_outgoing: VecDeque<String>,
+    worker_startup_outgoing: VecDeque<(String, boa_gc::Rooted<JsValue>)>,
     shared_worker: shared_worker::State,
     broadcast_channel: broadcast_channel::State,
     worklet: worklet::State,
@@ -2572,7 +2578,7 @@ struct WorkerRuntime {
     runtime: JsRuntime,
     owner_state: Rc<RefCell<HostState>>,
     owner_object: Option<JsValue>,
-    outgoing: VecDeque<String>,
+    outgoing: VecDeque<(String, boa_gc::Rooted<JsValue>)>,
     startup_error: Option<script_errors::WorkerErrorNotification>,
     service_worker: bool,
     terminated: bool,
@@ -11903,7 +11909,11 @@ impl JsRuntime {
                 data,
                 origin,
             } => self.run_broadcast_channel_message(channel_id, data, origin),
-            Task::WorkerMessage { worker_id, data } => self.run_worker_message(worker_id, data),
+            Task::WorkerMessage {
+                worker_id,
+                data,
+                ports,
+            } => self.run_worker_message(worker_id, data, ports),
             Task::ServiceWorkerLifecycle {
                 worker_id,
                 installing,
@@ -11914,7 +11924,8 @@ impl JsRuntime {
                 owner,
                 realm,
                 data,
-            } => self.run_worker_owner_message(worker_id, owner, realm, data),
+                ports,
+            } => self.run_worker_owner_message(worker_id, owner, realm, data, ports),
             Task::WorkerError {
                 worker_id,
                 owner,
@@ -11945,7 +11956,10 @@ impl JsRuntime {
         }
     }
 
-    fn run_worker_message(&mut self, worker_id: u64, data: String) -> JsResult<()> {
+    fn run_worker_message(&mut self, worker_id: u64, data: String, ports: JsValue) -> JsResult<()> {
+        let port_roots = Box::new(ports.clone());
+        // SAFETY: The immutable box remains at this address until the guard drops.
+        let _port_roots = unsafe { RootProvider::register(std::ptr::NonNull::from(&*port_roots)) };
         let default_origin = host_state_origin(&self.host_state.borrow());
         let entry = self.host_state.borrow_mut().workers.remove(&worker_id);
         let Some(entry) = entry else {
@@ -11969,7 +11983,7 @@ impl JsRuntime {
         let (errors, owner_realm, terminated) = {
             let runtime = &mut worker.runtime;
             let mut errors = Vec::new();
-            if let Err(error) = runtime.install_worker_message_values(data, owner_origin) {
+            if let Err(error) = runtime.install_worker_message_values(data, owner_origin, ports) {
                 runtime.collect_worker_task_error("worker message setup", error, &mut errors);
                 if let Err(cleanup_error) = runtime.clear_worker_message_values() {
                     runtime.collect_worker_task_error(
@@ -11980,7 +11994,7 @@ impl JsRuntime {
                 }
             } else {
                 if let Err(error) = runtime.eval(&format!(
-                    "__omoikane_worker_message_data = __omoikane_decode_worker_message(__omoikane_worker_message_wire); self.dispatchEvent(new MessageEvent('message', {{ data: __omoikane_worker_message_data, origin: __omoikane_worker_message_origin, source: {source}, ports: [] }}));",
+                    "__omoikane_receive_worker_message(__omoikane_worker_message_wire, __omoikane_worker_message_origin, {source}, __omoikane_worker_message_ports);",
                 )) {
                     runtime.collect_worker_task_error("worker message", error, &mut errors);
                 }
@@ -12026,7 +12040,12 @@ impl JsRuntime {
         owner_object: JsValue,
         owner_realm: Option<Realm>,
         data: String,
+        ports: JsValue,
     ) -> JsResult<()> {
+        // Realm already owns an explicit Boa root; these task values need one.
+        let roots = Box::new((owner_object.clone(), ports.clone()));
+        // SAFETY: The immutable box remains at this address until the guard drops.
+        let _roots = unsafe { RootProvider::register(std::ptr::NonNull::from(&*roots)) };
         let owner_origin = {
             let state = self.host_state.borrow();
             state
@@ -12036,7 +12055,7 @@ impl JsRuntime {
                 .unwrap_or_else(|| host_state_origin(&state))
         };
         let old_realm = owner_realm.map(|realm| self.context.enter_realm(realm));
-        if let Err(error) = self.install_worker_owner_values(owner_object, data) {
+        if let Err(error) = self.install_worker_owner_values(owner_object, data, ports) {
             self.record_task_error(format!("[worker message setup] {error}"));
             let cleanup = self.clear_worker_owner_values();
             self.record_error_from("worker message cleanup", cleanup);
@@ -12047,7 +12066,7 @@ impl JsRuntime {
         }
         let result = self.eval(
             &format!(
-                "__omoikane_worker_owner_data = __omoikane_decode_worker_message(__omoikane_worker_owner_wire); ((source) => {{ if (source !== null && !__omoikane_worker_owner.__terminated) {{ __omoikane_worker_owner.dispatchEvent(new MessageEvent('message', {{ data: __omoikane_worker_owner_data, origin: {owner_origin:?}, source: source || null, ports: [] }})); }} }})(__omoikane_service_worker_message_source(__omoikane_worker_owner, '{worker_id}'));"
+                "((source) => {{ if (source !== null && !__omoikane_worker_owner.__terminated) {{ __omoikane_receive_worker_message(__omoikane_worker_owner_wire, {owner_origin:?}, source || null, __omoikane_worker_owner_ports, __omoikane_worker_owner); }} }})(__omoikane_service_worker_message_source(__omoikane_worker_owner, '{worker_id}'));"
             ),
         );
         let cleanup = self.clear_worker_owner_values();
@@ -12102,8 +12121,19 @@ impl JsRuntime {
         Ok(())
     }
 
-    fn install_worker_message_values(&mut self, data: String, origin: String) -> JsResult<()> {
+    fn install_worker_message_values(
+        &mut self,
+        data: String,
+        origin: String,
+        ports: JsValue,
+    ) -> JsResult<()> {
         let global = self.context.global_object();
+        global.set(
+            js_string!("__omoikane_worker_message_ports"),
+            ports,
+            true,
+            &mut self.context,
+        )?;
         global.set(
             js_string!("__omoikane_worker_message_wire"),
             JsValue::from(js_string!(data)),
@@ -12122,6 +12152,12 @@ impl JsRuntime {
     fn clear_worker_message_values(&mut self) -> JsResult<()> {
         let global = self.context.global_object();
         global.set(
+            js_string!("__omoikane_worker_message_ports"),
+            JsValue::undefined(),
+            true,
+            &mut self.context,
+        )?;
+        global.set(
             js_string!("__omoikane_worker_message_wire"),
             JsValue::undefined(),
             true,
@@ -12136,8 +12172,19 @@ impl JsRuntime {
         Ok(())
     }
 
-    fn install_worker_owner_values(&mut self, owner: JsValue, data: String) -> JsResult<()> {
+    fn install_worker_owner_values(
+        &mut self,
+        owner: JsValue,
+        data: String,
+        ports: JsValue,
+    ) -> JsResult<()> {
         let global = self.context.global_object();
+        global.set(
+            js_string!("__omoikane_worker_owner_ports"),
+            ports,
+            true,
+            &mut self.context,
+        )?;
         global.set(
             js_string!("__omoikane_worker_owner"),
             owner,
@@ -12155,6 +12202,12 @@ impl JsRuntime {
 
     fn clear_worker_owner_values(&mut self) -> JsResult<()> {
         let global = self.context.global_object();
+        global.set(
+            js_string!("__omoikane_worker_owner_ports"),
+            JsValue::undefined(),
+            true,
+            &mut self.context,
+        )?;
         global.set(
             js_string!("__omoikane_worker_owner"),
             JsValue::undefined(),
@@ -15386,7 +15439,10 @@ fn register_host_bindings(
         (
             js_string!("__omoikane_enqueue_posted_message"),
             2,
-            NativeFunction::from_copy_closure(enqueue_posted_message_native),
+            NativeFunction::from_copy_closure_with_captures(
+                enqueue_posted_message_native,
+                PostedMessageOwner(Rc::downgrade(host_state)),
+            ),
         ),
         (
             js_string!("__omoikane_window_post_message"),
@@ -21326,17 +21382,18 @@ fn set_adopted_stylesheets_native(
 fn enqueue_posted_message_native(
     _: &JsValue,
     args: &[JsValue],
+    owner: &PostedMessageOwner,
     _: &mut Context,
 ) -> JsResult<JsValue> {
     let port = args.first().cloned().unwrap_or_default();
     let data = args.get(1).cloned().unwrap_or_default();
-    with_host_state(|state| {
+    if let Some(state) = owner.0.upgrade() {
         state
             .borrow_mut()
             .event_loop
             .enqueue_posted_message(port, data);
-        Ok(JsValue::undefined())
-    })
+    }
+    Ok(JsValue::undefined())
 }
 
 /// Serializes a tuple origin without an explicit default port, as HTML does.
@@ -22595,12 +22652,13 @@ fn bind_worker_owner_native(
         );
         worker.outgoing.extend(startup_queued);
         let queued = std::mem::take(&mut worker.outgoing);
-        for data in queued {
+        for (data, ports) in queued {
             state.borrow_mut().event_loop.enqueue_worker_owner_message(
                 id,
                 owner_object.clone(),
                 owner_realm.clone(),
                 data,
+                (*ports).clone(),
             );
         }
         if let Some(message) = worker.startup_error.take() {
@@ -22626,6 +22684,7 @@ fn worker_post_message_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = worker_id_argument(args, context)?;
+    let ports = args.get(2).cloned().unwrap_or_default();
     let data = args
         .get(1)
         .cloned()
@@ -22644,7 +22703,7 @@ fn worker_post_message_native(
         state
             .borrow_mut()
             .event_loop
-            .enqueue_worker_message(id, data);
+            .enqueue_worker_message(id, data, ports);
         Ok(JsValue::undefined())
     })
 }
@@ -22676,6 +22735,7 @@ fn worker_owner_post_message_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    let ports = args.get(2).cloned().unwrap_or_default();
     let data = args
         .get(1)
         .cloned()
@@ -22703,7 +22763,12 @@ fn worker_owner_post_message_native(
             return Ok(JsValue::undefined());
         }
         if !owner_bound {
-            state.borrow_mut().worker_startup_outgoing.push_back(data);
+            // Allocating a root may collect; do it before borrowing the host.
+            let ports = boa_gc::Rooted::new(ports);
+            state
+                .borrow_mut()
+                .worker_startup_outgoing
+                .push_back((data, ports));
             return Ok(JsValue::undefined());
         }
         if state.borrow().worker_terminated {
@@ -22717,6 +22782,7 @@ fn worker_owner_post_message_native(
             owner_object,
             owner_realm,
             data,
+            ports,
         );
         Ok(JsValue::undefined())
     })
