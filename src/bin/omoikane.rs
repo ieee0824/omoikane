@@ -428,6 +428,18 @@ impl BrowserApp {
         }
         let mut record = match event {
             WindowEvent::Focused(focused) => json!({ "kind": "focus", "focused": focused }),
+            WindowEvent::CursorMoved { position, .. } => json!({
+                "kind": "cursor",
+                "x": position.x,
+                "y": position.y,
+                "previous_x": self.cursor_position.0,
+                "previous_y": self.cursor_position.1,
+            }),
+            WindowEvent::MouseInput { state, button, .. } => json!({
+                "kind": "mouse_button",
+                "button": format!("{button:?}"),
+                "pressed": *state == ElementState::Pressed,
+            }),
             WindowEvent::KeyboardInput {
                 event,
                 is_synthetic,
@@ -816,13 +828,16 @@ fn physical_position_css_pixels(position: PhysicalPosition<f64>, scale_factor: f
 
 fn wheel_delta_css_pixels(delta: MouseScrollDelta, scale_factor: f64) -> (f64, f64) {
     const CSS_PIXELS_PER_LINE: f64 = 40.0;
+    // Winit reports the direction in which content moves; DOM wheel deltas
+    // describe the direction in which the scroll offset increases.
     match delta {
         MouseScrollDelta::LineDelta(x, y) => (
-            f64::from(x) * CSS_PIXELS_PER_LINE,
-            f64::from(y) * CSS_PIXELS_PER_LINE,
+            -f64::from(x) * CSS_PIXELS_PER_LINE,
+            -f64::from(y) * CSS_PIXELS_PER_LINE,
         ),
         MouseScrollDelta::PixelDelta(position) => {
-            physical_position_css_pixels(position, scale_factor)
+            let (x, y) = physical_position_css_pixels(position, scale_factor);
+            (-x, -y)
         }
     }
 }
@@ -914,6 +929,9 @@ impl ApplicationHandler for BrowserApp {
         }
         self.update_media_environment_for_event(&event);
         if !matches!(event, WindowEvent::RedrawRequested) {
+            // X11 and macOS can consume a wheel backlog before delivering a
+            // queued redraw. Present at most once per frame interval while
+            // processing input so the page visibly moves during the burst.
             if matches!(event, WindowEvent::MouseWheel { .. }) {
                 self.render_before_wheel(Instant::now());
             }
@@ -1143,14 +1161,14 @@ mod tests {
         );
         assert_eq!(
             wheel_delta_css_pixels(MouseScrollDelta::LineDelta(0.5, -2.0), 2.0),
-            (20.0, -80.0)
+            (-20.0, 80.0)
         );
         assert_eq!(
             wheel_delta_css_pixels(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(2.5, -7.0)),
                 2.0
             ),
-            (1.25, -3.5)
+            (-1.25, 3.5)
         );
     }
 

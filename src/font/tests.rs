@@ -970,6 +970,42 @@ fn load_selection_fixture() -> Arc<Font> {
 }
 
 #[test]
+fn shaping_cache_reuses_exact_runs_without_mixing_size_or_direction() {
+    let font = load_selection_fixture();
+    let first = font
+        .shape_text("AB", 16.0, ShapingDirection::LeftToRight)
+        .unwrap();
+    let repeated = font
+        .shape_text("AB", 16.0, ShapingDirection::LeftToRight)
+        .unwrap();
+    assert_eq!(first, repeated);
+    assert_eq!(font.shape_cache.lock().unwrap().entries.len(), 1);
+
+    font.shape_text("AB", 24.0, ShapingDirection::LeftToRight)
+        .unwrap();
+    font.shape_text("AB", 16.0, ShapingDirection::RightToLeft)
+        .unwrap();
+    assert_eq!(font.shape_cache.lock().unwrap().entries.len(), 3);
+}
+
+#[test]
+fn shaping_cache_evicts_old_runs_at_its_entry_limit() {
+    let mut cache = ShapeCache::default();
+    for index in 0..=ShapeCache::MAX_ENTRIES {
+        cache.insert(
+            ShapeKey {
+                text: index.to_string(),
+                size_bits: 16.0_f32.to_bits(),
+                direction: ShapingDirection::LeftToRight,
+            },
+            Vec::new(),
+        );
+    }
+    assert_eq!(cache.entries.len(), ShapeCache::MAX_ENTRIES);
+    assert!(!cache.entries.keys().any(|key| key.text == "0"));
+}
+
+#[test]
 fn web_font_registry_matches_stretch_before_style_and_weight() {
     let condensed = load_selection_fixture();
     let normal_italic = load_selection_fixture();
