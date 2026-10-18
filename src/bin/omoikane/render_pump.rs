@@ -66,7 +66,9 @@ impl BrowserApp {
     /// immediately after switching documents, so old idle time is discarded.
     pub(super) fn begin_page_frame(&mut self, now: Instant) -> u64 {
         #[cfg(not(target_os = "macos"))]
-        self.wheel_frame_deadline = now + FRAME_INTERVAL;
+        {
+            self.wheel_frame_deadline = now + FRAME_INTERVAL;
+        }
         let delta = self.frame_scheduler.begin_frame(now);
         self.page_delta_for_document(delta)
     }
