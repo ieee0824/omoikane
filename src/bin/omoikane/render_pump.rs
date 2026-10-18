@@ -98,9 +98,19 @@ impl BrowserApp {
 
     pub(super) fn sync_page_time_before_input(&mut self, now: Instant) {
         let elapsed = self.advance_page_clock(now);
+        let started = self.paint_trace.as_ref().map(|_| Instant::now());
         if let Err(error) = self.session.advance_tasks(elapsed) {
             report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Frame, &error);
             eprintln!("page clock advancement failed: {error}");
+        }
+        if let Some(started) = started {
+            eprintln!(
+                "OMOIKANE_INPUT_CLOCK {}",
+                json!({
+                    "page_elapsed_ms": elapsed,
+                    "advance_tasks_ms": started.elapsed().as_secs_f64() * 1000.0,
+                })
+            );
         }
         self.rebase_clock_if_document_changed();
     }
