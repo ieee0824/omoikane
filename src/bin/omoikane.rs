@@ -828,13 +828,16 @@ fn physical_position_css_pixels(position: PhysicalPosition<f64>, scale_factor: f
 
 fn wheel_delta_css_pixels(delta: MouseScrollDelta, scale_factor: f64) -> (f64, f64) {
     const CSS_PIXELS_PER_LINE: f64 = 40.0;
+    // Winit reports the direction in which content moves; DOM wheel deltas
+    // describe the direction in which the scroll offset increases.
     match delta {
         MouseScrollDelta::LineDelta(x, y) => (
-            f64::from(x) * CSS_PIXELS_PER_LINE,
-            f64::from(y) * CSS_PIXELS_PER_LINE,
+            -f64::from(x) * CSS_PIXELS_PER_LINE,
+            -f64::from(y) * CSS_PIXELS_PER_LINE,
         ),
         MouseScrollDelta::PixelDelta(position) => {
-            physical_position_css_pixels(position, scale_factor)
+            let (x, y) = physical_position_css_pixels(position, scale_factor);
+            (-x, -y)
         }
     }
 }
@@ -1158,14 +1161,14 @@ mod tests {
         );
         assert_eq!(
             wheel_delta_css_pixels(MouseScrollDelta::LineDelta(0.5, -2.0), 2.0),
-            (20.0, -80.0)
+            (-20.0, 80.0)
         );
         assert_eq!(
             wheel_delta_css_pixels(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(2.5, -7.0)),
                 2.0
             ),
-            (1.25, -3.5)
+            (-1.25, 3.5)
         );
     }
 
