@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
-use dynify::{Fn, from_fn};
+use dynify::from_fn;
 use rustc_hash::FxHashMap;
 
 use boa_gc::GcRefCell;
@@ -203,6 +203,18 @@ pub trait ModuleLoader: Any {
     }
 }
 
+// This is the expansion of dynify 0.1.2's Fn! return type. Spelling it here
+// keeps the borrowed Future type visible to CodeQL without changing dispatch.
+type LoadImportedModuleFn<'a, 'b, 'fut> = dynify::r#priv::Fn<
+    (
+        dynify::r#priv::RcSelf,
+        Referrer,
+        JsString,
+        &'a AsyncContext<'b>,
+    ),
+    dyn 'fut + Future<Output = JsResult<Module>>,
+>;
+
 /// A dyn-compatible version of [`ModuleLoader`].
 pub(crate) trait DynModuleLoader: Any {
     /// See [`ModuleLoader::load_imported_module`].
@@ -211,7 +223,7 @@ pub(crate) trait DynModuleLoader: Any {
         referrer: Referrer,
         specifier: JsString,
         context: &'a AsyncContext<'b>,
-    ) -> Fn!(Rc<Self>, Referrer, JsString, &'a AsyncContext<'b> => dyn 'fut + Future<Output = JsResult<Module>>)
+    ) -> LoadImportedModuleFn<'a, 'b, 'fut>
     where
         'a: 'fut,
         'b: 'fut;
@@ -231,7 +243,7 @@ impl<T: ModuleLoader> DynModuleLoader for T {
         referrer: Referrer,
         specifier: JsString,
         context: &'a AsyncContext<'b>,
-    ) -> Fn!(Rc<Self>, Referrer, JsString, &'a AsyncContext<'b> => dyn 'fut + Future<Output = JsResult<Module>>)
+    ) -> LoadImportedModuleFn<'a, 'b, 'fut>
     where
         'a: 'fut,
         'b: 'fut,

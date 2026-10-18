@@ -1,6 +1,6 @@
 //! Reduced macro inputs from Omoikane Issue #1266, retaining ABI and Future checks.
 
-use dynify::{Fn, from_fn};
+use dynify::from_fn;
 use std::{any::Any, future::Future, mem::offset_of, rc::Rc};
 
 #[repr(C)]
@@ -9,8 +9,10 @@ struct NativeFrame {
     dirty: *mut u8,
 }
 
-static_assertions::const_assert!(offset_of!(NativeFrame, registers) == 0);
-static_assertions::const_assert!(offset_of!(NativeFrame, dirty) == size_of::<*mut i64>());
+const NATIVE_REGISTERS_OFFSET: usize = offset_of!(NativeFrame, registers);
+const NATIVE_DIRTY_OFFSET: usize = offset_of!(NativeFrame, dirty);
+static_assertions::const_assert!(NATIVE_REGISTERS_OFFSET == 0);
+static_assertions::const_assert!(NATIVE_DIRTY_OFFSET == size_of::<*mut i64>());
 
 #[repr(C)]
 struct RuntimeCallFrame {
@@ -18,7 +20,8 @@ struct RuntimeCallFrame {
     state: *mut std::ffi::c_void,
 }
 
-static_assertions::const_assert!(offset_of!(RuntimeCallFrame, trampoline) == 0);
+const RUNTIME_TRAMPOLINE_OFFSET: usize = offset_of!(RuntimeCallFrame, trampoline);
+static_assertions::const_assert!(RUNTIME_TRAMPOLINE_OFFSET == 0);
 
 trait Loader: Any {
     fn load<'a, 'b>(self: Rc<Self>, input: &'a &'b u32) -> impl Future<Output = u32>;
@@ -28,7 +31,7 @@ trait DynLoader: Any {
     fn load<'a, 'b, 'fut>(
         self: Rc<Self>,
         input: &'a &'b u32,
-    ) -> Fn!(Rc<Self>, &'a &'b u32 => dyn 'fut + Future<Output = u32>)
+    ) -> dynify::r#priv::Fn<(dynify::r#priv::RcSelf, &'a &'b u32), dyn 'fut + Future<Output = u32>>
     where
         'a: 'fut,
         'b: 'fut;
@@ -38,7 +41,7 @@ impl<T: Loader> DynLoader for T {
     fn load<'a, 'b, 'fut>(
         self: Rc<Self>,
         input: &'a &'b u32,
-    ) -> Fn!(Rc<Self>, &'a &'b u32 => dyn 'fut + Future<Output = u32>)
+    ) -> dynify::r#priv::Fn<(dynify::r#priv::RcSelf, &'a &'b u32), dyn 'fut + Future<Output = u32>>
     where
         'a: 'fut,
         'b: 'fut,
@@ -92,5 +95,24 @@ mod tests {
     #[test]
     fn arm64_assertion_with_function_cfg_control() {
         assert!(String::from("ldr x0, 0x8").contains("ldr x0, 0x8"));
+    }
+
+    #[test]
+    fn macos_eprintln_with_statement_cfg() {
+        let value = 42;
+        assert_eq!(value, 42);
+        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+        eprintln!("macOS diagnostic: {value}");
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
+    fn macos_eprintln_with_function_cfg_control() {
+        eprintln!("macOS diagnostic: {}", 42);
+    }
+
+    #[test]
+    fn eprintln_without_cfg_control() {
+        eprintln!("diagnostic control: {}", 42);
     }
 }

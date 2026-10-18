@@ -219,7 +219,8 @@ struct RuntimeCallFrame {
     spilled_len: usize,
 }
 
-static_assertions::const_assert!(offset_of!(RuntimeCallFrame, trampoline) == 0);
+const RUNTIME_CALL_TRAMPOLINE_OFFSET: usize = offset_of!(RuntimeCallFrame, trampoline);
+static_assertions::const_assert!(RUNTIME_CALL_TRAMPOLINE_OFFSET == 0);
 
 struct PendingCall {
     runtime: *const JitRuntimeCall,

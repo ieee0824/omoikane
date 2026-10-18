@@ -1,0 +1,2 @@
+"name","beginLine","beginColumn","severity","tag","message","fullMessage"
+"docs/codeql/repros/macro-gaps/src/lib.rs",105,19,30,"parse_error","macro expansion failed for '$crate::format_args_nl'","macro expansion failed for '$crate::format_args_nl'"
