@@ -45,9 +45,8 @@ impl PaintTrace {
 
 impl BrowserApp {
     /// Present a previously delivered wheel's changes before consuming more
-    /// input when the frame deadline has passed. X11 can drain an entire input
-    /// backlog before delivering its queued RedrawRequested event.
-    #[cfg(not(target_os = "macos"))]
+    /// input when the frame deadline has passed. Native event loops can drain
+    /// an entire input backlog before delivering a queued RedrawRequested.
     pub(super) fn render_before_wheel(&mut self, now: Instant) {
         if self.window_occluded
             || self.window_minimized
@@ -65,10 +64,7 @@ impl BrowserApp {
     /// Returns elapsed milliseconds since the last clock update, or zero
     /// immediately after switching documents, so old idle time is discarded.
     pub(super) fn begin_page_frame(&mut self, now: Instant) -> u64 {
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.wheel_frame_deadline = now + FRAME_INTERVAL;
-        }
+        self.wheel_frame_deadline = now + FRAME_INTERVAL;
         let delta = self.frame_scheduler.begin_frame(now);
         self.page_delta_for_document(delta)
     }
@@ -202,6 +198,25 @@ impl BrowserApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_backlog_advances_scheduler_without_a_redraw_callback() {
+        let mut app =
+            BrowserApp::new("data:text/html,<body style='height:2000px'>scroll</body>").unwrap();
+        app.start_initial_navigation().unwrap();
+        assert!(app.frame_cache.demand(&app.session).needs_paint);
+
+        let now = Instant::now();
+        app.frame_scheduler.queue_redraw();
+        app.render_before_wheel(now);
+        assert!(!app.frame_scheduler.redraw_pending());
+        assert_eq!(app.wheel_frame_deadline, now + FRAME_INTERVAL);
+
+        app.frame_scheduler.queue_redraw();
+        app.render_before_wheel(now + FRAME_INTERVAL / 2);
+        assert!(app.frame_scheduler.redraw_pending());
+        assert_eq!(app.wheel_frame_deadline, now + FRAME_INTERVAL);
+    }
 
     #[test]
     fn page_frame_errors_are_reported_with_and_without_page_area() {
