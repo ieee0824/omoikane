@@ -164,6 +164,7 @@ struct BrowserApp {
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     frame_scheduler: PlatformFrameScheduler,
     /// Earliest frame allowed inside an input batch, independent of wakeups.
+    #[cfg(not(target_os = "macos"))]
     wheel_frame_deadline: Instant,
     frame_cache: BrowserFrameCache,
     clock_document: u64,
@@ -220,6 +221,7 @@ impl BrowserApp {
             context: None,
             surface: None,
             frame_scheduler: PlatformFrameScheduler::new(started_at, FRAME_INTERVAL),
+            #[cfg(not(target_os = "macos"))]
             wheel_frame_deadline: started_at,
             frame_cache: BrowserFrameCache::default(),
             clock_document,
@@ -914,6 +916,10 @@ impl ApplicationHandler for BrowserApp {
         }
         self.update_media_environment_for_event(&event);
         if !matches!(event, WindowEvent::RedrawRequested) {
+            // X11 can consume a wheel backlog before delivering a queued redraw.
+            // On macOS, Winit queues and deduplicates redraws; painting here
+            // would synchronously repaint before every wheel input instead.
+            #[cfg(not(target_os = "macos"))]
             if matches!(event, WindowEvent::MouseWheel { .. }) {
                 self.render_before_wheel(Instant::now());
             }

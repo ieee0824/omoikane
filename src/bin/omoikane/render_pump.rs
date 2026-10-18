@@ -47,6 +47,7 @@ impl BrowserApp {
     /// Present a previously delivered wheel's changes before consuming more
     /// input when the frame deadline has passed. X11 can drain an entire input
     /// backlog before delivering its queued RedrawRequested event.
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn render_before_wheel(&mut self, now: Instant) {
         if self.window_occluded
             || self.window_minimized
@@ -64,6 +65,7 @@ impl BrowserApp {
     /// Returns elapsed milliseconds since the last clock update, or zero
     /// immediately after switching documents, so old idle time is discarded.
     pub(super) fn begin_page_frame(&mut self, now: Instant) -> u64 {
+        #[cfg(not(target_os = "macos"))]
         self.wheel_frame_deadline = now + FRAME_INTERVAL;
         let delta = self.frame_scheduler.begin_frame(now);
         self.page_delta_for_document(delta)
