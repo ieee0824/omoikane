@@ -7298,7 +7298,11 @@ impl HostState {
     /// Builds paint-time geometry once per tracked style/layout/paint/scroll
     /// state and reuses it across CSSOM geometry queries and hit tests.
     fn ensure_adjusted_layout(&mut self) {
+        static TRACE_PAINT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let trace = *TRACE_PAINT.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_PAINT").is_some());
+        let started = Instant::now();
         self.ensure_layout();
+        let ensured_layout = started.elapsed();
         let current = (
             self.layout_generation,
             self.scroll_generation,
@@ -7319,6 +7323,7 @@ impl HostState {
             self.adjusted_layout_cache = None;
             return;
         };
+        let cloned_layout = started.elapsed();
         let document_id = self.document.identity();
         let Some(resolver) = self
             .document_styles
@@ -7329,6 +7334,17 @@ impl HostState {
             return;
         };
         crate::paint::apply_scroll_offsets(&mut root, resolver, self.viewport, self.window_scroll);
+        if trace {
+            let translated_layout = started.elapsed();
+            eprintln!(
+                "OMOIKANE_ADJUSTED_LAYOUT {}",
+                serde_json::json!({
+                    "ensure_layout_ms": ensured_layout.as_secs_f64() * 1000.0,
+                    "clone_ms": (cloned_layout - ensured_layout).as_secs_f64() * 1000.0,
+                    "translate_ms": (translated_layout - cloned_layout).as_secs_f64() * 1000.0,
+                })
+            );
+        }
         self.adjusted_layout_cache = Some(AdjustedLayoutCache {
             layout_generation: current.0,
             scroll_generation: current.1,
