@@ -1,0 +1,3 @@
+"name","beginLine","beginColumn","severity","tag","message","fullMessage"
+"docs/codeql/repros/macro-gaps/src/lib.rs",91,9,30,"parse_error","macro expansion failed for '$crate::panic::panic_2021'","macro expansion failed for '$crate::panic::panic_2021'"
+"docs/codeql/repros/macro-gaps/src/lib.rs",105,19,30,"parse_error","macro expansion failed for '$crate::format_args_nl'","macro expansion failed for '$crate::format_args_nl'"
