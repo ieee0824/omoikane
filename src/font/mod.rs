@@ -5,7 +5,7 @@
 
 use ab_glyph::{Font as AbGlyphFont, FontVec, GlyphId, ScaleFont};
 use rustybuzz::{Direction, Face, UnicodeBuffer};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::{fmt, io};
@@ -85,7 +85,7 @@ pub struct ShapedGlyph {
     pub y_offset: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShapingDirection {
     LeftToRight,
     RightToLeft,
@@ -261,6 +261,42 @@ pub struct Font {
     face_index: u32,
     pub(crate) cache_id: u64,
     system_face: Option<SystemFontFace>,
+    shape_cache: Mutex<ShapeCache>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ShapeKey {
+    text: String,
+    size_bits: u32,
+    direction: ShapingDirection,
+}
+
+#[derive(Default)]
+struct ShapeCache {
+    entries: HashMap<ShapeKey, Vec<ShapedGlyph>>,
+    order: VecDeque<ShapeKey>,
+    glyphs: usize,
+}
+
+impl ShapeCache {
+    const MAX_ENTRIES: usize = 2048;
+    const MAX_GLYPHS: usize = 65_536;
+
+    fn insert(&mut self, key: ShapeKey, glyphs: Vec<ShapedGlyph>) {
+        if self.entries.contains_key(&key) {
+            return;
+        }
+        self.glyphs += glyphs.len();
+        self.order.push_back(key.clone());
+        self.entries.insert(key, glyphs);
+        while self.entries.len() > Self::MAX_ENTRIES || self.glyphs > Self::MAX_GLYPHS {
+            if let Some(oldest) = self.order.pop_front()
+                && let Some(removed) = self.entries.remove(&oldest)
+            {
+                self.glyphs -= removed.len();
+            }
+        }
+    }
 }
 
 /// Returns whether a code point is a shaping control or combining mark that
@@ -313,6 +349,7 @@ impl Font {
             face_index,
             cache_id,
             system_face: None,
+            shape_cache: Mutex::new(ShapeCache::default()),
         })
     }
 
@@ -362,6 +399,21 @@ impl Font {
         size_px: f32,
         direction: ShapingDirection,
     ) -> Result<Vec<ShapedGlyph>, FontError> {
+        let key = (text.len() <= 1024).then(|| ShapeKey {
+            text: text.to_owned(),
+            size_bits: size_px.to_bits(),
+            direction,
+        });
+        if let Some(cached) = key.as_ref().and_then(|key| {
+            self.shape_cache
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entries
+                .get(key)
+                .cloned()
+        }) {
+            return Ok(cached);
+        }
         let face = Face::from_slice(self.inner.font_data(), self.face_index)
             .ok_or_else(|| FontError::InvalidFont("Failed to build shaping face".to_string()))?;
         let mut buffer = UnicodeBuffer::new();
@@ -375,7 +427,7 @@ impl Font {
         buffer.guess_segment_properties();
         let glyphs = rustybuzz::shape(&face, &[], buffer);
         let scale = size_px / face.units_per_em().max(1) as f32;
-        Ok(glyphs
+        let shaped: Vec<_> = glyphs
             .glyph_infos()
             .iter()
             .zip(glyphs.glyph_positions())
@@ -387,7 +439,16 @@ impl Font {
                 x_offset: position.x_offset as f32 * scale,
                 y_offset: position.y_offset as f32 * scale,
             })
-            .collect())
+            .collect();
+        if let Some(key) = key
+            && shaped.len() <= 1024
+        {
+            self.shape_cache
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(key, shaped.clone());
+        }
+        Ok(shaped)
     }
 
     /// Rasterizes a glyph selected by the shaping engine.
