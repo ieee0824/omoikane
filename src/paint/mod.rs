@@ -147,8 +147,7 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, WebFontRegistry};
 #[allow(unused_imports)]
 use crate::layout::{
-    InlineFragmentContent, LayoutBox, PageMarginFragment, PagedPage, PositionScheme, Rect,
-    Visibility,
+    InlineFragmentContent, LayoutBox, PageMarginFragment, PagedPage, Rect, Visibility,
 };
 
 // Re-export public types from submodules
@@ -3243,22 +3242,18 @@ fn translate_layout_for_scroll(
         ((0.0, 0.0), None)
     };
     layout.paint_scroll = scroll_geometry;
-    // Layout already resolved positioning and fixed containing blocks. Looking
-    // up computed style for every box on every wheel frame is especially costly
-    // in debug builds; only sticky insets require a style at paint time.
-    let position = layout.position_scheme;
-    let offset = if position == PositionScheme::Absolute {
+    let style = paint_box_style(layout, resolver);
+    let offset = if is_absolute_for_paint(&style) {
         positioned_offset
     } else {
         offset
     };
-    let (mut dx, mut dy) = if position == PositionScheme::Fixed {
+    let (mut dx, mut dy) = if is_fixed_for_paint(&style) {
         fixed_offset
     } else {
         offset
     };
-    if position == PositionScheme::Sticky {
-        let style = paint_box_style(layout, resolver);
+    if is_sticky_for_paint(&style) {
         let border_box = border_box_rect(layout);
         let margin = layout.dimensions.margin;
         let margin_box = Rect {
@@ -3311,12 +3306,12 @@ fn translate_layout_for_scroll(
             marker.y += content_dy;
         }
     }
-    let positioned_offset = if position != PositionScheme::Static || layout.fixed_containing_block {
+    let positioned_offset = if establishes_containing_block_for_paint(&style) {
         (content_dx, content_dy)
     } else {
         positioned_offset
     };
-    let fixed_offset = if layout.fixed_containing_block {
+    let fixed_offset = if crate::layout::establishes_fixed_containing_block(&style) {
         (content_dx, content_dy)
     } else {
         fixed_offset
@@ -3343,6 +3338,13 @@ fn translate_layout_for_scroll(
             Some(child_containing_block),
         );
     }
+}
+
+fn is_sticky_for_paint(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("position"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("sticky")
+    )
 }
 
 fn sticky_inset(style: &ComputedStyle, side: &str, reference: f32) -> Option<f32> {
@@ -3424,6 +3426,25 @@ fn sticky_axis_translation(
     } else {
         containing_lower
     }
+}
+
+fn is_absolute_for_paint(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("position"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("absolute")
+    )
+}
+
+fn establishes_containing_block_for_paint(style: &ComputedStyle) -> bool {
+    crate::layout::establishes_positioned_containing_block(style)
+}
+
+/// Whether a box uses the fixed-position containing block's scroll chain.
+fn is_fixed_for_paint(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get("position"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed")
+    )
 }
 
 fn paint_box_internal_untransformed(
