@@ -6424,7 +6424,7 @@ impl HostState {
         if document_id == self.document.identity() {
             self.style_generation = self.style_generation.saturating_add(1);
             self.capture_scroll_offsets_before_layout();
-            self.layout_root = None;
+            self.invalidate_layout_root("document_style_dirty");
             self.invalidate_paint_cache();
         } else {
             self.invalidate_paint_cache();
@@ -6452,7 +6452,7 @@ impl HostState {
         if document_id == self.document.identity() {
             self.style_generation = self.style_generation.saturating_add(1);
             self.capture_scroll_offsets_before_layout();
-            self.layout_root = None;
+            self.invalidate_layout_root("style_cache_invalidated");
             self.invalidate_paint_cache();
         } else {
             self.invalidate_paint_cache();
@@ -6465,6 +6465,20 @@ impl HostState {
         self.invalidate_layout_metrics_cache();
         self.paint_generation = self.paint_generation.saturating_add(1);
         self.adjusted_layout_cache = None;
+    }
+
+    /// Drops cached layout and records its cause in opt-in paint traces.
+    fn invalidate_layout_root(&mut self, reason: &'static str) {
+        static TRACE_PAINT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if self.layout_root.is_some()
+            && *TRACE_PAINT.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_PAINT").is_some())
+        {
+            eprintln!(
+                "OMOIKANE_LAYOUT_INVALIDATE {}",
+                serde_json::json!({"reason": reason})
+            );
+        }
+        self.layout_root = None;
     }
 
     fn invalidate_layout_metrics_cache(&mut self) {
@@ -6630,6 +6644,15 @@ impl HostState {
         if kind == "focus" {
             self.focus_visible_id = next_visible;
         }
+        if !affected.is_empty() {
+            static TRACE_PAINT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *TRACE_PAINT.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_PAINT").is_some()) {
+                eprintln!(
+                    "OMOIKANE_USER_ACTION {}",
+                    serde_json::json!({"kind": kind, "affected_documents": affected.len()})
+                );
+            }
+        }
         for document in affected.into_values() {
             self.invalidate_document_style_cache(&document);
         }
@@ -6641,7 +6664,7 @@ impl HostState {
             .is_some_and(|document| document.identity() == self.document.identity())
         {
             self.capture_scroll_offsets_before_layout();
-            self.layout_root = None;
+            self.invalidate_layout_root("node_layout_invalidated");
             self.invalidate_paint_cache();
         }
     }
@@ -6679,7 +6702,7 @@ impl HostState {
             entry.dirty = true;
         }
         self.capture_scroll_offsets_before_layout();
-        self.layout_root = None;
+        self.invalidate_layout_root("all_document_styles_dirty");
         self.invalidate_paint_cache();
     }
 
@@ -6744,7 +6767,7 @@ impl HostState {
                     self.style_generation = self.style_generation.saturating_add(1);
                     if requires_layout {
                         self.capture_scroll_offsets_before_layout();
-                        self.layout_root = None;
+                        self.invalidate_layout_root("animated_style_requires_layout");
                     }
                 }
                 self.invalidate_paint_cache();
@@ -7218,7 +7241,7 @@ impl HostState {
         }
         if changed {
             self.capture_scroll_offsets_before_layout();
-            self.layout_root = None;
+            self.invalidate_layout_root("content_visibility_relevance");
             self.invalidate_paint_cache();
         }
     }
@@ -7264,7 +7287,7 @@ impl HostState {
         }
         self.content_visibility_forced_nodes.extend(ancestors);
         self.capture_scroll_offsets_before_layout();
-        self.layout_root = None;
+        self.invalidate_layout_root("content_visibility_geometry");
         self.invalidate_paint_cache();
         self.ensure_layout();
     }
@@ -7382,7 +7405,7 @@ impl HostState {
         self.scroll_generation = self.scroll_generation.saturating_add(1);
         if !self.content_visibility_auto_nodes.is_empty() {
             self.capture_scroll_offsets_before_layout();
-            self.layout_root = None;
+            self.invalidate_layout_root("scroll_content_visibility_auto");
         }
         self.invalidate_paint_cache();
         let document_id = self.document.identity();
