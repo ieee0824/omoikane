@@ -112,6 +112,12 @@ Rust 1.98.1、CLI 2.27.2、`codeql/rust-all` 0.2.23、同じlockを用いた。
 
 `offset_of!`を`const_assert!`の入力から同じ値の`const`定義へ移し、
 ABI assertionは保持した。3箇所とも内側ASTが0から8になり、警告が消えた。
+ARM64の小規模DBで[型照会](../../queries/ReproResolvedTypes.ql)を実行し、
+3定数の宣言型`usize`、`offset_of!`の対象型`NativeFrame`/
+`RuntimeCallFrame`、trait/implの戻り値型`Fn`を確認した。
+`offset_of!`の対象型解決は式自体の戻り型を示さず、
+この照会はdataflowの完全性も検証しない。
+結果は[型CSV](../../results/2026-10-18-issue1310-repro-arm64-types.csv)に保存した。
 `Fn!`の戻り値型はdynify 0.1.2の展開型を明示し、借用Future・`Rc<Self>`の
 実行テストを保持した。dynifyの`r#priv`は非公開扱いの実装APIなので、
 依存版を変える際は型契約と展開結果を再検証する。

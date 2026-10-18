@@ -388,5 +388,9 @@ ARM64有効式である`jit/mod.rs:356`と`tests/jit_code_memory.rs:53`の
 [embedded正常系対照](results/2026-10-18-issue1310-main-EmbeddedExpansion.csv)を保存した。
 元DB・BQRS・抽出ログは`/workspace/.artifacts/issue1310-main-final/`に保持する。
 AST件数は型・データフローの完全性を証明しないため、
-[型照会](queries/ModuleLoaderTypes.ql)と
-[ABI型照会](queries/AbiOffsetTypes.ql)で別に評価する。
+[小規模DBの型照会](queries/ReproResolvedTypes.ql)で定数の`usize`宣言型、
+offset対象の構造体型、trait/implの`Fn`戻り型を確認した。
+本体DB向け[ローダー照会](queries/ModuleLoaderTypes.ql)と
+[ABI照会](queries/AbiOffsetTypes.ql)はコンパイルしたが、
+本体DBの型照会はキャッシュのアクセスエラーで完了していない。
+小規模DBの型結果もdataflowの完全性は証明しない。
