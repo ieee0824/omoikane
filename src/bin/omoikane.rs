@@ -430,6 +430,18 @@ impl BrowserApp {
         }
         let mut record = match event {
             WindowEvent::Focused(focused) => json!({ "kind": "focus", "focused": focused }),
+            WindowEvent::CursorMoved { position, .. } => json!({
+                "kind": "cursor",
+                "x": position.x,
+                "y": position.y,
+                "previous_x": self.cursor_position.0,
+                "previous_y": self.cursor_position.1,
+            }),
+            WindowEvent::MouseInput { state, button, .. } => json!({
+                "kind": "mouse_button",
+                "button": format!("{button:?}"),
+                "pressed": *state == ElementState::Pressed,
+            }),
             WindowEvent::KeyboardInput {
                 event,
                 is_synthetic,
