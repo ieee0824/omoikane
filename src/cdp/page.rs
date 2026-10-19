@@ -387,17 +387,16 @@ impl CdpSession {
         for _ in 0..MAX_SCRIPT_NAVIGATIONS {
             if pump_tasks {
                 self.runtime.run_until_idle().map_err(js_error)?;
+            } else {
+                self.runtime.promote_navigation_tasks_without_running();
             }
             // Surface failures from tasks that ran at an earlier opportunity.
             // A failed task must not hide an already queued navigation.
             for error in self.runtime.take_task_errors() {
                 eprintln!("[omoikane][js-error] {error}");
             }
-            let Some((request, source, security)) = self
-                .runtime
-                .take_navigation_requests_with_source()
-                .into_iter()
-                .next()
+            let Some((request, source, security)) =
+                self.runtime.pop_navigation_request_with_source()
             else {
                 return Ok(());
             };

@@ -4251,7 +4251,7 @@ fn native_input_does_not_run_due_timer_tasks() {
         .unwrap();
     session
         .runtime
-        .eval("document.addEventListener('wheel', () => { globalThis.wheelFired = true; history.pushState(null, '', '/wheel'); })")
+        .eval("document.addEventListener('wheel', () => { globalThis.wheelFired = true; history.pushState(null, '', '/wheel/first'); history.pushState(null, '', '/wheel'); })")
         .unwrap();
     session.advance_clock_without_tasks(1000);
 

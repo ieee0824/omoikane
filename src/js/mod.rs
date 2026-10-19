@@ -9256,19 +9256,31 @@ impl JsRuntime {
             .collect()
     }
 
-    /// Takes visit sources and request-client security snapshots with queued navigations.
-    pub(crate) fn take_navigation_requests_with_source(
+    /// Takes the next queued navigation and its visit/security context.
+    pub(crate) fn pop_navigation_request_with_source(
         &mut self,
-    ) -> Vec<(
+    ) -> Option<(
         NavigationRequest,
         Option<VisitSource>,
         Option<NavigationSecuritySnapshot>,
     )> {
-        self.host_state
-            .borrow_mut()
-            .navigation_requests
-            .drain(..)
-            .collect()
+        self.host_state.borrow_mut().navigation_requests.pop_front()
+    }
+
+    /// Makes queued navigation tasks available to the embedder without
+    /// executing timer, networking, or other page tasks.
+    pub(crate) fn promote_navigation_tasks_without_running(&mut self) {
+        let mut state = self.host_state.borrow_mut();
+        while let Some(Task::Navigation {
+            request,
+            source,
+            security,
+        }) = state.event_loop.pop_navigation_task()
+        {
+            state
+                .navigation_requests
+                .push_back((request, source, security));
+        }
     }
 
     /// Enables or disables Fullscreen API support for this presentation host.

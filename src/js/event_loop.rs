@@ -671,6 +671,23 @@ impl EventLoop {
         None
     }
 
+    /// Takes a queued navigation without running unrelated page tasks.
+    /// Native input uses this to commit its own navigation while a slow timer
+    /// or resource task remains queued for a later rendering opportunity.
+    pub(crate) fn pop_navigation_task(&mut self) -> Option<Task> {
+        let queue = self.queues.get_mut(&TaskSource::Navigation)?;
+        let index = queue
+            .iter()
+            .position(|(_, task)| matches!(task, Task::Navigation { .. }))?;
+        let (id, task) = queue.remove(index)?;
+        let position = self
+            .order
+            .iter()
+            .position(|(queued_id, _)| *queued_id == id)?;
+        self.order.remove(position);
+        Some(task)
+    }
+
     pub(crate) fn schedule_timer(
         &mut self,
         payload: TimerPayload,
@@ -896,6 +913,22 @@ mod tests {
             event_loop.pop_task(),
             Some((TaskSource::Timer, Task::Timer { .. }))
         ));
+    }
+
+    #[test]
+    fn navigation_can_be_taken_without_consuming_earlier_timer() {
+        let mut event_loop = EventLoop::default();
+        event_loop.enqueue_timer(TimerPayload::Source("timer".into()));
+        event_loop.enqueue_navigation(NavigationRequest::Reload);
+        assert!(matches!(
+            event_loop.pop_navigation_task(),
+            Some(Task::Navigation { .. })
+        ));
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((TaskSource::Timer, Task::Timer { .. }))
+        ));
+        assert!(event_loop.pop_task().is_none());
     }
 
     #[test]
