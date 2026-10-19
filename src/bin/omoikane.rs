@@ -58,6 +58,7 @@ mod url_bar;
 mod keyboard_tests;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const WHEEL_TASK_QUIET_PERIOD: Duration = Duration::from_millis(120);
 const DEFAULT_WINDOW_TITLE: &str = "Omoikane";
 
 #[derive(Clone, Copy)]
@@ -166,6 +167,8 @@ struct BrowserApp {
     frame_scheduler: PlatformFrameScheduler,
     /// Earliest frame allowed inside an input batch, independent of wakeups.
     wheel_frame_deadline: Instant,
+    last_wheel_input_at: Option<Instant>,
+    deferred_page_elapsed_ms: u64,
     frame_cache: BrowserFrameCache,
     clock_document: u64,
     last_chrome: Option<render_pump::PresentedChrome>,
@@ -237,6 +240,8 @@ impl BrowserApp {
             surface: None,
             frame_scheduler: PlatformFrameScheduler::new(started_at, FRAME_INTERVAL),
             wheel_frame_deadline: started_at,
+            last_wheel_input_at: None,
+            deferred_page_elapsed_ms: 0,
             frame_cache: BrowserFrameCache::default(),
             clock_document,
             last_chrome: None,
@@ -947,9 +952,12 @@ impl ApplicationHandler for BrowserApp {
             // queued redraw. Present at most once per frame interval while
             // processing input so the page visibly moves during the burst.
             if matches!(event, WindowEvent::MouseWheel { .. }) {
-                self.render_before_wheel(Instant::now());
+                let now = Instant::now();
+                self.render_before_wheel(now);
+                self.last_wheel_input_at = Some(now);
+            } else if !self.wheel_input_is_recent(Instant::now()) {
+                self.sync_page_time_before_input(Instant::now());
             }
-            self.sync_page_time_before_input(Instant::now());
         }
         match event {
             WindowEvent::CloseRequested => {
@@ -988,7 +996,12 @@ impl ApplicationHandler for BrowserApp {
                 // Without a queued application redraw, this is an OS exposure event.
                 let os_exposure = !self.frame_scheduler.redraw_pending();
                 let elapsed_ms = self.begin_page_frame(Instant::now());
-                if let Err(error) = self.draw(elapsed_ms, os_exposure) {
+                let result = if self.wheel_input_is_recent(Instant::now()) {
+                    self.draw_without_page_tasks(elapsed_ms, os_exposure)
+                } else {
+                    self.draw(elapsed_ms, os_exposure)
+                };
+                if let Err(error) = result {
                     eprintln!("frame failed: {error}");
                 }
                 if self.initial_url.is_some() && self.initial_navigation_due_at.is_none() {
@@ -1079,6 +1092,14 @@ impl ApplicationHandler for BrowserApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        let wheel_resume_at = self
+            .last_wheel_input_at
+            .map(|last| last + WHEEL_TASK_QUIET_PERIOD);
+        if wheel_resume_at.is_some_and(|deadline| now >= deadline) {
+            self.last_wheel_input_at = None;
+            self.frame_scheduler.request_rendering_opportunity(now);
+        }
         if self
             .initial_navigation_due_at
             .is_some_and(|deadline| Instant::now() >= deadline)
@@ -1100,6 +1121,14 @@ impl ApplicationHandler for BrowserApp {
         self.sync_pointer_lock();
         if let Some(window) = &self.window {
             let now = Instant::now();
+            let wake_at = self
+                .initial_navigation_due_at
+                .into_iter()
+                .chain(
+                    self.last_wheel_input_at
+                        .map(|last| last + WHEEL_TASK_QUIET_PERIOD),
+                )
+                .min();
             match self
                 .frame_scheduler
                 .plan(now, self.frame_cache.demand(&self.session))
@@ -1109,14 +1138,12 @@ impl ApplicationHandler for BrowserApp {
                     window.request_redraw();
                     event_loop.set_control_flow(ControlFlow::Wait);
                 }
-                PlatformFramePlan::Wait => match self.initial_navigation_due_at {
+                PlatformFramePlan::Wait => match wake_at {
                     Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
                     None => event_loop.set_control_flow(ControlFlow::Wait),
                 },
                 PlatformFramePlan::WaitUntil(deadline) => {
-                    let deadline = self
-                        .initial_navigation_due_at
-                        .map_or(deadline, |initial| std::cmp::min(initial, deadline));
+                    let deadline = wake_at.map_or(deadline, |wake| std::cmp::min(wake, deadline));
                     event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
                 }
             }

@@ -44,6 +44,12 @@ impl PaintTrace {
 }
 
 impl BrowserApp {
+    /// Defer page tasks briefly while a native wheel gesture is active.
+    pub(super) fn wheel_input_is_recent(&self, now: Instant) -> bool {
+        self.last_wheel_input_at
+            .is_some_and(|last| now.saturating_duration_since(last) < WHEEL_TASK_QUIET_PERIOD)
+    }
+
     /// Present a previously delivered wheel's changes before consuming more
     /// input when the frame deadline has passed. Native event loops can drain
     /// an entire input backlog before delivering a queued RedrawRequested.
@@ -56,7 +62,7 @@ impl BrowserApp {
             return;
         }
         let elapsed_ms = self.begin_page_frame(now);
-        if let Err(error) = self.draw(elapsed_ms, false) {
+        if let Err(error) = self.draw_without_page_tasks(elapsed_ms, false) {
             eprintln!("frame failed: {error}");
         }
     }
@@ -88,12 +94,20 @@ impl BrowserApp {
 
     pub(super) fn rebase_clock_if_document_changed(&mut self) {
         if self.clock_document != self.session.document_generation() {
+            self.deferred_page_elapsed_ms = 0;
             self.advance_page_clock(Instant::now());
         }
     }
 
+    fn take_page_elapsed(&mut self, elapsed_ms: u64) -> u64 {
+        let elapsed = self.deferred_page_elapsed_ms.saturating_add(elapsed_ms);
+        self.deferred_page_elapsed_ms = 0;
+        elapsed
+    }
+
     pub(super) fn sync_page_time_before_input(&mut self, now: Instant) {
-        let elapsed = self.advance_page_clock(now);
+        let elapsed_ms = self.advance_page_clock(now);
+        let elapsed = self.take_page_elapsed(elapsed_ms);
         let started = self.paint_trace.as_ref().map(|_| Instant::now());
         if let Err(error) = self.session.advance_tasks(elapsed) {
             report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Frame, &error);
@@ -144,6 +158,25 @@ impl BrowserApp {
         elapsed_ms: u64,
         os_exposure: bool,
     ) -> Result<(), Box<dyn Error>> {
+        let elapsed_ms = self.take_page_elapsed(elapsed_ms);
+        self.draw_with_page_mode(Some(elapsed_ms), os_exposure)
+    }
+
+    /// Presents native scroll changes before resuming page task execution.
+    pub(super) fn draw_without_page_tasks(
+        &mut self,
+        elapsed_ms: u64,
+        os_exposure: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        self.deferred_page_elapsed_ms = self.deferred_page_elapsed_ms.saturating_add(elapsed_ms);
+        self.draw_with_page_mode(None, os_exposure)
+    }
+
+    fn draw_with_page_mode(
+        &mut self,
+        elapsed_ms: Option<u64>,
+        os_exposure: bool,
+    ) -> Result<(), Box<dyn Error>> {
         let Some(window) = self.window.clone() else {
             return Ok(());
         };
@@ -156,7 +189,16 @@ impl BrowserApp {
             omoikane::paint::take_last_render_timings();
             Instant::now()
         });
-        let painted = self.update_page_frame(layout.page_viewport(), elapsed_ms)?;
+        let painted = if let Some(elapsed_ms) = elapsed_ms {
+            self.update_page_frame(layout.page_viewport(), elapsed_ms)?
+        } else {
+            self.frame_cache
+                .paint_without_advance(&mut self.session)
+                .map_err(|error| {
+                    report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Frame, &error);
+                    error
+                })?
+        };
         let frame_time = started.map(|start| start.elapsed()).unwrap_or_default();
         let timings = started.map(|_| omoikane::paint::take_last_render_timings());
         self.rebase_clock_if_document_changed();
@@ -216,6 +258,30 @@ mod tests {
         app.render_before_wheel(now + FRAME_INTERVAL / 2);
         assert!(app.frame_scheduler.redraw_pending());
         assert_eq!(app.wheel_frame_deadline, now + FRAME_INTERVAL);
+    }
+
+    #[test]
+    fn wheel_paint_defers_page_clock_until_tasks_resume() {
+        let mut app = BrowserApp::new(
+            "data:text/html,<script>window.fired=false;setTimeout(()=>fired=true,100)</script>",
+        )
+        .unwrap();
+        app.start_initial_navigation().unwrap();
+        app.draw_without_page_tasks(100, false).unwrap();
+        assert_eq!(app.deferred_page_elapsed_ms, 100);
+        let value = app
+            .session
+            .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
+            .unwrap();
+        assert_eq!(value["result"]["value"], json!(false));
+
+        app.sync_page_time_before_input(Instant::now());
+        assert_eq!(app.deferred_page_elapsed_ms, 0);
+        let value = app
+            .session
+            .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
+            .unwrap();
+        assert_eq!(value["result"]["value"], json!(true));
     }
 
     #[test]

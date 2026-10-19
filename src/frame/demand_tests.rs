@@ -164,6 +164,27 @@ fn frame_cache_skips_stable_pages_and_refreshes_dom_scroll_resize_and_navigation
 }
 
 #[test]
+fn paint_without_advance_presents_scroll_without_running_timers() {
+    let mut session = CdpSession::new().unwrap();
+    navigate(
+        &mut session,
+        "<style>body{margin:0}</style><div style='height:100px;background:red'></div><div style='height:100px;background:blue'></div><script>window.fired=false;setTimeout(()=>fired=true,100)</script>",
+    );
+    let mut cache = BrowserFrameCache::default();
+    assert!(cache.update(&mut session, 100, 100, 0).unwrap());
+    assert_eq!(&cache.frame().unwrap().pixels()[..4], &[255, 0, 0, 255]);
+
+    eval(&mut session, "window.scrollTo(0,100)");
+    assert!(cache.paint_without_advance(&mut session).unwrap());
+    assert_eq!(&cache.frame().unwrap().pixels()[..4], &[0, 0, 255, 255]);
+    assert_eq!(eval(&mut session, "fired"), json!(false));
+    assert!(!cache.paint_without_advance(&mut session).unwrap());
+
+    session.advance_tasks(100).unwrap();
+    assert_eq!(eval(&mut session, "fired"), json!(true));
+}
+
+#[test]
 fn native_input_after_idle_starts_timers_now_without_delivering_extra_raf() {
     let mut session = CdpSession::new().unwrap();
     navigate(

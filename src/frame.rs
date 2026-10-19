@@ -285,6 +285,19 @@ impl BrowserFrameCache {
         self.presented = Some(session.paint_state_key());
         Ok(true)
     }
+
+    /// Paints current page state without running page tasks or advancing its clock.
+    ///
+    /// Native input can present a scroll offset before expensive networking or
+    /// script tasks receive their next event-loop turn.
+    pub fn paint_without_advance(&mut self, session: &mut CdpSession) -> Result<bool, FrameError> {
+        if !self.demand(session).needs_paint {
+            return Ok(false);
+        }
+        self.frame = Some(paint_browser_frame(session)?);
+        self.presented = Some(session.paint_state_key());
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
