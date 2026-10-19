@@ -50,6 +50,12 @@ pub struct RenderDemand {
 }
 
 impl CdpSession {
+    /// Fetches network images on workers while the host keeps driving frames.
+    pub fn set_nonblocking_image_loading(&mut self, enabled: bool) {
+        self.nonblocking_image_loading = enabled;
+        self.runtime.set_nonblocking_image_loading(enabled);
+    }
+
     /// Advances page time without running queued tasks or animation callbacks.
     /// Native hosts call this before input so timers created by that input use
     /// the current clock even when page tasks are deferred for responsiveness.

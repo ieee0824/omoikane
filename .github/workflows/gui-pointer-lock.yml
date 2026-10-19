@@ -3,10 +3,10 @@ name: GUI Pointer Lock
 on:
   pull_request:
     branches: [main]
-    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'scripts/test-gui-media-environment.py', 'scripts/test-gui-scroll.py', 'scripts/test-gui-startup.py', 'tests/fixtures/gui-scroll/**', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
+    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'scripts/test-gui-media-environment.py', 'scripts/test-gui-scroll.py', 'scripts/test-gui-startup.py', 'scripts/test-gui-image-loading.py', 'tests/fixtures/gui-scroll/**', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
   push:
     branches: [main]
-    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'scripts/test-gui-media-environment.py', 'scripts/test-gui-scroll.py', 'scripts/test-gui-startup.py', 'tests/fixtures/gui-scroll/**', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
+    paths: ['src/**', 'engine/**', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/anonymized-pointer-lock/**', 'scripts/test-pointer-lock-x11.py', 'scripts/gui_x11.py', 'scripts/test-gui-x11.py', 'scripts/test-gui-render-demand.py', 'scripts/test-gui-media-environment.py', 'scripts/test-gui-scroll.py', 'scripts/test-gui-startup.py', 'scripts/test-gui-image-loading.py', 'tests/fixtures/gui-scroll/**', 'tests/fixtures/gui-render-demand/**', 'scripts/tests/test_gui_x11.py', 'scripts/test-gui-url-entry.py', 'scripts/gui_navigation_fixture.py', 'scripts/tests/test_gui_url_entry.py', 'scripts/tests/test_gui_navigation_fixture.py', 'tests/fixtures/gui-navigation/**', '.github/workflows/gui-pointer-lock.yml']
   workflow_dispatch:
 
 permissions:
@@ -74,6 +74,8 @@ jobs:
           /usr/bin/python3 scripts/test-gui-scroll.py --binary target/debug/omoikane --scale 2 --artifacts .artifacts/gui-scroll-2
       - name: Verify parsed page is presented before slow initial scripts
         run: /usr/bin/python3 scripts/test-gui-startup.py --binary target/debug/omoikane --artifacts .artifacts/gui-startup
+      - name: Verify image network waits do not block wheel input
+        run: /usr/bin/python3 scripts/test-gui-image-loading.py --binary target/debug/omoikane --artifacts .artifacts/gui-image-loading
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -86,6 +88,7 @@ jobs:
             .artifacts/gui-scroll-1/
             .artifacts/gui-scroll-2/
             .artifacts/gui-startup/
+            .artifacts/gui-image-loading/
             .artifacts/gui-url-entry/
             .artifacts/gui-url-entry-negative/
           include-hidden-files: true

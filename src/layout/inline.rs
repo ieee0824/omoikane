@@ -1,7 +1,7 @@
 //! Inline layout: text segments, line breaking, and inline image handling.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
@@ -31,6 +31,32 @@ mod text_source;
 
 thread_local! {
     static PRINT_INLINE_SKIP: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
+    // Each active decode records only pending images it actually visits.
+    static IMAGE_PENDING_DEPENDENCIES: RefCell<Vec<HashSet<String>>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ImageDependencies;
+
+impl ImageDependencies {
+    fn begin() -> Self {
+        IMAGE_PENDING_DEPENDENCIES.with(|stack| stack.borrow_mut().push(HashSet::new()));
+        Self
+    }
+
+    fn has_pending(&self) -> bool {
+        IMAGE_PENDING_DEPENDENCIES.with(|stack| !stack.borrow().last().unwrap().is_empty())
+    }
+
+    fn pending_references(&self) -> Vec<String> {
+        IMAGE_PENDING_DEPENDENCIES
+            .with(|stack| stack.borrow().last().unwrap().iter().cloned().collect())
+    }
+}
+
+impl Drop for ImageDependencies {
+    fn drop(&mut self) {
+        IMAGE_PENDING_DEPENDENCIES.with(|stack| stack.borrow_mut().pop());
+    }
 }
 
 /// Relayout inline formatting contexts after their already printed token prefixes.
@@ -1919,6 +1945,17 @@ fn fetch_image(url: &str) -> Option<Image> {
         return result;
     }
 
+    if super::image_security::start_async_image(url) {
+        if super::image_security::image_asset_pending(url) {
+            IMAGE_PENDING_DEPENDENCIES.with(|stack| {
+                for dependencies in stack.borrow_mut().iter_mut() {
+                    dependencies.insert(url.to_owned());
+                }
+            });
+        }
+        return None;
+    }
+
     // Fetch and decode the image
     let result = fetch_image_uncached(url);
 
@@ -1976,6 +2013,9 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
         }
     })?;
 
+    if !super::image_security::image_request_is_live() {
+        return None;
+    }
     if response.status_code() != 200 {
         return None;
     }
@@ -2079,12 +2119,15 @@ fn decode_blob_url_image(url: &str) -> Option<Image> {
     if entry.bytes.len() > MAX_IMAGE_SIZE {
         return None;
     }
+    let dependencies = ImageDependencies::begin();
     let image = decode_image_bytes(&entry.bytes, &entry.media_type.to_lowercase(), url)?;
-    IMAGE_CACHE.with(|cache| {
-        cache
-            .borrow_mut()
-            .insert(url.to_string(), Some(image.clone()));
-    });
+    if !dependencies.has_pending() {
+        IMAGE_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert(url.to_string(), Some(image.clone()));
+        });
+    }
     Some(image)
 }
 
@@ -2127,6 +2170,17 @@ fn decode_or_fetch_image_with_base(url_like: &str, base_url: Option<&Url>) -> Op
 /// Decodes an image reference using the caller's explicit base URL.
 pub(crate) fn decode_or_fetch_image_asset(url_like: &str, base_url: Option<&Url>) -> Option<Image> {
     decode_or_fetch_image_with_base(url_like, base_url)
+}
+
+/// Resolves an image and reports the pending network dependencies encountered
+/// during this decode, including those inside composite blob or data SVG images.
+pub(crate) fn decode_or_fetch_image_asset_with_pending_dependencies(
+    url_like: &str,
+    base_url: Option<&Url>,
+) -> (Option<Image>, Vec<String>) {
+    let dependencies = ImageDependencies::begin();
+    let image = decode_or_fetch_image_asset(url_like, base_url);
+    (image, dependencies.pending_references())
 }
 
 /// Produces a stable identity for a referenced image without reading ambient URL state.

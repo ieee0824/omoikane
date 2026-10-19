@@ -56,10 +56,13 @@ use table::{
 };
 
 pub(crate) use inline::element_inline_image;
-pub(crate) use inline::{canonical_image_asset_reference, decode_or_fetch_image_asset};
+pub(crate) use inline::{
+    canonical_image_asset_reference, decode_or_fetch_image_asset,
+    decode_or_fetch_image_asset_with_pending_dependencies,
+};
 mod image_security;
 pub(crate) use image_security::{
-    ImageDocumentState, ImagePolicyNotice, with_image_security_policy,
+    ImageDocumentState, ImagePolicyNotice, poll_async_images, with_image_security_policy,
 };
 
 // Re-exports used by tests

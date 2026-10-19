@@ -2,6 +2,12 @@
 use super::*;
 use crate::js::csp::{CspPolicy, PolicyViolation, ResourceType};
 use std::collections::HashSet;
+use std::sync::Weak;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+mod async_fetch;
+pub(super) use async_fetch::start as start_async_image;
+pub(crate) use async_fetch::{pending as image_asset_pending, poll as poll_async_images};
 
 type ReportedChecks = Rc<RefCell<HashSet<(String, String, usize)>>>;
 
@@ -11,6 +17,7 @@ pub(crate) struct ImageDocumentState {
     policy: Option<CspPolicy>,
     cache: ImageCache,
     reported: ReportedChecks,
+    asynchronous: async_fetch::State,
 }
 
 #[derive(Default)]
@@ -48,6 +55,36 @@ struct ActiveImagePolicy {
 
 thread_local! {
     static ACTIVE_POLICY: RefCell<Option<ActiveImagePolicy>> = const { RefCell::new(None) };
+    static IMAGE_REQUEST_LIVENESS: RefCell<Option<Weak<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// Uses an owned cancellation token during a worker's image fetch and decode.
+/// Restores the previous token on return or unwind; transport I/O is not interrupted.
+pub(crate) fn with_image_request_liveness<T>(
+    live: Weak<AtomicBool>,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Weak<AtomicBool>>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            IMAGE_REQUEST_LIVENESS.with(|slot| slot.replace(self.0.take()));
+        }
+    }
+
+    let _restore = Restore(IMAGE_REQUEST_LIVENESS.with(|slot| slot.replace(Some(live))));
+    operation()
+}
+
+/// Returns whether the active request still belongs to a live Document context.
+/// Image operations outside a cancellation scope remain enabled.
+pub(crate) fn image_request_is_live() -> bool {
+    IMAGE_REQUEST_LIVENESS.with(|slot| {
+        slot.borrow().as_ref().is_none_or(|live| {
+            live.upgrade()
+                .is_some_and(|live| live.load(Ordering::Acquire))
+        })
+    })
 }
 
 struct ImagePolicyGuard {
@@ -92,6 +129,7 @@ pub(crate) fn with_image_security_policy<T>(
         let mut state = state.borrow_mut();
         if state.policy.as_ref() != Some(&policy) {
             state.cache = ImageCache::default();
+            state.asynchronous.reset();
             state.reported = ReportedChecks::default();
             state.policy = Some(policy.clone());
         }
@@ -124,6 +162,9 @@ pub(crate) fn with_image_security_policy<T>(
 }
 
 pub(super) fn allows_image_request(reference: &str, redirects: usize, initial: &str) -> bool {
+    if !image_request_is_live() {
+        return false;
+    }
     ACTIVE_POLICY.with(|slot| {
         let slot = slot.borrow();
         let Some(active) = slot.as_ref() else {

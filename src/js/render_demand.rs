@@ -90,7 +90,12 @@ impl JsRuntime {
                     || worker.startup_error.is_some()
                     || worker.runtime.next_rendering() != NextRendering::Idle)
         });
-        if visual_work || modules || workers || state.worklet.has_pending_render_work() {
+        let images = !state.pending_image_events.is_empty()
+            || state
+                .image_resources
+                .values()
+                .any(|images| images.borrow().has_pending_images());
+        if visual_work || modules || workers || images || state.worklet.has_pending_render_work() {
             return NextRendering::EveryFrame;
         }
         let timer_delay = state

@@ -2397,6 +2397,8 @@ struct HostState {
     live_css_animations: bool,
     image_timeline: crate::paint::animation::ImageTimeline,
     image_resources: HashMap<usize, Rc<RefCell<crate::layout::ImageDocumentState>>>,
+    nonblocking_image_loading: bool,
+    pending_image_events: Vec<image_loading::PendingImageEvent>,
     visible_image_playbacks: Vec<Arc<crate::paint::animation::ImagePlayback>>,
     /// Committed URL per live Document. Nested Window/Document access must not
     /// accidentally expose the top-level Location after iframe navigation.
@@ -3177,6 +3179,8 @@ impl HostState {
             live_css_animations: false,
             image_timeline: Arc::new(Mutex::new(HashMap::new())),
             image_resources: HashMap::new(),
+            nonblocking_image_loading: false,
+            pending_image_events: Vec::new(),
             visible_image_playbacks: Vec::new(),
             document_urls,
             document_reporting: HashMap::from([(
@@ -5746,7 +5750,7 @@ impl HostState {
         self.storage_access_active_documents.remove(&document_id);
         self.document_urls.remove(&document_id);
         self.document_reporting.remove(&document_id);
-        self.image_resources.remove(&document_id);
+        self.retire_document_images(document_id);
         self.report_observer_dispatchers.remove(&document_id);
         self.service_worker_lifecycle_callbacks.remove(&document_id);
         self.clear_document_target(document_id);
@@ -5880,7 +5884,7 @@ impl HostState {
         self.storage_access_active_documents.remove(&document_id);
         self.document_urls.remove(&document_id);
         self.document_reporting.remove(&document_id);
-        self.image_resources.remove(&document_id);
+        self.retire_document_images(document_id);
         self.report_observer_dispatchers.remove(&document_id);
         self.service_worker_lifecycle_callbacks.remove(&document_id);
         self.clear_document_target(document_id);
@@ -10276,6 +10280,7 @@ impl JsRuntime {
         if self.is_terminated_worker() {
             return Ok(());
         }
+        self.poll_image_resource_loads()?;
         // An embedder call may have completed a script task and left promise
         // jobs pending. Its checkpoint can itself enqueue host tasks.
         self.run_jobs()?;
@@ -10455,6 +10460,7 @@ impl JsRuntime {
         if self.is_terminated_worker() {
             return Ok(());
         }
+        self.poll_image_resource_loads()?;
         self.run_jobs()?;
         self.dispatch_cookie_changes()?;
         self.run_worklet_background_tasks();
@@ -13825,6 +13831,7 @@ impl Drop for JsRuntime {
         // so a later collection cannot trace a stale worker realm.
         let _guard = activate_host_state(Rc::clone(&self.host_state));
         self.terminate_workers();
+        self.host_state.borrow_mut().cancel_image_loads();
 
         let (storage_manager, clients) = {
             let mut state = self.host_state.borrow_mut();
