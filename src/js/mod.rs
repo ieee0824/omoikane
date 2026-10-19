@@ -10269,6 +10269,31 @@ impl JsRuntime {
             static TRACE_SLOW_TASKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             let trace_slow_tasks = *TRACE_SLOW_TASKS
                 .get_or_init(|| std::env::var_os("OMOIKANE_TRACE_TASKS").is_some());
+            let task_kind = trace_slow_tasks.then(|| match &task {
+                Task::Timer {
+                    payload: TimerPayload::ResourceLoad { node_id },
+                    ..
+                } => self
+                    .host_state
+                    .borrow()
+                    .get_node(*node_id)
+                    .and_then(|node| node.tag_name())
+                    .map_or_else(
+                        || "resource:detached".to_string(),
+                        |tag| format!("resource:{tag}"),
+                    ),
+                Task::Timer {
+                    payload: TimerPayload::FormSubmission { .. },
+                    ..
+                } => "form_submission".to_string(),
+                Task::Timer {
+                    payload: TimerPayload::JavascriptDocumentLoad { .. },
+                    ..
+                } => "javascript_document_load".to_string(),
+                Task::Timer { .. } => "timer".to_string(),
+                Task::SecurityPolicyViolation { .. } => "security_policy_violation".to_string(),
+                _ => "other".to_string(),
+            });
             let task_started = trace_slow_tasks.then(std::time::Instant::now);
             let task_result = self.run_task(task);
             if let Some(started) = task_started {
@@ -10278,6 +10303,7 @@ impl JsRuntime {
                         "OMOIKANE_TASK {}",
                         serde_json::json!({
                             "source": format!("{source:?}"),
+                            "kind": task_kind,
                             "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
                             "success": task_result.is_ok(),
                         })
