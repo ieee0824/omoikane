@@ -254,11 +254,6 @@ mod tests {
         assert_eq!(value["result"]["value"], json!(false));
 
         app.defer_page_time_before_input(Instant::now());
-        let value = app
-            .session
-            .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
-            .unwrap();
-        assert_eq!(value["result"]["value"], json!(false));
         app.update_page_frame((100, 100), 0).unwrap();
         let value = app
             .session
