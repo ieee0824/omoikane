@@ -614,7 +614,7 @@ impl CdpSession {
         self.runtime
             .run_animation_frame(elapsed_ms)
             .map_err(js_error)?;
-        self.drive_navigation_requests()
+        self.commit_pending_navigation_requests()
     }
 
     /// Settles deferred page initialization before a static render snapshot.

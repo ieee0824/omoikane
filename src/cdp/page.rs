@@ -376,9 +376,9 @@ impl CdpSession {
         self.drive_navigation_requests_inner(true)
     }
 
-    /// Commits navigation requested by an input handler without running due
-    /// page tasks while native input is being dispatched.
-    pub(super) fn drive_input_navigation_requests(&mut self) -> Result<(), JsonRpcError> {
+    /// Commits navigation already requested by script without running another
+    /// page task during native input or after a rendering opportunity.
+    pub(super) fn commit_pending_navigation_requests(&mut self) -> Result<(), JsonRpcError> {
         self.drive_navigation_requests_inner(false)
     }
 

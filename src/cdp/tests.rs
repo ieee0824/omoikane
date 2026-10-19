@@ -36,6 +36,24 @@ fn task_pump_limit_survives_navigation_and_defers_extra_timer_tasks() {
 }
 
 #[test]
+fn rendering_opportunity_defers_tasks_after_navigation_commit() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document("https://example.test/", "<body></body>", 1, "null")
+        .unwrap();
+    session.set_task_pump_limit(NonZeroUsize::new(1));
+    session
+        .runtime
+        .eval("globalThis.runs=0;for(let i=0;i<3;i++)setTimeout(()=>runs++,0)")
+        .unwrap();
+
+    session.drive_event_loop(0).unwrap();
+    assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(2.0));
+    session.drive_event_loop(0).unwrap();
+    assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(3.0));
+}
+
+#[test]
 fn javascript_navigation_keeps_history_for_non_string_and_replaces_on_html_completion() {
     let mut session = CdpSession::new().unwrap();
     session
@@ -4213,7 +4231,7 @@ fn native_input_does_not_run_due_timer_tasks() {
         .unwrap();
     session
         .runtime
-        .eval("addEventListener('wheel', () => history.pushState(null, '', '/wheel'))")
+        .eval("document.addEventListener('wheel', () => { globalThis.wheelFired = true; history.pushState(null, '', '/wheel'); })")
         .unwrap();
     session.advance_clock_without_tasks(1000);
 
@@ -4223,6 +4241,10 @@ fn native_input_does_not_run_due_timer_tasks() {
             json!({ "type": "mouseWheel", "x": 20, "y": 20, "deltaY": 10 }),
         )
         .unwrap();
+    assert_eq!(
+        session.runtime.eval("wheelFired").unwrap().as_boolean(),
+        Some(true),
+    );
     assert_eq!(session.current_url(), "https://example.test/wheel");
     assert_eq!(
         session.runtime.eval("timerFired").unwrap().as_boolean(),
