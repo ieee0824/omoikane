@@ -70,10 +70,15 @@ def verify(binary, artifacts):
             pixel = ImageGrab.grab(xdisplay=gui.env['DISPLAY']).convert('RGB').getpixel(point)
             assert pixel == (255, 0, 0), ('parsed document not presented', pixel)
             paints = trace_records(log, 'PAINT')
-            assert len(paints) >= 2, paints
+            # The native owner presents its blank surface before the worker
+            # produces a page frame; only page frames emit PAINT records.
+            assert paints and paints[0]['sequence'] == 1, paints
             initial = trace_records(log, 'STARTUP')
             first_page = next(row for row in initial
                               if row['phase'] == 'first_page_redraw_attempted')
+            first_window = next(row for row in initial
+                                if row['phase'] == 'first_window_redraw_attempted')
+            assert first_window['elapsed_ms'] < first_page['elapsed_ms'], initial
             observed_timer = {}
 
             def title():

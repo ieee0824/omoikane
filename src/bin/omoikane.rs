@@ -8,8 +8,10 @@ use std::time::{Duration, Instant};
 
 use chrome_layout::ChromeLayout;
 use device_scale::{DeviceScale, blit_scaled};
+#[cfg(test)]
 use input_routing::{InputTarget, PagePointer};
 use omoikane::cdp::CdpSession;
+#[cfg(test)]
 use omoikane::dom::NodeHandle;
 use omoikane::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
@@ -18,10 +20,13 @@ use omoikane::error_reporting::{
 use omoikane::font::{Font, load_system_font};
 #[cfg(test)]
 use omoikane::frame::render_browser_frame;
+#[cfg(test)]
 use omoikane::frame::{BrowserFrameCache, PlatformFramePlan, PlatformFrameScheduler};
 use omoikane::js::{FindInPageResult, FullscreenTransition, PointerLockTransition};
+#[cfg(test)]
+use omoikane::platform_input::PlatformInput;
 use omoikane::platform_input::{
-    InputModifiers, PlatformImeEvent, PlatformInput, PlatformKeyEvent, PlatformMouseButton,
+    InputModifiers, PlatformImeEvent, PlatformKeyEvent, PlatformMouseButton,
 };
 use serde_json::json;
 use softbuffer::{Context, Surface};
@@ -36,16 +41,23 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Fullscreen as WindowFullscreen, Window, WindowId};
 
+#[path = "omoikane/async_gui.rs"]
+mod async_gui;
 #[path = "omoikane/chrome_layout.rs"]
 mod chrome_layout;
 #[path = "omoikane/device_scale.rs"]
 mod device_scale;
+#[cfg(test)]
 #[path = "omoikane/input_routing.rs"]
 mod input_routing;
+#[cfg(test)]
 #[path = "omoikane/media_environment.rs"]
 mod media_environment;
+#[path = "omoikane/page_worker.rs"]
+mod page_worker;
 #[path = "omoikane/pointer_lock_host.rs"]
 mod pointer_lock_host;
+#[cfg(test)]
 #[path = "omoikane/render_pump.rs"]
 mod render_pump;
 #[path = "omoikane/toolbar_paint.rs"]
@@ -148,12 +160,14 @@ fn configured_error_reporter() -> Result<Option<Arc<ErrorReporter>>, Box<dyn Err
     )?)))
 }
 
+#[cfg(test)]
 struct FindUi {
     query: String,
     result: FindInPageResult,
     document: NodeHandle,
 }
 
+#[cfg(test)]
 struct BrowserApp {
     session: CdpSession,
     cookie_changes: Option<omoikane::http::CookieChangeSubscription>,
@@ -202,6 +216,7 @@ struct BrowserApp {
     toolbar_font: OnceCell<Option<Font>>,
 }
 
+#[cfg(test)]
 impl BrowserApp {
     fn trace_startup(&self, phase: &str) {
         if let Some(started) = self.startup_trace {
@@ -808,6 +823,7 @@ fn changed_window_title(current: &mut String, next: String) -> Option<String> {
     Some(next)
 }
 
+#[cfg(test)]
 fn find_window_title(page_title: String, find_ui: Option<&FindUi>) -> String {
     match find_ui {
         Some(ui) => format!(
@@ -859,6 +875,7 @@ fn wheel_delta_css_pixels(delta: MouseScrollDelta, scale_factor: f64) -> (f64, f
     }
 }
 
+#[cfg(test)]
 impl ApplicationHandler for BrowserApp {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, (): ()) {
         if self
@@ -1399,8 +1416,10 @@ mod tests {
     }
 }
 
+#[cfg(test)]
 struct CookieStoreWake(winit::event_loop::EventLoopProxy<()>);
 
+#[cfg(test)]
 impl std::task::Wake for CookieStoreWake {
     fn wake(self: Arc<Self>) {
         self.wake_by_ref();
@@ -1411,6 +1430,7 @@ impl std::task::Wake for CookieStoreWake {
     }
 }
 
+#[cfg(test)]
 fn main() -> Result<(), Box<dyn Error>> {
     let startup_trace = std::env::var_os("OMOIKANE_TRACE_STARTUP").map(|_| Instant::now());
     let url = std::env::args().nth(1).unwrap_or_else(|| {
@@ -1442,6 +1462,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.initial_navigation_error.take() {
         return Err(error.into());
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn main() -> Result<(), Box<dyn Error>> {
+    let startup_trace = std::env::var_os("OMOIKANE_TRACE_STARTUP").map(|_| Instant::now());
+    let url = std::env::args().nth(1).unwrap_or_else(|| {
+        "data:text/html,<title>Omoikane</title><style>body{font:32px sans-serif;padding:2rem}</style><h1>Omoikane</h1><p>Pass a URL as the first argument.</p>".into()
+    });
+    let reporter = configured_error_reporter()?;
+    if let Some(reporter) = reporter.as_ref() {
+        install_panic_reporter(reporter, ExecutionSurface::Gui);
+    }
+    let event_loop = EventLoop::<page_worker::AsyncEvent>::with_user_event().build()?;
+    if let Some(started) = startup_trace {
+        eprintln!(
+            "OMOIKANE_STARTUP {}",
+            json!({"phase":"event_loop_ready","elapsed_ms":started.elapsed().as_secs_f64()*1000.0})
+        );
+    }
+    let mut app =
+        async_gui::AsyncBrowserApp::new(url, event_loop.create_proxy(), reporter, startup_trace)?;
+    app.trace_startup("app_ready");
+    event_loop.run_app(&mut app)?;
+    if let Some(error) = app.initial_error.take() {
+        return Err(std::io::Error::other(error).into());
     }
     Ok(())
 }

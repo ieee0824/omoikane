@@ -30,7 +30,8 @@ def last_frame(gui):
 
 
 def verify(binary, artifacts, scale, iterations, baseline):
-    environment = {'WINIT_X11_SCALE_FACTOR': str(scale), 'OMOIKANE_TRACE_PAINT': '1'}
+    environment = {'WINIT_X11_SCALE_FACTOR': str(scale), 'OMOIKANE_TRACE_PAINT': '1',
+                   'OMOIKANE_TRACE_INPUT': '1'}
     with NavigationFixture(ROOT / 'tests/fixtures/gui-scroll') as fixture:
         with GuiSession(artifacts, environment) as gui:
             app = gui.launch(binary, [fixture.url('/long.html')])
@@ -62,8 +63,8 @@ def verify(binary, artifacts, scale, iterations, baseline):
                 if index >= 2:
                     samples.append({**frame, **wheel,
                                     'observed_ms': (time.monotonic() - started) * 1000})
-            # Native events arrive faster than frames. Preserve every wheel's
-            # delivery and accumulated default scroll while drawing progress.
+            # Native events arrive faster than frames. Adjacent compatible
+            # inputs may coalesce; retain every source delta and draw progress.
             singles = iterations + 2
             if singles % 2:
                 gui.command('xdotool', 'mouseup', '5')
@@ -71,8 +72,22 @@ def verify(binary, artifacts, scale, iterations, baseline):
             before_burst = len(records(gui, 'PAINT'))
             gui.command('xdotool', 'click', '--repeat', '10', '--delay', '20', '5')
             expected = (40 * (singles + 20), singles + 20)
-            gui.wait_for('continuous wheels consumed', lambda: status(gui, window),
-                         lambda s: s and s[:2] == expected, seconds=60)
+            def burst_status():
+                page = status(gui, window)
+                if baseline:
+                    return {'page': page, 'sources': page[1] if page else 0,
+                            'delivered': page[1] if page else 0}
+                wheels = [row for row in records(gui, 'PAGE_INPUT')
+                          if row['kind'] == 'wheel']
+                return {'page': page,
+                        'sources': sum(row['source_count'] for row in wheels),
+                        'delivered': len(wheels)}
+
+            burst = gui.wait_for('continuous wheels consumed', burst_status,
+                                 lambda value: value['page']
+                                 and value['page'][0] == expected[0]
+                                 and value['sources'] == expected[1]
+                                 and value['page'][1] == value['delivered'], seconds=60)
             gui.wait_for('burst frame presented', lambda: last_frame(gui),
                          lambda frame: frame and frame['sequence'] > before_burst)
             burst_frames = len(records(gui, 'PAINT')) - before_burst
@@ -90,7 +105,7 @@ def verify(binary, artifacts, scale, iterations, baseline):
                 'page_bounds': [bounds['X'], bounds['Y'] + 40 * scale, 640 * scale, 400 * scale],
                 'median_ms': {key: statistics.median(s[key] for s in samples) for key in
                               ('dispatch_ms', 'adjusted_layout_ms', 'paint_ms', 'frame_ms', 'present_ms')},
-                'continuous_status': expected, 'hit_row': expected_row,
+                'continuous_status': burst, 'hit_row': expected_row,
                 'burst_frames': burst_frames,
             }
             (gui.out / 'benchmark.json').write_text(json.dumps(report, indent=2) + '\n')
