@@ -3204,6 +3204,28 @@ fn canvas_2d_pixels_transform_clip_image_data_draw_image_and_png() {
 }
 
 #[test]
+fn canvas_clear_rect_clips_large_untransformed_rectangles() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let result = eval_str(
+        &mut runtime,
+        r#"(() => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 3; canvas.height = 2;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = 'red'; ctx.fillRect(0, 0, 3, 2);
+          ctx.clearRect(-1000000, -1000000, 2000000, 2000000);
+          const cleared = Array.from(ctx.getImageData(0, 0, 3, 2).data).every(v => v === 0);
+          ctx.fillRect(0, 0, 3, 2);
+          ctx.clearRect(1, 0, 1, 1);
+          const pixels = ctx.getImageData(0, 0, 3, 2).data;
+          return cleared && pixels[3] === 255 && pixels[7] === 0 &&
+              pixels[11] === 255 && pixels[15] === 255;
+        })()"#,
+    );
+    assert_eq!(result, "true");
+}
+
+#[test]
 fn webgl_canvas_context_state_resources_and_loss_boundary() {
     let mut runtime = JsRuntime::new().unwrap();
     let result = eval_str(
