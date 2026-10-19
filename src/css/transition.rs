@@ -107,159 +107,53 @@ impl TransitionTimeline {
             state.initialized = true;
             return;
         }
-
+        // The base snapshot includes transition configuration. Equal snapshots
+        // cannot start or cancel a transition, but existing ones still advance.
+        if state.base_values == *properties {
+            sample_running_transitions(node_id, now_ms, state, properties, &mut self.events);
+            return;
+        }
         let configuration = TransitionConfiguration::from_properties(properties);
-        let no_longer_matching: Vec<String> = state
-            .running
-            .keys()
-            .filter(|property| configuration.matching_parameters(property).is_none())
-            .cloned()
-            .collect();
-        for property in no_longer_matching {
-            if let Some(running) = state.running.remove(&property) {
-                self.events.push(running.event_record(
-                    node_id,
-                    "transitioncancel",
-                    property,
-                    now_ms,
-                ));
-            }
+        if state.running.is_empty()
+            && !configuration.may_start_transition(&state.base_values, properties)
+        {
+            // Keep the latest baseline even while transitions are disabled, so
+            // enabling them later starts from the immediately preceding style.
+            state.base_values = properties.clone();
+            return;
         }
+        cancel_unmatched_transitions(node_id, now_ms, state, &configuration, &mut self.events);
+        update_changed_transitions(
+            node_id,
+            now_ms,
+            state,
+            properties,
+            &configuration,
+            &mut self.events,
+        );
+        state.base_values = properties.clone();
+        sample_running_transitions(node_id, now_ms, state, properties, &mut self.events);
+    }
 
-        let mut changed_properties = BTreeSet::new();
-        changed_properties.extend(state.base_values.keys().map(str::to_owned));
-        changed_properties.extend(properties.keys().map(str::to_owned));
-        changed_properties.retain(|property| {
-            effective_value(property, state.base_values.get(property))
-                != effective_value(property, properties.get(property))
-        });
-
-        for property in changed_properties {
-            let old_value = effective_value(&property, state.base_values.get(&property));
-            let new_value = effective_value(&property, properties.get(&property));
-            let Some(end_value) = new_value else {
-                state.running.remove(&property);
-                continue;
-            };
-            if state
-                .running
-                .get(&property)
-                .is_some_and(|running| running.end_value == end_value)
-            {
-                continue;
-            }
-            let interrupted = state.running.get(&property).cloned();
-            let start_value = interrupted
-                .as_ref()
-                .and_then(|running| {
-                    running.sample(
-                        &property,
-                        now_ms,
-                        &sampled_current_color(properties, &state.running, now_ms),
-                    )
-                })
-                .or(old_value);
-            let Some(start_value) = start_value else {
-                state.running.remove(&property);
-                continue;
-            };
-            if start_value == end_value {
-                if let Some(running) = state.running.remove(&property) {
-                    self.events.push(running.event_record(
-                        node_id,
-                        "transitioncancel",
-                        property.clone(),
-                        now_ms,
-                    ));
-                }
-                continue;
-            }
-            let Some(parameters) = configuration.matching_parameters(&property) else {
-                if let Some(running) = state.running.remove(&property) {
-                    self.events.push(running.event_record(
-                        node_id,
-                        "transitioncancel",
-                        property.clone(),
-                        now_ms,
-                    ));
-                }
-                continue;
-            };
-            if parameters.duration_ms + parameters.delay_ms <= 0.0
-                || interpolate_property_with_color(
-                    &property,
-                    &start_value,
-                    &end_value,
-                    0.5,
-                    &sampled_current_color(properties, &state.running, now_ms),
-                )
-                .is_none()
-            {
-                if let Some(running) = state.running.remove(&property) {
-                    self.events.push(running.event_record(
-                        node_id,
-                        "transitioncancel",
-                        property.clone(),
-                        now_ms,
-                    ));
-                }
-                continue;
-            }
-            if let Some(running) = interrupted.as_ref() {
-                self.events.push(running.event_record(
-                    node_id,
-                    "transitioncancel",
-                    property.clone(),
-                    now_ms,
-                ));
-            }
-            let (reversing_adjusted_start_value, reversing_shortening_factor) = interrupted
-                .as_ref()
-                .filter(|running| running.reversing_adjusted_start_value == end_value)
-                .map(|running| {
-                    let factor = (running.timing.sample(running.input_progress(now_ms))
-                        * running.reversing_shortening_factor
-                        + 1.0
-                        - running.reversing_shortening_factor)
-                        .abs()
-                        .clamp(0.0, 1.0);
-                    (running.end_value.clone(), factor)
-                })
-                .unwrap_or_else(|| (start_value.clone(), 1.0));
-            let delay_ms = if parameters.delay_ms < 0.0 {
-                parameters.delay_ms * reversing_shortening_factor
-            } else {
-                parameters.delay_ms
-            };
-            let start_ms = now_ms + delay_ms;
-            let end_ms = start_ms + parameters.duration_ms * reversing_shortening_factor;
-            let started = now_ms >= start_ms;
-            let running = RunningTransition {
-                start_value,
-                end_value,
-                reversing_adjusted_start_value,
-                reversing_shortening_factor,
-                start_ms,
-                end_ms,
-                timing: parameters.timing,
-                started,
-            };
-            self.events.push(running.event_record(
-                node_id,
-                "transitionrun",
-                property.clone(),
-                now_ms,
-            ));
-            if started {
-                self.events.push(running.event_record(
-                    node_id,
-                    "transitionstart",
-                    property.clone(),
-                    now_ms,
-                ));
-            }
-            state.running.insert(property, running);
+    #[cfg(test)]
+    fn sample_without_fast_paths(&mut self, node_id: usize, properties: &mut PropertyMap) {
+        let now_ms = self.now_ms;
+        let state = self.elements.entry(node_id).or_default();
+        if !state.initialized {
+            state.base_values = properties.clone();
+            state.initialized = true;
+            return;
         }
+        let configuration = TransitionConfiguration::from_properties(properties);
+        cancel_unmatched_transitions(node_id, now_ms, state, &configuration, &mut self.events);
+        update_changed_transitions(
+            node_id,
+            now_ms,
+            state,
+            properties,
+            &configuration,
+            &mut self.events,
+        );
         state.base_values = properties.clone();
         sample_running_transitions(node_id, now_ms, state, properties, &mut self.events);
     }
@@ -329,6 +223,141 @@ impl TransitionTimeline {
     }
 }
 
+fn cancel_unmatched_transitions(
+    node_id: usize,
+    now_ms: f64,
+    state: &mut ElementTransitionState,
+    configuration: &TransitionConfiguration,
+    events: &mut Vec<TransitionEventRecord>,
+) {
+    let no_longer_matching: Vec<String> = state
+        .running
+        .keys()
+        .filter(|property| configuration.matching_parameters(property).is_none())
+        .cloned()
+        .collect();
+    for property in no_longer_matching {
+        if let Some(running) = state.running.remove(&property) {
+            events.push(running.event_record(node_id, "transitioncancel", property, now_ms));
+        }
+    }
+}
+
+fn update_changed_transitions(
+    node_id: usize,
+    now_ms: f64,
+    state: &mut ElementTransitionState,
+    properties: &PropertyMap,
+    configuration: &TransitionConfiguration,
+    events: &mut Vec<TransitionEventRecord>,
+) {
+    let mut changed_properties = BTreeSet::new();
+    changed_properties.extend(state.base_values.keys().map(str::to_owned));
+    changed_properties.extend(properties.keys().map(str::to_owned));
+    changed_properties.retain(|property| {
+        effective_value(property, state.base_values.get(property))
+            != effective_value(property, properties.get(property))
+    });
+    for property in changed_properties {
+        update_transition_for_property(
+            node_id,
+            now_ms,
+            state,
+            properties,
+            configuration,
+            events,
+            property,
+        );
+    }
+}
+
+fn update_transition_for_property(
+    node_id: usize,
+    now_ms: f64,
+    state: &mut ElementTransitionState,
+    properties: &PropertyMap,
+    configuration: &TransitionConfiguration,
+    events: &mut Vec<TransitionEventRecord>,
+    property: String,
+) {
+    let old_value = effective_value(&property, state.base_values.get(&property));
+    let new_value = effective_value(&property, properties.get(&property));
+    let Some(end_value) = new_value else {
+        state.running.remove(&property);
+        return;
+    };
+    if state
+        .running
+        .get(&property)
+        .is_some_and(|running| running.end_value == end_value)
+    {
+        return;
+    }
+    let interrupted = state.running.get(&property).cloned();
+    let start_value = interrupted
+        .as_ref()
+        .and_then(|running| {
+            running.sample(
+                &property,
+                now_ms,
+                &sampled_current_color(properties, &state.running, now_ms),
+            )
+        })
+        .or(old_value);
+    let Some(start_value) = start_value else {
+        state.running.remove(&property);
+        return;
+    };
+    if start_value == end_value {
+        cancel_transition(node_id, now_ms, state, events, &property);
+        return;
+    }
+    let Some(parameters) = configuration.matching_parameters(&property) else {
+        cancel_transition(node_id, now_ms, state, events, &property);
+        return;
+    };
+    if parameters.duration_ms + parameters.delay_ms <= 0.0
+        || interpolate_property_with_color(
+            &property,
+            &start_value,
+            &end_value,
+            0.5,
+            &sampled_current_color(properties, &state.running, now_ms),
+        )
+        .is_none()
+    {
+        cancel_transition(node_id, now_ms, state, events, &property);
+        return;
+    }
+    if let Some(running) = interrupted.as_ref() {
+        events.push(running.event_record(node_id, "transitioncancel", property.clone(), now_ms));
+    }
+    let running = RunningTransition::new(
+        start_value,
+        end_value,
+        interrupted.as_ref(),
+        parameters,
+        now_ms,
+    );
+    events.push(running.event_record(node_id, "transitionrun", property.clone(), now_ms));
+    if running.started {
+        events.push(running.event_record(node_id, "transitionstart", property.clone(), now_ms));
+    }
+    state.running.insert(property, running);
+}
+
+fn cancel_transition(
+    node_id: usize,
+    now_ms: f64,
+    state: &mut ElementTransitionState,
+    events: &mut Vec<TransitionEventRecord>,
+    property: &str,
+) {
+    if let Some(running) = state.running.remove(property) {
+        events.push(running.event_record(node_id, "transitioncancel", property.to_owned(), now_ms));
+    }
+}
+
 fn sampled_current_color(
     properties: &PropertyMap,
     running: &HashMap<String, RunningTransition>,
@@ -348,6 +377,9 @@ fn sample_running_transitions(
     properties: &mut PropertyMap,
     events: &mut Vec<TransitionEventRecord>,
 ) {
+    if state.running.is_empty() {
+        return;
+    }
     // Resolve currentcolor from the sampled color independently of map iteration order.
     let current_color = sampled_current_color(properties, &state.running, now_ms);
     let mut completed = Vec::new();
@@ -370,6 +402,45 @@ fn sample_running_transitions(
 }
 
 impl RunningTransition {
+    fn new(
+        start_value: ComputedValue,
+        end_value: ComputedValue,
+        interrupted: Option<&Self>,
+        parameters: TransitionParameters,
+        now_ms: f64,
+    ) -> Self {
+        let (reversing_adjusted_start_value, reversing_shortening_factor) = interrupted
+            .filter(|running| running.reversing_adjusted_start_value == end_value)
+            .map(|running| {
+                let factor = (running.timing.sample(running.input_progress(now_ms))
+                    * running.reversing_shortening_factor
+                    + 1.0
+                    - running.reversing_shortening_factor)
+                    .abs()
+                    .clamp(0.0, 1.0);
+                (running.end_value.clone(), factor)
+            })
+            .unwrap_or_else(|| (start_value.clone(), 1.0));
+        let delay_ms = if parameters.delay_ms < 0.0 {
+            parameters.delay_ms * reversing_shortening_factor
+        } else {
+            parameters.delay_ms
+        };
+        let start_ms = now_ms + delay_ms;
+        let end_ms = start_ms + parameters.duration_ms * reversing_shortening_factor;
+        let started = now_ms >= start_ms;
+        Self {
+            start_value,
+            end_value,
+            reversing_adjusted_start_value,
+            reversing_shortening_factor,
+            start_ms,
+            end_ms,
+            timing: parameters.timing,
+            started,
+        }
+    }
+
     fn input_progress(&self, now_ms: f64) -> f64 {
         if now_ms >= self.end_ms || self.end_ms < self.start_ms {
             1.0
@@ -486,6 +557,20 @@ impl TransitionConfiguration {
         }
     }
 
+    fn may_start_transition(&self, old: &PropertyMap, new: &PropertyMap) -> bool {
+        // Avoid even scanning property names for the common zero-time case.
+        if !self.properties.iter().enumerate().any(|(index, _)| {
+            self.parameters_at(index)
+                .is_some_and(|parameters| parameters.duration_ms + parameters.delay_ms > 0.0)
+        }) {
+            return false;
+        }
+        old.keys().chain(new.keys()).any(|property| {
+            self.matching_parameters(property)
+                .is_some_and(|parameters| parameters.duration_ms + parameters.delay_ms > 0.0)
+        })
+    }
+
     fn matching_parameters(&self, property: &str) -> Option<TransitionParameters> {
         let index = self
             .properties
@@ -495,6 +580,10 @@ impl TransitionConfiguration {
             .find_map(|(index, candidate)| {
                 transition_property_matches(candidate, property).then_some(index)
             })?;
+        self.parameters_at(index)
+    }
+
+    fn parameters_at(&self, index: usize) -> Option<TransitionParameters> {
         Some(TransitionParameters {
             duration_ms: *repeated(&self.durations_ms, index)?,
             delay_ms: *repeated(&self.delays_ms, index)?,
@@ -1179,6 +1268,317 @@ fn format_number(value: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn timeline_style(
+        opacity: Option<f32>,
+        property: &str,
+        duration: &str,
+        delay: &str,
+    ) -> PropertyMap {
+        let mut values = PropertyMap::new();
+        if let Some(opacity) = opacity {
+            values.insert("opacity", ComputedValue::Number(opacity));
+        }
+        values.insert("width", ComputedValue::Px(16.0));
+        for (name, value) in [
+            ("transition-property", property),
+            ("transition-duration", duration),
+            ("transition-delay", delay),
+            ("transition-timing-function", "linear"),
+        ] {
+            values.insert(name, ComputedValue::Keyword(value.into()));
+        }
+        values
+    }
+
+    fn assert_timeline_state_matches(actual: &TransitionTimeline, expected: &TransitionTimeline) {
+        assert_eq!(actual.now_ms, expected.now_ms);
+        assert_eq!(actual.elements.len(), expected.elements.len());
+        for (id, state) in &actual.elements {
+            let expected = &expected.elements[id];
+            assert_eq!(state.initialized, expected.initialized);
+            assert_eq!(state.base_values, expected.base_values);
+            assert_eq!(state.running.len(), expected.running.len());
+            for (property, running) in &state.running {
+                let expected = &expected.running[property];
+                assert_eq!(running.start_value, expected.start_value);
+                assert_eq!(running.end_value, expected.end_value);
+                assert_eq!(
+                    running.reversing_adjusted_start_value,
+                    expected.reversing_adjusted_start_value
+                );
+                assert_eq!(
+                    running.reversing_shortening_factor,
+                    expected.reversing_shortening_factor
+                );
+                assert_eq!(running.start_ms, expected.start_ms);
+                assert_eq!(running.end_ms, expected.end_ms);
+                assert_eq!(running.started, expected.started);
+                for progress in [0.0, 0.25, 0.5, 1.0] {
+                    assert_eq!(
+                        running.timing.sample(progress),
+                        expected.timing.sample(progress)
+                    );
+                }
+            }
+        }
+    }
+
+    fn compare_timeline_step(
+        actual: &mut TransitionTimeline,
+        expected: &mut TransitionTimeline,
+        now_ms: f64,
+        base: &PropertyMap,
+    ) -> (PropertyMap, Vec<TransitionEventRecord>) {
+        assert_eq!(actual.set_time_ms(now_ms), expected.set_time_ms(now_ms));
+        let mut actual_values = base.clone();
+        let mut expected_values = base.clone();
+        actual.sample(1, &mut actual_values);
+        expected.sample_without_fast_paths(1, &mut expected_values);
+        assert_eq!(actual_values, expected_values);
+        assert_timeline_state_matches(actual, expected);
+        let events = actual.take_events();
+        assert_eq!(events, expected.take_events());
+        (actual_values, events)
+    }
+
+    #[test]
+    fn static_and_disabled_transitions_keep_latest_base_when_enabled_later() {
+        let mut actual = TransitionTimeline::default();
+        let mut expected = TransitionTimeline::default();
+        for (time, opacity) in [
+            (0.0, Some(0.0)),
+            (10.0, Some(0.2)),
+            (20.0, None),
+            (30.0, Some(0.4)),
+        ] {
+            let style = timeline_style(opacity, "none", "1s", "0s");
+            assert!(
+                compare_timeline_step(&mut actual, &mut expected, time, &style)
+                    .1
+                    .is_empty()
+            );
+        }
+        let enabled = timeline_style(Some(0.4), "opacity", "1s", "0s");
+        assert!(
+            compare_timeline_step(&mut actual, &mut expected, 40.0, &enabled)
+                .1
+                .is_empty()
+        );
+        let target = timeline_style(Some(0.8), "opacity", "1s", "0s");
+        let (values, events) = compare_timeline_step(&mut actual, &mut expected, 50.0, &target);
+        assert_eq!(values.get("opacity"), Some(&ComputedValue::Number(0.4)));
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type)
+                .collect::<Vec<_>>(),
+            ["transitionrun", "transitionstart"]
+        );
+        let (values, events) = compare_timeline_step(&mut actual, &mut expected, 550.0, &target);
+        assert_eq!(values.get("opacity"), Some(&ComputedValue::Number(0.6)));
+        assert!(events.is_empty());
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 1050.0, &target);
+        assert_eq!(events[0].event_type, "transitionend");
+        assert!(
+            compare_timeline_step(&mut actual, &mut expected, 1100.0, &target)
+                .1
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn no_effective_transition_skips_diff_without_losing_fallback_baselines() {
+        for (property, duration, delay) in [
+            ("all", "0s", "0s"),
+            ("opacity", "1s", "-1s"),
+            ("opacity", "1s", "-2s"),
+            ("unmatched-property", "1s", "0s"),
+            ("opacity, opacity", "1s, 0s", "0s"),
+        ] {
+            let mut actual = TransitionTimeline::default();
+            let mut expected = TransitionTimeline::default();
+            for (time, opacity) in [(0.0, Some(0.0)), (10.0, None), (20.0, Some(0.5))] {
+                let base = timeline_style(opacity, property, duration, delay);
+                assert!(
+                    compare_timeline_step(&mut actual, &mut expected, time, &base)
+                        .1
+                        .is_empty()
+                );
+            }
+            let enabled = timeline_style(Some(1.0), "opacity", "1s", "0s");
+            let (values, events) =
+                compare_timeline_step(&mut actual, &mut expected, 30.0, &enabled);
+            assert_eq!(values.get("opacity"), Some(&ComputedValue::Number(0.5)));
+            assert_eq!(events.len(), 2);
+        }
+    }
+
+    #[test]
+    fn unchanged_base_preserves_delayed_zero_duration_start_and_end_order() {
+        let mut actual = TransitionTimeline::default();
+        let mut expected = TransitionTimeline::default();
+        let initial = timeline_style(Some(0.0), "opacity", "0s", "100ms");
+        compare_timeline_step(&mut actual, &mut expected, 0.0, &initial);
+        let target = timeline_style(Some(1.0), "opacity", "0s", "100ms");
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 10.0, &target);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type)
+                .collect::<Vec<_>>(),
+            ["transitionrun"]
+        );
+        assert!(
+            compare_timeline_step(&mut actual, &mut expected, 109.0, &target)
+                .1
+                .is_empty()
+        );
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 110.0, &target);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type)
+                .collect::<Vec<_>>(),
+            ["transitionstart", "transitionend"]
+        );
+        assert!(events.iter().all(|event| event.elapsed_time == 0.0));
+    }
+
+    #[test]
+    fn changed_properties_keep_alphabetic_start_order_and_staggered_completion() {
+        let mut actual = TransitionTimeline::default();
+        let mut expected = TransitionTimeline::default();
+        let initial = timeline_style(Some(0.0), "width, opacity", "100ms, 200ms", "0s");
+        compare_timeline_step(&mut actual, &mut expected, 0.0, &initial);
+        let mut target = initial.clone();
+        target.insert("opacity", ComputedValue::Number(1.0));
+        target.insert("width", ComputedValue::Px(32.0));
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 10.0, &target);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.property_name.as_str(), event.event_type))
+                .collect::<Vec<_>>(),
+            [
+                ("opacity", "transitionrun"),
+                ("opacity", "transitionstart"),
+                ("width", "transitionrun"),
+                ("width", "transitionstart")
+            ],
+        );
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 110.0, &target);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].property_name, "width");
+        assert_eq!(events[0].event_type, "transitionend");
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 210.0, &target);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].property_name, "opacity");
+        assert_eq!(events[0].event_type, "transitionend");
+    }
+
+    #[test]
+    fn negative_delay_reversal_and_configuration_cancellation_match_unoptimized_timeline() {
+        let mut actual = TransitionTimeline::default();
+        let mut expected = TransitionTimeline::default();
+        let initial = timeline_style(Some(0.0), "opacity", "1s", "-250ms");
+        compare_timeline_step(&mut actual, &mut expected, 0.0, &initial);
+        let target = timeline_style(Some(1.0), "opacity", "1s", "-250ms");
+        let (values, events) = compare_timeline_step(&mut actual, &mut expected, 100.0, &target);
+        assert_eq!(values.get("opacity"), Some(&ComputedValue::Number(0.25)));
+        assert!(events.iter().all(|event| event.elapsed_time == 0.25));
+        let (values, events) = compare_timeline_step(&mut actual, &mut expected, 350.0, &target);
+        assert_eq!(values.get("opacity"), Some(&ComputedValue::Number(0.5)));
+        assert!(events.is_empty());
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 350.0, &initial);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type)
+                .collect::<Vec<_>>(),
+            ["transitioncancel", "transitionrun", "transitionstart"]
+        );
+        assert_eq!(
+            actual.elements[&1].running["opacity"].reversing_shortening_factor,
+            0.5
+        );
+        let cancelled = timeline_style(Some(0.0), "none", "1s", "-250ms");
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 400.0, &cancelled);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type)
+                .collect::<Vec<_>>(),
+            ["transitioncancel"]
+        );
+        assert!(!actual.has_running_transitions());
+        assert!(
+            compare_timeline_step(&mut actual, &mut expected, 2000.0, &cancelled)
+                .1
+                .is_empty()
+        );
+    }
+
+    fn run_static_timeline_benchmark(
+        sample: fn(&mut TransitionTimeline, usize, &mut PropertyMap),
+        template: &PropertyMap,
+        changing: bool,
+    ) -> (std::time::Duration, TransitionTimeline, Vec<PropertyMap>) {
+        let mut timeline = TransitionTimeline::default();
+        let mut last = vec![PropertyMap::new(); 32];
+        for (node, values) in last.iter_mut().enumerate() {
+            *values = template.clone();
+            sample(&mut timeline, node, values);
+        }
+        let started = std::time::Instant::now();
+        for frame in 1..=16 {
+            timeline.set_time_ms(frame as f64 * 16.0);
+            for (node, values) in last.iter_mut().enumerate() {
+                *values = template.clone();
+                if changing {
+                    values.insert("width", ComputedValue::Px(16.0 + frame as f32));
+                }
+                sample(&mut timeline, node, std::hint::black_box(&mut *values));
+                std::hint::black_box(&*values);
+            }
+        }
+        (started.elapsed(), timeline, last)
+    }
+
+    #[test]
+    #[ignore = "manual comparison of static CSS transition sampling fast paths"]
+    fn static_transition_sampling_microbenchmark() {
+        for (name, property, duration, changing) in [
+            ("static-default", "all", "0s", false),
+            ("static-enabled", "opacity", "1s", false),
+            ("changing-zero-time", "all", "0s", true),
+            ("changing-unmatched", "unmatched-property", "1s", true),
+        ] {
+            let mut style = timeline_style(Some(0.5), property, duration, "0s");
+            for index in 0..64 {
+                style.insert(
+                    format!("--benchmark-{index:02}"),
+                    ComputedValue::Number(index as f32),
+                );
+            }
+            let (reference_time, mut reference, reference_values) = run_static_timeline_benchmark(
+                TransitionTimeline::sample_without_fast_paths,
+                &style,
+                changing,
+            );
+            let (optimized_time, mut optimized, optimized_values) =
+                run_static_timeline_benchmark(TransitionTimeline::sample, &style, changing);
+            assert_eq!(optimized_values, reference_values);
+            assert_eq!(optimized.take_events(), reference.take_events());
+            assert_timeline_state_matches(&optimized, &reference);
+            println!(
+                "TRANSITION_SAMPLE_BENCH case={name} nodes=32 frames=16 reference_ms={:.3} optimized_ms={:.3} reference_over_optimized={:.3}",
+                reference_time.as_secs_f64() * 1000.0,
+                optimized_time.as_secs_f64() * 1000.0,
+                reference_time.as_secs_f64() / optimized_time.as_secs_f64(),
+            );
+        }
+    }
 
     #[test]
     fn expands_shorthand_lists_and_defaults() {
