@@ -52,6 +52,27 @@ use crate::http::cors::{
 use crate::http::{Client, HttpRequest, Method, default_user_agent};
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 
+fn trace_animation_frame_phases(
+    enabled: bool,
+    background_ms: f64,
+    tasks_ms: f64,
+    callbacks_ms: f64,
+    finish_ms: f64,
+) {
+    let total_ms = background_ms + tasks_ms + callbacks_ms + finish_ms;
+    if enabled && total_ms >= 50.0 {
+        eprintln!(
+            "OMOIKANE_FRAME_PHASE {}",
+            serde_json::json!({
+                "background_ms": background_ms,
+                "tasks_ms": tasks_ms,
+                "callbacks_ms": callbacks_ms,
+                "finish_ms": finish_ms,
+            })
+        );
+    }
+}
+
 mod broadcast_channel;
 mod cache_storage;
 mod child_document;
@@ -11370,12 +11391,18 @@ impl JsRuntime {
     /// [`run_jobs`](Self::run_jobs) alone never invokes
     /// animation-frame callbacks.
     pub fn run_animation_frame(&mut self, elapsed_ms: u64) -> JsResult<usize> {
+        let trace_frame = std::env::var_os("OMOIKANE_TRACE_TASKS").is_some();
+        let phase_started = Instant::now();
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.advance_worker_clocks(elapsed_ms);
         self.advance_worklet_clocks(elapsed_ms);
         self.run_worker_background_tasks();
         self.run_worklet_background_tasks();
+        let background_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
+        let phase_started = Instant::now();
         self.run_until_idle()?;
+        let tasks_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
+        let phase_started = Instant::now();
         self.host_state.borrow_mut().sample_smooth_scrolls();
         self.host_state
             .borrow_mut()
@@ -11391,6 +11418,7 @@ impl JsRuntime {
         }
 
         if self.host_state.borrow().page_hidden {
+            trace_animation_frame_phases(trace_frame, background_ms, tasks_ms, 0.0, 0.0);
             // Keep callbacks queued until the page has a rendering opportunity.
             return Ok(0);
         }
@@ -11479,6 +11507,8 @@ impl JsRuntime {
             return Err(error);
         }
         jobs_result?;
+        let callbacks_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
+        let phase_started = Instant::now();
 
         // A rendering opportunity samples CSS transitions after animation-frame
         // callbacks and their microtask checkpoint. This also queues transition
@@ -11488,6 +11518,13 @@ impl JsRuntime {
         // rendering callbacks (notably navigation). A newly requested rAF is
         // still retained for the next rendering opportunity.
         self.run_until_idle()?;
+        trace_animation_frame_phases(
+            trace_frame,
+            background_ms,
+            tasks_ms,
+            callbacks_ms,
+            phase_started.elapsed().as_secs_f64() * 1000.0,
+        );
         Ok(callbacks_run)
     }
 
