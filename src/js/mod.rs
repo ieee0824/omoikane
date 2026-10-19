@@ -10256,7 +10256,7 @@ impl JsRuntime {
             }
             flush_web_lock_notifications();
             let task = { self.host_state.borrow_mut().event_loop.pop_task() };
-            let Some((_, task)) = task else {
+            let Some((source, task)) = task else {
                 break;
             };
             let task_document_id = match &task {
@@ -10266,7 +10266,25 @@ impl JsRuntime {
                 Task::WebLock { document_id, .. } => Some(*document_id),
                 _ => None,
             };
-            self.run_task(task)?;
+            static TRACE_SLOW_TASKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let trace_slow_tasks = *TRACE_SLOW_TASKS
+                .get_or_init(|| std::env::var_os("OMOIKANE_TRACE_TASKS").is_some());
+            let task_started = trace_slow_tasks.then(std::time::Instant::now);
+            let task_result = self.run_task(task);
+            if let Some(started) = task_started {
+                let elapsed = started.elapsed();
+                if elapsed >= std::time::Duration::from_millis(50) {
+                    eprintln!(
+                        "OMOIKANE_TASK {}",
+                        serde_json::json!({
+                            "source": format!("{source:?}"),
+                            "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
+                            "success": task_result.is_ok(),
+                        })
+                    );
+                }
+            }
+            task_result?;
             self.run_worker_background_tasks();
             self.run_worklet_background_tasks();
             self.run_shared_worker_background_tasks();
