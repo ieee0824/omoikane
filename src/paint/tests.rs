@@ -16,6 +16,37 @@ use crate::test_support::http_fixture::{
 };
 
 #[test]
+fn opaque_fill_repeats_only_the_clipped_rows_and_columns() {
+    let mut canvas = Canvas::new(7, 4);
+    let color = Color::rgba(17, 83, 201, 255);
+    canvas.fill_rect_clipped(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 7.0,
+            height: 4.0,
+        },
+        color,
+        Some(Rect {
+            x: 2.0,
+            y: 1.0,
+            width: 3.0,
+            height: 2.0,
+        }),
+    );
+    for y in 0..4 {
+        for x in 0..7 {
+            let expected = if (2..5).contains(&x) && (1..3).contains(&y) {
+                color
+            } else {
+                Color::rgba(0, 0, 0, 0)
+            };
+            assert_eq!(canvas.pixel(x, y), Some(expected), "pixel ({x}, {y})");
+        }
+    }
+}
+
+#[test]
 fn polygon_clip_hit_testing_includes_boundary_but_not_zero_area_shapes() {
     let square = ClipPathShape::Polygon {
         points: vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
@@ -2487,6 +2518,16 @@ fn composites_transparent_canvas_over_opaque_background() {
     canvas.composite_over(Color::rgb(255, 255, 255));
     assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 255, 255)));
     assert_eq!(canvas.pixel(1, 0), Some(Color::rgb(255, 127, 127)));
+}
+
+#[test]
+fn opaque_canvas_is_unchanged_by_background_composition() {
+    let mut canvas = Canvas::new(2, 1);
+    canvas.set_pixel(0, 0, Color::rgb(1, 2, 3));
+    canvas.set_pixel(1, 0, Color::rgb(40, 50, 60));
+    let original = canvas.clone();
+    canvas.composite_over(Color::rgb(255, 255, 255));
+    assert_eq!(canvas, original);
 }
 
 #[test]
@@ -10221,6 +10262,24 @@ fn nested_render_glyph_cache_reuses_outer_entries_and_remains_active() {
         "nested and post-nested lookups must hit the outer entry"
     );
     assert_eq!(misses, 1, "the outermost lookup must be the only miss");
+}
+
+#[test]
+fn render_glyph_cache_reuses_raster_across_separate_paints() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf");
+    let font = Arc::new(Font::load_from_file(&path).unwrap());
+    let fonts = [font];
+
+    super::with_render_glyph_cache(|| {
+        let _ = super::rasterize_with_fallback(&fonts, 'Z', 19.0);
+    });
+    assert_eq!(super::text::render_glyph_cache_stats(), (0, 1));
+
+    super::with_render_glyph_cache(|| {
+        let _ = super::rasterize_with_fallback(&fonts, 'Z', 19.0);
+    });
+    assert_eq!(super::text::render_glyph_cache_stats(), (1, 0));
 }
 
 // --- Element scroll offsets (issue #245) ---

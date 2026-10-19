@@ -926,6 +926,9 @@ impl Canvas {
     /// browser screenshots use this before encoding to match the opaque page
     /// surface produced by desktop browsers.
     pub(crate) fn composite_over(&mut self, background: Color) {
+        if self.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255) {
+            return;
+        }
         for pixel in self.pixels.chunks_exact_mut(4) {
             let alpha = u32::from(pixel[3]);
             let inverse = 255 - alpha;
@@ -974,15 +977,21 @@ impl Canvas {
 
         if color.a == 255 {
             let row_start = x0 as usize * 4;
-            let row_end = x1 as usize * 4;
+            let row_bytes = (x1 - x0) as usize * 4;
             let stride = self.width as usize * 4;
             let rgba = [color.r, color.g, color.b, color.a];
-            for y in y0 as usize..y1 as usize {
-                for pixel in
-                    self.pixels[y * stride + row_start..y * stride + row_end].chunks_exact_mut(4)
-                {
-                    pixel.copy_from_slice(&rgba);
-                }
+            let first = y0 as usize * stride + row_start;
+            self.pixels[first..first + 4].copy_from_slice(&rgba);
+            let mut filled = 4;
+            while filled < row_bytes {
+                let copied = filled.min(row_bytes - filled);
+                self.pixels
+                    .copy_within(first..first + copied, first + filled);
+                filled += copied;
+            }
+            for y in y0 as usize + 1..y1 as usize {
+                self.pixels
+                    .copy_within(first..first + row_bytes, y * stride + row_start);
             }
             return;
         }
@@ -4540,13 +4549,15 @@ fn partition_children_for_paint<'a>(
     let mut auto_positioned_children = Vec::new();
     let mut positive_positioned_children = Vec::new();
     let item_container = is_flex_or_grid_container(&paint_box_style(layout, resolver));
+    let atomic_inline_nodes: HashSet<_> = layout
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .filter(|fragment| matches!(fragment.content, InlineFragmentContent::AtomicInline(_)))
+        .map(|fragment| fragment.node.identity())
+        .collect();
     for child in &layout.children {
-        if layout.lines.iter().any(|line| {
-            line.fragments.iter().any(|fragment| {
-                matches!(fragment.content, InlineFragmentContent::AtomicInline(_))
-                    && fragment.node == child.node
-            })
-        }) {
+        if atomic_inline_nodes.contains(&child.node.identity()) {
             continue;
         }
         let child_style = paint_box_style(child, resolver);
