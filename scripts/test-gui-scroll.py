@@ -70,8 +70,12 @@ def verify(binary, artifacts, scale, iterations, baseline):
                 gui.command('xdotool', 'mouseup', '5')
                 singles += 1
             before_burst = len(records(gui, 'PAINT'))
-            gui.command('xdotool', 'click', '--repeat', '10', '--delay', '20', '5')
-            expected = (40 * (singles + 20), singles + 20)
+            # Keep input active across several frames even on CI's unoptimized
+            # build, where a single software-painted frame can exceed 200ms.
+            burst_clicks = 40
+            gui.command('xdotool', 'click', '--repeat', str(burst_clicks), '--delay', '30', '5')
+            expected_sources = singles + 2 * burst_clicks
+            expected = (40 * expected_sources, expected_sources)
             def burst_status():
                 page = status(gui, window)
                 if baseline:
