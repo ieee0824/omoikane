@@ -1342,6 +1342,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         install_panic_reporter(reporter, ExecutionSurface::Gui);
     }
     let event_loop = EventLoop::new()?;
+    if let Some(started) = startup_trace {
+        eprintln!(
+            "OMOIKANE_STARTUP {}",
+            json!({
+                "phase": "event_loop_ready",
+                "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+            })
+        );
+    }
     let mut app = BrowserApp::new(&url)?;
     app.startup_trace = startup_trace;
     app.trace_startup("app_ready");
