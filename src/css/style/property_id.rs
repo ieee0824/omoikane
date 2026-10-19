@@ -49,12 +49,10 @@ macro_rules! define_properties {
             /// Returns `None` for shorthands, legacy aliases, custom
             /// properties, and any name this engine does not implement.
             pub(crate) fn parse(name: &str) -> Option<Self> {
-                // `NAMES` is sorted (see `variants_are_declared_in_name_order`),
-                // so this costs the same comparisons as a string-keyed map.
-                Self::NAMES
-                    .binary_search(&name)
-                    .ok()
-                    .map(|index| Self::ALL[index])
+                match name {
+                    $($lh_str => Some(Self::$lh_variant),)+
+                    _ => None,
+                }
             }
 
             /// Returns the canonical CSS property name.
