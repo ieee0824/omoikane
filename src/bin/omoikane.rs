@@ -58,7 +58,7 @@ mod url_bar;
 mod keyboard_tests;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
-const WHEEL_TASK_QUIET_PERIOD: Duration = Duration::from_millis(120);
+const WHEEL_TASK_QUIET_PERIOD: Duration = Duration::from_millis(300);
 const DEFAULT_WINDOW_TITLE: &str = "Omoikane";
 
 #[derive(Clone, Copy)]
