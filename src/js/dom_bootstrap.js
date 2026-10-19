@@ -14311,7 +14311,24 @@ export const __omoikane_service_worker_lifecycle = {};
     transform(a,b,c,d,e,f){const s=this.__s,m=s.style.transform;s.style.transform=[m[0]*a+m[2]*b,m[1]*a+m[3]*b,m[0]*c+m[2]*d,m[1]*c+m[3]*d,m[0]*e+m[2]*f+m[4],m[1]*e+m[3]*f+m[5]];}
     setTransform(a,b,c,d,e,f){if(typeof a==="object"){({a,b,c,d,e,f}=a);}this.__s.style.transform=[Number(a),Number(b),Number(c),Number(d),Number(e),Number(f)];}
     resetTransform(){this.__s.style.transform=[1,0,0,1,0,0];}
-    clearRect(x,y,w,h){const s=this.__s;for(let py=Math.floor(y);py<Math.ceil(y+h);py++)for(let px=Math.floor(x);px<Math.ceil(x+w);px++){const p=transformCanvasPoint(s.style.transform,px,py);blendCanvasPixel(s,p[0],p[1],[0,0,0,0],true);}commitCanvas(this.canvas,s);}
+    clearRect(x,y,w,h){
+      const s=this.__s,m=s.style.transform;
+      if(!s.style.clip&&m[0]===1&&m[1]===0&&m[2]===0&&m[3]===1&&m[4]===0&&m[5]===0){
+        const left=Math.max(0,Math.floor(x)),top=Math.max(0,Math.floor(y));
+        const right=Math.min(s.width,Math.ceil(Number(x)+Number(w)));
+        const bottom=Math.min(s.height,Math.ceil(Number(y)+Number(h)));
+        if(left<right&&top<bottom){
+          if(left===0&&top===0&&right===s.width&&bottom===s.height)s.pixels.fill(0);
+          else for(let row=top;row<bottom;row++)s.pixels.fill(0,(row*s.width+left)*4,(row*s.width+right)*4);
+        }
+      }else{
+        for(let py=Math.floor(y);py<Math.ceil(y+h);py++)for(let px=Math.floor(x);px<Math.ceil(x+w);px++){
+          const p=transformCanvasPoint(m,px,py);
+          blendCanvasPixel(s,p[0],p[1],[0,0,0,0],true);
+        }
+      }
+      commitCanvas(this.canvas,s);
+    }
     fillRect(x,y,w,h){this.beginPath();this.rect(x,y,w,h);this.fill();}
     strokeRect(x,y,w,h){this.beginPath();this.rect(x,y,w,h);this.stroke();}
     beginPath(){const s=this.__s;s.paths=[];s.current=null;}
