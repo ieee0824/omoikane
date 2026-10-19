@@ -216,7 +216,13 @@ impl AsyncBrowserApp {
             window.request_redraw();
         }
         let now = Instant::now();
-        self.next_frame = if update.demand.needs_paint {
+        self.next_frame = if update.deferred_task_turn {
+            // A wheel paint can leave scroll events and timers unprocessed even
+            // when the render demand is Idle. Schedule the owed task turn once
+            // pointer input has been quiet long enough.
+            self.last_pointer_input_at
+                .map_or(now, |last| now.max(last + POINTER_TASK_QUIET_PERIOD))
+        } else if update.demand.needs_paint {
             now
         } else {
             match update.demand.next {
@@ -1021,7 +1027,11 @@ impl ApplicationHandler<AsyncEvent> for AsyncBrowserApp {
         if self
             .last_pointer_input_at
             .is_some_and(|last| now >= last + POINTER_TASK_QUIET_PERIOD)
+            && !self.page_busy
         {
+            // Keep the quiet deadline while a paint is in flight. Its update
+            // may replace next_frame with Idle before deferred scroll events
+            // and page tasks get their turn.
             self.last_pointer_input_at = None;
             self.next_frame = now;
         }

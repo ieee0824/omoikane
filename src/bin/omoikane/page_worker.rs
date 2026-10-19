@@ -122,6 +122,7 @@ impl NativeWheel {
 pub(super) struct PageUpdate {
     pub(super) frame_completed: bool,
     pub(super) navigation_completed: bool,
+    pub(super) deferred_task_turn: bool,
     pub(super) frame: Option<BrowserFrame>,
     pub(super) paint_trace: Option<PagePaintTrace>,
     pub(super) demand: RenderDemand,
@@ -227,6 +228,7 @@ impl PageWorker {
                         let _ = updates.send(PageUpdate {
                             frame_completed: false,
                             navigation_completed: true,
+                            deferred_task_turn: false,
                             frame: None,
                             paint_trace: None,
                             demand: RenderDemand {
@@ -345,6 +347,7 @@ struct PageOwner {
     /// A wheel's Document must get a paint attempt before another task turn.
     /// This tracks worker painting, not native surface presentation.
     pending_wheel_paint: Option<u64>,
+    deferred_task_turn: bool,
 }
 
 impl PageOwner {
@@ -377,6 +380,7 @@ impl PageOwner {
             find_document: clock_document,
             cookie_changes,
             pending_wheel_paint: None,
+            deferred_task_turn: false,
         })
     }
 
@@ -396,6 +400,7 @@ impl PageOwner {
             Navigate(url) => {
                 self.session.dispatch("Page.navigate", json!({"url":url}))?;
                 self.pending_wheel_paint = None;
+                self.deferred_task_turn = false;
             }
             Viewport(width, height) => {
                 self.viewport = (width, height);
@@ -473,7 +478,8 @@ impl PageOwner {
         {
             self.pending_wheel_paint = None;
         }
-        let run_tasks = run_tasks && self.pending_wheel_paint.is_none();
+        let wheel_paint = self.pending_wheel_paint.is_some();
+        let run_tasks = run_tasks && !wheel_paint;
         // The command may have waited behind a long script. Use execution time
         // and never move the page clock back behind an intervening input.
         let at = Instant::now().max(at).max(self.clock_at);
@@ -493,6 +499,11 @@ impl PageOwner {
         // A canceled wheel can leave pixels unchanged. A successful no-op
         // attempt still releases the task turn; a paint error retains it.
         self.pending_wheel_paint = None;
+        if wheel_paint {
+            self.deferred_task_turn = true;
+        } else if run_tasks {
+            self.deferred_task_turn = false;
+        }
         if painted {
             self.last_frame = self.cache.frame().cloned();
             if let Some(started) = started {
@@ -546,6 +557,7 @@ impl PageOwner {
         PageUpdate {
             frame_completed,
             navigation_completed,
+            deferred_task_turn: self.deferred_task_turn,
             frame: self.last_frame.take(),
             paint_trace: self.last_paint_trace.take(),
             demand: self.cache.demand(&self.session),
@@ -638,8 +650,10 @@ mod tests {
             .expect("wheel state must be painted first");
         assert_eq!(&scrolled.pixels()[..4], &[0, 0, 255, 255]);
         assert!(page.pending_wheel_paint.is_none());
+        assert!(page.snapshot(true, false, None).deferred_task_turn);
 
         page.frame(Instant::now(), true).unwrap();
+        assert!(!page.deferred_task_turn);
         assert_eq!(
             background_events(&page).as_deref(),
             Some("[\"wheel\",\"timer\",\"raf\"]")
@@ -653,6 +667,7 @@ mod tests {
         )))
         .unwrap();
         assert!(page.pending_wheel_paint.is_none());
+        assert!(!page.deferred_task_turn);
     }
 
     #[test]
@@ -674,8 +689,10 @@ mod tests {
             "canceled wheel must not invent a paint"
         );
         assert!(page.pending_wheel_paint.is_none());
+        assert!(page.deferred_task_turn);
         assert_eq!(background_events(&page), None);
         page.frame(Instant::now(), true).unwrap();
+        assert!(!page.deferred_task_turn);
         assert_eq!(
             background_events(&page).as_deref(),
             Some("[\"wheel\",\"timer\"]")
