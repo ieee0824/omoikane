@@ -74,15 +74,24 @@ def verify(binary, artifacts):
             initial = trace_records(log, 'STARTUP')
             first_page = next(row for row in initial
                               if row['phase'] == 'first_page_redraw_attempted')
-            gui.wait_for('startup script completed',
-                         lambda: gui.command('xdotool', 'getwindowname', window),
-                         lambda title: title in ('Initialized', 'Timer fired'))
-            pixel = ImageGrab.grab(xdisplay=gui.env['DISPLAY']).convert('RGB').getpixel(point)
-            assert pixel == (0, 0, 255), ('initialized document not presented', pixel)
+            observed_timer = {}
+
+            def title():
+                value = gui.command('xdotool', 'getwindowname', window)
+                if value == 'Timer fired':
+                    observed_timer.setdefault('at', time.monotonic())
+                return value
+
+            gui.wait_for('startup script completed', title,
+                         lambda value: value in ('Initialized', 'Timer fired'))
+            # X11 title changes can be observed before the surface is presented.
+            pixel = gui.wait_for(
+                'initialized document presented',
+                lambda: ImageGrab.grab(xdisplay=gui.env['DISPLAY']).convert('RGB').getpixel(point),
+                lambda value: value == (0, 0, 255))
             gui.wait_for('new startup timer fired',
-                         lambda: gui.command('xdotool', 'getwindowname', window),
-                         lambda title: title == 'Timer fired')
-            timer_ms = (time.monotonic() - delivered['at']) * 1000
+                         title, lambda value: value == 'Timer fired')
+            timer_ms = (observed_timer['at'] - delivered['at']) * 1000
             assert timer_ms >= 800, ('startup timer fired too early', timer_ms)
             report = {'first_page_redraw_ms': first_page['elapsed_ms'],
                       'parsed_pixel': [255, 0, 0], 'initialized_pixel': list(pixel),
