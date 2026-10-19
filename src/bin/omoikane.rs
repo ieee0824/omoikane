@@ -792,15 +792,12 @@ fn platform_mouse_button(button: MouseButton) -> Option<PlatformMouseButton> {
 }
 
 fn document_window_title(session: &mut CdpSession) -> Result<String, omoikane::cdp::JsonRpcError> {
-    let result = session.dispatch(
-        "Runtime.evaluate",
-        json!({ "expression": "document.title", "returnByValue": true }),
-    )?;
-    Ok(result["result"]["value"]
-        .as_str()
-        .filter(|title| !title.is_empty())
-        .unwrap_or(DEFAULT_WINDOW_TITLE)
-        .to_string())
+    let title = session.document_title_without_tasks()?;
+    Ok(if title.is_empty() {
+        DEFAULT_WINDOW_TITLE.to_string()
+    } else {
+        title
+    })
 }
 
 fn changed_window_title(current: &mut String, next: String) -> Option<String> {
@@ -1332,6 +1329,28 @@ mod tests {
             document_window_title(&mut session).unwrap(),
             DEFAULT_WINDOW_TITLE
         );
+    }
+
+    #[test]
+    fn reading_window_title_does_not_run_due_page_timer() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": "data:text/html,<title>Before</title>" }),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "setTimeout(() => document.title = 'After', 1000)" }),
+            )
+            .unwrap();
+        session.advance_clock_without_tasks(1000);
+
+        assert_eq!(document_window_title(&mut session).unwrap(), "Before");
+        render_browser_frame(&mut session, 100, 100, 0).unwrap();
+        assert_eq!(document_window_title(&mut session).unwrap(), "After");
     }
 
     #[test]

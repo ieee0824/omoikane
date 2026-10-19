@@ -492,6 +492,17 @@ impl CdpSession {
         self.runtime.document()
     }
 
+    /// Reads the current document title for native chrome without pumping page tasks.
+    /// A GUI redraw must not run unrelated timers or promise jobs just to update
+    /// the window title.
+    pub fn document_title_without_tasks(&mut self) -> Result<String, JsonRpcError> {
+        let value = self.runtime.eval("document.title").map_err(js_error)?;
+        Ok(value
+            .as_string()
+            .map(|title| title.to_std_string_escaped())
+            .unwrap_or_default())
+    }
+
     fn omoikane_find_in_page(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
         let action = match require_string(params, "action")?.as_str() {
             "start" => FindInPageAction::Start,
