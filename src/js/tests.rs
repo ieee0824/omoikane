@@ -5850,6 +5850,67 @@ fn location_exposes_navigation_methods() {
 }
 
 #[test]
+fn location_relative_navigation_uses_live_document_base() {
+    let document = crate::html::TreeBuilder::parse(
+        r#"<html><head><base href="/first/"></head><body></body></html>"#,
+    )
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://example.test/page").unwrap();
+    runtime
+        .eval(
+            r#"location.assign('one');
+               document.querySelector('base').setAttribute('href', '/second/');
+               location.replace('two');
+               location.href = 'three';
+               document.querySelector('base').remove();
+               location.assign('four');"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        runtime.take_navigation_requests(),
+        vec![
+            NavigationRequest::Navigate {
+                url: "https://example.test/first/one".into(),
+                replace: false
+            },
+            NavigationRequest::Navigate {
+                url: "https://example.test/second/two".into(),
+                replace: true
+            },
+            NavigationRequest::Navigate {
+                url: "https://example.test/second/three".into(),
+                replace: false
+            },
+            NavigationRequest::Navigate {
+                url: "https://example.test/four".into(),
+                replace: false
+            },
+        ]
+    );
+}
+
+#[test]
+fn location_relative_navigation_uses_updated_document_url() {
+    let mut runtime = JsRuntime::with_document_and_url(
+        crate::html::TreeBuilder::parse("<html><body></body></html>").document(),
+        "https://example.test/old/page",
+    )
+    .unwrap();
+    runtime.commit_history_api_url("https://example.test/new/page");
+    runtime.eval("location.assign('next')").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        runtime.take_navigation_requests(),
+        vec![NavigationRequest::Navigate {
+            url: "https://example.test/new/next".into(),
+            replace: false,
+        }]
+    );
+}
+
+#[test]
 fn form_data_preserves_order_duplicates_and_mutation_semantics() {
     let mut runtime = runtime_from_html(
         r#"<form id="f"><input name="a" value="one"><input name="a" value="two"><input name="off" value="x" disabled><input type="checkbox" name="unchecked"><input type="checkbox" name="checked" value="yes" checked><textarea name="note">line1
@@ -25483,7 +25544,7 @@ fn iframe_location_navigation_resolves_relative_to_caller_document() {
         ),
     ]);
     let doc = TreeBuilder::parse(
-        r#"<html><body><iframe id="f" src="/frame/child.html"></iframe></body></html>"#,
+        r#"<html><head><base href="/caller/base/"></head><body><iframe id="f" src="/frame/child.html"></iframe></body></html>"#,
     )
     .document();
     let mut runtime = JsRuntime::with_document_and_url(
@@ -25516,9 +25577,68 @@ fn iframe_location_navigation_resolves_relative_to_caller_document() {
                 })()"#
         ),
         Some(format!(
-            "http://127.0.0.1:{port}/caller/href.html|http://127.0.0.1:{port}/caller/assign.html|http://127.0.0.1:{port}/caller/replace.html|http://127.0.0.1:{port}/frame/state.html"
+            "http://127.0.0.1:{port}/caller/base/href.html|http://127.0.0.1:{port}/caller/base/assign.html|http://127.0.0.1:{port}/caller/base/replace.html|http://127.0.0.1:{port}/frame/state.html"
         )),
         "Location uses the caller base while History state URLs use the target Document"
+    );
+}
+
+#[test]
+fn iframe_script_location_uses_its_own_document_base() {
+    let (port, _server) = spawn_path_http_server(&[
+        (
+            "/frame/child.html",
+            "text/html",
+            "<html><head><base href='/frame/alternate/'></head><body><script>location.assign('next.html')</script></body></html>",
+        ),
+        (
+            "/frame/alternate/next.html",
+            "text/html",
+            "<html><body><p id='arrived'>done</p></body></html>",
+        ),
+    ]);
+    let document = crate::html::TreeBuilder::parse(
+        r#"<html><head><base href="/top/"></head><body><iframe id="f" src="/frame/child.html"></iframe></body></html>"#,
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document_and_url(
+        document,
+        &format!("http://127.0.0.1:{port}/top/page.html"),
+    )
+    .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            "document.getElementById('f').contentDocument.URL"
+        ),
+        Some(format!("http://127.0.0.1:{port}/frame/alternate/next.html")),
+    );
+}
+
+#[test]
+fn srcdoc_script_location_inherits_parent_document_base() {
+    let (port, _server) = spawn_path_http_server(&[(
+        "/frame/next.html",
+        "text/html",
+        "<html><body>next</body></html>",
+    )]);
+    let document = crate::html::TreeBuilder::parse(
+        r#"<html><body><iframe id="f" srcdoc="<script>location.assign('next.html')</script>"></iframe></body></html>"#,
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document_and_url(
+        document,
+        &format!("http://127.0.0.1:{port}/frame/parent.html"),
+    )
+    .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            "document.getElementById('f').contentDocument.URL"
+        ),
+        Some(format!("http://127.0.0.1:{port}/frame/next.html")),
     );
 }
 

@@ -8654,7 +8654,10 @@ export const __omoikane_service_worker_lifecycle = {};
       requireNodeReceiver(this);
       const doc = internalNodeType(this) === 9 ? this : internalOwnerDocument(this);
       if (!doc) return "about:blank";
-      const fallback = doc.URL || "about:blank";
+      const documentURL = doc.URL || "about:blank";
+      const fallback = documentURL === "about:blank" || documentURL === "about:srcdoc"
+        ? nativeDocumentBaseURL(doc.__id) || documentURL
+        : documentURL;
       const base = doc.querySelector("base[href]");
       if (base) {
         try { return new URL(base.getAttribute("href"), fallback).href; }
@@ -10579,7 +10582,7 @@ export const __omoikane_service_worker_lifecycle = {};
           return new URL(String(value), base).href;
         };
         const callerBaseURL = () => {
-          return effectiveDocumentBaseURL(globalThis.document);
+          return globalThis.document.baseURI;
         };
         const captureHistoryEntry = (generation, nextAccess) => {
           const attribute = hasFrameSrcdoc(iframe) ? "srcdoc" : "src";
@@ -18315,8 +18318,8 @@ export const __omoikane_service_worker_lifecycle = {};
   const childLocation = {
     get href() { return childNavigation("location"); },
     set href(value) { this.assign(value); },
-    assign(value) { childNavigation("assign", new URL(String(value), nativeDocumentBaseURL(navigationDocumentId) || this.href).href); },
-    replace(value) { childNavigation("replace", new URL(String(value), nativeDocumentBaseURL(navigationDocumentId) || this.href).href); },
+    assign(value) { childNavigation("assign", new URL(String(value), document.baseURI).href); },
+    replace(value) { childNavigation("replace", new URL(String(value), document.baseURI).href); },
     reload() { childNavigation("reload"); },
     toString() { return this.href; },
   };
@@ -18339,7 +18342,7 @@ export const __omoikane_service_worker_lifecycle = {};
     if (url == null) return;
     const raw = String(url);
     if (raw === "") return;
-    const href = String(__omoikane_resolve_url(raw));
+    const href = new URL(raw, document.baseURI).href;
     const match = href.match(/^(.*?):\/\/([^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/);
     if (!match || (requireSameOrigin && (match[1] + "://" + match[2]) !== __loc.origin)) {
       throw new DOMException("History state URL must be same-origin", "SecurityError");
