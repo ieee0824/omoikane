@@ -168,6 +168,7 @@ impl BrowserApp {
             omoikane::paint::take_last_render_timings();
             Instant::now()
         });
+        let startup_pending = self.session.has_pending_document_startup();
         let painted = if let Some(elapsed_ms) = elapsed_ms {
             self.update_page_frame(layout.page_viewport(), elapsed_ms)?
         } else {
@@ -180,6 +181,11 @@ impl BrowserApp {
         };
         let frame_time = started.map(|start| start.elapsed()).unwrap_or_default();
         let timings = started.map(|_| omoikane::paint::take_last_render_timings());
+        if startup_pending && !self.session.has_pending_document_startup() {
+            // Match navigation's clock rebase: timers created at the end of
+            // slow startup must not inherit earlier script-fetch wall time.
+            self.advance_page_clock(Instant::now());
+        }
         self.rebase_clock_if_document_changed();
         self.sync_find_document();
         self.sync_url_bar();

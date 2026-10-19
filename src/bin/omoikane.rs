@@ -924,6 +924,7 @@ impl ApplicationHandler for BrowserApp {
         self.sync_media_environment();
         self.context = Some(context);
         self.surface = Some(surface);
+        self.session.set_deferred_document_startup(true);
         let (width, height) = self.chrome_layout().page_viewport();
         self.session.set_viewport(width, height);
     }

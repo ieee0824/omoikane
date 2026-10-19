@@ -3,6 +3,33 @@
 
 use super::*;
 
+#[derive(Debug)]
+pub(super) struct PendingDocumentStartup {
+    base_url: Option<crate::http::Url>,
+    started: std::time::Instant,
+    first_frame_due: bool,
+}
+
+fn finish_document_startup(
+    runtime: &mut JsRuntime,
+    base_url: Option<&crate::http::Url>,
+    started: std::time::Instant,
+) -> Result<(), CdpSessionError> {
+    let errors = runtime.execute_document_scripts(base_url);
+    trace_startup_page("document_scripts_finished", started);
+    if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+        for error in errors {
+            eprintln!("[omoikane][js-error] {error}");
+        }
+    }
+    runtime
+        .wire_inline_event_handlers()
+        .map_err(CdpSessionError::JavaScript)?;
+    runtime.fire_load().map_err(CdpSessionError::JavaScript)?;
+    trace_startup_page("load_finished", started);
+    Ok(())
+}
+
 fn trace_startup_page(phase: &str, started: std::time::Instant) {
     if std::env::var_os("OMOIKANE_TRACE_STARTUP").is_some() {
         eprintln!(
@@ -22,6 +49,47 @@ fn is_fragment_only_navigation(current: &str, target: &str) -> bool {
 }
 
 impl CdpSession {
+    /// Lets a native host paint parsed HTML before running initial page scripts.
+    /// The first event-loop opportunity exposes the parsed document; the next
+    /// executes startup in normal parser/defer order and delivers load events.
+    /// Embedders must keep driving opportunities while render demand is active.
+    pub fn set_deferred_document_startup(&mut self, enabled: bool) {
+        self.defer_document_startup = enabled;
+    }
+
+    /// Returns whether native presentation is still waiting for initial scripts.
+    /// Hosts use completion to rebase their wall clock, so newly created timers
+    /// do not inherit time spent fetching and executing startup scripts.
+    pub fn has_pending_document_startup(&self) -> bool {
+        self.pending_document_startup.is_some()
+    }
+
+    pub(super) fn advance_deferred_document_startup(
+        &mut self,
+        elapsed_ms: u64,
+    ) -> Result<bool, JsonRpcError> {
+        let Some(pending) = self.pending_document_startup.as_mut() else {
+            return Ok(false);
+        };
+        self.runtime.advance_clock_without_tasks(elapsed_ms);
+        if pending.first_frame_due {
+            pending.first_frame_due = false;
+            trace_startup_page("parsed_document_frame", pending.started);
+            return Ok(true);
+        }
+        let pending = self.pending_document_startup.take().unwrap();
+        finish_document_startup(
+            &mut self.runtime,
+            pending.base_url.as_ref(),
+            pending.started,
+        )
+        .map_err(|error| JsonRpcError {
+            code: -32000,
+            message: error.to_string(),
+        })?;
+        Ok(true)
+    }
+
     fn is_javascript_url(url: &str) -> bool {
         url::Url::parse(url).is_ok_and(|url| url.scheme() == "javascript")
     }
@@ -140,7 +208,9 @@ impl CdpSession {
             NavigationCommit::Push
         };
         let result = self.navigate_to(&url, commit)?;
-        self.drive_navigation_requests()?;
+        if self.pending_document_startup.is_none() {
+            self.drive_navigation_requests()?;
+        }
         Ok(result)
     }
 
@@ -385,7 +455,7 @@ impl CdpSession {
     fn drive_navigation_requests_inner(&mut self, pump_tasks: bool) -> Result<(), JsonRpcError> {
         const MAX_SCRIPT_NAVIGATIONS: usize = 32;
         for _ in 0..MAX_SCRIPT_NAVIGATIONS {
-            if pump_tasks {
+            if pump_tasks && self.pending_document_startup.is_none() {
                 self.runtime.run_until_idle().map_err(js_error)?;
             } else {
                 self.runtime.promote_navigation_tasks_without_running();
@@ -742,19 +812,21 @@ impl CdpSession {
         self.dispatch_document_departure();
 
         let base_url = url.parse::<crate::http::Url>().ok();
-        let script_errors = runtime.execute_document_scripts(base_url.as_ref());
-        trace_startup_page("document_scripts_finished", install_started);
-        if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
-            for error in script_errors {
-                eprintln!("[omoikane][js-error] {error}");
-            }
-        }
-        runtime
-            .wire_inline_event_handlers()
-            .map_err(CdpSessionError::JavaScript)?;
-        runtime.fire_load().map_err(CdpSessionError::JavaScript)?;
-        trace_startup_page("load_finished", install_started);
+        let pending_startup = if self.defer_document_startup {
+            runtime
+                .eval("document.__readyState = 'loading'")
+                .map_err(CdpSessionError::JavaScript)?;
+            Some(PendingDocumentStartup {
+                base_url,
+                started: install_started,
+                first_frame_due: true,
+            })
+        } else {
+            finish_document_startup(&mut runtime, base_url.as_ref(), install_started)?;
+            None
+        };
 
+        self.pending_document_startup = pending_startup;
         self.runtime = runtime;
         self.mouse_pressed_target = None;
         self.touch_target = None;
@@ -871,6 +943,7 @@ impl CdpSession {
         self.runtime.terminate_workers();
         self.dispatch_document_departure();
 
+        self.pending_document_startup = None;
         self.runtime = runtime;
         self.mouse_pressed_target = None;
         self.touch_target = None;

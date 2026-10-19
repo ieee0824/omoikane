@@ -15,6 +15,104 @@ use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 #[test]
+fn native_startup_paints_parsed_document_before_scripts_and_load() {
+    let mut session = CdpSession::new().unwrap();
+    session.set_deferred_document_startup(true);
+    session
+        .install_document(
+            "https://example.test/",
+            "<style>body { margin:0; background:red }</style><body><script>
+             globalThis.started = true;
+             globalThis.loads = 0;
+             addEventListener('load', () => loads++);
+             document.body.style.background = 'blue';
+             </script></body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    assert_eq!(
+        session
+            .runtime
+            .eval("typeof started")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "undefined"
+    );
+    assert_eq!(session.render_demand(None).next, NextRendering::EveryFrame);
+    let first = crate::frame::render_browser_frame(&mut session, 100, 100, 0).unwrap();
+    assert_eq!(&first.pixels()[0..4], &[255, 0, 0, 255]);
+    assert_eq!(session.render_demand(None).next, NextRendering::EveryFrame);
+    let second = crate::frame::render_browser_frame(&mut session, 100, 100, 16).unwrap();
+    assert_eq!(&second.pixels()[0..4], &[0, 0, 255, 255]);
+    assert_eq!(
+        session.runtime.eval("loads").unwrap().as_number(),
+        Some(1.0)
+    );
+    session.drive_event_loop(16).unwrap();
+    assert_eq!(
+        session.runtime.eval("loads").unwrap().as_number(),
+        Some(1.0)
+    );
+}
+
+#[test]
+fn navigation_replaces_unstarted_document_scripts() {
+    let mut session = CdpSession::new().unwrap();
+    session.set_deferred_document_startup(true);
+    session
+        .install_document(
+            "https://example.test/old",
+            "<script>localStorage.setItem('oldRan', 'yes')</script>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session
+        .install_document(
+            "https://example.test/new",
+            "<script>globalThis.newRan = true</script>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session.drive_event_loop(0).unwrap();
+    session.drive_event_loop(16).unwrap();
+    assert_eq!(
+        session.runtime.eval("newRan").unwrap().as_boolean(),
+        Some(true)
+    );
+    assert!(
+        session
+            .runtime
+            .eval("localStorage.getItem('oldRan')")
+            .unwrap()
+            .is_null()
+    );
+}
+
+#[test]
+fn static_render_settles_deferred_document_startup() {
+    let mut session = CdpSession::new().unwrap();
+    session.set_deferred_document_startup(true);
+    session
+        .install_document(
+            "https://example.test/",
+            "<body><script>document.title = 'Initialized'</script></body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session.settle_for_render().unwrap();
+    assert_eq!(
+        session.document_title_without_tasks().unwrap(),
+        "Initialized"
+    );
+}
+
+#[test]
 fn task_pump_limit_survives_navigation_and_defers_extra_timer_tasks() {
     let mut session = CdpSession::new().unwrap();
     session.set_task_pump_limit(NonZeroUsize::new(1));

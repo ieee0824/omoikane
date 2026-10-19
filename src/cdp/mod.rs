@@ -185,6 +185,8 @@ pub(crate) struct SessionSettleTimings {
 pub struct CdpSession {
     runtime: JsRuntime,
     task_pump_limit: Option<std::num::NonZeroUsize>,
+    defer_document_startup: bool,
+    pending_document_startup: Option<page::PendingDocumentStartup>,
     media_emulation: emulation::State,
     _storage_lifetime: TabStorageLifetime,
     storage_manager: StorageManager,
@@ -326,6 +328,8 @@ impl CdpSession {
         let mut session = Self {
             runtime,
             task_pump_limit: None,
+            defer_document_startup: false,
+            pending_document_startup: None,
             _storage_lifetime: storage_lifetime,
             storage_manager,
             storage_session_id,
@@ -611,6 +615,9 @@ impl CdpSession {
     /// animation frame, then any resulting Location/History request installs
     /// the next Document.
     pub fn drive_event_loop(&mut self, elapsed_ms: u64) -> Result<(), JsonRpcError> {
+        if self.advance_deferred_document_startup(elapsed_ms)? {
+            return self.commit_pending_navigation_requests();
+        }
         self.runtime
             .run_animation_frame(elapsed_ms)
             .map_err(js_error)?;
@@ -627,6 +634,9 @@ impl CdpSession {
 
         let mut timings = SessionSettleTimings::default();
         for _ in 0..MAX_NAVIGATION_PASSES {
+            while self.pending_document_startup.is_some() {
+                self.advance_deferred_document_startup(0)?;
+            }
             let previous_generation = self.document_generation;
             let timers_start = Instant::now();
             self.runtime

@@ -92,7 +92,11 @@ impl CdpSession {
     pub fn render_demand(&self, last_presented: Option<&PaintStateKey>) -> RenderDemand {
         RenderDemand {
             needs_paint: last_presented != Some(&self.paint_state_key()),
-            next: self.runtime.next_rendering(),
+            next: if self.pending_document_startup.is_some() {
+                NextRendering::EveryFrame
+            } else {
+                self.runtime.next_rendering()
+            },
         }
     }
 }
