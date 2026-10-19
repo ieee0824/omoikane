@@ -22,6 +22,16 @@ type CounterSet = Vec<Counter>;
 type Snapshot = HashMap<String, Vec<i32>>;
 
 pub(super) fn prepare_counter_values(node: &NodeHandle, resolver: &mut StyleResolver) {
+    // Ordinary list markers use list_item_ordinal and do not need these snapshots.
+    // A previous pass may have populated snapshots before a stylesheet was removed.
+    let started = std::env::var_os("OMOIKANE_TRACE_PAINT").map(|_| std::time::Instant::now());
+    let required = resolver.may_read_generated_counters();
+    let guard_ms = started.map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
+    if !required {
+        resolver.replace_counter_values(HashMap::new());
+        trace_counter_prepass(started, required, guard_ms);
+        return;
+    }
     let mut root = node.clone();
     while let Some(parent) = root.parent_node() {
         root = parent;
@@ -47,6 +57,20 @@ pub(super) fn prepare_counter_values(node: &NodeHandle, resolver: &mut StyleReso
     processor
         .resolver
         .replace_counter_values(processor.snapshots);
+    trace_counter_prepass(started, required, guard_ms);
+}
+
+fn trace_counter_prepass(started: Option<std::time::Instant>, required: bool, guard_ms: f64) {
+    if let Some(started) = started {
+        eprintln!(
+            "OMOIKANE_COUNTER_PREPASS {}",
+            serde_json::json!({
+                "required": required,
+                "guard_ms": guard_ms,
+                "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+            })
+        );
+    }
 }
 
 struct Processor<'a> {

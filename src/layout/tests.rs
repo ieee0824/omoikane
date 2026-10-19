@@ -3024,6 +3024,180 @@ fn generated_css_counters_follow_element_and_pseudo_order() {
 }
 
 #[test]
+fn ordinary_list_needs_no_generated_counter_snapshots() {
+    let list = NodeHandle::element("ol");
+    let item = NodeHandle::element("li");
+    list.append_child(item.clone());
+    let mut resolver = StyleResolver::new();
+    let _ = layout_tree(
+        &list,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    assert!(!resolver.may_read_generated_counters());
+    assert_eq!(list_item_ordinal(&item), 1);
+}
+
+#[test]
+fn removed_counter_reader_clears_old_snapshots() {
+    let body = NodeHandle::element("body");
+    let item = NodeHandle::element("div");
+    body.append_child(item.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { counter-reset: x; } div { counter-increment: x; } div::before { content: counter(x); }").unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 320.0,
+        height: 0.0,
+    };
+    let _ = layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert_eq!(
+        resolver.counter_values(&item, PseudoElement::Before, "x"),
+        Some(&[1][..])
+    );
+
+    // A fresh resolver models the stylesheet removal, while an old snapshot
+    // deliberately models state carried across consecutive layout passes.
+    let mut without_reader = StyleResolver::new();
+    let mut old = std::collections::HashMap::new();
+    old.insert(
+        (item.identity(), Some(PseudoElement::Before)),
+        std::collections::HashMap::from([("x".to_string(), vec![1])]),
+    );
+    without_reader.replace_counter_values(old);
+    let _ = layout_tree(&body, &mut without_reader, viewport).unwrap();
+    assert_eq!(
+        without_reader.counter_values(&item, PseudoElement::Before, "x"),
+        None
+    );
+}
+
+#[test]
+fn generated_counter_content_resolves_inline_custom_property_and_fallback() {
+    let body = NodeHandle::element("body");
+    let inline = NodeHandle::element("span");
+    inline.set_attribute("class", "inline");
+    inline.set_attribute("style", "--generated: counter(section)");
+    let fallback = NodeHandle::element("span");
+    fallback.set_attribute("class", "fallback");
+    body.append_child(inline.clone());
+    body.append_child(fallback.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { counter-reset: section; } \
+             span { counter-increment: section; display: inline; } \
+             .inline::before { content: var(--generated); } \
+             .fallback::before { content: var(--missing, counter(section)); }",
+        )
+        .unwrap(),
+    );
+    assert!(resolver.may_read_generated_counters());
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(generated_text_for_node(&layout, &inline), "1");
+    assert_eq!(generated_text_for_node(&layout, &fallback), "2");
+    assert_eq!(
+        resolver.counter_values(&inline, PseudoElement::Before, "section"),
+        Some(&[1][..])
+    );
+    assert_eq!(
+        resolver.counter_values(&fallback, PseudoElement::Before, "section"),
+        Some(&[2][..])
+    );
+}
+
+#[test]
+fn filled_pseudo_animation_preserves_generated_counter_content() {
+    let body = NodeHandle::element("body");
+    let item = NodeHandle::element("div");
+    body.append_child(item.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes fade { from { opacity: 0; } to { opacity: 1; } } \
+             body { counter-reset: x; } div { display: inline; counter-increment: x; } \
+             div::before { content: counter(x); animation-name: fade; \
+             animation-duration: 0.1s; animation-fill-mode: forwards; }",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 320.0,
+        height: 0.0,
+    };
+    resolver.set_animation_time_ms(0.0);
+    let _ = layout_tree(&body, &mut resolver, viewport).unwrap();
+    resolver.set_animation_time_ms(1000.0);
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert!(!resolver.has_running_animations());
+    assert!(resolver.may_read_generated_counters());
+    assert_eq!(generated_text_for_node(&layout, &item), "1");
+    assert_eq!(
+        resolver.counter_values(&item, PseudoElement::Before, "x"),
+        Some(&[1][..])
+    );
+}
+
+#[test]
+fn all_inherit_can_read_inline_element_counter_content() {
+    let body = NodeHandle::element("body");
+    let item = NodeHandle::element("div");
+    item.set_attribute("style", "content: counter(x)");
+    body.append_child(item.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { counter-reset: x; } div { display: inline; counter-increment: x; } \
+             div::before { all: var(--missing, inherit); }",
+        )
+        .unwrap(),
+    );
+    assert!(resolver.may_read_generated_counters());
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    // all: inherit also inherits counter-increment, so the pseudo adds the second step.
+    assert_eq!(generated_text_for_node(&layout, &item), "2");
+    assert_eq!(
+        resolver.counter_values(&item, PseudoElement::Before, "x"),
+        Some(&[2][..])
+    );
+}
+
+#[test]
 fn pseudo_counter_properties_run_before_and_after_element_children() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

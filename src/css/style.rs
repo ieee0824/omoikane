@@ -1,6 +1,7 @@
 //! CSS cascade and computed style resolution.
 
 mod animation;
+mod counter_readers;
 mod font_palette;
 mod forced_colors;
 mod generic_transform;
