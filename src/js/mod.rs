@@ -11393,9 +11393,7 @@ impl JsRuntime {
     pub fn run_animation_frame(&mut self, elapsed_ms: u64) -> JsResult<usize> {
         let trace_frame = std::env::var_os("OMOIKANE_TRACE_TASKS").is_some();
         let phase_started = Instant::now();
-        self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
-        self.advance_worker_clocks(elapsed_ms);
-        self.advance_worklet_clocks(elapsed_ms);
+        self.advance_clock_without_tasks(elapsed_ms);
         self.run_worker_background_tasks();
         self.run_worklet_background_tasks();
         let background_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
@@ -11526,6 +11524,15 @@ impl JsRuntime {
             phase_started.elapsed().as_secs_f64() * 1000.0,
         );
         Ok(callbacks_run)
+    }
+
+    /// Advances the page, worker and worklet clocks without running queued tasks.
+    /// Native hosts use this before input so newly created timers start at the
+    /// current page time while slow page tasks remain deferred.
+    pub fn advance_clock_without_tasks(&mut self, elapsed_ms: u64) {
+        self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
+        self.advance_worker_clocks(elapsed_ms);
+        self.advance_worklet_clocks(elapsed_ms);
     }
 
     async fn run_animation_frame_async(&mut self, elapsed_ms: u64) -> JsResult<usize> {

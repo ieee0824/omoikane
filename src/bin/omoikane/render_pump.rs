@@ -94,21 +94,14 @@ impl BrowserApp {
 
     pub(super) fn rebase_clock_if_document_changed(&mut self) {
         if self.clock_document != self.session.document_generation() {
-            self.deferred_page_elapsed_ms = 0;
             self.advance_page_clock(Instant::now());
         }
-    }
-
-    fn take_page_elapsed(&mut self, elapsed_ms: u64) -> u64 {
-        let elapsed = self.deferred_page_elapsed_ms.saturating_add(elapsed_ms);
-        self.deferred_page_elapsed_ms = 0;
-        elapsed
     }
 
     /// Accounts for elapsed page time without letting page tasks delay native input.
     pub(super) fn defer_page_time_before_input(&mut self, now: Instant) {
         let elapsed_ms = self.advance_page_clock(now);
-        self.deferred_page_elapsed_ms = self.deferred_page_elapsed_ms.saturating_add(elapsed_ms);
+        self.session.advance_clock_without_tasks(elapsed_ms);
         self.rebase_clock_if_document_changed();
     }
 
@@ -145,7 +138,6 @@ impl BrowserApp {
         elapsed_ms: u64,
         os_exposure: bool,
     ) -> Result<(), Box<dyn Error>> {
-        let elapsed_ms = self.take_page_elapsed(elapsed_ms);
         self.draw_with_page_mode(Some(elapsed_ms), os_exposure)
     }
 
@@ -155,7 +147,7 @@ impl BrowserApp {
         elapsed_ms: u64,
         os_exposure: bool,
     ) -> Result<(), Box<dyn Error>> {
-        self.deferred_page_elapsed_ms = self.deferred_page_elapsed_ms.saturating_add(elapsed_ms);
+        self.session.advance_clock_without_tasks(elapsed_ms);
         self.draw_with_page_mode(None, os_exposure)
     }
 
@@ -248,14 +240,13 @@ mod tests {
     }
 
     #[test]
-    fn wheel_paint_defers_page_clock_until_tasks_resume() {
+    fn wheel_paint_advances_clock_without_running_tasks() {
         let mut app = BrowserApp::new(
             "data:text/html,<script>window.fired=false;setTimeout(()=>fired=true,100)</script>",
         )
         .unwrap();
         app.start_initial_navigation().unwrap();
         app.draw_without_page_tasks(100, false).unwrap();
-        assert_eq!(app.deferred_page_elapsed_ms, 100);
         let value = app
             .session
             .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
@@ -268,9 +259,42 @@ mod tests {
             .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
             .unwrap();
         assert_eq!(value["result"]["value"], json!(false));
-        let elapsed_ms = app.take_page_elapsed(0);
-        app.update_page_frame((100, 100), elapsed_ms).unwrap();
-        assert_eq!(app.deferred_page_elapsed_ms, 0);
+        app.update_page_frame((100, 100), 0).unwrap();
+        let value = app
+            .session
+            .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
+            .unwrap();
+        assert_eq!(value["result"]["value"], json!(true));
+    }
+
+    #[test]
+    fn timer_created_after_idle_uses_current_page_clock() {
+        let mut app =
+            BrowserApp::new("data:text/html,<script>window.fired=false</script>").unwrap();
+        app.start_initial_navigation().unwrap();
+        app.rebase_clock_if_document_changed();
+        app.defer_page_time_before_input(Instant::now() + Duration::from_secs(2));
+        app.session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({"expression":"setTimeout(()=>fired=true,500)"}),
+            )
+            .unwrap();
+
+        app.update_page_frame((100, 100), 0).unwrap();
+        let value = app
+            .session
+            .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
+            .unwrap();
+        assert_eq!(value["result"]["value"], json!(false));
+
+        app.update_page_frame((100, 100), 499).unwrap();
+        let value = app
+            .session
+            .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
+            .unwrap();
+        assert_eq!(value["result"]["value"], json!(false));
+        app.update_page_frame((100, 100), 1).unwrap();
         let value = app
             .session
             .dispatch("Runtime.evaluate", json!({"expression":"fired"}))

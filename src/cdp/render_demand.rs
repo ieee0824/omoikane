@@ -50,6 +50,13 @@ pub struct RenderDemand {
 }
 
 impl CdpSession {
+    /// Advances page time without running queued tasks or animation callbacks.
+    /// Native hosts call this before input so timers created by that input use
+    /// the current clock even when page tasks are deferred for responsiveness.
+    pub fn advance_clock_without_tasks(&mut self, elapsed_ms: u64) {
+        self.runtime.advance_clock_without_tasks(elapsed_ms);
+    }
+
     /// Returns the monotonic generation of the active document. Native hosts
     /// use this to rebase their clock after a navigation installs a new runtime.
     pub fn document_generation(&self) -> u64 {

@@ -168,7 +168,6 @@ struct BrowserApp {
     /// Earliest frame allowed inside an input batch, independent of wakeups.
     wheel_frame_deadline: Instant,
     last_pointer_input_at: Option<Instant>,
-    deferred_page_elapsed_ms: u64,
     frame_cache: BrowserFrameCache,
     clock_document: u64,
     last_chrome: Option<render_pump::PresentedChrome>,
@@ -241,7 +240,6 @@ impl BrowserApp {
             frame_scheduler: PlatformFrameScheduler::new(started_at, FRAME_INTERVAL),
             wheel_frame_deadline: started_at,
             last_pointer_input_at: None,
-            deferred_page_elapsed_ms: 0,
             frame_cache: BrowserFrameCache::default(),
             clock_document,
             last_chrome: None,
