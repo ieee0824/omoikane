@@ -10245,8 +10245,9 @@ fn render_glyph_cache_hits_and_separates_font_identity_and_size() {
 
 #[test]
 fn nested_render_glyph_cache_reuses_outer_entries_and_remains_active() {
-    let fonts = super::load_text_fonts();
-    assert!(!fonts.is_empty());
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf");
+    let fonts = [Arc::new(Font::load_from_file(&path).unwrap())];
 
     super::with_render_glyph_cache(|| {
         let _ = super::rasterize_with_fallback(&fonts[..1], 'A', 16.0);
