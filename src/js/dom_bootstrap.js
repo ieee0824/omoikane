@@ -4064,8 +4064,9 @@ export const __omoikane_service_worker_lifecycle = {};
         decls
           .map(d => d.name + ": " + d.value + (d.priority ? " !" + d.priority : "") + ";")
           .join(" ");
-      const writeDecls = (decls) => {
+      const writeDecls = (decls, skipUnchanged = false) => {
         const source = serializeDecls(decls);
+        if (skipUnchanged && __omoikane_get_attribute(node.__id, "style") === source) return;
         node.setAttribute("style", source);
         safeWeakMapSet(elementStyleDeclarationCache, node, {
           source,
@@ -4142,12 +4143,12 @@ export const __omoikane_service_worker_lifecycle = {};
           for (const [name, expandedValue] of expanded) {
             remaining.push({ name, value: expandedValue, priority: priority || "" });
           }
-          writeDecls(remaining);
+          writeDecls(remaining, true);
           return;
         }
         const remaining = decls.filter(d => d.name !== kebab);
         remaining.push({ name: kebab, value, priority: priority || "" });
-        writeDecls(remaining);
+        writeDecls(remaining, true);
       };
       // Removes a kebab-case property and returns its previous value ("" if it
       // was not set), per CSSOM `removeProperty`. The returned value is the

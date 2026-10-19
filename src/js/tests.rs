@@ -21243,6 +21243,24 @@ fn bounding_client_rect_handles_3d_perspective_without_changing_offset_size() {
 }
 
 #[test]
+fn repeated_inline_property_assignment_does_not_mutate_style_attribute() {
+    let mut runtime = runtime_from_html("<html><body><div id='box'></div></body></html>");
+    runtime
+        .eval(
+            "globalThis.box = document.getElementById('box');
+             box.style.width = '10px';
+             globalThis.observer = new MutationObserver(() => {});
+             observer.observe(box, { attributes: true });
+             box.style.width = '10px';",
+        )
+        .unwrap();
+    assert_eq!(eval_num(&mut runtime, "observer.takeRecords().length"), 0.0);
+    runtime.eval("box.style.width = '20px'").unwrap();
+    assert_eq!(eval_num(&mut runtime, "observer.takeRecords().length"), 1.0);
+    assert_eq!(eval_num(&mut runtime, "box.offsetWidth"), 20.0);
+}
+
+#[test]
 fn inline_style_is_the_source_for_computed_width_and_layout() {
     let html = r#"<html><head><style>
             * { margin: 0; padding: 0; }
