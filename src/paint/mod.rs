@@ -6620,6 +6620,23 @@ pub(super) fn rounded_rect_pixel_coverage(
     {
         return 0.0;
     }
+    // Most pixels of a rounded box shadow lie well away from its corners.
+    // A whole pixel inside either central band has full coverage, avoiding
+    // four corner tests and the subpixel sampling below.
+    if pixel_left >= rect.x
+        && pixel_right <= rect.x + rect.width
+        && pixel_top >= rect.y
+        && pixel_bottom <= rect.y + rect.height
+    {
+        let (tl, tr, br, bl) = radii;
+        if (pixel_left >= rect.x + tl.max(bl).max(0.0)
+            && pixel_right <= rect.x + rect.width - tr.max(br).max(0.0))
+            || (pixel_top >= rect.y + tl.max(tr).max(0.0)
+                && pixel_bottom <= rect.y + rect.height - bl.max(br).max(0.0))
+        {
+            return 1.0;
+        }
+    }
     if [
         (pixel_left, pixel_top),
         (pixel_right, pixel_top),
