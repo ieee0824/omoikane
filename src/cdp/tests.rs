@@ -48,9 +48,29 @@ fn rendering_opportunity_defers_tasks_after_navigation_commit() {
         .unwrap();
 
     session.drive_event_loop(0).unwrap();
+    assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(1.0));
+    session.drive_event_loop(0).unwrap();
     assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(2.0));
     session.drive_event_loop(0).unwrap();
     assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(3.0));
+}
+
+#[test]
+fn bounded_rendering_opportunity_defers_timer_queued_by_frame_callback() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document("https://example.test/", "<body></body>", 1, "null")
+        .unwrap();
+    session.set_task_pump_limit(NonZeroUsize::new(1));
+    session
+        .runtime
+        .eval("globalThis.runs = 0; requestAnimationFrame(() => setTimeout(() => runs++, 0))")
+        .unwrap();
+
+    session.drive_event_loop(0).unwrap();
+    assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(0.0));
+    session.drive_event_loop(0).unwrap();
+    assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(1.0));
 }
 
 #[test]

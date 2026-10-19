@@ -11512,10 +11512,13 @@ impl JsRuntime {
         // callbacks and their microtask checkpoint. This also queues transition
         // events without requiring script to force a computed-style read.
         self.update_css_transitions()?;
-        // Continue the event-loop iteration for host tasks queued by rAF or
-        // rendering callbacks (notably navigation). A newly requested rAF is
-        // still retained for the next rendering opportunity.
-        self.run_until_idle()?;
+        // Hosts with a bounded task pump need to regain control after this
+        // rendering opportunity. Tasks queued by callbacks remain available
+        // for the next frame instead of consuming a second task budget here.
+        // Unbounded embedders retain the existing event-loop behavior.
+        if self.task_pump_limit == usize::MAX {
+            self.run_until_idle()?;
+        }
         trace_animation_frame_phases(
             trace_frame,
             background_ms,
