@@ -12935,6 +12935,16 @@ impl JsRuntime {
                 }
             };
             let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
+            if std::env::var_os("OMOIKANE_TRACE_TASKS").is_some() && elapsed_ms >= 50.0 {
+                eprintln!(
+                    "OMOIKANE_SCRIPT_PHASE {}",
+                    serde_json::json!({
+                        "phase": "fetch",
+                        "elapsed_ms": elapsed_ms,
+                        "kind": format!("{kind:?}"),
+                    })
+                );
+            }
             match fetched {
                 // Every failure below is the page's, not the engine's:
                 // it is recorded and execution continues, exactly as
@@ -12991,6 +13001,7 @@ impl JsRuntime {
                     let redirected =
                         resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
                     dispatch_timing = Some((effective_url.clone(), redirected, elapsed_ms));
+                    let execution_started = std::time::Instant::now();
                     let result = match kind {
                         ScriptKind::Module => {
                             self.eval_module_in_document_realm_timed(
@@ -13017,6 +13028,18 @@ impl JsRuntime {
                             .map(|_| JsValue::undefined())
                             .map_err(JsEvaluationError::JavaScript),
                     };
+                    let execution_ms = execution_started.elapsed().as_secs_f64() * 1_000.0;
+                    if std::env::var_os("OMOIKANE_TRACE_TASKS").is_some() && execution_ms >= 50.0 {
+                        eprintln!(
+                            "OMOIKANE_SCRIPT_PHASE {}",
+                            serde_json::json!({
+                                "phase": "execute",
+                                "elapsed_ms": execution_ms,
+                                "kind": format!("{kind:?}"),
+                                "success": result.is_ok(),
+                            })
+                        );
+                    }
                     if let Err(error) = result {
                         let context = script_source_context(&source);
                         self.record_task_error(format!(
