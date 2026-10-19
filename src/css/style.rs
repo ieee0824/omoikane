@@ -2510,9 +2510,9 @@ impl StyleResolver {
         self.computed_style_shared(node).as_ref().clone()
     }
 
-    /// Shares an immutable cached style with paint readers. Invalidation
+    /// Shares an immutable cached style with layout and paint readers. Invalidation
     /// replaces the cache entry without changing any retained snapshot.
-    fn computed_style_shared(&mut self, node: &NodeHandle) -> Arc<ComputedStyle> {
+    pub(crate) fn computed_style_shared(&mut self, node: &NodeHandle) -> Arc<ComputedStyle> {
         let key = node.identity();
         if let Some(style) = self.cache.get(&key) {
             return style.clone();
@@ -2523,13 +2523,13 @@ impl StyleResolver {
             if parent.node_type() == NodeType::DocumentFragment {
                 parent
                     .shadow_host()
-                    .map(|host| self.computed_style(&host))
+                    .map(|host| self.computed_style_shared(&host))
                     .unwrap_or_default()
             } else {
-                self.computed_style(&parent)
+                self.computed_style_shared(&parent)
             }
         });
-        let style = self.compute_style(node, inherited.as_ref());
+        let style = self.compute_style(node, inherited.as_deref());
 
         // Auto-update root_font_size from the root element's computed font-size so that
         // `rem` units in descendant elements resolve correctly even without an explicit
@@ -2667,7 +2667,8 @@ impl StyleResolver {
             .map(|style| style.as_ref().clone())
     }
 
-    fn computed_pseudo_style_shared(
+    /// Shares an immutable cached pseudo style without cloning its property maps.
+    pub(crate) fn computed_pseudo_style_shared(
         &mut self,
         node: &NodeHandle,
         pseudo: PseudoElement,
@@ -2679,10 +2680,12 @@ impl StyleResolver {
 
         let parent_style = match pseudo {
             PseudoElement::BeforeMarker => {
-                self.computed_pseudo_style(node, PseudoElement::Before)?
+                self.computed_pseudo_style_shared(node, PseudoElement::Before)?
             }
-            PseudoElement::AfterMarker => self.computed_pseudo_style(node, PseudoElement::After)?,
-            _ => self.computed_style(node),
+            PseudoElement::AfterMarker => {
+                self.computed_pseudo_style_shared(node, PseudoElement::After)?
+            }
+            _ => self.computed_style_shared(node),
         };
         // Inherit from the immediate originating pseudo, while numeric tree
         // counting still receives the ultimate originating DOM element.

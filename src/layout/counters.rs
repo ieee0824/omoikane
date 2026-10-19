@@ -68,7 +68,7 @@ impl Processor<'_> {
             parent: node.parent_node().map(|parent| parent.identity()),
         };
         let mut own = inherit_counters(counter_source, value_source, target);
-        let style = self.resolver.computed_style(node);
+        let style = self.resolver.computed_style_shared(node);
         let hidden = ancestor_hidden || style.is_display_none();
         if !hidden {
             apply_counter_properties(&mut own, target, &style);
@@ -110,7 +110,7 @@ impl Processor<'_> {
         counter_source: &CounterSet,
         value_source: &CounterSet,
     ) -> Option<CounterSet> {
-        let style = self.resolver.computed_pseudo_style(node, pseudo)?;
+        let style = self.resolver.computed_pseudo_style_shared(node, pseudo)?;
         if style.is_display_none() || !generates_pseudo_box(&style) {
             return None;
         }

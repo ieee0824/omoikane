@@ -147,6 +147,33 @@ fn shared_paint_style_preserves_owned_cssom_and_retained_snapshots() {
 }
 
 #[test]
+fn shared_inheritance_keeps_parent_and_pseudo_snapshots_independent() {
+    let parent = NodeHandle::element("div");
+    parent.set_attribute("style", "color: red; font-size: 20px");
+    let child = NodeHandle::element("span");
+    child.set_attribute("style", "color: blue");
+    parent.append_child(child.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("span::before { content: 'item'; font-size: 10px }").unwrap(),
+    );
+    let parent_style = resolver.computed_style_shared(&parent);
+    let child_style = resolver.computed_style_shared(&child);
+    let pseudo = resolver
+        .computed_pseudo_style_shared(&child, PseudoElement::Before)
+        .unwrap();
+    assert_ne!(parent_style.get("color"), child_style.get("color"));
+    assert_eq!(pseudo.get("color"), child_style.get("color"));
+    assert_eq!(
+        parent_style.get("font-size"),
+        Some(&ComputedValue::Px(20.0))
+    );
+    assert_eq!(child_style.get("font-size"), Some(&ComputedValue::Px(20.0)));
+    assert_eq!(pseudo.get("font-size"), Some(&ComputedValue::Px(10.0)));
+}
+
+#[test]
 fn shared_pseudo_paint_style_preserves_owned_values_and_invalidation() {
     let node = NodeHandle::element("div");
     let mut resolver = StyleResolver::new();
