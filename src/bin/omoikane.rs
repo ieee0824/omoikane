@@ -185,6 +185,7 @@ struct BrowserApp {
     /// Window logical position to restore the cursor to after Pointer Lock.
     pointer_restore: (f64, f64),
     trace_input: bool,
+    startup_trace: Option<Instant>,
     input_trace_sequence: u64,
     url_bar: UrlBar,
     /// Last cursor position in physical window pixels.
@@ -199,6 +200,18 @@ struct BrowserApp {
 }
 
 impl BrowserApp {
+    fn trace_startup(&self, phase: &str) {
+        if let Some(started) = self.startup_trace {
+            eprintln!(
+                "OMOIKANE_STARTUP {}",
+                json!({
+                    "phase": phase,
+                    "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+                })
+            );
+        }
+    }
+
     fn new(url: &str) -> Result<Self, Box<dyn Error>> {
         let mut session =
             CdpSession::new().map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -243,6 +256,7 @@ impl BrowserApp {
             native_pointer_lock_raw_buttons: false,
             pointer_restore: (0.0, 0.0),
             trace_input: std::env::var_os("OMOIKANE_TRACE_INPUT").is_some(),
+            startup_trace: None,
             input_trace_sequence: 0,
             url_bar: UrlBar::new(url),
             cursor_position: (0.0, 0.0),
@@ -870,6 +884,7 @@ impl ApplicationHandler for BrowserApp {
                 return;
             }
         };
+        self.trace_startup("window_created");
         window.set_ime_allowed(true);
         let context = match Context::new(window.clone()) {
             Ok(context) => context,
@@ -884,6 +899,7 @@ impl ApplicationHandler for BrowserApp {
                 return;
             }
         };
+        self.trace_startup("display_context_ready");
         let surface = match Surface::new(&context, window.clone()) {
             Ok(surface) => surface,
             Err(error) => {
@@ -897,6 +913,7 @@ impl ApplicationHandler for BrowserApp {
                 return;
             }
         };
+        self.trace_startup("surface_ready");
         self.frame_scheduler
             .request_rendering_opportunity(Instant::now());
         self.window = Some(window);
@@ -906,12 +923,14 @@ impl ApplicationHandler for BrowserApp {
         self.surface = Some(surface);
         let (width, height) = self.chrome_layout().page_viewport();
         self.session.set_viewport(width, height);
+        self.trace_startup("navigation_started");
         if let Err(error) = self.start_initial_navigation() {
             report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Input, &error);
             eprintln!("initial navigation failed: {error}");
             self.initial_navigation_error = Some(error);
             event_loop.exit();
         }
+        self.trace_startup("navigation_finished");
     }
 
     fn window_event(
@@ -977,6 +996,8 @@ impl ApplicationHandler for BrowserApp {
                 if let Err(error) = self.draw(elapsed_ms, os_exposure) {
                     eprintln!("frame failed: {error}");
                 }
+                self.trace_startup("first_redraw_attempted");
+                self.startup_trace = None;
             }
             event => {
                 if self.dispatch_input(event) {
@@ -1312,6 +1333,7 @@ impl std::task::Wake for CookieStoreWake {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let startup_trace = std::env::var_os("OMOIKANE_TRACE_STARTUP").map(|_| Instant::now());
     let url = std::env::args().nth(1).unwrap_or_else(|| {
         "data:text/html,<title>Omoikane</title><style>body{font:32px sans-serif;padding:2rem}</style><h1>Omoikane</h1><p>Pass a URL as the first argument.</p>".to_string()
     });
@@ -1321,6 +1343,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let event_loop = EventLoop::new()?;
     let mut app = BrowserApp::new(&url)?;
+    app.startup_trace = startup_trace;
+    app.trace_startup("app_ready");
     app.cookie_changes = Some(app.session.subscribe_cookie_changes(std::task::Waker::from(
         Arc::new(CookieStoreWake(event_loop.create_proxy())),
     )));

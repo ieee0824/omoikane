@@ -3,6 +3,18 @@
 
 use super::*;
 
+fn trace_startup_page(phase: &str, started: std::time::Instant) {
+    if std::env::var_os("OMOIKANE_TRACE_STARTUP").is_some() {
+        eprintln!(
+            "OMOIKANE_STARTUP_PAGE {}",
+            json!({
+                "phase": phase,
+                "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+            })
+        );
+    }
+}
+
 fn is_fragment_only_navigation(current: &str, target: &str) -> bool {
     let (current_base, current_fragment) = current.split_once('#').unwrap_or((current, ""));
     let (target_base, target_fragment) = target.split_once('#').unwrap_or((target, ""));
@@ -225,6 +237,7 @@ impl CdpSession {
         body: Option<Vec<u8>>,
         content_type: Option<String>,
     ) -> Result<Value, JsonRpcError> {
+        let navigation_started = std::time::Instant::now();
         let loader_id = self.next_loader_id.to_string();
         self.next_loader_id += 1;
 
@@ -275,6 +288,7 @@ impl CdpSession {
                 code: -32000,
                 message: error.to_string(),
             })?;
+        trace_startup_page("response_ready", navigation_started);
 
         let form_state = self.navigation_form_state(commit, &document_url)?;
         let (next_history_length, next_history_state) = self.prospective_history_state(commit);
@@ -292,6 +306,7 @@ impl CdpSession {
             code: -32000,
             message: error.to_string(),
         })?;
+        trace_startup_page("document_installed", navigation_started);
 
         self.commit_history_url(&document_url, commit, None);
         self.sync_history_length()?;
@@ -676,7 +691,9 @@ impl CdpSession {
         form_state: Option<&FormStateSnapshot>,
         inherit_javascript_security: bool,
     ) -> Result<(), CdpSessionError> {
+        let install_started = std::time::Instant::now();
         let document = TreeBuilder::parse_decoded(html).document();
+        trace_startup_page("html_parsed", install_started);
         let mut runtime = JsRuntime::with_document_url_and_storage(
             document,
             url,
@@ -684,6 +701,7 @@ impl CdpSession {
             self.storage_session_id,
         )
         .map_err(CdpSessionError::JavaScript)?;
+        trace_startup_page("runtime_ready", install_started);
         self.configure_replacement_runtime(&mut runtime)?;
         runtime.install_response_security_headers(response_headers);
         runtime.set_document_response_status(response_status);
@@ -715,6 +733,7 @@ impl CdpSession {
 
         let base_url = url.parse::<crate::http::Url>().ok();
         let script_errors = runtime.execute_document_scripts(base_url.as_ref());
+        trace_startup_page("document_scripts_finished", install_started);
         if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
             for error in script_errors {
                 eprintln!("[omoikane][js-error] {error}");
@@ -724,6 +743,7 @@ impl CdpSession {
             .wire_inline_event_handlers()
             .map_err(CdpSessionError::JavaScript)?;
         runtime.fire_load().map_err(CdpSessionError::JavaScript)?;
+        trace_startup_page("load_finished", install_started);
 
         self.runtime = runtime;
         self.mouse_pressed_target = None;
