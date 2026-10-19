@@ -79,6 +79,7 @@ mod child_document;
 #[cfg(test)]
 mod child_document_tests;
 mod cssom_normalization;
+mod frame_diagnostics;
 mod media_environment;
 use child_document::{FetchedChildResource, LoadedChildDocument, NavigationRedirect};
 use cross_origin_isolation::{
@@ -7109,11 +7110,13 @@ impl HostState {
     /// ensuring its style resolver is current. Runs a full synchronous layout
     /// (forced reflow). Layout is only maintained for the main document.
     fn ensure_layout(&mut self) {
+        let mut layout_sample = frame_diagnostics::LayoutSample::begin();
         let document = self.document.clone();
         self.ensure_style_resolver(&document);
         if self.layout_root.is_some() {
             return;
         }
+        layout_sample.mark_rebuild();
         let viewport = self.viewport;
         let document_id = document.identity();
         let base = crate::paint::stylesheet::extract_document_base_url(
@@ -11410,6 +11413,7 @@ impl JsRuntime {
     /// animation-frame callbacks.
     pub fn run_animation_frame(&mut self, elapsed_ms: u64) -> JsResult<usize> {
         let trace_frame = std::env::var_os("OMOIKANE_TRACE_TASKS").is_some();
+        let trace_detail = trace_frame || std::env::var_os("OMOIKANE_TRACE_PAINT").is_some();
         let phase_started = Instant::now();
         self.advance_clock_without_tasks(elapsed_ms);
         self.run_worker_background_tasks();
@@ -11419,6 +11423,11 @@ impl JsRuntime {
         self.run_until_idle()?;
         let tasks_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
         let phase_started = Instant::now();
+        let detail = frame_diagnostics::FrameScope::begin(
+            trace_detail,
+            self.host_state.borrow().document.identity(),
+        );
+        let stage_started = detail.stage_start();
         self.host_state.borrow_mut().sample_smooth_scrolls();
         self.host_state
             .borrow_mut()
@@ -11432,14 +11441,18 @@ impl JsRuntime {
         if self.has_pending_visual_viewport_scroll_steps() {
             self.flush_pending_visual_viewport_scroll_events()?;
         }
+        detail.record_scroll_events(stage_started);
 
         if self.host_state.borrow().page_hidden {
             trace_animation_frame_phases(trace_frame, background_ms, tasks_ms, 0.0, 0.0);
+            detail.finish(phase_started.elapsed().as_secs_f64() * 1000.0);
             // Keep callbacks queued until the page has a rendering opportunity.
             return Ok(0);
         }
 
+        let stage_started = detail.stage_start();
         self.report_media_query_changes()?;
+        detail.record_media(stage_started);
         let (timestamp, callback_ids) = self
             .host_state
             .borrow_mut()
@@ -11474,6 +11487,7 @@ impl JsRuntime {
             let old_realm = realm.map(|realm| self.context.enter_realm(realm));
             let _document = document_id
                 .map(|document_id| activate_module_document(&self.host_state, document_id));
+            let stage_started = detail.stage_start();
             let result = self.with_active_host(|context| {
                 let callable = callback.as_callable().ok_or_else(|| {
                     JsError::from(
@@ -11484,6 +11498,7 @@ impl JsRuntime {
                 callable.call(&JsValue::undefined(), &[JsValue::from(timestamp)], context)?;
                 Ok(())
             });
+            detail.record_raf_call(stage_started);
             if let Some(old_realm) = old_realm {
                 self.context.enter_realm(old_realm);
             }
@@ -11499,12 +11514,15 @@ impl JsRuntime {
                     first_error = Some(error);
                 }
             }
-            if document_id.is_some()
-                && let Err(error) = self.run_jobs()
-            {
-                self.record_js_task_failure("JS_ANIMATION_FRAME_JOB_FAILED", "animation-frame");
-                if first_jobs_error.is_none() {
-                    first_jobs_error = Some(error);
+            if document_id.is_some() {
+                let stage_started = detail.stage_start();
+                let jobs_result = self.run_jobs();
+                detail.record_jobs(stage_started);
+                if let Err(error) = jobs_result {
+                    self.record_js_task_failure("JS_ANIMATION_FRAME_JOB_FAILED", "animation-frame");
+                    if first_jobs_error.is_none() {
+                        first_jobs_error = Some(error);
+                    }
                 }
             }
         }
@@ -11512,7 +11530,9 @@ impl JsRuntime {
         // DOM mutations performed by frame callbacks queue observer delivery;
         // the microtask checkpoint completes that work before the embedder
         // proceeds to style/layout/paint.
+        let stage_started = detail.stage_start();
         let jobs_result = self.run_jobs();
+        detail.record_jobs(stage_started);
         if callbacks_run > 0 && jobs_result.is_err() {
             self.record_js_task_failure("JS_ANIMATION_FRAME_JOB_FAILED", "animation-frame");
         }
@@ -11524,6 +11544,7 @@ impl JsRuntime {
         }
         jobs_result?;
         let callbacks_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
+        detail.finish(callbacks_ms);
         let phase_started = Instant::now();
 
         // A rendering opportunity samples CSS transitions after animation-frame
