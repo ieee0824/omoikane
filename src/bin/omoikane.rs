@@ -944,6 +944,15 @@ impl ApplicationHandler for BrowserApp {
         {
             return;
         }
+        // macOS emits zero-delta wheel notifications during a gesture. They
+        // cannot scroll, but dispatching them can synchronously run expensive
+        // page listeners and hit testing before the first real wheel delta.
+        if let WindowEvent::MouseWheel { delta, .. } = &event {
+            let (dx, dy) = wheel_delta_css_pixels(delta.clone(), self.device_scale().factor());
+            if dx == 0.0 && dy == 0.0 {
+                return;
+            }
+        }
         self.update_media_environment_for_event(&event);
         if !matches!(event, WindowEvent::RedrawRequested) {
             // X11 and macOS can consume a wheel backlog before delivering a
