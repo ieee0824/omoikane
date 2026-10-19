@@ -157,6 +157,7 @@ struct BrowserApp {
     session: CdpSession,
     cookie_changes: Option<omoikane::http::CookieChangeSubscription>,
     initial_url: Option<String>,
+    initial_navigation_due_at: Option<Instant>,
     initial_navigation_error: Option<omoikane::cdp::JsonRpcError>,
     error_reporter: Option<Arc<ErrorReporter>>,
     window: Option<Arc<Window>>,
@@ -215,6 +216,7 @@ impl BrowserApp {
     fn new(url: &str) -> Result<Self, Box<dyn Error>> {
         let mut session =
             CdpSession::new().map_err(|error| std::io::Error::other(error.to_string()))?;
+        session.set_task_pump_limit(std::num::NonZeroUsize::new(1));
         session.set_pointer_lock_deferred(true);
         let media_preferences = omoikane::platform_media::capture_media_preferences();
         let mut environment = session.host_media_environment();
@@ -227,6 +229,7 @@ impl BrowserApp {
             session,
             cookie_changes: None,
             initial_url: Some(url.into()),
+            initial_navigation_due_at: None,
             initial_navigation_error: None,
             error_reporter: None,
             window: None,
@@ -923,14 +926,6 @@ impl ApplicationHandler for BrowserApp {
         self.surface = Some(surface);
         let (width, height) = self.chrome_layout().page_viewport();
         self.session.set_viewport(width, height);
-        self.trace_startup("navigation_started");
-        if let Err(error) = self.start_initial_navigation() {
-            report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Input, &error);
-            eprintln!("initial navigation failed: {error}");
-            self.initial_navigation_error = Some(error);
-            event_loop.exit();
-        }
-        self.trace_startup("navigation_finished");
     }
 
     fn window_event(
@@ -996,8 +991,13 @@ impl ApplicationHandler for BrowserApp {
                 if let Err(error) = self.draw(elapsed_ms, os_exposure) {
                     eprintln!("frame failed: {error}");
                 }
-                self.trace_startup("first_redraw_attempted");
-                self.startup_trace = None;
+                if self.initial_url.is_some() && self.initial_navigation_due_at.is_none() {
+                    self.trace_startup("first_window_redraw_attempted");
+                    self.initial_navigation_due_at = Some(Instant::now() + FRAME_INTERVAL);
+                } else if self.initial_url.is_none() && self.initial_navigation_due_at.is_none() {
+                    self.trace_startup("first_page_redraw_attempted");
+                    self.startup_trace = None;
+                }
             }
             event => {
                 if self.dispatch_input(event) {
@@ -1079,6 +1079,23 @@ impl ApplicationHandler for BrowserApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self
+            .initial_navigation_due_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.initial_navigation_due_at = None;
+            self.trace_startup("navigation_started");
+            if let Err(error) = self.start_initial_navigation() {
+                report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Input, &error);
+                eprintln!("initial navigation failed: {error}");
+                self.initial_navigation_error = Some(error);
+                event_loop.exit();
+                return;
+            }
+            self.trace_startup("navigation_finished");
+            self.frame_scheduler
+                .request_rendering_opportunity(Instant::now());
+        }
         self.sync_fullscreen();
         self.sync_pointer_lock();
         if let Some(window) = &self.window {
@@ -1092,8 +1109,14 @@ impl ApplicationHandler for BrowserApp {
                     window.request_redraw();
                     event_loop.set_control_flow(ControlFlow::Wait);
                 }
-                PlatformFramePlan::Wait => event_loop.set_control_flow(ControlFlow::Wait),
+                PlatformFramePlan::Wait => match self.initial_navigation_due_at {
+                    Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
+                    None => event_loop.set_control_flow(ControlFlow::Wait),
+                },
                 PlatformFramePlan::WaitUntil(deadline) => {
+                    let deadline = self
+                        .initial_navigation_due_at
+                        .map_or(deadline, |initial| std::cmp::min(initial, deadline));
                     event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
                 }
             }

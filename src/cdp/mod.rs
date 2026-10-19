@@ -184,6 +184,7 @@ pub(crate) struct SessionSettleTimings {
 #[derive(Debug)]
 pub struct CdpSession {
     runtime: JsRuntime,
+    task_pump_limit: Option<std::num::NonZeroUsize>,
     media_emulation: emulation::State,
     _storage_lifetime: TabStorageLifetime,
     storage_manager: StorageManager,
@@ -324,6 +325,7 @@ impl CdpSession {
         http_client.set_shared_cookie_store(Arc::clone(&cookie_store));
         let mut session = Self {
             runtime,
+            task_pump_limit: None,
             _storage_lifetime: storage_lifetime,
             storage_manager,
             storage_session_id,
@@ -395,6 +397,7 @@ impl CdpSession {
             runtime.set_error_reporter(reporter, surface);
         }
         Self::configure_runtime_playback(runtime, &self.cookie_store);
+        runtime.set_task_pump_limit(self.task_pump_limit);
         runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
         let (width, height) = self.runtime.presentation_viewport();
         runtime.set_viewport(width, height);
@@ -413,6 +416,15 @@ impl CdpSession {
 
     fn runtime_timeout(&self) -> Duration {
         self.runtime.sandbox_timeout()
+    }
+
+    /// Bounds the number of page macrotasks drained in one host call.
+    ///
+    /// The setting applies to the current document and later navigations.
+    /// `None` restores the default unlimited drain used by CDP callers.
+    pub fn set_task_pump_limit(&mut self, limit: Option<std::num::NonZeroUsize>) {
+        self.task_pump_limit = limit;
+        self.runtime.set_task_pump_limit(limit);
     }
 
     /// Dispatches a CDP domain method and returns the result payload.

@@ -11,7 +11,29 @@ use crate::test_support::http_fixture::{
 };
 use std::cell::RefCell;
 use std::io::{Read, Write};
+use std::num::NonZeroUsize;
 use std::rc::Rc;
+
+#[test]
+fn task_pump_limit_survives_navigation_and_defers_extra_timer_tasks() {
+    let mut session = CdpSession::new().unwrap();
+    session.set_task_pump_limit(NonZeroUsize::new(1));
+
+    for _ in 0..2 {
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({"url": "data:text/html,<script>globalThis.runs=0;for(let i=0;i<4;i++)setTimeout(()=>runs++,0)</script>"}),
+            )
+            .unwrap();
+        let runs_after_navigation = session.runtime.eval("runs").unwrap().as_number().unwrap();
+        assert!(runs_after_navigation < 4.0);
+        for _ in 0..8 {
+            session.drive_event_loop(0).unwrap();
+        }
+        assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(4.0));
+    }
+}
 
 #[test]
 fn javascript_navigation_keeps_history_for_non_string_and_replaces_on_html_completion() {
