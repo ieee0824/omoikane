@@ -4197,6 +4197,46 @@ fn pointer_leaving_surface_clears_hover_selector() {
 }
 
 #[test]
+fn native_input_does_not_run_due_timer_tasks() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document(
+            "https://example.test/",
+            "<html><body style='height:1000px'></body></html>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session
+        .runtime
+        .eval("globalThis.timerFired = false; setTimeout(() => timerFired = true, 1000)")
+        .unwrap();
+    session
+        .runtime
+        .eval("addEventListener('wheel', () => history.pushState(null, '', '/wheel'))")
+        .unwrap();
+    session.advance_clock_without_tasks(1000);
+
+    session
+        .dispatch(
+            "Input.dispatchMouseEvent",
+            json!({ "type": "mouseWheel", "x": 20, "y": 20, "deltaY": 10 }),
+        )
+        .unwrap();
+    assert_eq!(session.current_url(), "https://example.test/wheel");
+    assert_eq!(
+        session.runtime.eval("timerFired").unwrap().as_boolean(),
+        Some(false),
+    );
+
+    session.drive_event_loop(0).unwrap();
+    assert_eq!(
+        session.runtime.eval("timerFired").unwrap().as_boolean(),
+        Some(true),
+    );
+}
+
+#[test]
 fn mouse_input_hit_tests_paint_order_transforms_clips_and_scroll() {
     let mut session = CdpSession::new().unwrap();
     session

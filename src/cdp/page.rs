@@ -373,12 +373,23 @@ impl CdpSession {
     /// navigation, so the new Runtime is checked again after every commit. The
     /// cap prevents a script redirect loop from blocking the embedding API.
     pub(super) fn drive_navigation_requests(&mut self) -> Result<(), JsonRpcError> {
+        self.drive_navigation_requests_inner(true)
+    }
+
+    /// Commits navigation requested by an input handler without running due
+    /// page tasks while native input is being dispatched.
+    pub(super) fn drive_input_navigation_requests(&mut self) -> Result<(), JsonRpcError> {
+        self.drive_navigation_requests_inner(false)
+    }
+
+    fn drive_navigation_requests_inner(&mut self, pump_tasks: bool) -> Result<(), JsonRpcError> {
         const MAX_SCRIPT_NAVIGATIONS: usize = 32;
         for _ in 0..MAX_SCRIPT_NAVIGATIONS {
-            self.runtime.run_until_idle().map_err(js_error)?;
-            // Tasks record page-script failures rather than aborting the loop, so
-            // a navigation is not lost to one broken script. Surface them here,
-            // where document script errors are already reported.
+            if pump_tasks {
+                self.runtime.run_until_idle().map_err(js_error)?;
+            }
+            // Surface failures from tasks that ran at an earlier opportunity.
+            // A failed task must not hide an already queued navigation.
             for error in self.runtime.take_task_errors() {
                 eprintln!("[omoikane][js-error] {error}");
             }

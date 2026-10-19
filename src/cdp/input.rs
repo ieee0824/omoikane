@@ -403,7 +403,7 @@ impl CdpSession {
             evaluate(&mut self.runtime)
         }
         .map_err(js_error)?;
-        self.drive_navigation_requests()?;
+        self.drive_input_navigation_requests()?;
         Ok(not_canceled)
     }
 
@@ -416,7 +416,7 @@ impl CdpSession {
                 Ok(value.as_number().unwrap_or(1.0) as u8)
             })
             .map_err(js_error)?;
-        self.drive_navigation_requests()?;
+        self.drive_input_navigation_requests()?;
         Ok(outcome)
     }
 }
