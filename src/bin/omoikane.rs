@@ -58,7 +58,7 @@ mod url_bar;
 mod keyboard_tests;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
-const WHEEL_TASK_QUIET_PERIOD: Duration = Duration::from_millis(300);
+const POINTER_TASK_QUIET_PERIOD: Duration = Duration::from_millis(300);
 const DEFAULT_WINDOW_TITLE: &str = "Omoikane";
 
 #[derive(Clone, Copy)]
@@ -167,7 +167,7 @@ struct BrowserApp {
     frame_scheduler: PlatformFrameScheduler,
     /// Earliest frame allowed inside an input batch, independent of wakeups.
     wheel_frame_deadline: Instant,
-    last_wheel_input_at: Option<Instant>,
+    last_pointer_input_at: Option<Instant>,
     deferred_page_elapsed_ms: u64,
     frame_cache: BrowserFrameCache,
     clock_document: u64,
@@ -240,7 +240,7 @@ impl BrowserApp {
             surface: None,
             frame_scheduler: PlatformFrameScheduler::new(started_at, FRAME_INTERVAL),
             wheel_frame_deadline: started_at,
-            last_wheel_input_at: None,
+            last_pointer_input_at: None,
             deferred_page_elapsed_ms: 0,
             frame_cache: BrowserFrameCache::default(),
             clock_document,
@@ -954,10 +954,11 @@ impl ApplicationHandler for BrowserApp {
             if matches!(event, WindowEvent::MouseWheel { .. }) {
                 let now = Instant::now();
                 self.render_before_wheel(now);
-                self.last_wheel_input_at = Some(now);
-            } else if !self.wheel_input_is_recent(Instant::now()) {
-                self.sync_page_time_before_input(Instant::now());
+                self.last_pointer_input_at = Some(now);
+            } else if matches!(event, WindowEvent::CursorMoved { .. }) {
+                self.last_pointer_input_at = Some(Instant::now());
             }
+            self.defer_page_time_before_input(Instant::now());
         }
         match event {
             WindowEvent::CloseRequested => {
@@ -996,7 +997,7 @@ impl ApplicationHandler for BrowserApp {
                 // Without a queued application redraw, this is an OS exposure event.
                 let os_exposure = !self.frame_scheduler.redraw_pending();
                 let elapsed_ms = self.begin_page_frame(Instant::now());
-                let result = if self.wheel_input_is_recent(Instant::now()) {
+                let result = if self.pointer_input_is_recent(Instant::now()) {
                     self.draw_without_page_tasks(elapsed_ms, os_exposure)
                 } else {
                     self.draw(elapsed_ms, os_exposure)
@@ -1031,7 +1032,7 @@ impl ApplicationHandler for BrowserApp {
         if !self.native_pointer_lock {
             return;
         }
-        self.sync_page_time_before_input(Instant::now());
+        self.defer_page_time_before_input(Instant::now());
         let result = match event {
             DeviceEvent::MouseMotion { delta } => {
                 self.input
@@ -1093,11 +1094,11 @@ impl ApplicationHandler for BrowserApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        let wheel_resume_at = self
-            .last_wheel_input_at
-            .map(|last| last + WHEEL_TASK_QUIET_PERIOD);
-        if wheel_resume_at.is_some_and(|deadline| now >= deadline) {
-            self.last_wheel_input_at = None;
+        let pointer_resume_at = self
+            .last_pointer_input_at
+            .map(|last| last + POINTER_TASK_QUIET_PERIOD);
+        if pointer_resume_at.is_some_and(|deadline| now >= deadline) {
+            self.last_pointer_input_at = None;
             self.frame_scheduler.request_rendering_opportunity(now);
         }
         if self
@@ -1125,8 +1126,8 @@ impl ApplicationHandler for BrowserApp {
                 .initial_navigation_due_at
                 .into_iter()
                 .chain(
-                    self.last_wheel_input_at
-                        .map(|last| last + WHEEL_TASK_QUIET_PERIOD),
+                    self.last_pointer_input_at
+                        .map(|last| last + POINTER_TASK_QUIET_PERIOD),
                 )
                 .min();
             match self

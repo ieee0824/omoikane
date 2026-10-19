@@ -44,10 +44,10 @@ impl PaintTrace {
 }
 
 impl BrowserApp {
-    /// Defer page tasks briefly while a native wheel gesture is active.
-    pub(super) fn wheel_input_is_recent(&self, now: Instant) -> bool {
-        self.last_wheel_input_at
-            .is_some_and(|last| now.saturating_duration_since(last) < WHEEL_TASK_QUIET_PERIOD)
+    /// Defer page tasks briefly while a native pointer gesture is active.
+    pub(super) fn pointer_input_is_recent(&self, now: Instant) -> bool {
+        self.last_pointer_input_at
+            .is_some_and(|last| now.saturating_duration_since(last) < POINTER_TASK_QUIET_PERIOD)
     }
 
     /// Present a previously delivered wheel's changes before consuming more
@@ -105,23 +105,10 @@ impl BrowserApp {
         elapsed
     }
 
-    pub(super) fn sync_page_time_before_input(&mut self, now: Instant) {
+    /// Accounts for elapsed page time without letting page tasks delay native input.
+    pub(super) fn defer_page_time_before_input(&mut self, now: Instant) {
         let elapsed_ms = self.advance_page_clock(now);
-        let elapsed = self.take_page_elapsed(elapsed_ms);
-        let started = self.paint_trace.as_ref().map(|_| Instant::now());
-        if let Err(error) = self.session.advance_tasks(elapsed) {
-            report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Frame, &error);
-            eprintln!("page clock advancement failed: {error}");
-        }
-        if let Some(started) = started {
-            eprintln!(
-                "OMOIKANE_INPUT_CLOCK {}",
-                json!({
-                    "page_elapsed_ms": elapsed,
-                    "advance_tasks_ms": started.elapsed().as_secs_f64() * 1000.0,
-                })
-            );
-        }
+        self.deferred_page_elapsed_ms = self.deferred_page_elapsed_ms.saturating_add(elapsed_ms);
         self.rebase_clock_if_document_changed();
     }
 
@@ -275,7 +262,14 @@ mod tests {
             .unwrap();
         assert_eq!(value["result"]["value"], json!(false));
 
-        app.sync_page_time_before_input(Instant::now());
+        app.defer_page_time_before_input(Instant::now());
+        let value = app
+            .session
+            .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
+            .unwrap();
+        assert_eq!(value["result"]["value"], json!(false));
+        let elapsed_ms = app.take_page_elapsed(0);
+        app.update_page_frame((100, 100), elapsed_ms).unwrap();
         assert_eq!(app.deferred_page_elapsed_ms, 0);
         let value = app
             .session
