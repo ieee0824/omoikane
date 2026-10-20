@@ -34,9 +34,10 @@ use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Script, Sou
 use boa_gc::{Finalize, RootProvider, Trace, Tracer};
 
 use crate::accessibility::{AccessibilityRenderState, AccessibilitySnapshotState};
+use crate::css::style::StyleClockEffects;
 use crate::css::{
     AffineTransform, ComputedStyle, ComputedValue, Origin, PseudoElement, Selector, StyleResolver,
-    parse_scope_prelude, parse_selector_list,
+    TransitionPropertyCounts, parse_scope_prelude, parse_selector_list,
 };
 use crate::css::{SelectorMatchCache, matches_selector_boundary_cached, matches_selector_cached};
 use crate::dom::{
@@ -7039,6 +7040,26 @@ impl HostState {
         }
     }
 
+    fn advance_document_style_clocks(
+        &mut self,
+        document_id: usize,
+        transition_time_ms: f64,
+        live_animations: bool,
+    ) -> (StyleClockEffects, Option<TransitionPropertyCounts>) {
+        let Some(resolver) = self
+            .document_styles
+            .get_mut(&document_id)
+            .and_then(|entry| entry.resolver.as_mut())
+        else {
+            return (StyleClockEffects::default(), None);
+        };
+        let effects = resolver.advance_style_clocks(transition_time_ms, live_animations);
+        let transition_properties = (effects.transition_changed
+            && frame_diagnostics::style_clock_record_requested(effects))
+        .then(|| resolver.running_transition_property_counts());
+        (effects, transition_properties)
+    }
+
     /// Rebuilds a document's author cascade, retaining its loaded resources.
     /// The same resolver feeds computed style, geometry, hit testing and paint.
     fn ensure_style_resolver(&mut self, document: &NodeHandle) {
@@ -7054,13 +7075,16 @@ impl HostState {
         if !needs_rebuild {
             let transition_time_ms = self.event_loop.rendering_time_ms();
             let live_animations = self.live_css_animations;
-            let clock_effects = self
-                .document_styles
-                .get_mut(&document_id)
-                .and_then(|entry| entry.resolver.as_mut())
-                .map(|resolver| resolver.advance_style_clocks(transition_time_ms, live_animations))
-                .unwrap_or_default();
-            frame_diagnostics::record_style_clock_effects(document_id, clock_effects);
+            let (clock_effects, transition_properties) = self.advance_document_style_clocks(
+                document_id,
+                transition_time_ms,
+                live_animations,
+            );
+            frame_diagnostics::record_style_clock_effects(
+                document_id,
+                clock_effects,
+                transition_properties,
+            );
             if clock_effects.changed() {
                 if document_id == self.document.identity() {
                     self.style_generation = self.style_generation.saturating_add(1);

@@ -36,7 +36,21 @@ computed style解決回数で、pseudo専用の計算は含まない。`outer_co
 `local`と`local_raw_style_subject`では変更要素とlight-DOM子孫の通常・pseudo
 キャッシュを破棄し、他の要素のキャッシュを保持する。`fallback_*`は全破棄を示す。
 この値だけではレイアウトを保持したか判断できないため、同じ入力区間の
-`OMOIKANE_SCROLL_LAYOUT.rebuild`と処理時間も確認する。
+`OMOIKANE_SCROLL_TARGET`の`phase: "end"`にある`ensure_layout_rebuilds`と
+`ensure_layout_cache_hits`、`ensure_layout_ms`も確認する。読出しごとのログは出さず、
+対象ごとに集計する。合計・最大時間と再構築時間は入力処理時間の内数である。
+
+`OMOIKANE_STYLE_CLOCK`は、`OMOIKANE_TRACE_PAINT=1`でclockの更新がgeometryの
+無効化対象になったときに出る。transitionとanimationの変更フラグ・layout要求を
+区別し、animationは保持状態数と今回のsample変更数も記録する。保持状態には
+完了済みのanimationも含まれる。変更フラグだけで最終CSS値が変化したとは判断しない。
+
+transitionのclockが変わった記録には、`running_transition_properties`としてnode数と
+property数、geometry・transform・color・background・filter・opacity・otherの排他的な
+内訳も出る。通常styleの再sample前に保持されているtransitionの集計であり、すべての値が
+そのtickで変化したという意味ではない。animationだけの記録ではこの欄は`null`になる。
+分類は調査用で、layoutを省略できるpropertyの一覧ではない。CSS名や値は記録せず、
+診断無効時はこの内訳を集計しない。
 
 実サイトの読み込み状態も比較条件に含める。本文の一部が表示されても、スクロール先が
 遅延読み込みのプレースホルダーだけなら、通常コンテンツ表示後の性能を検証したことには

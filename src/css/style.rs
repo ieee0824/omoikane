@@ -2407,6 +2407,11 @@ impl StyleResolver {
             .running_transitions_require_layout()
     }
 
+    /// Returns bounded transition-property counts for opt-in diagnostics.
+    pub(crate) fn running_transition_property_counts(&self) -> super::TransitionPropertyCounts {
+        self.transition_timeline.running_property_counts()
+    }
+
     pub(crate) fn cancel_detached_transitions(&mut self, active_node_ids: &HashSet<usize>) {
         self.transition_timeline
             .cancel_detached_transitions(active_node_ids);

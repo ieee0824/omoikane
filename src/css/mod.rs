@@ -49,8 +49,8 @@ pub use style::{
 };
 pub(crate) use supports::{supports_condition_matches, supports_condition_result};
 pub(crate) use transition::{
-    computed_transition_longhand, computed_transition_shorthand, expand_transition_shorthand,
-    normalize_transition_longhand, normalize_transition_shorthand,
+    TransitionPropertyCounts, computed_transition_longhand, computed_transition_shorthand,
+    expand_transition_shorthand, normalize_transition_longhand, normalize_transition_shorthand,
 };
 pub use typed::{
     ComputedBreak, ComputedDirection, ComputedDisplay, ComputedFloat, ComputedPosition,

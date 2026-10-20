@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use super::event_loop::ScriptSourceLocation;
-use crate::css::style::StyleClockEffects;
+use crate::css::{TransitionPropertyCounts, style::StyleClockEffects};
 
 fn raf_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -167,7 +167,25 @@ fn style_clock_trace_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_PAINT").is_some())
 }
 
-fn style_clock_data(document_id: usize, effects: StyleClockEffects) -> serde_json::Value {
+fn transition_property_data(counts: TransitionPropertyCounts) -> serde_json::Value {
+    serde_json::json!({
+        "nodes": counts.nodes,
+        "properties": counts.properties,
+        "geometry": counts.geometry,
+        "transform": counts.transform,
+        "color": counts.color,
+        "background": counts.background,
+        "filter": counts.filter,
+        "opacity": counts.opacity,
+        "other": counts.other,
+    })
+}
+
+fn style_clock_data(
+    document_id: usize,
+    effects: StyleClockEffects,
+    transition_properties: Option<TransitionPropertyCounts>,
+) -> serde_json::Value {
     serde_json::json!({
         "document_id": document_id,
         "transition_changed": effects.transition_changed,
@@ -178,19 +196,32 @@ fn style_clock_data(document_id: usize, effects: StyleClockEffects) -> serde_jso
         "retained_animation_pseudos": effects.retained_animation_pseudos,
         "changed_animation_elements": effects.changed_animation_elements,
         "changed_animation_pseudos": effects.changed_animation_pseudos,
+        "running_transition_properties": transition_properties.map(transition_property_data),
     })
 }
 
+/// Whether the current sample will emit an opt-in style-clock record.
+///
+/// Callers use this before collecting transition-property counts, keeping the
+/// trace-disabled path free of an additional timeline scan.
+pub(super) fn style_clock_record_requested(effects: StyleClockEffects) -> bool {
+    style_clock_trace_enabled() && effects.changed() && effects.requires_layout()
+}
+
 /// Records a bounded summary when changed clocks require rebuilt geometry.
-pub(super) fn record_style_clock_effects(document_id: usize, effects: StyleClockEffects) {
-    if !style_clock_trace_enabled() || !effects.changed() || !effects.requires_layout() {
+pub(super) fn record_style_clock_effects(
+    document_id: usize,
+    effects: StyleClockEffects,
+    transition_properties: Option<TransitionPropertyCounts>,
+) {
+    if !style_clock_record_requested(effects) {
         return;
     }
     eprintln!(
         "{}",
         crate::diagnostics::json_record(
             "OMOIKANE_STYLE_CLOCK",
-            &style_clock_data(document_id, effects)
+            &style_clock_data(document_id, effects, transition_properties)
         )
     );
 }
@@ -637,8 +668,19 @@ mod tests {
             changed_animation_elements: 1,
             changed_animation_pseudos: 2,
         };
+        let transition_properties = TransitionPropertyCounts {
+            nodes: 2,
+            properties: 7,
+            geometry: 1,
+            transform: 1,
+            color: 1,
+            background: 1,
+            filter: 1,
+            opacity: 1,
+            other: 1,
+        };
         assert_eq!(
-            style_clock_data(41, effects),
+            style_clock_data(41, effects, Some(transition_properties)),
             serde_json::json!({
                 "document_id": 41,
                 "transition_changed": true,
@@ -649,7 +691,22 @@ mod tests {
                 "retained_animation_pseudos": 3,
                 "changed_animation_elements": 1,
                 "changed_animation_pseudos": 2,
+                "running_transition_properties": {
+                    "nodes": 2,
+                    "properties": 7,
+                    "geometry": 1,
+                    "transform": 1,
+                    "color": 1,
+                    "background": 1,
+                    "filter": 1,
+                    "opacity": 1,
+                    "other": 1,
+                },
             })
+        );
+        assert_eq!(
+            style_clock_data(41, effects, None)["running_transition_properties"],
+            serde_json::Value::Null
         );
         assert!(effects.changed());
         assert!(effects.requires_layout());

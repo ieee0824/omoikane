@@ -43,6 +43,119 @@ pub(crate) struct TransitionEventRecord {
     pub elapsed_time: f64,
 }
 
+/// Bounded diagnostic counts for currently running transition properties.
+///
+/// The summary intentionally omits property names, values, selectors, and DOM
+/// handles. Its categories are diagnostic labels and do not relax the existing
+/// layout invalidation policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TransitionPropertyCounts {
+    pub(crate) nodes: usize,
+    pub(crate) properties: usize,
+    pub(crate) geometry: usize,
+    pub(crate) transform: usize,
+    pub(crate) color: usize,
+    pub(crate) background: usize,
+    pub(crate) filter: usize,
+    pub(crate) opacity: usize,
+    pub(crate) other: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransitionPropertyCategory {
+    Geometry,
+    Transform,
+    Color,
+    Background,
+    Filter,
+    Opacity,
+    Other,
+}
+
+impl TransitionPropertyCounts {
+    fn add(&mut self, property: &str) {
+        self.properties += 1;
+        match transition_property_category(property) {
+            TransitionPropertyCategory::Geometry => self.geometry += 1,
+            TransitionPropertyCategory::Transform => self.transform += 1,
+            TransitionPropertyCategory::Color => self.color += 1,
+            TransitionPropertyCategory::Background => self.background += 1,
+            TransitionPropertyCategory::Filter => self.filter += 1,
+            TransitionPropertyCategory::Opacity => self.opacity += 1,
+            TransitionPropertyCategory::Other => self.other += 1,
+        }
+    }
+
+    #[cfg(test)]
+    fn categorized_properties(self) -> usize {
+        self.geometry
+            + self.transform
+            + self.color
+            + self.background
+            + self.filter
+            + self.opacity
+            + self.other
+    }
+}
+
+fn transition_property_category(property: &str) -> TransitionPropertyCategory {
+    if property.starts_with("--") {
+        return TransitionPropertyCategory::Other;
+    }
+    if property == "opacity" {
+        TransitionPropertyCategory::Opacity
+    } else if matches!(property, "filter" | "backdrop-filter") {
+        TransitionPropertyCategory::Filter
+    } else if matches!(property, "transform" | "translate" | "rotate" | "scale") {
+        TransitionPropertyCategory::Transform
+    } else if property.starts_with("background-") {
+        TransitionPropertyCategory::Background
+    } else if property == "color" || property.ends_with("-color") {
+        TransitionPropertyCategory::Color
+    } else if transition_property_is_geometry(property) {
+        TransitionPropertyCategory::Geometry
+    } else {
+        TransitionPropertyCategory::Other
+    }
+}
+
+fn transition_property_is_geometry(property: &str) -> bool {
+    matches!(
+        property,
+        "width"
+            | "height"
+            | "min-width"
+            | "max-width"
+            | "min-height"
+            | "max-height"
+            | "top"
+            | "right"
+            | "bottom"
+            | "left"
+            | "inset"
+            | "inset-inline"
+            | "inset-inline-start"
+            | "inset-inline-end"
+            | "inset-block"
+            | "inset-block-start"
+            | "inset-block-end"
+            | "flex-basis"
+            | "flex-grow"
+            | "flex-shrink"
+            | "row-gap"
+            | "column-gap"
+            | "gap"
+            | "font-size"
+            | "font-weight"
+            | "line-height"
+            | "letter-spacing"
+            | "word-spacing"
+            | "text-indent"
+    ) || property.starts_with("margin-")
+        || property.starts_with("padding-")
+        || (property.starts_with("border-") && property.ends_with("-width"))
+}
+
 #[derive(Debug, Default)]
 struct ElementTransitionState {
     base_values: PropertyMap,
@@ -198,6 +311,21 @@ impl TransitionTimeline {
                 !matches!(property.as_str(), "opacity" | "filter" | "backdrop-filter")
             })
         })
+    }
+
+    pub(crate) fn running_property_counts(&self) -> TransitionPropertyCounts {
+        let mut counts = TransitionPropertyCounts::default();
+        for state in self
+            .elements
+            .values()
+            .filter(|state| !state.running.is_empty())
+        {
+            counts.nodes += 1;
+            for property in state.running.keys() {
+                counts.add(property);
+            }
+        }
+        counts
     }
 
     pub(crate) fn cancel_detached_transitions(
@@ -1517,6 +1645,70 @@ mod tests {
                 .1
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn running_property_diagnostics_are_bounded_and_exhaustive() {
+        let running = RunningTransition::new(
+            ComputedValue::Number(0.0),
+            ComputedValue::Number(1.0),
+            None,
+            TransitionParameters {
+                duration_ms: 1_000.0,
+                delay_ms: 0.0,
+                timing: TimingFunction::Linear,
+            },
+            0.0,
+        );
+        let mut timeline = TransitionTimeline::default();
+        for (node_id, properties) in [
+            (
+                10,
+                ["bottom", "transform", "color", "background-color"].as_slice(),
+            ),
+            (
+                20,
+                [
+                    "filter",
+                    "backdrop-filter",
+                    "opacity",
+                    "text-shadow",
+                    "--tone",
+                ]
+                .as_slice(),
+            ),
+        ] {
+            timeline.elements.insert(
+                node_id,
+                ElementTransitionState {
+                    running: properties
+                        .iter()
+                        .map(|property| ((*property).to_string(), running.clone()))
+                        .collect(),
+                    ..ElementTransitionState::default()
+                },
+            );
+        }
+        timeline
+            .elements
+            .insert(30, ElementTransitionState::default());
+
+        let counts = timeline.running_property_counts();
+        assert_eq!(
+            counts,
+            TransitionPropertyCounts {
+                nodes: 2,
+                properties: 9,
+                geometry: 1,
+                transform: 1,
+                color: 1,
+                background: 1,
+                filter: 2,
+                opacity: 1,
+                other: 2,
+            }
+        );
+        assert_eq!(counts.categorized_properties(), counts.properties);
     }
 
     fn run_static_timeline_benchmark(
