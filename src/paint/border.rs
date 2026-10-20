@@ -635,6 +635,28 @@ pub(crate) fn paint_box_shadow(
     }
 }
 
+fn shadow_buffer_intersects_canvas(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> bool {
+    if width == 0 || height == 0 || canvas_width == 0 || canvas_height == 0 {
+        return false;
+    }
+    if canvas_width > i32::MAX as u32 || canvas_height > i32::MAX as u32 {
+        return true;
+    }
+    let right = i64::from(x) + i64::from(width);
+    let bottom = i64::from(y) + i64::from(height);
+    right > 0
+        && bottom > 0
+        && i64::from(x) < i64::from(canvas_width)
+        && i64::from(y) < i64::from(canvas_height)
+}
+
 /// アウター box-shadow を描画する。
 /// border_box の内側は描画しない（外側のみ）。
 pub(crate) fn paint_outer_box_shadow(
@@ -671,6 +693,16 @@ pub(crate) fn paint_outer_box_shadow(
             let buf_w = shadow_rect.width.ceil() as u32 + 2;
             let buf_h = shadow_rect.height.ceil() as u32 + 2;
             if buf_w == 0 || buf_h == 0 {
+                return;
+            }
+            if !shadow_buffer_intersects_canvas(
+                buf_x,
+                buf_y,
+                buf_w,
+                buf_h,
+                canvas.width(),
+                canvas.height(),
+            ) {
                 return;
             }
             let mut shadow_buf = Canvas::new(buf_w, buf_h);
@@ -781,80 +813,98 @@ pub(crate) fn paint_outer_box_shadow(
             }
         }
     } else {
-        // CSS blur radiusの半分を標準偏差とするGaussianへ合わせる。小さいkernelは
-        // 直接畳み込み、それ以外は3つのbox blurで線形時間に近似する。
-        // 全passの支持範囲をmarginに取り、端を透明として畳み込む。
-        let sigma = blur * 0.5;
-        let use_direct_gaussian = sigma > 0.5 && sigma <= 2.0;
-        let blur_radii = gaussian_box_blur_radii(blur);
-        let blur_support = if use_direct_gaussian {
-            (sigma * 3.0).ceil() as u32
-        } else {
-            blur_radii.iter().copied().fold(0u32, u32::saturating_add)
-        };
-        let margin = blur_support.saturating_add(1);
-        let margin_f = margin as f32;
-        let buf_x = (shadow_rect.x - margin_f).floor() as i32;
-        let buf_y = (shadow_rect.y - margin_f).floor() as i32;
-        let buf_w = (shadow_rect.width + margin_f * 2.0).ceil() as u32 + 2;
-        let buf_h = (shadow_rect.height + margin_f * 2.0).ceil() as u32 + 2;
-
-        if buf_w == 0 || buf_h == 0 {
-            return;
-        }
-
-        let mut shadow_buf = Canvas::new(buf_w, buf_h);
-        let local_rect = Rect {
-            x: shadow_rect.x - buf_x as f32,
-            y: shadow_rect.y - buf_y as f32,
-            width: shadow_rect.width,
-            height: shadow_rect.height,
-        };
-        // 影の shape を描画（border_radius あれば rounded）
-        if let Some((tl, tr, br, bl)) = radii {
-            shadow_buf.fill_rounded_rect(
-                local_rect,
-                Color::rgba(color.r, color.g, color.b, 255),
-                tl + spread,
-                tr + spread,
-                br + spread,
-                bl + spread,
-                None,
-            );
-        } else {
-            shadow_buf.fill_rect(local_rect, Color::rgba(color.r, color.g, color.b, 255));
-        }
-
-        // 先に不透明なborder-box形状全体をblurし、完成したouter shadowだけを
-        // border edgeの内側から除外する。
-        if use_direct_gaussian {
-            shadow_buf.gaussian_blur_alpha_zero_padded(sigma);
-        } else {
-            shadow_buf.box_blur_alpha_radii_zero_padded(&blur_radii);
-        }
-        let box_local = Rect {
-            x: border_box.x - buf_x as f32,
-            y: border_box.y - buf_y as f32,
-            width: border_box.width,
-            height: border_box.height,
-        };
-        knock_out_shadow_interior(&mut shadow_buf, box_local, radii);
-
-        // color.a は合成時に適用し、一時バッファへの追加走査を避ける。
-        let alpha_scale = color.a as f32 / 255.0;
-
-        // メインキャンバスに合成（clip 適用）
-        canvas.composite_canvas_clipped(
-            &shadow_buf,
-            buf_x,
-            buf_y,
-            color.r,
-            color.g,
-            color.b,
-            alpha_scale,
-            clip,
-        );
+        paint_blurred_outer_box_shadow(canvas, border_box, shadow_rect, shadow, clip, radii);
     }
+}
+
+fn paint_blurred_outer_box_shadow(
+    canvas: &mut Canvas,
+    border_box: Rect,
+    shadow_rect: Rect,
+    shadow: &BoxShadow,
+    clip: Option<Rect>,
+    radii: Option<(f32, f32, f32, f32)>,
+) {
+    let blur = shadow.blur_radius;
+    let spread = shadow.spread_radius;
+    let color = shadow.color;
+    // CSS blur radiusの半分を標準偏差とするGaussianへ合わせる。小さいkernelは
+    // 直接畳み込み、それ以外は3つのbox blurで線形時間に近似する。
+    // 全passの支持範囲をmarginに取り、端を透明として畳み込む。
+    let sigma = blur * 0.5;
+    let use_direct_gaussian = sigma > 0.5 && sigma <= 2.0;
+    let blur_radii = gaussian_box_blur_radii(blur);
+    let blur_support = if use_direct_gaussian {
+        (sigma * 3.0).ceil() as u32
+    } else {
+        blur_radii.iter().copied().fold(0u32, u32::saturating_add)
+    };
+    let margin = blur_support.saturating_add(1);
+    let margin_f = margin as f32;
+    let buf_x = (shadow_rect.x - margin_f).floor() as i32;
+    let buf_y = (shadow_rect.y - margin_f).floor() as i32;
+    let buf_w = (shadow_rect.width + margin_f * 2.0).ceil() as u32 + 2;
+    let buf_h = (shadow_rect.height + margin_f * 2.0).ceil() as u32 + 2;
+
+    if buf_w == 0 || buf_h == 0 {
+        return;
+    }
+
+    if !shadow_buffer_intersects_canvas(buf_x, buf_y, buf_w, buf_h, canvas.width(), canvas.height())
+    {
+        return;
+    }
+    let mut shadow_buf = Canvas::new(buf_w, buf_h);
+    let local_rect = Rect {
+        x: shadow_rect.x - buf_x as f32,
+        y: shadow_rect.y - buf_y as f32,
+        width: shadow_rect.width,
+        height: shadow_rect.height,
+    };
+    // 影の shape を描画（border_radius あれば rounded）
+    if let Some((tl, tr, br, bl)) = radii {
+        shadow_buf.fill_rounded_rect(
+            local_rect,
+            Color::rgba(color.r, color.g, color.b, 255),
+            tl + spread,
+            tr + spread,
+            br + spread,
+            bl + spread,
+            None,
+        );
+    } else {
+        shadow_buf.fill_rect(local_rect, Color::rgba(color.r, color.g, color.b, 255));
+    }
+
+    // 先に不透明なborder-box形状全体をblurし、完成したouter shadowだけを
+    // border edgeの内側から除外する。
+    if use_direct_gaussian {
+        shadow_buf.gaussian_blur_alpha_zero_padded(sigma);
+    } else {
+        shadow_buf.box_blur_alpha_radii_zero_padded(&blur_radii);
+    }
+    let box_local = Rect {
+        x: border_box.x - buf_x as f32,
+        y: border_box.y - buf_y as f32,
+        width: border_box.width,
+        height: border_box.height,
+    };
+    knock_out_shadow_interior(&mut shadow_buf, box_local, radii);
+
+    // color.a は合成時に適用し、一時バッファへの追加走査を避ける。
+    let alpha_scale = color.a as f32 / 255.0;
+
+    // メインキャンバスに合成（clip 適用）
+    canvas.composite_canvas_clipped(
+        &shadow_buf,
+        buf_x,
+        buf_y,
+        color.r,
+        color.g,
+        color.b,
+        alpha_scale,
+        clip,
+    );
 }
 
 pub(super) fn gaussian_box_blur_radii(blur_radius: f32) -> [u32; 3] {
@@ -920,3 +970,7 @@ fn knock_out_shadow_interior(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "border/shadow_cull_tests.rs"]
+mod shadow_cull_tests;
