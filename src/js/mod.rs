@@ -7046,6 +7046,7 @@ impl HostState {
         transition_time_ms: f64,
         live_animations: bool,
     ) -> (StyleClockEffects, Option<TransitionPropertyCounts>) {
+        let transition_nodes = self.transition_nodes_for_document(document_id, transition_time_ms);
         let Some(resolver) = self
             .document_styles
             .get_mut(&document_id)
@@ -7053,11 +7054,42 @@ impl HostState {
         else {
             return (StyleClockEffects::default(), None);
         };
-        let effects = resolver.advance_style_clocks(transition_time_ms, live_animations);
+        let effects = resolver.advance_style_clocks_with_node_lookup(
+            transition_time_ms,
+            live_animations,
+            |node_id| transition_nodes.get(&node_id).cloned(),
+        );
         let transition_properties = (effects.transition_changed
             && frame_diagnostics::style_clock_record_requested(effects))
         .then(|| resolver.running_transition_property_counts());
         (effects, transition_properties)
+    }
+
+    fn transition_nodes_for_document(
+        &self,
+        document_id: usize,
+        transition_time_ms: f64,
+    ) -> HashMap<usize, NodeHandle> {
+        let Some(resolver) = self
+            .document_styles
+            .get(&document_id)
+            .and_then(|entry| entry.resolver.as_ref())
+        else {
+            return HashMap::new();
+        };
+        if !resolver.transition_sample_needs_node_lookup(transition_time_ms) {
+            return HashMap::new();
+        }
+        resolver
+            .running_transition_node_ids()
+            .into_iter()
+            .filter_map(|node_id| {
+                let node = self.get_node(node_id)?;
+                document_root_for_node(&node)
+                    .is_some_and(|document| document.identity() == document_id)
+                    .then_some((node_id, node))
+            })
+            .collect()
     }
 
     /// Rebuilds a document's author cascade, retaining its loaded resources.

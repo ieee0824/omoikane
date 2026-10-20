@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::paint::color::{Color, parse_color};
 
-use super::style::PropertyMap;
+use super::style::{PropertyId, PropertyMap};
 use super::{
     ComputedValue, Declaration, LengthPercentageMath, Value, is_css_wide_keyword,
     split_top_level_whitespace_strict as split_top_level_whitespace,
@@ -70,6 +70,55 @@ enum TransitionPropertyCategory {
     Filter,
     Opacity,
     Other,
+}
+
+/// The smallest computed-style cache region that can safely be discarded for
+/// one running transition node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TransitionCacheScope {
+    /// Invalidate the transition owner and its light-DOM descendants.
+    Subtree,
+    /// Invalidate every ordinary and pseudo computed style.
+    Full,
+}
+
+/// Classifies a transitioned property by the computed-style cache region that
+/// can observe a newly sampled value.
+pub(crate) fn transition_cache_scope(property: &str) -> TransitionCacheScope {
+    let Some(property_id) = PropertyId::parse(property) else {
+        return TransitionCacheScope::Full;
+    };
+    if matches!(
+        property_id,
+        PropertyId::Color
+            | PropertyId::BorderBlockEndColor
+            | PropertyId::BorderBlockStartColor
+            | PropertyId::BorderBottomColor
+            | PropertyId::BorderInlineEndColor
+            | PropertyId::BorderInlineStartColor
+            | PropertyId::BorderLeftColor
+            | PropertyId::BorderRightColor
+            | PropertyId::BorderTopColor
+            | PropertyId::ColumnRuleColor
+            | PropertyId::OutlineColor
+            | PropertyId::TextDecorationColor
+            | PropertyId::BackgroundAttachment
+            | PropertyId::BackgroundClip
+            | PropertyId::BackgroundColor
+            | PropertyId::BackgroundImage
+            | PropertyId::BackgroundOrigin
+            | PropertyId::BackgroundPositionX
+            | PropertyId::BackgroundPositionY
+            | PropertyId::BackgroundRepeat
+            | PropertyId::BackgroundSize
+            | PropertyId::Opacity
+            | PropertyId::Filter
+            | PropertyId::BackdropFilter
+    ) {
+        TransitionCacheScope::Subtree
+    } else {
+        TransitionCacheScope::Full
+    }
 }
 
 impl TransitionPropertyCounts {
@@ -198,6 +247,41 @@ struct TransitionParameters {
 }
 
 impl TransitionTimeline {
+    fn sample_time_advances(&self, time_ms: f64) -> bool {
+        time_ms.is_finite() && time_ms.max(0.0) > self.now_ms
+    }
+
+    /// Whether this finite monotonic sample advances at least one transition.
+    pub(crate) fn sample_will_advance(&self, time_ms: f64) -> bool {
+        self.sample_time_advances(time_ms)
+            && self
+                .elements
+                .values()
+                .any(|state| !state.running.is_empty())
+    }
+
+    /// Whether this advancing sample can localize every running transition and
+    /// therefore needs document node lookup.
+    ///
+    /// A false result can mean either that the clock will not advance or that
+    /// one running property requires full cache invalidation. Callers must
+    /// still sample the clock.
+    pub(crate) fn sample_needs_node_lookup(&self, time_ms: f64) -> bool {
+        if !self.sample_time_advances(time_ms) {
+            return false;
+        }
+        let mut has_running = false;
+        for state in self.elements.values() {
+            for property in state.running.keys() {
+                has_running = true;
+                if transition_cache_scope(property) == TransitionCacheScope::Full {
+                    return false;
+                }
+            }
+        }
+        has_running
+    }
+
     pub(crate) fn set_time_ms(&mut self, time_ms: f64) -> bool {
         if time_ms.is_finite() {
             let next = self.now_ms.max(time_ms.max(0.0));
@@ -296,6 +380,24 @@ impl TransitionTimeline {
         self.elements
             .iter()
             .filter_map(|(node_id, state)| (!state.running.is_empty()).then_some(*node_id))
+            .collect()
+    }
+
+    /// Returns one strongest cache invalidation scope per running node.
+    ///
+    /// Callers collect this before advancing the clock so a transition that
+    /// completes at the new sample time still has its final value recomputed.
+    pub(crate) fn running_cache_scopes(&self) -> Vec<(usize, TransitionCacheScope)> {
+        self.elements
+            .iter()
+            .filter_map(|(node_id, state)| {
+                state
+                    .running
+                    .keys()
+                    .map(|property| transition_cache_scope(property))
+                    .max()
+                    .map(|scope| (*node_id, scope))
+            })
             .collect()
     }
 
@@ -1709,6 +1811,86 @@ mod tests {
             }
         );
         assert_eq!(counts.categorized_properties(), counts.properties);
+    }
+
+    #[test]
+    fn transition_cache_scope_is_an_exact_audited_property_allowlist() {
+        use crate::css::style::PropertyId;
+
+        let localized = PropertyId::ALL
+            .iter()
+            .filter_map(|property| {
+                (transition_cache_scope(property.as_str()) == TransitionCacheScope::Subtree)
+                    .then_some(property.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            localized,
+            [
+                "backdrop-filter",
+                "background-attachment",
+                "background-clip",
+                "background-color",
+                "background-image",
+                "background-origin",
+                "background-position-x",
+                "background-position-y",
+                "background-repeat",
+                "background-size",
+                "border-block-end-color",
+                "border-block-start-color",
+                "border-bottom-color",
+                "border-inline-end-color",
+                "border-inline-start-color",
+                "border-left-color",
+                "border-right-color",
+                "border-top-color",
+                "color",
+                "column-rule-color",
+                "filter",
+                "opacity",
+                "outline-color",
+                "text-decoration-color",
+            ],
+            "adding another localized property requires a dependency audit and this contract update",
+        );
+
+        for property in PropertyId::ALL {
+            if matches!(
+                transition_property_category(property.as_str()),
+                TransitionPropertyCategory::Color | TransitionPropertyCategory::Background
+            ) {
+                assert_eq!(
+                    transition_cache_scope(property.as_str()),
+                    TransitionCacheScope::Subtree,
+                    "every implemented color/background diagnostic property needs an audited cache scope: {}",
+                    property.as_str(),
+                );
+            }
+        }
+
+        for property in [
+            "background",
+            "border-color",
+            "border-block-color",
+            "border-inline-color",
+            "width",
+            "transform",
+            "text-shadow",
+            "box-shadow",
+            "--accent-color",
+            "caret-color",
+            "text-emphasis-color",
+            "-webkit-text-fill-color",
+            "future-color",
+            "background-future",
+        ] {
+            assert_eq!(
+                transition_cache_scope(property),
+                TransitionCacheScope::Full,
+                "unknown, custom, shorthand, and unaudited properties must fail closed: {property}",
+            );
+        }
     }
 
     fn run_static_timeline_benchmark(

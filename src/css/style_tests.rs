@@ -10708,6 +10708,11 @@ fn style_clock_effects_distinguish_transition_layout_and_paint_changes() {
             StyleClockEffects {
                 transition_changed: true,
                 transition_requires_layout: requires_layout,
+                transition_cache_before_animation: TransitionCacheEffects {
+                    outcome: TransitionCacheOutcome::Full,
+                    ordinary_evicted: 1,
+                    ..TransitionCacheEffects::default()
+                },
                 ..StyleClockEffects::default()
             }
         );
@@ -10718,6 +10723,833 @@ fn style_clock_effects_distinguish_transition_layout_and_paint_changes() {
             Some(&expected)
         );
     }
+}
+
+fn transition_node_lookup(nodes: &[NodeHandle]) -> impl FnMut(usize) -> Option<NodeHandle> + '_ {
+    move |identity| {
+        nodes
+            .iter()
+            .find(|node| node.identity() == identity)
+            .cloned()
+    }
+}
+
+#[test]
+fn localized_nested_color_transitions_replace_the_union_and_retain_unrelated_styles() {
+    let document = NodeHandle::document();
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    let grandchild = NodeHandle::element("b");
+    let unrelated = NodeHandle::element("aside");
+    parent.set_attribute("id", "transition-parent");
+    child.set_attribute("id", "transition-child");
+    grandchild.set_attribute("id", "transition-grandchild");
+    unrelated.set_attribute("id", "transition-unrelated");
+    parent.set_attribute("style", "color:red;transition:color 1s linear");
+    child.set_attribute(
+        "style",
+        "background-color:red;transition:background-color 1s linear",
+    );
+    grandchild.set_attribute("style", "color:inherit;background-color:inherit");
+    document.append_child(parent.clone());
+    parent.append_child(child.clone());
+    child.append_child(grandchild.clone());
+    document.append_child(unrelated.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#transition-parent::before,#transition-child::before,\
+             #transition-grandchild::before{content:'';background-color:inherit}\
+             #transition-unrelated::before{content:''}",
+        )
+        .unwrap(),
+    );
+    resolver.computed_style_shared(&grandchild);
+
+    parent.set_attribute("style", "color:blue;transition:color 1s linear");
+    child.set_attribute(
+        "style",
+        "background-color:blue;transition:background-color 1s linear",
+    );
+    resolver.invalidate_style_cache_for_test();
+    resolver.computed_style_shared(&grandchild);
+    assert_eq!(resolver.running_transition_node_ids().len(), 2);
+
+    let parent_before = resolver.computed_style_shared(&parent);
+    let child_before = resolver.computed_style_shared(&child);
+    let grandchild_before = resolver.computed_style_shared(&grandchild);
+    let parent_pseudo_before = resolver
+        .computed_pseudo_style_shared(&parent, PseudoElement::Before)
+        .unwrap();
+    let child_pseudo_before = resolver
+        .computed_pseudo_style_shared(&child, PseudoElement::Before)
+        .unwrap();
+    let grandchild_pseudo_before = resolver
+        .computed_pseudo_style_shared(&grandchild, PseudoElement::Before)
+        .unwrap();
+    let unrelated_before = resolver.computed_style_shared(&unrelated);
+    let unrelated_pseudo_before = resolver
+        .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+        .unwrap();
+
+    let mut looked_up = Vec::new();
+    let effects = resolver.advance_style_clocks_with_node_lookup(500.0, false, |identity| {
+        looked_up.push(identity);
+        [parent.clone(), child.clone()]
+            .into_iter()
+            .find(|node| node.identity() == identity)
+    });
+    looked_up.sort_unstable();
+    let mut expected_lookups = vec![parent.identity(), child.identity()];
+    expected_lookups.sort_unstable();
+    assert_eq!(looked_up, expected_lookups);
+    assert!(effects.transition_changed);
+    assert!(effects.transition_requires_layout);
+    assert_eq!(
+        effects.transition_cache_before_animation,
+        TransitionCacheEffects {
+            outcome: TransitionCacheOutcome::Subtree,
+            ordinary_evicted: 3,
+            ordinary_retained: 2,
+            pseudo_evicted: 3,
+            pseudo_retained: 1,
+        },
+    );
+
+    let parent_middle = resolver.computed_style_shared(&parent);
+    let child_middle = resolver.computed_style_shared(&child);
+    let grandchild_middle = resolver.computed_style_shared(&grandchild);
+    let parent_pseudo_middle = resolver
+        .computed_pseudo_style_shared(&parent, PseudoElement::Before)
+        .unwrap();
+    let child_pseudo_middle = resolver
+        .computed_pseudo_style_shared(&child, PseudoElement::Before)
+        .unwrap();
+    let grandchild_pseudo_middle = resolver
+        .computed_pseudo_style_shared(&grandchild, PseudoElement::Before)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&parent_before, &parent_middle));
+    assert!(!Arc::ptr_eq(&child_before, &child_middle));
+    assert!(!Arc::ptr_eq(&grandchild_before, &grandchild_middle));
+    assert!(!Arc::ptr_eq(&parent_pseudo_before, &parent_pseudo_middle));
+    assert!(!Arc::ptr_eq(&child_pseudo_before, &child_pseudo_middle));
+    assert!(!Arc::ptr_eq(
+        &grandchild_pseudo_before,
+        &grandchild_pseudo_middle,
+    ));
+    assert!(Arc::ptr_eq(
+        &unrelated_before,
+        &resolver.computed_style_shared(&unrelated),
+    ));
+    assert!(Arc::ptr_eq(
+        &unrelated_pseudo_before,
+        &resolver
+            .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+            .unwrap(),
+    ));
+    let purple = ComputedValue::Color("rgb(128, 0, 128)".into());
+    assert_eq!(parent_middle.get("color"), Some(&purple));
+    assert_eq!(child_middle.get("color"), Some(&purple));
+    assert_eq!(child_middle.get("background-color"), Some(&purple));
+    assert_eq!(grandchild_middle.get("color"), Some(&purple));
+    assert_eq!(grandchild_middle.get("background-color"), Some(&purple));
+    assert_eq!(parent_pseudo_middle.get("color"), Some(&purple));
+    assert_eq!(child_pseudo_middle.get("background-color"), Some(&purple));
+    assert_eq!(
+        grandchild_pseudo_middle.get("background-color"),
+        Some(&purple),
+    );
+
+    let effects = resolver.advance_style_clocks_with_node_lookup(
+        1_000.0,
+        false,
+        transition_node_lookup(&[parent.clone(), child.clone()]),
+    );
+    assert!(effects.transition_changed);
+    assert_eq!(
+        effects.transition_cache_before_animation,
+        TransitionCacheEffects {
+            outcome: TransitionCacheOutcome::Subtree,
+            ordinary_evicted: 3,
+            ordinary_retained: 2,
+            pseudo_evicted: 3,
+            pseudo_retained: 1,
+        },
+    );
+    let parent_final = resolver.computed_style_shared(&parent);
+    let child_final = resolver.computed_style_shared(&child);
+    let grandchild_final = resolver.computed_style_shared(&grandchild);
+    assert!(!Arc::ptr_eq(&parent_middle, &parent_final));
+    assert!(!Arc::ptr_eq(&child_middle, &child_final));
+    assert!(!Arc::ptr_eq(&grandchild_middle, &grandchild_final));
+    let blue = ComputedValue::Color("blue".into());
+    assert_eq!(parent_final.get("color"), Some(&blue));
+    assert_eq!(child_final.get("color"), Some(&blue));
+    assert_eq!(child_final.get("background-color"), Some(&blue));
+    assert_eq!(grandchild_final.get("color"), Some(&blue));
+    assert_eq!(grandchild_final.get("background-color"), Some(&blue));
+    assert!(!resolver.has_running_transitions());
+
+    let unchanged = resolver.advance_style_clocks_with_node_lookup(
+        1_250.0,
+        false,
+        transition_node_lookup(&[parent.clone(), child.clone()]),
+    );
+    assert!(!unchanged.transition_changed);
+    assert_eq!(
+        unchanged.transition_cache_before_animation.outcome,
+        TransitionCacheOutcome::None,
+    );
+    assert_eq!(
+        unchanged.transition_cache_before_animation.ordinary_evicted,
+        0,
+    );
+    assert_eq!(
+        unchanged.transition_cache_before_animation.pseudo_evicted,
+        0,
+    );
+    assert!(Arc::ptr_eq(
+        &parent_final,
+        &resolver.computed_style_shared(&parent),
+    ));
+    assert!(Arc::ptr_eq(
+        &child_final,
+        &resolver.computed_style_shared(&child),
+    ));
+    assert!(Arc::ptr_eq(
+        &grandchild_final,
+        &resolver.computed_style_shared(&grandchild),
+    ));
+    assert_eq!(
+        resolver.computed_style_shared(&grandchild).get("color"),
+        Some(&blue),
+    );
+}
+
+#[test]
+fn localized_noninherited_color_transitions_refresh_explicit_inherit_descendants() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    let unrelated = NodeHandle::element("aside");
+    target.set_attribute("id", "paint-transition-target");
+    child.set_attribute("id", "paint-transition-child");
+    unrelated.set_attribute("id", "paint-transition-unrelated");
+    target.set_attribute(
+        "style",
+        "background-color:red;border-top:1px solid red;\
+         transition:background-color 1s linear,border-top-color 1s linear",
+    );
+    child.set_attribute(
+        "style",
+        "background-color:inherit;border-top-color:inherit;border-top-style:solid",
+    );
+    document.append_child(target.clone());
+    target.append_child(child.clone());
+    document.append_child(unrelated.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#paint-transition-target::before,#paint-transition-child::before{\
+             content:'';background-color:inherit;border-top-color:inherit}\
+             #paint-transition-unrelated::before{content:''}",
+        )
+        .unwrap(),
+    );
+    resolver.computed_style_shared(&child);
+    target.set_attribute(
+        "style",
+        "background-color:blue;border-top:1px solid blue;\
+         transition:background-color 1s linear,border-top-color 1s linear",
+    );
+    resolver.invalidate_style_cache_for_test();
+    resolver.computed_style_shared(&child);
+
+    let target_before = resolver.computed_style_shared(&target);
+    let child_before = resolver.computed_style_shared(&child);
+    let target_pseudo_before = resolver
+        .computed_pseudo_style_shared(&target, PseudoElement::Before)
+        .unwrap();
+    let child_pseudo_before = resolver
+        .computed_pseudo_style_shared(&child, PseudoElement::Before)
+        .unwrap();
+    let unrelated_before = resolver.computed_style_shared(&unrelated);
+    let unrelated_pseudo_before = resolver
+        .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+        .unwrap();
+
+    let effects = resolver.advance_style_clocks_with_node_lookup(
+        500.0,
+        false,
+        transition_node_lookup(std::slice::from_ref(&target)),
+    );
+    assert!(effects.transition_changed);
+    assert_eq!(
+        effects.transition_cache_before_animation,
+        TransitionCacheEffects {
+            outcome: TransitionCacheOutcome::Subtree,
+            ordinary_evicted: 2,
+            ordinary_retained: 2,
+            pseudo_evicted: 2,
+            pseudo_retained: 1,
+        },
+    );
+    let target_middle = resolver.computed_style_shared(&target);
+    let child_middle = resolver.computed_style_shared(&child);
+    let target_pseudo_middle = resolver
+        .computed_pseudo_style_shared(&target, PseudoElement::Before)
+        .unwrap();
+    let child_pseudo_middle = resolver
+        .computed_pseudo_style_shared(&child, PseudoElement::Before)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&target_before, &target_middle));
+    assert!(!Arc::ptr_eq(&child_before, &child_middle));
+    assert!(!Arc::ptr_eq(&target_pseudo_before, &target_pseudo_middle));
+    assert!(!Arc::ptr_eq(&child_pseudo_before, &child_pseudo_middle));
+    assert!(Arc::ptr_eq(
+        &unrelated_before,
+        &resolver.computed_style_shared(&unrelated),
+    ));
+    assert!(Arc::ptr_eq(
+        &unrelated_pseudo_before,
+        &resolver
+            .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+            .unwrap(),
+    ));
+    let purple = ComputedValue::Color("rgb(128, 0, 128)".into());
+    for style in [
+        &target_middle,
+        &child_middle,
+        &target_pseudo_middle,
+        &child_pseudo_middle,
+    ] {
+        assert_eq!(style.get("background-color"), Some(&purple));
+        assert_eq!(style.get("border-top-color"), Some(&purple));
+    }
+
+    let final_effects = resolver.advance_style_clocks_with_node_lookup(
+        1_000.0,
+        false,
+        transition_node_lookup(std::slice::from_ref(&target)),
+    );
+    assert_eq!(
+        final_effects.transition_cache_before_animation,
+        TransitionCacheEffects {
+            outcome: TransitionCacheOutcome::Subtree,
+            ordinary_evicted: 2,
+            ordinary_retained: 2,
+            pseudo_evicted: 2,
+            pseudo_retained: 1,
+        },
+    );
+    let target_final = resolver.computed_style_shared(&target);
+    let child_final = resolver.computed_style_shared(&child);
+    let target_pseudo_final = resolver
+        .computed_pseudo_style_shared(&target, PseudoElement::Before)
+        .unwrap();
+    let child_pseudo_final = resolver
+        .computed_pseudo_style_shared(&child, PseudoElement::Before)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&target_middle, &target_final));
+    assert!(!Arc::ptr_eq(&child_middle, &child_final));
+    let blue = ComputedValue::Color("blue".into());
+    for style in [
+        &target_final,
+        &child_final,
+        &target_pseudo_final,
+        &child_pseudo_final,
+    ] {
+        assert_eq!(style.get("background-color"), Some(&blue));
+        assert_eq!(style.get("border-top-color"), Some(&blue));
+    }
+    assert!(Arc::ptr_eq(
+        &unrelated_before,
+        &resolver.computed_style_shared(&unrelated),
+    ));
+}
+
+#[test]
+fn localized_text_decoration_color_refreshes_propagated_descendant_data() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("span");
+    let child = NodeHandle::element("b");
+    let unrelated = NodeHandle::element("aside");
+    target.set_attribute(
+        "style",
+        "text-decoration-line:underline;text-decoration-color:red;\
+         transition:text-decoration-color 1s linear",
+    );
+    document.append_child(target.clone());
+    target.append_child(child.clone());
+    document.append_child(unrelated.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.computed_style_shared(&child);
+
+    target.set_attribute(
+        "style",
+        "text-decoration-line:underline;text-decoration-color:blue;\
+         transition:text-decoration-color 1s linear",
+    );
+    resolver.invalidate_style_cache_for_test();
+    resolver.computed_style_shared(&child);
+    let target_before = resolver.computed_style_shared(&target);
+    let child_before = resolver.computed_style_shared(&child);
+    let unrelated_before = resolver.computed_style_shared(&unrelated);
+    assert_eq!(child_before.text_decorations()[0].color, "rgb(255, 0, 0)");
+
+    let effects = resolver.advance_style_clocks_with_node_lookup(
+        500.0,
+        false,
+        transition_node_lookup(std::slice::from_ref(&target)),
+    );
+    assert_eq!(
+        effects.transition_cache_before_animation,
+        TransitionCacheEffects {
+            outcome: TransitionCacheOutcome::Subtree,
+            ordinary_evicted: 2,
+            ordinary_retained: 2,
+            ..TransitionCacheEffects::default()
+        },
+    );
+    let target_middle = resolver.computed_style_shared(&target);
+    let child_middle = resolver.computed_style_shared(&child);
+    assert!(!Arc::ptr_eq(&target_before, &target_middle));
+    assert!(!Arc::ptr_eq(&child_before, &child_middle));
+    assert!(Arc::ptr_eq(
+        &unrelated_before,
+        &resolver.computed_style_shared(&unrelated),
+    ));
+    assert_eq!(target_middle.text_decorations().len(), 1);
+    assert_eq!(child_middle.text_decorations().len(), 1);
+    assert_eq!(
+        target_middle.text_decorations()[0].color,
+        "rgb(128, 0, 128)",
+    );
+    assert_eq!(child_middle.text_decorations()[0].color, "rgb(128, 0, 128)",);
+
+    let final_effects = resolver.advance_style_clocks_with_node_lookup(
+        1_000.0,
+        false,
+        transition_node_lookup(std::slice::from_ref(&target)),
+    );
+    assert_eq!(
+        final_effects.transition_cache_before_animation,
+        TransitionCacheEffects {
+            outcome: TransitionCacheOutcome::Subtree,
+            ordinary_evicted: 2,
+            ordinary_retained: 2,
+            ..TransitionCacheEffects::default()
+        },
+    );
+    let target_final = resolver.computed_style_shared(&target);
+    let child_final = resolver.computed_style_shared(&child);
+    assert!(!Arc::ptr_eq(&target_middle, &target_final));
+    assert!(!Arc::ptr_eq(&child_middle, &child_final));
+    assert!(Arc::ptr_eq(
+        &unrelated_before,
+        &resolver.computed_style_shared(&unrelated),
+    ));
+    assert_eq!(target_final.text_decorations()[0].color, "blue");
+    assert_eq!(child_final.text_decorations()[0].color, "blue");
+    assert!(!resolver.has_running_transitions());
+}
+
+#[test]
+fn localized_transition_clock_noops_preserve_all_cached_arc_identities() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    let unrelated = NodeHandle::element("aside");
+    target.set_attribute("id", "noop-target");
+    child.set_attribute("id", "noop-child");
+    unrelated.set_attribute("id", "noop-unrelated");
+    target.set_attribute("style", "color:red;transition:color 1s linear");
+    document.append_child(target.clone());
+    target.append_child(child.clone());
+    document.append_child(unrelated.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#noop-target::before,#noop-child::before,#noop-unrelated::before{content:''}",
+        )
+        .unwrap(),
+    );
+    resolver.computed_style_shared(&child);
+    target.set_attribute("style", "color:blue;transition:color 1s linear");
+    resolver.invalidate_style_cache_for_test();
+    resolver.computed_style_shared(&child);
+    assert!(resolver.has_running_transitions());
+
+    let target_before = resolver.computed_style_shared(&target);
+    let child_before = resolver.computed_style_shared(&child);
+    let unrelated_before = resolver.computed_style_shared(&unrelated);
+    let target_pseudo_before = resolver
+        .computed_pseudo_style_shared(&target, PseudoElement::Before)
+        .unwrap();
+    let child_pseudo_before = resolver
+        .computed_pseudo_style_shared(&child, PseudoElement::Before)
+        .unwrap();
+    let unrelated_pseudo_before = resolver
+        .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+        .unwrap();
+
+    for time_ms in [0.0, -10.0, f64::NAN] {
+        assert!(!resolver.transition_sample_needs_node_lookup(time_ms));
+        let effects = resolver.advance_style_clocks_with_node_lookup(time_ms, false, |identity| {
+            panic!("no-op clock unexpectedly looked up node {identity}")
+        });
+        assert!(!effects.transition_changed, "time={time_ms:?}");
+        assert!(!effects.changed(), "time={time_ms:?}");
+        assert_eq!(
+            effects.transition_cache_before_animation,
+            TransitionCacheEffects::default(),
+            "time={time_ms:?}",
+        );
+        assert!(Arc::ptr_eq(
+            &target_before,
+            &resolver.computed_style_shared(&target),
+        ));
+        assert!(Arc::ptr_eq(
+            &child_before,
+            &resolver.computed_style_shared(&child),
+        ));
+        assert!(Arc::ptr_eq(
+            &unrelated_before,
+            &resolver.computed_style_shared(&unrelated),
+        ));
+        assert!(Arc::ptr_eq(
+            &target_pseudo_before,
+            &resolver
+                .computed_pseudo_style_shared(&target, PseudoElement::Before)
+                .unwrap(),
+        ));
+        assert!(Arc::ptr_eq(
+            &child_pseudo_before,
+            &resolver
+                .computed_pseudo_style_shared(&child, PseudoElement::Before)
+                .unwrap(),
+        ));
+        assert!(Arc::ptr_eq(
+            &unrelated_pseudo_before,
+            &resolver
+                .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+                .unwrap(),
+        ));
+    }
+
+    assert!(resolver.transition_sample_needs_node_lookup(500.0));
+    let middle_effects = resolver.advance_style_clocks_with_node_lookup(
+        500.0,
+        false,
+        transition_node_lookup(std::slice::from_ref(&target)),
+    );
+    assert_eq!(
+        middle_effects.transition_cache_before_animation.outcome,
+        TransitionCacheOutcome::Subtree,
+    );
+    let target_middle = resolver.computed_style_shared(&target);
+    let child_middle = resolver.computed_style_shared(&child);
+    let unrelated_middle = resolver.computed_style_shared(&unrelated);
+    let target_pseudo_middle = resolver
+        .computed_pseudo_style_shared(&target, PseudoElement::Before)
+        .unwrap();
+    let child_pseudo_middle = resolver
+        .computed_pseudo_style_shared(&child, PseudoElement::Before)
+        .unwrap();
+    let unrelated_pseudo_middle = resolver
+        .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+        .unwrap();
+
+    assert!(!resolver.transition_sample_needs_node_lookup(500.0));
+    let same_time = resolver.advance_style_clocks_with_node_lookup(500.0, false, |identity| {
+        panic!("same-time clock unexpectedly looked up node {identity}")
+    });
+    assert!(!same_time.changed());
+    assert_eq!(
+        same_time.transition_cache_before_animation,
+        TransitionCacheEffects::default(),
+    );
+    assert!(Arc::ptr_eq(
+        &target_middle,
+        &resolver.computed_style_shared(&target),
+    ));
+    assert!(Arc::ptr_eq(
+        &child_middle,
+        &resolver.computed_style_shared(&child),
+    ));
+    assert!(Arc::ptr_eq(
+        &unrelated_middle,
+        &resolver.computed_style_shared(&unrelated),
+    ));
+    assert!(Arc::ptr_eq(
+        &target_pseudo_middle,
+        &resolver
+            .computed_pseudo_style_shared(&target, PseudoElement::Before)
+            .unwrap(),
+    ));
+    assert!(Arc::ptr_eq(
+        &child_pseudo_middle,
+        &resolver
+            .computed_pseudo_style_shared(&child, PseudoElement::Before)
+            .unwrap(),
+    ));
+    assert!(Arc::ptr_eq(
+        &unrelated_pseudo_middle,
+        &resolver
+            .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+            .unwrap(),
+    ));
+}
+
+#[test]
+fn unsupported_transition_scopes_fall_back_to_full_cache_invalidation() {
+    for (label, extra_css, initial, current) in [
+        (
+            "mixed width",
+            "",
+            "color:red;width:10px;transition:color 1s linear,width 1s linear",
+            "color:blue;width:30px;transition:color 1s linear,width 1s linear",
+        ),
+        (
+            "registered custom property",
+            "@property --tone{syntax:'<number>';inherits:false;initial-value:0;}",
+            "--tone:0;transition:--tone 1s linear",
+            "--tone:1;transition:--tone 1s linear",
+        ),
+        (
+            "text shadow",
+            "",
+            "color:red;text-shadow:0px 0px;transition:text-shadow 1s linear",
+            "color:red;text-shadow:blue 20px 10px 4px;transition:text-shadow 1s linear",
+        ),
+    ] {
+        let document = NodeHandle::document();
+        let target = NodeHandle::element("div");
+        let unrelated = NodeHandle::element("aside");
+        unrelated.set_attribute("id", "fallback-unrelated");
+        target.set_attribute("style", initial);
+        document.append_child(target.clone());
+        document.append_child(unrelated.clone());
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "{extra_css}#fallback-unrelated::before{{content:''}}"
+            ))
+            .unwrap(),
+        );
+        resolver.computed_style_shared(&target);
+        target.set_attribute("style", current);
+        resolver.invalidate_style_cache_for_test();
+        resolver.computed_style_shared(&target);
+        assert!(resolver.has_running_transitions(), "{label}");
+        let unrelated_before = resolver.computed_style_shared(&unrelated);
+        let unrelated_pseudo_before = resolver
+            .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+            .unwrap();
+
+        assert!(
+            !resolver.transition_sample_needs_node_lookup(500.0),
+            "a Full cache plan must bypass document node lookup: {label}",
+        );
+        let effects = resolver.advance_style_clocks_with_node_lookup(500.0, false, |identity| {
+            panic!("Full cache plan unexpectedly looked up node {identity}: {label}")
+        });
+        assert!(effects.transition_changed, "{label}");
+        assert_eq!(
+            effects.transition_cache_before_animation,
+            TransitionCacheEffects {
+                outcome: TransitionCacheOutcome::Full,
+                ordinary_evicted: 3,
+                ordinary_retained: 0,
+                pseudo_evicted: 1,
+                pseudo_retained: 0,
+            },
+            "{label}",
+        );
+        assert!(
+            !Arc::ptr_eq(
+                &unrelated_before,
+                &resolver.computed_style_shared(&unrelated),
+            ),
+            "{label}",
+        );
+        assert!(
+            !Arc::ptr_eq(
+                &unrelated_pseudo_before,
+                &resolver
+                    .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+                    .unwrap(),
+            ),
+            "{label}",
+        );
+        if label == "mixed width" {
+            assert!(effects.transition_requires_layout);
+            let middle = resolver.computed_style_shared(&target);
+            assert_eq!(
+                middle.get("color"),
+                Some(&ComputedValue::Color("rgb(128, 0, 128)".into())),
+            );
+            assert_eq!(middle.get("width"), Some(&ComputedValue::Px(20.0)));
+        }
+    }
+}
+
+#[test]
+fn missing_or_wrong_transition_node_lookup_falls_back_to_full_cache_invalidation() {
+    for (label, return_wrong_node) in [("missing", false), ("wrong identity", true)] {
+        let document = NodeHandle::document();
+        let target = NodeHandle::element("div");
+        let unrelated = NodeHandle::element("aside");
+        unrelated.set_attribute("id", "lookup-unrelated");
+        target.set_attribute("style", "color:red;transition:color 1s linear");
+        document.append_child(target.clone());
+        document.append_child(unrelated.clone());
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("#lookup-unrelated::before{content:''}").unwrap(),
+        );
+        resolver.computed_style_shared(&target);
+        target.set_attribute("style", "color:blue;transition:color 1s linear");
+        resolver.invalidate_style_cache_for_test();
+        resolver.computed_style_shared(&target);
+        let unrelated_before = resolver.computed_style_shared(&unrelated);
+        let unrelated_pseudo_before = resolver
+            .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+            .unwrap();
+
+        let effects = if return_wrong_node {
+            resolver
+                .advance_style_clocks_with_node_lookup(500.0, false, |_| Some(unrelated.clone()))
+        } else {
+            resolver.advance_style_clocks_with_node_lookup(500.0, false, |_| None)
+        };
+        assert_eq!(
+            effects.transition_cache_before_animation,
+            TransitionCacheEffects {
+                outcome: TransitionCacheOutcome::Full,
+                ordinary_evicted: 3,
+                ordinary_retained: 0,
+                pseudo_evicted: 1,
+                pseudo_retained: 0,
+            },
+            "{label}",
+        );
+        assert!(
+            !Arc::ptr_eq(
+                &unrelated_before,
+                &resolver.computed_style_shared(&unrelated),
+            ),
+            "{label}",
+        );
+        assert!(
+            !Arc::ptr_eq(
+                &unrelated_pseudo_before,
+                &resolver
+                    .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+                    .unwrap(),
+            ),
+            "{label}",
+        );
+    }
+}
+
+#[test]
+fn shadow_and_slot_transition_roots_fall_back_to_full_cache_invalidation() {
+    fn assert_full_fallback(
+        _document: NodeHandle,
+        target: NodeHandle,
+        unrelated: NodeHandle,
+        label: &str,
+        expected_ordinary_evicted: usize,
+    ) {
+        unrelated.set_attribute("id", "topology-unrelated");
+        target.set_attribute("style", "color:red;transition:color 1s linear");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("#topology-unrelated::before{content:''}").unwrap(),
+        );
+        resolver.computed_style_shared(&target);
+        target.set_attribute("style", "color:blue;transition:color 1s linear");
+        resolver.invalidate_style_cache_for_test();
+        resolver.computed_style_shared(&target);
+        let unrelated_before = resolver.computed_style_shared(&unrelated);
+        let unrelated_pseudo_before = resolver
+            .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+            .unwrap();
+
+        let effects = resolver.advance_style_clocks_with_node_lookup(
+            500.0,
+            false,
+            transition_node_lookup(std::slice::from_ref(&target)),
+        );
+        assert_eq!(
+            effects.transition_cache_before_animation,
+            TransitionCacheEffects {
+                outcome: TransitionCacheOutcome::Full,
+                ordinary_evicted: expected_ordinary_evicted,
+                ordinary_retained: 0,
+                pseudo_evicted: 1,
+                pseudo_retained: 0,
+            },
+            "{label}",
+        );
+        assert!(
+            !Arc::ptr_eq(
+                &unrelated_before,
+                &resolver.computed_style_shared(&unrelated),
+            ),
+            "{label}",
+        );
+        assert!(
+            !Arc::ptr_eq(
+                &unrelated_pseudo_before,
+                &resolver
+                    .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+                    .unwrap(),
+            ),
+            "{label}",
+        );
+    }
+
+    let shadow_document = NodeHandle::document();
+    let shadow_target = NodeHandle::element("x-host");
+    let shadow_unrelated = NodeHandle::element("aside");
+    shadow_document.append_child(shadow_target.clone());
+    shadow_document.append_child(shadow_unrelated.clone());
+    shadow_target.attach_shadow(ShadowRootMode::Open).unwrap();
+    assert_full_fallback(
+        shadow_document,
+        shadow_target,
+        shadow_unrelated,
+        "shadow host",
+        3,
+    );
+
+    let slot_document = NodeHandle::document();
+    let host = NodeHandle::element("x-host");
+    let slotted_target = NodeHandle::element("span");
+    let slot_unrelated = NodeHandle::element("aside");
+    slot_document.append_child(host.clone());
+    slot_document.append_child(slot_unrelated.clone());
+    host.append_child(slotted_target.clone());
+    let shadow_root = host.attach_shadow(ShadowRootMode::Open).unwrap();
+    shadow_root.append_child(NodeHandle::element("slot"));
+    assert!(slotted_target.assigned_slot().is_some());
+    assert_full_fallback(
+        slot_document,
+        slotted_target,
+        slot_unrelated,
+        "assigned slot",
+        5,
+    );
 }
 
 #[test]

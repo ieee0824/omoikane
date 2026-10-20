@@ -32,6 +32,7 @@ use super::matcher::{
     SelectorMatchCache, matches_selector_boundary_cached, matches_selector_with_pseudo_cached,
     matches_selector_with_scope_cached,
 };
+use super::transition::TransitionCacheScope;
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
     CssRelativeFontMetrics, Font, FontFamilyKey, FontStretch, FontVariantKey, FontWeight,
@@ -736,6 +737,63 @@ enum StyleAttributeSelectorDependency {
 }
 
 type AttributeSelectorDependency = StyleAttributeSelectorDependency;
+
+/// Bounded result of transition cache processing before animation sampling.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TransitionCacheOutcome {
+    /// The transition clock did not invalidate computed-style caches.
+    #[default]
+    None,
+    /// Running transition light-DOM subtrees were invalidated.
+    Subtree,
+    /// All ordinary and pseudo computed styles were invalidated.
+    Full,
+}
+
+impl TransitionCacheOutcome {
+    /// Returns the bounded label written to style-clock diagnostics.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Subtree => "subtree",
+            Self::Full => "full",
+        }
+    }
+}
+
+/// Cache entry counts from transition processing before animation invalidation.
+/// A `None` outcome reports zeroes rather than the current cache sizes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TransitionCacheEffects {
+    /// Scope selected for transition cache invalidation.
+    pub(crate) outcome: TransitionCacheOutcome,
+    /// Ordinary entries removed by transition processing.
+    pub(crate) ordinary_evicted: usize,
+    /// Ordinary entries retained by transition processing.
+    pub(crate) ordinary_retained: usize,
+    /// Pseudo entries removed by transition processing.
+    pub(crate) pseudo_evicted: usize,
+    /// Pseudo entries retained by transition processing.
+    pub(crate) pseudo_retained: usize,
+}
+
+impl TransitionCacheEffects {
+    fn from_lengths(
+        outcome: TransitionCacheOutcome,
+        ordinary_before: usize,
+        ordinary_after: usize,
+        pseudo_before: usize,
+        pseudo_after: usize,
+    ) -> Self {
+        Self {
+            outcome,
+            ordinary_evicted: ordinary_before.saturating_sub(ordinary_after),
+            ordinary_retained: ordinary_after,
+            pseudo_evicted: pseudo_before.saturating_sub(pseudo_after),
+            pseudo_retained: pseudo_after,
+        }
+    }
+}
 
 /// Computes styles and caches results per node.
 #[derive(Debug, Default)]
@@ -2162,18 +2220,26 @@ fn inline_style_change_is_subtree_local(previous: Option<&str>, current: Option<
 }
 
 fn inline_invalidation_subtree(node: &NodeHandle) -> Option<HashSet<usize>> {
-    if node.containing_shadow_root().is_some() {
+    invalidation_subtrees([node.clone()])
+}
+
+fn invalidation_subtrees(roots: impl IntoIterator<Item = NodeHandle>) -> Option<HashSet<usize>> {
+    let mut pending = roots.into_iter().collect::<Vec<_>>();
+    if pending
+        .iter()
+        .any(|node| node.containing_shadow_root().is_some())
+    {
         return None;
     }
-    let mut pending = vec![node.clone()];
     let mut identities = HashSet::new();
     while let Some(current) = pending.pop() {
+        if !identities.insert(current.identity()) {
+            continue;
+        }
         if current.shadow_root().is_some() || current.assigned_slot().is_some() {
             return None;
         }
-        if identities.insert(current.identity()) {
-            pending.extend(current.child_nodes());
-        }
+        pending.extend(current.child_nodes());
     }
     Some(identities)
 }
@@ -2360,13 +2426,109 @@ impl StyleResolver {
 
     /// Advances the CSS transition sampling clock without moving it backwards.
     pub(crate) fn set_transition_time_ms(&mut self, time_ms: f64) -> bool {
-        if self.transition_timeline.set_time_ms(time_ms) {
+        self.sample_transition_time_ms(time_ms).0
+    }
+
+    fn sample_transition_time_ms(&mut self, time_ms: f64) -> (bool, TransitionCacheEffects) {
+        let ordinary_before = self.cache.len();
+        let pseudo_before = self.pseudo_cache.len();
+        if !self.transition_timeline.set_time_ms(time_ms) {
+            return (false, TransitionCacheEffects::default());
+        }
+        self.cache.clear();
+        self.pseudo_cache.clear();
+        (
+            true,
+            TransitionCacheEffects::from_lengths(
+                TransitionCacheOutcome::Full,
+                ordinary_before,
+                self.cache.len(),
+                pseudo_before,
+                self.pseudo_cache.len(),
+            ),
+        )
+    }
+
+    /// Advances the transition clock and discards only caches that can observe
+    /// a sampled value. The lookup must return nodes from the resolver's
+    /// document; a missing node conservatively falls back to a full clear.
+    fn sample_transition_time_ms_with_node_lookup<F>(
+        &mut self,
+        time_ms: f64,
+        lookup: F,
+    ) -> (bool, TransitionCacheEffects)
+    where
+        F: FnMut(usize) -> Option<NodeHandle>,
+    {
+        if !self.transition_timeline.sample_will_advance(time_ms) {
+            let _ = self.transition_timeline.set_time_ms(time_ms);
+            return (false, TransitionCacheEffects::default());
+        }
+        // Capture running nodes before moving the clock. Sampling the final
+        // frame removes a completed transition only after its style is read.
+        let scopes = self.transition_timeline.running_cache_scopes();
+        let ordinary_before = self.cache.len();
+        let pseudo_before = self.pseudo_cache.len();
+        if !self.transition_timeline.set_time_ms(time_ms) {
+            return (false, TransitionCacheEffects::default());
+        }
+        let outcome = self.invalidate_transition_cache_scopes(scopes, lookup);
+        (
+            true,
+            TransitionCacheEffects::from_lengths(
+                outcome,
+                ordinary_before,
+                self.cache.len(),
+                pseudo_before,
+                self.pseudo_cache.len(),
+            ),
+        )
+    }
+
+    fn invalidate_transition_cache_scopes<F>(
+        &mut self,
+        scopes: Vec<(usize, TransitionCacheScope)>,
+        mut lookup: F,
+    ) -> TransitionCacheOutcome
+    where
+        F: FnMut(usize) -> Option<NodeHandle>,
+    {
+        if scopes
+            .iter()
+            .any(|(_, scope)| *scope == TransitionCacheScope::Full)
+        {
             self.cache.clear();
             self.pseudo_cache.clear();
-            true
-        } else {
-            false
+            return TransitionCacheOutcome::Full;
         }
+
+        let mut root_ids = HashSet::new();
+        let mut roots = Vec::new();
+        for (node_id, scope) in scopes {
+            let Some(node) = lookup(node_id).filter(|node| node.identity() == node_id) else {
+                self.cache.clear();
+                self.pseudo_cache.clear();
+                return TransitionCacheOutcome::Full;
+            };
+            match scope {
+                TransitionCacheScope::Subtree => {
+                    if root_ids.insert(node_id) {
+                        roots.push(node);
+                    }
+                }
+                TransitionCacheScope::Full => unreachable!("handled before node lookup"),
+            }
+        }
+        let Some(identities) = invalidation_subtrees(roots) else {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return TransitionCacheOutcome::Full;
+        };
+        self.cache
+            .retain(|identity, _| !identities.contains(identity));
+        self.pseudo_cache
+            .retain(|key, _| !identities.contains(&key.0));
+        TransitionCacheOutcome::Subtree
     }
 
     /// Moves transition state into a replacement resolver after stylesheet
@@ -2396,6 +2558,12 @@ impl StyleResolver {
 
     pub(crate) fn running_transition_node_ids(&self) -> Vec<usize> {
         self.transition_timeline.running_node_ids()
+    }
+
+    /// Whether the next transition sample can use localized eviction and needs
+    /// document node handles. A false result does not permit skipping sampling.
+    pub(crate) fn transition_sample_needs_node_lookup(&self, time_ms: f64) -> bool {
+        self.transition_timeline.sample_needs_node_lookup(time_ms)
     }
 
     pub(crate) fn has_running_transitions(&self) -> bool {

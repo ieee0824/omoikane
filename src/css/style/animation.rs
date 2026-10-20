@@ -207,12 +207,14 @@ impl AnimationClockEffects {
 
 /// Bounded summary of one transition and animation clock sample.
 ///
-/// The summary contains counts and booleans only. It does not retain DOM nodes,
-/// property names, CSS values, or source locations.
+/// The summary contains counts, booleans, and a bounded cache outcome only. It
+/// does not retain DOM nodes, property names, CSS values, or source locations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct StyleClockEffects {
     pub(crate) transition_changed: bool,
     pub(crate) transition_requires_layout: bool,
+    /// Transition cache processing before animation invalidation in this sample.
+    pub(crate) transition_cache_before_animation: TransitionCacheEffects,
     pub(crate) animation_changed: bool,
     pub(crate) animation_requires_layout: bool,
     pub(crate) retained_animation_elements: usize,
@@ -405,14 +407,50 @@ impl StyleResolver {
     }
 
     /// Advances both live style clocks and returns a value-only diagnostic
-    /// summary. Existing cache invalidation policy remains inside the clock
-    /// setters so callers cannot observe a sampled clock with stale caches.
+    /// summary. Cache invalidation remains inside the sampling helpers so
+    /// callers cannot observe a sampled clock with stale caches.
     pub(crate) fn advance_style_clocks(
         &mut self,
         time_ms: f64,
         live_animations: bool,
     ) -> StyleClockEffects {
-        let transition_changed = self.set_transition_time_ms(time_ms);
+        let (transition_changed, transition_cache) = self.sample_transition_time_ms(time_ms);
+        self.finish_style_clock_advance(
+            transition_changed,
+            transition_cache,
+            time_ms,
+            live_animations,
+        )
+    }
+
+    /// Advances both live style clocks while resolving running transition
+    /// nodes through a document-scoped lookup for localized cache eviction.
+    pub(crate) fn advance_style_clocks_with_node_lookup<F>(
+        &mut self,
+        time_ms: f64,
+        live_animations: bool,
+        lookup: F,
+    ) -> StyleClockEffects
+    where
+        F: FnMut(usize) -> Option<NodeHandle>,
+    {
+        let (transition_changed, transition_cache) =
+            self.sample_transition_time_ms_with_node_lookup(time_ms, lookup);
+        self.finish_style_clock_advance(
+            transition_changed,
+            transition_cache,
+            time_ms,
+            live_animations,
+        )
+    }
+
+    fn finish_style_clock_advance(
+        &mut self,
+        transition_changed: bool,
+        transition_cache_before_animation: TransitionCacheEffects,
+        time_ms: f64,
+        live_animations: bool,
+    ) -> StyleClockEffects {
         // Preserve the existing conservative policy: a retained layout-affecting
         // transition participates in the combined result whenever either clock
         // changes, even if this transition sample itself did not advance.
@@ -425,6 +463,7 @@ impl StyleResolver {
         StyleClockEffects {
             transition_changed,
             transition_requires_layout,
+            transition_cache_before_animation,
             animation_changed: animation.changed(),
             animation_requires_layout: animation.requires_layout,
             retained_animation_elements: animation.retained_elements,

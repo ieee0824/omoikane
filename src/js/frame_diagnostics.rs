@@ -167,6 +167,11 @@ fn style_clock_trace_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_PAINT").is_some())
 }
 
+fn all_style_clocks_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_STYLE_CLOCK_ALL").is_some())
+}
+
 fn transition_property_data(counts: TransitionPropertyCounts) -> serde_json::Value {
     serde_json::json!({
         "nodes": counts.nodes,
@@ -190,6 +195,13 @@ fn style_clock_data(
         "document_id": document_id,
         "transition_changed": effects.transition_changed,
         "transition_requires_layout": effects.transition_requires_layout,
+        "transition_cache_before_animation": {
+            "outcome": effects.transition_cache_before_animation.outcome.as_str(),
+            "ordinary_evicted": effects.transition_cache_before_animation.ordinary_evicted,
+            "ordinary_retained": effects.transition_cache_before_animation.ordinary_retained,
+            "pseudo_evicted": effects.transition_cache_before_animation.pseudo_evicted,
+            "pseudo_retained": effects.transition_cache_before_animation.pseudo_retained,
+        },
         "animation_changed": effects.animation_changed,
         "animation_requires_layout": effects.animation_requires_layout,
         "retained_animation_elements": effects.retained_animation_elements,
@@ -205,10 +217,22 @@ fn style_clock_data(
 /// Callers use this before collecting transition-property counts, keeping the
 /// trace-disabled path free of an additional timeline scan.
 pub(super) fn style_clock_record_requested(effects: StyleClockEffects) -> bool {
-    style_clock_trace_enabled() && effects.changed() && effects.requires_layout()
+    style_clock_record_requested_with_flags(
+        style_clock_trace_enabled(),
+        all_style_clocks_trace_enabled(),
+        effects,
+    )
 }
 
-/// Records a bounded summary when changed clocks require rebuilt geometry.
+fn style_clock_record_requested_with_flags(
+    default_enabled: bool,
+    all_enabled: bool,
+    effects: StyleClockEffects,
+) -> bool {
+    effects.changed() && (all_enabled || (default_enabled && effects.requires_layout()))
+}
+
+/// Records a bounded summary for geometry-changing clocks or the all-clock trace.
 pub(super) fn record_style_clock_effects(
     document_id: usize,
     effects: StyleClockEffects,
@@ -661,6 +685,13 @@ mod tests {
         let effects = StyleClockEffects {
             transition_changed: true,
             transition_requires_layout: false,
+            transition_cache_before_animation: crate::css::style::TransitionCacheEffects {
+                outcome: crate::css::style::TransitionCacheOutcome::Subtree,
+                ordinary_evicted: 3,
+                ordinary_retained: 5,
+                pseudo_evicted: 2,
+                pseudo_retained: 7,
+            },
             animation_changed: true,
             animation_requires_layout: true,
             retained_animation_elements: 2,
@@ -685,6 +716,13 @@ mod tests {
                 "document_id": 41,
                 "transition_changed": true,
                 "transition_requires_layout": false,
+                "transition_cache_before_animation": {
+                    "outcome": "subtree",
+                    "ordinary_evicted": 3,
+                    "ordinary_retained": 5,
+                    "pseudo_evicted": 2,
+                    "pseudo_retained": 7,
+                },
                 "animation_changed": true,
                 "animation_requires_layout": true,
                 "retained_animation_elements": 2,
@@ -710,6 +748,32 @@ mod tests {
         );
         assert!(effects.changed());
         assert!(effects.requires_layout());
+    }
+
+    #[test]
+    fn style_clock_trace_all_includes_paint_only_changes() {
+        let paint_only = StyleClockEffects {
+            transition_changed: true,
+            ..StyleClockEffects::default()
+        };
+        assert!(!style_clock_record_requested_with_flags(
+            true, false, paint_only
+        ));
+        assert!(style_clock_record_requested_with_flags(
+            false, true, paint_only
+        ));
+
+        let layout = StyleClockEffects {
+            transition_changed: true,
+            transition_requires_layout: true,
+            ..StyleClockEffects::default()
+        };
+        assert!(style_clock_record_requested_with_flags(true, false, layout));
+        assert!(!style_clock_record_requested_with_flags(
+            true,
+            true,
+            StyleClockEffects::default()
+        ));
     }
 
     #[test]

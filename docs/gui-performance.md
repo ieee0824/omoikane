@@ -44,6 +44,14 @@ computed style解決回数で、pseudo専用の計算は含まない。`outer_co
 無効化対象になったときに出る。transitionとanimationの変更フラグ・layout要求を
 区別し、animationは保持状態数と今回のsample変更数も記録する。保持状態には
 完了済みのanimationも含まれる。変更フラグだけで最終CSS値が変化したとは判断しない。
+paint-onlyを含むchanged clockも同じschemaで記録する場合は、起動時に
+`OMOIKANE_TRACE_STYLE_CLOCK_ALL=1`を指定する。この変数は単独で有効にでき、既定の
+`OMOIKANE_TRACE_PAINT=1`によるgeometry対象だけの出力条件は変えない。
+
+`transition_cache_before_animation`はtransition clock処理直後のcache結果を示す。
+`outcome`は`none`・`subtree`・`full`のいずれかで、通常・pseudo cacheごとの
+`ordinary_evicted`・`ordinary_retained`・`pseudo_evicted`・`pseudo_retained`はentry数で
+ある。同じsampleで後からanimationがcacheを破棄する前の値であり、処理時間ではない。
 
 transitionのclockが変わった記録には、`running_transition_properties`としてnode数と
 property数、geometry・transform・color・background・filter・opacity・otherの排他的な
