@@ -394,7 +394,7 @@ fn positioned_block_pseudo_does_not_advance_normal_flow() {
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
-            ".host { position: relative; width: 100px; } \
+            ".host { position: relative; width: 100px; padding: 10px 20px; } \
              .host::before { position: absolute; content: \"\"; \
                left: 7px; top: 5px; width: 20px; height: 60px; } \
              .host > div { height: 10px; }",
@@ -424,11 +424,11 @@ fn positioned_block_pseudo_does_not_advance_normal_flow() {
     );
     assert_eq!(
         before.dimensions.border_box().x,
-        host_box.dimensions.content.x + 7.0
+        host_box.dimensions.content.x - host_box.dimensions.padding.left + 7.0
     );
     assert_eq!(
         before.dimensions.border_box().y,
-        host_box.dimensions.content.y + 5.0
+        host_box.dimensions.content.y - host_box.dimensions.padding.top + 5.0
     );
 }
 
@@ -7037,7 +7037,7 @@ fn wrapped_flex_rows_honor_row_gap() {
 }
 
 #[test]
-fn absolutely_positions_child_relative_to_parent_content_box() {
+fn absolutely_positions_child_relative_to_parent_padding_box() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
     let container = NodeHandle::element("div");
@@ -7080,9 +7080,476 @@ fn absolutely_positions_child_relative_to_parent_content_box() {
         .iter()
         .find(|child| child.node.tag_name().as_deref() == Some("aside"))
         .unwrap();
-    assert_eq!(absolute_box.dimensions.content.x, 40.0);
-    assert_eq!(absolute_box.dimensions.content.y, 17.0);
+    assert_eq!(container_box.dimensions.content.x, 10.0);
+    assert_eq!(container_box.dimensions.content.y, 5.0);
+    assert_eq!(absolute_box.dimensions.content.x, 30.0);
+    assert_eq!(absolute_box.dimensions.content.y, 12.0);
     assert_eq!(container_box.dimensions.content.height, 20.0);
+}
+
+#[test]
+fn absolute_auto_axes_stretch_between_padding_box_insets() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("main");
+    let child = NodeHandle::element("div");
+    let grandchild = NodeHandle::element("section");
+    child.set_attribute("class", "target");
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(child.clone());
+    child.append_child(grandchild.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "main { position:relative; width:200px; height:100px; \
+                     padding:10px 20px 30px 40px; border:5px solid } \
+             .target { position:absolute; left:10px; right:20px; \
+                       top:15px; bottom:25px } \
+             .target > section { width:50%; height:50% }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 300.0,
+        },
+    )
+    .unwrap();
+    let parent_box = find_layout_box(&layout, &parent).unwrap();
+    let child_box = find_layout_box(&layout, &child).unwrap();
+    let grandchild_box = find_layout_box(&layout, &grandchild).unwrap();
+
+    assert_eq!(
+        parent_box.dimensions.content,
+        Rect {
+            x: 45.0,
+            y: 15.0,
+            width: 200.0,
+            height: 100.0,
+        }
+    );
+    assert_eq!(
+        child_box.dimensions.border_box(),
+        Rect {
+            x: 15.0,
+            y: 20.0,
+            width: 230.0,
+            height: 100.0,
+        }
+    );
+    assert_eq!(grandchild_box.dimensions.content.width, 115.0);
+    assert_eq!(grandchild_box.dimensions.content.height, 50.0);
+}
+
+#[test]
+fn absolute_auto_stretch_resolves_percent_edges_before_negative_margins() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("main");
+    let child = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(child.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "main { position:relative; width:200px; height:100px } \
+             div { position:absolute; left:10%; right:10%; top:20%; bottom:20%; \
+                   margin:5% -10px; padding:5%; border:2px solid }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 200.0,
+        },
+    )
+    .unwrap();
+    let child_box = find_layout_box(&layout, &child).unwrap();
+    assert_eq!(child_box.dimensions.content.width, 156.0);
+    assert_eq!(child_box.dimensions.content.height, 16.0);
+    assert_eq!(
+        child_box.dimensions.border_box(),
+        Rect {
+            x: 10.0,
+            y: 30.0,
+            width: 180.0,
+            height: 40.0,
+        }
+    );
+}
+
+#[test]
+fn absolute_auto_stretch_keeps_negative_span_until_after_negative_margins() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("main");
+    let child = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(child.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "main { position:relative; width:100px; height:100px } \
+             div { position:absolute; left:100px; right:100px; \
+                   top:100px; bottom:100px; margin:-100px }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 200.0,
+        },
+    )
+    .unwrap();
+    let child_box = find_layout_box(&layout, &child).unwrap();
+    assert_eq!(child_box.dimensions.content.width, 100.0);
+    assert_eq!(child_box.dimensions.content.height, 100.0);
+    assert_eq!(
+        child_box.dimensions.border_box(),
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        }
+    );
+}
+
+#[test]
+fn absolute_auto_inset_fills_nested_ratio_padding_box() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let slot = NodeHandle::element("div");
+    let media = NodeHandle::element("div");
+    let wrapper = NodeHandle::element("div");
+    let thumbnail = NodeHandle::element("div");
+    let target = NodeHandle::element("div");
+    slot.set_attribute("class", "slot");
+    media.set_attribute("class", "media");
+    wrapper.set_attribute("class", "wrapper");
+    thumbnail.set_attribute("class", "thumbnail");
+    target.set_attribute("class", "target");
+    document.append_child(body.clone());
+    body.append_child(slot.clone());
+    slot.append_child(media.clone());
+    media.append_child(wrapper.clone());
+    wrapper.append_child(thumbnail.clone());
+    thumbnail.append_child(target.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".slot { width:160px } \
+             .media { position:relative; width:100%; height:0; padding-top:56.25% } \
+             .wrapper { position:absolute; top:0; width:100%; height:100% } \
+             .thumbnail { position:relative; width:100%; height:0; padding-top:56.25% } \
+             .target { position:absolute; inset:0; margin:-10px }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 180.0,
+            height: 110.0,
+        },
+    )
+    .unwrap();
+    for node in [&media, &wrapper, &thumbnail] {
+        assert_eq!(
+            find_layout_box(&layout, node)
+                .unwrap()
+                .dimensions
+                .border_box(),
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 160.0,
+                height: 90.0,
+            }
+        );
+    }
+    assert_eq!(
+        find_layout_box(&layout, &target)
+            .unwrap()
+            .dimensions
+            .border_box(),
+        Rect {
+            x: -10.0,
+            y: -10.0,
+            width: 180.0,
+            height: 110.0,
+        }
+    );
+}
+
+#[test]
+fn absolute_auto_stretch_clamps_percent_max_and_border_box_min_sizes() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("main");
+    let child = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(child.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "main { position:relative; width:200px; height:100px } \
+             div { position:absolute; left:20px; right:20px; top:10px; bottom:10px; \
+                   padding:10px; border:5px solid; box-sizing:border-box; \
+                   max-width:50%; min-height:80px }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 200.0,
+        },
+    )
+    .unwrap();
+    let child_box = find_layout_box(&layout, &child).unwrap();
+    assert_eq!(child_box.dimensions.content.width, 70.0);
+    assert_eq!(child_box.dimensions.content.height, 50.0);
+    assert_eq!(
+        child_box.dimensions.border_box(),
+        Rect {
+            x: 20.0,
+            y: 10.0,
+            width: 100.0,
+            height: 80.0,
+        }
+    );
+}
+
+#[test]
+fn absolute_auto_stretch_preserves_replaced_and_intrinsic_widths() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("main");
+    let frame = NodeHandle::element("iframe");
+    let intrinsic = NodeHandle::element("aside");
+    for width in ["50px", "70px"] {
+        let span = NodeHandle::element("span");
+        span.set_attribute("style", &format!("display:inline-block;width:{width}"));
+        intrinsic.append_child(span);
+    }
+    frame.set_attribute("class", "frame");
+    intrinsic.set_attribute("class", "intrinsic");
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(frame.clone());
+    parent.append_child(intrinsic.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "main { position:relative; width:400px; height:250px } \
+             .frame { position:absolute; inset:0 } \
+             .intrinsic { position:absolute; inset:0; width:max-content }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 300.0,
+        },
+    )
+    .unwrap();
+    let frame_box = find_layout_box(&layout, &frame).unwrap();
+    let intrinsic_box = find_layout_box(&layout, &intrinsic).unwrap();
+    assert_eq!(
+        (
+            frame_box.dimensions.content.width,
+            frame_box.dimensions.content.height
+        ),
+        (300.0, 150.0)
+    );
+    assert_eq!(intrinsic_box.dimensions.content.width, 120.0);
+}
+
+#[test]
+fn absolute_auto_stretch_preserves_intrinsic_table_wrapper_width() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("main");
+    let table = NodeHandle::element("table");
+    let row = NodeHandle::element("tr");
+    let cell = NodeHandle::element("td");
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(table.clone());
+    table.append_child(row.clone());
+    row.append_child(cell);
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "main { position:relative; width:400px; height:250px } \
+             table { display:table; position:absolute; inset:0; border-spacing:0 } \
+             tr { display:table-row } \
+             td { display:table-cell; width:80px; height:20px }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 300.0,
+        },
+    )
+    .unwrap();
+    let table_box = find_layout_box(&layout, &table).unwrap();
+    assert_eq!(table_box.dimensions.content.width, 80.0);
+    assert_eq!(table_box.dimensions.content.height, 20.0);
+}
+
+#[test]
+fn allocated_flex_width_remains_the_percentage_width_basis() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let flex = NodeHandle::element("main");
+    let first = NodeHandle::element("section");
+    let second = NodeHandle::element("section");
+    document.append_child(body.clone());
+    body.append_child(flex.clone());
+    flex.append_child(first.clone());
+    flex.append_child(second.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "main { display:flex; width:100px } \
+             section { flex-grow:1; flex-basis:0; width:100%; min-width:0; height:10px }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    let flex_box = find_layout_box(&layout, &flex).unwrap();
+    let first_box = find_layout_box(&layout, &first).unwrap();
+    let second_box = find_layout_box(&layout, &second).unwrap();
+    assert_eq!(flex_box.dimensions.content.width, 100.0);
+    assert_eq!(first_box.dimensions.content.width, 50.0);
+    assert_eq!(second_box.dimensions.content.width, 50.0);
+    assert_eq!(first_box.dimensions.content.x, 0.0);
+    assert_eq!(second_box.dimensions.content.x, 50.0);
+}
+
+#[test]
+fn absolute_auto_stretch_preserves_preferred_ratio_and_self_alignment_paths() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("main");
+    let ratio = NodeHandle::element("article");
+    let ratio_content = NodeHandle::element("div");
+    let aligned = NodeHandle::element("aside");
+    let aligned_content = NodeHandle::element("div");
+    ratio.set_attribute("class", "ratio");
+    ratio_content.set_attribute("class", "ratio-content");
+    aligned.set_attribute("class", "aligned");
+    aligned_content.set_attribute("class", "aligned-content");
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(ratio.clone());
+    parent.append_child(aligned.clone());
+    ratio.append_child(ratio_content);
+    aligned.append_child(aligned_content);
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "main { position:relative; width:100px; height:100px } \
+             .ratio { position:absolute; inset:0; width:40px; aspect-ratio:1/1 } \
+             .ratio-content { width:10px; height:40px } \
+             .aligned { position:absolute; inset:0; justify-self:center; align-self:center } \
+             .aligned-content { width:20px; height:10px }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 200.0,
+        },
+    )
+    .unwrap();
+    let ratio_box = find_layout_box(&layout, &ratio).unwrap();
+    let aligned_box = find_layout_box(&layout, &aligned).unwrap();
+    assert_eq!(ratio_box.dimensions.content.width, 40.0);
+    assert_eq!(ratio_box.dimensions.content.height, 40.0);
+    assert_eq!(aligned_box.dimensions.content.width, 20.0);
+    assert_eq!(aligned_box.dimensions.content.height, 10.0);
 }
 
 #[test]
@@ -7288,7 +7755,7 @@ fn absolute_without_positioned_ancestor_uses_the_initial_viewport() {
 }
 
 #[test]
-fn absolute_uses_nearest_positioned_ancestor_content_box() {
+fn absolute_uses_nearest_positioned_ancestor_padding_box() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
     let outer = NodeHandle::element("div");
@@ -7327,8 +7794,11 @@ fn absolute_uses_nearest_positioned_ancestor_content_box() {
     .unwrap();
 
     let absolute_box = find_layout_box_by_tag(&layout, "aside").unwrap();
-    assert_eq!(absolute_box.dimensions.content.x, 30.0);
-    assert_eq!(absolute_box.dimensions.content.y, 35.0);
+    let outer_box = find_layout_box_by_tag(&layout, "div").unwrap();
+    assert_eq!(outer_box.dimensions.content.x, 10.0);
+    assert_eq!(outer_box.dimensions.content.y, 5.0);
+    assert_eq!(absolute_box.dimensions.content.x, 20.0);
+    assert_eq!(absolute_box.dimensions.content.y, 30.0);
 }
 
 #[test]
@@ -7417,6 +7887,150 @@ fn absolute_auto_offsets_use_static_position() {
         .find(|child| child.node.tag_name().as_deref() == Some("aside"))
         .unwrap();
     assert_eq!(absolute_box.dimensions.content.x, 0.0);
+    assert_eq!(absolute_box.dimensions.content.y, 20.0);
+}
+
+#[test]
+fn absolute_inline_static_top_overlays_ratio_padding_sibling() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let background = NodeHandle::element("span");
+    let foreground = NodeHandle::element("aside");
+    background.set_attribute("class", "background");
+    foreground.set_attribute("class", "foreground");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(background.clone());
+    container.append_child(foreground.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { position:relative; width:160px; font-size:0; line-height:0 } \
+             .background, .foreground { display:inline-block; width:160px; \
+                                        padding-top:56.25%; vertical-align:top } \
+             .foreground { position:absolute; left:0 }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 200.0,
+        },
+    )
+    .unwrap();
+    let container_box = find_layout_box(&layout, &container).unwrap();
+    let background_box = find_layout_box(&layout, &background).unwrap();
+    let foreground_box = find_layout_box(&layout, &foreground).unwrap();
+    assert_eq!(container_box.dimensions.content.height, 90.0);
+    assert_eq!(container_box.lines.len(), 1);
+    let expected = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 160.0,
+        height: 90.0,
+    };
+    assert_eq!(background_box.dimensions.border_box(), expected);
+    assert_eq!(foreground_box.dimensions.border_box(), expected);
+}
+
+#[test]
+fn block_level_absolute_after_inline_block_keeps_next_block_static_position() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let inline = NodeHandle::element("span");
+    let absolute = NodeHandle::element("aside");
+    inline.set_attribute("class", "inline");
+    absolute.set_attribute("class", "absolute");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(inline.clone());
+    container.append_child(absolute.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { position:relative; width:100px; font-size:0; line-height:0 } \
+             .inline { display:inline-block; width:100px; height:20px; vertical-align:top } \
+             .absolute { display:block; position:absolute; left:0; width:10px; height:10px }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    let inline_box = find_layout_box(&layout, &inline).unwrap();
+    let absolute_box = find_layout_box(&layout, &absolute).unwrap();
+    assert_eq!(inline_box.dimensions.content.y, 0.0);
+    assert_eq!(absolute_box.dimensions.content.y, 20.0);
+}
+
+#[test]
+fn absolute_auto_top_after_wrapped_inline_blocks_uses_last_line_start() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let first = NodeHandle::element("span");
+    let second = NodeHandle::element("span");
+    let absolute = NodeHandle::element("aside");
+    first.set_attribute("class", "inline");
+    second.set_attribute("class", "inline");
+    absolute.set_attribute("class", "absolute");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(first.clone());
+    container.append_child(second.clone());
+    container.append_child(absolute.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { position:relative; width:100px; font-size:0; line-height:0 } \
+             .inline { display:inline-block; width:100px; height:20px; vertical-align:top } \
+             .absolute { display:inline-block; position:absolute; left:0; \
+                         width:10px; height:10px }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    let container_box = find_layout_box(&layout, &container).unwrap();
+    let first_box = find_layout_box(&layout, &first).unwrap();
+    let second_box = find_layout_box(&layout, &second).unwrap();
+    let absolute_box = find_layout_box(&layout, &absolute).unwrap();
+    assert_eq!(container_box.dimensions.content.height, 40.0);
+    assert_eq!(first_box.dimensions.content.y, 0.0);
+    assert_eq!(second_box.dimensions.content.y, 20.0);
     assert_eq!(absolute_box.dimensions.content.y, 20.0);
 }
 

@@ -47,6 +47,41 @@ fn opaque_fill_repeats_only_the_clipped_rows_and_columns() {
 }
 
 #[test]
+fn absolute_auto_inset_thumbnail_paints_inside_ratio_padding_box() {
+    let html = format!(
+        r#"<style>
+            html, body {{ margin:0; background:white }}
+            .slot {{ width:160px }}
+            .media {{ position:relative; width:100%; height:0; padding-top:56.25% }}
+            .wrapper {{ position:absolute; top:0; width:100%; height:100% }}
+            .thumbnail {{ position:relative; width:100%; height:0; padding-top:56.25%;
+                          overflow:hidden }}
+            .image {{ position:absolute; inset:0; margin:-10px;
+                      background:url('{}') center / cover no-repeat }}
+        </style>
+        <div class="slot"><div class="media"><div class="wrapper"><div class="thumbnail">
+          <div class="image"></div>
+        </div></div></div></div>"#,
+        red_pixel_data_uri(),
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 180.0,
+            height: 110.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(80, 45), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(165, 45), Some(Color::rgb(255, 255, 255)));
+    assert_eq!(canvas.pixel(80, 95), Some(Color::rgb(255, 255, 255)));
+}
+
+#[test]
 fn polygon_clip_hit_testing_includes_boundary_but_not_zero_area_shapes() {
     let square = ClipPathShape::Polygon {
         points: vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],

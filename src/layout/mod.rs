@@ -658,6 +658,15 @@ pub struct BoxDimensions {
 }
 
 impl BoxDimensions {
+    fn padding_box(&self) -> Rect {
+        Rect {
+            x: self.content.x - self.padding.left,
+            y: self.content.y - self.padding.top,
+            width: self.content.width + self.padding.horizontal(),
+            height: self.content.height + self.padding.vertical(),
+        }
+    }
+
     pub fn border_box(&self) -> Rect {
         Rect {
             x: self.content.x - self.padding.left - self.border.left,
@@ -1747,12 +1756,7 @@ impl LayoutViewport {
     fn for_descendants(self, style: &ComputedStyle, dimensions: BoxDimensions) -> Self {
         if establishes_fixed_containing_block(style) {
             Self {
-                fixed: Some(Rect {
-                    x: dimensions.content.x - dimensions.padding.left,
-                    y: dimensions.content.y - dimensions.padding.top,
-                    width: dimensions.content.width + dimensions.padding.horizontal(),
-                    height: dimensions.content.height + dimensions.padding.vertical(),
-                }),
+                fixed: Some(dimensions.padding_box()),
                 ..self
             }
         } else {
@@ -2394,6 +2398,7 @@ fn layout_element(
         used_height,
         None,
         containing_block.width,
+        containing_block.width,
     )
 }
 
@@ -2417,6 +2422,7 @@ fn layout_element_with_percentage_basis(
         used_height,
         None,
         percentage_basis,
+        containing_block.width,
     )
 }
 
@@ -2707,6 +2713,7 @@ fn layout_generated_pseudo_box(
         resolver,
         style,
         containing_block.width,
+        containing_block.width,
         padding,
         border,
         &mut margin,
@@ -2773,6 +2780,7 @@ fn layout_element_with_cell(
     used_height: Option<UsedHeight>,
     table_cell: Option<EdgeSizes>,
     percentage_basis: f32,
+    width_percentage_basis: f32,
 ) -> Option<LayoutBox> {
     margins::forget(node);
     if is_non_rendered_html_element(node) {
@@ -2800,6 +2808,7 @@ fn layout_element_with_cell(
         table_cell,
         used_height,
         percentage_basis,
+        width_percentage_basis,
     );
     let CellBoxMetrics {
         padding,
@@ -2942,7 +2951,9 @@ struct CellBoxMetrics {
 /// origin from its computed style and the table/float context that
 /// `layout_element_with_cell` was called with. Table tracks assign the
 /// cell's border-box width directly, overriding both the computed width and
-/// margins.
+/// margins. `percentage_basis` applies to margin/padding; width and min/max
+/// constraints use `width_percentage_basis` so allocated flex/grid widths do
+/// not accidentally resolve again against their original container.
 fn resolve_cell_box_metrics(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -2951,6 +2962,7 @@ fn resolve_cell_box_metrics(
     table_cell: Option<EdgeSizes>,
     used_height: Option<UsedHeight>,
     percentage_basis: f32,
+    width_percentage_basis: f32,
 ) -> CellBoxMetrics {
     let padding = edge_sizes_with_basis(style, "padding", percentage_basis);
     let border = table_cell.unwrap_or_else(|| edge_sizes(style, "border"));
@@ -2975,6 +2987,7 @@ fn resolve_cell_box_metrics(
         resolver,
         style,
         containing_block.width,
+        width_percentage_basis,
         padding,
         border,
         &mut margin,
@@ -3087,6 +3100,33 @@ fn skip_cell_for_content_visibility(
         .then_some(skipped)
 }
 
+fn is_replaced_media_element(node: &NodeHandle) -> bool {
+    node.with_tag_name(|tag| {
+        matches!(
+            tag,
+            Some("img" | "picture" | "video" | "canvas" | "svg" | "object")
+        )
+    })
+}
+
+fn is_form_control_layout_element(node: &NodeHandle) -> bool {
+    node.with_tag_name(|tag| {
+        matches!(
+            tag,
+            Some("input" | "textarea" | "select" | "button" | "progress" | "meter")
+        )
+    })
+}
+
+fn has_replaced_layout_semantics(node: &NodeHandle) -> bool {
+    // Keep the engine's media/form-control sizing paths and the remaining
+    // replaced-like defaults out of the non-replaced absolute equation.
+    // This predicate is tag based so image decode state cannot change sizing.
+    is_replaced_media_element(node)
+        || is_form_control_layout_element(node)
+        || node.with_tag_name(|tag| matches!(tag, Some("audio" | "embed" | "frame" | "iframe")))
+}
+
 /// Lays out `img`/`picture`/`video`/`canvas`/`svg`/`object` elements that
 /// participate as block or flex/grid items, so they still paint their image
 /// payload even though the parent isn't collecting inline image fragments.
@@ -3114,14 +3154,7 @@ fn layout_replaced_media_cell(
         used_height,
     } = metrics;
     let is_positioned_img = node.has_tag_name("img") && is_out_of_flow_positioned(style);
-    if is_positioned_img
-        || !node.with_tag_name(|tag| {
-            matches!(
-                tag,
-                Some("img" | "picture" | "video" | "canvas" | "svg" | "object")
-            )
-        })
-    {
+    if is_positioned_img || !is_replaced_media_element(node) {
         return None;
     }
 
@@ -3248,12 +3281,7 @@ fn layout_form_control_cell(
         width,
         used_height,
     } = metrics;
-    if !node.with_tag_name(|tag| {
-        matches!(
-            tag,
-            Some("input" | "textarea" | "select" | "button" | "progress" | "meter")
-        )
-    }) {
+    if !is_form_control_layout_element(node) {
         return None;
     }
 
@@ -4080,13 +4108,14 @@ fn compute_width(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     style: &ComputedStyle,
-    containing_width: f32,
+    available_width: f32,
+    percentage_basis: f32,
     padding: EdgeSizes,
     border: EdgeSizes,
     margin: &mut EdgeSizes,
 ) -> f32 {
     let pb_horizontal = padding.horizontal() + border.horizontal();
-    let stretch_fit_width = (containing_width - pb_horizontal - margin.horizontal()).max(0.0);
+    let stretch_fit_width = (available_width - pb_horizontal - margin.horizontal()).max(0.0);
     let mut intrinsic = IntrinsicContentWidths::default();
 
     // `specified_width` is the value given to the `width` property.
@@ -4097,7 +4126,7 @@ fn compute_width(
         resolver,
         style,
         "width",
-        containing_width,
+        percentage_basis,
         padding,
         border,
         stretch_fit_width,
@@ -4107,7 +4136,7 @@ fn compute_width(
     let margin_right_auto = margin_end_is_auto(style);
 
     let mut width = if let Some(width) = specified_width {
-        let remaining = (containing_width - width - pb_horizontal).max(0.0);
+        let remaining = (available_width - width - pb_horizontal).max(0.0);
 
         match (margin_left_auto, margin_right_auto) {
             (true, true) => {
@@ -4135,7 +4164,7 @@ fn compute_width(
         if node.has_tag_name("iframe") {
             300.0
         } else {
-            (containing_width - pb_horizontal - margin.horizontal()).max(0.0)
+            (available_width - pb_horizontal - margin.horizontal()).max(0.0)
         }
     };
 
@@ -4146,7 +4175,7 @@ fn compute_width(
         resolver,
         style,
         "min-width",
-        containing_width,
+        percentage_basis,
         padding,
         border,
         stretch_fit_width,
@@ -4157,7 +4186,7 @@ fn compute_width(
         resolver,
         style,
         "max-width",
-        containing_width,
+        percentage_basis,
         padding,
         border,
         stretch_fit_width,
@@ -4175,7 +4204,7 @@ fn compute_width(
     }
 
     if margin_left_auto || margin_right_auto {
-        let remaining = (containing_width - width - pb_horizontal).max(0.0);
+        let remaining = (available_width - width - pb_horizontal).max(0.0);
         match (margin_left_auto, margin_right_auto) {
             (true, true) => {
                 margin.left = remaining / 2.0;
@@ -5036,7 +5065,7 @@ fn layout_positioned_source(
 
     let origin = match position_scheme(style) {
         PositionScheme::Fixed => viewport.fixed.unwrap_or(viewport.rect),
-        PositionScheme::Absolute => parent_box.content,
+        PositionScheme::Absolute => parent_box.padding_box(),
         PositionScheme::Static | PositionScheme::Relative | PositionScheme::Sticky => {
             containing_block
         }
@@ -5152,6 +5181,76 @@ fn positioned_auto_content_width(
     width
 }
 
+#[derive(Clone, Copy, Default)]
+struct PositionedAutoStretch {
+    available_width: Option<f32>,
+    content_height: Option<f32>,
+}
+
+fn positioned_size_is_auto(style: &ComputedStyle, property: &str) -> bool {
+    style.get(property).is_none() || is_auto(style.get(property))
+}
+
+fn positioned_self_alignment_is_normal(style: &ComputedStyle, property: &str) -> bool {
+    style.get(property).is_none_or(|value| {
+        matches!(value, ComputedValue::Keyword(keyword) if keyword.eq_ignore_ascii_case("normal"))
+    })
+}
+
+fn has_preferred_aspect_ratio(style: &ComputedStyle) -> bool {
+    style.get("aspect-ratio").is_some_and(|value| {
+        !matches!(value, ComputedValue::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto"))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn positioned_auto_stretch(
+    child: &NodeHandle,
+    style: &ComputedStyle,
+    position: PositionScheme,
+    origin: Rect,
+    left: Option<f32>,
+    right: Option<f32>,
+    top: Option<f32>,
+    bottom: Option<f32>,
+) -> PositionedAutoStretch {
+    if position != PositionScheme::Absolute
+        || has_replaced_layout_semantics(child)
+        || is_table_container_element(child, style)
+        || has_preferred_aspect_ratio(style)
+        || !positioned_self_alignment_is_normal(style, "justify-self")
+        || !positioned_self_alignment_is_normal(style, "align-self")
+    {
+        return PositionedAutoStretch::default();
+    }
+
+    // Preserve the signed inset span until margins and decorations are
+    // removed, then clamp the final content size. compute_width performs the
+    // horizontal equation below; the vertical path mirrors it directly.
+    // Negative margins can therefore leave content space when insets overlap.
+    let available_width = left
+        .zip(right)
+        .filter(|_| positioned_size_is_auto(style, "width"))
+        .map(|(left, right)| origin.width - left - right)
+        .filter(|span| span.is_finite());
+    let content_height = top
+        .zip(bottom)
+        .filter(|_| positioned_size_is_auto(style, "height"))
+        .map(|(top, bottom)| origin.height - top - bottom)
+        .filter(|span| span.is_finite())
+        .map(|span| {
+            let margin = edge_sizes_with_basis(style, "margin", origin.width);
+            let padding = edge_sizes_with_basis(style, "padding", origin.width);
+            let border = edge_sizes(style, "border");
+            (span - margin.vertical() - padding.vertical() - border.vertical()).max(0.0)
+        });
+
+    PositionedAutoStretch {
+        available_width,
+        content_height,
+    }
+}
+
 fn layout_positioned_child_mode(
     child: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -5164,31 +5263,41 @@ fn layout_positioned_child_mode(
     let position = position_scheme(style);
     let origin = match position {
         PositionScheme::Fixed => viewport.fixed.unwrap_or(viewport.rect),
-        PositionScheme::Absolute => parent_box.content,
+        PositionScheme::Absolute => parent_box.padding_box(),
         PositionScheme::Static => containing_block,
         PositionScheme::Relative => containing_block,
         PositionScheme::Sticky => containing_block,
     };
 
     let (left, right, top, bottom) = positioned_insets(style, origin);
+    let stretch = positioned_auto_stretch(child, style, position, origin, left, right, top, bottom);
     let static_outer = containing_block;
     let specified_width = resolved_length(style, "width", origin.width);
-    let child_width = if specified_width.is_none() {
-        shrink_to_fit_layout_width(child, resolver, origin.width)
-    } else {
-        origin.width
-    };
+    let child_width = stretch.available_width.unwrap_or_else(|| {
+        if specified_width.is_none() {
+            shrink_to_fit_layout_width(child, resolver, origin.width)
+        } else {
+            origin.width
+        }
+    });
     let child_containing = Rect {
         x: origin.x,
         y: origin.y,
         width: child_width,
         height: origin.height,
     };
+    let width_percentage_basis = if stretch.available_width.is_some() {
+        origin.width
+    } else {
+        child_containing.width
+    };
     if !top_layer_root && child.top_layer_order().is_some() {
         return None;
     }
     // Shrink-to-fit changes the allocated width, not the containing block
-    // against which percentage margins and padding are resolved.
+    // against which percentage margins and padding are resolved. Ordinary
+    // width constraints keep their allocated-width basis; opposing-inset auto
+    // sizing alone resolves min/max percentages against the original block.
     let mut layout_child = layout_element_with_cell(
         child,
         resolver,
@@ -5196,11 +5305,15 @@ fn layout_positioned_child_mode(
         viewport,
         Some(parent_box),
         None,
-        None,
+        stretch.content_height.map(|value| UsedHeight {
+            value,
+            definite: true,
+        }),
         None,
         origin.width,
+        width_percentage_basis,
     )?;
-    if specified_width.is_none() {
+    if specified_width.is_none() && stretch.available_width.is_none() {
         let auto_width =
             positioned_auto_content_width(child, resolver, style, &layout_child, origin.width);
         if (auto_width - layout_child.dimensions.content.width).abs() > 0.5 {
@@ -5222,9 +5335,13 @@ fn layout_positioned_child_mode(
                 viewport,
                 Some(parent_box),
                 None,
-                None,
+                stretch.content_height.map(|value| UsedHeight {
+                    value,
+                    definite: true,
+                }),
                 None,
                 origin.width,
+                relayout_containing.width,
             )?;
         }
         layout_child.dimensions.content.width =

@@ -505,6 +505,7 @@ fn layout_table_row_entry(
             None,
             Some(border),
             cell_containing.width,
+            cell_containing.width,
         )?;
         // A cell's height is a minimum; row sizing consumes its border box.
         // Never store total_height() in content.height and count decorations twice.
