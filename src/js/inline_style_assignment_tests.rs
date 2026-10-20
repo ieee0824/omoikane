@@ -123,3 +123,36 @@ fn background_image_cssom_updates_fifteen_hidden_subtrees_without_global_cache_c
     assert!(std::sync::Arc::ptr_eq(&before.0, &after.0));
     assert!(std::sync::Arc::ptr_eq(&before.1, &after.1));
 }
+
+#[test]
+fn inline_display_none_focus_fixup_refreshes_external_selector_and_paint() {
+    let html = "<style>body{margin:0}#target{width:20px;height:20px;background:red}\
+        #observer{height:20px;background:green;color:blue}\
+        body:has(#target:focus) #observer{color:red}</style>\
+        <div id=target tabindex=0 style='display:block'></div><aside id=observer></aside>";
+    let mut runtime =
+        JsRuntime::with_document(crate::html::TreeBuilder::parse(html).document()).unwrap();
+    assert!(runtime.eval("globalThis.target=document.getElementById('target');globalThis.observer=document.getElementById('observer');globalThis.cold=getComputedStyle(observer).color;target.focus();document.activeElement===target&&getComputedStyle(observer).color!==cold").unwrap().to_boolean());
+    let before = runtime
+        .paint_current_document()
+        .unwrap()
+        .pixel(5, 5)
+        .unwrap();
+    assert_eq!((before.r, before.g, before.b), (255, 0, 0));
+    let generation = runtime.render_generations().layout;
+    assert!(runtime.eval("target.style.display='none';document.activeElement!==target&&getComputedStyle(observer).color===cold").unwrap().to_boolean());
+    let after = runtime
+        .paint_current_document()
+        .unwrap()
+        .pixel(5, 5)
+        .unwrap();
+    assert_eq!((after.r, after.g, after.b), (0, 128, 0));
+    assert!(runtime.render_generations().layout > generation);
+    assert!(runtime.eval("target.style.display='block';target.focus();document.activeElement===target&&getComputedStyle(observer).color!==cold").unwrap().to_boolean());
+    let shown = runtime
+        .paint_current_document()
+        .unwrap()
+        .pixel(5, 5)
+        .unwrap();
+    assert_eq!((shown.r, shown.g, shown.b), (255, 0, 0));
+}
