@@ -237,6 +237,9 @@ impl Tracer {
     }
 
     /// Takes the ephemerons discovered while a collection was tracing.
+    ///
+    /// Each allocation is returned at most once over this tracer's lifetime,
+    /// including across calls to this method.
     pub(crate) fn take_discovered_ephemerons(&mut self) -> Vec<EphemeronPointer> {
         std::mem::take(&mut self.discovered_ephemerons)
     }

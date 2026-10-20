@@ -289,6 +289,92 @@ fn old_parent_is_rescanned_only_after_another_write() {
     });
 }
 
+#[derive(Debug)]
+struct MinorEphemeronChainRoot {
+    live_key: GcEdge<u8>,
+    blocked: crate::EphemeronEdge<u8, GcEdge<u32>>,
+    unlocking: crate::EphemeronEdge<u8, GcEdge<u8>>,
+}
+
+impl Finalize for MinorEphemeronChainRoot {}
+
+// SAFETY: every stored GC edge is forwarded to the tracer. The explicit order
+// is part of this test: `blocked` must enter the pending list before
+// `unlocking`, whose value is the only strong edge to `blocked`'s key.
+unsafe impl Trace for MinorEphemeronChainRoot {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        // SAFETY: forwarding the collector's trace call preserves each edge's
+        // pointer validity contract.
+        unsafe {
+            self.live_key.trace(tracer);
+            self.blocked.trace(tracer);
+            self.unlocking.trace(tracer);
+        }
+    }
+
+    fn run_finalizer(&self) {
+        Finalize::finalize(self);
+        self.live_key.run_finalizer();
+        self.blocked.run_finalizer();
+        self.unlocking.run_finalizer();
+    }
+}
+
+#[test]
+fn minor_ephemeron_fixed_point_revisits_an_earlier_blocked_entry() {
+    run_test(|| {
+        let live_key = Rooted::new(1_u8);
+        let blocked_key = Rooted::new(2_u8);
+        let payload = Rooted::new(99_u32);
+        assert!(!is_old(&live_key));
+        assert!(!is_old(&blocked_key));
+        assert!(!is_old(&payload));
+
+        let blocked = Ephemeron::new(&blocked_key, payload.clone().into_edge());
+        let unlocking = Ephemeron::new(&live_key, blocked_key.clone().into_edge());
+        let blocked_edge = blocked.clone().into_edge();
+        let unlocking_edge = unlocking.clone().into_edge();
+        assert!(blocked_edge.inner().header.is_young());
+        assert!(unlocking_edge.inner().header.is_young());
+
+        // Keep the original roots alive while allocating the aggregate root.
+        // If this allocation becomes a collection safepoint, every edge passed
+        // into it is still protected until construction has completed.
+        let root = Rooted::new(MinorEphemeronChainRoot {
+            live_key: live_key.clone().into_edge(),
+            blocked: blocked_edge,
+            unlocking: unlocking_edge,
+        });
+
+        // The fixed-point pass must now be seeded solely by `root`.
+        drop(live_key);
+        drop(blocked_key);
+        drop(payload);
+        drop(blocked);
+        drop(unlocking);
+
+        // `blocked` is examined before its key is marked. `unlocking` then
+        // traces that key, so a later fixed-point iteration must revisit
+        // `blocked` and retain its payload.
+        force_minor_collect();
+
+        assert_eq!(root.unlocking.value().as_deref().copied(), Some(2));
+        assert_eq!(root.blocked.value().as_deref().copied(), Some(99));
+        assert!(!is_old(&root));
+        assert!(!edge_is_old(&root.live_key));
+        assert!(root.blocked.inner().header.is_young());
+        assert!(root.unlocking.inner().header.is_young());
+        Harness::assert_strong_allocations(4);
+        Harness::assert_ephemeron_allocations(2);
+
+        // All allocations survived only one minor pass and remain young.
+        // Removing the single root lets the next minor reclaim the full chain.
+        drop(root);
+        force_minor_collect();
+        Harness::assert_empty_gc();
+    });
+}
+
 fn run_ephemeron_generation_case(key_old: bool, value_old: bool) {
     let key = Rooted::new(0_u32);
     if key_old {

@@ -1151,7 +1151,6 @@ impl Collector {
         }
 
         let mut pending = Vec::new();
-        let mut pending_set = EphemeronSet::new();
         loop {
             // SAFETY: all queued pointers come from roots, live heap edges, or
             // the write barrier and remain valid during this pass.
@@ -1159,10 +1158,8 @@ impl Collector {
 
             let mut changed = false;
             for pointer in tracer.take_discovered_ephemerons() {
-                if pending_set.insert(pointer) {
-                    pending.push(pointer);
-                    changed = true;
-                }
+                pending.push(pointer);
+                changed = true;
             }
 
             let mut next_pending = Vec::with_capacity(pending.len());
