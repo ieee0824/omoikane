@@ -18,6 +18,30 @@ OMOIKANE_TRACE_STARTUP=1 OMOIKANE_TRACE_PAINT=1 OMOIKANE_TRACE_INPUT=1 \
 本文の表示は画面でも確認する。`OMOIKANE_PAINT.frame_ms`にはページの処理・
 レイアウト・描画が含まれるので、`paint_ms`を再び加算しない。
 
+## スタイル再計算と属性変更の計測
+
+`OMOIKANE_TRACE_PAINT=1`は、レイアウトを再構築したときに
+`OMOIKANE_LAYOUT_STYLE`も記録する。`cache_hits`と`cache_misses`は通常要素の
+computed style解決回数で、pseudo専用の計算は含まない。`outer_compute_ms`は
+親の解決を除くcache missの計算時間で、再帰計算の時間を二重に加算しない。
+`scope_ms`と同じくレイアウト時間の内数なので、フレーム時間へ加算しない。
+キャッシュされたレイアウトを使った場合には、この行は出ない。
+
+属性変更を対応付けるには、起動時に`OMOIKANE_TRACE_ATTRIBUTE_SET=1`を追加する。
+`OMOIKANE_ATTRIBUTE_SET`の`cached_style_state`は変更前の既存キャッシュを調べた
+結果であり、診断のために新たなスタイル計算やレイアウトは行わない。
+`null`や`unknown`は情報不足を示し、可視・非表示の判定結果として扱わない。
+
+`OMOIKANE_STYLE_CACHE_INVALIDATION.outcome`はresolverの無効化範囲を示す。
+`local`と`local_raw_style_subject`では変更要素とlight-DOM子孫の通常・pseudo
+キャッシュを破棄し、他の要素のキャッシュを保持する。`fallback_*`は全破棄を示す。
+この値だけではレイアウトを保持したか判断できないため、同じ入力区間の
+`OMOIKANE_SCROLL_LAYOUT.rebuild`と処理時間も確認する。
+
+実サイトの読み込み状態も比較条件に含める。本文の一部が表示されても、スクロール先が
+遅延読み込みのプレースホルダーだけなら、通常コンテンツ表示後の性能を検証したことには
+ならない。画像とログを保存し、操作・表示位置・読み込み状態が揃った結果を比較する。
+
 ## 任意のGC計測
 
 既存のBoa GC計測を有効にするには、`gc-profile`を追加する。

@@ -726,6 +726,14 @@ impl std::fmt::Debug for CssFontResources {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum StyleAttributeSelectorDependency {
+    #[default]
+    None,
+    SubjectOnly,
+    NonLocal,
+}
+
 /// Computes styles and caches results per node.
 #[derive(Debug, Default)]
 pub struct StyleResolver {
@@ -739,6 +747,8 @@ pub struct StyleResolver {
     pseudo_cache: HashMap<(usize, PseudoElement), Arc<ComputedStyle>>,
     counter_values: HashMap<(usize, Option<PseudoElement>), HashMap<String, Vec<i32>>>,
     selector_match_cache: SelectorMatchCache,
+    /// Furthest reach of a registered selector that observes the raw `style` attribute.
+    style_attribute_selector_dependency: StyleAttributeSelectorDependency,
     visited_paint_state: Option<VisitedPaintState>,
     /// Root element's computed font-size in px (for `rem` unit resolution).
     root_font_size: f32,
@@ -1679,6 +1689,267 @@ struct UnsupportedCssConfig {
     top_n: Option<usize>,
 }
 
+fn selector_observes_style_attribute(selector: &Selector) -> bool {
+    selector.parts.iter().any(|part| {
+        part.simples.iter().any(|simple| match simple {
+            SimpleSelector::Attribute { name, .. } => name.eq_ignore_ascii_case("style"),
+            SimpleSelector::Is(selectors)
+            | SimpleSelector::Where(selectors)
+            | SimpleSelector::Not(selectors) => {
+                selectors.iter().any(selector_observes_style_attribute)
+            }
+            SimpleSelector::Has(selectors) => selectors
+                .iter()
+                .any(|relative| selector_observes_style_attribute(&relative.selector)),
+            SimpleSelector::PseudoClass(name) | SimpleSelector::PseudoElement(name) => {
+                functional_selector_observes_style_attribute(name)
+            }
+            _ => false,
+        })
+    })
+}
+
+fn functional_selector_observes_style_attribute(value: &str) -> bool {
+    let Some((_, rest)) = value.split_once('(') else {
+        return false;
+    };
+    let Some(argument) = rest.strip_suffix(')') else {
+        return false;
+    };
+    selector_text_observes_style_attribute(argument)
+        || selector_tokens_observe_style_attribute(argument)
+}
+
+fn selector_text_observes_style_attribute(input: &str) -> bool {
+    super::parse_selector_list(input)
+        .is_ok_and(|selectors| selectors.iter().any(selector_observes_style_attribute))
+}
+
+fn selector_tokens_observe_style_attribute(input: &str) -> bool {
+    let Ok(tokens) = super::tokenize(input) else {
+        return false;
+    };
+    tokens.iter().enumerate().any(|(index, token)| {
+        (*token == CssToken::BracketOpen)
+            .then(|| attribute_selector_local_name(&tokens[index + 1..]))
+            .flatten()
+            .is_some_and(|name| name.eq_ignore_ascii_case("style"))
+    })
+}
+
+fn attribute_selector_local_name(tokens: &[CssToken]) -> Option<&str> {
+    let mut significant = tokens
+        .iter()
+        .filter(|token| **token != CssToken::Whitespace);
+    match significant.next()? {
+        CssToken::Ident(name) => match (significant.next(), significant.next()) {
+            (Some(CssToken::Delim('|')), Some(CssToken::Ident(local_name))) => Some(local_name),
+            _ => Some(name),
+        },
+        CssToken::Delim('|') => match significant.next() {
+            Some(CssToken::Ident(name)) => Some(name),
+            _ => None,
+        },
+        CssToken::Delim('*') => match (significant.next(), significant.next()) {
+            (Some(CssToken::Delim('|')), Some(CssToken::Ident(name))) => Some(name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn selector_style_attribute_dependency(selector: &Selector) -> StyleAttributeSelectorDependency {
+    let Some(subject_index) = selector.parts.len().checked_sub(1) else {
+        return StyleAttributeSelectorDependency::None;
+    };
+    let mut dependency = StyleAttributeSelectorDependency::None;
+    for (part_index, part) in selector.parts.iter().enumerate() {
+        for simple in &part.simples {
+            dependency = dependency.max(simple_style_attribute_dependency(
+                simple,
+                part_index == subject_index,
+            ));
+        }
+    }
+    if dependency == StyleAttributeSelectorDependency::SubjectOnly
+        && (selector_contains_has(selector) || selector_contains_shadow_pseudo(selector))
+    {
+        StyleAttributeSelectorDependency::NonLocal
+    } else {
+        dependency
+    }
+}
+
+fn selector_contains_has(selector: &Selector) -> bool {
+    selector.parts.iter().any(|part| {
+        part.simples.iter().any(|simple| match simple {
+            SimpleSelector::Has(_) => true,
+            SimpleSelector::Is(selectors)
+            | SimpleSelector::Where(selectors)
+            | SimpleSelector::Not(selectors) => selectors.iter().any(selector_contains_has),
+            _ => false,
+        })
+    })
+}
+
+fn selector_contains_shadow_pseudo(selector: &Selector) -> bool {
+    if selector_uses_shadow_pseudo(selector) {
+        return true;
+    }
+    selector.parts.iter().any(|part| {
+        part.simples.iter().any(|simple| match simple {
+            SimpleSelector::Is(selectors)
+            | SimpleSelector::Where(selectors)
+            | SimpleSelector::Not(selectors) => {
+                selectors.iter().any(selector_contains_shadow_pseudo)
+            }
+            SimpleSelector::Has(selectors) => selectors
+                .iter()
+                .any(|relative| selector_contains_shadow_pseudo(&relative.selector)),
+            _ => false,
+        })
+    })
+}
+
+fn simple_style_attribute_dependency(
+    simple: &SimpleSelector,
+    in_subject: bool,
+) -> StyleAttributeSelectorDependency {
+    match simple {
+        SimpleSelector::Attribute { name, .. } if name.eq_ignore_ascii_case("style") => {
+            if in_subject {
+                StyleAttributeSelectorDependency::SubjectOnly
+            } else {
+                StyleAttributeSelectorDependency::NonLocal
+            }
+        }
+        SimpleSelector::Is(selectors)
+        | SimpleSelector::Where(selectors)
+        | SimpleSelector::Not(selectors) => selectors.iter().fold(
+            StyleAttributeSelectorDependency::None,
+            |dependency, selector| {
+                let nested = selector_style_attribute_dependency(selector);
+                let nested = match nested {
+                    StyleAttributeSelectorDependency::None => nested,
+                    StyleAttributeSelectorDependency::SubjectOnly
+                        if in_subject && selector.parts.len() == 1 =>
+                    {
+                        nested
+                    }
+                    _ => StyleAttributeSelectorDependency::NonLocal,
+                };
+                dependency.max(nested)
+            },
+        ),
+        SimpleSelector::Has(selectors) => {
+            if selectors
+                .iter()
+                .any(|relative| selector_observes_style_attribute(&relative.selector))
+            {
+                StyleAttributeSelectorDependency::NonLocal
+            } else {
+                StyleAttributeSelectorDependency::None
+            }
+        }
+        SimpleSelector::PseudoClass(name) | SimpleSelector::PseudoElement(name)
+            if functional_selector_observes_style_attribute(name) =>
+        {
+            StyleAttributeSelectorDependency::NonLocal
+        }
+        _ => StyleAttributeSelectorDependency::None,
+    }
+}
+
+fn rules_style_attribute_dependency(rules: &[Rule]) -> StyleAttributeSelectorDependency {
+    rules.iter().fold(
+        StyleAttributeSelectorDependency::None,
+        |dependency, rule| {
+            let rule_dependency = match rule {
+                Rule::Style(rule) => rule
+                    .selectors
+                    .iter()
+                    .map(selector_style_attribute_dependency)
+                    .chain(std::iter::once(rules_style_attribute_dependency(
+                        &rule.rules,
+                    )))
+                    .max()
+                    .unwrap_or_default(),
+                Rule::At(rule) => {
+                    let scope_observes = rule.name.eq_ignore_ascii_case("scope")
+                        && (super::parse_scope_prelude(&rule.prelude).is_some_and(|scope| {
+                            scope
+                                .start
+                                .iter()
+                                .chain(scope.end.iter())
+                                .flatten()
+                                .any(selector_observes_style_attribute)
+                        }) || selector_tokens_observe_style_attribute(&rule.prelude));
+                    let scope_dependency = if scope_observes {
+                        StyleAttributeSelectorDependency::NonLocal
+                    } else {
+                        StyleAttributeSelectorDependency::None
+                    };
+                    scope_dependency.max(
+                        rule.block
+                            .as_deref()
+                            .map(rules_style_attribute_dependency)
+                            .unwrap_or_default(),
+                    )
+                }
+                Rule::FontFace(_) => StyleAttributeSelectorDependency::None,
+            };
+            dependency.max(rule_dependency)
+        },
+    )
+}
+
+fn parsed_inline_style(source: Option<&str>) -> Vec<Declaration> {
+    source.map(super::parse_style_attribute).unwrap_or_default()
+}
+
+fn is_local_inline_property(name: &str) -> bool {
+    matches!(canonical_property_name(name), "bottom" | "transform")
+}
+
+fn is_flow_relative_inset(name: &str) -> bool {
+    name.starts_with("inset-block-") || name.starts_with("inset-inline-")
+}
+
+fn inline_style_change_is_subtree_local(previous: Option<&str>, current: Option<&str>) -> bool {
+    let previous = parsed_inline_style(previous);
+    let current = parsed_inline_style(current);
+    if previous
+        .iter()
+        .chain(&current)
+        .any(|declaration| is_flow_relative_inset(&declaration.name))
+    {
+        return false;
+    }
+    previous
+        .iter()
+        .filter(|declaration| !is_local_inline_property(&declaration.name))
+        .eq(current
+            .iter()
+            .filter(|declaration| !is_local_inline_property(&declaration.name)))
+}
+
+fn inline_invalidation_subtree(node: &NodeHandle) -> Option<HashSet<usize>> {
+    if node.containing_shadow_root().is_some() {
+        return None;
+    }
+    let mut pending = vec![node.clone()];
+    let mut identities = HashSet::new();
+    while let Some(current) = pending.pop() {
+        if current.shadow_root().is_some() || current.assigned_slot().is_some() {
+            return None;
+        }
+        if identities.insert(current.identity()) {
+            pending.extend(current.child_nodes());
+        }
+    }
+    Some(identities)
+}
+
 impl StyleResolver {
     pub(crate) fn replace_counter_values(
         &mut self,
@@ -1921,6 +2192,66 @@ impl StyleResolver {
         self.selector_match_cache = SelectorMatchCache::default();
     }
 
+    /// Invalidates computed styles after one element's inline `style` mutation.
+    ///
+    /// Returns a bounded diagnostic outcome. A `"local*"` outcome means cached
+    /// styles outside the element's light-DOM subtree were retained; every
+    /// `"fallback_*"` outcome means all computed and pseudo styles were cleared.
+    /// Selectors are always invalidated.
+    pub(crate) fn invalidate_inline_style_subtree(
+        &mut self,
+        node: &NodeHandle,
+        previous: Option<&str>,
+        current: Option<&str>,
+        has_non_scalar_dom_string: bool,
+        csp_block_state_changed: bool,
+    ) -> &'static str {
+        self.selector_match_cache = SelectorMatchCache::default();
+        let is_document_element = node.node_type() == NodeType::Element
+            && node
+                .parent_node()
+                .is_some_and(|parent| parent.node_type() == NodeType::Document);
+        let fallback = if self.style_attribute_selector_dependency
+            == StyleAttributeSelectorDependency::NonLocal
+        {
+            Some("fallback_raw_style_selector")
+        } else if self.has_running_transitions() {
+            Some("fallback_active_transition")
+        } else if self.has_running_animations() {
+            Some("fallback_active_animation")
+        } else if is_document_element {
+            Some("fallback_document_root")
+        } else if has_non_scalar_dom_string {
+            Some("fallback_non_scalar_dom_string")
+        } else if csp_block_state_changed {
+            Some("fallback_csp_block_state_change")
+        } else if !inline_style_change_is_subtree_local(previous, current) {
+            Some("fallback_unsupported_declaration_change")
+        } else {
+            None
+        };
+        if let Some(reason) = fallback {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return reason;
+        }
+        let Some(identities) = inline_invalidation_subtree(node) else {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return "fallback_shadow_or_slot";
+        };
+        self.cache
+            .retain(|identity, _| !identities.contains(identity));
+        self.pseudo_cache
+            .retain(|key, _| !identities.contains(&key.0));
+        if self.style_attribute_selector_dependency == StyleAttributeSelectorDependency::SubjectOnly
+        {
+            "local_raw_style_subject"
+        } else {
+            "local"
+        }
+    }
+
     /// Installs the CSP-filtered set of inline style attributes for the next
     /// computed-style pass. The attribute remains observable through CSSOM;
     /// only its cascade contribution is removed.
@@ -1934,12 +2265,12 @@ impl StyleResolver {
     /// Updates one CSP-filtered inline-style entry after a `style` attribute
     /// mutation. The caller invalidates the owning document's computed-style
     /// cache separately, so this operation does not rescan or clear unrelated
-    /// resolver state.
-    pub(crate) fn set_blocked_inline_style_node(&mut self, node_id: usize, blocked: bool) {
+    /// resolver state. Returns whether the blocked state changed.
+    pub(crate) fn set_blocked_inline_style_node(&mut self, node_id: usize, blocked: bool) -> bool {
         if blocked {
-            self.blocked_inline_style_nodes.insert(node_id);
+            self.blocked_inline_style_nodes.insert(node_id)
         } else {
-            self.blocked_inline_style_nodes.remove(&node_id);
+            self.blocked_inline_style_nodes.remove(&node_id)
         }
     }
 
@@ -2180,6 +2511,9 @@ impl StyleResolver {
         scope_root: Option<usize>,
         stylesheet: &Stylesheet,
     ) -> usize {
+        self.style_attribute_selector_dependency = self
+            .style_attribute_selector_dependency
+            .max(rules_style_attribute_dependency(&stylesheet.rules));
         let stylesheet_id = self.next_stylesheet_id;
         self.next_stylesheet_id += 1;
         self.layer_orders
@@ -2513,6 +2847,15 @@ impl StyleResolver {
         &self.active_font_faces
     }
 
+    /// Reads whether an existing ordinary-style cache entry has `display: none`.
+    ///
+    /// Returns `None` without resolving style when `node` has no cached entry.
+    pub(crate) fn cached_display_none(&self, node: &NodeHandle) -> Option<bool> {
+        self.cache
+            .get(&node.identity())
+            .map(|style| style.is_display_none())
+    }
+
     /// Resolves computed style for `node`, using the cache when possible.
     pub fn computed_style(&mut self, node: &NodeHandle) -> ComputedStyle {
         self.computed_style_shared(node).as_ref().clone()
@@ -2523,6 +2866,7 @@ impl StyleResolver {
     pub(crate) fn computed_style_shared(&mut self, node: &NodeHandle) -> Arc<ComputedStyle> {
         let key = node.identity();
         if let Some(style) = self.cache.get(&key) {
+            super::style_profile::record_cache_hit();
             return style.clone();
         }
 
@@ -2537,7 +2881,10 @@ impl StyleResolver {
                 self.computed_style_shared(&parent)
             }
         });
-        let style = self.compute_style(node, inherited.as_deref());
+        let style = {
+            let _sample = super::style_profile::StyleComputationSample::begin();
+            self.compute_style(node, inherited.as_deref())
+        };
 
         // Auto-update root_font_size from the root element's computed font-size so that
         // `rem` units in descendant elements resolve correctly even without an explicit

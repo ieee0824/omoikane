@@ -109,6 +109,29 @@ fn scroll_trace_enabled() -> bool {
     })
 }
 
+fn style_cache_invalidation_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_ATTRIBUTE_SET").is_some())
+}
+
+/// Records only the bounded cache-policy outcome; CSS names and values are omitted.
+pub(super) fn record_style_cache_invalidation(
+    document_id: usize,
+    node_id: usize,
+    outcome: &'static str,
+) {
+    if style_cache_invalidation_trace_enabled() {
+        eprintln!(
+            "OMOIKANE_STYLE_CACHE_INVALIDATION {}",
+            serde_json::json!({
+                "document_id": document_id,
+                "node_id": node_id,
+                "outcome": outcome,
+            })
+        );
+    }
+}
+
 pub(super) struct ScrollTargetScope {
     started: Option<Instant>,
 }

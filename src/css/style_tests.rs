@@ -10584,3 +10584,690 @@ fn hidden_attribute_uses_overridable_user_agent_styles() {
         );
     }
 }
+
+#[test]
+fn inline_transform_and_bottom_invalidation_retains_unrelated_style_entries() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let target = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    let unrelated = NodeHandle::element("aside");
+    target.set_attribute("id", "target");
+    child.set_attribute("id", "child");
+    unrelated.set_attribute("id", "unrelated");
+    let previous = "position:relative;transform:translateX(0px);bottom:0px";
+    target.set_attribute("style", previous);
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(target.clone());
+    target.append_child(child.clone());
+    body.append_child(unrelated.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#target::before,#child::before,#unrelated::before{content:'cached'}#target::after{content:attr(style)}",
+        )
+        .unwrap(),
+    );
+    let target_style = resolver.computed_style_shared(&target);
+    let child_style = resolver.computed_style_shared(&child);
+    let unrelated_style = resolver.computed_style_shared(&unrelated);
+    let target_pseudo = resolver
+        .computed_pseudo_style_shared(&target, PseudoElement::Before)
+        .unwrap();
+    let child_pseudo = resolver
+        .computed_pseudo_style_shared(&child, PseudoElement::Before)
+        .unwrap();
+    let target_attr_pseudo = resolver
+        .computed_pseudo_style_shared(&target, PseudoElement::After)
+        .unwrap();
+    let unrelated_pseudo = resolver
+        .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+        .unwrap();
+
+    let current = "position:relative;transform:translateX(20px);bottom:5px";
+    target.set_attribute("style", current);
+    assert_eq!(
+        resolver.invalidate_inline_style_subtree(
+            &target,
+            Some(previous),
+            Some(current),
+            false,
+            false,
+        ),
+        "local",
+    );
+
+    let updated_target = resolver.computed_style_shared(&target);
+    let updated_child = resolver.computed_style_shared(&child);
+    let updated_unrelated = resolver.computed_style_shared(&unrelated);
+    let updated_target_pseudo = resolver
+        .computed_pseudo_style_shared(&target, PseudoElement::Before)
+        .unwrap();
+    let updated_child_pseudo = resolver
+        .computed_pseudo_style_shared(&child, PseudoElement::Before)
+        .unwrap();
+    let updated_target_attr_pseudo = resolver
+        .computed_pseudo_style_shared(&target, PseudoElement::After)
+        .unwrap();
+    let updated_unrelated_pseudo = resolver
+        .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+        .unwrap();
+
+    assert!(!Arc::ptr_eq(&target_style, &updated_target));
+    assert!(!Arc::ptr_eq(&child_style, &updated_child));
+    assert!(Arc::ptr_eq(&unrelated_style, &updated_unrelated));
+    assert!(!Arc::ptr_eq(&target_pseudo, &updated_target_pseudo));
+    assert!(!Arc::ptr_eq(&child_pseudo, &updated_child_pseudo));
+    assert!(!Arc::ptr_eq(
+        &target_attr_pseudo,
+        &updated_target_attr_pseudo,
+    ));
+    assert!(Arc::ptr_eq(&unrelated_pseudo, &updated_unrelated_pseudo));
+    assert_eq!(updated_target.get("bottom"), Some(&ComputedValue::Px(5.0)));
+    assert_ne!(
+        target_style.get("transform"),
+        updated_target.get("transform")
+    );
+}
+
+#[test]
+fn raw_style_attribute_selector_forces_document_style_invalidation() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let target = NodeHandle::element("div");
+    let observer = NodeHandle::element("p");
+    target.set_attribute("id", "target");
+    observer.set_attribute("id", "observer");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(target.clone());
+    body.append_child(observer.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#observer{color:blue}body:has(#target[st\\79 le]) #observer{color:red}")
+            .unwrap(),
+    );
+    let before = resolver.computed_style_shared(&observer);
+    assert_eq!(
+        before.get("color"),
+        Some(&ComputedValue::Color("blue".to_string()))
+    );
+
+    let current = "transform:translateX(20px)";
+    target.set_attribute("style", current);
+    assert_eq!(
+        resolver.invalidate_inline_style_subtree(&target, None, Some(current), false, false,),
+        "fallback_raw_style_selector",
+    );
+    let after = resolver.computed_style_shared(&observer);
+    assert!(!Arc::ptr_eq(&before, &after));
+    assert_eq!(
+        after.get("color"),
+        Some(&ComputedValue::Color("red".to_string()))
+    );
+}
+
+#[test]
+fn raw_style_attribute_dependency_only_accepts_the_selector_subject() {
+    let dependency = |selector: &str| {
+        let stylesheet = parse_stylesheet(&format!("{selector}{{color:red}}"))
+            .expect("selector fixture should parse");
+        rules_style_attribute_dependency(&stylesheet.rules)
+    };
+    for selector in [
+        "[style]",
+        "body [style]",
+        "div:is([style], .plain)",
+        "div:where([style])",
+        "div:not([style])",
+        r"[st\79 le]",
+    ] {
+        assert_eq!(
+            dependency(selector),
+            StyleAttributeSelectorDependency::SubjectOnly,
+            "{selector}",
+        );
+    }
+    for selector in [
+        "[style] span",
+        "[style] + span",
+        "body:has([style])",
+        "[style]:has(.child)",
+        "div:is(.ancestor [style])",
+        "div:nth-child(1 of [style])",
+        "x-card[style]::part(label)",
+        "div:is([style], :host)",
+    ] {
+        assert_eq!(
+            dependency(selector),
+            StyleAttributeSelectorDependency::NonLocal,
+            "{selector}",
+        );
+    }
+    for stylesheet in [
+        "@scope ([style]) { div { color:red } }",
+        "@scope ([st\\79 le]) trailing { div { color:red } }",
+    ] {
+        let scoped = parse_stylesheet(stylesheet).unwrap();
+        assert_eq!(
+            rules_style_attribute_dependency(&scoped.rules),
+            StyleAttributeSelectorDependency::NonLocal,
+            "{stylesheet}",
+        );
+    }
+}
+
+#[test]
+fn subject_raw_style_rule_updates_subtree_and_external_counter_snapshot() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let target = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    let observer = NodeHandle::element("p");
+    observer.set_attribute("id", "observer");
+    document.append_child(body.clone());
+    body.append_child(target.clone());
+    target.append_child(child.clone());
+    body.append_child(observer.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "[style]{display:inline;color:red;font-size:30px;counter-reset:item 7}\
+             #observer::before{content:counter(item)}",
+        )
+        .unwrap(),
+    );
+    let viewport = crate::layout::Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 320.0,
+        height: 200.0,
+    };
+    crate::layout::layout_tree(&body, &mut resolver, viewport).unwrap();
+    let target_before = resolver.computed_style_shared(&target);
+    let child_before = resolver.computed_style_shared(&child);
+    let observer_before = resolver.computed_style_shared(&observer);
+    let observer_pseudo_before = resolver
+        .computed_pseudo_style_shared(&observer, PseudoElement::Before)
+        .unwrap();
+    assert_eq!(
+        resolver.counter_values(&observer, PseudoElement::Before, "item"),
+        Some(&[0][..]),
+    );
+
+    let current = "transform:translateX(1px)";
+    target.set_attribute("style", current);
+    assert_eq!(
+        resolver.invalidate_inline_style_subtree(&target, None, Some(current), false, false,),
+        "local_raw_style_subject",
+    );
+    let target_after = resolver.computed_style_shared(&target);
+    let child_after = resolver.computed_style_shared(&child);
+    let observer_after = resolver.computed_style_shared(&observer);
+    let observer_pseudo_after = resolver
+        .computed_pseudo_style_shared(&observer, PseudoElement::Before)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&target_before, &target_after));
+    assert!(!Arc::ptr_eq(&child_before, &child_after));
+    assert!(Arc::ptr_eq(&observer_before, &observer_after));
+    assert!(Arc::ptr_eq(&observer_pseudo_before, &observer_pseudo_after,));
+    assert_eq!(
+        target_after.get("display"),
+        Some(&ComputedValue::Keyword("inline".to_string())),
+    );
+    assert_eq!(child_after.get("font-size"), Some(&ComputedValue::Px(30.0)));
+    assert_eq!(
+        child_after.get("color"),
+        Some(&ComputedValue::Color("red".to_string())),
+    );
+
+    crate::layout::layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert!(Arc::ptr_eq(
+        &observer_pseudo_before,
+        &resolver
+            .computed_pseudo_style_shared(&observer, PseudoElement::Before)
+            .unwrap(),
+    ));
+    assert_eq!(
+        resolver.counter_values(&observer, PseudoElement::Before, "item"),
+        Some(&[7][..]),
+        "the full counter prepass must refresh generated content outside the subtree",
+    );
+}
+
+#[test]
+fn subject_raw_style_rule_refreshes_descendant_container_queries() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let target = NodeHandle::element("section");
+    let child = NodeHandle::element("span");
+    let observer = NodeHandle::element("aside");
+    child.set_attribute("id", "inside");
+    observer.set_attribute("id", "observer");
+    document.append_child(body.clone());
+    body.append_child(target.clone());
+    target.append_child(child.clone());
+    body.append_child(observer.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "[style]{width:100px;container-type:inline-size}\
+             #inside{color:blue}#observer{color:green}\
+             @container (min-width:80px){#inside{color:red}}",
+        )
+        .unwrap(),
+    );
+    let viewport = crate::layout::Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 320.0,
+        height: 200.0,
+    };
+    crate::layout::layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert_eq!(
+        resolver.computed_style_shared(&child).get("color"),
+        Some(&ComputedValue::Color("blue".to_string())),
+    );
+    let observer_before = resolver.computed_style_shared(&observer);
+
+    let current = "transform:translateX(1px)";
+    target.set_attribute("style", current);
+    assert_eq!(
+        resolver.invalidate_inline_style_subtree(&target, None, Some(current), false, false,),
+        "local_raw_style_subject",
+    );
+    assert!(Arc::ptr_eq(
+        &observer_before,
+        &resolver.computed_style_shared(&observer),
+    ));
+
+    crate::layout::layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert_eq!(
+        resolver.computed_style_shared(&child).get("color"),
+        Some(&ComputedValue::Color("red".to_string())),
+        "a changed container context must invalidate the first-pass style cache",
+    );
+    assert_eq!(
+        resolver.computed_style_shared(&observer).get("color"),
+        Some(&ComputedValue::Color("green".to_string())),
+    );
+}
+
+#[test]
+fn raw_functional_pseudo_arguments_keep_style_attribute_detection_conservative() {
+    for selector in ["div:future([style])", "div:nth-child(1 of [style])"] {
+        let target = NodeHandle::element("div");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!("{selector}{{color:red}}"))
+                .expect("raw functional pseudo fixture should parse"),
+        );
+        target.set_attribute("style", "transform:translateX(1px)");
+        assert_eq!(
+            resolver.invalidate_inline_style_subtree(
+                &target,
+                None,
+                Some("transform:translateX(1px)"),
+                false,
+                false,
+            ),
+            "fallback_raw_style_selector",
+            "{selector}",
+        );
+    }
+}
+
+#[test]
+fn non_scalar_inline_style_values_force_document_style_invalidation() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let target = NodeHandle::element("div");
+    let unrelated = NodeHandle::element("aside");
+    document.append_child(html.clone());
+    html.append_child(target.clone());
+    html.append_child(unrelated.clone());
+
+    target.set_attribute_utf16("style", &[0xd800]);
+    let previous = target.get_attribute("style").unwrap();
+    let previous_is_non_scalar = target.attribute_has_non_scalar_value("style");
+
+    target.set_attribute_utf16("style", &[0xd801]);
+    let current = target.get_attribute("style").unwrap();
+    assert_eq!(
+        previous, current,
+        "lossy scalar projections intentionally collide"
+    );
+    assert!(previous_is_non_scalar);
+    assert!(target.attribute_has_non_scalar_value("style"));
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("[style]{color:red}").unwrap(),
+    );
+    let unrelated_before = resolver.computed_style_shared(&unrelated);
+    assert_eq!(
+        resolver.invalidate_inline_style_subtree(
+            &target,
+            Some(&previous),
+            Some(&current),
+            previous_is_non_scalar || target.attribute_has_non_scalar_value("style"),
+            false,
+        ),
+        "fallback_non_scalar_dom_string",
+    );
+    let unrelated_after = resolver.computed_style_shared(&unrelated);
+    assert!(!Arc::ptr_eq(&unrelated_before, &unrelated_after));
+}
+
+#[test]
+fn csp_block_state_change_forces_document_style_invalidation() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let target = NodeHandle::element("div");
+    let unrelated = NodeHandle::element("aside");
+    document.append_child(html.clone());
+    html.append_child(target.clone());
+    html.append_child(unrelated.clone());
+    let previous = "display:none;counter-reset:item 7;--tone:red;transform:translateX(0px)";
+    let current = "display:none;counter-reset:item 7;--tone:red;transform:translateX(1px)";
+    target.set_attribute("style", previous);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("[style]{color:red}").unwrap(),
+    );
+    let unrelated_before = resolver.computed_style_shared(&unrelated);
+    assert!(resolver.set_blocked_inline_style_node(target.identity(), true));
+    target.set_attribute("style", current);
+    assert_eq!(
+        resolver.invalidate_inline_style_subtree(
+            &target,
+            Some(previous),
+            Some(current),
+            false,
+            true,
+        ),
+        "fallback_csp_block_state_change",
+    );
+    let unrelated_after = resolver.computed_style_shared(&unrelated);
+    assert!(!Arc::ptr_eq(&unrelated_before, &unrelated_after));
+}
+
+#[test]
+fn local_inline_invalidation_starts_then_guards_a_running_transition() {
+    let element = NodeHandle::element("div");
+    let previous = "transform:translateX(0px);transition:transform 1s linear";
+    element.set_attribute("style", previous);
+    let mut resolver = StyleResolver::new();
+    let initial = resolver.computed_style_shared(&element);
+
+    let current = "transform:translateX(20px);transition:transform 1s linear";
+    element.set_attribute("style", current);
+    assert_eq!(
+        resolver.invalidate_inline_style_subtree(
+            &element,
+            Some(previous),
+            Some(current),
+            false,
+            false,
+        ),
+        "local",
+    );
+    let started = resolver.computed_style_shared(&element);
+    // Transition sampling canonicalizes transform function syntax. Compare the
+    // resolved matrices so the initial geometry must remain exactly unchanged.
+    let resolved_transform = |style: &ComputedStyle| {
+        let mut style = style.clone();
+        style.set_resolved_transform(validation_transform_reference_box());
+        style.get("transform").cloned()
+    };
+    assert_eq!(resolved_transform(&initial), resolved_transform(&started));
+    assert!(resolver.has_running_transitions());
+
+    let next = "transform:translateX(40px);transition:transform 1s linear";
+    element.set_attribute("style", next);
+    assert_eq!(
+        resolver
+            .invalidate_inline_style_subtree(&element, Some(current), Some(next), false, false,),
+        "fallback_active_transition",
+    );
+}
+
+#[test]
+fn running_animation_reports_its_document_invalidation_guard() {
+    let animated = NodeHandle::element("div");
+    let target = NodeHandle::element("div");
+    animated.set_attribute("id", "animated");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes fade{from{opacity:0}to{opacity:1}}#animated{animation:fade 10s linear}",
+        )
+        .unwrap(),
+    );
+    resolver.set_animation_time_ms(0.0);
+    resolver.computed_style_shared(&animated);
+    assert!(resolver.has_running_animations());
+
+    target.set_attribute("style", "transform:translateX(1px)");
+    assert_eq!(
+        resolver.invalidate_inline_style_subtree(
+            &target,
+            None,
+            Some("transform:translateX(1px)"),
+            false,
+            false,
+        ),
+        "fallback_active_animation",
+    );
+}
+
+#[test]
+fn shadow_participation_and_document_root_keep_full_invalidation() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let host = NodeHandle::element("x-host");
+    let unrelated = NodeHandle::element("p");
+    document.append_child(html.clone());
+    html.append_child(host.clone());
+    html.append_child(unrelated.clone());
+    host.attach_shadow(ShadowRootMode::Open).unwrap();
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("[style]{color:red;font-size:32px}p{width:1rem}").unwrap(),
+    );
+    let unrelated_before = resolver.computed_style_shared(&unrelated);
+    assert_eq!(
+        unrelated_before.get("width"),
+        Some(&ComputedValue::Px(16.0))
+    );
+    host.set_attribute("style", "transform:translateX(1px)");
+    assert_eq!(
+        resolver.invalidate_inline_style_subtree(
+            &host,
+            None,
+            Some("transform:translateX(1px)"),
+            false,
+            false,
+        ),
+        "fallback_shadow_or_slot",
+    );
+    let unrelated_after_shadow = resolver.computed_style_shared(&unrelated);
+    assert!(!Arc::ptr_eq(&unrelated_before, &unrelated_after_shadow));
+
+    html.set_attribute("style", "bottom:1px");
+    assert_eq!(
+        resolver.invalidate_inline_style_subtree(&html, None, Some("bottom:1px"), false, false,),
+        "fallback_document_root",
+    );
+    let unrelated_after_root = resolver.computed_style_shared(&unrelated);
+    assert!(!Arc::ptr_eq(&unrelated_after_shadow, &unrelated_after_root,));
+    assert_eq!(
+        unrelated_after_root.get("width"),
+        Some(&ComputedValue::Px(32.0)),
+        "the document-root fallback must refresh rem resolution",
+    );
+}
+
+#[test]
+#[ignore = "diagnostic A/B timing fixture; run explicitly with --ignored --nocapture"]
+fn profile_inline_style_subtree_invalidation_against_full_cache_clear() {
+    use std::time::{Duration, Instant};
+
+    const SIBLINGS: usize = 6_000;
+    const WARMUPS: usize = 2;
+    const SAMPLES: usize = 9;
+
+    struct Fixture {
+        target: NodeHandle,
+        nodes: Vec<NodeHandle>,
+        resolver: StyleResolver,
+    }
+
+    fn fixture() -> Fixture {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let body = NodeHandle::element("body");
+        document.append_child(html.clone());
+        html.append_child(body.clone());
+        let mut nodes = Vec::with_capacity(SIBLINGS);
+        for index in 0..SIBLINGS {
+            let node = NodeHandle::element("div");
+            node.set_attribute("class", "profile-item");
+            node.set_attribute("data-bucket", &(index % 32).to_string());
+            body.append_child(node.clone());
+            nodes.push(node);
+        }
+        let target = nodes[SIBLINGS / 2].clone();
+        target.set_attribute("style", "transform:translateX(0px);bottom:0px");
+        let child = NodeHandle::element("span");
+        target.append_child(child.clone());
+        nodes.push(child);
+
+        let mut css = String::from(
+            ".profile-item{position:relative;color:black}.profile-item::before{content:'cached'}",
+        );
+        for bucket in 0..32 {
+            css.push_str(&format!(
+                ".profile-item[data-bucket='{bucket}']{{padding-left:{}px}}",
+                bucket % 8
+            ));
+        }
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
+        Fixture {
+            target,
+            nodes,
+            resolver,
+        }
+    }
+
+    fn warm(fixture: &mut Fixture) {
+        for node in &fixture.nodes {
+            fixture.resolver.computed_style_shared(node);
+            fixture
+                .resolver
+                .computed_pseudo_style_shared(node, PseudoElement::Before);
+        }
+    }
+
+    fn measure(fixture: &mut Fixture, local: bool, step: usize) -> Duration {
+        warm(fixture);
+        let previous = fixture.target.get_attribute("style").unwrap();
+        let current = format!(
+            "transform:translateX({}px);bottom:{}px",
+            step % 17,
+            step % 5
+        );
+        let started = Instant::now();
+        fixture.target.set_attribute("style", &current);
+        if local {
+            assert_eq!(
+                fixture.resolver.invalidate_inline_style_subtree(
+                    &fixture.target,
+                    Some(&previous),
+                    Some(&current),
+                    false,
+                    false,
+                ),
+                "local",
+            );
+        } else {
+            fixture.resolver.invalidate_style_cache_for_test();
+        }
+        warm(fixture);
+        started.elapsed()
+    }
+
+    fn median(mut samples: Vec<Duration>) -> Duration {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    let mut local = fixture();
+    let mut full = fixture();
+    warm(&mut local);
+    let retained_before = local.resolver.computed_style_shared(&local.nodes[0]);
+    let previous = local.target.get_attribute("style").unwrap();
+    let current = "transform:translateX(1px);bottom:1px";
+    local.target.set_attribute("style", current);
+    assert_eq!(
+        local.resolver.invalidate_inline_style_subtree(
+            &local.target,
+            Some(&previous),
+            Some(current),
+            false,
+            false,
+        ),
+        "local",
+    );
+    assert!(Arc::ptr_eq(
+        &retained_before,
+        &local.resolver.computed_style_shared(&local.nodes[0]),
+    ));
+
+    let mut local_samples = Vec::with_capacity(SAMPLES);
+    let mut full_samples = Vec::with_capacity(SAMPLES);
+    for sample in 0..WARMUPS + SAMPLES {
+        let (local_elapsed, full_elapsed) = if sample % 2 == 0 {
+            (
+                measure(&mut local, true, sample + 2),
+                measure(&mut full, false, sample + 2),
+            )
+        } else {
+            let full_elapsed = measure(&mut full, false, sample + 2);
+            let local_elapsed = measure(&mut local, true, sample + 2);
+            (local_elapsed, full_elapsed)
+        };
+        if sample >= WARMUPS {
+            local_samples.push(local_elapsed);
+            full_samples.push(full_elapsed);
+        }
+    }
+
+    let local_median = median(local_samples);
+    let full_median = median(full_samples);
+    eprintln!(
+        "inline-style resolver A/B: siblings={SIBLINGS} samples={SAMPLES} local_median_ms={:.3} full_median_ms={:.3} ratio={:.3}",
+        local_median.as_secs_f64() * 1_000.0,
+        full_median.as_secs_f64() * 1_000.0,
+        local_median.as_secs_f64() / full_median.as_secs_f64(),
+    );
+}

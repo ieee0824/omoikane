@@ -340,3 +340,383 @@ fn inline_form_controls_expose_painted_border_boxes_and_invalidate_when_hidden()
         assert_eq!(number(&mut runtime, "editor.getClientRects().length"), 0.0);
     }
 }
+
+#[test]
+fn localized_inline_style_cache_keeps_geometry_cssom_and_container_queries_fresh() {
+    let mut runtime = runtime(
+        "<html><head><style>html,body{margin:0}#target{position:relative;width:100px;height:20px;container-type:inline-size}#inside{height:5px}@container (min-width:80px){#inside{color:red}}</style></head><body><div id='target'><span id='inside'></span></div><aside id='unrelated'></aside></body></html>",
+    );
+    runtime.set_viewport(320.0, 200.0);
+    assert!(runtime.eval("globalThis.target=document.getElementById('target');globalThis.inside=document.getElementById('inside');globalThis.before=target.getBoundingClientRect();getComputedStyle(inside).color==='rgb(255, 0, 0)'").unwrap().to_boolean());
+    let layout_generation = runtime.render_generations().layout;
+
+    runtime
+        .eval("target.style.transform='translateX(20px)';target.style.bottom='5px'")
+        .unwrap();
+    assert!(runtime.eval("(()=>{const style=getComputedStyle(target),rect=target.getBoundingClientRect();return style.transform!=='none'&&style.bottom==='5px'&&rect.x-before.x===20&&rect.y-before.y===-5&&getComputedStyle(inside).color==='rgb(255, 0, 0)'})()").unwrap().to_boolean());
+    assert!(runtime.render_generations().layout > layout_generation);
+}
+
+#[test]
+fn hidden_subject_raw_style_keeps_geometry_and_shared_layout_snapshots() {
+    let mut runtime = runtime(
+        r#"<html><head><style>
+          html,body{margin:0}body{counter-reset:item 0}
+          #target{display:none}#child{color:var(--tone,black)}
+          #target[style*="20px"]{--tone:red;counter-reset:item 7;container-type:inline-size}
+          #container{container-type:inline-size;width:100px}#consumer{color:black}
+          @container (min-width:80px){#consumer{color:green}}
+          #peer{width:80px;height:20px}#peer::before{content:counter(item)}
+        </style></head><body>
+          <div id="target" style="transform:translateX(0px)"><span id="child"></span></div>
+          <section id="container"><span id="consumer"></span></section><div id="peer"></div>
+        </body></html>"#,
+    );
+    runtime.set_viewport(320.0, 200.0);
+    assert!(
+        runtime
+            .eval(
+                r#"(() => {
+                  globalThis.target=document.getElementById('target');
+                  globalThis.child=document.getElementById('child');
+                  globalThis.peer=document.getElementById('peer');
+                  globalThis.beforePeer=peer.getBoundingClientRect();
+                  const hidden=target.getBoundingClientRect();
+                  return hidden.width===0&&hidden.height===0&&beforePeer.width===80&&
+                    getComputedStyle(child).color==='rgb(0, 0, 0)'&&
+                    getComputedStyle(document.getElementById('consumer')).color==='rgb(0, 128, 0)';
+                })()"#,
+            )
+            .unwrap()
+            .to_boolean(),
+    );
+    let generations = runtime.render_generations();
+    let calls = metric_calls();
+    let resolver_snapshot = |runtime: &JsRuntime| {
+        let state = runtime.host_state.borrow();
+        let document_id = state.document.identity();
+        let peer = state.document.query_selector("#peer").unwrap();
+        let resolver = state.document_styles[&document_id]
+            .resolver
+            .as_ref()
+            .unwrap();
+        (
+            resolver
+                .counter_values(&peer, crate::css::PseudoElement::Before, "item")
+                .map(|values| values.to_vec()),
+            resolver.container_contexts_snapshot(),
+        )
+    };
+    let snapshot = resolver_snapshot(&runtime);
+    assert_eq!(snapshot.0, Some(vec![0]));
+    assert!(!snapshot.1.is_empty());
+
+    runtime
+        .eval("target.style.transform='translateX(20px)'")
+        .unwrap();
+    let invalidated = runtime.render_generations();
+    assert!(invalidated.style > generations.style);
+    assert_eq!(invalidated.layout, generations.layout);
+    assert!(invalidated.paint > generations.paint);
+    let observed = runtime
+        .eval(
+            r#"(() => {
+        const style=getComputedStyle(target),after=peer.getBoundingClientRect();
+        const hidden=target.getBoundingClientRect();
+        return JSON.stringify({display:style.display,transform:style.transform,
+          inlineTransform:target.style.transform,tone:style.getPropertyValue('--tone'),
+          childColor:getComputedStyle(child).color,hidden:[hidden.width,hidden.height],
+          peer:[after.x,after.y,after.width,after.height],
+          before:[beforePeer.x,beforePeer.y,beforePeer.width,beforePeer.height]});
+    })()"#,
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    let observed: serde_json::Value = serde_json::from_str(&observed).unwrap();
+    assert_eq!(observed["display"], "none", "{observed}");
+    assert_eq!(
+        observed["inlineTransform"], "translateX(20px)",
+        "{observed}"
+    );
+    assert_eq!(observed["tone"], "red", "{observed}");
+    assert_eq!(observed["childColor"], "rgb(255, 0, 0)", "{observed}");
+    assert_eq!(observed["hidden"], serde_json::json!([0, 0]), "{observed}");
+    assert_eq!(observed["peer"], observed["before"], "{observed}");
+    assert_eq!(runtime.render_generations().layout, generations.layout);
+    assert!(metric_calls() > calls);
+    assert_eq!(resolver_snapshot(&runtime), snapshot);
+}
+
+#[test]
+fn hidden_subject_raw_style_that_reveals_target_rebuilds_peer_flow() {
+    let mut runtime = runtime(
+        r#"<html><head><style>
+          html,body{margin:0}#target{display:block;height:30px}
+          #target[style*="0px"]{display:none}#peer{height:10px}
+        </style></head><body><div id="target" style="transform:translateX(0px)"></div><div id="peer"></div></body></html>"#,
+    );
+    runtime.set_viewport(320.0, 200.0);
+    assert!(
+        runtime
+            .eval(
+                "globalThis.target=document.getElementById('target');globalThis.peer=document.getElementById('peer');target.getBoundingClientRect().height===0&&peer.getBoundingClientRect().y===0",
+            )
+            .unwrap()
+            .to_boolean(),
+    );
+    let layout_generation = runtime.render_generations().layout;
+
+    runtime
+        .eval("target.style.transform='translateX(1px)'")
+        .unwrap();
+    assert!(
+        runtime
+            .eval(
+                "getComputedStyle(target).display!=='none'&&target.getBoundingClientRect().height===30&&peer.getBoundingClientRect().y===30",
+            )
+            .unwrap()
+            .to_boolean(),
+    );
+    assert!(runtime.render_generations().layout > layout_generation);
+}
+
+#[test]
+fn hidden_nonlocal_raw_selector_rebuilds_peer_geometry() {
+    let mut runtime = runtime(
+        r#"<html><head><style>
+          html,body{margin:0}#target{display:none}#peer{width:20px;height:10px}
+          body:has(#target[style]) #peer{width:80px}
+        </style></head><body><div id="target"></div><div id="peer"></div></body></html>"#,
+    );
+    runtime.set_viewport(320.0, 200.0);
+    assert_eq!(
+        number(
+            &mut runtime,
+            "globalThis.target=document.getElementById('target');document.getElementById('peer').getBoundingClientRect().width",
+        ),
+        20.0,
+    );
+    let layout_generation = runtime.render_generations().layout;
+
+    runtime
+        .eval("target.style.transform='translateX(1px)'")
+        .unwrap();
+    assert_eq!(
+        number(
+            &mut runtime,
+            "document.getElementById('peer').getBoundingClientRect().width",
+        ),
+        80.0,
+    );
+    assert!(runtime.render_generations().layout > layout_generation);
+}
+
+#[test]
+fn hidden_subtree_with_top_layer_box_rebuilds_geometry() {
+    let mut runtime = runtime(
+        r#"<html><head><style>
+          html,body{margin:0}#target{display:none;--popover-width:20px}
+          #target[style*="20px"]{--popover-width:40px}
+          #popover{position:fixed;left:0;top:0;box-sizing:border-box;margin:0;padding:0;border:0;width:var(--popover-width);height:10px}
+        </style></head><body><div id="target" style="transform:translateX(0px)"><div id="popover" popover="manual"></div></div></body></html>"#,
+    );
+    runtime.set_viewport(320.0, 200.0);
+    assert!(
+        runtime
+            .eval(
+                r#"globalThis.target=document.getElementById('target');
+                   globalThis.popover=document.getElementById('popover');
+                   popover.showPopover();
+                   target.getBoundingClientRect().width===0&&popover.getBoundingClientRect().width===20"#,
+            )
+            .unwrap()
+            .to_boolean(),
+    );
+    let layout_generation = runtime.render_generations().layout;
+
+    runtime
+        .eval("target.style.transform='translateX(20px)'")
+        .unwrap();
+    assert!(
+        runtime
+            .eval(
+                "getComputedStyle(target).display==='none'&&target.getBoundingClientRect().width===0&&popover.getBoundingClientRect().width===40",
+            )
+            .unwrap()
+            .to_boolean(),
+    );
+    assert!(runtime.render_generations().layout > layout_generation);
+}
+
+#[test]
+fn hidden_local_change_that_starts_transition_rebuilds_geometry() {
+    let mut runtime = runtime(
+        r#"<html><head><style>#target{display:none}</style></head><body><div id="target" style="transform:translateX(0px);transition:transform 1s linear"></div></body></html>"#,
+    );
+    assert_eq!(
+        number(
+            &mut runtime,
+            "globalThis.target=document.getElementById('target');target.getBoundingClientRect().width",
+        ),
+        0.0,
+    );
+    let layout_generation = runtime.render_generations().layout;
+
+    runtime
+        .eval("target.style.transform='translateX(20px)'")
+        .unwrap();
+    let transition_started = {
+        let state = runtime.host_state.borrow();
+        let document_id = state.document.identity();
+        state.document_styles[&document_id]
+            .resolver
+            .as_ref()
+            .is_some_and(|resolver| resolver.has_running_transitions())
+    };
+    assert!(transition_started);
+    assert_eq!(
+        number(&mut runtime, "target.getBoundingClientRect().width"),
+        0.0
+    );
+    assert!(runtime.render_generations().layout > layout_generation);
+}
+
+#[test]
+#[ignore = "diagnostic A/B timing fixture; run explicitly with --ignored --nocapture"]
+fn profile_hidden_subtree_geometry_retention_against_full_rebuild() {
+    use std::time::{Duration, Instant};
+
+    const SIBLINGS: usize = 6_000;
+    const WARMUPS: usize = 2;
+    const SAMPLES: usize = 9;
+
+    fn fixture() -> JsRuntime {
+        let mut html = String::from(
+            r#"<html><head><style>
+              html,body{margin:0}.row{height:1px;width:100px}
+              #target{display:none}#target[style*="20px"]{--probe:1;counter-reset:item 7;container-type:inline-size}
+            </style></head><body><div id="target" style="transform:translateX(0px)"></div>"#,
+        );
+        for index in 0..SIBLINGS {
+            html.push_str(&format!(
+                "<div class='row' data-bucket='{}'></div>",
+                index % 32
+            ));
+        }
+        html.push_str("<div id='probe' class='row'></div></body></html>");
+        let mut runtime = runtime(&html);
+        runtime.set_viewport(320.0, 200.0);
+        assert!(
+            runtime
+                .eval(
+                    "globalThis.target=document.getElementById('target');globalThis.probe=document.getElementById('probe');target.getBoundingClientRect().width===0&&probe.getBoundingClientRect().width===100",
+                )
+                .unwrap()
+                .to_boolean(),
+        );
+        runtime
+    }
+
+    fn measure(runtime: &mut JsRuntime, force_full_layout: bool, step: usize) -> Duration {
+        let generations = runtime.render_generations();
+        let transform = if step % 2 == 0 { 20 } else { 0 };
+        let started = Instant::now();
+        runtime
+            .eval(&format!(
+                "target.style.transform='translateX({transform}px)'"
+            ))
+            .unwrap();
+        if force_full_layout {
+            let mut state = runtime.host_state.borrow_mut();
+            state.capture_scroll_offsets_before_layout();
+            state.invalidate_layout_root("hidden_geometry_profile_full_rebuild");
+        }
+        assert_eq!(
+            number(runtime, "probe.getBoundingClientRect().width"),
+            100.0
+        );
+        let elapsed = started.elapsed();
+        if force_full_layout {
+            assert!(runtime.render_generations().layout > generations.layout);
+        } else {
+            assert_eq!(runtime.render_generations().layout, generations.layout);
+        }
+        elapsed
+    }
+
+    fn median(mut samples: Vec<Duration>) -> Duration {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    let mut retained = fixture();
+    let mut rebuilt = fixture();
+    let mut retained_samples = Vec::with_capacity(SAMPLES);
+    let mut rebuilt_samples = Vec::with_capacity(SAMPLES);
+    for sample in 0..WARMUPS + SAMPLES {
+        let (retained_elapsed, rebuilt_elapsed) = if sample % 2 == 0 {
+            (
+                measure(&mut retained, false, sample),
+                measure(&mut rebuilt, true, sample),
+            )
+        } else {
+            let rebuilt_elapsed = measure(&mut rebuilt, true, sample);
+            let retained_elapsed = measure(&mut retained, false, sample);
+            (retained_elapsed, rebuilt_elapsed)
+        };
+        if sample >= WARMUPS {
+            retained_samples.push(retained_elapsed);
+            rebuilt_samples.push(rebuilt_elapsed);
+        }
+    }
+
+    let retained_median = median(retained_samples);
+    let rebuilt_median = median(rebuilt_samples);
+    eprintln!(
+        "hidden geometry A/B: siblings={SIBLINGS} samples={SAMPLES} retained_median_ms={:.3} rebuilt_median_ms={:.3} ratio={:.3}",
+        retained_median.as_secs_f64() * 1_000.0,
+        rebuilt_median.as_secs_f64() * 1_000.0,
+        retained_median.as_secs_f64() / rebuilt_median.as_secs_f64(),
+    );
+}
+
+#[test]
+fn inline_style_hash_change_recomputes_the_whole_blocked_declaration_set() {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+
+    let previous = "display:none;counter-reset:item 7;--tone:red;transform:translateX(0px)";
+    let current = "display:none;counter-reset:item 7;--tone:red;transform:translateX(1px)";
+    let digest =
+        base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(previous.as_bytes()));
+    let mut runtime = runtime(&format!(
+        "<html><head><style>#child{{color:var(--tone, black)}}</style></head><body><div id='target' style='{previous}'><span id='child'></span></div><aside id='unrelated'></aside></body></html>",
+    ));
+    runtime.install_response_security_headers(&[(
+        "Content-Security-Policy".into(),
+        format!("style-src-attr 'unsafe-hashes' 'sha256-{digest}'"),
+    )]);
+    assert!(
+        runtime
+            .eval(
+                "globalThis.target=document.getElementById('target');globalThis.child=document.getElementById('child');getComputedStyle(target).display==='none'&&getComputedStyle(child).color==='rgb(255, 0, 0)'",
+            )
+            .unwrap()
+            .to_boolean(),
+    );
+
+    runtime
+        .eval(&format!("target.setAttribute('style','{current}')"))
+        .unwrap();
+    assert!(
+        runtime
+            .eval(
+                "getComputedStyle(target).display!=='none'&&getComputedStyle(child).color==='rgb(0, 0, 0)'",
+            )
+            .unwrap()
+            .to_boolean(),
+        "a transform-only source edit that misses the CSP hash blocks every inline declaration",
+    );
+}

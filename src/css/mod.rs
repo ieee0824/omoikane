@@ -15,6 +15,7 @@ mod parser;
 mod scope;
 mod shorthand;
 pub(crate) mod style;
+pub(crate) mod style_profile;
 mod supports;
 mod tokenizer;
 mod transform;

@@ -1597,6 +1597,32 @@ impl NodeHandle {
         self.with_attribute(name, |value| value == Some(expected))
     }
 
+    /// Reports whether an attribute retains exact non-scalar UTF-16 units.
+    /// Name matching follows [`Self::get_attribute`].
+    pub(crate) fn attribute_has_non_scalar_value(&self, name: &str) -> bool {
+        let inner = self.0.borrow();
+        let NodeData::Element(element) = &inner.data else {
+            return false;
+        };
+        element
+            .attribute_records
+            .iter()
+            .find(|record| record.qualified_name == name)
+            .or_else(|| {
+                element
+                    .html
+                    .then(|| {
+                        let lowercase = name.to_ascii_lowercase();
+                        element
+                            .attribute_records
+                            .iter()
+                            .find(|record| record.qualified_name == lowercase)
+                    })
+                    .flatten()
+            })
+            .is_some_and(|record| record.utf16.is_some())
+    }
+
     /// Returns an attribute value as exact UTF-16 code units.
     /// Name matching follows [`Self::get_attribute`].
     pub fn get_attribute_utf16(&self, name: &str) -> Option<Vec<u16>> {

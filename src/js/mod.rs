@@ -6473,11 +6473,12 @@ impl HostState {
 
     /// Rechecks CSP after each explicit `style` attribute mutation, even when
     /// the new text equals the old text. Resolver rebuilds retain the snapshot
-    /// to avoid duplicate reports from unrelated style recalculation.
-    fn refresh_csp_inline_style_nodes(&mut self, node: &NodeHandle) {
+    /// to avoid duplicate reports from unrelated style recalculation. Returns
+    /// whether an existing resolver's blocked membership changed.
+    fn refresh_csp_inline_style_nodes(&mut self, node: &NodeHandle) -> bool {
         self.observed_style_attributes.remove(&node.identity());
         let Some(document) = document_root_for_node(node) else {
-            return;
+            return false;
         };
         let blocked = if let Some(source) = node.get_attribute("style") {
             !self.csp_allows_inline_style_attribute(&document, node, &source)
@@ -6489,7 +6490,9 @@ impl HostState {
             .get_mut(&document.identity())
             .and_then(|entry| entry.resolver.as_mut())
         {
-            resolver.set_blocked_inline_style_node(node.identity(), blocked);
+            resolver.set_blocked_inline_style_node(node.identity(), blocked)
+        } else {
+            false
         }
     }
 
@@ -6535,15 +6538,31 @@ impl HostState {
                 resolver.invalidate_style_cache();
             }
         }
+        self.invalidate_document_style_outputs(document, false);
+    }
+
+    /// Invalidates derived style outputs after selecting the resolver cache
+    /// policy. A proven hidden-subtree change can retain main-document geometry,
+    /// while paint and layout-metric products are always invalidated.
+    fn invalidate_document_style_outputs(
+        &mut self,
+        document: &NodeHandle,
+        preserve_main_layout: bool,
+    ) {
+        let document_id = document.identity();
         if document_id == self.document.identity() {
             self.style_generation = self.style_generation.saturating_add(1);
-            self.capture_scroll_offsets_before_layout();
-            self.invalidate_layout_root("style_cache_invalidated");
+            if !preserve_main_layout {
+                self.capture_scroll_offsets_before_layout();
+                self.invalidate_layout_root("style_cache_invalidated");
+            }
             self.invalidate_paint_cache();
         } else {
             self.invalidate_paint_cache();
         }
-        frame_diagnostics::record_scroll_invalidation(document_id);
+        if !preserve_main_layout {
+            frame_diagnostics::record_scroll_invalidation(document_id);
+        }
     }
 
     /// Invalidates the scroll-adjusted paint geometry while retaining the
@@ -6583,8 +6602,84 @@ impl HostState {
     /// Constraint validity depends on form attributes, values and tree
     /// structure, never on inline style, so the validation snapshot stays
     /// fresh and the next CSSOM read does not rescan every form control.
-    fn invalidate_inline_style_for_node(&mut self, node: &NodeHandle) {
-        self.invalidate_style_cache_for_node_keeping_validation(node);
+    fn invalidate_inline_style_for_node(
+        &mut self,
+        node: &NodeHandle,
+        previous_inline_style: Option<&str>,
+        previous_inline_style_is_non_scalar: bool,
+        csp_block_state_changed: bool,
+    ) {
+        if let Some(document) = document_root_for_node(node) {
+            let current_inline_style = node.get_attribute("style");
+            let has_non_scalar_dom_string =
+                previous_inline_style_is_non_scalar || node.attribute_has_non_scalar_value("style");
+            let hidden_layout_candidate = self.can_preserve_hidden_main_layout(&document, node);
+            let mut outcome = "deferred_resolver";
+            let mut preserve_main_layout = false;
+            if let Some(entry) = self.document_styles.get_mut(&document.identity()) {
+                entry.needs_full_sample = true;
+                entry.child_layout = None;
+                if let Some(resolver) = entry.resolver.as_mut() {
+                    outcome = resolver.invalidate_inline_style_subtree(
+                        node,
+                        previous_inline_style,
+                        current_inline_style.as_deref(),
+                        has_non_scalar_dom_string,
+                        csp_block_state_changed,
+                    );
+                    preserve_main_layout = hidden_layout_candidate
+                        && matches!(outcome, "local" | "local_raw_style_subject")
+                        && resolver.computed_style_shared(node).is_display_none()
+                        && !resolver.has_running_transitions()
+                        && !resolver.has_running_animations();
+                }
+            }
+            frame_diagnostics::record_style_cache_invalidation(
+                document.identity(),
+                node.identity(),
+                outcome,
+            );
+            self.invalidate_document_style_outputs(&document, preserve_main_layout);
+        }
+        if matches!(node.tag_name().as_deref(), Some("iframe" | "frame"))
+            && let Some(child) = self.iframe_documents.get(&node.identity())
+        {
+            let child_document = child.document.clone();
+            self.mark_document_style_dirty(&child_document);
+        }
+    }
+
+    /// Checks only pre-mutation caches needed to retain a hidden main-document
+    /// subtree's geometry. The caller must still verify a local style-cache
+    /// outcome and resolve the target's new `display` value.
+    fn can_preserve_hidden_main_layout(&self, document: &NodeHandle, node: &NodeHandle) -> bool {
+        if document.identity() != self.document.identity() {
+            return false;
+        }
+        let Some(layout) = self.layout_root.as_ref() else {
+            return false;
+        };
+        let Some(resolver) = self
+            .document_styles
+            .get(&document.identity())
+            .and_then(|entry| entry.resolver.as_ref())
+        else {
+            return false;
+        };
+        if resolver.cached_display_none(node) != Some(true) {
+            return false;
+        }
+
+        let mut subtree_ids = HashSet::new();
+        Self::collect_tree_ids(node, &mut subtree_ids);
+        if subtree_ids.iter().any(|identity| {
+            self.nodes
+                .get(identity)
+                .is_none_or(|node| node.top_layer_order().is_some())
+        }) {
+            return false;
+        }
+        !layout_uses_any_node(layout, &subtree_ids)
     }
 
     fn invalidate_style_cache_for_node_keeping_validation(&mut self, node: &NodeHandle) {
@@ -7189,6 +7284,7 @@ impl HostState {
         layout_sample.mark_rebuild();
         let viewport = self.viewport;
         let document_id = document.identity();
+        let _style_profile = crate::css::style_profile::StyleProfileScope::begin(document_id);
         let base = crate::paint::stylesheet::extract_document_base_url(
             &document,
             self.base_url_for_document(document_id).as_ref(),
@@ -17715,6 +17811,34 @@ fn find_layout_box<'a>(root: &'a LayoutBox, node: &NodeHandle) -> Option<&'a Lay
     None
 }
 
+/// Returns whether cached geometry contains a box or inline fragment sourced
+/// from any node in `identities`, regardless of where it was placed.
+fn layout_uses_any_node(root: &LayoutBox, identities: &HashSet<usize>) -> bool {
+    if identities.contains(&root.node.identity()) {
+        return true;
+    }
+    for line in &root.lines {
+        let overflow_fragments = line
+            .text_overflow
+            .as_ref()
+            .into_iter()
+            .flat_map(|overflow| &overflow.fragments);
+        for fragment in line.fragments.iter().chain(overflow_fragments) {
+            if identities.contains(&fragment.node.identity())
+                || fragment
+                    .text_source
+                    .iter()
+                    .any(|source| identities.contains(&source.node.identity()))
+            {
+                return true;
+            }
+        }
+    }
+    root.children
+        .iter()
+        .any(|child| layout_uses_any_node(child, identities))
+}
+
 fn find_layout_box_with_transform<'a>(
     root: &'a LayoutBox,
     node: &NodeHandle,
@@ -21231,10 +21355,17 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             .borrow()
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let previous_inline_style = is_style_attribute
+            .then(|| node.get_attribute("style"))
+            .flatten();
+        let previous_inline_style_is_non_scalar =
+            is_style_attribute && node.attribute_has_non_scalar_value("style");
         // Setting the resource attribute of a connected `<iframe>`/`<object>`
         // starts a fresh navigation; detect it before `name` is moved into
         // `set_attribute`. Any other attribute leaves navigation untouched.
-        attribute_assignment::trace(&node, &name, &value);
+        attribute_assignment::trace(&node, &name, &value, || {
+            attribute_assignment::cached_state(&state.borrow(), &node)
+        });
         let resource_attr = node.tag_name().and_then(|tag| {
             if tag.eq_ignore_ascii_case("iframe") && name.eq_ignore_ascii_case("srcdoc") {
                 Some("srcdoc")
@@ -21262,8 +21393,13 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         // selectors), so invalidate the element's live document. Detached
         // elements cannot affect it until the insertion path invalidates it.
         if is_style_attribute {
-            state.borrow_mut().refresh_csp_inline_style_nodes(&node);
-            state.borrow_mut().invalidate_inline_style_for_node(&node);
+            let csp_block_state_changed = state.borrow_mut().refresh_csp_inline_style_nodes(&node);
+            state.borrow_mut().invalidate_inline_style_for_node(
+                &node,
+                previous_inline_style.as_deref(),
+                previous_inline_style_is_non_scalar,
+                csp_block_state_changed,
+            );
         } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         } else {
@@ -21325,6 +21461,11 @@ fn set_attribute_ns_native(
             .borrow()
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let previous_inline_style = is_style_attribute
+            .then(|| node.get_attribute("style"))
+            .flatten();
+        let previous_inline_style_is_non_scalar =
+            is_style_attribute && node.attribute_has_non_scalar_value("style");
         let resource_attr = namespace.as_ref().is_none().then(|| {
             node.tag_name().and_then(|tag| {
                 if tag.eq_ignore_ascii_case("iframe") && qualified_name == "srcdoc" {
@@ -21356,8 +21497,13 @@ fn set_attribute_ns_native(
             state.borrow_mut().refresh_iframe_context_name(&node);
         }
         if is_style_attribute {
-            state.borrow_mut().refresh_csp_inline_style_nodes(&node);
-            state.borrow_mut().invalidate_inline_style_for_node(&node);
+            let csp_block_state_changed = state.borrow_mut().refresh_csp_inline_style_nodes(&node);
+            state.borrow_mut().invalidate_inline_style_for_node(
+                &node,
+                previous_inline_style.as_deref(),
+                previous_inline_style_is_non_scalar,
+                csp_block_state_changed,
+            );
         } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         } else {
@@ -25087,6 +25233,11 @@ fn remove_attribute_native(
             .borrow()
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let previous_inline_style = is_style_attribute
+            .then(|| node.get_attribute("style"))
+            .flatten();
+        let previous_inline_style_is_non_scalar =
+            is_style_attribute && node.attribute_has_non_scalar_value("style");
         let resource_attr = node.tag_name().and_then(|tag| {
             if tag.eq_ignore_ascii_case("iframe") && name.eq_ignore_ascii_case("srcdoc") {
                 Some("srcdoc")
@@ -25113,8 +25264,13 @@ fn remove_attribute_native(
         // Any attribute may participate in a selector, so invalidate the
         // element's live document. Detached elements affect no document yet.
         if is_style_attribute {
-            state.borrow_mut().refresh_csp_inline_style_nodes(&node);
-            state.borrow_mut().invalidate_inline_style_for_node(&node);
+            let csp_block_state_changed = state.borrow_mut().refresh_csp_inline_style_nodes(&node);
+            state.borrow_mut().invalidate_inline_style_for_node(
+                &node,
+                previous_inline_style.as_deref(),
+                previous_inline_style_is_non_scalar,
+                csp_block_state_changed,
+            );
         } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         } else {
@@ -25165,6 +25321,11 @@ fn remove_attribute_ns_native(
             .borrow()
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let previous_inline_style = is_style_attribute
+            .then(|| node.get_attribute("style"))
+            .flatten();
+        let previous_inline_style_is_non_scalar =
+            is_style_attribute && node.attribute_has_non_scalar_value("style");
         let resource_attr = namespace.as_ref().is_none().then(|| {
             node.tag_name().and_then(|tag| {
                 if tag.eq_ignore_ascii_case("iframe") && qualified_name == "srcdoc" {
@@ -25189,8 +25350,13 @@ fn remove_attribute_ns_native(
             state.borrow_mut().refresh_iframe_context_name(&node);
         }
         if is_style_attribute {
-            state.borrow_mut().refresh_csp_inline_style_nodes(&node);
-            state.borrow_mut().invalidate_inline_style_for_node(&node);
+            let csp_block_state_changed = state.borrow_mut().refresh_csp_inline_style_nodes(&node);
+            state.borrow_mut().invalidate_inline_style_for_node(
+                &node,
+                previous_inline_style.as_deref(),
+                previous_inline_style_is_non_scalar,
+                csp_block_state_changed,
+            );
         } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
             state.borrow_mut().mark_style_dirty_for_node(&node);
         } else {
