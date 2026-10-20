@@ -7490,8 +7490,8 @@ impl HostState {
                     crate::paint::text::load_text_fonts(),
                     Some(entry.web_fonts.clone()),
                     || {
-                        image_environment.run(false, || {
-                            crate::layout::with_image_base_url(base, || {
+                        image_environment.run_cached_layout(|| {
+                            let output = crate::layout::with_image_base_url(base, || {
                                 crate::layout::with_image_animation_time(animation_time, || {
                                     crate::layout::with_error_reporter(layout_reporter, || {
                                         crate::layout::layout_tree_with_content_visibility(
@@ -7502,7 +7502,9 @@ impl HostState {
                                         )
                                     })
                                 })
-                            })
+                            });
+                            let success = output.0.is_some();
+                            (output, success)
                         })
                     },
                 ))
@@ -19320,12 +19322,14 @@ fn build_child_document_layout(
         crate::paint::text::load_text_fonts(),
         Some(entry.web_fonts.clone()),
         || {
-            image_environment.run(false, || {
-                crate::layout::with_image_base_url(base, || {
+            image_environment.run_cached_layout(|| {
+                let layout = crate::layout::with_image_base_url(base, || {
                     crate::layout::with_image_animation_time(animation_time, || {
                         crate::layout::layout_tree(document, resolver, viewport)
                     })
-                })
+                });
+                let success = layout.is_some();
+                (layout, success)
             })
         },
     );

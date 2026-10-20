@@ -55,6 +55,17 @@ impl DocumentImageEnvironment {
         );
         (result, ImageReports { coep, csp })
     }
+
+    /// Runs a full layout whose successful result will be retained by the
+    /// owning Document, and replaces its image dependency coverage atomically.
+    pub(super) fn run_cached_layout<T>(
+        self,
+        operation: impl FnOnce() -> (T, bool),
+    ) -> (T, ImageReports) {
+        self.run(false, || {
+            crate::layout::with_image_layout_dependency_capture(operation)
+        })
+    }
 }
 
 impl HostState {
@@ -145,11 +156,18 @@ impl JsRuntime {
                 }
                 state.image_environment(document_id)
             };
-            let (changed, reports) = environment.run(false, crate::layout::poll_async_images);
+            let (effects, reports) =
+                environment.run(false, crate::layout::poll_async_image_effects);
             let mut state = self.host_state.borrow_mut();
             state.queue_image_reports(document_id, reports);
-            if changed && let Some(document) = state.get_node(document_id) {
-                state.mark_document_layout_dirty(&document, "image_resource_completed");
+            if effects.changed
+                && let Some(document) = state.get_node(document_id)
+            {
+                if effects.requires_layout {
+                    state.mark_document_layout_dirty(&document, "image_resource_completed");
+                } else {
+                    state.invalidate_paint_cache();
+                }
             }
         }
         let waiting = std::mem::take(&mut self.host_state.borrow_mut().pending_image_events);

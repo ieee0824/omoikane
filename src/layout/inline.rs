@@ -1979,6 +1979,7 @@ const MAX_IMAGE_SIZE: usize = 10 * 1024 * 1024;
 /// Fetch an image from an HTTP/HTTPS URL with caching.
 fn fetch_image(url: &str) -> Option<Image> {
     super::ensure_image_cache_context();
+    super::image_security::record_layout_image_dependency(url);
     if let Some(image) = IMAGE_ANIMATION_CACHE.with(|cache| {
         cache
             .borrow()

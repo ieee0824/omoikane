@@ -194,6 +194,89 @@ impl Fixture {
 
 struct RedirectImage(Mutex<Vec<String>>);
 
+#[test]
+fn failed_or_unwound_cached_layout_cannot_publish_partial_image_coverage() {
+    let fixture = Fixture::new(Arc::new(RedirectImage(Mutex::new(Vec::new()))));
+    fixture.run(|| {
+        let unrelated = HashSet::from(["https://image.test/background.png".to_owned()]);
+        with_image_layout_dependency_capture(|| ((), true));
+        let owner = IMAGE_CACHE_OWNER.with(|slot| slot.borrow().clone().unwrap());
+        assert!(
+            !fixture
+                .state
+                .borrow()
+                .layout_dependencies
+                .completion_requires_layout(Some(&owner), &unrelated,)
+        );
+
+        with_image_layout_dependency_capture(|| {
+            // A nested successful layout must not survive an outer failure.
+            with_image_layout_dependency_capture(|| ((), true));
+            ((), false)
+        });
+        assert!(
+            fixture
+                .state
+                .borrow()
+                .layout_dependencies
+                .completion_requires_layout(Some(&owner), &unrelated,)
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_image_layout_dependency_capture::<()>(|| {
+                with_image_layout_dependency_capture(|| ((), true));
+                panic!("exercise failed outer layout cleanup");
+            });
+        }));
+        assert!(result.is_err());
+        assert!(ACTIVE_LAYOUT_DEPENDENCY_CAPTURES.with(|stack| stack.borrow().is_empty()));
+        assert!(
+            fixture
+                .state
+                .borrow()
+                .layout_dependencies
+                .completion_requires_layout(Some(&owner), &unrelated,)
+        );
+        with_image_layout_dependency_capture(|| ((), true));
+        assert!(
+            !fixture
+                .state
+                .borrow()
+                .layout_dependencies
+                .completion_requires_layout(Some(&owner), &unrelated,)
+        );
+    });
+}
+
+#[test]
+fn cached_layout_capture_cannot_publish_across_an_image_policy_reset() {
+    let fixture = Fixture::new(Arc::new(RedirectImage(Mutex::new(Vec::new()))));
+    fixture.run(|| {
+        with_image_layout_dependency_capture(|| {
+            fixture.state.borrow_mut().layout_dependencies.reset();
+            // Restoring the same owner does not make the earlier capture valid.
+            let owner = IMAGE_CACHE_OWNER.with(|slot| slot.borrow().clone().unwrap());
+            fixture
+                .state
+                .borrow_mut()
+                .layout_dependencies
+                .select_owner(Some(&owner));
+            ((), true)
+        });
+        let owner = IMAGE_CACHE_OWNER.with(|slot| slot.borrow().clone().unwrap());
+        assert!(
+            fixture
+                .state
+                .borrow()
+                .layout_dependencies
+                .completion_requires_layout(
+                    Some(&owner),
+                    &HashSet::from(["https://image.test/background.png".to_owned()]),
+                )
+        );
+    });
+}
+
 struct RetiredImages {
     entered: mpsc::Sender<()>,
     release: (Mutex<bool>, std::sync::Condvar),
@@ -600,6 +683,89 @@ fn changing_request_context_discards_inflight_image_and_refetches() {
             .is_some()
     );
     assert_eq!(transport.requests.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn completed_response_from_different_owner_requires_layout_without_merging() {
+    let fixture = Fixture::new(Arc::new(RedirectImage(Mutex::new(Vec::new()))));
+    let url = "https://image.test/mismatched-owner.png";
+    let report_identity = (
+        url.to_owned(),
+        "https://other.test/redirect.png".to_owned(),
+        1,
+    );
+    let (settled, ready) = mpsc::channel();
+
+    fixture.run(|| {
+        ensure_image_cache_context();
+        let owner = IMAGE_CACHE_OWNER.with(|slot| slot.borrow().clone().unwrap());
+        let mut mismatched_owner = owner.clone();
+        mismatched_owner.2 = mismatched_owner.2.saturating_add(1);
+        let mut cache = ImageCache::default();
+        cache.owner = Some(mismatched_owner);
+        cache.images.insert(url.to_owned(), None);
+        let response = Response {
+            cache,
+            reported: HashSet::from([report_identity.clone()]),
+            csp: vec![ImagePolicyNotice {
+                reference: url.to_owned(),
+                enforced: Vec::new(),
+                report_only: Vec::new(),
+            }],
+            coep: vec![CorpViolation {
+                blocked_url: url.to_owned(),
+                report_only: true,
+                enforced: false,
+            }],
+        };
+        let task = {
+            let state = fixture.state.borrow();
+            state
+                .asynchronous
+                .pool
+                .submit(
+                    &state.asynchronous.scope,
+                    ResourcePriority::Normal,
+                    ResourceKind::Image,
+                    move |_| {
+                        settled.send(()).unwrap();
+                        response
+                    },
+                )
+                .unwrap()
+        };
+        let mut state = fixture.state.borrow_mut();
+        state.asynchronous.owner = Some(owner);
+        state.asynchronous.pending.insert(url.to_owned(), task);
+    });
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut observed = None;
+    while fixture.state.borrow().has_pending_images() {
+        let ((effects, coep), csp) = fixture.run_all_reports(poll_effects);
+        assert!(coep.is_empty(), "mismatched response merged COEP reports");
+        assert!(csp.is_empty(), "mismatched response merged CSP reports");
+        if effects.changed {
+            assert!(observed.replace(effects).is_none());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "mismatched response did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        observed,
+        Some(ImageCompletionEffects {
+            changed: true,
+            requires_layout: true,
+        })
+    );
+
+    let state = fixture.state.borrow();
+    assert!(!state.cache.images.contains_key(url));
+    assert!(!state.reported.borrow().contains(&report_identity));
 }
 
 #[test]

@@ -18,6 +18,12 @@ OMOIKANE_TRACE_STARTUP=1 OMOIKANE_TRACE_PAINT=1 OMOIKANE_TRACE_INPUT=1 \
 本文の表示は画面でも確認する。`OMOIKANE_PAINT.frame_ms`にはページの処理・
 レイアウト・描画が含まれるので、`paint_ms`を再び加算しない。
 
+非同期画像の完了は、成功したmain/child全体レイアウトが読んだHTTP画像URLと
+完了batchのURLを照合する。既知の依存集合に含まれない背景画像ならpaintと派生metrics
+だけを無効化し、geometryを保持する。実寸を読む画像とURLを共有する場合や、
+レイアウト未完了・失敗・セキュリティ条件変更で依存が不明な場合は再レイアウトする。
+背景SVG内部のレイアウトはページ全体の依存情報を確定しない。
+
 ## スタイル再計算と属性変更の計測
 
 `OMOIKANE_TRACE_PAINT=1`は、レイアウトを再構築したときに

@@ -61,13 +61,13 @@ impl ImageDocumentState {
     }
 }
 
-fn same_owner(left: &ImageCacheOwner, right: &ImageCacheOwner) -> bool {
-    Arc::ptr_eq(&left.0, &right.0)
-        && left.1 == right.1
-        && left.2 == right.2
-        && left.3 == right.3
-        && left.4 == right.4
-        && left.5 == right.5
+/// Cache and geometry effects produced by one nonblocking image poll.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ImageCompletionEffects {
+    /// At least one completion settled or the active cache owner was reset.
+    pub(crate) changed: bool,
+    /// Existing cached layout geometry may depend on the changed image state.
+    pub(crate) requires_layout: bool,
 }
 
 /// Starts a checked download only in an explicitly asynchronous document scope.
@@ -87,7 +87,7 @@ pub(crate) fn start(url: &str) -> bool {
         if !asynchronous
             .owner
             .as_ref()
-            .is_some_and(|old| same_owner(old, &owner))
+            .is_some_and(|old| same_image_cache_owner(old, &owner))
         {
             asynchronous.reset();
             asynchronous.owner = Some(owner.clone());
@@ -122,11 +122,16 @@ pub(crate) fn start(url: &str) -> bool {
 
 /// Merges completed jobs under the same document/security traversal scope.
 pub(crate) fn poll() -> bool {
+    poll_effects().changed
+}
+
+/// Merges completed jobs and classifies whether cached geometry depends on them.
+pub(crate) fn poll_effects() -> ImageCompletionEffects {
     ensure_image_cache_context();
     ACTIVE_POLICY.with(|slot| {
         let slot = slot.borrow();
         let Some(active) = slot.as_ref() else {
-            return false;
+            return ImageCompletionEffects::default();
         };
         let owner = IMAGE_CACHE_OWNER.with(|slot| slot.borrow().clone());
         let mut state = active.state.borrow_mut();
@@ -134,12 +139,15 @@ pub(crate) fn poll() -> bool {
             && !owner
                 .as_ref()
                 .zip(state.asynchronous.owner.as_ref())
-                .is_some_and(|(current, requested)| same_owner(current, requested))
+                .is_some_and(|(current, requested)| same_image_cache_owner(current, requested))
         {
             // A storage-access or embedder-policy change selects a new cache
             // context. Discard even failed completions from the old context.
             state.asynchronous.reset();
-            return true;
+            return ImageCompletionEffects {
+                changed: true,
+                requires_layout: true,
+            };
         }
         let mut completed = Vec::new();
         state
@@ -157,20 +165,25 @@ pub(crate) fn poll() -> bool {
                 }
                 Err(mpsc::TryRecvError::Empty) => true,
             });
-        let mut changed = false;
+        let mut affected = HashSet::new();
+        let mut owner_mismatch = false;
         for (url, response) in completed {
             let Some(response) = response else {
+                affected.insert(url.clone());
                 IMAGE_CACHE.with(|slot| slot.borrow_mut().insert(url, None));
-                changed = true;
                 continue;
             };
             if !owner
                 .as_ref()
                 .zip(response.cache.owner.as_ref())
-                .is_some_and(|(current, fetched)| same_owner(current, fetched))
+                .is_some_and(|(current, fetched)| same_image_cache_owner(current, fetched))
             {
+                owner_mismatch = true;
                 continue;
             }
+            affected.insert(url);
+            affected.extend(response.cache.images.keys().cloned());
+            affected.extend(response.cache.animations.keys().cloned());
             IMAGE_CACHE.with(|slot| slot.borrow_mut().extend(response.cache.images));
             IMAGE_ANIMATION_CACHE.with(|slot| slot.borrow_mut().extend(response.cache.animations));
             active.reported.borrow_mut().extend(response.reported);
@@ -180,9 +193,16 @@ pub(crate) fn poll() -> bool {
                     context.coep_reports.borrow_mut().extend(response.coep);
                 }
             });
-            changed = true;
         }
-        changed
+        let changed = owner_mismatch || !affected.is_empty();
+        ImageCompletionEffects {
+            changed,
+            requires_layout: owner_mismatch
+                || (changed
+                    && state
+                        .layout_dependencies
+                        .completion_requires_layout(owner.as_ref(), &affected)),
+        }
     })
 }
 

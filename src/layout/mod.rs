@@ -62,7 +62,8 @@ pub(crate) use inline::{
 };
 mod image_security;
 pub(crate) use image_security::{
-    ImageDocumentState, ImagePolicyNotice, poll_async_images, with_image_security_policy,
+    ImageDocumentState, ImagePolicyNotice, poll_async_image_effects, poll_async_images,
+    with_image_layout_dependency_capture, with_image_security_policy,
 };
 
 // Re-exports used by tests
@@ -581,33 +582,11 @@ fn ensure_image_cache_context() {
             )
         })
     });
-    IMAGE_CACHE_OWNER.with(|owner| {
+    let owner_changed = IMAGE_CACHE_OWNER.with(|owner| {
         let mut owner = owner.borrow_mut();
         let same = match (owner.as_ref(), current.as_ref()) {
-            (
-                Some((
-                    left_store,
-                    left_context,
-                    left_document,
-                    left_origin,
-                    left_policy,
-                    left_report_only,
-                )),
-                Some((
-                    right_store,
-                    right_context,
-                    right_document,
-                    right_origin,
-                    right_policy,
-                    right_report_only,
-                )),
-            ) => {
-                Arc::ptr_eq(left_store, right_store)
-                    && left_context == right_context
-                    && left_document == right_document
-                    && left_origin == right_origin
-                    && left_policy == right_policy
-                    && left_report_only == right_report_only
+            (Some(previous), Some(current)) => {
+                image_security::same_image_cache_owner(previous, current)
             }
             (None, None) => true,
             _ => false,
@@ -615,9 +594,13 @@ fn ensure_image_cache_context() {
         if !same {
             IMAGE_CACHE.with(|cache| cache.borrow_mut().clear());
             IMAGE_ANIMATION_CACHE.with(|cache| cache.borrow_mut().clear());
-            *owner = current;
+            *owner = current.clone();
         }
+        !same
     });
+    if owner_changed {
+        image_security::synchronize_layout_dependency_owner(current.as_ref());
+    }
 }
 
 /// A rectangle in layout space.
