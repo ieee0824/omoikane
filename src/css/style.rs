@@ -8609,7 +8609,7 @@ fn truncate_log_value(value: &str, max_len: usize) -> String {
 }
 
 pub(super) fn is_supported_property(name: &str) -> bool {
-    SUPPORTED_PROPERTIES.contains(&name)
+    PropertyId::parse(name).is_some() || is_shorthand_or_legacy_alias(name)
 }
 
 /// Returns every implemented longhand affected by the CSS `all` shorthand.

@@ -9150,6 +9150,27 @@ fn is_supported_property_includes_cursor() {
 }
 
 #[test]
+fn supported_property_lookup_matches_the_canonical_registry() {
+    for name in super::property_id::SUPPORTED_PROPERTIES {
+        for probe in [
+            (*name).to_owned(),
+            name.to_ascii_uppercase(),
+            format!("--{name}"),
+            format!("{name}-unknown"),
+        ] {
+            assert_eq!(
+                is_supported_property(&probe),
+                super::property_id::SUPPORTED_PROPERTIES.contains(&probe.as_str()),
+                "{probe}"
+            );
+        }
+    }
+    for name in ["", " ", "width ", "сolor", "unimplemented-property"] {
+        assert!(!is_supported_property(name), "{name}");
+    }
+}
+
+#[test]
 fn inline_cursor_validation_matches_cascade() {
     let computed_value = |style_attribute: &str, property: &str| {
         let element = NodeHandle::element("div");
