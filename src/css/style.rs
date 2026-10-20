@@ -2193,7 +2193,7 @@ fn parsed_inline_style(source: Option<&str>) -> Vec<Declaration> {
 fn is_local_inline_property(name: &str) -> bool {
     matches!(
         canonical_property_name(name),
-        "background-image" | "bottom" | "transform"
+        "background-image" | "bottom" | "top" | "right" | "left" | "transform"
     )
 }
 

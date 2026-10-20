@@ -13009,3 +13009,320 @@ fn profile_inline_style_subtree_invalidation_against_full_cache_clear() {
         local_median.as_secs_f64() / full_median.as_secs_f64(),
     );
 }
+
+#[test]
+fn inline_physical_insets_refresh_inherit_and_retain_unrelated_styles() {
+    for property in ["top", "right", "left"] {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let target = NodeHandle::element("section");
+        let child = NodeHandle::element("span");
+        let unrelated = NodeHandle::element("aside");
+        let previous = format!("position:absolute;{property}:10px");
+        let current = format!("position:absolute;{property}:20px");
+        target.set_attribute("style", &previous);
+        target.set_attribute("id", "target");
+        child.set_attribute("style", &format!("{property}:inherit"));
+        unrelated.set_attribute("id", "unrelated");
+        document.append_child(html.clone());
+        html.append_child(target.clone());
+        target.append_child(child.clone());
+        html.append_child(unrelated.clone());
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&format!(
+            "#target::before{{content:'cached';{property}:inherit}}#unrelated::before{{content:'cached'}}"
+        )).unwrap());
+        let before_target = resolver.computed_style_shared(&target);
+        let before_child = resolver.computed_style_shared(&child);
+        let before_pseudo = resolver
+            .computed_pseudo_style_shared(&target, PseudoElement::Before)
+            .unwrap();
+        let before_unrelated = resolver.computed_style_shared(&unrelated);
+        let before_unrelated_pseudo = resolver
+            .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+            .unwrap();
+        target.set_attribute("style", &current);
+        let outcome = resolver.invalidate_inline_style_subtree(
+            &target,
+            Some(&previous),
+            Some(&current),
+            false,
+            false,
+        );
+        assert!(
+            Arc::ptr_eq(
+                &before_unrelated,
+                &resolver.computed_style_shared(&unrelated)
+            ),
+            "{property}: unrelated ordinary Arc"
+        );
+        assert!(
+            Arc::ptr_eq(
+                &before_unrelated_pseudo,
+                &resolver
+                    .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+                    .unwrap()
+            ),
+            "{property}: unrelated pseudo Arc"
+        );
+        assert_eq!(outcome, "local", "{property}");
+        let after_target = resolver.computed_style_shared(&target);
+        let after_child = resolver.computed_style_shared(&child);
+        let after_pseudo = resolver
+            .computed_pseudo_style_shared(&target, PseudoElement::Before)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&before_target, &after_target));
+        assert!(!Arc::ptr_eq(&before_child, &after_child));
+        assert!(!Arc::ptr_eq(&before_pseudo, &after_pseudo));
+        assert_eq!(after_target.get(property), Some(&ComputedValue::Px(20.0)));
+        assert_eq!(after_child.get(property), Some(&ComputedValue::Px(20.0)));
+        assert_eq!(after_pseudo.get(property), Some(&ComputedValue::Px(20.0)));
+    }
+}
+
+#[test]
+fn physical_inset_raw_style_rule_updates_external_counter_snapshot() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let target = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    let observer = NodeHandle::element("p");
+    observer.set_attribute("id", "observer");
+    document.append_child(body.clone());
+    body.append_child(target.clone());
+    target.append_child(child.clone());
+    body.append_child(observer.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "[style]{display:inline;color:red;font-size:30px;counter-reset:item 7}\
+             #observer::before{content:counter(item)}",
+        )
+        .unwrap(),
+    );
+    let viewport = crate::layout::Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 320.0,
+        height: 200.0,
+    };
+    crate::layout::layout_tree(&body, &mut resolver, viewport).unwrap();
+    let target_before = resolver.computed_style_shared(&target);
+    let child_before = resolver.computed_style_shared(&child);
+    let observer_before = resolver.computed_style_shared(&observer);
+    let observer_pseudo_before = resolver
+        .computed_pseudo_style_shared(&observer, PseudoElement::Before)
+        .unwrap();
+    assert_eq!(
+        resolver.counter_values(&observer, PseudoElement::Before, "item"),
+        Some(&[0][..]),
+    );
+
+    let current = "top:1px";
+    target.set_attribute("style", current);
+    assert_eq!(
+        resolver.invalidate_inline_style_subtree(&target, None, Some(current), false, false,),
+        "local_raw_style_subject",
+    );
+    let target_after = resolver.computed_style_shared(&target);
+    let child_after = resolver.computed_style_shared(&child);
+    let observer_after = resolver.computed_style_shared(&observer);
+    let observer_pseudo_after = resolver
+        .computed_pseudo_style_shared(&observer, PseudoElement::Before)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&target_before, &target_after));
+    assert!(!Arc::ptr_eq(&child_before, &child_after));
+    assert!(Arc::ptr_eq(&observer_before, &observer_after));
+    assert!(Arc::ptr_eq(&observer_pseudo_before, &observer_pseudo_after,));
+    assert_eq!(
+        target_after.get("display"),
+        Some(&ComputedValue::Keyword("inline".to_string())),
+    );
+    assert_eq!(child_after.get("font-size"), Some(&ComputedValue::Px(30.0)));
+    assert_eq!(
+        child_after.get("color"),
+        Some(&ComputedValue::Color("red".to_string())),
+    );
+
+    crate::layout::layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert!(Arc::ptr_eq(
+        &observer_pseudo_before,
+        &resolver
+            .computed_pseudo_style_shared(&observer, PseudoElement::Before)
+            .unwrap(),
+    ));
+    assert_eq!(
+        resolver.counter_values(&observer, PseudoElement::Before, "item"),
+        Some(&[7][..]),
+        "the full counter prepass must refresh generated content outside the subtree",
+    );
+}
+
+#[test]
+fn physical_inset_raw_style_rule_refreshes_descendant_container_queries() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let target = NodeHandle::element("section");
+    let child = NodeHandle::element("span");
+    let observer = NodeHandle::element("aside");
+    child.set_attribute("id", "inside");
+    observer.set_attribute("id", "observer");
+    document.append_child(body.clone());
+    body.append_child(target.clone());
+    target.append_child(child.clone());
+    body.append_child(observer.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "[style]{width:100px;container-type:inline-size}\
+             #inside{color:blue}#observer{color:green}\
+             @container (min-width:80px){#inside{color:red}}",
+        )
+        .unwrap(),
+    );
+    let viewport = crate::layout::Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 320.0,
+        height: 200.0,
+    };
+    crate::layout::layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert_eq!(
+        resolver.computed_style_shared(&child).get("color"),
+        Some(&ComputedValue::Color("blue".to_string())),
+    );
+    let observer_before = resolver.computed_style_shared(&observer);
+
+    let current = "top:1px";
+    target.set_attribute("style", current);
+    assert_eq!(
+        resolver.invalidate_inline_style_subtree(&target, None, Some(current), false, false,),
+        "local_raw_style_subject",
+    );
+    assert!(Arc::ptr_eq(
+        &observer_before,
+        &resolver.computed_style_shared(&observer),
+    ));
+
+    crate::layout::layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert_eq!(
+        resolver.computed_style_shared(&child).get("color"),
+        Some(&ComputedValue::Color("red".to_string())),
+        "a changed container context must invalidate the first-pass style cache",
+    );
+    assert_eq!(
+        resolver.computed_style_shared(&observer).get("color"),
+        Some(&ComputedValue::Color("green".to_string())),
+    );
+}
+
+#[test]
+fn inline_physical_insets_keep_mixed_geometry_and_logical_changes_conservative() {
+    for (previous, current) in [
+        ("top:10px;width:100px", "top:20px;width:101px"),
+        ("right:10px;height:100px", "right:20px;height:101px"),
+        ("left:10px;position:absolute", "left:20px;position:relative"),
+        ("top:10px;display:block", "top:20px;display:none"),
+        (
+            "top:10px;writing-mode:horizontal-tb",
+            "top:20px;writing-mode:vertical-rl",
+        ),
+        ("top:10px;--offset:1px", "top:20px;--offset:2px"),
+        (
+            "top:10px;inset-block-start:1px",
+            "top:20px;inset-block-start:1px",
+        ),
+    ] {
+        assert!(
+            !inline_style_change_is_subtree_local(Some(previous), Some(current)),
+            "{previous} -> {current}"
+        );
+    }
+}
+
+#[test]
+fn inline_physical_insets_rebuild_geometry_and_container_styles_like_full_clear() {
+    for property in ["top", "right", "left"] {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let parent = NodeHandle::element("section");
+        let target = NodeHandle::element("div");
+        let child = NodeHandle::element("span");
+        let observer = NodeHandle::element("aside");
+        parent.set_attribute("id", "parent");
+        target.set_attribute("id", "target");
+        child.set_attribute("id", "child");
+        observer.set_attribute("id", "observer");
+        document.append_child(html.clone());
+        html.append_child(parent.clone());
+        parent.append_child(target.clone());
+        target.append_child(child.clone());
+        parent.append_child(observer.clone());
+        let previous = "position:absolute;top:10px;right:10px;left:10px;height:20px";
+        let current = previous.replace(&format!("{property}:10px"), &format!("{property}:20px"));
+        target.set_attribute("style", previous);
+        let stylesheet = "#parent{position:relative;width:200px;height:100px;container-type:inline-size}\
+            #target{container-type:inline-size}\
+            #child,#observer{color:blue}\
+            @container (min-width:175px){#child,#observer{color:red}}";
+        let mut local = StyleResolver::new();
+        let mut full = StyleResolver::new();
+        local.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        full.add_stylesheet(Origin::Author, parse_stylesheet(stylesheet).unwrap());
+        let viewport = crate::layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 200.0,
+        };
+        let before = crate::layout::layout_tree(&parent, &mut local, viewport).unwrap();
+        assert_eq!(
+            before,
+            crate::layout::layout_tree(&parent, &mut full, viewport).unwrap()
+        );
+        assert_eq!(
+            local.computed_style_shared(&observer).get("color"),
+            Some(&ComputedValue::Color("red".to_string()))
+        );
+        target.set_attribute("style", &current);
+        assert_eq!(
+            local.invalidate_inline_style_subtree(
+                &target,
+                Some(previous),
+                Some(&current),
+                false,
+                false
+            ),
+            "local"
+        );
+        full.invalidate_style_cache_for_test();
+        let after = crate::layout::layout_tree(&parent, &mut local, viewport).unwrap();
+        let expected = crate::layout::layout_tree(&parent, &mut full, viewport).unwrap();
+        assert_ne!(before, after, "{property}: geometry must still rebuild");
+        assert_eq!(
+            after, expected,
+            "{property}: every layout field matches full clear"
+        );
+        assert_eq!(
+            local.computed_style_shared(&observer).get("color"),
+            full.computed_style_shared(&observer).get("color")
+        );
+        assert_eq!(
+            local.computed_style_shared(&observer).get("color"),
+            Some(&ComputedValue::Color("red".to_string()))
+        );
+        assert_eq!(
+            local.computed_style_shared(&child).get("color"),
+            full.computed_style_shared(&child).get("color")
+        );
+        let expected_color = if property == "top" { "red" } else { "blue" };
+        assert_eq!(
+            local.computed_style_shared(&child).get("color"),
+            Some(&ComputedValue::Color(expected_color.to_string()))
+        );
+    }
+}
