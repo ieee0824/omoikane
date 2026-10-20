@@ -13,7 +13,21 @@ pub(super) fn paint_layout_with_snapshot_attribution(
     web_fonts: &crate::font::WebFontRegistry,
     visited_link_ids: impl IntoIterator<Item = usize>,
     nested_documents: &HashMap<usize, crate::paint::Image>,
+    shadow_masks: Option<&crate::paint::border::FrameShadowMaskCache>,
 ) -> (crate::paint::Canvas, crate::paint::PaintRasterSummary) {
+    if let Some(shadow_masks) = shadow_masks {
+        return crate::paint::paint_layout_with_document_snapshots_cached(
+            layout,
+            resolver,
+            viewport,
+            crate::paint::text::load_text_fonts(),
+            Some(web_fonts),
+            visited_link_ids,
+            nested_documents,
+            diagnostics_enabled,
+            shadow_masks,
+        );
+    }
     if diagnostics_enabled {
         crate::paint::paint_layout_with_document_snapshots_counted(
             layout,
@@ -133,6 +147,7 @@ fn child_snapshot(
                     &entry.web_fonts,
                     visited,
                     &children,
+                    None,
                 )
             })
         })

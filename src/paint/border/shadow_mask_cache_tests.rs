@@ -212,12 +212,17 @@ fn synthetic_key(index: u32) -> ShadowMaskKey {
 #[test]
 fn cache_enforces_entry_single_mask_and_total_byte_limits_without_eviction() {
     let entries = FrameShadowMaskCache::new(true);
-    for index in 0..=MAX_FRAME_SHADOW_MASK_ENTRIES {
+    for index in 0..MAX_FRAME_SHADOW_MASK_ENTRIES {
         let key = synthetic_key(index as u32);
         assert!(entries.lookup(&key, 4).is_none());
         entries.record_generation(ShadowMaskGeneration::Eligible);
         entries.retain(key, 4, Rc::new(Canvas::new(1, 1)));
     }
+    assert!(entries.lookup(&synthetic_key(0), 4).is_some());
+    let newest = synthetic_key(MAX_FRAME_SHADOW_MASK_ENTRIES as u32);
+    assert!(entries.lookup(&newest, 4).is_none());
+    entries.record_generation(ShadowMaskGeneration::Eligible);
+    entries.retain(newest, 4, Rc::new(Canvas::new(1, 1)));
     let summary = entries.summary().unwrap();
     assert_eq!(summary.generated, MAX_FRAME_SHADOW_MASK_ENTRIES + 1);
     assert_eq!(summary.retained_entries, MAX_FRAME_SHADOW_MASK_ENTRIES);
@@ -225,8 +230,11 @@ fn cache_enforces_entry_single_mask_and_total_byte_limits_without_eviction() {
         summary.retained_rgba_bytes,
         MAX_FRAME_SHADOW_MASK_ENTRIES * 4
     );
-    assert_eq!(summary.eligible, MAX_FRAME_SHADOW_MASK_ENTRIES + 1);
+    assert_eq!(summary.eligible, MAX_FRAME_SHADOW_MASK_ENTRIES + 2);
     assert_eq!(summary.bypassed_capacity, 1);
+    assert!(entries.lookup(&synthetic_key(0), 4).is_some());
+    assert!(entries.lookup(&synthetic_key(1), 4).is_some());
+    assert!(entries.lookup(&newest, 4).is_none());
 
     let (_, oversized_bytes) = cache_entry_for(
         Rect {
@@ -277,6 +285,81 @@ fn cache_enforces_entry_single_mask_and_total_byte_limits_without_eviction() {
     );
     assert_eq!(summary.eligible, 9);
     assert_eq!(summary.bypassed_capacity, 1);
+}
+
+fn retain_synthetic_entry(cache: &FrameShadowMaskCache, index: u32, rgba_capacity: usize) {
+    let key = synthetic_key(index);
+    assert!(cache.lookup(&key, rgba_capacity).is_none());
+    cache.record_generation(ShadowMaskGeneration::Eligible);
+    cache.retain(key, rgba_capacity, Rc::new(Canvas::new(1, 1)));
+}
+
+#[test]
+fn persistent_entry_and_byte_caps_preserve_earlier_raster_entries_without_eviction() {
+    let entries = FrameShadowMaskCache::new(false);
+    for raster in 0..2 {
+        let token = entries.begin_raster_measurement(true);
+        for offset in 0..(MAX_FRAME_SHADOW_MASK_ENTRIES / 2) {
+            retain_synthetic_entry(
+                &entries,
+                (raster * (MAX_FRAME_SHADOW_MASK_ENTRIES / 2) + offset) as u32,
+                4,
+            );
+        }
+        let summary = entries.finish_raster_measurement(token).unwrap();
+        assert_eq!(
+            summary.retained_entries,
+            (raster + 1) * (MAX_FRAME_SHADOW_MASK_ENTRIES / 2)
+        );
+        assert_eq!(summary.bypassed_capacity, 0);
+    }
+
+    let rejected_entry = synthetic_key(MAX_FRAME_SHADOW_MASK_ENTRIES as u32);
+    let token = entries.begin_raster_measurement(true);
+    assert!(entries.lookup(&synthetic_key(0), 4).is_some());
+    retain_synthetic_entry(&entries, MAX_FRAME_SHADOW_MASK_ENTRIES as u32, 4);
+    let summary = entries.finish_raster_measurement(token).unwrap();
+    assert_eq!(summary.retained_entries, MAX_FRAME_SHADOW_MASK_ENTRIES);
+    assert_eq!((summary.hits, summary.prior_raster_hits), (1, 1));
+    assert_eq!(summary.same_raster_hits, 0);
+    assert_eq!(summary.bypassed_capacity, 1);
+    assert!(entries.lookup(&synthetic_key(0), 4).is_some());
+    assert!(entries.lookup(&rejected_entry, 4).is_none());
+
+    let bytes = FrameShadowMaskCache::new(false);
+    let entry_bytes = MAX_FRAME_SHADOW_MASK_ENTRY_RGBA_BYTES;
+    let entries_per_raster = MAX_FRAME_SHADOW_MASK_RGBA_BYTES / entry_bytes / 2;
+    for raster in 0..2 {
+        let token = bytes.begin_raster_measurement(true);
+        for offset in 0..entries_per_raster {
+            retain_synthetic_entry(
+                &bytes,
+                (raster * entries_per_raster + offset) as u32,
+                entry_bytes,
+            );
+        }
+        let summary = bytes.finish_raster_measurement(token).unwrap();
+        assert_eq!(
+            summary.retained_rgba_bytes,
+            (raster + 1) * entries_per_raster * entry_bytes
+        );
+        assert_eq!(summary.bypassed_capacity, 0);
+    }
+
+    let rejected_byte_entry = synthetic_key((entries_per_raster * 2) as u32);
+    let token = bytes.begin_raster_measurement(true);
+    assert!(bytes.lookup(&synthetic_key(0), entry_bytes).is_some());
+    retain_synthetic_entry(&bytes, (entries_per_raster * 2) as u32, entry_bytes);
+    let summary = bytes.finish_raster_measurement(token).unwrap();
+    assert_eq!(
+        summary.retained_rgba_bytes,
+        MAX_FRAME_SHADOW_MASK_RGBA_BYTES
+    );
+    assert_eq!((summary.hits, summary.prior_raster_hits), (1, 1));
+    assert_eq!(summary.same_raster_hits, 0);
+    assert_eq!(summary.bypassed_capacity, 1);
+    assert!(bytes.lookup(&synthetic_key(0), entry_bytes).is_some());
+    assert!(bytes.lookup(&rejected_byte_entry, entry_bytes).is_none());
 }
 
 #[test]
@@ -373,6 +456,88 @@ fn metrics_disabled_keeps_functional_reuse_without_counter_state() {
     let expected = paint_pair(None);
     let actual = paint_pair(Some(&cache));
     assert_eq!(actual.pixels(), expected.pixels());
+    assert_eq!(cache.summary(), None);
+}
+
+#[test]
+fn persistent_cache_classifies_same_and_prior_raster_hits_exactly() {
+    let expected = paint_pair(None);
+    let cache = FrameShadowMaskCache::new(false);
+
+    let first_token = cache.begin_raster_measurement(true);
+    let first = paint_pair(Some(&cache));
+    let first_summary = cache.finish_raster_measurement(first_token).unwrap();
+    assert_eq!(first.pixels(), expected.pixels());
+    assert_eq!(
+        (
+            first_summary.eligible,
+            first_summary.generated,
+            first_summary.hits,
+            first_summary.same_raster_hits,
+            first_summary.prior_raster_hits,
+        ),
+        (2, 1, 1, 1, 0)
+    );
+
+    let second_token = cache.begin_raster_measurement(true);
+    let second = paint_pair(Some(&cache));
+    let second_summary = cache.finish_raster_measurement(second_token).unwrap();
+    assert_eq!(second.pixels(), expected.pixels());
+    assert_eq!(
+        (
+            second_summary.eligible,
+            second_summary.generated,
+            second_summary.hits,
+            second_summary.same_raster_hits,
+            second_summary.prior_raster_hits,
+        ),
+        (2, 0, 2, 0, 2)
+    );
+    assert_eq!(second_summary.hits, 2);
+    assert_eq!(
+        second_summary.hits,
+        second_summary.same_raster_hits + second_summary.prior_raster_hits
+    );
+}
+
+#[test]
+fn late_measurement_classifies_trace_off_entries_as_prior_raster_hits() {
+    let cache = FrameShadowMaskCache::new(false);
+    let expected = paint_pair(None);
+    let unmeasured = paint_pair(Some(&cache));
+    assert_eq!(unmeasured.pixels(), expected.pixels());
+    assert_eq!(cache.summary(), None);
+
+    let token = cache.begin_raster_measurement(true);
+    let measured = paint_pair(Some(&cache));
+    let summary = cache.finish_raster_measurement(token).unwrap();
+    assert_eq!(measured.pixels(), expected.pixels());
+    assert_eq!((summary.generated, summary.hits), (0, 2));
+    assert_eq!(
+        (summary.same_raster_hits, summary.prior_raster_hits),
+        (0, 2)
+    );
+}
+
+#[test]
+fn stale_and_exhausted_measurement_tokens_cannot_take_newer_counters() {
+    let cache = FrameShadowMaskCache::new(false);
+    let stale = cache.begin_raster_measurement(true);
+    let disabled = cache.begin_raster_measurement(false);
+    assert_eq!(cache.finish_raster_measurement(stale), None);
+    assert_eq!(cache.finish_raster_measurement(disabled), None);
+    assert_eq!(cache.summary(), None);
+
+    let stale = cache.begin_raster_measurement(true);
+    let current = cache.begin_raster_measurement(true);
+    paint_pair(Some(&cache));
+    assert_eq!(cache.finish_raster_measurement(stale), None);
+    assert!(cache.finish_raster_measurement(current).is_some());
+
+    cache.exhaust_measurement_tokens();
+    let disabled = cache.begin_raster_measurement(true);
+    paint_pair(Some(&cache));
+    assert_eq!(cache.finish_raster_measurement(disabled), None);
     assert_eq!(cache.summary(), None);
 }
 

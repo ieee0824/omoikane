@@ -84,6 +84,9 @@ mod child_document;
 mod child_document_tests;
 mod cssom_normalization;
 mod frame_diagnostics;
+mod main_shadow_mask_cache;
+#[cfg(test)]
+mod main_shadow_mask_cache_tests;
 mod media_environment;
 use child_document::{FetchedChildResource, LoadedChildDocument, NavigationRedirect};
 use cross_origin_isolation::{
@@ -127,6 +130,8 @@ mod trusted_types;
 mod trusted_types_tests;
 use errors::JsHostError;
 pub use errors::{FindInPageError, JsEvaluationError, NotificationPermissionError};
+#[cfg(test)]
+mod document_shadow_mask_baseline_tests;
 #[cfg(test)]
 mod document_write_tests;
 mod fetch_loading;
@@ -2279,6 +2284,8 @@ struct HostState {
     /// the document that node actually lives in — the main document's rules
     /// never leak into a sub-document and vice versa (issue 016-15).
     document_styles: HashMap<usize, DocumentStyleEntry>,
+    /// Bounded paint data partitioned to the host-selected main Document.
+    main_shadow_masks: main_shadow_mask_cache::MainDocumentShadowMaskOwner,
     /// Last inline-style CSP check per live element, so a resolver rebuild
     /// does not repeat reports for unchanged attribute text and policy.
     observed_style_attributes: HashMap<usize, InlineStyleCspSnapshot>,
@@ -3155,6 +3162,9 @@ impl HostState {
             smooth_scrolls: Vec::new(),
             scroll_offsets_before_layout: HashMap::new(),
             document_styles,
+            main_shadow_masks: main_shadow_mask_cache::MainDocumentShadowMaskOwner::new(
+                document.identity(),
+            ),
             observed_style_attributes: HashMap::new(),
             registered_custom_properties: HashMap::new(),
             font_loading: Default::default(),
@@ -9212,8 +9222,13 @@ impl JsRuntime {
             nested_rendering::collect_snapshots(state, &layout, 0, &mut paint_attribution);
         paint_attribution.record_snapshot_collection(snapshot_started);
         let snapshots = snapshots?;
-        let entry = state
-            .document_styles
+        let HostState {
+            document_styles,
+            main_shadow_masks,
+            ..
+        } = state;
+        let shadow_masks = main_shadow_masks.cache_for(document_id);
+        let entry = document_styles
             .get_mut(&document_id)
             .ok_or(crate::paint::PaintError::InvalidImageBuffer)?;
         let resolver = entry
@@ -9238,6 +9253,7 @@ impl JsRuntime {
                         &entry.web_fonts,
                         visited_link_ids,
                         &snapshots,
+                        Some(shadow_masks),
                     )
                 })
             })
@@ -14375,6 +14391,7 @@ impl Drop for JsRuntime {
         state.main_realm = None;
         state.write_parsers.clear();
         state.written_script_queue.clear();
+        state.main_shadow_masks.clear();
     }
 }
 
@@ -26278,7 +26295,9 @@ fn document_reset_native(
         if is_main_document {
             // The emptied main document has no insertion point; a following
             // write() appends into the now-childless document node.
-            state.borrow_mut().write_insertion_ref = None;
+            let mut state = state.borrow_mut();
+            state.main_shadow_masks.clear();
+            state.write_insertion_ref = None;
         }
         Ok(JsValue::undefined())
     })

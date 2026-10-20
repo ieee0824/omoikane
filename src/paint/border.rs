@@ -4,7 +4,9 @@ mod shadow_mask_cache;
 
 use std::rc::Rc;
 
-pub(crate) use shadow_mask_cache::{FrameShadowMaskCache, ShadowMaskCacheSummary};
+pub(crate) use shadow_mask_cache::{
+    FrameShadowMaskCache, RasterMeasurementToken, ShadowMaskCacheSummary,
+};
 #[cfg(test)]
 use shadow_mask_cache::{MAX_FRAME_SHADOW_MASK_ENTRIES, MAX_FRAME_SHADOW_MASK_RGBA_BYTES};
 use shadow_mask_cache::{

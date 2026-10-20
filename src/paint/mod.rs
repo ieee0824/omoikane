@@ -1318,6 +1318,7 @@ pub(crate) fn paint_layout_with_document_snapshots(
         visited_link_ids,
         nested_documents,
         false,
+        None,
     )
     .0
 }
@@ -1343,6 +1344,33 @@ pub(crate) fn paint_layout_with_document_snapshots_counted(
         visited_link_ids,
         nested_documents,
         true,
+        None,
+    )
+}
+
+/// Paints one runtime-owned document with a cache that may outlive this raster.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_layout_with_document_snapshots_cached(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    fonts: Vec<Arc<Font>>,
+    web_fonts: Option<&WebFontRegistry>,
+    visited_link_ids: impl IntoIterator<Item = usize>,
+    nested_documents: &HashMap<usize, Image>,
+    collect_diagnostics: bool,
+    shadow_masks: &border::FrameShadowMaskCache,
+) -> (Canvas, PaintRasterSummary) {
+    paint_layout_with_document_snapshots_internal(
+        layout,
+        resolver,
+        viewport,
+        fonts,
+        web_fonts,
+        visited_link_ids,
+        nested_documents,
+        collect_diagnostics,
+        Some(shadow_masks),
     )
 }
 
@@ -1356,9 +1384,17 @@ fn paint_layout_with_document_snapshots_internal(
     visited_link_ids: impl IntoIterator<Item = usize>,
     nested_documents: &HashMap<usize, Image>,
     collect_diagnostics: bool,
+    external_shadow_masks: Option<&border::FrameShadowMaskCache>,
 ) -> (Canvas, PaintRasterSummary) {
     resolver.begin_visited_paint(visited_link_ids);
-    let shadow_masks = border::FrameShadowMaskCache::new(collect_diagnostics);
+    let local_shadow_masks = external_shadow_masks
+        .is_none()
+        .then(|| border::FrameShadowMaskCache::new(false));
+    let shadow_masks = external_shadow_masks
+        .or(local_shadow_masks.as_ref())
+        .expect("a local or external shadow-mask cache");
+    let shadow_measurement: border::RasterMeasurementToken =
+        shadow_masks.begin_raster_measurement(collect_diagnostics);
     let snapshot_draw_calls = Cell::new(0);
     let mut canvas = Canvas::new(
         viewport.width.ceil().max(1.0) as u32,
@@ -1380,7 +1416,7 @@ fn paint_layout_with_document_snapshots_internal(
                 nested_documents: Some(nested_documents),
                 nested_snapshot_draw_calls: collect_diagnostics.then_some(&snapshot_draw_calls),
                 propagated_background_node: viewport_background.propagated_node,
-                shadow_masks: Some(&shadow_masks),
+                shadow_masks: Some(shadow_masks),
             },
             PaintBoxOptions {
                 inherited_clip: None,
@@ -1395,7 +1431,9 @@ fn paint_layout_with_document_snapshots_internal(
         canvas,
         PaintRasterSummary {
             nested_snapshot_draw_calls: snapshot_draw_calls.get(),
-            shadow_masks: shadow_masks.summary().unwrap_or_default(),
+            shadow_masks: shadow_masks
+                .finish_raster_measurement(shadow_measurement)
+                .unwrap_or_default(),
         },
     )
 }
