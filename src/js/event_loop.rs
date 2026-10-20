@@ -453,6 +453,21 @@ impl EventLoop {
         );
     }
 
+    /// Queues a networking completion whose lifetime follows its Document.
+    pub(crate) fn enqueue_networking_for_document(
+        &mut self,
+        payload: TimerPayload,
+        document: usize,
+    ) {
+        self.enqueue(
+            TaskSource::Networking,
+            Task::Timer {
+                payload,
+                owner_document_id: Some(document),
+            },
+        );
+    }
+
     /// Queues a font callback owned by a live Document.
     pub(crate) fn enqueue_font_loading(&mut self, payload: TimerPayload, document_id: usize) {
         self.enqueue(

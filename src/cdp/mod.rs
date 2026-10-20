@@ -189,6 +189,7 @@ pub struct CdpSession {
     nonblocking_image_loading: bool,
     nonblocking_font_loading: bool,
     nonblocking_script_loading: bool,
+    nonblocking_fetch_loading: bool,
     pending_document_startup: Option<page::PendingDocumentStartup>,
     media_emulation: emulation::State,
     _storage_lifetime: TabStorageLifetime,
@@ -335,6 +336,7 @@ impl CdpSession {
             nonblocking_image_loading: false,
             nonblocking_font_loading: false,
             nonblocking_script_loading: false,
+            nonblocking_fetch_loading: false,
             pending_document_startup: None,
             _storage_lifetime: storage_lifetime,
             storage_manager,
@@ -411,6 +413,7 @@ impl CdpSession {
         runtime.set_nonblocking_image_loading(self.nonblocking_image_loading);
         runtime.set_nonblocking_font_loading(self.nonblocking_font_loading);
         runtime.set_nonblocking_script_loading(self.nonblocking_script_loading);
+        runtime.set_nonblocking_fetch_loading(self.nonblocking_fetch_loading);
         runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
         let (width, height) = self.runtime.presentation_viewport();
         runtime.set_viewport(width, height);

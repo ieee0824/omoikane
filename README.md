@@ -135,6 +135,8 @@ Omoikane は、HTTP クライアント、HTML/CSS パーサー、DOM、レイア
 - [`src/cdp`](/src/cdp) CDP / WebSocket / JSON-RPC
 - [`src/ffi`](/src/ffi) C FFI
 
+リソース取得の並列化と所有境界は[共通queue/workerの設計](docs/resource-workers.md)を参照してください。
+
 ## クイックスタート
 
 ### Rust

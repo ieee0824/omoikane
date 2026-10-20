@@ -41,6 +41,8 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeRunMicrotaskCallback = globalThis.__omoikane_run_microtask_callback;
   const nativeCaptureCspSource = globalThis.__omoikane_capture_csp_source;
   const nativeFetch = globalThis.__omoikane_fetch;
+  const nativeBeginFetch = globalThis.__omoikane_begin_fetch;
+  const nativeCancelFetch = globalThis.__omoikane_cancel_fetch;
   const nativeWebSocketConnect = globalThis.__omoikane_websocket_connect;
   const nativeEventSourceFetch = globalThis.__omoikane_event_source_fetch;
   const nativeTrustedTypeCreate = globalThis.__omoikane_trusted_type_create;
@@ -57,6 +59,8 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_import_scripts;
   delete globalThis.__omoikane_capture_csp_source;
   delete globalThis.__omoikane_fetch;
+  delete globalThis.__omoikane_begin_fetch;
+  delete globalThis.__omoikane_cancel_fetch;
   delete globalThis.__omoikane_websocket_connect;
   delete globalThis.__omoikane_event_source_fetch;
   delete globalThis.__omoikane_trusted_type_create;
@@ -21564,6 +21568,7 @@ export const __omoikane_service_worker_lifecycle = {};
       });
     }
     open(method, url, async = true) {
+      this._cancelFetch();
       // Re-opening an active request aborts the old fetch.  Preserve the
       // Resource Timing entry even though no terminal network payload arrives.
       this._clearTimeout();
@@ -21626,6 +21631,7 @@ export const __omoikane_service_worker_lifecycle = {};
       removeListener(this._listeners, type, callback, options);
     }
     abort() {
+      this._cancelFetch();
       const active = this._sendFlag && !this._terminal;
       if (!active) {
         this._clearTimeout();
@@ -21709,8 +21715,12 @@ export const __omoikane_service_worker_lifecycle = {};
               bodyPresent: true,
             };
           })
-        : Promise.resolve().then(() =>
-            nativeFetch(
+        : Promise.resolve().then(() => {
+            if (this._async && nativeBeginFetch() &&
+                (requestId !== this._requestId || this._terminal)) {
+              throw new DOMException("The operation was aborted", "AbortError");
+            }
+            const args = [
               this._url,
               this._method,
               JSON.stringify(Object.entries(this._headers)),
@@ -21720,9 +21730,13 @@ export const __omoikane_service_worker_lifecycle = {};
               "follow",
               this._timeout,
               cspSource,
-            )
-          ).then(raw => JSON.parse(String(raw)));
+            ];
+            return this._async
+              ? fetchWithScheduling(args, null, id => { this._fetchRequestId = id; })
+              : nativeFetch(...args);
+          }).then(raw => JSON.parse(String(raw)));
       payload.then(data => {
+        if (requestId === this._requestId) this._fetchRequestId = null;
         if (requestId !== this._requestId || this._terminal) return;
         if (data && data.__omoikane_timeout === true) {
           this._queueNetworking(() => this._finishTimeout(requestId));
@@ -21730,6 +21744,7 @@ export const __omoikane_service_worker_lifecycle = {};
         }
         this._queueNetworking(() => this._finishSuccess(data, requestId));
       }).catch(error => {
+        if (requestId === this._requestId) this._fetchRequestId = null;
         if (requestId !== this._requestId || this._terminal) return;
         if (error && error.__omoikane_timeout === true) {
           this._queueNetworking(() => this._finishTimeout(requestId));
@@ -21744,6 +21759,10 @@ export const __omoikane_service_worker_lifecycle = {};
       } else {
         setTimeout(callback, 0);
       }
+    }
+    _cancelFetch() {
+      if (this._fetchRequestId) nativeCancelFetch(this._fetchRequestId);
+      this._fetchRequestId = null;
     }
     _clearTimeout() {
       if (this._timeoutTimer !== null) {
@@ -21844,6 +21863,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     _finishTimeout(requestId) {
       if (requestId !== this._requestId || this._terminal || !this._sendFlag) return;
+      this._cancelFetch();
       this._clearTimeout();
       if (this.__resourceTiming) {
         finishResourceTiming(this.__resourceTiming, {}, true);
@@ -28061,6 +28081,46 @@ export const __omoikane_service_worker_lifecycle = {};
     return response;
   }
 
+  // A background request keeps only its completion functions in the host.
+  // Blocking embedders retain the existing native Fetch path.
+  function fetchWithScheduling(args, signal = null, onStart = null) {
+    if (!nativeBeginFetch()) return nativeFetch(...args);
+    return new Promise((resolve, reject) => {
+      let requestId = false;
+      let settled = false;
+      const cleanup = () => {
+        if (signal) signal.removeEventListener("abort", abort);
+      };
+      const loaded = raw => {
+        if (settled) return;
+        settled = true; cleanup(); resolve(raw);
+      };
+      const failed = error => {
+        if (settled) return;
+        settled = true; cleanup(); reject(error);
+      };
+      const abort = () => {
+        if (settled) return;
+        failed(signal.reason);
+        if (requestId) nativeCancelFetch(requestId);
+      };
+      try {
+        if (signal && signal.aborted) { failed(signal.reason); return; }
+        if (signal) signal.addEventListener("abort", abort, {once:true});
+        requestId = nativeBeginFetch(...args, [loaded, failed]);
+        if (requestId) {
+          if (onStart) onStart(requestId);
+          if (signal && signal.aborted) abort();
+        } else {
+          loaded(nativeFetch(...args));
+        }
+      } catch (error) {
+        if (requestId) nativeCancelFetch(requestId);
+        failed(error);
+      }
+    });
+  }
+
   // Fetching a blob URL is a store lookup rather than a network request. Only
   // GET is defined for it, and an unknown or revoked URL is a network error.
   function blobUrlResponse(url, method) {
@@ -28099,7 +28159,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     return Promise.resolve().then(() => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
-      return nativeFetch(
+      return fetchWithScheduling([
         request.url,
         request.method,
         JSON.stringify([...request.headers]),
@@ -28109,7 +28169,7 @@ export const __omoikane_service_worker_lifecycle = {};
         request.redirect,
         undefined,
         cspSource,
-      );
+      ], request.signal);
     }).then(raw => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
       const data = JSON.parse(String(raw));

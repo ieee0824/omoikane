@@ -67,6 +67,22 @@ impl JsRuntime {
     /// constructing computed styles. Background work is initially polled each
     /// frame until the worker/worklet/module queues have drained.
     pub(crate) fn next_rendering(&self) -> NextRendering {
+        self.next_rendering_with_visited(&mut HashSet::new())
+    }
+
+    pub(super) fn next_rendering_with_visited(
+        &self,
+        visited: &mut HashSet<usize>,
+    ) -> NextRendering {
+        if !visited.insert(Rc::as_ptr(&self.host_state) as usize) {
+            return NextRendering::Idle;
+        }
+        let own = self.own_next_rendering(visited);
+        let shared = shared_worker::owner_next_rendering(&self.host_state, visited);
+        merge_next_rendering(own, shared)
+    }
+
+    fn own_next_rendering(&self, visited: &mut HashSet<usize>) -> NextRendering {
         let state = self.host_state.borrow();
         let visual_work = !state.page_hidden
             && (state.pending_media_query_report
@@ -88,7 +104,7 @@ impl JsRuntime {
             !worker.terminated
                 && (!worker.outgoing.is_empty()
                     || worker.startup_error.is_some()
-                    || worker.runtime.next_rendering() != NextRendering::Idle)
+                    || worker.runtime.next_rendering_with_visited(visited) != NextRendering::Idle)
         });
         let images = !state.pending_image_events.is_empty()
             || state
@@ -101,6 +117,7 @@ impl JsRuntime {
             || images
             || state.font_loading.has_pending()
             || state.script_loads.has_pending()
+            || state.fetch_loads.has_pending()
             || state.worklet.has_pending_render_work()
         {
             return NextRendering::EveryFrame;
@@ -141,9 +158,88 @@ impl JsRuntime {
     }
 }
 
+/// Combines requirements while keeping page and wall clocks distinct.
+pub(super) fn merge_next_rendering(a: NextRendering, b: NextRendering) -> NextRendering {
+    if a == NextRendering::EveryFrame || b == NextRendering::EveryFrame {
+        return NextRendering::EveryFrame;
+    }
+    let clocks = |demand| match demand {
+        NextRendering::After(delay) => (Some(delay), None),
+        NextRendering::AfterWall(delay) => (None, Some(delay)),
+        NextRendering::AfterBoth {
+            page_delay,
+            wall_delay,
+        } => (Some(page_delay), Some(wall_delay)),
+        _ => (None, None),
+    };
+    let earlier = |a: Option<Duration>, b: Option<Duration>| match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    let (a_page, a_wall) = clocks(a);
+    let (b_page, b_wall) = clocks(b);
+    match (earlier(a_page, b_page), earlier(a_wall, b_wall)) {
+        (Some(page_delay), Some(wall_delay)) => NextRendering::AfterBoth {
+            page_delay,
+            wall_delay,
+        },
+        (Some(delay), None) => NextRendering::After(delay),
+        (None, Some(delay)) => NextRendering::AfterWall(delay),
+        (None, None) => NextRendering::Idle,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merging_worker_demands_preserves_independent_clock_deadlines() {
+        let page = NextRendering::After(Duration::from_millis(100));
+        let wall = NextRendering::AfterWall(Duration::from_millis(50));
+        let both = NextRendering::AfterBoth {
+            page_delay: Duration::from_millis(100),
+            wall_delay: Duration::from_millis(50),
+        };
+        assert_eq!(merge_next_rendering(page, wall), both);
+        assert_eq!(
+            merge_next_rendering(both, NextRendering::After(Duration::ZERO)),
+            NextRendering::AfterBoth {
+                page_delay: Duration::ZERO,
+                wall_delay: Duration::from_millis(50)
+            }
+        );
+        let values = [
+            NextRendering::Idle,
+            NextRendering::EveryFrame,
+            page,
+            wall,
+            both,
+        ];
+        for a in values {
+            assert_eq!(merge_next_rendering(a, a), a);
+            assert_eq!(merge_next_rendering(a, NextRendering::Idle), a);
+            for b in values {
+                assert_eq!(merge_next_rendering(a, b), merge_next_rendering(b, a));
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_runtime_visits_terminate_without_losing_the_first_deadline() {
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.eval("setTimeout(()=>{},123)").unwrap();
+        let mut visited = HashSet::new();
+        assert_eq!(
+            runtime.next_rendering_with_visited(&mut visited),
+            NextRendering::After(Duration::from_millis(123))
+        );
+        assert_eq!(
+            runtime.next_rendering_with_visited(&mut visited),
+            NextRendering::Idle
+        );
+    }
 
     #[test]
     fn expiring_cookie_wakes_an_otherwise_idle_window() {

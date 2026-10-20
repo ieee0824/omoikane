@@ -50,6 +50,12 @@ pub struct RenderDemand {
 }
 
 impl CdpSession {
+    /// Shares Fetch/XHR transport workers with other document resources.
+    pub fn set_nonblocking_fetch_loading(&mut self, enabled: bool) {
+        self.nonblocking_fetch_loading = enabled;
+        self.runtime.set_nonblocking_fetch_loading(enabled);
+    }
+
     /// Shares dynamic script fetch workers with other document resources.
     pub fn set_nonblocking_script_loading(&mut self, enabled: bool) {
         self.nonblocking_script_loading = enabled;

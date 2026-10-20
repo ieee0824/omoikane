@@ -112,6 +112,7 @@ use errors::JsHostError;
 pub use errors::{FindInPageError, JsEvaluationError, NotificationPermissionError};
 #[cfg(test)]
 mod document_write_tests;
+mod fetch_loading;
 mod font_descriptors;
 mod font_loading;
 #[cfg(test)]
@@ -2406,6 +2407,8 @@ struct HostState {
     nonblocking_image_loading: bool,
     nonblocking_font_loading: bool,
     nonblocking_script_loading: bool,
+    nonblocking_fetch_loading: bool,
+    fetch_loads: fetch_loading::FetchLoads,
     script_loads: script_loading::ScriptLoads,
     resource_queue: crate::resource_worker::ResourceQueue,
     pending_image_events: Vec<image_loading::PendingImageEvent>,
@@ -2518,6 +2521,7 @@ unsafe impl Trace for HostState {
             unsafe { maps.trace(tracer) };
         }
         unsafe { self.font_loading.trace_pending(tracer) };
+        unsafe { self.fetch_loads.trace_pending(tracer) };
         // Iframe and auxiliary Document realms, plus rendering callbacks
         // retained by the event loop, are Boa `Realm` handles backed by
         // `Rooted<RealmInner>`. Retaining those handles keeps child intrinsics
@@ -3193,6 +3197,8 @@ impl HostState {
             nonblocking_image_loading: false,
             nonblocking_font_loading: false,
             nonblocking_script_loading: false,
+            nonblocking_fetch_loading: false,
+            fetch_loads: Default::default(),
             script_loads: Default::default(),
             resource_queue: Default::default(),
             pending_image_events: Vec::new(),
@@ -5752,6 +5758,7 @@ impl HostState {
         self.registered_custom_properties.remove(&document_id);
         self.font_loading.remove_document(document_id);
         self.script_loads.remove_document(document_id);
+        self.fetch_loads.remove_document(document_id);
         self.write_parsers.remove(&document_id);
         self.written_script_queue
             .retain(|script| script.document.identity() != document_id);
@@ -5887,6 +5894,7 @@ impl HostState {
         self.registered_custom_properties.remove(&document_id);
         self.font_loading.remove_document(document_id);
         self.script_loads.remove_document(document_id);
+        self.fetch_loads.remove_document(document_id);
         self.write_parsers.remove(&document_id);
         self.written_script_queue
             .retain(|script| script.document.identity() != document_id);
@@ -10302,6 +10310,7 @@ impl JsRuntime {
         self.poll_image_resource_loads()?;
         font_loading::poll_resource_loads(&mut self.host_state.borrow_mut());
         self.host_state.borrow_mut().poll_script_loads();
+        fetch_loading::poll(self);
         // An embedder call may have completed a script task and left promise
         // jobs pending. Its checkpoint can itself enqueue host tasks.
         self.run_jobs()?;
@@ -10484,6 +10493,7 @@ impl JsRuntime {
         self.poll_image_resource_loads()?;
         font_loading::poll_resource_loads(&mut self.host_state.borrow_mut());
         self.host_state.borrow_mut().poll_script_loads();
+        fetch_loading::poll(self);
         self.run_jobs()?;
         self.dispatch_cookie_changes()?;
         self.run_worklet_background_tasks();
@@ -13812,6 +13822,7 @@ impl Drop for JsRuntime {
         self.terminate_workers();
         self.host_state.borrow_mut().cancel_image_loads();
         self.host_state.borrow_mut().script_loads = Default::default();
+        self.host_state.borrow_mut().fetch_loads = Default::default();
 
         let (storage_manager, clients) = {
             let mut state = self.host_state.borrow_mut();
@@ -15572,6 +15583,16 @@ fn register_host_bindings(
             js_string!("__omoikane_capture_csp_source"),
             0,
             NativeFunction::from_copy_closure(capture_csp_source_native),
+        ),
+        (
+            js_string!("__omoikane_begin_fetch"),
+            10,
+            NativeFunction::from_copy_closure(fetch_loading::begin_native),
+        ),
+        (
+            js_string!("__omoikane_cancel_fetch"),
+            1,
+            NativeFunction::from_copy_closure(fetch_loading::cancel_native),
         ),
         (
             js_string!("__omoikane_fetch"),
@@ -22630,6 +22651,7 @@ fn prepare_dedicated_worker(
         let owner = owner_state.borrow();
         let mut state = worker_runtime.host_state.borrow_mut();
         state.inherit_worker_cookie_session(&owner, owner_document_id);
+        state.inherit_resource_loading(&owner);
         let document_id = state.document.identity();
         state.document_origins.insert(document_id, creator.origin);
         if let Some(origin) = creator.security_origin {
@@ -23453,227 +23475,19 @@ fn fetch_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
     }) {
         return Ok(js_string!(response.as_str()).into());
     }
-    let method_name = args
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| js_string!("GET").into())
-        .to_string(context)?
-        .to_std_string_escaped();
-    let method = match method_name.as_str() {
-        "GET" => Method::Get,
-        "POST" => Method::Post,
-        "HEAD" => Method::Head,
-        "PUT" => Method::Put,
-        "DELETE" => Method::Delete,
-        "OPTIONS" => Method::Options,
-        "PATCH" => Method::Patch,
-        _ => {
-            return Err(JsNativeError::typ()
-                .with_message(format!("unsupported HTTP method: {method_name}"))
-                .into());
-        }
-    };
-    let headers_json = args
-        .get(2)
-        .cloned()
-        .unwrap_or_else(|| js_string!("[]").into())
-        .to_string(context)?
-        .to_std_string_escaped();
-    let headers: Vec<(String, String)> = serde_json::from_str(&headers_json).map_err(|error| {
-        JsError::from(
-            JsNativeError::typ().with_message(format!("invalid request headers: {error}")),
-        )
-    })?;
-    let body = body_bytes_argument(args.get(3), context)?;
-    let mode = match string_argument(args.get(4), "cors", context)?.as_str() {
-        "same-origin" => RequestMode::SameOrigin,
-        "cors" => RequestMode::Cors,
-        "no-cors" => RequestMode::NoCors,
-        value => {
-            return Err(JsNativeError::typ()
-                .with_message(format!("unsupported request mode: {value}"))
-                .into());
-        }
-    };
-    let credentials = match string_argument(args.get(5), "same-origin", context)?.as_str() {
-        "omit" => CredentialsMode::Omit,
-        "same-origin" => CredentialsMode::SameOrigin,
-        "include" => CredentialsMode::Include,
-        value => {
-            return Err(JsNativeError::typ()
-                .with_message(format!("unsupported credentials mode: {value}"))
-                .into());
-        }
-    };
-    let redirect_mode = match string_argument(args.get(6), "follow", context)?.as_str() {
-        "follow" => RedirectMode::Follow,
-        "error" => RedirectMode::Error,
-        "manual" => RedirectMode::Manual,
-        value => {
-            return Err(JsNativeError::typ()
-                .with_message(format!("unsupported redirect mode: {value}"))
-                .into());
-        }
-    };
-    let timeout = if let Some(value) = args.get(7) {
-        let milliseconds = value.to_number(context)?;
-        if milliseconds.is_finite() && milliseconds > 0.0 {
-            Some(Duration::from_millis(
-                milliseconds.ceil().min(u64::MAX as f64) as u64,
-            ))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let csp_source = csp_source_location_argument(args, 8, context)?;
-
-    let payload = with_host_state(|state| {
-        let mut state = state.borrow_mut();
-        let parsed_url = url
-            .parse::<crate::http::Url>()
-            .map_err(|error| JsError::from(JsNativeError::typ().with_message(error.to_string())))?;
-        let normalized_url = parsed_url.to_string();
-        let document = state.csp_document_for_context(context)?;
-        if !state.csp_allows_connect(&document, &normalized_url, csp_source.as_ref()) {
-            state.record_csp_violation_with_source(
-                &document,
-                ResourceType::Connect,
-                &normalized_url,
-                csp_source.as_ref(),
-            );
-            return Err(JsNativeError::typ()
-                .with_message("fetch blocked by CSP connect-src")
-                .into());
-        }
-        let origin = script_errors::document_fetch_origin(&state, document.identity());
-        let mut request = HttpRequest::new(method, parsed_url);
-        state.set_document_cookie_request_context(document.identity(), &mut request);
-        for (name, value) in headers {
-            if !crate::http::is_valid_header(&name, &value) {
-                return Err(JsNativeError::typ()
-                    .with_message("invalid request header")
-                    .into());
-            }
-            if crate::http::is_forbidden_request_header(&name, &value) {
-                continue;
-            }
-            request.set_header(name, value);
-        }
-        if let Some(body) = body {
-            request.set_body(body);
-        }
-
-        let embedder = state
-            .isolation_policy_for_document(document.identity())
-            .embedder;
-        let mut violations = Vec::new();
-        let fetch_result = {
+    let options = fetch_loading::parse_options(url, args, context)?;
+    let payload = with_host_state(|host| {
+        let mut state = host.borrow_mut();
+        let prepared = fetch_loading::prepare(&mut state, options, context)?;
+        let response = {
             let HostState {
                 http_client,
                 cors_preflight_cache,
                 ..
             } = &mut *state;
-            crate::http::cors::fetch_with_embedder_policy_reporting(
-                http_client,
-                request,
-                &origin,
-                mode,
-                credentials,
-                redirect_mode,
-                cors_preflight_cache,
-                embedder.value.into(),
-                embedder.report_only_value.into(),
-                &mut violations,
-                timeout,
-            )
+            prepared.network.execute(http_client, cors_preflight_cache)
         };
-        state.queue_coep_corp_violations(document.identity(), "", violations);
-        let fetched = match fetch_result {
-            Ok(fetched) => fetched,
-            Err(crate::http::cors::CorsError::Timeout) if timeout.is_some() => {
-                return Ok(r#"{"__omoikane_timeout":true}"#.to_string());
-            }
-            Err(crate::http::cors::CorsError::CorpCheck) => {
-                return Err(JsNativeError::typ()
-                    .with_message("CORP response check failed")
-                    .into());
-            }
-            Err(error) => {
-                return Err(
-                    JsError::from(JsNativeError::error().with_message(error.to_string())).into(),
-                );
-            }
-        };
-        if let Some(effective_url) = fetched.response.effective_url()
-            && !state.csp_allows_response_for_document_with_source(
-                &document,
-                ResourceType::Connect,
-                &effective_url.to_string(),
-                fetched.response.redirect_count(),
-                &normalized_url,
-                csp_source.as_ref(),
-            )
-        {
-            return Err(JsNativeError::typ()
-                .with_message("fetch redirect blocked by CSP connect-src")
-                .into());
-        }
-        let response = fetched.response;
-        let opaque = matches!(
-            fetched.response_type,
-            ResponseType::Opaque | ResponseType::OpaqueRedirect
-        );
-        // Fetch creates a null body for HEAD responses and for status codes
-        // whose semantics forbid a body. A successful response with an empty
-        // payload (for example `200 Content-Length: 0`) still has an empty
-        // ReadableStream, so presence cannot be inferred from byte length.
-        let body_present = !opaque
-            && !matches!(method, Method::Head)
-            && !matches!(response.status_code(), 100..=199 | 204 | 205 | 304);
-        // `bodyText` is the lossy UTF-8 decoding the Fetch and XHR text paths are
-        // defined in terms of, so it stays the primary representation. It cannot
-        // represent a payload that is not valid UTF-8 though (an image, a font),
-        // and `Response.blob()`/`arrayBuffer()` must hand back the original
-        // bytes. Carry those separately, and only when decoding actually lost
-        // information, so text responses pay nothing for it.
-        //
-        // `from_utf8_lossy` borrows when the input is already valid UTF-8 and
-        // only allocates to substitute replacement characters, so an owned `Cow`
-        // is the signal that bytes were lost — no second validation pass needed.
-        let decoded_body = body_present.then(|| String::from_utf8_lossy(response.body()));
-        let body_base64 = matches!(decoded_body, Some(std::borrow::Cow::Owned(_)))
-            .then(|| base64::engine::general_purpose::STANDARD.encode(response.body()));
-        let body_text = decoded_body.map(std::borrow::Cow::into_owned);
-        let effective_url = (!opaque).then(|| {
-            response
-                .effective_url()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| normalized_url.clone())
-        });
-        let response_type = match fetched.response_type {
-            ResponseType::Basic => "basic",
-            ResponseType::Cors => "cors",
-            ResponseType::Opaque => "opaque",
-            ResponseType::OpaqueRedirect => "opaqueredirect",
-        };
-        let exposed_headers =
-            exposed_response_headers(&response, fetched.response_type, credentials);
-        let payload = serde_json::json!({
-            "status": if opaque { 0 } else { response.status_code() },
-            "statusText": if opaque { "" } else { response.reason() },
-            "ok": !opaque && (200..300).contains(&response.status_code()),
-            "url": effective_url.as_deref().unwrap_or(""),
-            "redirected": !opaque && fetched.redirected,
-            "type": response_type,
-            "headers": exposed_headers,
-            "bodyText": body_text.as_deref().unwrap_or(""),
-            "bodyBase64": body_base64,
-            "bodyPresent": body_present,
-        })
-        .to_string();
-        Ok(payload)
+        fetch_loading::apply(&mut state, prepared.context, response)
     })?;
     Ok(js_string!(payload.as_str()).into())
 }
