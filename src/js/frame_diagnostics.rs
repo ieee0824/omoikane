@@ -89,6 +89,146 @@ thread_local! {
     static FRAMES: RefCell<Vec<FrameSample>> = const { RefCell::new(Vec::new()) };
 }
 
+#[derive(Clone, Copy)]
+struct ScrollTarget {
+    document_id: usize,
+    node_id: usize,
+    viewport: bool,
+}
+
+thread_local! {
+    // Nested event-loop calls restore the previous target on return.
+    static SCROLL_TARGETS: RefCell<Vec<ScrollTarget>> = const { RefCell::new(Vec::new()) };
+}
+
+fn scroll_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("OMOIKANE_TRACE_PAINT").is_some()
+            || std::env::var_os("OMOIKANE_TRACE_TASKS").is_some()
+    })
+}
+
+pub(super) struct ScrollTargetScope {
+    started: Option<Instant>,
+}
+
+impl ScrollTargetScope {
+    pub(super) fn begin(document_id: usize, node_id: usize, viewport: bool) -> Self {
+        Self::begin_with_enabled(scroll_trace_enabled(), document_id, node_id, viewport)
+    }
+
+    fn begin_with_enabled(
+        enabled: bool,
+        document_id: usize,
+        node_id: usize,
+        viewport: bool,
+    ) -> Self {
+        if !enabled {
+            return Self { started: None };
+        }
+        let target = ScrollTarget {
+            document_id,
+            node_id,
+            viewport,
+        };
+        SCROLL_TARGETS.with(|targets| targets.borrow_mut().push(target));
+        eprintln!(
+            "OMOIKANE_SCROLL_TARGET {}",
+            serde_json::json!({
+                "phase": "begin", "document_id": document_id,
+                "target_id": node_id, "viewport": viewport,
+            })
+        );
+        Self {
+            started: Some(Instant::now()),
+        }
+    }
+}
+
+impl Drop for ScrollTargetScope {
+    fn drop(&mut self) {
+        let Some(started) = self.started else { return };
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let target = SCROLL_TARGETS.with(|targets| targets.borrow_mut().pop());
+        if let Some(target) = target {
+            eprintln!(
+                "OMOIKANE_SCROLL_TARGET {}",
+                serde_json::json!({
+                    "phase": "end", "document_id": target.document_id,
+                    "target_id": target.node_id, "viewport": target.viewport,
+                    "elapsed_ms": elapsed_ms,
+                })
+            );
+        }
+    }
+}
+
+pub(super) fn record_scroll_invalidation(document_id: usize) {
+    if !scroll_trace_enabled() {
+        return;
+    }
+    SCROLL_TARGETS.with(|targets| {
+        if let Some(target) = targets.borrow().last().copied() {
+            eprintln!(
+                "OMOIKANE_SCROLL_INVALIDATE {}",
+                serde_json::json!({
+                    "document_id": document_id, "target_id": target.node_id,
+                    "target_document_id": target.document_id,
+                })
+            );
+        }
+    });
+}
+
+pub(super) fn record_scroll_mutation(
+    api: &'static str,
+    node_id: usize,
+    attribute_name: Option<&str>,
+) {
+    if !scroll_trace_enabled() {
+        return;
+    }
+    SCROLL_TARGETS.with(|targets| {
+        if let Some(target) = targets.borrow().last().copied() {
+            let kind = attribute_name.map_or("text", attribute_kind);
+            eprintln!(
+                "OMOIKANE_SCROLL_MUTATION {}",
+                serde_json::json!({
+                    "api": api, "kind": kind, "node_id": node_id,
+                    "target_id": target.node_id, "document_id": target.document_id,
+                })
+            );
+        }
+    });
+}
+
+pub(super) fn attribute_kind(name: &str) -> &'static str {
+    if name.eq_ignore_ascii_case("style") {
+        "style"
+    } else if name.eq_ignore_ascii_case("class") {
+        "class"
+    } else if name.eq_ignore_ascii_case("id") {
+        "id"
+    } else {
+        "other"
+    }
+}
+
+fn record_scroll_layout(rebuilt: bool, elapsed_ms: f64) {
+    SCROLL_TARGETS.with(|targets| {
+        if let Some(target) = targets.borrow().last().copied() {
+            eprintln!(
+                "OMOIKANE_SCROLL_LAYOUT {}",
+                serde_json::json!({
+                    "document_id": target.document_id, "target_id": target.node_id,
+                    "rebuild": rebuilt, "elapsed_ms": elapsed_ms,
+                })
+            );
+        }
+    });
+}
+
 pub(super) struct FrameScope {
     started: Option<Instant>,
 }
@@ -207,6 +347,7 @@ impl Drop for LayoutSample {
                 sample.layout_ms += ms;
             }
         });
+        record_scroll_layout(self.rebuilt, ms);
     }
 }
 
@@ -229,6 +370,52 @@ mod tests {
 
     fn frame_depth() -> usize {
         FRAMES.with(|frames| frames.borrow().len())
+    }
+
+    fn scroll_target_ids() -> Vec<usize> {
+        SCROLL_TARGETS.with(|targets| {
+            targets
+                .borrow()
+                .iter()
+                .map(|target| target.node_id)
+                .collect()
+        })
+    }
+
+    #[test]
+    fn disabled_scroll_scope_does_not_create_timer_or_stack_entry() {
+        assert!(scroll_target_ids().is_empty());
+        let scope = ScrollTargetScope::begin_with_enabled(false, 1, 2, true);
+        assert!(scope.started.is_none());
+        assert!(scroll_target_ids().is_empty());
+        drop(scope);
+        assert!(scroll_target_ids().is_empty());
+    }
+
+    #[test]
+    fn nested_scroll_scope_restores_outer_target_after_early_return() {
+        fn inner_scope_returns_early(skip_remaining_work: bool) {
+            let _inner = ScrollTargetScope::begin_with_enabled(true, 1, 22, false);
+            assert_eq!(scroll_target_ids(), vec![11, 22]);
+            if skip_remaining_work {
+                return;
+            }
+            panic!("this work should be skipped");
+        }
+        assert!(scroll_target_ids().is_empty());
+        let outer = ScrollTargetScope::begin_with_enabled(true, 1, 11, true);
+        inner_scope_returns_early(true);
+        assert_eq!(scroll_target_ids(), vec![11]);
+        drop(outer);
+        assert!(scroll_target_ids().is_empty());
+    }
+
+    #[test]
+    fn attribute_categories_are_bounded_labels() {
+        assert_eq!(attribute_kind("STYLE"), "style");
+        assert_eq!(attribute_kind("Class"), "class");
+        assert_eq!(attribute_kind("id"), "id");
+        assert_eq!(attribute_kind("data-private-value"), "other");
     }
 
     #[test]

@@ -6543,6 +6543,7 @@ impl HostState {
         } else {
             self.invalidate_paint_cache();
         }
+        frame_diagnostics::record_scroll_invalidation(document_id);
     }
 
     /// Invalidates the scroll-adjusted paint geometry while retaining the
@@ -11790,6 +11791,8 @@ impl JsRuntime {
                     .unwrap_or(document_id);
                 (owner_document_id, viewport)
             };
+            let _scroll_target =
+                frame_diagnostics::ScrollTargetScope::begin(owner_document_id, node_id, viewport);
             self.eval_in_document_realm(
                 owner_document_id,
                 &format!("__omoikane_dispatch_scroll_event({node_id}, {viewport})"),
@@ -21247,6 +21250,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
                 None
             }
         });
+        frame_diagnostics::record_scroll_mutation("set_attribute", node_id, Some(&name));
         node.set_attribute_owned(name, dom_string::from_js(&value));
         if node.has_tag_name("meta") && is_meta_referrer_attribute {
             state.borrow_mut().apply_connected_referrer_meta(&node);
@@ -23780,6 +23784,7 @@ fn set_text_content_native(
                 .parent_node()
                 .and_then(|parent| parent.tag_name())
                 .is_some_and(|tag| tag.eq_ignore_ascii_case("style"));
+        frame_diagnostics::record_scroll_mutation("set_text_content", id, None);
         // For text/comment leaf nodes, update data directly
         if is_character_data {
             node.set_data_owned(data);
@@ -25100,6 +25105,7 @@ fn remove_attribute_native(
         let resource_attr = resource_attr.filter(|_| node.has_attribute(&name));
         let removed_name =
             name.eq_ignore_ascii_case("name") && node.get_attribute("name").is_some();
+        frame_diagnostics::record_scroll_mutation("remove_attribute", id, Some(&name));
         node.remove_attribute(&name);
         if removed_name {
             state.borrow_mut().refresh_iframe_context_name(&node);
