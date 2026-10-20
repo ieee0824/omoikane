@@ -108,11 +108,39 @@ thread_local! {
     static FRAMES: RefCell<Vec<FrameSample>> = const { RefCell::new(Vec::new()) };
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ScrollLayoutSummary {
+    calls: usize,
+    rebuilds: usize,
+    total_ms: f64,
+    max_ms: f64,
+    rebuild_total_ms: f64,
+    rebuild_max_ms: f64,
+}
+
+impl ScrollLayoutSummary {
+    fn record(&mut self, rebuilt: bool, elapsed_ms: f64) {
+        self.calls += 1;
+        self.rebuilds += usize::from(rebuilt);
+        self.total_ms += elapsed_ms;
+        self.max_ms = self.max_ms.max(elapsed_ms);
+        if rebuilt {
+            self.rebuild_total_ms += elapsed_ms;
+            self.rebuild_max_ms = self.rebuild_max_ms.max(elapsed_ms);
+        }
+    }
+
+    fn cache_hits(&self) -> usize {
+        self.calls - self.rebuilds
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ScrollTarget {
     document_id: usize,
     node_id: usize,
     viewport: bool,
+    layout: ScrollLayoutSummary,
 }
 
 thread_local! {
@@ -176,6 +204,7 @@ impl ScrollTargetScope {
             document_id,
             node_id,
             viewport,
+            layout: ScrollLayoutSummary::default(),
         };
         SCROLL_TARGETS.with(|targets| targets.borrow_mut().push(target));
         eprintln!(
@@ -204,11 +233,7 @@ impl Drop for ScrollTargetScope {
                 "{}",
                 crate::diagnostics::json_record(
                     "OMOIKANE_SCROLL_TARGET",
-                    &serde_json::json!({
-                        "phase": "end", "document_id": target.document_id,
-                        "target_id": target.node_id, "viewport": target.viewport,
-                        "elapsed_ms": elapsed_ms,
-                    })
+                    &scroll_target_end_data(&target, elapsed_ms)
                 )
             );
         }
@@ -272,19 +297,25 @@ pub(super) fn attribute_kind(name: &str) -> &'static str {
     }
 }
 
+fn scroll_target_end_data(target: &ScrollTarget, elapsed_ms: f64) -> serde_json::Value {
+    serde_json::json!({
+        "phase": "end", "document_id": target.document_id,
+        "target_id": target.node_id, "viewport": target.viewport,
+        "elapsed_ms": elapsed_ms,
+        "ensure_layout_calls": target.layout.calls,
+        "ensure_layout_rebuilds": target.layout.rebuilds,
+        "ensure_layout_cache_hits": target.layout.cache_hits(),
+        "ensure_layout_ms": target.layout.total_ms,
+        "ensure_layout_max_ms": target.layout.max_ms,
+        "ensure_layout_rebuild_ms": target.layout.rebuild_total_ms,
+        "ensure_layout_rebuild_max_ms": target.layout.rebuild_max_ms,
+    })
+}
+
 fn record_scroll_layout(rebuilt: bool, elapsed_ms: f64) {
     SCROLL_TARGETS.with(|targets| {
-        if let Some(target) = targets.borrow().last().copied() {
-            eprintln!(
-                "{}",
-                crate::diagnostics::json_record(
-                    "OMOIKANE_SCROLL_LAYOUT",
-                    &serde_json::json!({
-                        "document_id": target.document_id, "target_id": target.node_id,
-                        "rebuild": rebuilt, "elapsed_ms": elapsed_ms,
-                    })
-                )
-            );
+        if let Some(target) = targets.borrow_mut().last_mut() {
+            target.layout.record(rebuilt, elapsed_ms);
         }
     });
 }
@@ -445,6 +476,10 @@ mod tests {
         })
     }
 
+    fn active_scroll_target() -> ScrollTarget {
+        SCROLL_TARGETS.with(|targets| *targets.borrow().last().unwrap())
+    }
+
     #[test]
     fn disabled_scroll_scope_does_not_create_timer_or_stack_entry() {
         assert!(scroll_target_ids().is_empty());
@@ -460,6 +495,19 @@ mod tests {
         fn inner_scope_returns_early(skip_remaining_work: bool) {
             let _inner = ScrollTargetScope::begin_with_enabled(true, 1, 22, false);
             assert_eq!(scroll_target_ids(), vec![11, 22]);
+            record_scroll_layout(false, 2.0);
+            record_scroll_layout(true, 4.0);
+            assert_eq!(
+                active_scroll_target().layout,
+                ScrollLayoutSummary {
+                    calls: 2,
+                    rebuilds: 1,
+                    total_ms: 6.0,
+                    max_ms: 4.0,
+                    rebuild_total_ms: 4.0,
+                    rebuild_max_ms: 4.0,
+                }
+            );
             if skip_remaining_work {
                 return;
             }
@@ -467,9 +515,71 @@ mod tests {
         }
         assert!(scroll_target_ids().is_empty());
         let outer = ScrollTargetScope::begin_with_enabled(true, 1, 11, true);
+        record_scroll_layout(false, 1.0);
         inner_scope_returns_early(true);
         assert_eq!(scroll_target_ids(), vec![11]);
+        assert_eq!(
+            active_scroll_target().layout,
+            ScrollLayoutSummary {
+                calls: 1,
+                total_ms: 1.0,
+                max_ms: 1.0,
+                ..ScrollLayoutSummary::default()
+            }
+        );
+        record_scroll_layout(true, 8.0);
+        assert_eq!(
+            active_scroll_target().layout,
+            ScrollLayoutSummary {
+                calls: 2,
+                rebuilds: 1,
+                total_ms: 9.0,
+                max_ms: 8.0,
+                rebuild_total_ms: 8.0,
+                rebuild_max_ms: 8.0,
+            }
+        );
         drop(outer);
+        assert!(scroll_target_ids().is_empty());
+    }
+
+    #[test]
+    fn scroll_target_aggregates_many_cache_hits_and_one_rebuild_exactly() {
+        assert!(scroll_target_ids().is_empty());
+        let scope = ScrollTargetScope::begin_with_enabled(true, 7, 77, false);
+        for _ in 0..512 {
+            record_scroll_layout(false, 0.25);
+        }
+        record_scroll_layout(true, 8.0);
+
+        let target = active_scroll_target();
+        assert_eq!(
+            target.layout,
+            ScrollLayoutSummary {
+                calls: 513,
+                rebuilds: 1,
+                total_ms: 136.0,
+                max_ms: 8.0,
+                rebuild_total_ms: 8.0,
+                rebuild_max_ms: 8.0,
+            }
+        );
+        assert_eq!(
+            scroll_target_end_data(&target, 150.0),
+            serde_json::json!({
+                "phase": "end", "document_id": 7,
+                "target_id": 77, "viewport": false,
+                "elapsed_ms": 150.0,
+                "ensure_layout_calls": 513,
+                "ensure_layout_rebuilds": 1,
+                "ensure_layout_cache_hits": 512,
+                "ensure_layout_ms": 136.0,
+                "ensure_layout_max_ms": 8.0,
+                "ensure_layout_rebuild_ms": 8.0,
+                "ensure_layout_rebuild_max_ms": 8.0,
+            })
+        );
+        drop(scope);
         assert!(scroll_target_ids().is_empty());
     }
 
