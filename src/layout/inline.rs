@@ -27,6 +27,8 @@ use super::{
 };
 
 mod boxes;
+#[cfg(test)]
+mod data_image_tests;
 mod text_source;
 
 thread_local! {
@@ -1868,6 +1870,10 @@ fn element_inline_image_with_current_color(
 
 /// Decode an image from a data: URI (PNG, JPEG, GIF, WebP, or SVG).
 fn decode_data_uri_image(uri: &str) -> Option<Image> {
+    super::ensure_image_cache_context();
+    if let Some(image) = IMAGE_CACHE.with(|cache| cache.borrow().get(uri).cloned()) {
+        return image;
+    }
     let data_uri = parse_data_uri(uri).ok()?;
     match data_uri {
         DataUri::Binary { mime_type, data } => {
@@ -1883,14 +1889,14 @@ fn decode_data_uri_image(uri: &str) -> Option<Image> {
             } else if mime_type.eq_ignore_ascii_case("image/webp") {
                 Image::decode_webp(&data).ok()
             } else if mime_type.eq_ignore_ascii_case("image/svg+xml") {
-                decode_svg_bytes(&data)
+                decode_data_svg(std::str::from_utf8(&data).ok()?, uri)
             } else {
                 None
             }
         }
         DataUri::Text { mime_type, data } => {
             if mime_type.eq_ignore_ascii_case("image/svg+xml") {
-                decode_svg_text(&data)
+                decode_data_svg(&data, uri)
             } else {
                 None
             }
@@ -1906,6 +1912,49 @@ fn decode_svg_bytes(bytes: &[u8]) -> Option<Image> {
 
 /// Decode SVG from text, parse and rasterize.
 fn decode_svg_text(text: &str) -> Option<Image> {
+    crate::svg::render_svg_to_image(&parse_svg_node(text)?)
+}
+
+const MAX_CACHED_DATA_SVGS: usize = 64;
+const MAX_CACHED_DATA_SVG_PIXEL_BYTES: usize = 256 * 1024;
+const MAX_CACHED_DATA_SVG_URI_BYTES: usize = 64 * 1024;
+
+/// Reuses immutable, self-contained SVG data images across layout and paint.
+/// SVGs containing image elements remain live: their nested resources can be
+/// pending, relative to a changing base URL, revoked, or animated.
+fn decode_data_svg(text: &str, uri: &str) -> Option<Image> {
+    fn contains_image(node: &NodeHandle) -> bool {
+        node.tag_name()
+            .is_some_and(|tag| tag.eq_ignore_ascii_case("image"))
+            || node.child_nodes().iter().any(contains_image)
+    }
+    let svg = parse_svg_node(text)?;
+    let cacheable = !contains_image(&svg);
+    let image = crate::svg::render_svg_to_image(&svg)?;
+    // Bound the added retention even when a page continuously changes its URIs.
+    if cacheable
+        && image.pixels().len() <= MAX_CACHED_DATA_SVG_PIXEL_BYTES
+        && uri.len() <= MAX_CACHED_DATA_SVG_URI_BYTES
+    {
+        IMAGE_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let count = cache
+                .keys()
+                .filter(|key| {
+                    key.get(..5)
+                        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+                })
+                .take(MAX_CACHED_DATA_SVGS)
+                .count();
+            if count < MAX_CACHED_DATA_SVGS {
+                cache.insert(uri.to_owned(), Some(image.clone()));
+            }
+        });
+    }
+    Some(image)
+}
+
+fn parse_svg_node(text: &str) -> Option<NodeHandle> {
     use crate::dom::Node;
     use crate::html::TreeBuilder;
     let doc = TreeBuilder::parse(text).document();
@@ -1921,8 +1970,7 @@ fn decode_svg_text(text: &str) -> Option<Image> {
         }
         None
     }
-    let svg_node = find_svg(&doc)?;
-    crate::svg::render_svg_to_image(&svg_node)
+    find_svg(&doc)
 }
 
 /// Maximum image size to fetch (10 MiB).
