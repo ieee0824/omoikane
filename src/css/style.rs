@@ -11513,115 +11513,181 @@ impl InitialValue {
 /// This intentionally excludes the handful of properties whose initial value
 /// depends on another property's resolved value or on the number of layers
 /// in a shorthand — those stay as explicit code in `apply_initial_values`.
-const INITIAL_VALUES: &[(&str, InitialValue)] = &[
-    ("translate", InitialValue::Keyword("none")),
-    ("rotate", InitialValue::Keyword("none")),
-    ("scale", InitialValue::Keyword("none")),
-    ("order", InitialValue::Number(0.0)),
-    ("flex-grow", InitialValue::Number(0.0)),
-    ("flex-shrink", InitialValue::Number(1.0)),
-    ("grid-auto-flow", InitialValue::Keyword("row")),
-    ("grid-auto-columns", InitialValue::Keyword("auto")),
-    ("grid-auto-rows", InitialValue::Keyword("auto")),
-    ("counter-reset", InitialValue::Keyword("none")),
-    ("counter-increment", InitialValue::Keyword("none")),
-    ("shape-outside", InitialValue::Keyword("none")),
-    ("shape-margin", InitialValue::Px(0.0)),
-    ("background-clip", InitialValue::Keyword("border-box")),
-    ("background-color", InitialValue::Color("transparent")),
-    ("background-origin", InitialValue::Keyword("padding-box")),
-    ("color", InitialValue::Color("black")),
-    ("font-size", InitialValue::Px(16.0)),
-    ("font-palette", InitialValue::Keyword("normal")),
-    ("direction", InitialValue::Keyword("ltr")),
-    ("writing-mode", InitialValue::Keyword("horizontal-tb")),
-    ("unicode-bidi", InitialValue::Keyword("normal")),
-    ("text-transform", InitialValue::Keyword("none")),
-    ("white-space", InitialValue::Keyword("normal")),
-    ("text-overflow", InitialValue::Keyword("clip")),
-    ("text-shadow", InitialValue::Keyword("none")),
-    ("text-decoration-line", InitialValue::Keyword("none")),
-    ("text-decoration-style", InitialValue::Keyword("solid")),
+const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
+    (PropertyId::Translate, InitialValue::Keyword("none")),
+    (PropertyId::Rotate, InitialValue::Keyword("none")),
+    (PropertyId::Scale, InitialValue::Keyword("none")),
+    (PropertyId::Order, InitialValue::Number(0.0)),
+    (PropertyId::FlexGrow, InitialValue::Number(0.0)),
+    (PropertyId::FlexShrink, InitialValue::Number(1.0)),
+    (PropertyId::GridAutoFlow, InitialValue::Keyword("row")),
+    (PropertyId::GridAutoColumns, InitialValue::Keyword("auto")),
+    (PropertyId::GridAutoRows, InitialValue::Keyword("auto")),
+    (PropertyId::CounterReset, InitialValue::Keyword("none")),
+    (PropertyId::CounterIncrement, InitialValue::Keyword("none")),
+    (PropertyId::ShapeOutside, InitialValue::Keyword("none")),
+    (PropertyId::ShapeMargin, InitialValue::Px(0.0)),
+    (
+        PropertyId::BackgroundClip,
+        InitialValue::Keyword("border-box"),
+    ),
+    (
+        PropertyId::BackgroundColor,
+        InitialValue::Color("transparent"),
+    ),
+    (
+        PropertyId::BackgroundOrigin,
+        InitialValue::Keyword("padding-box"),
+    ),
+    (PropertyId::Color, InitialValue::Color("black")),
+    (PropertyId::FontSize, InitialValue::Px(16.0)),
+    (PropertyId::FontPalette, InitialValue::Keyword("normal")),
+    (PropertyId::Direction, InitialValue::Keyword("ltr")),
+    (
+        PropertyId::WritingMode,
+        InitialValue::Keyword("horizontal-tb"),
+    ),
+    (PropertyId::UnicodeBidi, InitialValue::Keyword("normal")),
+    (PropertyId::TextTransform, InitialValue::Keyword("none")),
+    (PropertyId::WhiteSpace, InitialValue::Keyword("normal")),
+    (PropertyId::TextOverflow, InitialValue::Keyword("clip")),
+    (PropertyId::TextShadow, InitialValue::Keyword("none")),
+    (
+        PropertyId::TextDecorationLine,
+        InitialValue::Keyword("none"),
+    ),
+    (
+        PropertyId::TextDecorationStyle,
+        InitialValue::Keyword("solid"),
+    ),
     // `text-decoration-color`'s initial value is `currentcolor`.
-    ("text-decoration-color", InitialValue::CurrentColor),
-    ("text-decoration-thickness", InitialValue::Keyword("auto")),
-    ("text-underline-position", InitialValue::Keyword("auto")),
-    ("text-underline-offset", InitialValue::Keyword("auto")),
+    (PropertyId::TextDecorationColor, InitialValue::CurrentColor),
+    (
+        PropertyId::TextDecorationThickness,
+        InitialValue::Keyword("auto"),
+    ),
+    (
+        PropertyId::TextUnderlinePosition,
+        InitialValue::Keyword("auto"),
+    ),
+    (
+        PropertyId::TextUnderlineOffset,
+        InitialValue::Keyword("auto"),
+    ),
     // `cursor` initial value is `auto` (CSS UI). Ensuring it is always
     // present lets a dropped/absent `cursor` declaration serialize as `auto`
     // in getComputedStyle (Acid3 test 47).
-    ("forced-color-adjust", InitialValue::Keyword("auto")),
-    ("will-change", InitialValue::Keyword("auto")),
-    ("cursor", InitialValue::Keyword("auto")),
-    ("pointer-events", InitialValue::Keyword("auto")),
-    ("scroll-behavior", InitialValue::Keyword("auto")),
-    ("table-layout", InitialValue::Keyword("auto")),
-    ("overscroll-behavior-block", InitialValue::Keyword("auto")),
-    ("overscroll-behavior-inline", InitialValue::Keyword("auto")),
-    ("overscroll-behavior-x", InitialValue::Keyword("auto")),
-    ("overscroll-behavior-y", InitialValue::Keyword("auto")),
-    ("scroll-snap-type", InitialValue::Keyword("none")),
-    ("scroll-snap-align", InitialValue::Keyword("none")),
-    ("position", InitialValue::Keyword("static")),
-    ("contain", InitialValue::Keyword("none")),
-    ("content-visibility", InitialValue::Keyword("visible")),
-    ("contain-intrinsic-width", InitialValue::Keyword("none")),
-    ("contain-intrinsic-height", InitialValue::Keyword("none")),
+    (PropertyId::ForcedColorAdjust, InitialValue::Keyword("auto")),
+    (PropertyId::WillChange, InitialValue::Keyword("auto")),
+    (PropertyId::Cursor, InitialValue::Keyword("auto")),
+    (PropertyId::PointerEvents, InitialValue::Keyword("auto")),
+    (PropertyId::ScrollBehavior, InitialValue::Keyword("auto")),
+    (PropertyId::TableLayout, InitialValue::Keyword("auto")),
     (
-        "contain-intrinsic-inline-size",
+        PropertyId::OverscrollBehaviorBlock,
+        InitialValue::Keyword("auto"),
+    ),
+    (
+        PropertyId::OverscrollBehaviorInline,
+        InitialValue::Keyword("auto"),
+    ),
+    (
+        PropertyId::OverscrollBehaviorX,
+        InitialValue::Keyword("auto"),
+    ),
+    (
+        PropertyId::OverscrollBehaviorY,
+        InitialValue::Keyword("auto"),
+    ),
+    (PropertyId::ScrollSnapType, InitialValue::Keyword("none")),
+    (PropertyId::ScrollSnapAlign, InitialValue::Keyword("none")),
+    (PropertyId::Position, InitialValue::Keyword("static")),
+    (PropertyId::Contain, InitialValue::Keyword("none")),
+    (
+        PropertyId::ContentVisibility,
+        InitialValue::Keyword("visible"),
+    ),
+    (
+        PropertyId::ContainIntrinsicWidth,
         InitialValue::Keyword("none"),
     ),
     (
-        "contain-intrinsic-block-size",
+        PropertyId::ContainIntrinsicHeight,
         InitialValue::Keyword("none"),
     ),
-    ("container-name", InitialValue::Keyword("none")),
-    ("container-type", InitialValue::Keyword("normal")),
-    ("column-count", InitialValue::Keyword("auto")),
-    ("column-width", InitialValue::Keyword("auto")),
-    ("column-gap", InitialValue::Keyword("normal")),
-    ("column-fill", InitialValue::Keyword("balance")),
-    ("column-span", InitialValue::Keyword("none")),
-    ("box-decoration-break", InitialValue::Keyword("slice")),
-    ("column-rule-style", InitialValue::Keyword("none")),
-    ("column-rule-width", InitialValue::Px(3.0)),
+    (
+        PropertyId::ContainIntrinsicInlineSize,
+        InitialValue::Keyword("none"),
+    ),
+    (
+        PropertyId::ContainIntrinsicBlockSize,
+        InitialValue::Keyword("none"),
+    ),
+    (PropertyId::ContainerName, InitialValue::Keyword("none")),
+    (PropertyId::ContainerType, InitialValue::Keyword("normal")),
+    (PropertyId::ColumnCount, InitialValue::Keyword("auto")),
+    (PropertyId::ColumnWidth, InitialValue::Keyword("auto")),
+    (PropertyId::ColumnGap, InitialValue::Keyword("normal")),
+    (PropertyId::ColumnFill, InitialValue::Keyword("balance")),
+    (PropertyId::ColumnSpan, InitialValue::Keyword("none")),
+    (
+        PropertyId::BoxDecorationBreak,
+        InitialValue::Keyword("slice"),
+    ),
+    (PropertyId::ColumnRuleStyle, InitialValue::Keyword("none")),
+    (PropertyId::ColumnRuleWidth, InitialValue::Px(3.0)),
     // `column-rule-color`'s initial value is `currentcolor`.
-    ("column-rule-color", InitialValue::CurrentColor),
-    ("outline-style", InitialValue::Keyword("none")),
-    ("outline-width", InitialValue::Px(3.0)),
-    ("outline-offset", InitialValue::Px(0.0)),
-    ("outline-color", InitialValue::Keyword("auto")),
-    ("break-before", InitialValue::Keyword("auto")),
-    ("break-after", InitialValue::Keyword("auto")),
-    ("break-inside", InitialValue::Keyword("auto")),
-    ("page", InitialValue::Keyword("auto")),
-    ("orphans", InitialValue::Number(2.0)),
-    ("widows", InitialValue::Number(2.0)),
+    (PropertyId::ColumnRuleColor, InitialValue::CurrentColor),
+    (PropertyId::OutlineStyle, InitialValue::Keyword("none")),
+    (PropertyId::OutlineWidth, InitialValue::Px(3.0)),
+    (PropertyId::OutlineOffset, InitialValue::Px(0.0)),
+    (PropertyId::OutlineColor, InitialValue::Keyword("auto")),
+    (PropertyId::BreakBefore, InitialValue::Keyword("auto")),
+    (PropertyId::BreakAfter, InitialValue::Keyword("auto")),
+    (PropertyId::BreakInside, InitialValue::Keyword("auto")),
+    (PropertyId::Page, InitialValue::Keyword("auto")),
+    (PropertyId::Orphans, InitialValue::Number(2.0)),
+    (PropertyId::Widows, InitialValue::Number(2.0)),
     // CSS Sizing: `aspect-ratio` is `auto`, meaning "use the intrinsic ratio".
-    ("aspect-ratio", InitialValue::Keyword("auto")),
+    (PropertyId::AspectRatio, InitialValue::Keyword("auto")),
     // CSS Images: `object-fit` is `fill` and `object-position` is `50% 50%`.
     // Keeping them present lets getComputedStyle serialize the initial value
     // even when nothing declares them.
-    ("object-fit", InitialValue::Keyword("fill")),
-    ("object-position", InitialValue::Position(50.0, 50.0)),
+    (PropertyId::ObjectFit, InitialValue::Keyword("fill")),
+    (
+        PropertyId::ObjectPosition,
+        InitialValue::Position(50.0, 50.0),
+    ),
     // CSS Masking initial values. `none` is an identity mask in the paint
     // implementation; match-source resolves gradients/images through their
     // alpha channel and keeps SVG/image defaults deterministic.
-    ("mask-image", InitialValue::Keyword("none")),
-    ("mask-mode", InitialValue::Keyword("match-source")),
-    ("mask-composite", InitialValue::Keyword("add")),
-    ("transform", InitialValue::Keyword("none")),
-    ("transform-origin", InitialValue::Keyword("50% 50%")),
-    ("perspective", InitialValue::Keyword("none")),
-    ("perspective-origin", InitialValue::Keyword("50% 50%")),
-    ("transform-style", InitialValue::Keyword("flat")),
-    ("backface-visibility", InitialValue::Keyword("visible")),
-    ("mix-blend-mode", InitialValue::Keyword("normal")),
-    ("isolation", InitialValue::Keyword("auto")),
-    ("transition-property", InitialValue::Keyword("all")),
-    ("transition-duration", InitialValue::Keyword("0s")),
-    ("transition-timing-function", InitialValue::Keyword("ease")),
-    ("transition-delay", InitialValue::Keyword("0s")),
+    (PropertyId::MaskImage, InitialValue::Keyword("none")),
+    (PropertyId::MaskMode, InitialValue::Keyword("match-source")),
+    (PropertyId::MaskComposite, InitialValue::Keyword("add")),
+    (PropertyId::Transform, InitialValue::Keyword("none")),
+    (
+        PropertyId::TransformOrigin,
+        InitialValue::Keyword("50% 50%"),
+    ),
+    (PropertyId::Perspective, InitialValue::Keyword("none")),
+    (
+        PropertyId::PerspectiveOrigin,
+        InitialValue::Keyword("50% 50%"),
+    ),
+    (PropertyId::TransformStyle, InitialValue::Keyword("flat")),
+    (
+        PropertyId::BackfaceVisibility,
+        InitialValue::Keyword("visible"),
+    ),
+    (PropertyId::MixBlendMode, InitialValue::Keyword("normal")),
+    (PropertyId::Isolation, InitialValue::Keyword("auto")),
+    (PropertyId::TransitionProperty, InitialValue::Keyword("all")),
+    (PropertyId::TransitionDuration, InitialValue::Keyword("0s")),
+    (
+        PropertyId::TransitionTimingFunction,
+        InitialValue::Keyword("ease"),
+    ),
+    (PropertyId::TransitionDelay, InitialValue::Keyword("0s")),
 ];
 
 fn apply_initial_values(properties: &mut PropertyMap) {
@@ -11629,37 +11695,51 @@ fn apply_initial_values(properties: &mut PropertyMap) {
         if matches!(initial, InitialValue::CurrentColor) {
             continue;
         }
-        if !properties.contains_key(*name) {
-            properties
-                .entry((*name).to_string())
-                .or_insert_with(|| initial.resolve());
+        if !properties.contains_key(name) {
+            properties.entry(*name).or_insert_with(|| initial.resolve());
         }
     }
     // `currentcolor`-valued initial values are resolved once `color` (set by
     // the author or defaulted above) is known.
     for (name, initial) in INITIAL_VALUES {
         if matches!(initial, InitialValue::CurrentColor) {
-            if !properties.contains_key(*name) {
-                properties.copy_property("color", name);
+            if !properties.contains_key(name) {
+                properties.copy_property("color", name.as_str());
             }
         }
     }
-    for side in [
-        "top",
-        "right",
-        "bottom",
-        "left",
-        "inline-start",
-        "inline-end",
-        "block-start",
-        "block-end",
+    for (padding, margin) in [
+        (PropertyId::ScrollPaddingTop, PropertyId::ScrollMarginTop),
+        (
+            PropertyId::ScrollPaddingRight,
+            PropertyId::ScrollMarginRight,
+        ),
+        (
+            PropertyId::ScrollPaddingBottom,
+            PropertyId::ScrollMarginBottom,
+        ),
+        (PropertyId::ScrollPaddingLeft, PropertyId::ScrollMarginLeft),
+        (
+            PropertyId::ScrollPaddingInlineStart,
+            PropertyId::ScrollMarginInlineStart,
+        ),
+        (
+            PropertyId::ScrollPaddingInlineEnd,
+            PropertyId::ScrollMarginInlineEnd,
+        ),
+        (
+            PropertyId::ScrollPaddingBlockStart,
+            PropertyId::ScrollMarginBlockStart,
+        ),
+        (
+            PropertyId::ScrollPaddingBlockEnd,
+            PropertyId::ScrollMarginBlockEnd,
+        ),
     ] {
         properties
-            .entry(format!("scroll-padding-{side}"))
+            .entry(padding)
             .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
-        properties
-            .entry(format!("scroll-margin-{side}"))
-            .or_insert(ComputedValue::Px(0.0));
+        properties.entry(margin).or_insert(ComputedValue::Px(0.0));
     }
     let intrinsic_width = properties
         .get(&PropertyId::ContainIntrinsicWidth)

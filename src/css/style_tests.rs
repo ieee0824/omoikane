@@ -3362,6 +3362,57 @@ fn applies_initial_values_when_no_rule_matches() {
 }
 
 #[test]
+fn initial_defaults_preserve_authored_values_and_currentcolor() {
+    let element = NodeHandle::element("span");
+    element.set_attribute(
+        "style",
+        "color:rgb(10, 20, 30);order:7;scroll-padding-top:9px;\
+         scroll-margin-inline-end:4px;contain-intrinsic-width:10px;\
+         contain-intrinsic-height:20px",
+    );
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(style.get("order"), Some(&ComputedValue::Number(7.0)));
+    assert_eq!(style.get("flex-grow"), Some(&ComputedValue::Number(0.0)));
+    assert_eq!(
+        style.get("scroll-padding-top"),
+        Some(&ComputedValue::Px(9.0))
+    );
+    assert_eq!(
+        style.get("scroll-padding-bottom"),
+        Some(&ComputedValue::Keyword("auto".into()))
+    );
+    assert_eq!(
+        style.get("scroll-margin-inline-end"),
+        Some(&ComputedValue::Px(4.0))
+    );
+    assert_eq!(
+        style.get("scroll-margin-left"),
+        Some(&ComputedValue::Px(0.0))
+    );
+    for name in ["text-decoration-color", "column-rule-color"] {
+        assert_eq!(style.get(name), style.get("color"), "{name}");
+    }
+    assert_eq!(
+        style.get("contain-intrinsic-size"),
+        Some(&ComputedValue::Keyword("10px 20px".into()))
+    );
+}
+
+#[test]
+fn initial_currentcolor_retains_the_authored_system_color_identity() {
+    let element = NodeHandle::element("span");
+    element.set_attribute("style", "color:CanvasText");
+    let style = StyleResolver::new().computed_style(&element);
+    for name in ["color", "text-decoration-color", "column-rule-color"] {
+        assert_eq!(
+            style.properties.system_color_name(name),
+            Some("canvastext"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn keeps_pseudo_element_rules_out_of_normal_computed_style() {
     let (_document, _body, title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();
