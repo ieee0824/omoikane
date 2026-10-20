@@ -5495,7 +5495,8 @@ impl HostState {
             let url = if src.is_empty() { "about:blank" } else { src };
             return LoadedChildDocument::about_blank(url.to_owned());
         }
-        self.fetch_child_resource(
+        let fetch_started = std::time::Instant::now();
+        let fetched = self.fetch_child_resource(
             src,
             base_url,
             cookie_context,
@@ -5503,10 +5504,23 @@ impl HostState {
             top_level_navigation,
             source_url,
             policy,
-        )
-        .map_or_else(LoadedChildDocument::fetch_failed, |resource| {
+        );
+        let fetch_ms = fetch_started.elapsed().as_secs_f64() * 1000.0;
+        let parse_started = std::time::Instant::now();
+        let loaded = fetched.map_or_else(LoadedChildDocument::fetch_failed, |resource| {
             resource.into_get_document()
-        })
+        });
+        if std::env::var_os("OMOIKANE_TRACE_TASKS").is_some() {
+            eprintln!(
+                "OMOIKANE_IFRAME_RESOURCE {}",
+                serde_json::json!({
+                    "fetch_ms": fetch_ms,
+                    "parse_ms": parse_started.elapsed().as_secs_f64() * 1000.0,
+                    "loaded": loaded.url.is_some(),
+                })
+            );
+        }
+        loaded
     }
 
     /// Resolves `src` to inline `data:` bytes or fetches it with a GET.
@@ -8385,14 +8399,32 @@ impl JsRuntime {
                     muted_errors,
                     Some(csp_requested_url.to_owned()),
                 );
-                Script::parse_with_host_defined(
+                let parse_started = std::time::Instant::now();
+                let script = Script::parse_with_host_defined(
                     Source::from_reader(source.as_bytes(), Some(Path::new(filename)))
                         .with_start_position(start_position.0, start_position.1),
                     None,
                     metadata,
                     context,
-                )?
-                .evaluate(context)
+                )?;
+                let parse_ms = parse_started.elapsed().as_secs_f64() * 1000.0;
+                let evaluate_started = std::time::Instant::now();
+                let result = script.evaluate(context);
+                let evaluate_ms = evaluate_started.elapsed().as_secs_f64() * 1000.0;
+                if std::env::var_os("OMOIKANE_TRACE_TASKS").is_some()
+                    && parse_ms + evaluate_ms >= 50.0
+                {
+                    eprintln!(
+                        "OMOIKANE_CLASSIC_SCRIPT {}",
+                        serde_json::json!({
+                            "source_bytes": source.len(),
+                            "parse_ms": parse_ms,
+                            "evaluate_ms": evaluate_ms,
+                            "success": result.is_ok(),
+                        })
+                    );
+                }
+                result
             });
             if let Err(error) = &evaluated {
                 let _ = self.with_active_host(|context| {
@@ -12616,6 +12648,12 @@ impl JsRuntime {
     }
 
     fn run_resource_load_timer(&mut self, node_id: usize) -> JsResult<()> {
+        let trace_iframe = std::env::var_os("OMOIKANE_TRACE_TASKS").is_some()
+            && self
+                .host_state
+                .borrow()
+                .get_node(node_id)
+                .is_some_and(|node| node.has_tag_name("iframe"));
         if self.run_image_resource_load(node_id)? {
             return Ok(());
         }
@@ -12630,6 +12668,7 @@ impl JsRuntime {
         if self.try_run_javascript_iframe_resource(node_id)? {
             return Ok(());
         }
+        let gather_started = std::time::Instant::now();
         let Some((should_dispatch, initial_scripts, dynamic_script, resource_document_id)) =
             self.gather_resource_load_dispatch_state(node_id)?
         else {
@@ -12639,6 +12678,7 @@ impl JsRuntime {
                 .remove(&node_id);
             return Ok(());
         };
+        let gather_ms = gather_started.elapsed().as_secs_f64() * 1000.0;
         let dispatch_document_id = dynamic_script
             .as_ref()
             .and_then(|(script, _, _, _, _)| document_root_for_node(script))
@@ -12652,7 +12692,17 @@ impl JsRuntime {
             let forgotten = self.eval("__omoikane_forget_discarded_node_wrappers()");
             self.record_error_from("iframe wrapper cleanup", forgotten);
         }
+        let scripts_started = std::time::Instant::now();
         self.run_initial_iframe_scripts(initial_scripts, iframe_context);
+        if trace_iframe {
+            eprintln!(
+                "OMOIKANE_IFRAME_TASK {}",
+                serde_json::json!({
+                    "gather_ms": gather_ms,
+                    "initial_scripts_ms": scripts_started.elapsed().as_secs_f64() * 1000.0,
+                })
+            );
+        }
         // A script whose type Omoikane does not execute is not fetched and
         // does not load, so it must not go on to dispatch `load` either.
         let mut dispatch_load = should_dispatch && {
@@ -12921,6 +12971,20 @@ impl JsRuntime {
         initial_scripts: Vec<NodeHandle>,
         iframe_context: Option<(usize, usize)>,
     ) {
+        let trace_slow_iframe_script = |kind: &str, started: std::time::Instant| {
+            let elapsed = started.elapsed();
+            if elapsed >= std::time::Duration::from_millis(50)
+                && std::env::var_os("OMOIKANE_TRACE_TASKS").is_some()
+            {
+                eprintln!(
+                    "OMOIKANE_IFRAME_SCRIPT {}",
+                    serde_json::json!({
+                        "kind": kind,
+                        "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
+                    })
+                );
+            }
+        };
         for script in initial_scripts {
             // Like top-level document scripts, one failing initial
             // script must not prevent later scripts or the iframe load
@@ -12949,7 +13013,9 @@ impl JsRuntime {
                 continue;
             }
             if let Some(src) = script.get_attribute("src") {
+                let started = std::time::Instant::now();
                 self.run_initial_iframe_external_script(&script, src);
+                trace_slow_iframe_script("external", started);
                 continue;
             }
             if !csp_allowed {
@@ -12965,12 +13031,14 @@ impl JsRuntime {
                     .or_default() += 1;
             }
             let source = inline_source.expect("inline script has source text");
+            let started = std::time::Instant::now();
             let result = if let Some((iframe_id, document_id)) = iframe_context {
                 self.eval_iframe_script(iframe_id, document_id, script.identity(), &source)
             } else {
                 self.eval(&source).and_then(|_| self.run_jobs())
             };
             self.record_error_from("iframe inline script", result);
+            trace_slow_iframe_script("inline", started);
         }
     }
 
