@@ -119,6 +119,9 @@ mod dom_string_tests;
 mod errors;
 #[cfg(test)]
 mod inline_style_assignment_tests;
+#[cfg(test)]
+mod leaf_background_paint_tests;
+mod leaf_paint;
 mod trusted_types;
 #[cfg(test)]
 mod trusted_types_tests;
@@ -6668,6 +6671,14 @@ impl HostState {
             let has_non_scalar_dom_string =
                 previous_inline_style_is_non_scalar || node.attribute_has_non_scalar_value("style");
             let hidden_layout_candidate = self.can_preserve_hidden_main_layout(&document, node);
+            let leaf_candidate = if StyleResolver::is_background_image_inline_change(
+                previous_inline_style,
+                current_inline_style.as_deref(),
+            ) {
+                self.leaf_paint_candidate(node)
+            } else {
+                Err("not_background_delta")
+            };
             let mut outcome = "deferred_resolver";
             let mut preserve_main_layout = false;
             if let Some(entry) = self.document_styles.get_mut(&document.identity()) {
@@ -6688,6 +6699,13 @@ impl HostState {
                         && !resolver.has_running_animations();
                 }
             }
+            let leaf_preserved = self.finish_leaf_paint(
+                node,
+                leaf_candidate,
+                leaf_paint::Mutation::BackgroundImage,
+                outcome,
+            );
+            preserve_main_layout |= leaf_preserved;
             frame_diagnostics::record_style_cache_invalidation(
                 document.identity(),
                 node.identity(),
@@ -6705,8 +6723,9 @@ impl HostState {
     }
 
     /// Invalidates styles after one ordinary HTML `data-*` attribute mutation.
-    /// Layout remains document-wide: this path only retains computed-style and
-    /// pseudo-style cache entries outside the affected light-DOM subtree.
+    /// Computed-style locality follows selector dependencies. Geometry normally
+    /// remains document-wide; a proven empty absolute background leaf can keep
+    /// its existing clean main-document layout for unchanged `data-loaded`.
     fn invalidate_data_attribute_for_node(
         &mut self,
         node: &NodeHandle,
@@ -6721,6 +6740,11 @@ impl HostState {
                     NonInlineFullStyleInvalidation::OrdinaryNodeMutation,
                 );
             } else {
+                let leaf_candidate = if attribute_name == "data-loaded" {
+                    self.leaf_paint_candidate(node)
+                } else {
+                    Err("not_data_loaded")
+                };
                 let mut outcome = "deferred_resolver";
                 if let Some(entry) = self.document_styles.get_mut(&document.identity()) {
                     entry.needs_full_sample = true;
@@ -6746,9 +6770,13 @@ impl HostState {
                     node.identity(),
                     outcome,
                 );
-                // A visible subtree can still affect document geometry. This
-                // optimization deliberately stops at resolver cache locality.
-                self.invalidate_document_style_outputs(&document, false);
+                let preserve_main_layout = self.finish_leaf_paint(
+                    node,
+                    leaf_candidate,
+                    leaf_paint::Mutation::DataLoaded,
+                    outcome,
+                );
+                self.invalidate_document_style_outputs(&document, preserve_main_layout);
             }
         }
         if matches!(node.tag_name().as_deref(), Some("iframe" | "frame"))

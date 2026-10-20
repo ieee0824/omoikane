@@ -519,6 +519,23 @@ pub(super) fn record_style_cache_invalidation(
     }
 }
 
+/// Bounded geometry-policy evidence under the existing attribute trace flag.
+pub(super) fn record_leaf_paint_reuse(
+    node_id: usize,
+    mutation: &'static str,
+    reason: &'static str,
+) {
+    if style_cache_invalidation_trace_enabled() {
+        eprintln!(
+            "{}",
+            crate::diagnostics::json_record(
+                "OMOIKANE_LEAF_PAINT_REUSE",
+                &serde_json::json!({"node_id": node_id, "mutation": mutation, "reason": reason, "kept_geometry": reason == "keep"}),
+            )
+        );
+    }
+}
+
 pub(super) struct ScrollTargetScope {
     started: Option<Instant>,
 }

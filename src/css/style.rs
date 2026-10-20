@@ -8,6 +8,7 @@ mod forced_colors;
 mod generic_transform;
 pub(crate) mod grid_properties;
 pub(crate) mod individual_transform;
+mod leaf_paint;
 mod page;
 mod property_id;
 mod sibling_functions;
