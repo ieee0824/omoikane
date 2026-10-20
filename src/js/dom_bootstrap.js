@@ -29379,16 +29379,47 @@ export const __omoikane_service_worker_lifecycle = {};
     });
   }
 
+  const intersectionObserverEntryStates = browsingInput.intersectionObserverEntryStates ||
+    (browsingInput.intersectionObserverEntryStates = new WeakMap());
+  function intersectionObserverEntryState(entry) {
+    const state = safeWeakMapGet(intersectionObserverEntryStates, entry);
+    if (state === undefined) throw new IntrinsicTypeError("Illegal invocation");
+    return state;
+  }
+
   class IntersectionObserverEntry {
     constructor(init) {
-      this.time = globalThis.performance.now();
-      this.target = init.target;
-      this.rootBounds = init.rootBounds;
-      this.boundingClientRect = init.boundingClientRect;
-      this.intersectionRect = init.intersectionRect;
-      this.isIntersecting = init.isIntersecting;
-      this.intersectionRatio = init.intersectionRatio;
+      safeWeakMapSet(intersectionObserverEntryStates, this, {
+        time: globalThis.performance.now(),
+        target: init.target,
+        rootBounds: init.rootBounds,
+        boundingClientRect: init.boundingClientRect,
+        intersectionRect: init.intersectionRect,
+        isIntersecting: init.isIntersecting,
+        intersectionRatio: init.intersectionRatio,
+      });
     }
+
+    get time() { return intersectionObserverEntryState(this).time; }
+    get target() { return intersectionObserverEntryState(this).target; }
+    get rootBounds() { return intersectionObserverEntryState(this).rootBounds; }
+    get boundingClientRect() {
+      return intersectionObserverEntryState(this).boundingClientRect;
+    }
+    get intersectionRect() { return intersectionObserverEntryState(this).intersectionRect; }
+    get isIntersecting() { return intersectionObserverEntryState(this).isIntersecting; }
+    get intersectionRatio() { return intersectionObserverEntryState(this).intersectionRatio; }
+  }
+  for (const attribute of [
+    "time", "target", "rootBounds", "boundingClientRect", "intersectionRect",
+    "isIntersecting", "intersectionRatio",
+  ]) {
+    const descriptor = safeGetOwnPropertyDescriptor(IntersectionObserverEntry.prototype, attribute);
+    safeDefineProperty(IntersectionObserverEntry.prototype, attribute, {
+      get: descriptor.get,
+      enumerable: true,
+      configurable: true,
+    });
   }
 
   const activeIntersectionObservers = new Set();

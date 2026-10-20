@@ -11204,6 +11204,234 @@ fn intersection_observer_fires_callback_on_observe() {
 }
 
 #[test]
+fn intersection_observer_entry_exposes_readonly_webidl_attributes() {
+    let mut runtime = runtime_from_html(
+        r#"<div id="box" style="position:absolute;left:10px;top:20px;width:20px;height:10px"></div>"#,
+    );
+    runtime.set_viewport(320.0, 200.0);
+    runtime
+        .eval(
+            r#"
+            globalThis.ioEntryContractFailures = "callback-not-delivered";
+            const ioEntryAttributeNames = [
+                "time", "target", "rootBounds", "boundingClientRect",
+                "intersectionRect", "isIntersecting", "intersectionRatio",
+            ];
+            const ioEntryTarget = document.getElementById("box");
+            const ioEntryObserver = new IntersectionObserver(entries => {
+                const entry = entries[0];
+                const prototype = IntersectionObserverEntry.prototype;
+                const descriptors = ioEntryAttributeNames.map(name =>
+                    Object.getOwnPropertyDescriptor(prototype, name));
+                const brandChecks = descriptors.every(descriptor => {
+                    try {
+                        descriptor.get.call({});
+                        return false;
+                    } catch (error) {
+                        return error instanceof TypeError;
+                    }
+                });
+                const intrinsicTypeError = TypeError;
+                let intrinsicBrandCheck = false;
+                try {
+                    window.TypeError = class AuthorTypeError extends Error {};
+                    descriptors[0].get.call({});
+                } catch (error) {
+                    intrinsicBrandCheck = error instanceof intrinsicTypeError &&
+                        !(error instanceof window.TypeError);
+                } finally {
+                    window.TypeError = intrinsicTypeError;
+                }
+                const valuesThroughGetters = descriptors.every((descriptor, index) =>
+                    descriptor.get.call(entry) === entry[ioEntryAttributeNames[index]]);
+                const ratioBeforeAssignment = entry.intersectionRatio;
+                let readonlyAssignmentThrows = false;
+                try {
+                    (function() {
+                        "use strict";
+                        entry.intersectionRatio = 0;
+                    })();
+                } catch (error) {
+                    readonlyAssignmentThrows = error instanceof TypeError;
+                }
+                const checks = {
+                    prototype: Object.getPrototypeOf(entry) === prototype,
+                    prototypeAttributes: ioEntryAttributeNames.every(name => name in prototype),
+                    noOwnAttributes: ioEntryAttributeNames.every(name =>
+                        !Object.prototype.hasOwnProperty.call(entry, name)),
+                    descriptors: descriptors.every(descriptor =>
+                        descriptor !== undefined && typeof descriptor.get === "function" &&
+                        descriptor.set === undefined && descriptor.enumerable === true &&
+                        descriptor.configurable === true),
+                    brands: brandChecks,
+                    intrinsicBrand: intrinsicBrandCheck,
+                    getterValues: valuesThroughGetters,
+                    readonly: readonlyAssignmentThrows &&
+                        entry.intersectionRatio === ratioBeforeAssignment &&
+                        !Object.prototype.hasOwnProperty.call(entry, "intersectionRatio"),
+                    time: Number.isFinite(entry.time) && entry.time >= 0,
+                    target: entry.target === ioEntryTarget,
+                    rootBounds: entry.rootBounds.width === 320 && entry.rootBounds.height === 200,
+                    targetBounds: entry.boundingClientRect.width === 20 &&
+                        entry.boundingClientRect.height === 10,
+                    intersectionBounds: entry.intersectionRect.width === 20 &&
+                        entry.intersectionRect.height === 10,
+                    intersection: entry.isIntersecting === true && entry.intersectionRatio === 1,
+                };
+                ioEntryContractFailures = Object.entries(checks)
+                    .filter(([, passed]) => !passed)
+                    .map(([name]) => name)
+                    .join(",");
+            });
+            ioEntryObserver.observe(ioEntryTarget);
+        "#,
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+
+    let failures = runtime
+        .eval("ioEntryContractFailures")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(failures, "");
+}
+
+#[test]
+fn intersection_observer_entry_getters_accept_same_origin_cross_realm_entries() {
+    let mut runtime = runtime_from_html(
+        r#"<html><body><iframe id="frame" srcdoc='<div id="child-target"></div>'></iframe></body></html>"#,
+    );
+    runtime.run_until_idle().unwrap();
+
+    let result = runtime
+        .eval(
+            r#"
+            (() => {
+                const child = document.getElementById("frame").contentWindow;
+                const childTarget = child.document.getElementById("child-target");
+                const rect = {
+                    x: 0, y: 0, width: 1, height: 1,
+                    top: 0, right: 1, bottom: 1, left: 0,
+                };
+                const init = target => ({
+                    target,
+                    rootBounds: rect,
+                    boundingClientRect: rect,
+                    intersectionRect: rect,
+                    isIntersecting: true,
+                    intersectionRatio: 1,
+                });
+                const parentEntry = new IntersectionObserverEntry(init(document.body));
+                const childEntry = new child.IntersectionObserverEntry(init(childTarget));
+                const names = [
+                    "time", "target", "rootBounds", "boundingClientRect",
+                    "intersectionRect", "isIntersecting", "intersectionRatio",
+                ];
+                const parentGetters = names.map(name => Object.getOwnPropertyDescriptor(
+                    IntersectionObserverEntry.prototype, name).get);
+                const childGetters = names.map(name => Object.getOwnPropertyDescriptor(
+                    child.IntersectionObserverEntry.prototype, name).get);
+                let parentRejectsPlainObject = false;
+                try {
+                    parentGetters[0].call({ target: childTarget });
+                } catch (error) {
+                    parentRejectsPlainObject = error instanceof TypeError;
+                }
+                let childRejectsPlainObject = false;
+                try {
+                    childGetters[0].call({ target: childTarget });
+                } catch (error) {
+                    childRejectsPlainObject = error instanceof child.TypeError;
+                }
+                return parentGetters.every((getter, index) =>
+                    getter.call(childEntry) === childEntry[names[index]]) &&
+                    childGetters.every((getter, index) =>
+                        getter.call(parentEntry) === parentEntry[names[index]]) &&
+                    parentEntry.target === document.body && childEntry.target === childTarget &&
+                    parentRejectsPlainObject && childRejectsPlainObject;
+            })()
+        "#,
+        )
+        .unwrap();
+    assert_eq!(result.as_boolean(), Some(true));
+}
+
+#[test]
+fn intersection_observer_entry_passes_google_polyfill_native_detector() {
+    let mut runtime = runtime_from_html(r#"<div id="box"></div>"#);
+    runtime
+        .eval(
+            r#"
+            const detectorNativeObserver = window.IntersectionObserver;
+            const detectorNativeEntry = window.IntersectionObserverEntry;
+            const detectorNativeSetTimeout = window.setTimeout;
+            let detectorReplacementInstalls = 0;
+            let detectorTimerRegistrations = 0;
+            let detectorState;
+            try {
+                window.setTimeout = function() {
+                    detectorTimerRegistrations++;
+                    return 1;
+                };
+                (function installGoogleIntersectionObserverDetectorReplica() {
+                    if ("IntersectionObserver" in window &&
+                        "IntersectionObserverEntry" in window &&
+                        "intersectionRatio" in window.IntersectionObserverEntry.prototype) {
+                        if (!("isIntersecting" in window.IntersectionObserverEntry.prototype)) {
+                            Object.defineProperty(
+                                window.IntersectionObserverEntry.prototype,
+                                "isIntersecting",
+                                { get() { return this.intersectionRatio > 0; } },
+                            );
+                        }
+                        return;
+                    }
+                    detectorReplacementInstalls++;
+                    window.IntersectionObserverEntry = class PolyfillIntersectionObserverEntry {};
+                    window.IntersectionObserver = class PolyfillIntersectionObserver {
+                        observe() { setTimeout(() => {}, 100); }
+                    };
+                })();
+                const detectorProbe = new window.IntersectionObserver(() => {});
+                detectorProbe.observe(document.getElementById("box"));
+                detectorState = [
+                    window.IntersectionObserver === detectorNativeObserver,
+                    window.IntersectionObserverEntry === detectorNativeEntry,
+                    detectorReplacementInstalls,
+                    detectorTimerRegistrations,
+                ];
+            } finally {
+                window.IntersectionObserver = detectorNativeObserver;
+                window.IntersectionObserverEntry = detectorNativeEntry;
+                window.setTimeout = detectorNativeSetTimeout;
+            }
+
+            globalThis.detectorNativeDeliveries = 0;
+            const detectorNativeDeliveryObserver = new detectorNativeObserver(entries => {
+                if (entries.length === 1 && entries[0] instanceof detectorNativeEntry &&
+                    entries[0].target === document.getElementById("box") &&
+                    entries[0].isIntersecting === true) {
+                    detectorNativeDeliveries++;
+                }
+            });
+            detectorNativeDeliveryObserver.observe(document.getElementById("box"));
+        "#,
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+
+    let result = runtime
+        .eval("JSON.stringify([...detectorState, detectorNativeDeliveries])")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(result, "[true,true,0,0,1]");
+}
+
+#[test]
 fn intersection_observer_reobserve_before_delivery_is_coalesced() {
     let doc = NodeHandle::document();
     let div = NodeHandle::element("div");
