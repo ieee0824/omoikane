@@ -18327,7 +18327,12 @@ fn computed_style_native(
         .and_then(JsValue::as_string)
         .map(|name| name.to_std_string_escaped());
     let needs_used_size = !flush_only && name.as_deref().is_none_or(cssom_property_uses_used_size);
-    let style = resolve_native_computed_style(args, needs_used_size, context)?;
+    let needs_logical_aliases = !flush_only
+        && name
+            .as_deref()
+            .is_none_or(ComputedStyle::has_logical_cssom_alias);
+    let style =
+        resolve_native_computed_style(args, needs_used_size, needs_logical_aliases, context)?;
     // A synchronous flush samples transitions before event dispatch, but its
     // caller does not need to materialize a property map until a later read.
     if flush_only {
@@ -18379,6 +18384,7 @@ fn cssom_property_uses_used_size(name: &str) -> bool {
 fn resolve_native_computed_style(
     args: &[JsValue],
     needs_used_size: bool,
+    needs_logical_aliases: bool,
     context: &mut Context,
 ) -> JsResult<Option<ComputedStyle>> {
     let node_id = parse_node_id(args.first(), context)?;
@@ -18422,6 +18428,11 @@ fn resolve_native_computed_style(
         else {
             return Ok(None);
         };
+        // Only full snapshots and projected logical longhands need alias
+        // fields. Other reads do not observe these owned snapshot mutations.
+        if !needs_logical_aliases {
+            return Ok(Some(style));
+        }
         let Some(resolver) = document_style_resolver(&mut state, &document) else {
             return Ok(None);
         };

@@ -530,46 +530,53 @@ impl ComputedStyle {
             .insert(PropertyId::Transform, ComputedValue::Keyword("none".into()));
     }
 
+    const LOGICAL_CSSOM_ALIASES: &[&str] = &[
+        "inline-size",
+        "block-size",
+        "min-inline-size",
+        "min-block-size",
+        "max-inline-size",
+        "max-block-size",
+        "inset-inline-start",
+        "inset-inline-end",
+        "inset-block-start",
+        "inset-block-end",
+        "margin-inline-start",
+        "margin-inline-end",
+        "margin-block-start",
+        "margin-block-end",
+        "padding-inline-start",
+        "padding-inline-end",
+        "padding-block-start",
+        "padding-block-end",
+        "border-inline-start-width",
+        "border-inline-end-width",
+        "border-block-start-width",
+        "border-block-end-width",
+        "border-inline-start-style",
+        "border-inline-end-style",
+        "border-block-start-style",
+        "border-block-end-style",
+        "border-inline-start-color",
+        "border-inline-end-color",
+        "border-block-start-color",
+        "border-block-end-color",
+        "border-start-start-radius",
+        "border-start-end-radius",
+        "border-end-start-radius",
+        "border-end-end-radius",
+    ];
+
+    /// Reports whether projecting this CSSOM longhand needs a logical alias.
+    pub(crate) fn has_logical_cssom_alias(name: &str) -> bool {
+        Self::LOGICAL_CSSOM_ALIASES.contains(&name)
+    }
+
     /// Exposes logical aliases of the final physical values to computed CSSOM.
     /// This runs after layout has resolved used width and height.
     pub(crate) fn populate_logical_cssom(&mut self, flex_or_grid_item: bool) {
         let flow = logical_flow_from_properties(&self.properties);
-        for name in [
-            "inline-size",
-            "block-size",
-            "min-inline-size",
-            "min-block-size",
-            "max-inline-size",
-            "max-block-size",
-            "inset-inline-start",
-            "inset-inline-end",
-            "inset-block-start",
-            "inset-block-end",
-            "margin-inline-start",
-            "margin-inline-end",
-            "margin-block-start",
-            "margin-block-end",
-            "padding-inline-start",
-            "padding-inline-end",
-            "padding-block-start",
-            "padding-block-end",
-            "border-inline-start-width",
-            "border-inline-end-width",
-            "border-block-start-width",
-            "border-block-end-width",
-            "border-inline-start-style",
-            "border-inline-end-style",
-            "border-block-start-style",
-            "border-block-end-style",
-            "border-inline-start-color",
-            "border-inline-end-color",
-            "border-block-start-color",
-            "border-block-end-color",
-            "border-start-start-radius",
-            "border-start-end-radius",
-            "border-end-start-radius",
-            "border-end-end-radius",
-        ] {
+        for &name in Self::LOGICAL_CSSOM_ALIASES {
             let Some(physical) = flow.physical_name(name) else {
                 continue;
             };

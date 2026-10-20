@@ -96,3 +96,54 @@ fn container_dependent_computed_values_use_current_layout() {
         "container-relative colors must use the new container size"
     );
 }
+
+#[test]
+fn named_logical_cssom_reads_match_full_snapshots_after_flow_changes() {
+    let document = crate::html::TreeBuilder::parse(
+        "<div id='target' style='width:80px;height:40px;color:rgb(10,20,30);\
+         margin:1px 2px 3px 4px;padding:5px 6px 7px 8px;\
+         border-style:solid;border-width:1px 2px 3px 4px;min-width:auto;min-height:auto'></div>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let result = eval_text(
+        &mut runtime,
+        r#"
+        (() => {
+            const element = document.getElementById('target');
+            const style = getComputedStyle(element);
+            for (const [writingMode, direction] of [
+                ['horizontal-tb', 'ltr'], ['horizontal-tb', 'rtl'],
+                ['vertical-rl', 'ltr'], ['vertical-lr', 'rtl']
+            ]) {
+                element.style.writingMode = writingMode;
+                element.style.direction = direction;
+                const snapshot = new Map(style.cssText.split(';').filter(Boolean).map(row => {
+                    const colon = row.indexOf(':');
+                    return [row.slice(0, colon).trim(), row.slice(colon + 1).trim()];
+                }));
+                for (const [name, value] of snapshot) {
+                    if (style.getPropertyValue(name) !== value) {
+                        throw new Error(writingMode + '/' + direction + ': ' + name);
+                    }
+                }
+                if (style.color !== 'rgb(10, 20, 30)' || style.width !== '80px') {
+                    throw new Error('physical value changed');
+                }
+                const inlineSize = writingMode === 'horizontal-tb' ? '80px' : '40px';
+                if (style.inlineSize !== inlineSize || style.minInlineSize !== '0px'
+                    || style.borderInlineStartColor !== 'rgb(10, 20, 30)') {
+                    throw new Error('logical value changed');
+                }
+            }
+            const shell = document.createElement('section');
+            shell.style.display = 'flex';
+            document.body.appendChild(shell);
+            shell.appendChild(element);
+            if (style.minInlineSize !== 'auto') throw new Error('flex auto minimum changed');
+            return 'ok';
+        })()
+    "#,
+    );
+    assert_eq!(result, "ok");
+}
