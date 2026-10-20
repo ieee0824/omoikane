@@ -2368,6 +2368,13 @@ fn position() {
 }
 
 #[test]
+fn stack_trace_is_empty_without_an_active_frame() {
+    let context = Context::default();
+
+    assert_eq!(context.stack_trace().count(), 0);
+}
+
+#[test]
 fn stack_frames_expose_their_own_script_or_module_host_defined() {
     let context = &mut Context::default();
     context

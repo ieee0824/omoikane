@@ -772,17 +772,10 @@ impl Context {
     /// The stack trace is returned ordered with the most recent frames first.
     #[inline]
     pub fn stack_trace(&self) -> impl Iterator<Item = &CallFrame> {
-        // Create a list containing the previous frames plus the current frame.
-        let frames: Vec<_> = self
-            .vm
-            .frames
-            .iter()
-            .chain(std::iter::once(&self.vm.frame))
-            .collect();
-
-        // The first frame is always a dummy frame (see `Vm` implementation for more details),
-        // so skip the dummy frame and return the reversed list so that the most recent frames are first.
-        frames.into_iter().skip(1).rev()
+        (!self.vm.frames.is_empty())
+            .then_some(&self.vm.frame)
+            .into_iter()
+            .chain(self.vm.frames.iter().skip(1).rev())
     }
 
     /// Returns stack frames with their actual execution Realms, most recent first.
