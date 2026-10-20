@@ -10623,6 +10623,104 @@ fn completed_element_animation_state_keeps_the_full_cache_clear_fallback() {
 }
 
 #[test]
+fn style_clock_effects_separate_retained_and_changed_animation_states() {
+    let animated = NodeHandle::element("div");
+    animated.set_attribute("id", "animated-element");
+    let pseudo_host = NodeHandle::element("div");
+    pseudo_host.set_attribute("id", "animated-pseudo");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes widen { from { width: 10px } to { width: 30px } } \
+             #animated-element { animation: widen .1s linear forwards } \
+             #animated-pseudo::before { content: ''; animation: widen 1s linear forwards }",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        resolver.advance_style_clocks(0.0, true),
+        StyleClockEffects::default()
+    );
+    resolver.computed_style_shared(&animated);
+    resolver
+        .computed_pseudo_style_shared(&pseudo_host, PseudoElement::Before)
+        .unwrap();
+
+    assert_eq!(
+        resolver.advance_style_clocks(500.0, true),
+        StyleClockEffects {
+            animation_changed: true,
+            animation_requires_layout: true,
+            retained_animation_elements: 1,
+            retained_animation_pseudos: 1,
+            changed_animation_elements: 1,
+            changed_animation_pseudos: 1,
+            ..StyleClockEffects::default()
+        }
+    );
+    assert_eq!(
+        resolver.advance_style_clocks(750.0, true),
+        StyleClockEffects {
+            animation_changed: true,
+            animation_requires_layout: true,
+            retained_animation_elements: 1,
+            retained_animation_pseudos: 1,
+            changed_animation_pseudos: 1,
+            ..StyleClockEffects::default()
+        }
+    );
+    let unchanged = resolver.advance_style_clocks(750.0, true);
+    assert_eq!(
+        unchanged,
+        StyleClockEffects {
+            retained_animation_elements: 1,
+            retained_animation_pseudos: 1,
+            ..StyleClockEffects::default()
+        }
+    );
+    assert!(!unchanged.changed());
+    assert!(!unchanged.requires_layout());
+}
+
+#[test]
+fn style_clock_effects_distinguish_transition_layout_and_paint_changes() {
+    for (property, start, end, expected, requires_layout) in [
+        ("width", "10px", "30px", ComputedValue::Px(20.0), true),
+        ("opacity", "0", "1", ComputedValue::Number(0.5), false),
+    ] {
+        let element = NodeHandle::element("div");
+        let mut resolver = StyleResolver::new();
+        element.set_attribute(
+            "style",
+            format!("{property}:{start};transition:{property} 1s linear"),
+        );
+        resolver.computed_style_shared(&element);
+        element.set_attribute(
+            "style",
+            format!("{property}:{end};transition:{property} 1s linear"),
+        );
+        resolver.invalidate_style_cache_for_test();
+        resolver.computed_style_shared(&element);
+        let effects = resolver.advance_style_clocks(500.0, false);
+        assert_eq!(
+            effects,
+            StyleClockEffects {
+                transition_changed: true,
+                transition_requires_layout: requires_layout,
+                ..StyleClockEffects::default()
+            }
+        );
+        assert!(effects.changed());
+        assert_eq!(effects.requires_layout(), requires_layout);
+        assert_eq!(
+            resolver.computed_style_shared(&element).get(property),
+            Some(&expected)
+        );
+    }
+}
+
+#[test]
 fn live_animation_clock_installation_evicts_unregistered_snapshots() {
     let element = NodeHandle::element("div");
     let mut resolver = StyleResolver::new();

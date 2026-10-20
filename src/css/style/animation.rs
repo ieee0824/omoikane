@@ -190,6 +190,50 @@ pub(crate) struct AnimationTimeline {
     elements: HashMap<(usize, Option<PseudoElement>), AnimationState>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AnimationClockEffects {
+    requires_layout: bool,
+    retained_elements: usize,
+    retained_pseudos: usize,
+    changed_elements: usize,
+    changed_pseudos: usize,
+}
+
+impl AnimationClockEffects {
+    fn changed(self) -> bool {
+        self.changed_elements != 0 || self.changed_pseudos != 0
+    }
+}
+
+/// Bounded summary of one transition and animation clock sample.
+///
+/// The summary contains counts and booleans only. It does not retain DOM nodes,
+/// property names, CSS values, or source locations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StyleClockEffects {
+    pub(crate) transition_changed: bool,
+    pub(crate) transition_requires_layout: bool,
+    pub(crate) animation_changed: bool,
+    pub(crate) animation_requires_layout: bool,
+    pub(crate) retained_animation_elements: usize,
+    pub(crate) retained_animation_pseudos: usize,
+    pub(crate) changed_animation_elements: usize,
+    pub(crate) changed_animation_pseudos: usize,
+}
+
+impl StyleClockEffects {
+    /// Whether either sampled clock requires cached styles to be invalidated.
+    pub(crate) fn changed(self) -> bool {
+        self.transition_changed || self.animation_changed
+    }
+
+    /// Whether the current invalidation policy requires rebuilt geometry.
+    pub(crate) fn requires_layout(self) -> bool {
+        self.transition_requires_layout
+            || (self.animation_changed && self.animation_requires_layout)
+    }
+}
+
 impl AnimationTimeline {
     pub(super) fn applies_will_change(
         &self,
@@ -201,22 +245,33 @@ impl AnimationTimeline {
             .map(|state| state.applies_will_change(self.now_ms))
     }
 
-    fn set_time(&mut self, now_ms: f64) -> bool {
+    fn set_time(&mut self, now_ms: f64) -> AnimationClockEffects {
         let next = if now_ms.is_finite() {
             now_ms.max(self.now_ms)
         } else {
             self.now_ms
         };
-        let mut changed = false;
-        self.layout_changed = false;
-        for state in self.elements.values() {
+        let mut effects = AnimationClockEffects::default();
+        for ((_, pseudo), state) in &self.elements {
+            if pseudo.is_some() {
+                effects.retained_pseudos += 1;
+            } else {
+                effects.retained_elements += 1;
+            }
             let sample_changed = state.progress(self.now_ms) != state.progress(next)
                 || state.applies_will_change(self.now_ms) != state.applies_will_change(next);
-            changed |= sample_changed;
-            self.layout_changed |= sample_changed && state.spec.requires_layout;
+            if sample_changed {
+                if pseudo.is_some() {
+                    effects.changed_pseudos += 1;
+                } else {
+                    effects.changed_elements += 1;
+                }
+                effects.requires_layout |= state.spec.requires_layout;
+            }
         }
         self.now_ms = next;
-        changed
+        self.layout_changed = effects.requires_layout;
+        effects
     }
     fn sample(
         &mut self,
@@ -322,20 +377,26 @@ impl StyleResolver {
     /// cache rebuilds. First activation drops static snapshots; later pseudo-only
     /// samples retain ordinary element styles. This is an effect at the rendering
     /// lifecycle boundary.
-    pub(crate) fn set_animation_time_ms(&mut self, time_ms: f64) -> bool {
+    fn sample_animation_time_ms(&mut self, time_ms: f64) -> AnimationClockEffects {
         let first_live_sample = self.animation_timeline.is_none();
         let timeline = self.animation_timeline.get_or_insert_with(Default::default);
         let timeline = timeline.get_mut();
-        let changed = timeline.set_time(time_ms);
-        let pseudo_only = changed && timeline.elements.keys().all(|(_, pseudo)| pseudo.is_some());
-        if first_live_sample || (changed && !pseudo_only) {
+        let effects = timeline.set_time(time_ms);
+        let pseudo_only = effects.changed() && effects.retained_elements == 0;
+        if first_live_sample || (effects.changed() && !pseudo_only) {
             self.cache.clear();
         }
-        if first_live_sample || changed {
+        if first_live_sample || effects.changed() {
             self.pseudo_cache.clear();
         }
-        changed
+        effects
     }
+
+    /// Advances the live sampling clock while preserving its change-only result.
+    pub(crate) fn set_animation_time_ms(&mut self, time_ms: f64) -> bool {
+        self.sample_animation_time_ms(time_ms).changed()
+    }
+
     /// Whether the most recent live sample can change layout geometry.
     pub(crate) fn animation_sample_requires_layout(&self) -> bool {
         self.animation_timeline
@@ -343,6 +404,35 @@ impl StyleResolver {
             .is_some_and(|timeline| timeline.borrow().layout_changed)
     }
 
+    /// Advances both live style clocks and returns a value-only diagnostic
+    /// summary. Existing cache invalidation policy remains inside the clock
+    /// setters so callers cannot observe a sampled clock with stale caches.
+    pub(crate) fn advance_style_clocks(
+        &mut self,
+        time_ms: f64,
+        live_animations: bool,
+    ) -> StyleClockEffects {
+        let transition_changed = self.set_transition_time_ms(time_ms);
+        // Preserve the existing conservative policy: a retained layout-affecting
+        // transition participates in the combined result whenever either clock
+        // changes, even if this transition sample itself did not advance.
+        let transition_requires_layout = self.running_transitions_require_layout();
+        let animation = if live_animations {
+            self.sample_animation_time_ms(time_ms)
+        } else {
+            AnimationClockEffects::default()
+        };
+        StyleClockEffects {
+            transition_changed,
+            transition_requires_layout,
+            animation_changed: animation.changed(),
+            animation_requires_layout: animation.requires_layout,
+            retained_animation_elements: animation.retained_elements,
+            retained_animation_pseudos: animation.retained_pseudos,
+            changed_animation_elements: animation.changed_elements,
+            changed_animation_pseudos: animation.changed_pseudos,
+        }
+    }
     pub(crate) fn take_animation_timeline(&mut self) -> Option<AnimationTimeline> {
         let timeline = self.animation_timeline.take().map(RefCell::into_inner);
         if timeline.is_some() {

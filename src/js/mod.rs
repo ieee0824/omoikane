@@ -7054,29 +7054,21 @@ impl HostState {
         if !needs_rebuild {
             let transition_time_ms = self.event_loop.rendering_time_ms();
             let live_animations = self.live_css_animations;
-            let (time_changed, requires_layout) = self
+            let clock_effects = self
                 .document_styles
                 .get_mut(&document_id)
                 .and_then(|entry| entry.resolver.as_mut())
-                .map(|resolver| {
-                    let changed = resolver.set_transition_time_ms(transition_time_ms);
-                    let animation_changed =
-                        live_animations && resolver.set_animation_time_ms(transition_time_ms);
-                    (
-                        changed || animation_changed,
-                        resolver.running_transitions_require_layout()
-                            || (animation_changed && resolver.animation_sample_requires_layout()),
-                    )
-                })
-                .unwrap_or((false, false));
-            if time_changed {
+                .map(|resolver| resolver.advance_style_clocks(transition_time_ms, live_animations))
+                .unwrap_or_default();
+            frame_diagnostics::record_style_clock_effects(document_id, clock_effects);
+            if clock_effects.changed() {
                 if document_id == self.document.identity() {
                     self.style_generation = self.style_generation.saturating_add(1);
-                    if requires_layout {
+                    if clock_effects.requires_layout() {
                         self.capture_scroll_offsets_before_layout();
                         self.invalidate_layout_root("animated_style_requires_layout");
                     }
-                } else if requires_layout {
+                } else if clock_effects.requires_layout() {
                     // Paint-only child animations keep their unscrolled geometry.
                     if let Some(entry) = self.document_styles.get_mut(&document_id) {
                         entry.child_layout = None;

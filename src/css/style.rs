@@ -1,6 +1,7 @@
 //! CSS cascade and computed style resolution.
 
 mod animation;
+pub(crate) use animation::StyleClockEffects;
 mod counter_readers;
 mod font_palette;
 mod forced_colors;

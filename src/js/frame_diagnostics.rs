@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use super::event_loop::ScriptSourceLocation;
+use crate::css::style::StyleClockEffects;
 
 fn raf_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -159,6 +160,39 @@ fn scroll_trace_enabled() -> bool {
 fn style_cache_invalidation_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_ATTRIBUTE_SET").is_some())
+}
+
+fn style_clock_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_PAINT").is_some())
+}
+
+fn style_clock_data(document_id: usize, effects: StyleClockEffects) -> serde_json::Value {
+    serde_json::json!({
+        "document_id": document_id,
+        "transition_changed": effects.transition_changed,
+        "transition_requires_layout": effects.transition_requires_layout,
+        "animation_changed": effects.animation_changed,
+        "animation_requires_layout": effects.animation_requires_layout,
+        "retained_animation_elements": effects.retained_animation_elements,
+        "retained_animation_pseudos": effects.retained_animation_pseudos,
+        "changed_animation_elements": effects.changed_animation_elements,
+        "changed_animation_pseudos": effects.changed_animation_pseudos,
+    })
+}
+
+/// Records a bounded summary when changed clocks require rebuilt geometry.
+pub(super) fn record_style_clock_effects(document_id: usize, effects: StyleClockEffects) {
+    if !style_clock_trace_enabled() || !effects.changed() || !effects.requires_layout() {
+        return;
+    }
+    eprintln!(
+        "{}",
+        crate::diagnostics::json_record(
+            "OMOIKANE_STYLE_CLOCK",
+            &style_clock_data(document_id, effects)
+        )
+    );
 }
 
 /// Records only the bounded cache-policy outcome; CSS names and values are omitted.
@@ -589,6 +623,36 @@ mod tests {
         assert_eq!(attribute_kind("Class"), "class");
         assert_eq!(attribute_kind("id"), "id");
         assert_eq!(attribute_kind("data-private-value"), "other");
+    }
+
+    #[test]
+    fn style_clock_record_has_only_bounded_effects_and_counts() {
+        let effects = StyleClockEffects {
+            transition_changed: true,
+            transition_requires_layout: false,
+            animation_changed: true,
+            animation_requires_layout: true,
+            retained_animation_elements: 2,
+            retained_animation_pseudos: 3,
+            changed_animation_elements: 1,
+            changed_animation_pseudos: 2,
+        };
+        assert_eq!(
+            style_clock_data(41, effects),
+            serde_json::json!({
+                "document_id": 41,
+                "transition_changed": true,
+                "transition_requires_layout": false,
+                "animation_changed": true,
+                "animation_requires_layout": true,
+                "retained_animation_elements": 2,
+                "retained_animation_pseudos": 3,
+                "changed_animation_elements": 1,
+                "changed_animation_pseudos": 2,
+            })
+        );
+        assert!(effects.changed());
+        assert!(effects.requires_layout());
     }
 
     #[test]
