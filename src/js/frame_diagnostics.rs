@@ -1,7 +1,76 @@
 //! Optional per-rendering-opportunity diagnostics for synchronous page work.
 
 use std::cell::RefCell;
+use std::sync::OnceLock;
 use std::time::Instant;
+
+fn raf_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_RAF").is_some())
+}
+
+fn source_label(source: &str) -> String {
+    match url::Url::parse(source) {
+        Ok(mut url) if matches!(url.scheme(), "http" | "https") => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        }
+        Ok(url) => format!("{}:", url.scheme()),
+        Err(_) => "<inline-or-local>".into(),
+    }
+}
+
+pub(super) fn raf_source(context: &boa_engine::Context) -> Option<serde_json::Value> {
+    if !raf_enabled() {
+        return None;
+    }
+    // requestAnimationFrame is a direct public native binding, so the first
+    // JavaScript frame is its caller; no trusted-bootstrap frame is skipped.
+    let frame = context.stack_trace().next()?;
+    let location = frame.position();
+    let position = location.position?;
+    let file = match &location.path {
+        boa_engine::vm::SourcePath::Path(path) => source_label(&path.to_string_lossy()),
+        _ => "<anonymous>".into(),
+    };
+    Some(serde_json::json!({
+        "file": file, "line": position.line_number(), "column": position.column_number(),
+    }))
+}
+
+pub(super) fn record_raf_schedule(
+    id: u64,
+    document: Option<usize>,
+    source: Option<serde_json::Value>,
+) {
+    if raf_enabled() {
+        eprintln!(
+            "OMOIKANE_RAF_SCHEDULE {}",
+            serde_json::json!({
+                "id": id, "document_id": document, "source": source,
+            })
+        );
+    }
+}
+
+pub(super) fn start_raf_callback() -> Option<Instant> {
+    raf_enabled().then(Instant::now)
+}
+
+pub(super) fn record_raf_execution(id: u64, document: Option<usize>, started: Option<Instant>) {
+    if let Some(started) = started {
+        eprintln!(
+            "OMOIKANE_RAF_EXECUTE {}",
+            serde_json::json!({
+                "id": id, "document_id": document,
+                "duration_ms": started.elapsed().as_secs_f64() * 1000.0,
+            })
+        );
+    }
+}
 
 #[derive(Default)]
 struct FrameSample {
@@ -144,6 +213,19 @@ impl Drop for LayoutSample {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raf_source_labels_omit_credentials_queries_fragments_and_inline_code() {
+        assert_eq!(
+            source_label("https://user:password@example.test/render.js?token=secret#part"),
+            "https://example.test/render.js"
+        );
+        assert_eq!(
+            source_label("data:text/javascript,secret_inline_code"),
+            "data:"
+        );
+        assert_eq!(source_label("/private/user/path.js"), "<inline-or-local>");
+    }
 
     fn frame_depth() -> usize {
         FRAMES.with(|frames| frames.borrow().len())

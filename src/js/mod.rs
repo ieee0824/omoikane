@@ -87,6 +87,7 @@ use cross_origin_isolation::{
     coep_corp_body, coep_inheritance_body, coop_navigation_from_body, coop_navigation_to_body,
     policy_name, report_envelope, sanitize_report_url,
 };
+mod attribute_assignment;
 mod canvas_blit;
 #[cfg(test)]
 mod canvas_blit_tests;
@@ -11464,6 +11465,7 @@ impl JsRuntime {
             let _document = document_id
                 .map(|document_id| activate_module_document(&self.host_state, document_id));
             let stage_started = detail.stage_start();
+            let raf_started = frame_diagnostics::start_raf_callback();
             let result = self.with_active_host(|context| {
                 let callable = callback.as_callable().ok_or_else(|| {
                     JsError::from(
@@ -11475,6 +11477,7 @@ impl JsRuntime {
                 Ok(())
             });
             detail.record_raf_call(stage_started);
+            frame_diagnostics::record_raf_execution(id, document_id, raf_started);
             if let Some(old_realm) = old_realm {
                 self.context.enter_realm(old_realm);
             }
@@ -11603,6 +11606,7 @@ impl JsRuntime {
                 continue;
             }
             let old_realm = realm.map(|realm| self.context.enter_realm(realm));
+            let raf_started = frame_diagnostics::start_raf_callback();
             let result = if let Some(callable) = callback.as_callable() {
                 let args = [JsValue::from(timestamp)];
                 let this = JsValue::undefined();
@@ -11632,6 +11636,7 @@ impl JsRuntime {
                     .with_message("animation frame callback is not callable")
                     .into())
             };
+            frame_diagnostics::record_raf_execution(id, document_id, raf_started);
             if let Some(old_realm) = old_realm {
                 self.context.enter_realm(old_realm);
             }
@@ -19329,6 +19334,7 @@ fn request_animation_frame_native(
             .with_message("requestAnimationFrame callback must be callable")
             .into());
     }
+    let source = frame_diagnostics::raf_source(context);
     let binding = current_iframe_realm(context);
     // Resolve ownership from the executing Context Realm first. Inline child
     // scripts run in a cached iframe Realm even when no asynchronous module
@@ -19351,6 +19357,7 @@ fn request_animation_frame_native(
             .borrow_mut()
             .event_loop
             .schedule_animation_frame_with_realm(callback, realm, document_id);
+        frame_diagnostics::record_raf_schedule(id, document_id, source);
         if !owner_is_live {
             state.borrow_mut().event_loop.cancel_animation_frame(id);
         }
@@ -21126,6 +21133,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         // Setting the resource attribute of a connected `<iframe>`/`<object>`
         // starts a fresh navigation; detect it before `name` is moved into
         // `set_attribute`. Any other attribute leaves navigation untouched.
+        attribute_assignment::trace(&node, &name, &value);
         let resource_attr = node.tag_name().and_then(|tag| {
             if tag.eq_ignore_ascii_case("iframe") && name.eq_ignore_ascii_case("srcdoc") {
                 Some("srcdoc")
