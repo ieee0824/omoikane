@@ -186,6 +186,13 @@ jobs:
           name: jit-gate4-partition-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: .artifacts/js-benchmark/
           if-no-files-found: error
+      - name: Upload upstream WPT server diagnostics
+        if: always() && matrix.shard == 'compatibility'
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-gate4-wptserve-attempt-${{ github.run_attempt }}
+          path: .artifacts/wptserve/
+          if-no-files-found: warn
 
   # Preserve the existing required-check name; missing/failed partitions are no-go.
   jit-stress:
