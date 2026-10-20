@@ -7,6 +7,58 @@ use crate::dom::{NodeHandle, ShadowRootMode};
 use super::*;
 
 #[test]
+fn property_id_lookup_matches_string_lookup_for_every_longhand() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "color:red;width:12px;transform:translateX(1px)");
+    let mut style = StyleResolver::new().computed_style(&element);
+
+    for id in PropertyId::ALL {
+        assert_eq!(
+            style.get_by_id(*id),
+            style.get(id.as_str()),
+            "{} must address the same computed value by id and name",
+            id.as_str()
+        );
+    }
+
+    let canonical_color = style.get_by_id(PropertyId::Color).cloned();
+    assert!(style.get("COLOR").is_none());
+    style
+        .properties
+        .insert("COLOR", ComputedValue::Number(9001.0));
+    style
+        .properties
+        .insert("transition", ComputedValue::Keyword("all 1s".into()));
+    style
+        .properties
+        .insert("not-a-real-property", ComputedValue::Number(9002.0));
+
+    assert_eq!(
+        style.get("COLOR"),
+        Some(&ComputedValue::Number(9001.0)),
+        "uppercase names retain exact string fallback semantics"
+    );
+    assert_eq!(style.get_by_id(PropertyId::Color), canonical_color.as_ref());
+    assert_eq!(
+        style.get("transition"),
+        Some(&ComputedValue::Keyword("all 1s".into()))
+    );
+    assert_eq!(
+        style.get("not-a-real-property"),
+        Some(&ComputedValue::Number(9002.0))
+    );
+
+    for id in PropertyId::ALL {
+        assert_eq!(
+            style.get_by_id(*id),
+            style.get(id.as_str()),
+            "{}",
+            id.as_str()
+        );
+    }
+}
+
+#[test]
 fn text_shadow_paused_snapshot_interpolates_negative_delay() {
     let element = NodeHandle::element("div");
     let mut resolver = StyleResolver::new();

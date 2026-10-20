@@ -446,6 +446,11 @@ impl ComputedStyle {
         self.properties.get(name)
     }
 
+    /// Returns a computed longhand by its canonical property identity.
+    pub(crate) fn get_by_id(&self, id: PropertyId) -> Option<&ComputedValue> {
+        self.properties.get(&id)
+    }
+
     /// Returns a snapshot of all computed properties, keyed by name.
     ///
     /// The map is built on each call; use [`Self::get`] to read a single

@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::css::style::PropertyId;
 use crate::css::{
     AffineTransform, ComputedDirection, ComputedFloat, ComputedPosition, ComputedStyle,
     ComputedValue, ComputedWritingMode, ContainerContext, Matrix4, PseudoElement, StyleResolver,
@@ -4598,20 +4599,27 @@ pub(crate) fn establishes_positioned_containing_block(style: &ComputedStyle) -> 
 /// Whether this box anchors fixed descendants instead of the viewport.
 /// Identity transforms still establish a containing block.
 pub(crate) fn establishes_fixed_containing_block(style: &ComputedStyle) -> bool {
-    ["transform", "translate", "rotate", "scale", "perspective"]
-        .iter()
-        .any(|property| {
-            computed_keyword(style, property)
-                .is_some_and(|value| !value.eq_ignore_ascii_case("none"))
+    const TRANSFORM_PROPERTIES: &[(PropertyId, &str)] = &[
+        (PropertyId::Transform, "transform"),
+        (PropertyId::Translate, "translate"),
+        (PropertyId::Rotate, "rotate"),
+        (PropertyId::Scale, "scale"),
+        (PropertyId::Perspective, "perspective"),
+    ];
+    let keyword = |property| match style.get_by_id(property) {
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => Some(value.as_str()),
+        _ => None,
+    };
+
+    TRANSFORM_PROPERTIES.iter().any(|(property, _)| {
+        keyword(*property).is_some_and(|value| !value.eq_ignore_ascii_case("none"))
+    }) || keyword(PropertyId::WillChange).is_some_and(|features| {
+        features.split(',').any(|feature| {
+            TRANSFORM_PROPERTIES
+                .iter()
+                .any(|(_, name)| feature.trim().eq_ignore_ascii_case(name))
         })
-        || computed_keyword(style, "will-change").is_some_and(|features| {
-            features.split(',').any(|feature| {
-                ["transform", "translate", "rotate", "scale", "perspective"]
-                    .iter()
-                    .any(|name| feature.trim().eq_ignore_ascii_case(name))
-            })
-        })
-        || has_containment(style, "layout")
+    }) || has_containment(style, "layout")
         || has_containment(style, "paint")
 }
 

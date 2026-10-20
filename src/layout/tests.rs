@@ -12731,3 +12731,46 @@ fn skipped_content_visibility_uses_intrinsic_inline_size_for_shrink_to_fit_boxes
     assert!(report.skipped_nodes.contains(&hidden.identity()));
     assert!(report.skipped_nodes.contains(&automatic.identity()));
 }
+
+fn computed_style_for_fixed_containing_block_contract(
+    declarations: &str,
+) -> crate::css::ComputedStyle {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", declarations);
+    StyleResolver::new().computed_style(&element)
+}
+
+#[test]
+fn fixed_containing_block_property_matrix_preserves_existing_semantics() {
+    let cases = [
+        ("initial values", "", false),
+        (
+            "explicit transform none values",
+            "transform:none;translate:none;rotate:none;scale:none;perspective:none;will-change:auto;contain:none",
+            false,
+        ),
+        ("transform", "transform:translateX(1px)", true),
+        ("translate", "translate:1px 0px", true),
+        ("rotate", "rotate:1deg", true),
+        ("scale identity", "scale:1", true),
+        ("perspective", "perspective:100px", true),
+        ("will-change transform", "will-change:transform", true),
+        ("will-change translate", "will-change:translate", true),
+        ("will-change rotate", "will-change:rotate", true),
+        ("will-change scale", "will-change:scale", true),
+        ("will-change perspective", "will-change:perspective", true),
+        ("unrelated will-change", "will-change:opacity", false),
+        ("layout containment", "contain:layout", true),
+        ("paint containment", "contain:paint", true),
+        ("size-only containment", "contain:size", false),
+    ];
+
+    for (name, declarations, expected) in cases {
+        let style = computed_style_for_fixed_containing_block_contract(declarations);
+        assert_eq!(
+            establishes_fixed_containing_block(&style),
+            expected,
+            "{name}: {declarations}"
+        );
+    }
+}

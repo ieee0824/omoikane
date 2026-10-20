@@ -140,6 +140,7 @@ fn force_opacity_enabled() -> bool {
 #[allow(unused_imports)]
 use base64::Engine;
 
+use crate::css::style::PropertyId;
 use crate::css::{
     AffineTransform, ComputedStyle, ComputedValue, MediaType, Origin, PageMarginBox, PseudoElement,
     StyleResolver, Value, split_top_level_whitespace,
@@ -4983,13 +4984,20 @@ fn is_positioned_for_paint(style: &ComputedStyle) -> bool {
 }
 
 fn has_transform_style(style: &ComputedStyle) -> bool {
+    const TRANSFORM_PROPERTIES: &[(PropertyId, &str)] = &[
+        (PropertyId::Transform, "transform"),
+        (PropertyId::Translate, "translate"),
+        (PropertyId::Rotate, "rotate"),
+        (PropertyId::Scale, "scale"),
+    ];
+
     style.has_transform_animation_context()
-        || style.get("will-change").is_some_and(|value| {
-            value.css_text().split(',').any(|property| ["transform", "translate", "rotate", "scale"].iter().any(|name| property.trim().eq_ignore_ascii_case(name)))
+        || style.get_by_id(PropertyId::WillChange).is_some_and(|value| {
+            value.css_text().split(',').any(|property| TRANSFORM_PROPERTIES.iter().any(|(_, name)| property.trim().eq_ignore_ascii_case(name)))
         })
-        || ["transform", "translate", "rotate", "scale"].iter().any(|property| {
-        matches!(style.get(property), Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("none"))
-    })
+        || TRANSFORM_PROPERTIES.iter().any(|(property, _)| {
+            matches!(style.get_by_id(*property), Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("none"))
+        })
 }
 
 #[derive(Default)]

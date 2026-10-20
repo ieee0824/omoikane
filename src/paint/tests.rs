@@ -11817,3 +11817,119 @@ fn underline_nested_fixed_font_keeps_the_origin_line_despite_child_overrides() {
         .unwrap();
     }
 }
+
+fn computed_style_for_transform_hot_path_contract(declarations: &str) -> crate::css::ComputedStyle {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", declarations);
+    StyleResolver::new().computed_style(&element)
+}
+
+#[test]
+fn paint_transform_style_property_matrix_preserves_existing_semantics() {
+    let cases = [
+        ("initial values", "", false),
+        (
+            "explicit transform none values",
+            "transform:none;translate:none;rotate:none;scale:none;will-change:auto",
+            false,
+        ),
+        ("transform", "transform:translateX(1px)", true),
+        ("translate", "translate:1px 0px", true),
+        ("rotate", "rotate:1deg", true),
+        ("scale identity", "scale:1", true),
+        ("will-change transform", "will-change:transform", true),
+        ("will-change translate", "will-change:translate", true),
+        ("will-change rotate", "will-change:rotate", true),
+        ("will-change scale", "will-change:scale", true),
+        ("perspective alone", "perspective:100px", false),
+        ("will-change perspective", "will-change:perspective", false),
+        ("unrelated will-change", "will-change:opacity", false),
+    ];
+
+    for (name, declarations, expected) in cases {
+        let style = computed_style_for_transform_hot_path_contract(declarations);
+        assert_eq!(
+            super::has_transform_style(&style),
+            expected,
+            "{name}: {declarations}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "fixed-workload profiling fixture; run explicitly"]
+fn profile_fixed_transform_property_lookup_hot_paths() {
+    const ITERATIONS_PER_CASE: u64 = 250_000;
+
+    let cases = [
+        (
+            "plain-default-none",
+            computed_style_for_transform_hot_path_contract(""),
+            false,
+            false,
+        ),
+        (
+            "explicit-none",
+            computed_style_for_transform_hot_path_contract(
+                "transform:none;translate:none;rotate:none;scale:none;perspective:none;will-change:auto",
+            ),
+            false,
+            false,
+        ),
+        (
+            "positive-individual-scale",
+            computed_style_for_transform_hot_path_contract("scale:2"),
+            true,
+            true,
+        ),
+        (
+            "will-change-only-scale",
+            computed_style_for_transform_hot_path_contract("will-change:scale"),
+            true,
+            true,
+        ),
+        (
+            "unrelated-will-change",
+            computed_style_for_transform_hot_path_contract("will-change:opacity"),
+            false,
+            false,
+        ),
+    ];
+
+    for (name, style, expected_layout, expected_paint) in cases {
+        assert_eq!(
+            crate::layout::establishes_fixed_containing_block(&style),
+            expected_layout,
+            "layout result for {name}"
+        );
+        assert_eq!(
+            super::has_transform_style(&style),
+            expected_paint,
+            "paint result for {name}"
+        );
+
+        let started = std::time::Instant::now();
+        let mut checksum = 0_u64;
+        for _ in 0..ITERATIONS_PER_CASE {
+            let style = std::hint::black_box(&style);
+            let layout =
+                std::hint::black_box(crate::layout::establishes_fixed_containing_block(style));
+            let paint = std::hint::black_box(super::has_transform_style(style));
+            checksum = checksum.wrapping_add(1 + layout as u64 + (paint as u64) * 2);
+        }
+        let elapsed = started.elapsed();
+        let expected_checksum =
+            ITERATIONS_PER_CASE * (1 + expected_layout as u64 + (expected_paint as u64) * 2);
+
+        assert_eq!(checksum, expected_checksum, "checksum for {name}");
+        eprintln!(
+            "OMOIKANE_PROPERTY_ID_FIXED_PROFILE case={} iterations={} layout={} paint={} elapsed_ns={} checksum={}",
+            name,
+            ITERATIONS_PER_CASE,
+            expected_layout,
+            expected_paint,
+            elapsed.as_nanos(),
+            checksum
+        );
+    }
+}
