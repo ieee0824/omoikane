@@ -8,6 +8,7 @@ pub(crate) mod color;
 pub(crate) mod color4;
 pub(crate) mod form_control;
 pub(crate) mod image;
+mod image_scale;
 mod outline;
 mod print_budget;
 
@@ -1069,6 +1070,24 @@ impl Canvas {
         let shrink_y = destination.height < image.height as f32;
         let source_per_dest_x = image.width as f32 / destination.width;
         let source_per_dest_y = image.height as f32 / destination.height;
+        let scale_plan = if shrink_x || shrink_y {
+            image_scale::ImageScalePlan::try_new(
+                x0..x1,
+                y0..y1,
+                destination.x,
+                destination.y,
+                destination.width,
+                destination.height,
+                image.width,
+                image.height,
+                source_per_dest_x,
+                source_per_dest_y,
+                shrink_x,
+                shrink_y,
+            )
+        } else {
+            None
+        };
 
         for dest_y in y0..y1 {
             for dest_x in x0..x1 {
@@ -1085,31 +1104,41 @@ impl Canvas {
                 }
 
                 let mut color = if shrink_x || shrink_y {
-                    let source_left = if shrink_x {
-                        ((dest_x as f32 - destination.x) * source_per_dest_x)
-                            .clamp(0.0, image.width as f32)
+                    if let Some(plan) = &scale_plan {
+                        plan.sample(image, dest_x, dest_y)
                     } else {
-                        source_x as f32
-                    };
-                    let source_right = if shrink_x {
-                        (((dest_x + 1) as f32 - destination.x) * source_per_dest_x)
-                            .clamp(0.0, image.width as f32)
-                    } else {
-                        source_x as f32 + 1.0
-                    };
-                    let source_top = if shrink_y {
-                        ((dest_y as f32 - destination.y) * source_per_dest_y)
-                            .clamp(0.0, image.height as f32)
-                    } else {
-                        source_y as f32
-                    };
-                    let source_bottom = if shrink_y {
-                        (((dest_y + 1) as f32 - destination.y) * source_per_dest_y)
-                            .clamp(0.0, image.height as f32)
-                    } else {
-                        source_y as f32 + 1.0
-                    };
-                    box_filter_sample(image, source_left, source_top, source_right, source_bottom)
+                        let source_left = if shrink_x {
+                            ((dest_x as f32 - destination.x) * source_per_dest_x)
+                                .clamp(0.0, image.width as f32)
+                        } else {
+                            source_x as f32
+                        };
+                        let source_right = if shrink_x {
+                            (((dest_x + 1) as f32 - destination.x) * source_per_dest_x)
+                                .clamp(0.0, image.width as f32)
+                        } else {
+                            source_x as f32 + 1.0
+                        };
+                        let source_top = if shrink_y {
+                            ((dest_y as f32 - destination.y) * source_per_dest_y)
+                                .clamp(0.0, image.height as f32)
+                        } else {
+                            source_y as f32
+                        };
+                        let source_bottom = if shrink_y {
+                            (((dest_y + 1) as f32 - destination.y) * source_per_dest_y)
+                                .clamp(0.0, image.height as f32)
+                        } else {
+                            source_y as f32 + 1.0
+                        };
+                        box_filter_sample(
+                            image,
+                            source_left,
+                            source_top,
+                            source_right,
+                            source_bottom,
+                        )
+                    }
                 } else {
                     let source_index =
                         ((source_y as u32 * image.width + source_x as u32) * 4) as usize;
@@ -7958,6 +7987,10 @@ impl Canvas {
 mod font_data_url_tests;
 #[cfg(test)]
 mod font_selection_tests;
+#[cfg(test)]
+mod image_scale_baseline_tests;
+#[cfg(test)]
+mod image_scale_post_tests;
 #[cfg(test)]
 mod outline_tests;
 #[cfg(test)]
