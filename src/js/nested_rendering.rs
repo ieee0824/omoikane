@@ -13,7 +13,7 @@ pub(super) fn paint_layout_with_snapshot_attribution(
     web_fonts: &crate::font::WebFontRegistry,
     visited_link_ids: impl IntoIterator<Item = usize>,
     nested_documents: &HashMap<usize, crate::paint::Image>,
-) -> (crate::paint::Canvas, usize) {
+) -> (crate::paint::Canvas, crate::paint::PaintRasterSummary) {
     if diagnostics_enabled {
         crate::paint::paint_layout_with_document_snapshots_counted(
             layout,
@@ -35,7 +35,7 @@ pub(super) fn paint_layout_with_snapshot_attribution(
                 visited_link_ids,
                 nested_documents,
             ),
-            0,
+            crate::paint::PaintRasterSummary::default(),
         )
     }
 }
@@ -122,34 +122,28 @@ fn child_snapshot(
     let raster_style_profile =
         crate::css::style_profile::StyleProfileScope::begin_measurement(diagnostics_enabled, id);
     let raster_started = attribution.stage_start();
-    let ((canvas, nested_snapshot_draw_calls), image_reports) =
-        image_environment.run(false, || {
-            crate::layout::with_image_base_url(base, || {
-                crate::layout::with_image_animation_time(time, || {
-                    paint_layout_with_snapshot_attribution(
-                        diagnostics_enabled,
-                        &layout,
-                        resolver,
-                        viewport,
-                        &entry.web_fonts,
-                        visited,
-                        &children,
-                    )
-                })
+    let ((canvas, raster_summary), image_reports) = image_environment.run(false, || {
+        crate::layout::with_image_base_url(base, || {
+            crate::layout::with_image_animation_time(time, || {
+                paint_layout_with_snapshot_attribution(
+                    diagnostics_enabled,
+                    &layout,
+                    resolver,
+                    viewport,
+                    &entry.web_fonts,
+                    visited,
+                    &children,
+                )
             })
-        });
+        })
+    });
     let raster_style_profile = raster_style_profile.finish();
     let style_profile = match (preparation_style_profile, raster_style_profile) {
         (Some(preparation), Some(raster)) => Some(preparation.merged(raster)),
         (Some(summary), None) | (None, Some(summary)) => Some(summary),
         (None, None) => None,
     };
-    attribution.record_child_raster(
-        id,
-        raster_started,
-        style_profile,
-        nested_snapshot_draw_calls,
-    );
+    attribution.record_child_raster(id, raster_started, style_profile, raster_summary);
     state.queue_image_reports(id, image_reports);
     Ok(Some(canvas.into_image()))
 }

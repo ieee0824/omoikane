@@ -262,6 +262,7 @@ pub(crate) fn paint_text_with_registry(
             nested_documents: None,
             nested_snapshot_draw_calls: None,
             propagated_background_node: None,
+            shadow_masks: None,
         },
         offset,
     );

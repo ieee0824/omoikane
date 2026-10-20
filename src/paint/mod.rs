@@ -1242,6 +1242,7 @@ pub fn paint_layout_with_web_fonts(
     if let Some(background) = viewport_background.color {
         canvas.fill_rect(viewport, background);
     }
+    let shadow_masks = border::FrameShadowMaskCache::new(false);
     text::with_render_glyph_cache(|| {
         paint_box(
             &mut canvas,
@@ -1252,9 +1253,27 @@ pub fn paint_layout_with_web_fonts(
             &fonts,
             web_fonts,
             viewport_background.propagated_node,
+            &shadow_masks,
         );
     });
     canvas
+}
+
+/// Owned counters returned only by the opt-in document-raster attribution path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PaintRasterSummary {
+    pub(crate) nested_snapshot_draw_calls: usize,
+    pub(crate) shadow_masks: border::ShadowMaskCacheSummary,
+}
+
+impl PaintRasterSummary {
+    pub(crate) fn merged(mut self, other: Self) -> Self {
+        self.nested_snapshot_draw_calls = self
+            .nested_snapshot_draw_calls
+            .saturating_add(other.nested_snapshot_draw_calls);
+        self.shadow_masks = self.shadow_masks.merged(other.shadow_masks);
+        self
+    }
 }
 
 /// Paints with a private visited-link color snapshot, restored before return.
@@ -1298,12 +1317,14 @@ pub(crate) fn paint_layout_with_document_snapshots(
         web_fonts,
         visited_link_ids,
         nested_documents,
-        None,
+        false,
     )
+    .0
 }
 
-/// Paints nested documents and returns the number of snapshot draw calls made
-/// after resolving each image and its inherited clip in this traversal.
+/// Paints nested documents and returns owned counters for this document raster.
+/// The counters exclude work done while producing a child snapshot because
+/// each child gets its own measurement scope and cache owner.
 pub(crate) fn paint_layout_with_document_snapshots_counted(
     layout: &LayoutBox,
     resolver: &mut StyleResolver,
@@ -1312,9 +1333,8 @@ pub(crate) fn paint_layout_with_document_snapshots_counted(
     web_fonts: Option<&WebFontRegistry>,
     visited_link_ids: impl IntoIterator<Item = usize>,
     nested_documents: &HashMap<usize, Image>,
-) -> (Canvas, usize) {
-    let snapshot_draw_calls = Cell::new(0);
-    let canvas = paint_layout_with_document_snapshots_internal(
+) -> (Canvas, PaintRasterSummary) {
+    paint_layout_with_document_snapshots_internal(
         layout,
         resolver,
         viewport,
@@ -1322,9 +1342,8 @@ pub(crate) fn paint_layout_with_document_snapshots_counted(
         web_fonts,
         visited_link_ids,
         nested_documents,
-        Some(&snapshot_draw_calls),
-    );
-    (canvas, snapshot_draw_calls.get())
+        true,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1336,9 +1355,11 @@ fn paint_layout_with_document_snapshots_internal(
     web_fonts: Option<&WebFontRegistry>,
     visited_link_ids: impl IntoIterator<Item = usize>,
     nested_documents: &HashMap<usize, Image>,
-    nested_snapshot_draw_calls: Option<&Cell<usize>>,
-) -> Canvas {
+    collect_diagnostics: bool,
+) -> (Canvas, PaintRasterSummary) {
     resolver.begin_visited_paint(visited_link_ids);
+    let shadow_masks = border::FrameShadowMaskCache::new(collect_diagnostics);
+    let snapshot_draw_calls = Cell::new(0);
     let mut canvas = Canvas::new(
         viewport.width.ceil().max(1.0) as u32,
         viewport.height.ceil().max(1.0) as u32,
@@ -1357,8 +1378,9 @@ fn paint_layout_with_document_snapshots_internal(
                 text_fonts: &fonts,
                 web_fonts,
                 nested_documents: Some(nested_documents),
-                nested_snapshot_draw_calls,
+                nested_snapshot_draw_calls: collect_diagnostics.then_some(&snapshot_draw_calls),
                 propagated_background_node: viewport_background.propagated_node,
+                shadow_masks: Some(&shadow_masks),
             },
             PaintBoxOptions {
                 inherited_clip: None,
@@ -1369,7 +1391,13 @@ fn paint_layout_with_document_snapshots_internal(
         );
     });
     resolver.end_visited_paint();
-    canvas
+    (
+        canvas,
+        PaintRasterSummary {
+            nested_snapshot_draw_calls: snapshot_draw_calls.get(),
+            shadow_masks: shadow_masks.summary().unwrap_or_default(),
+        },
+    )
 }
 
 fn paint_box_style(layout: &LayoutBox, resolver: &mut StyleResolver) -> Arc<ComputedStyle> {
@@ -1538,6 +1566,7 @@ fn paint_page_content_fragments(
     web_fonts: Option<&WebFontRegistry>,
     propagated_background_node: Option<usize>,
 ) {
+    let shadow_masks = border::FrameShadowMaskCache::new(false);
     for fragment in &page.fragments {
         let painted_area = Rect {
             width: fragment.source.width.min(fragment.destination.width),
@@ -1563,6 +1592,7 @@ fn paint_page_content_fragments(
             fonts,
             web_fonts,
             propagated_background_node,
+            &shadow_masks,
         );
     }
 }
@@ -2217,6 +2247,7 @@ struct PaintContext<'a> {
     nested_documents: Option<&'a HashMap<usize, Image>>,
     nested_snapshot_draw_calls: Option<&'a Cell<usize>>,
     propagated_background_node: Option<usize>,
+    shadow_masks: Option<&'a border::FrameShadowMaskCache>,
 }
 
 /// Per-box traversal state in the destination surface's coordinate system.
@@ -2243,6 +2274,7 @@ fn paint_box(
     text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
     propagated_background_node: Option<usize>,
+    shadow_masks: &border::FrameShadowMaskCache,
 ) {
     paint_box_internal(
         canvas,
@@ -2255,6 +2287,7 @@ fn paint_box(
             nested_documents: None,
             nested_snapshot_draw_calls: None,
             propagated_background_node,
+            shadow_masks: Some(shadow_masks),
         },
         PaintBoxOptions {
             inherited_clip,
@@ -4419,6 +4452,7 @@ fn paint_box_internal_to(
         text_fonts,
         nested_documents,
         nested_snapshot_draw_calls,
+        shadow_masks,
         ..
     } = context;
     let PaintBoxGeometry {
@@ -4438,7 +4472,7 @@ fn paint_box_internal_to(
 
     if paint_decorations {
         // box-shadow を背景より前（下）に描画する
-        border::paint_box_shadow(canvas, style, border_box, inherited_clip);
+        border::paint_box_shadow(canvas, style, border_box, inherited_clip, shadow_masks);
 
         // `background_list` always supplies at least its default, but keep the
         // arithmetic robust if its parsing contract changes.

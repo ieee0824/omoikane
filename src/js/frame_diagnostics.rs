@@ -190,7 +190,7 @@ struct ChildRasterDetail {
     document_id: usize,
     raster_ms: f64,
     style: StyleProfileSummary,
-    nested_snapshot_draw_calls: usize,
+    raster: crate::paint::PaintRasterSummary,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -204,12 +204,12 @@ struct PaintAttributionSample {
     child_style_cache_hits: usize,
     child_style_cache_misses: usize,
     child_style_outer_compute_ms: f64,
-    child_nested_snapshot_draw_calls: usize,
+    child_raster: crate::paint::PaintRasterSummary,
     child_details: Vec<ChildRasterDetail>,
     child_raster_detail_overflow: usize,
     main_raster_ms: f64,
     main_style: StyleProfileSummary,
-    main_snapshot_draw_calls: usize,
+    main_raster: crate::paint::PaintRasterSummary,
 }
 
 /// Owns one opt-in top-level paint attribution sample without borrowing the
@@ -264,14 +264,14 @@ impl PaintAttributionScope {
         document_id: usize,
         started: Option<Instant>,
         style: Option<StyleProfileSummary>,
-        nested_snapshot_draw_calls: usize,
+        raster: crate::paint::PaintRasterSummary,
     ) {
         let Some(started) = started else { return };
         self.record_child_raster_ms(
             document_id,
             started.elapsed().as_secs_f64() * 1000.0,
             style.unwrap_or_default(),
-            nested_snapshot_draw_calls,
+            raster,
         );
     }
 
@@ -280,7 +280,7 @@ impl PaintAttributionScope {
         document_id: usize,
         raster_ms: f64,
         style: StyleProfileSummary,
-        nested_snapshot_draw_calls: usize,
+        raster: crate::paint::PaintRasterSummary,
     ) {
         let Some(sample) = &mut self.sample else {
             return;
@@ -295,14 +295,12 @@ impl PaintAttributionScope {
             .child_style_cache_misses
             .saturating_add(style.cache_misses);
         sample.child_style_outer_compute_ms += style.outer_compute_ms;
-        sample.child_nested_snapshot_draw_calls = sample
-            .child_nested_snapshot_draw_calls
-            .saturating_add(nested_snapshot_draw_calls);
+        sample.child_raster = sample.child_raster.merged(raster);
         let detail = ChildRasterDetail {
             document_id,
             raster_ms,
             style,
-            nested_snapshot_draw_calls,
+            raster,
         };
         if sample.child_details.len() < MAX_CHILD_RASTER_DETAILS {
             sample.child_details.push(detail);
@@ -316,13 +314,13 @@ impl PaintAttributionScope {
         &mut self,
         started: Option<Instant>,
         style: Option<StyleProfileSummary>,
-        snapshot_draw_calls: usize,
+        raster: crate::paint::PaintRasterSummary,
     ) {
         let Some(started) = started else { return };
         self.record_main_raster_ms(
             started.elapsed().as_secs_f64() * 1000.0,
             style.unwrap_or_default(),
-            snapshot_draw_calls,
+            raster,
         );
     }
 
@@ -330,14 +328,12 @@ impl PaintAttributionScope {
         &mut self,
         raster_ms: f64,
         style: StyleProfileSummary,
-        snapshot_draw_calls: usize,
+        raster: crate::paint::PaintRasterSummary,
     ) {
         if let Some(sample) = &mut self.sample {
             sample.main_raster_ms += raster_ms;
             sample.main_style = style;
-            sample.main_snapshot_draw_calls = sample
-                .main_snapshot_draw_calls
-                .saturating_add(snapshot_draw_calls);
+            sample.main_raster = raster;
         }
     }
 
@@ -371,14 +367,52 @@ fn child_raster_data(detail: &ChildRasterDetail) -> serde_json::Value {
         "style_cache_hits": detail.style.cache_hits,
         "style_cache_misses": detail.style.cache_misses,
         "style_outer_compute_ms": detail.style.outer_compute_ms,
-        "nested_snapshot_draw_calls": detail.nested_snapshot_draw_calls,
+        "nested_snapshot_draw_calls": detail.raster.nested_snapshot_draw_calls,
+        "shadow_masks": shadow_mask_data(detail.raster.shadow_masks, false),
     })
+}
+
+fn shadow_mask_data(
+    summary: crate::paint::border::ShadowMaskCacheSummary,
+    child_aggregate: bool,
+) -> serde_json::Value {
+    let mut data = serde_json::json!({
+        "eligible": summary.eligible,
+        "generated": summary.generated,
+        "hits": summary.hits,
+        "generation_rgba_bytes_avoided": summary.generation_rgba_bytes_avoided,
+        "bypassed_unkeyable": summary.bypassed_unkeyable,
+        "bypassed_oversize": summary.bypassed_oversize,
+        "bypassed_capacity": summary.bypassed_capacity,
+    });
+    let object = data.as_object_mut().expect("shadow mask data is an object");
+    if child_aggregate {
+        object.insert(
+            "retained_entries_sum".to_owned(),
+            summary.retained_entries.into(),
+        );
+        object.insert(
+            "retained_rgba_bytes_sum".to_owned(),
+            summary.retained_rgba_bytes.into(),
+        );
+    } else {
+        object.insert(
+            "retained_entries".to_owned(),
+            summary.retained_entries.into(),
+        );
+        object.insert(
+            "retained_rgba_bytes".to_owned(),
+            summary.retained_rgba_bytes.into(),
+        );
+    }
+    data
 }
 
 fn paint_attribution_data(sample: &PaintAttributionSample, completed: bool) -> serde_json::Value {
     let snapshot_draw_calls = sample
-        .child_nested_snapshot_draw_calls
-        .saturating_add(sample.main_snapshot_draw_calls);
+        .child_raster
+        .nested_snapshot_draw_calls
+        .saturating_add(sample.main_raster.nested_snapshot_draw_calls);
     serde_json::json!({
         "document_id": sample.document_id,
         "completed": completed,
@@ -393,7 +427,8 @@ fn paint_attribution_data(sample: &PaintAttributionSample, completed: bool) -> s
         "child_style_cache_hits": sample.child_style_cache_hits,
         "child_style_cache_misses": sample.child_style_cache_misses,
         "child_style_outer_compute_ms": sample.child_style_outer_compute_ms,
-        "child_nested_snapshot_draw_calls": sample.child_nested_snapshot_draw_calls,
+        "child_nested_snapshot_draw_calls": sample.child_raster.nested_snapshot_draw_calls,
+        "child_shadow_masks": shadow_mask_data(sample.child_raster.shadow_masks, true),
         "child_details": sample.child_details.iter().map(child_raster_data).collect::<Vec<_>>(),
         "child_raster_detail_overflow": sample.child_raster_detail_overflow,
         "main_raster_ms": sample.main_raster_ms,
@@ -401,7 +436,8 @@ fn paint_attribution_data(sample: &PaintAttributionSample, completed: bool) -> s
         "main_style_cache_hits": sample.main_style.cache_hits,
         "main_style_cache_misses": sample.main_style.cache_misses,
         "main_style_outer_compute_ms": sample.main_style.outer_compute_ms,
-        "main_snapshot_draw_calls": sample.main_snapshot_draw_calls,
+        "main_snapshot_draw_calls": sample.main_raster.nested_snapshot_draw_calls,
+        "main_shadow_masks": shadow_mask_data(sample.main_raster.shadow_masks, false),
     })
 }
 
@@ -803,6 +839,23 @@ impl Drop for LayoutSample {
 mod tests {
     use super::*;
 
+    fn raster_summary(nested_snapshot_draw_calls: usize) -> crate::paint::PaintRasterSummary {
+        crate::paint::PaintRasterSummary {
+            nested_snapshot_draw_calls,
+            shadow_masks: crate::paint::border::ShadowMaskCacheSummary {
+                eligible: 3,
+                generated: 4,
+                hits: 1,
+                generation_rgba_bytes_avoided: 4,
+                bypassed_unkeyable: 1,
+                bypassed_oversize: 1,
+                bypassed_capacity: 1,
+                retained_entries: 1,
+                retained_rgba_bytes: 8,
+            },
+        }
+    }
+
     #[test]
     fn raf_source_labels_omit_credentials_queries_fragments_and_inline_code() {
         assert_eq!(
@@ -1048,8 +1101,8 @@ mod tests {
         assert!(scope.stage_start().is_none());
         scope.record_snapshot_candidate();
         scope.record_snapshot_collection_ms(10.0);
-        scope.record_child_raster_ms(2, 20.0, StyleProfileSummary::default(), 3);
-        scope.record_main_raster_ms(30.0, StyleProfileSummary::default(), 4);
+        scope.record_child_raster_ms(2, 20.0, StyleProfileSummary::default(), raster_summary(3));
+        scope.record_main_raster_ms(30.0, StyleProfileSummary::default(), raster_summary(4));
         assert_eq!(scope.finish_data_for_test(true), None);
     }
 
@@ -1079,7 +1132,7 @@ mod tests {
                     cache_misses: 1,
                     outer_compute_ms: 0.5,
                 },
-                1,
+                raster_summary(1),
             );
         }
         scope.record_main_raster_ms(
@@ -1091,7 +1144,7 @@ mod tests {
                 cache_misses: 3,
                 outer_compute_ms: 1.5,
             },
-            2,
+            raster_summary(2),
         );
         let details = (0..MAX_CHILD_RASTER_DETAILS)
             .map(|index| {
@@ -1103,6 +1156,17 @@ mod tests {
                     "style_cache_misses": 1,
                     "style_outer_compute_ms": 0.5,
                     "nested_snapshot_draw_calls": 1,
+                    "shadow_masks": {
+                        "eligible": 3,
+                        "generated": 4,
+                        "hits": 1,
+                        "generation_rgba_bytes_avoided": 4,
+                        "bypassed_unkeyable": 1,
+                        "bypassed_oversize": 1,
+                        "bypassed_capacity": 1,
+                        "retained_entries": 1,
+                        "retained_rgba_bytes": 8,
+                    },
                 })
             })
             .collect::<Vec<_>>();
@@ -1123,6 +1187,17 @@ mod tests {
                 "child_style_cache_misses": 34,
                 "child_style_outer_compute_ms": 17.0,
                 "child_nested_snapshot_draw_calls": 34,
+                "child_shadow_masks": {
+                    "eligible": 102,
+                    "generated": 136,
+                    "hits": 34,
+                    "generation_rgba_bytes_avoided": 136,
+                    "bypassed_unkeyable": 34,
+                    "bypassed_oversize": 34,
+                    "bypassed_capacity": 34,
+                    "retained_entries_sum": 34,
+                    "retained_rgba_bytes_sum": 272,
+                },
                 "child_details": details,
                 "child_raster_detail_overflow": 2,
                 "main_raster_ms": 7.0,
@@ -1131,6 +1206,17 @@ mod tests {
                 "main_style_cache_misses": 3,
                 "main_style_outer_compute_ms": 1.5,
                 "main_snapshot_draw_calls": 2,
+                "main_shadow_masks": {
+                    "eligible": 3,
+                    "generated": 4,
+                    "hits": 1,
+                    "generation_rgba_bytes_avoided": 4,
+                    "bypassed_unkeyable": 1,
+                    "bypassed_oversize": 1,
+                    "bypassed_capacity": 1,
+                    "retained_entries": 1,
+                    "retained_rgba_bytes": 8,
+                },
             }))
         );
     }

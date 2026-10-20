@@ -236,7 +236,7 @@ fn nested_snapshot_draw_count_matches_actual_scaled_draw_calls() {
         (offscreen.identity(), image),
     ]);
 
-    let (canvas, snapshot_draw_calls) = paint_layout_with_document_snapshots_counted(
+    let (canvas, summary) = paint_layout_with_document_snapshots_counted(
         &layout,
         &mut resolver,
         viewport,
@@ -246,7 +246,7 @@ fn nested_snapshot_draw_count_matches_actual_scaled_draw_calls() {
         &nested,
     );
 
-    assert_eq!(snapshot_draw_calls, 2);
+    assert_eq!(summary.nested_snapshot_draw_calls, 2);
     assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 0)));
     assert_eq!(canvas.pixel(30, 5), Some(Color::rgb(255, 255, 255)));
 }

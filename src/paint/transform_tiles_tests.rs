@@ -158,6 +158,94 @@ fn tiled_offsets_preserve_nested_effects_clipping_text_and_stacking() {
     }
 }
 
+fn paint_with_test_shadow_cache(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    use_cache: bool,
+) -> (Canvas, border::ShadowMaskCacheSummary) {
+    let mut canvas = Canvas::new(viewport.width as u32, viewport.height as u32);
+    let shadow_masks = border::FrameShadowMaskCache::new(true);
+    paint_box_internal(
+        &mut canvas,
+        layout,
+        resolver,
+        PaintContext {
+            viewport,
+            text_fonts: &[],
+            web_fonts: None,
+            nested_documents: None,
+            nested_snapshot_draw_calls: None,
+            propagated_background_node: None,
+            shadow_masks: use_cache.then_some(&shadow_masks),
+        },
+        PaintBoxOptions {
+            inherited_clip: None,
+            include_phase_descendants: true,
+            paint_decorations: true,
+            offset: PaintOffset::default(),
+        },
+    );
+    (canvas, shadow_masks.summary().unwrap())
+}
+
+#[test]
+fn transformed_and_effect_surfaces_share_the_frame_shadow_mask_owner() {
+    for (case, effect) in [
+        ("transform", "transform:translateX(5px)"),
+        ("opacity", "opacity:0.5"),
+        ("filter", "filter:blur(1px)"),
+    ] {
+        let host = NodeHandle::element("main");
+        host.set_attribute("class", "host");
+        for class_name in ["card first", "card second"] {
+            let card = NodeHandle::element("div");
+            card.set_attribute("class", class_name);
+            host.append_child(card);
+        }
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                ".host {{display:block;position:relative;width:140px;height:60px;{effect}}}\
+                 .card {{display:block;position:absolute;top:12px;width:32px;height:24px;\
+                         border-radius:6px;background:white;box-shadow:0 0 6px 2px rgba(20,40,80,.7)}}\
+                 .first {{left:12px}} .second {{left:72px}}"
+            ))
+            .unwrap(),
+        );
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 180.0,
+            height: 90.0,
+        };
+        let layout = crate::layout::layout_tree(&host, &mut resolver, viewport).unwrap();
+        let (expected, disabled) =
+            paint_with_test_shadow_cache(&layout, &mut resolver, viewport, false);
+        if case == "transform" {
+            assert!(!layout.transform.is_identity());
+            TRANSFORM_SURFACE_STATS.with(|stats| stats.set((0, 0, 0)));
+        } else {
+            let _ = take_effect_surface_pixels();
+        }
+        let (actual, enabled) =
+            paint_with_test_shadow_cache(&layout, &mut resolver, viewport, true);
+
+        assert_pixels(&actual, &expected, case);
+        if case == "transform" {
+            assert!(TRANSFORM_SURFACE_STATS.with(|stats| stats.get().0) > 0);
+        } else {
+            assert!(take_effect_surface_pixels() > 0, "{case}");
+        }
+        assert_eq!(disabled, border::ShadowMaskCacheSummary::default());
+        assert_eq!(enabled.eligible, 2, "{case}");
+        assert_eq!(enabled.generated, 1, "{case}");
+        assert_eq!(enabled.hits, 1, "{case}");
+        assert_eq!(enabled.retained_entries, 1, "{case}");
+    }
+}
+
 // Frozen pre-#649 tile implementation: deliberately copies and translates the
 // subtree to provide an independent pixel reference for the shared-layout path.
 pub(super) fn paint_reference(
@@ -210,6 +298,7 @@ pub(super) fn paint_reference(
         nested_documents: None,
         nested_snapshot_draw_calls: None,
         propagated_background_node: None,
+        shadow_masks: None,
     };
     let Some(source_region) = intersect(
         subtree_paint_bounds(layout, resolver, context),
@@ -255,6 +344,7 @@ pub(super) fn paint_reference(
                     nested_documents: None,
                     nested_snapshot_draw_calls: None,
                     propagated_background_node: None,
+                    shadow_masks: None,
                 },
                 PaintBoxOptions {
                     inherited_clip: None,

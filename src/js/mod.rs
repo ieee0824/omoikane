@@ -9227,7 +9227,7 @@ impl JsRuntime {
             document_id,
         );
         let main_raster_started = paint_attribution.stage_start();
-        let ((canvas, snapshot_draw_calls), image_reports) = image_environment.run(false, || {
+        let ((canvas, raster_summary), image_reports) = image_environment.run(false, || {
             crate::layout::with_image_base_url(base, || {
                 crate::layout::with_image_animation_time(animation_time, || {
                     nested_rendering::paint_layout_with_snapshot_attribution(
@@ -9243,11 +9243,7 @@ impl JsRuntime {
             })
         });
         let style_profile = style_profile.finish();
-        paint_attribution.record_main_raster(
-            main_raster_started,
-            style_profile,
-            snapshot_draw_calls,
-        );
+        paint_attribution.record_main_raster(main_raster_started, style_profile, raster_summary);
         state.queue_image_reports(document_id, image_reports);
         crate::paint::record_render_timings(&crate::paint::RenderTimings {
             layout: layout_time,

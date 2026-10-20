@@ -215,7 +215,10 @@ fn main_layout_cache_repaints_current_inline_canvas_pixels() {
 
 #[test]
 fn child_snapshot_attribution_connects_candidate_raster_style_and_pixels() {
-    let runtime = runtime();
+    let mut runtime = runtime();
+    runtime
+        .eval("a.style.boxShadow='2px 1px 6px 1px #2468ac'")
+        .unwrap();
     let mut state = runtime.host_state.borrow_mut();
     state.ensure_adjusted_layout();
     let layout = state.adjusted_layout_cache.as_ref().unwrap().root.clone();
@@ -246,4 +249,8 @@ fn child_snapshot_attribution_connects_candidate_raster_style_and_pixels() {
             .as_u64()
             .is_some_and(|hits| hits > 0)
     );
+    assert_eq!(data["child_details"][0]["shadow_masks"]["eligible"], 1);
+    assert_eq!(data["child_details"][0]["shadow_masks"]["generated"], 1);
+    assert_eq!(data["child_details"][0]["shadow_masks"]["hits"], 0);
+    assert_eq!(data["child_shadow_masks"]["eligible"], 1);
 }
