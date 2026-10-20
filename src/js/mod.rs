@@ -6541,6 +6541,19 @@ impl HostState {
         }
     }
 
+    /// Drops geometry derived from a document resource while retaining its
+    /// parsed cascade and computed-style caches.
+    fn mark_document_layout_dirty(&mut self, document: &NodeHandle, reason: &'static str) {
+        let document_id = document.identity();
+        if document_id == self.document.identity() {
+            self.capture_scroll_offsets_before_layout();
+            self.invalidate_layout_root(reason);
+        } else if let Some(entry) = self.document_styles.get_mut(&document_id) {
+            entry.child_layout = None;
+        }
+        self.invalidate_paint_cache();
+    }
+
     /// Invalidates values derived from the DOM without rebuilding the parsed
     /// stylesheet/rule-index portion of an existing resolver.
     fn invalidate_document_style_cache(&mut self, document: &NodeHandle) {

@@ -33,6 +33,25 @@ impl HttpTransport for ImageTransport {
     }
 }
 
+fn wait_until_images_settle(runtime: &mut JsRuntime) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        runtime.run_until_idle().unwrap();
+        let pending = runtime
+            .host_state
+            .borrow()
+            .image_resources
+            .values()
+            .any(|images| images.borrow().has_pending_images());
+        if !pending {
+            runtime.run_until_idle().unwrap();
+            return;
+        }
+        assert!(Instant::now() < deadline, "image did not settle");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn blob_svg_load_event_waits_for_its_http_image_dependency() {
     let document = crate::html::TreeBuilder::parse("<body></body>").document();
@@ -165,6 +184,209 @@ fn asynchronous_image_events_wait_for_completion_and_discard_replaced_sources() 
             .to_std_string_escaped(),
         "[\"/fast.png\"]"
     );
+}
+
+#[test]
+fn asynchronous_image_completion_retains_styles_and_rebuilds_main_geometry() {
+    let document = crate::html::TreeBuilder::parse(
+        "<style>html,body{margin:0}img{vertical-align:top}#peer{color:red}</style>\
+         <body><div id='peer'></div></body>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document_and_url(document, "https://image.test/").unwrap();
+    let (entered, started) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    runtime.set_http_resource_transport(Some(Arc::new(ImageTransport {
+        entered,
+        release: Mutex::new(gate),
+    })));
+    runtime.set_nonblocking_image_loading(true);
+    runtime
+        .eval(
+            "globalThis.events=[]; globalThis.image=new Image();\
+             image.onload=()=>events.push('load'); image.onerror=()=>events.push('error');\
+             image.src='/slow.png'; document.body.prepend(image)",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        runtime
+            .eval("image.getBoundingClientRect().width")
+            .unwrap()
+            .as_number(),
+        Some(0.0)
+    );
+    let red = crate::paint::Color::rgb(255, 0, 0);
+    assert_ne!(
+        runtime.paint_current_document().unwrap().pixel(0, 0),
+        Some(red)
+    );
+    let generations = runtime.render_generations();
+    let peer = runtime.document().query_selector("#peer").unwrap();
+    let peer_style = {
+        let mut state = runtime.host_state.borrow_mut();
+        let document_id = state.document.identity();
+        state
+            .document_styles
+            .get_mut(&document_id)
+            .unwrap()
+            .resolver
+            .as_mut()
+            .unwrap()
+            .computed_style_shared(&peer)
+    };
+
+    release.send(()).unwrap();
+    wait_until_images_settle(&mut runtime);
+    let invalidated = runtime.render_generations();
+    assert_eq!(invalidated.style, generations.style);
+    assert_eq!(invalidated.layout, generations.layout);
+    assert!(invalidated.paint > generations.paint);
+    let peer_style_after = {
+        let mut state = runtime.host_state.borrow_mut();
+        let document_id = state.document.identity();
+        assert!(state.layout_root.is_none());
+        let entry = state.document_styles.get_mut(&document_id).unwrap();
+        assert!(!entry.dirty);
+        entry
+            .resolver
+            .as_mut()
+            .unwrap()
+            .computed_style_shared(&peer)
+    };
+    assert!(Arc::ptr_eq(&peer_style, &peer_style_after));
+    assert_eq!(
+        runtime
+            .eval("[image.getBoundingClientRect().width,image.getBoundingClientRect().height].join(',')")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "1,1"
+    );
+    assert!(runtime.render_generations().layout > generations.layout);
+    assert_eq!(
+        runtime.paint_current_document().unwrap().pixel(0, 0),
+        Some(red)
+    );
+    assert_eq!(
+        runtime
+            .eval("JSON.stringify(events)")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "[\"load\"]"
+    );
+}
+
+#[test]
+fn asynchronous_child_image_completion_drops_only_child_geometry() {
+    let document = crate::html::TreeBuilder::parse(
+        "<body><iframe id='frame' style='width:20px;height:20px;border:0'></iframe></body>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document_and_url(document, "https://image.test/").unwrap();
+    let (entered, started) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    runtime.set_http_resource_transport(Some(Arc::new(ImageTransport {
+        entered,
+        release: Mutex::new(gate),
+    })));
+    runtime.set_nonblocking_image_loading(true);
+    runtime
+        .eval(
+            "globalThis.frame=document.getElementById('frame');\
+             frame.srcdoc=\"<style>html,body{margin:0}img{vertical-align:top}#peer{color:red}</style><div id='peer'></div>\";\
+             globalThis.child=frame.contentDocument; globalThis.childImage=child.createElement('img');\
+             childImage.src='https://image.test/slow.png'; child.body.prepend(childImage)",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        runtime
+            .eval("childImage.getBoundingClientRect().width")
+            .unwrap()
+            .as_number(),
+        Some(0.0)
+    );
+    let main_layout_generation = runtime.render_generations().layout;
+    let (child_document, peer, peer_style, child_builds) = {
+        let mut state = runtime.host_state.borrow_mut();
+        let child_document = state
+            .iframe_documents
+            .values()
+            .next()
+            .unwrap()
+            .document
+            .clone();
+        let document_id = child_document.identity();
+        let peer = child_document.query_selector("#peer").unwrap();
+        let child_builds = state.child_layout_builds;
+        let entry = state.document_styles.get_mut(&document_id).unwrap();
+        assert!(!entry.dirty);
+        assert!(entry.child_layout.is_some());
+        let style = entry
+            .resolver
+            .as_mut()
+            .unwrap()
+            .computed_style_shared(&peer);
+        (child_document, peer, style, child_builds)
+    };
+
+    release.send(()).unwrap();
+    wait_until_images_settle(&mut runtime);
+    let peer_style_after = {
+        let mut state = runtime.host_state.borrow_mut();
+        let entry = state
+            .document_styles
+            .get_mut(&child_document.identity())
+            .unwrap();
+        assert!(!entry.dirty);
+        assert!(entry.child_layout.is_none());
+        entry
+            .resolver
+            .as_mut()
+            .unwrap()
+            .computed_style_shared(&peer)
+    };
+    assert!(Arc::ptr_eq(&peer_style, &peer_style_after));
+    assert_eq!(runtime.render_generations().layout, main_layout_generation);
+    assert_eq!(
+        runtime
+            .eval("childImage.getBoundingClientRect().width")
+            .unwrap()
+            .as_number(),
+        Some(1.0)
+    );
+    let state = runtime.host_state.borrow();
+    assert!(state.child_layout_builds > child_builds);
+    assert!(
+        state.document_styles[&child_document.identity()]
+            .child_layout
+            .is_some()
+    );
+}
+
+#[test]
+fn image_layout_invalidation_preserves_a_preexisting_style_rebuild() {
+    let document = crate::html::TreeBuilder::parse(
+        "<style>body{margin:0}</style><body><div id='target'></div></body>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    runtime
+        .eval("document.getElementById('target').getBoundingClientRect().width")
+        .unwrap();
+    let document = runtime.document().clone();
+    let mut state = runtime.host_state.borrow_mut();
+    let document_id = document.identity();
+    state.document_styles.get_mut(&document_id).unwrap().dirty = true;
+    state.mark_document_layout_dirty(&document, "image_resource_completed");
+    assert!(state.document_styles[&document_id].dirty);
+    assert!(state.layout_root.is_none());
 }
 
 #[test]

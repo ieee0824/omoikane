@@ -149,7 +149,7 @@ impl JsRuntime {
             let mut state = self.host_state.borrow_mut();
             state.queue_image_reports(document_id, reports);
             if changed && let Some(document) = state.get_node(document_id) {
-                state.mark_document_style_dirty(&document);
+                state.mark_document_layout_dirty(&document, "image_resource_completed");
             }
         }
         let waiting = std::mem::take(&mut self.host_state.borrow_mut().pending_image_events);
