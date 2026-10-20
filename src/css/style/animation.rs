@@ -74,6 +74,7 @@ struct AnimationSpec {
     direction: AnimationDirection,
     fill: AnimationFill,
     timing: String,
+    requires_layout: bool,
 }
 
 impl AnimationSpec {
@@ -103,6 +104,7 @@ impl AnimationSpec {
             )),
             fill: AnimationFill::from_keyword(&keyword(PropertyId::AnimationFillMode, "none")),
             timing: keyword(PropertyId::AnimationTimingFunction, "ease"),
+            requires_layout: true,
         }
     }
 
@@ -184,6 +186,7 @@ impl AnimationState {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AnimationTimeline {
     now_ms: f64,
+    layout_changed: bool,
     elements: HashMap<(usize, Option<PseudoElement>), AnimationState>,
 }
 
@@ -204,10 +207,14 @@ impl AnimationTimeline {
         } else {
             self.now_ms
         };
-        let changed = self.elements.values().any(|state| {
-            state.progress(self.now_ms) != state.progress(next)
-                || state.applies_will_change(self.now_ms) != state.applies_will_change(next)
-        });
+        let mut changed = false;
+        self.layout_changed = false;
+        for state in self.elements.values() {
+            let sample_changed = state.progress(self.now_ms) != state.progress(next)
+                || state.applies_will_change(self.now_ms) != state.applies_will_change(next);
+            changed |= sample_changed;
+            self.layout_changed |= sample_changed && state.spec.requires_layout;
+        }
         self.now_ms = next;
         changed
     }
@@ -322,6 +329,13 @@ impl StyleResolver {
         }
         changed
     }
+    /// Whether the most recent live sample can change layout geometry.
+    pub(crate) fn animation_sample_requires_layout(&self) -> bool {
+        self.animation_timeline
+            .as_ref()
+            .is_some_and(|timeline| timeline.borrow().layout_changed)
+    }
+
     pub(crate) fn take_animation_timeline(&mut self) -> Option<AnimationTimeline> {
         self.animation_timeline.take().map(RefCell::into_inner)
     }
@@ -388,7 +402,14 @@ impl StyleResolver {
                 .remove(&(node.identity(), pseudo));
             return BTreeMap::new();
         };
-        let spec = AnimationSpec::from_properties(&name, scope, properties);
+        let mut spec = AnimationSpec::from_properties(&name, scope, properties);
+        // Opacity is sampled by paint and does not change containing blocks or
+        // geometry. Unknown/custom properties retain conservative reflow.
+        spec.requires_layout = steps.iter().any(|step| {
+            step.declarations
+                .iter()
+                .any(|declaration| declaration.name != "opacity")
+        });
         let paused = matches!(
             properties.get(&PropertyId::AnimationPlayState),
             Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("paused")

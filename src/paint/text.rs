@@ -362,12 +362,13 @@ pub(super) fn paint_text_with_context(
                 InlineFragmentContent::InlineSpacing(_)
                 | InlineFragmentContent::InlineEdge(_, _) => {}
                 InlineFragmentContent::Image(image, style) => {
-                    let paint = fragment_box_paint_style(fragment, resolver);
-                    paint_inline_image_fragment(
+                    paint_current_inline_image(
                         canvas,
+                        fragment,
                         fragment_rect,
                         image,
-                        paint.as_deref().unwrap_or(style),
+                        style,
+                        resolver,
                         clip,
                         _viewport,
                     );
@@ -397,6 +398,7 @@ pub(super) fn paint_text_with_context(
                         fonts,
                         web_fonts,
                         clip,
+                        _viewport,
                     );
                 }
                 InlineFragmentContent::IconFormControl(style, image, width, height) => {
@@ -424,6 +426,34 @@ pub(super) fn paint_text_with_context(
 /// A text fragment's originating box, keyed the same way as its captured
 /// text decorations, for caching per-origin decoration state on a line.
 type DecorationOrigin = (usize, Option<crate::css::PseudoElement>);
+
+/// Samples canvas backing stores at paint time, independently of cached geometry.
+/// Other replaced fragments keep their layout-time image and animation metadata.
+fn paint_current_inline_image(
+    canvas: &mut Canvas,
+    fragment: &crate::layout::InlineFragment,
+    rect: Rect,
+    image: &Image,
+    style: &ComputedStyle,
+    resolver: &mut crate::css::StyleResolver,
+    clip: Option<Rect>,
+    viewport: Rect,
+) {
+    let current_canvas = fragment
+        .node
+        .has_tag_name("canvas")
+        .then(|| crate::canvas::image(fragment.node.identity()))
+        .flatten();
+    let paint = fragment_box_paint_style(fragment, resolver);
+    paint_inline_image_fragment(
+        canvas,
+        rect,
+        current_canvas.as_ref().unwrap_or(image),
+        paint.as_deref().unwrap_or(style),
+        clip,
+        viewport,
+    );
+}
 
 /// Selects the resolved installed or web font for one text fragment and
 /// paints its glyphs, falling back to placeholder rectangles when no font is
@@ -646,9 +676,18 @@ fn paint_form_control_fragment(
     fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
     clip: Option<Rect>,
+    viewport: Rect,
 ) {
     let paint = fragment_box_paint_style(fragment, resolver);
     let style = paint.as_deref().unwrap_or(style);
+    // Before its first draw a canvas has the same geometry as a media
+    // placeholder. Its first pixels must also appear without rebuilding it.
+    if fragment.node.has_tag_name("canvas")
+        && let Some(image) = crate::canvas::image(fragment.node.identity())
+    {
+        paint_inline_image_fragment(canvas, fragment_rect, &image, style, clip, viewport);
+        return;
+    }
     paint_form_control_background(canvas, layout, fragment, fragment_rect, style, clip);
     let shadows = shadow::style_shadows(style);
     if !shadows.is_empty() {

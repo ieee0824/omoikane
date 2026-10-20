@@ -117,6 +117,7 @@ pub(super) fn document_native(
                 web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
+                child_layout: None,
             },
         );
         Ok(js_string!(serde_json::json!({"id": id, "quirks": quirks}).to_string()).into())

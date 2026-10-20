@@ -87,10 +87,14 @@ use cross_origin_isolation::{
     coep_corp_body, coep_inheritance_body, coop_navigation_from_body, coop_navigation_to_body,
     policy_name, report_envelope, sanitize_report_url,
 };
+#[cfg(test)]
+mod animation_layout_cache_tests;
 mod attribute_assignment;
 mod canvas_blit;
 #[cfg(test)]
 mod canvas_blit_tests;
+#[cfg(test)]
+mod child_layout_cache_tests;
 mod compression_stream;
 #[cfg(test)]
 mod compression_stream_tests;
@@ -2272,11 +2276,8 @@ struct HostState {
     registered_custom_properties:
         HashMap<usize, BTreeMap<String, crate::css::style::RegisteredCustomProperty>>,
     font_loading: font_loading::FontStore,
-    /// Cached layout tree for the **main** document, matching its entry in
-    /// [`HostState::document_styles`]. Rebuilt lazily and only when a layout
-    /// metric (not just a computed style) is requested. Sub-documents do not
-    /// participate in layout (layout metrics for sub-document nodes report
-    /// zero); only computed styles are document-scoped here.
+    /// Cached geometry for the main document. Child documents keep their own
+    /// unscrolled trees in [`DocumentStyleEntry::child_layout`].
     layout_root: Option<LayoutBox>,
     /// Results and persistent inputs for `content-visibility` layout.
     content_visibility_auto_nodes: HashSet<usize>,
@@ -2302,6 +2303,8 @@ struct HostState {
     adjusted_layout_cache: Option<AdjustedLayoutCache>,
     #[cfg(test)]
     adjusted_layout_builds: u64,
+    #[cfg(test)]
+    child_layout_builds: u64,
     #[cfg(test)]
     style_resolver_generation: u64,
     #[cfg(test)]
@@ -2944,6 +2947,8 @@ struct DocumentStyleEntry {
     /// DOM-derived values changed and every element must be sampled once so
     /// transition start/end values are discovered without rebuilding rules.
     needs_full_sample: bool,
+    /// Unscrolled child-document geometry; dropped with the document style entry.
+    child_layout: Option<(Rect, LayoutBox)>,
 }
 
 struct InlineStyleCspSnapshot {
@@ -3018,6 +3023,7 @@ impl HostState {
                 web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
+                child_layout: None,
             },
         );
         let performance_start = std::time::Instant::now();
@@ -3152,6 +3158,8 @@ impl HostState {
             adjusted_layout_cache: None,
             #[cfg(test)]
             adjusted_layout_builds: 0,
+            #[cfg(test)]
+            child_layout_builds: 0,
             #[cfg(test)]
             style_resolver_generation: 0,
             #[cfg(test)]
@@ -4077,6 +4085,7 @@ impl HostState {
                 web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
+                child_layout: None,
             },
         );
         // A failed or policy-blocked load commits the blank fallback, not the
@@ -4238,6 +4247,7 @@ impl HostState {
                 web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
+                child_layout: None,
             },
         );
         self.iframe_documents.insert(
@@ -4909,6 +4919,7 @@ impl HostState {
                 web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
+                child_layout: None,
             },
         );
         self.web_lock_clients
@@ -5255,6 +5266,7 @@ impl HostState {
                 web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
+                child_layout: None,
             },
         );
         self.web_lock_clients
@@ -5349,6 +5361,7 @@ impl HostState {
                 web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
+                child_layout: None,
             },
         );
         self.web_lock_clients
@@ -6476,7 +6489,9 @@ impl HostState {
     fn mark_document_style_dirty(&mut self, document: &NodeHandle) {
         self.form_validation.invalidate();
         let document_id = document.identity();
-        self.document_styles.entry(document_id).or_default().dirty = true;
+        let entry = self.document_styles.entry(document_id).or_default();
+        entry.dirty = true;
+        entry.child_layout = None;
         if document_id == self.document.identity() {
             self.style_generation = self.style_generation.saturating_add(1);
             self.capture_scroll_offsets_before_layout();
@@ -6501,6 +6516,7 @@ impl HostState {
         let document_id = document.identity();
         if let Some(entry) = self.document_styles.get_mut(&document_id) {
             entry.needs_full_sample = true;
+            entry.child_layout = None;
             if let Some(resolver) = entry.resolver.as_mut() {
                 resolver.invalidate_style_cache();
             }
@@ -6714,15 +6730,18 @@ impl HostState {
         }
     }
 
-    /// Drops cached layout for a live main-document node without touching style caches.
+    /// Drops geometry for a node's document without touching style caches.
     fn invalidate_layout_for_node(&mut self, node: &NodeHandle) {
-        if document_root_for_node(node)
-            .is_some_and(|document| document.identity() == self.document.identity())
-        {
+        let Some(document) = document_root_for_node(node) else {
+            return;
+        };
+        if document.identity() == self.document.identity() {
             self.capture_scroll_offsets_before_layout();
             self.invalidate_layout_root("node_layout_invalidated");
-            self.invalidate_paint_cache();
+        } else if let Some(entry) = self.document_styles.get_mut(&document.identity()) {
+            entry.child_layout = None;
         }
+        self.invalidate_paint_cache();
     }
 
     /// Marks the document that `node` currently lives in as stale.
@@ -6756,6 +6775,7 @@ impl HostState {
         self.style_generation = self.style_generation.saturating_add(1);
         for entry in self.document_styles.values_mut() {
             entry.dirty = true;
+            entry.child_layout = None;
         }
         self.capture_scroll_offsets_before_layout();
         self.invalidate_layout_root("all_document_styles_dirty");
@@ -6812,9 +6832,8 @@ impl HostState {
                         live_animations && resolver.set_animation_time_ms(transition_time_ms);
                     (
                         changed || animation_changed,
-                        // Keyframes can animate geometry as well as paint properties;
-                        // conservatively rebuild layout when their sampled values change.
-                        resolver.running_transitions_require_layout() || animation_changed,
+                        resolver.running_transitions_require_layout()
+                            || (animation_changed && resolver.animation_sample_requires_layout()),
                     )
                 })
                 .unwrap_or((false, false));
@@ -6824,6 +6843,11 @@ impl HostState {
                     if requires_layout {
                         self.capture_scroll_offsets_before_layout();
                         self.invalidate_layout_root("animated_style_requires_layout");
+                    }
+                } else if requires_layout {
+                    // Paint-only child animations keep their unscrolled geometry.
+                    if let Some(entry) = self.document_styles.get_mut(&document_id) {
+                        entry.child_layout = None;
                     }
                 }
                 self.invalidate_paint_cache();
@@ -6961,6 +6985,7 @@ impl HostState {
                 web_fonts,
                 dirty: false,
                 needs_full_sample: true,
+                child_layout: None,
             },
         );
         #[cfg(test)]
@@ -18798,6 +18823,20 @@ fn build_child_document_layout(
 ) -> Option<LayoutBox> {
     let document_id = document.identity();
     state.ensure_style_resolver(document);
+    if let Some((cached_viewport, root)) = state
+        .document_styles
+        .get(&document_id)?
+        .child_layout
+        .as_ref()
+        && *cached_viewport == viewport
+    {
+        // Callers apply their own scroll transforms to an owned view.
+        return Some(root.clone());
+    }
+    #[cfg(test)]
+    {
+        state.child_layout_builds += 1;
+    }
     let base = crate::paint::stylesheet::extract_document_base_url(
         document,
         state.base_url_for_document(document_id).as_ref(),
@@ -18820,6 +18859,9 @@ fn build_child_document_layout(
         },
     );
     state.queue_image_reports(document_id, image_reports);
+    if let Some(root) = layout.as_ref() {
+        state.document_styles.get_mut(&document_id)?.child_layout = Some((viewport, root.clone()));
+    }
     layout
 }
 
@@ -23071,12 +23113,16 @@ fn canvas_commit_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         .to_number(context)? as u32;
     let pixels = body_bytes_argument(args.get(3), context)?.unwrap_or_default();
     with_host_state(|state| {
-        let Some(node) = state.borrow().get_node(id) else {
+        let mut state = state.borrow_mut();
+        let Some(node) = state.get_node(id) else {
             return Ok(JsValue::from(false));
         };
-        Ok(JsValue::from(crate::canvas::commit(
-            &node, width, height, pixels,
-        )))
+        let committed = crate::canvas::commit(&node, width, height, pixels);
+        if committed && state.node_is_in_active_document(&node) {
+            // Pixel changes need a new frame, not a new layout tree.
+            state.invalidate_paint_cache();
+        }
+        Ok(JsValue::from(committed))
     })
 }
 
@@ -25334,6 +25380,7 @@ fn create_document_native(
                 web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
+                child_layout: None,
             },
         );
         Ok(JsValue::from(id as f64))
@@ -25371,6 +25418,7 @@ fn parse_xml_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
                 web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
+                child_layout: None,
             },
         );
         Ok(JsValue::from(id as f64))
