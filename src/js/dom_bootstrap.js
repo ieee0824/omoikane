@@ -41,6 +41,8 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeRunMicrotaskCallback = globalThis.__omoikane_run_microtask_callback;
   const nativeCaptureCspSource = globalThis.__omoikane_capture_csp_source;
   const nativeFetch = globalThis.__omoikane_fetch;
+  const nativeCanvasBlit = globalThis.__omoikane_canvas_blit;
+  delete globalThis.__omoikane_canvas_blit;
   const nativeBeginFetch = globalThis.__omoikane_begin_fetch;
   const nativeCancelFetch = globalThis.__omoikane_cancel_fetch;
   const nativeWebSocketConnect = globalThis.__omoikane_websocket_connect;
@@ -14366,6 +14368,16 @@ export const __omoikane_service_worker_lifecycle = {};
       }
       const s=this.__s;let sx=0,sy=0,sw=src.width,sh=src.height,dx,dy,dw,dh;
       if(args.length===2){[dx,dy]=args;dw=sw;dh=sh;}else if(args.length===4){[dx,dy,dw,dh]=args;}else{[sx,sy,sw,sh,dx,dy,dw,dh]=args;}
+      const m=s.style.transform;
+      if(!s.style.clip && s.style.globalAlpha===1 && sw===dw && sh===dh &&
+          m[0]===1 && m[1]===0 && m[2]===0 && m[3]===1 &&
+          typeof dx==="number" && typeof dy==="number" &&
+          nativeCanvasBlit(
+            new Uint8Array(src.pixels.buffer,src.pixels.byteOffset,src.pixels.byteLength),
+            new Uint8Array(s.pixels.buffer,s.pixels.byteOffset,s.pixels.byteLength),
+            src.width,src.height,s.width,s.height,sx,sy,sw,sh,dx+m[4],dy+m[5])) {
+        commitCanvas(this.canvas,s);return;
+      }
       for(let y=0;y<dh;y++)for(let x=0;x<dw;x++){const xx=Math.floor(sx+x*sw/dw),yy=Math.floor(sy+y*sh/dh),i=(yy*src.width+xx)*4;blendCanvasPixel(s,dx+x,dy+y,[src.pixels[i],src.pixels[i+1],src.pixels[i+2],Math.round(src.pixels[i+3]*s.style.globalAlpha)]);}commitCanvas(this.canvas,s);}
     measureText(text){const size=parseFloat(this.__s.style.font)||10;return domInterfaces.makeTextMetrics({width:String(text).length*size*.6,actualBoundingBoxAscent:size*.8,actualBoundingBoxDescent:size*.2});}
     fillText(text,x,y){const s=this.__s,size=parseFloat(s.style.font)||10,w=this.measureText(text).width;this.fillRect(x,y-size*.8,w,size);}

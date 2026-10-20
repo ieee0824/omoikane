@@ -87,6 +87,9 @@ use cross_origin_isolation::{
     coep_corp_body, coep_inheritance_body, coop_navigation_from_body, coop_navigation_to_body,
     policy_name, report_envelope, sanitize_report_url,
 };
+mod canvas_blit;
+#[cfg(test)]
+mod canvas_blit_tests;
 mod compression_stream;
 #[cfg(test)]
 mod compression_stream_tests;
@@ -15763,6 +15766,11 @@ fn register_host_bindings(
             js_string!("__omoikane_worker_close"),
             0,
             NativeFunction::from_copy_closure(worker_close_native),
+        ),
+        (
+            js_string!("__omoikane_canvas_blit"),
+            12,
+            NativeFunction::from_copy_closure(canvas_blit::native),
         ),
         (
             js_string!("__omoikane_canvas_commit"),
