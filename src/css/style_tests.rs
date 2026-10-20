@@ -10505,6 +10505,187 @@ fn live_animation_display_none_keyword_is_ascii_case_insensitive() {
 }
 
 #[test]
+fn pseudo_only_animation_time_retains_elements_and_refreshes_all_pseudos() {
+    let host = NodeHandle::element("div");
+    host.set_attribute("id", "pseudo-host");
+    let unrelated = NodeHandle::element("p");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes widen { from { width: 10px; color: red } \
+             to { width: 30px; color: blue } } \
+             #pseudo-host::before { content: ''; display: list-item; \
+             animation: widen 1s linear forwards } \
+             #pseudo-host::before::marker { content: ''; } \
+             #pseudo-host::first-line { color: green; } \
+             #pseudo-host::first-letter { color: purple; }",
+        )
+        .unwrap(),
+    );
+    resolver.set_animation_time_ms(0.0);
+    let host_before = resolver.computed_style_shared(&host);
+    let unrelated_before = resolver.computed_style_shared(&unrelated);
+    let before = resolver
+        .computed_pseudo_style_shared(&host, PseudoElement::Before)
+        .unwrap();
+    let marker_before = resolver
+        .computed_pseudo_style_shared(&host, PseudoElement::BeforeMarker)
+        .unwrap();
+    let first_line_before = resolver
+        .computed_pseudo_style_shared(&host, PseudoElement::FirstLine)
+        .unwrap();
+    let first_letter_before = resolver
+        .computed_pseudo_style_shared(&host, PseudoElement::FirstLetter)
+        .unwrap();
+    assert_eq!(before.get("width"), Some(&ComputedValue::Px(10.0)));
+
+    assert!(resolver.set_animation_time_ms(500.0));
+    assert!(resolver.animation_sample_requires_layout());
+    let host_after = resolver.computed_style_shared(&host);
+    let unrelated_after = resolver.computed_style_shared(&unrelated);
+    let after = resolver
+        .computed_pseudo_style_shared(&host, PseudoElement::Before)
+        .unwrap();
+    let marker_after = resolver
+        .computed_pseudo_style_shared(&host, PseudoElement::BeforeMarker)
+        .unwrap();
+    let first_line_after = resolver
+        .computed_pseudo_style_shared(&host, PseudoElement::FirstLine)
+        .unwrap();
+    let first_letter_after = resolver
+        .computed_pseudo_style_shared(&host, PseudoElement::FirstLetter)
+        .unwrap();
+
+    assert!(Arc::ptr_eq(&host_before, &host_after));
+    assert!(Arc::ptr_eq(&unrelated_before, &unrelated_after));
+    assert!(!Arc::ptr_eq(&before, &after));
+    assert!(!Arc::ptr_eq(&marker_before, &marker_after));
+    assert!(!Arc::ptr_eq(&first_line_before, &first_line_after));
+    assert!(!Arc::ptr_eq(&first_letter_before, &first_letter_after));
+    assert_eq!(after.get("width"), Some(&ComputedValue::Px(20.0)));
+    assert_eq!(marker_after.get("color"), after.get("color"));
+}
+
+#[test]
+fn completed_element_animation_state_keeps_the_full_cache_clear_fallback() {
+    let animated = NodeHandle::element("div");
+    animated.set_attribute("id", "animated-element");
+    let pseudo_host = NodeHandle::element("div");
+    pseudo_host.set_attribute("id", "animated-pseudo");
+    let unrelated = NodeHandle::element("p");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes widen { from { width: 10px } to { width: 30px } } \
+             #animated-element { animation: widen .1s linear forwards } \
+             #animated-pseudo::before { content: ''; animation: widen 1s linear forwards }",
+        )
+        .unwrap(),
+    );
+    resolver.set_animation_time_ms(0.0);
+    let animated_before = resolver.computed_style_shared(&animated);
+    let unrelated_before = resolver.computed_style_shared(&unrelated);
+    let pseudo_before = resolver
+        .computed_pseudo_style_shared(&pseudo_host, PseudoElement::Before)
+        .unwrap();
+
+    assert!(resolver.set_animation_time_ms(500.0));
+    let animated_completed = resolver.computed_style_shared(&animated);
+    let unrelated_middle = resolver.computed_style_shared(&unrelated);
+    let pseudo_middle = resolver
+        .computed_pseudo_style_shared(&pseudo_host, PseudoElement::Before)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&animated_before, &animated_completed));
+    assert!(!Arc::ptr_eq(&unrelated_before, &unrelated_middle));
+    assert!(!Arc::ptr_eq(&pseudo_before, &pseudo_middle));
+    assert_eq!(
+        animated_completed.get("width"),
+        Some(&ComputedValue::Px(30.0))
+    );
+    assert_eq!(pseudo_middle.get("width"), Some(&ComputedValue::Px(20.0)));
+
+    // The filled element animation is complete, but its `None` key remains in
+    // the timeline. A later pseudo-only sample change must still use the full
+    // fallback rather than treating the retained state as pseudo-only.
+    assert!(resolver.set_animation_time_ms(750.0));
+    let animated_after = resolver.computed_style_shared(&animated);
+    let unrelated_after = resolver.computed_style_shared(&unrelated);
+    let pseudo_after = resolver
+        .computed_pseudo_style_shared(&pseudo_host, PseudoElement::Before)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&animated_completed, &animated_after));
+    assert!(!Arc::ptr_eq(&unrelated_middle, &unrelated_after));
+    assert!(!Arc::ptr_eq(&pseudo_middle, &pseudo_after));
+    assert_eq!(animated_after.get("width"), Some(&ComputedValue::Px(30.0)));
+    assert_eq!(pseudo_after.get("width"), Some(&ComputedValue::Px(25.0)));
+}
+
+#[test]
+fn live_animation_clock_installation_evicts_unregistered_snapshots() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes widen { from { width: 10px } to { width: 30px } } \
+             div { animation: widen 10s linear forwards } \
+             div::before { content: ''; animation: widen 10s linear forwards }",
+        )
+        .unwrap(),
+    );
+    let static_element = resolver.computed_style_shared(&element);
+    let static_pseudo = resolver
+        .computed_pseudo_style_shared(&element, PseudoElement::Before)
+        .unwrap();
+    assert!(resolver.animation_node_ids().is_empty());
+
+    assert!(!resolver.set_animation_time_ms(0.0));
+    let live_element = resolver.computed_style_shared(&element);
+    let live_pseudo = resolver
+        .computed_pseudo_style_shared(&element, PseudoElement::Before)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&static_element, &live_element));
+    assert!(!Arc::ptr_eq(&static_pseudo, &live_pseudo));
+    assert!(!resolver.animation_node_ids().is_empty());
+
+    let timeline = resolver.take_animation_timeline();
+    let static_after_take = resolver.computed_style_shared(&element);
+    let static_pseudo_after_take = resolver
+        .computed_pseudo_style_shared(&element, PseudoElement::Before)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&live_element, &static_after_take));
+    assert!(!Arc::ptr_eq(&live_pseudo, &static_pseudo_after_take));
+
+    let mut destination = StyleResolver::new();
+    destination.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes widen { from { width: 10px } to { width: 30px } } \
+             div { animation: widen 10s linear forwards } \
+             div::before { content: ''; animation: widen 10s linear forwards }",
+        )
+        .unwrap(),
+    );
+    let cached_element = destination.computed_style_shared(&element);
+    let cached_pseudo = destination
+        .computed_pseudo_style_shared(&element, PseudoElement::Before)
+        .unwrap();
+    destination.install_animation_timeline(timeline);
+    assert!(!Arc::ptr_eq(
+        &cached_element,
+        &destination.computed_style_shared(&element),
+    ));
+    assert!(!Arc::ptr_eq(
+        &cached_pseudo,
+        &destination
+            .computed_pseudo_style_shared(&element, PseudoElement::Before)
+            .unwrap(),
+    ));
+}
+
+#[test]
 fn property_registry_rejects_the_same_values_as_the_cascade() {
     for name in SUPPORTED_PROPERTIES.iter().copied().chain([
         "rotate",

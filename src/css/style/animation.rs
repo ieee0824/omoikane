@@ -319,12 +319,19 @@ impl StyleResolver {
     }
 
     /// Enables explicit live sampling, preserving the clock and start times on
-    /// cache rebuilds. This is an effect at the rendering lifecycle boundary.
+    /// cache rebuilds. First activation drops static snapshots; later pseudo-only
+    /// samples retain ordinary element styles. This is an effect at the rendering
+    /// lifecycle boundary.
     pub(crate) fn set_animation_time_ms(&mut self, time_ms: f64) -> bool {
+        let first_live_sample = self.animation_timeline.is_none();
         let timeline = self.animation_timeline.get_or_insert_with(Default::default);
-        let changed = timeline.get_mut().set_time(time_ms);
-        if changed {
+        let timeline = timeline.get_mut();
+        let changed = timeline.set_time(time_ms);
+        let pseudo_only = changed && timeline.elements.keys().all(|(_, pseudo)| pseudo.is_some());
+        if first_live_sample || (changed && !pseudo_only) {
             self.cache.clear();
+        }
+        if first_live_sample || changed {
             self.pseudo_cache.clear();
         }
         changed
@@ -337,10 +344,17 @@ impl StyleResolver {
     }
 
     pub(crate) fn take_animation_timeline(&mut self) -> Option<AnimationTimeline> {
-        self.animation_timeline.take().map(RefCell::into_inner)
+        let timeline = self.animation_timeline.take().map(RefCell::into_inner);
+        if timeline.is_some() {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+        }
+        timeline
     }
     pub(crate) fn install_animation_timeline(&mut self, timeline: Option<AnimationTimeline>) {
         self.animation_timeline = timeline.map(RefCell::new);
+        self.cache.clear();
+        self.pseudo_cache.clear();
     }
     /// Reads playback state without sampling or mutating computed styles.
     pub(crate) fn has_running_animations(&self) -> bool {
