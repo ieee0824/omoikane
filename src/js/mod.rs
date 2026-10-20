@@ -109,6 +109,8 @@ mod dom_string;
 #[cfg(test)]
 mod dom_string_tests;
 mod errors;
+#[cfg(test)]
+mod inline_style_assignment_tests;
 mod trusted_types;
 #[cfg(test)]
 mod trusted_types_tests;

@@ -1028,6 +1028,14 @@ export const __omoikane_service_worker_lifecycle = {};
     "scroll-margin-inline-start", "scroll-margin-inline-end",
     "scroll-margin-block-start", "scroll-margin-block-end",
   ]);
+  // A conservative fast path: every declaration must be an independent,
+  // unaliased longhand. Logical properties, shorthands and vendor aliases keep
+  // the general remove/append ordering below.
+  const independentInlineStyleProperties = new Set([
+    "position", "width", "height", "top", "right", "bottom", "left", "z-index",
+    "display", "cursor", "visibility", "pointer-events", "transform", "opacity",
+    "background-image", "background-clip", "background-color", "color",
+  ]);
   const logicalBoxStyleProperties = new Set([
     "margin-block", "margin-inline", "padding-block", "padding-inline",
     "margin-block-start", "margin-block-end", "margin-inline-start", "margin-inline-end",
@@ -4127,10 +4135,9 @@ export const __omoikane_service_worker_lifecycle = {};
         }
         return "";
       };
-      // Sets a kebab-case property. Existing occurrences are removed and the
-      // replacement is appended, matching CSSOM's declaration-list ordering.
-      // This also collapses redundant declarations (e.g. from cssText) to the
-      // single value returned by getValue/getPriority.
+      // Keep independent declarations in place, avoiding a style-attribute
+      // mutation when value and priority are unchanged. The general path
+      // retains remove/append precedence for logical and shorthand groups.
       const setValue = (kebab, value, priority) => {
         value = String(value);
         if (!kebab.startsWith("--") && !nativeStyleSupports(kebab, value)) return;
@@ -4150,6 +4157,17 @@ export const __omoikane_service_worker_lifecycle = {};
             remaining.push({ name, value: expandedValue, priority: priority || "" });
           }
           writeDecls(remaining, true);
+          return;
+        }
+        const existing = decls.findIndex(d => d.name === kebab);
+        if (existing >= 0 && decls.every((d, i) =>
+            hasSetValue(independentInlineStyleProperties, d.name) &&
+            (i === existing || d.name !== kebab))) {
+          const previous = decls[existing];
+          const nextPriority = priority || "";
+          if (previous.value === value && previous.priority === nextPriority) return;
+          decls[existing] = { name: kebab, value, priority: nextPriority };
+          writeDecls(decls, true);
           return;
         }
         const remaining = decls.filter(d => d.name !== kebab);
@@ -12100,9 +12118,11 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeRegisterValidation = globalThis.__omoikane_register_validation;
   const nativeFlushValidation = globalThis.__omoikane_flush_validation;
   const nativeInvalidateValidation = globalThis.__omoikane_invalidate_validation;
+  const nativeValidationTree = globalThis.__omoikane_validation_tree;
   delete globalThis.__omoikane_register_validation;
   delete globalThis.__omoikane_flush_validation;
   delete globalThis.__omoikane_invalidate_validation;
+  delete globalThis.__omoikane_validation_tree;
   let validationReady = false;
 
   const nativeParserFormOwner = globalThis.__omoikane_parser_form_owner;
@@ -13146,32 +13166,17 @@ export const __omoikane_service_worker_lifecycle = {};
   // their descendants. Shadow trees are independent validation trees.
   function snapshotCssValidity(rootId) {
     const output = [];
-    const roots = [wrapNode(rootId)];
-    while (roots.length) {
-      const root = roots.pop();
-      const records = [];
+    for (const tree of JSON.parse(nativeValidationTree(rootId))) {
+      const records = tree.records;
       const firstIds = new Map();
-      const pending = [{ node: root, parent: -1, form: null }];
-      while (pending.length) {
-        const item = pending.pop();
-        const node = item.node;
-        const element = internalNodeType(node) === 1;
-        const tag = element && hasCanonicalWrapperId(canonicalHtmlElementIds, node) ? internalNodeLocalName(node) : "";
-        const index = records.length;
-        const record = { node, id: internalNodeId(node), tag, parent: item.parent,
-          form: item.form, invalid: 0, value: null };
-        records.push(record);
-        if (element) {
-          const id = nativeAttribute(node, "id");
-          if (id && !firstIds.has(id)) firstIds.set(id, node);
-          const shadow = wrapNode(__omoikane_shadow_root(record.id));
-          if (shadow) roots.push(shadow);
-        }
-        const form = tag === "form" ? node : item.form;
-        const children = internalChildNodes(node);
-        for (let child = children.length - 1; child >= 0; child--) {
-          pending.push({ node: children[child], parent: index, form });
-        }
+      for (const id of tree.first_ids) {
+        firstIds.set(__omoikane_get_attribute(id, "id"), id);
+      }
+      for (const record of records) {
+        record.node = wrapNode(record.id);
+        record.form = record.form === null ? null : wrapNode(record.form);
+        record.invalid = 0;
+        record.value = null;
       }
       const radioGroups = new Map();
       const invalidForms = new Set();
@@ -13183,7 +13188,7 @@ export const __omoikane_service_worker_lifecycle = {};
         const formId = nativeAttribute(node, "form");
         if (parserOwner !== null) record.form = wrapNode(parserOwner);
         else if (formId !== null && internalIsConnected(node)) {
-          const owner = firstIds.get(formId);
+          const owner = wrapNode(firstIds.get(formId));
           record.form = owner && hasCanonicalWrapperId(canonicalHtmlElementIds, owner) &&
             internalNodeLocalName(owner) === "form" ? owner : null;
         }

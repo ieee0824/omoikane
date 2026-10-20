@@ -1,6 +1,8 @@
 //! Shares form-validation results with native selector matching and painting.
 use super::*;
 
+mod tree;
+
 #[derive(Default)]
 pub(super) struct State {
     callbacks: HashMap<usize, JsValue>,
@@ -125,6 +127,7 @@ pub(super) fn flush(node_id: usize, context: &mut Context) -> JsResult<()> {
 }
 
 pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {
+    tree::register(context, bindings)?;
     register_private_builtin_callable(
         context,
         bindings,
