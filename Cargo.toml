@@ -10,6 +10,8 @@ build = "build.rs"
 crate-type = ["rlib", "cdylib"]
 
 [features]
+# Optional per-thread GC timings for script diagnostics; does not enable JIT.
+gc-profile = ["boa_gc/gc-profile"]
 gui = ["dep:softbuffer", "dep:winit", "dep:x11-dl", "dep:windows-sys", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:block2"]
 # Test-only Gate 2 comparison harness. This never selects a production
 # JavaScript engine; it compares the existing Boa embedding with a standalone

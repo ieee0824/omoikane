@@ -178,6 +178,9 @@ cargo run --example screenshot -- --insecure "https://expired.example.com/" out.
 cargo run --features gui --bin omoikane -- "https://example.com/"
 ```
 
+起動・入力・描画と任意のGC時間の採取方法は
+[GUIの性能計測](docs/gui-performance.md) を参照してください。
+
 ウィンドウサイズはそのままページの viewport に反映され、基本的な keyboard/mouse と
 wheel/touchpad 入力は active document に届きます。touch gesture、IME、ブラウザ UI は未実装です。
 

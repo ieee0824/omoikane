@@ -18479,6 +18479,75 @@ fn throwing_dynamic_script_does_not_abort_the_event_loop() {
 }
 
 #[test]
+fn dynamic_classic_declaration_failure_clears_current_script_before_following_script() {
+    let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+    runtime
+        .eval(
+            r#"globalThis.failureCurrentScriptId = null;
+                   globalThis.onerror = () => {
+                       globalThis.failureCurrentScriptId =
+                           document.currentScript && document.currentScript.id;
+                       return true;
+                   };
+                   const failing = document.createElement("script");
+                   failing.id = "failing";
+                   failing.src = "data:text/javascript,let%20undefined%3B%20globalThis.failedBodyRan%20%3D%20true%3B";
+                   document.head.appendChild(failing);"#,
+        )
+        .unwrap();
+
+    // `undefined` is a non-configurable global property. The source parses,
+    // then evaluation fails during global declaration instantiation before its body.
+    runtime.run_until_idle().unwrap();
+
+    assert!(
+        runtime
+            .eval(
+                "failureCurrentScriptId === 'failing' && \
+                 document.currentScript === null && \
+                 typeof failedBodyRan === 'undefined'",
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap(),
+        "the failed script must be current while reporting and cleared afterward",
+    );
+
+    runtime
+        .eval(
+            r#"const following = document.createElement("script");
+                   following.id = "following";
+                   following.src = "data:text/javascript,globalThis.followingScriptId%20%3D%20document.currentScript.id%3B%20globalThis.followingScriptRan%20%3D%20true%3B";
+                   document.head.appendChild(following);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+
+    assert!(
+        runtime
+            .eval(
+                "followingScriptRan === true && \
+                 followingScriptId === 'following' && \
+                 document.currentScript === null",
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap(),
+        "the following script must run with its own currentScript and clean it up",
+    );
+    let errors = runtime.take_task_errors();
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected one declaration error: {errors:?}"
+    );
+    assert!(
+        errors[0].contains("cannot redefine non-configurable global property"),
+        "unexpected declaration error: {errors:?}",
+    );
+}
+
+#[test]
 fn unfetchable_dynamic_script_fires_error_and_does_not_abort_the_event_loop() {
     let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
     runtime

@@ -482,3 +482,157 @@ pub(super) fn clear_force_async_native(
         Ok(JsValue::undefined())
     })
 }
+
+/// Reports collection deltas for a single classic-script phase on its owner
+/// thread. Nested evaluations overlap; callers must not sum nested records.
+#[cfg(feature = "gc-profile")]
+fn trace_gc_phase(
+    phase: &str,
+    source_bytes: usize,
+    before: boa_gc::GcProfile,
+    after: boa_gc::GcProfile,
+    success: bool,
+) {
+    if std::env::var_os("OMOIKANE_TRACE_TASKS").is_none() {
+        return;
+    }
+    let delta = |before: boa_gc::CollectionProfile, after: boa_gc::CollectionProfile| {
+        serde_json::json!({
+            "collections": after.collections.saturating_sub(before.collections),
+            "total_ms": after.total.saturating_sub(before.total).as_secs_f64() * 1000.0,
+            "mark_ms": after.mark.saturating_sub(before.mark).as_secs_f64() * 1000.0,
+            "finalize_ms": after.finalize.saturating_sub(before.finalize).as_secs_f64() * 1000.0,
+            "sweep_ms": after.sweep.saturating_sub(before.sweep).as_secs_f64() * 1000.0,
+        })
+    };
+    eprintln!(
+        "OMOIKANE_CLASSIC_GC {}",
+        serde_json::json!({
+            "phase": phase,
+            "source_bytes": source_bytes,
+            "success": success,
+            "minor": delta(before.minor, after.minor),
+            "major": delta(before.major, after.major),
+        })
+    );
+}
+
+/// Separates initial codeblock creation from evaluation in profiling builds.
+/// `evaluate` reuses this cached block; ordinary builds retain their old path.
+#[cfg(feature = "gc-profile")]
+fn profile_classic_compile(
+    script: &Script,
+    context: &mut Context,
+    source_bytes: usize,
+) -> (JsResult<()>, f64) {
+    let before = boa_gc::profile();
+    let started = std::time::Instant::now();
+    let result = script.codeblock(context).map(|_| ());
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    trace_gc_phase(
+        "compile",
+        source_bytes,
+        before,
+        boa_gc::profile(),
+        result.is_ok(),
+    );
+    (result, elapsed_ms)
+}
+
+impl JsRuntime {
+    /// Parses and evaluates in the already-active Realm; checkpoints stay with
+    /// the caller so parse/evaluation and queued jobs remain separate phases.
+    pub(super) fn evaluate_classic_script_source(
+        &mut self,
+        source: &str,
+        filename: &str,
+        csp_requested_url: &str,
+        muted_errors: bool,
+        start_position: (u32, u32),
+    ) -> JsResult<JsValue> {
+        self.with_active_host(|context| {
+            let metadata = script_errors::classic_script_metadata(
+                muted_errors,
+                Some(csp_requested_url.to_owned()),
+            );
+            #[cfg(feature = "gc-profile")]
+            let before_parse = boa_gc::profile();
+            let parse_started = std::time::Instant::now();
+            let script = Script::parse_with_host_defined(
+                Source::from_reader(source.as_bytes(), Some(Path::new(filename)))
+                    .with_start_position(start_position.0, start_position.1),
+                None,
+                metadata,
+                context,
+            );
+            let parse_ms = parse_started.elapsed().as_secs_f64() * 1000.0;
+            #[cfg(feature = "gc-profile")]
+            trace_gc_phase(
+                "parse",
+                source.len(),
+                before_parse,
+                boa_gc::profile(),
+                script.is_ok(),
+            );
+            let script = script?;
+            #[cfg(feature = "gc-profile")]
+            let (compile_result, compile_ms) = {
+                let (result, elapsed) = profile_classic_compile(&script, context, source.len());
+                (result, Some(elapsed))
+            };
+            #[cfg(not(feature = "gc-profile"))]
+            let (compile_result, compile_ms): (JsResult<()>, Option<f64>) = (Ok(()), None);
+            let did_run = compile_result.is_ok();
+            #[cfg(feature = "gc-profile")]
+            let before_evaluate = boa_gc::profile();
+            let evaluate_started = std::time::Instant::now();
+            let result = compile_result.and_then(|()| script.evaluate(context));
+            let run_ms = evaluate_started.elapsed().as_secs_f64() * 1000.0;
+            // Retain the old total's meaning even when profiling moves the
+            // initial compilation into its own measurement.
+            let evaluate_ms = compile_ms.unwrap_or(0.0) + if did_run { run_ms } else { 0.0 };
+            #[cfg(feature = "gc-profile")]
+            if did_run {
+                trace_gc_phase(
+                    "evaluate",
+                    source.len(),
+                    before_evaluate,
+                    boa_gc::profile(),
+                    result.is_ok(),
+                );
+            }
+            if std::env::var_os("OMOIKANE_TRACE_TASKS").is_some() && parse_ms + evaluate_ms >= 50.0
+            {
+                eprintln!(
+                    "OMOIKANE_CLASSIC_SCRIPT {}",
+                    serde_json::json!({
+                        "source_bytes": source.len(),
+                        "parse_ms": parse_ms,
+                        "compile_ms": compile_ms,
+                        "run_ms": compile_ms.filter(|_| did_run).map(|_| run_ms),
+                        "evaluate_ms": evaluate_ms,
+                        "success": result.is_ok(),
+                    })
+                );
+            }
+            result
+        })
+    }
+
+    /// Performs the existing classic-script microtask checkpoint, optionally
+    /// recording GC on the current owner thread without resetting counters.
+    pub(super) fn run_classic_script_jobs(&mut self, _source_bytes: usize) -> JsResult<()> {
+        #[cfg(feature = "gc-profile")]
+        let before = boa_gc::profile();
+        let result = self.run_jobs();
+        #[cfg(feature = "gc-profile")]
+        trace_gc_phase(
+            "jobs",
+            _source_bytes,
+            before,
+            boa_gc::profile(),
+            result.is_ok(),
+        );
+        result
+    }
+}

@@ -8394,38 +8394,13 @@ impl JsRuntime {
             if set_current_script {
                 self.eval(&format!("__omoikane_set_current_script({script_id})"))?;
             }
-            let evaluated = self.with_active_host(|context| {
-                let metadata = script_errors::classic_script_metadata(
-                    muted_errors,
-                    Some(csp_requested_url.to_owned()),
-                );
-                let parse_started = std::time::Instant::now();
-                let script = Script::parse_with_host_defined(
-                    Source::from_reader(source.as_bytes(), Some(Path::new(filename)))
-                        .with_start_position(start_position.0, start_position.1),
-                    None,
-                    metadata,
-                    context,
-                )?;
-                let parse_ms = parse_started.elapsed().as_secs_f64() * 1000.0;
-                let evaluate_started = std::time::Instant::now();
-                let result = script.evaluate(context);
-                let evaluate_ms = evaluate_started.elapsed().as_secs_f64() * 1000.0;
-                if std::env::var_os("OMOIKANE_TRACE_TASKS").is_some()
-                    && parse_ms + evaluate_ms >= 50.0
-                {
-                    eprintln!(
-                        "OMOIKANE_CLASSIC_SCRIPT {}",
-                        serde_json::json!({
-                            "source_bytes": source.len(),
-                            "parse_ms": parse_ms,
-                            "evaluate_ms": evaluate_ms,
-                            "success": result.is_ok(),
-                        })
-                    );
-                }
-                result
-            });
+            let evaluated = self.evaluate_classic_script_source(
+                source,
+                filename,
+                csp_requested_url,
+                muted_errors,
+                start_position,
+            );
             if let Err(error) = &evaluated {
                 let _ = self.with_active_host(|context| {
                     script_errors::report_exception_with_muting(
@@ -8437,7 +8412,7 @@ impl JsRuntime {
                 });
             }
             evaluated?;
-            self.run_jobs()
+            self.run_classic_script_jobs(source.len())
         })();
         if set_current_script {
             let _ = self.eval("__omoikane_set_current_script(null)");
