@@ -5,7 +5,11 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use super::event_loop::ScriptSourceLocation;
-use crate::css::{TransitionPropertyCounts, style::StyleClockEffects};
+use crate::css::{
+    TransitionPropertyCounts, style::StyleClockEffects, style_profile::StyleProfileSummary,
+};
+
+const MAX_CHILD_RASTER_DETAILS: usize = 32;
 
 fn raf_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -165,6 +169,250 @@ fn style_cache_invalidation_trace_enabled() -> bool {
 fn style_clock_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_PAINT").is_some())
+}
+
+fn paint_attribution_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        paint_attribution_requested_with_flags(
+            std::env::var_os("OMOIKANE_TRACE_PAINT").is_some(),
+            std::env::var_os("OMOIKANE_TRACE_PAINT_ATTRIBUTION").is_some(),
+        )
+    })
+}
+
+fn paint_attribution_requested_with_flags(paint: bool, attribution: bool) -> bool {
+    paint && attribution
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ChildRasterDetail {
+    document_id: usize,
+    raster_ms: f64,
+    style: StyleProfileSummary,
+    nested_snapshot_draw_calls: usize,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct PaintAttributionSample {
+    document_id: usize,
+    snapshot_collection_ms: f64,
+    snapshot_candidate_owners: usize,
+    child_rasters: usize,
+    child_raster_ms: f64,
+    child_style_scope_ms: f64,
+    child_style_cache_hits: usize,
+    child_style_cache_misses: usize,
+    child_style_outer_compute_ms: f64,
+    child_nested_snapshot_draw_calls: usize,
+    child_details: Vec<ChildRasterDetail>,
+    child_raster_detail_overflow: usize,
+    main_raster_ms: f64,
+    main_style: StyleProfileSummary,
+    main_snapshot_draw_calls: usize,
+}
+
+/// Owns one opt-in top-level paint attribution sample without borrowing the
+/// runtime, style resolver, layout tree, or nested-document images.
+pub(super) struct PaintAttributionScope {
+    sample: Option<PaintAttributionSample>,
+}
+
+impl PaintAttributionScope {
+    pub(super) fn begin(document_id: usize) -> Self {
+        Self::begin_with_enabled(paint_attribution_trace_enabled(), document_id)
+    }
+
+    pub(super) fn begin_with_enabled(enabled: bool, document_id: usize) -> Self {
+        Self {
+            sample: enabled.then(|| PaintAttributionSample {
+                document_id,
+                ..PaintAttributionSample::default()
+            }),
+        }
+    }
+
+    pub(super) fn enabled(&self) -> bool {
+        self.sample.is_some()
+    }
+
+    /// Starts a stage timer only while this opt-in sample is active.
+    pub(super) fn stage_start(&self) -> Option<Instant> {
+        self.enabled().then(Instant::now)
+    }
+
+    pub(super) fn record_snapshot_candidate(&mut self) {
+        if let Some(sample) = &mut self.sample {
+            sample.snapshot_candidate_owners = sample.snapshot_candidate_owners.saturating_add(1);
+        }
+    }
+
+    pub(super) fn record_snapshot_collection(&mut self, started: Option<Instant>) {
+        if let Some(started) = started {
+            self.record_snapshot_collection_ms(started.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+
+    fn record_snapshot_collection_ms(&mut self, elapsed_ms: f64) {
+        if let Some(sample) = &mut self.sample {
+            sample.snapshot_collection_ms += elapsed_ms;
+        }
+    }
+
+    pub(super) fn record_child_raster(
+        &mut self,
+        document_id: usize,
+        started: Option<Instant>,
+        style: Option<StyleProfileSummary>,
+        nested_snapshot_draw_calls: usize,
+    ) {
+        let Some(started) = started else { return };
+        self.record_child_raster_ms(
+            document_id,
+            started.elapsed().as_secs_f64() * 1000.0,
+            style.unwrap_or_default(),
+            nested_snapshot_draw_calls,
+        );
+    }
+
+    fn record_child_raster_ms(
+        &mut self,
+        document_id: usize,
+        raster_ms: f64,
+        style: StyleProfileSummary,
+        nested_snapshot_draw_calls: usize,
+    ) {
+        let Some(sample) = &mut self.sample else {
+            return;
+        };
+        sample.child_rasters = sample.child_rasters.saturating_add(1);
+        sample.child_raster_ms += raster_ms;
+        sample.child_style_scope_ms += style.scope_ms;
+        sample.child_style_cache_hits = sample
+            .child_style_cache_hits
+            .saturating_add(style.cache_hits);
+        sample.child_style_cache_misses = sample
+            .child_style_cache_misses
+            .saturating_add(style.cache_misses);
+        sample.child_style_outer_compute_ms += style.outer_compute_ms;
+        sample.child_nested_snapshot_draw_calls = sample
+            .child_nested_snapshot_draw_calls
+            .saturating_add(nested_snapshot_draw_calls);
+        let detail = ChildRasterDetail {
+            document_id,
+            raster_ms,
+            style,
+            nested_snapshot_draw_calls,
+        };
+        if sample.child_details.len() < MAX_CHILD_RASTER_DETAILS {
+            sample.child_details.push(detail);
+        } else {
+            sample.child_raster_detail_overflow =
+                sample.child_raster_detail_overflow.saturating_add(1);
+        }
+    }
+
+    pub(super) fn record_main_raster(
+        &mut self,
+        started: Option<Instant>,
+        style: Option<StyleProfileSummary>,
+        snapshot_draw_calls: usize,
+    ) {
+        let Some(started) = started else { return };
+        self.record_main_raster_ms(
+            started.elapsed().as_secs_f64() * 1000.0,
+            style.unwrap_or_default(),
+            snapshot_draw_calls,
+        );
+    }
+
+    fn record_main_raster_ms(
+        &mut self,
+        raster_ms: f64,
+        style: StyleProfileSummary,
+        snapshot_draw_calls: usize,
+    ) {
+        if let Some(sample) = &mut self.sample {
+            sample.main_raster_ms += raster_ms;
+            sample.main_style = style;
+            sample.main_snapshot_draw_calls = sample
+                .main_snapshot_draw_calls
+                .saturating_add(snapshot_draw_calls);
+        }
+    }
+
+    pub(super) fn finish(mut self) {
+        if let Some(sample) = self.sample.take() {
+            emit_paint_attribution(&sample, true);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn finish_data_for_test(mut self, completed: bool) -> Option<serde_json::Value> {
+        self.sample
+            .take()
+            .map(|sample| paint_attribution_data(&sample, completed))
+    }
+}
+
+impl Drop for PaintAttributionScope {
+    fn drop(&mut self) {
+        if let Some(sample) = self.sample.take() {
+            emit_paint_attribution(&sample, false);
+        }
+    }
+}
+
+fn child_raster_data(detail: &ChildRasterDetail) -> serde_json::Value {
+    serde_json::json!({
+        "document_id": detail.document_id,
+        "raster_ms": detail.raster_ms,
+        "style_scope_ms": detail.style.scope_ms,
+        "style_cache_hits": detail.style.cache_hits,
+        "style_cache_misses": detail.style.cache_misses,
+        "style_outer_compute_ms": detail.style.outer_compute_ms,
+        "nested_snapshot_draw_calls": detail.nested_snapshot_draw_calls,
+    })
+}
+
+fn paint_attribution_data(sample: &PaintAttributionSample, completed: bool) -> serde_json::Value {
+    let snapshot_draw_calls = sample
+        .child_nested_snapshot_draw_calls
+        .saturating_add(sample.main_snapshot_draw_calls);
+    serde_json::json!({
+        "document_id": sample.document_id,
+        "completed": completed,
+        "style_counts_ordinary_only": true,
+        "style_counts_exclude_nested_scopes": true,
+        "snapshot_collection_ms": sample.snapshot_collection_ms,
+        "snapshot_candidate_owners": sample.snapshot_candidate_owners,
+        "snapshot_draw_calls": snapshot_draw_calls,
+        "child_rasters": sample.child_rasters,
+        "child_raster_ms": sample.child_raster_ms,
+        "child_style_scope_ms": sample.child_style_scope_ms,
+        "child_style_cache_hits": sample.child_style_cache_hits,
+        "child_style_cache_misses": sample.child_style_cache_misses,
+        "child_style_outer_compute_ms": sample.child_style_outer_compute_ms,
+        "child_nested_snapshot_draw_calls": sample.child_nested_snapshot_draw_calls,
+        "child_details": sample.child_details.iter().map(child_raster_data).collect::<Vec<_>>(),
+        "child_raster_detail_overflow": sample.child_raster_detail_overflow,
+        "main_raster_ms": sample.main_raster_ms,
+        "main_style_scope_ms": sample.main_style.scope_ms,
+        "main_style_cache_hits": sample.main_style.cache_hits,
+        "main_style_cache_misses": sample.main_style.cache_misses,
+        "main_style_outer_compute_ms": sample.main_style.outer_compute_ms,
+        "main_snapshot_draw_calls": sample.main_snapshot_draw_calls,
+    })
+}
+
+fn emit_paint_attribution(sample: &PaintAttributionSample, completed: bool) {
+    eprintln!(
+        "{}",
+        crate::diagnostics::json_record(
+            "OMOIKANE_PAINT_ATTRIBUTION",
+            &paint_attribution_data(sample, completed),
+        )
+    );
 }
 
 fn all_style_clocks_trace_enabled() -> bool {
@@ -774,6 +1022,114 @@ mod tests {
             true,
             StyleClockEffects::default()
         ));
+    }
+
+    #[test]
+    fn disabled_paint_attribution_has_no_sample_or_stage_timer() {
+        let mut scope = PaintAttributionScope::begin_with_enabled(false, 5);
+        assert!(!scope.enabled());
+        assert!(scope.stage_start().is_none());
+        scope.record_snapshot_candidate();
+        scope.record_snapshot_collection_ms(10.0);
+        scope.record_child_raster_ms(2, 20.0, StyleProfileSummary::default(), 3);
+        scope.record_main_raster_ms(30.0, StyleProfileSummary::default(), 4);
+        assert_eq!(scope.finish_data_for_test(true), None);
+    }
+
+    #[test]
+    fn paint_attribution_requires_both_trace_flags() {
+        assert!(!paint_attribution_requested_with_flags(false, false));
+        assert!(!paint_attribution_requested_with_flags(true, false));
+        assert!(!paint_attribution_requested_with_flags(false, true));
+        assert!(paint_attribution_requested_with_flags(true, true));
+    }
+
+    #[test]
+    fn paint_attribution_schema_aggregates_and_bounds_child_details_exactly() {
+        let mut scope = PaintAttributionScope::begin_with_enabled(true, 5);
+        for _ in 0..3 {
+            scope.record_snapshot_candidate();
+        }
+        scope.record_snapshot_collection_ms(20.0);
+        for index in 0..34 {
+            scope.record_child_raster_ms(
+                100 + index,
+                1.0,
+                StyleProfileSummary {
+                    document_id: 100 + index,
+                    scope_ms: 2.0,
+                    cache_hits: 2,
+                    cache_misses: 1,
+                    outer_compute_ms: 0.5,
+                },
+                1,
+            );
+        }
+        scope.record_main_raster_ms(
+            7.0,
+            StyleProfileSummary {
+                document_id: 1,
+                scope_ms: 8.0,
+                cache_hits: 10,
+                cache_misses: 3,
+                outer_compute_ms: 1.5,
+            },
+            2,
+        );
+        let details = (0..MAX_CHILD_RASTER_DETAILS)
+            .map(|index| {
+                serde_json::json!({
+                    "document_id": 100 + index,
+                    "raster_ms": 1.0,
+                    "style_scope_ms": 2.0,
+                    "style_cache_hits": 2,
+                    "style_cache_misses": 1,
+                    "style_outer_compute_ms": 0.5,
+                    "nested_snapshot_draw_calls": 1,
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scope.finish_data_for_test(true),
+            Some(serde_json::json!({
+                "document_id": 5,
+                "completed": true,
+                "style_counts_ordinary_only": true,
+                "style_counts_exclude_nested_scopes": true,
+                "snapshot_collection_ms": 20.0,
+                "snapshot_candidate_owners": 3,
+                "snapshot_draw_calls": 36,
+                "child_rasters": 34,
+                "child_raster_ms": 34.0,
+                "child_style_scope_ms": 68.0,
+                "child_style_cache_hits": 68,
+                "child_style_cache_misses": 34,
+                "child_style_outer_compute_ms": 17.0,
+                "child_nested_snapshot_draw_calls": 34,
+                "child_details": details,
+                "child_raster_detail_overflow": 2,
+                "main_raster_ms": 7.0,
+                "main_style_scope_ms": 8.0,
+                "main_style_cache_hits": 10,
+                "main_style_cache_misses": 3,
+                "main_style_outer_compute_ms": 1.5,
+                "main_snapshot_draw_calls": 2,
+            }))
+        );
+    }
+
+    #[test]
+    fn aborted_paint_attribution_uses_the_same_bounded_schema() {
+        let mut scope = PaintAttributionScope::begin_with_enabled(true, 5);
+        scope.record_snapshot_candidate();
+        let data = scope.finish_data_for_test(false).unwrap();
+        assert_eq!(data["document_id"], 5);
+        assert_eq!(data["completed"], false);
+        assert_eq!(data["style_counts_ordinary_only"], true);
+        assert_eq!(data["style_counts_exclude_nested_scopes"], true);
+        assert_eq!(data["snapshot_candidate_owners"], 1);
+        assert_eq!(data["child_details"], serde_json::json!([]));
+        assert_eq!(data["snapshot_draw_calls"], 0);
     }
 
     #[test]

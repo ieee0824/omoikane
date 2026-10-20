@@ -260,6 +260,7 @@ pub(crate) fn paint_text_with_registry(
             text_fonts: fonts,
             web_fonts,
             nested_documents: None,
+            nested_snapshot_draw_calls: None,
             propagated_background_node: None,
         },
         offset,

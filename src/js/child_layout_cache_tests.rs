@@ -212,3 +212,38 @@ fn main_layout_cache_repaints_current_inline_canvas_pixels() {
     );
     assert_eq!(runtime.render_generations().layout, layout);
 }
+
+#[test]
+fn child_snapshot_attribution_connects_candidate_raster_style_and_pixels() {
+    let runtime = runtime();
+    let mut state = runtime.host_state.borrow_mut();
+    state.ensure_adjusted_layout();
+    let layout = state.adjusted_layout_cache.as_ref().unwrap().root.clone();
+    let document_id = state.document.identity();
+    let frame = state.document.query_selector("#f").unwrap();
+    let child_document_id = state.iframe_content_document(&frame).unwrap().identity();
+    let mut attribution =
+        frame_diagnostics::PaintAttributionScope::begin_with_enabled(true, document_id);
+
+    let snapshots =
+        nested_rendering::collect_snapshots(&mut state, &layout, 0, &mut attribution).unwrap();
+    let child = snapshots.get(&frame.identity()).unwrap();
+    assert_eq!((child.width(), child.height()), (200, 100));
+    let pixel_offset = (5 * child.width() as usize + 5) * 4;
+    assert_eq!(
+        &child.pixels()[pixel_offset..pixel_offset + 4],
+        &[255, 0, 0, 255]
+    );
+
+    let data = attribution.finish_data_for_test(true).unwrap();
+    assert_eq!(data["document_id"], document_id);
+    assert_eq!(data["snapshot_candidate_owners"], 1);
+    assert_eq!(data["child_rasters"], 1);
+    assert_eq!(data["child_raster_detail_overflow"], 0);
+    assert_eq!(data["child_details"][0]["document_id"], child_document_id);
+    assert!(
+        data["child_details"][0]["style_cache_hits"]
+            .as_u64()
+            .is_some_and(|hits| hits > 0)
+    );
+}

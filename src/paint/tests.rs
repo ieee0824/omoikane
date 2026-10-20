@@ -202,6 +202,56 @@ fn visited_paint_changes_only_allowed_link_colors() {
 }
 
 #[test]
+fn nested_snapshot_draw_count_matches_actual_scaled_draw_calls() {
+    let document = TreeBuilder::parse(
+        "<style>html,body{margin:0;background:white}iframe{display:block;border:0;width:20px;height:20px}#off{position:absolute;left:200px;top:0}</style><iframe id=visible></iframe><iframe id=off></iframe>",
+    )
+    .document();
+    let visible = document.query_selector("#visible").unwrap();
+    let offscreen = document.query_selector("#off").unwrap();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 30.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let mut snapshot = Canvas::new(20, 20);
+    snapshot.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
+    let image = snapshot.into_image();
+    let nested = std::collections::HashMap::from([
+        (visible.identity(), image.clone()),
+        (offscreen.identity(), image),
+    ]);
+
+    let (canvas, snapshot_draw_calls) = paint_layout_with_document_snapshots_counted(
+        &layout,
+        &mut resolver,
+        viewport,
+        Vec::new(),
+        None,
+        std::iter::empty(),
+        &nested,
+    );
+
+    assert_eq!(snapshot_draw_calls, 2);
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(30, 5), Some(Color::rgb(255, 255, 255)));
+}
+
+#[test]
 fn visited_text_color_changes_without_relaying_out_glyphs() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

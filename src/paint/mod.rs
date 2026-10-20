@@ -1290,6 +1290,54 @@ pub(crate) fn paint_layout_with_document_snapshots(
     visited_link_ids: impl IntoIterator<Item = usize>,
     nested_documents: &HashMap<usize, Image>,
 ) -> Canvas {
+    paint_layout_with_document_snapshots_internal(
+        layout,
+        resolver,
+        viewport,
+        fonts,
+        web_fonts,
+        visited_link_ids,
+        nested_documents,
+        None,
+    )
+}
+
+/// Paints nested documents and returns the number of snapshot draw calls made
+/// after resolving each image and its inherited clip in this traversal.
+pub(crate) fn paint_layout_with_document_snapshots_counted(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    fonts: Vec<Arc<Font>>,
+    web_fonts: Option<&WebFontRegistry>,
+    visited_link_ids: impl IntoIterator<Item = usize>,
+    nested_documents: &HashMap<usize, Image>,
+) -> (Canvas, usize) {
+    let snapshot_draw_calls = Cell::new(0);
+    let canvas = paint_layout_with_document_snapshots_internal(
+        layout,
+        resolver,
+        viewport,
+        fonts,
+        web_fonts,
+        visited_link_ids,
+        nested_documents,
+        Some(&snapshot_draw_calls),
+    );
+    (canvas, snapshot_draw_calls.get())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_layout_with_document_snapshots_internal(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    fonts: Vec<Arc<Font>>,
+    web_fonts: Option<&WebFontRegistry>,
+    visited_link_ids: impl IntoIterator<Item = usize>,
+    nested_documents: &HashMap<usize, Image>,
+    nested_snapshot_draw_calls: Option<&Cell<usize>>,
+) -> Canvas {
     resolver.begin_visited_paint(visited_link_ids);
     let mut canvas = Canvas::new(
         viewport.width.ceil().max(1.0) as u32,
@@ -1309,6 +1357,7 @@ pub(crate) fn paint_layout_with_document_snapshots(
                 text_fonts: &fonts,
                 web_fonts,
                 nested_documents: Some(nested_documents),
+                nested_snapshot_draw_calls,
                 propagated_background_node: viewport_background.propagated_node,
             },
             PaintBoxOptions {
@@ -2166,6 +2215,7 @@ struct PaintContext<'a> {
     text_fonts: &'a [Arc<Font>],
     web_fonts: Option<&'a WebFontRegistry>,
     nested_documents: Option<&'a HashMap<usize, Image>>,
+    nested_snapshot_draw_calls: Option<&'a Cell<usize>>,
     propagated_background_node: Option<usize>,
 }
 
@@ -2203,6 +2253,7 @@ fn paint_box(
             text_fonts,
             web_fonts,
             nested_documents: None,
+            nested_snapshot_draw_calls: None,
             propagated_background_node,
         },
         PaintBoxOptions {
@@ -4333,6 +4384,7 @@ fn paint_nested_document_snapshot(
     canvas: &mut Canvas,
     layout: &LayoutBox,
     nested_documents: Option<&HashMap<usize, Image>>,
+    snapshot_draw_calls: Option<&Cell<usize>>,
     clip: Option<Rect>,
     offset: PaintOffset,
 ) {
@@ -4345,6 +4397,9 @@ fn paint_nested_document_snapshot(
             None => Some(destination),
         };
         if let Some(image_clip) = image_clip {
+            if let Some(snapshot_draw_calls) = snapshot_draw_calls {
+                snapshot_draw_calls.set(snapshot_draw_calls.get().saturating_add(1));
+            }
             canvas.draw_image_scaled_clipped(image, destination, Some(image_clip));
         }
     }
@@ -4363,6 +4418,7 @@ fn paint_box_internal_to(
         viewport,
         text_fonts,
         nested_documents,
+        nested_snapshot_draw_calls,
         ..
     } = context;
     let PaintBoxGeometry {
@@ -4479,7 +4535,14 @@ fn paint_box_internal_to(
         inherited_clip
     };
 
-    paint_nested_document_snapshot(canvas, layout, nested_documents, clip, offset);
+    paint_nested_document_snapshot(
+        canvas,
+        layout,
+        nested_documents,
+        nested_snapshot_draw_calls,
+        clip,
+        offset,
+    );
 
     paint_column_rules(canvas, layout, style, clip, offset);
 

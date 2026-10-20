@@ -24,6 +24,21 @@ OMOIKANE_TRACE_STARTUP=1 OMOIKANE_TRACE_PAINT=1 OMOIKANE_TRACE_INPUT=1 \
 レイアウト未完了・失敗・セキュリティ条件変更で依存が不明な場合は再レイアウトする。
 背景SVG内部のレイアウトはページ全体の依存情報を確定しない。
 
+親ページと子フレームの描画時間を分ける場合は、`OMOIKANE_TRACE_PAINT=1`と
+`OMOIKANE_TRACE_PAINT_ATTRIBUTION=1`を両方指定する。
+`OMOIKANE_PAINT_ATTRIBUTION`の`snapshot_collection_ms`は子フレームの準備と再帰的な
+画像生成の合計、`child_raster_ms`はその内数となる各子の描画時間の合計、
+`main_raster_ms`は子の画像生成後に行う親ページの描画時間である。
+子の描画区間は孫の画像生成を含まないため、子同士を二重に加算しない。
+
+`child_style_*`と`main_style_*`の件数は通常要素だけで、入れ子の別profileへ渡った
+計数とpseudo専用の計算は含まない。style区間は描画時間と重なるので加算しない。
+`document_id`で既存の`OMOIKANE_LAYOUT_STYLE`と対応付けて調べる。
+子の詳細行は最大32件で、省略数は`child_raster_detail_overflow`に出る。
+候補owner数と`snapshot_draw_calls`は候補数・実描画呼出し回数であり、可視画素の証明や
+同じ母集団ではない。差し引いて不可視数を求めない。`completed=false`の記録も
+可視性の根拠にしない。通常の`OMOIKANE_TRACE_PAINT`だけではこの追加計測は行わない。
+
 ## スタイル再計算と属性変更の計測
 
 `OMOIKANE_TRACE_PAINT=1`は、レイアウトを再構築したときに

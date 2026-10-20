@@ -9163,6 +9163,7 @@ impl JsRuntime {
         state.ensure_adjusted_layout();
         let layout_time = start.elapsed();
         let document_id = state.document.identity();
+        let mut paint_attribution = frame_diagnostics::PaintAttributionScope::begin(document_id);
         let visited_link_ids = state.visited_link_ids_for_paint(&state.document);
         let viewport = state.viewport;
         let base = crate::paint::stylesheet::extract_document_base_url(
@@ -9178,7 +9179,11 @@ impl JsRuntime {
             .ok_or(crate::paint::PaintError::InvalidImageBuffer)?
             .root
             .clone();
-        let snapshots = nested_rendering::collect_snapshots(state, &layout, 0)?;
+        let snapshot_started = paint_attribution.stage_start();
+        let snapshots =
+            nested_rendering::collect_snapshots(state, &layout, 0, &mut paint_attribution);
+        paint_attribution.record_snapshot_collection(snapshot_started);
+        let snapshots = snapshots?;
         let entry = state
             .document_styles
             .get_mut(&document_id)
@@ -9188,27 +9193,40 @@ impl JsRuntime {
             .as_mut()
             .ok_or(crate::paint::PaintError::InvalidImageBuffer)?;
         let start = Instant::now();
-        let (canvas, image_reports) = image_environment.run(false, || {
+        let diagnostics_enabled = paint_attribution.enabled();
+        let style_profile = crate::css::style_profile::StyleProfileScope::begin_measurement(
+            diagnostics_enabled,
+            document_id,
+        );
+        let main_raster_started = paint_attribution.stage_start();
+        let ((canvas, snapshot_draw_calls), image_reports) = image_environment.run(false, || {
             crate::layout::with_image_base_url(base, || {
                 crate::layout::with_image_animation_time(animation_time, || {
-                    crate::paint::paint_layout_with_document_snapshots(
+                    nested_rendering::paint_layout_with_snapshot_attribution(
+                        diagnostics_enabled,
                         &layout,
                         resolver,
                         viewport,
-                        crate::paint::text::load_text_fonts(),
-                        Some(&entry.web_fonts),
+                        &entry.web_fonts,
                         visited_link_ids,
                         &snapshots,
                     )
                 })
             })
         });
+        let style_profile = style_profile.finish();
+        paint_attribution.record_main_raster(
+            main_raster_started,
+            style_profile,
+            snapshot_draw_calls,
+        );
         state.queue_image_reports(document_id, image_reports);
         crate::paint::record_render_timings(&crate::paint::RenderTimings {
             layout: layout_time,
             paint: start.elapsed(),
             ..Default::default()
         });
+        paint_attribution.finish();
         Ok(canvas)
     }
 

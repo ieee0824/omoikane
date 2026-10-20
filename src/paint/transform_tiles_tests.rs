@@ -208,6 +208,7 @@ pub(super) fn paint_reference(
         text_fonts,
         web_fonts,
         nested_documents: None,
+        nested_snapshot_draw_calls: None,
         propagated_background_node: None,
     };
     let Some(source_region) = intersect(
@@ -252,6 +253,7 @@ pub(super) fn paint_reference(
                     text_fonts,
                     web_fonts,
                     nested_documents: None,
+                    nested_snapshot_draw_calls: None,
                     propagated_background_node: None,
                 },
                 PaintBoxOptions {
