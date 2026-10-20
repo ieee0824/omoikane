@@ -57,7 +57,16 @@ fn declarations_may_read_counters(declarations: &[Declaration]) -> bool {
 
 fn value_may_read_counters(value: &Value) -> bool {
     match value {
-        // Includes counter(), counters(), var(), attr() and future functions.
+        // An untyped attr() with no fallback always yields a string. Even an
+        // attribute containing "counter(x)" is literal text, never a counter
+        // reader. Typed forms and fallbacks remain conservative below.
+        Value::Function { name, arguments }
+            if name.eq_ignore_ascii_case("attr")
+                && matches!(arguments.as_slice(), [Value::Keyword(_)]) =>
+        {
+            false
+        }
+        // Includes counter(), counters(), var(), typed attr() and future functions.
         Value::Function { .. } | Value::TreeCounting { .. } => true,
         Value::List(values) | Value::CommaList(values) => {
             values.iter().any(value_may_read_counters)
@@ -103,6 +112,28 @@ mod tests {
             "li::before { content: counter(item); }",
             "li::before { content: counters(item, '.'); }",
             r"li::before { content: c\6f unter(item); }",
+        ] {
+            assert!(resolver_with(css).may_read_generated_counters(), "{css}");
+        }
+    }
+
+    #[test]
+    fn untyped_attribute_strings_do_not_require_counter_snapshots() {
+        for css in [
+            "x::before { content: attr(data-title); }",
+            "x::after { content: 'Label: ' attr(data-label); }",
+            r"x::before { content: a\74tr(data-title); }",
+        ] {
+            assert!(!resolver_with(css).may_read_generated_counters(), "{css}");
+        }
+    }
+
+    #[test]
+    fn attribute_fallback_and_typed_values_remain_conservative() {
+        for css in [
+            "x::before { content: attr(data-title, counter(x)); }",
+            "x::before { content: attr(data-title type(*)); }",
+            "x::before { content: attr(data-title) counter(x); }",
         ] {
             assert!(resolver_with(css).may_read_generated_counters(), "{css}");
         }
