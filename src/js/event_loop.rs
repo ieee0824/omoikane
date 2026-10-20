@@ -237,6 +237,7 @@ pub(super) unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tr
         }
         TimerPayload::Source(_)
         | TimerPayload::ResourceLoad { .. }
+        | TimerPayload::ScriptResourceReady { .. }
         | TimerPayload::ImageResourceEvent { .. }
         | TimerPayload::JavascriptDocumentLoad { .. }
         | TimerPayload::FormSubmission { .. }
@@ -337,6 +338,7 @@ impl EventLoop {
     ) {
         let source = match payload {
             TimerPayload::ResourceLoad { .. }
+            | TimerPayload::ScriptResourceReady { .. }
             | TimerPayload::JavascriptDocumentLoad { .. }
             | TimerPayload::FormSubmission { .. } => TaskSource::Networking,
             TimerPayload::ImageResourceEvent { .. } => TaskSource::DomManipulation,

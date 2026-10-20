@@ -398,6 +398,7 @@ pub struct Element {
     dirty_selectedness: bool,
     form_associated_custom: bool,
     script_source_position: Option<(u32, u32)>,
+    script_force_async: bool,
     css_validity: Option<bool>,
     /// Dynamic selector state shared by style resolution and DOM queries.
     user_action_state: u8,
@@ -498,6 +499,7 @@ impl Element {
             dirty_selectedness: false,
             form_associated_custom: false,
             script_source_position: None,
+            script_force_async: true,
             css_validity: None,
             user_action_state: 0,
             parser_form_owner: None,
@@ -544,6 +546,7 @@ impl Element {
             dirty_selectedness: false,
             form_associated_custom: false,
             script_source_position: None,
+            script_force_async: true,
             css_validity: None,
             user_action_state: 0,
             parser_form_owner: None,
@@ -855,6 +858,26 @@ impl NodeHandle {
     /// Creates an XML element, preserving its qualified name and namespace.
     pub fn xml_element(tag_name: impl Into<String>, namespace_uri: Option<String>) -> Self {
         Self::new(NodeData::Element(Element::new_xml(tag_name, namespace_uri)))
+    }
+
+    /// Returns the script's force-async state combined with its async attribute.
+    pub(crate) fn script_is_async(&self) -> bool {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => {
+                element.script_force_async
+                    || element.attribute_records.iter().any(|attribute| {
+                        attribute.namespace_uri.is_none() && attribute.local_name == "async"
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Sets parser/IDL-owned force-async state without changing attributes.
+    pub(crate) fn set_script_force_async(&self, asynchronous: bool) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.script_force_async = asynchronous;
+        }
     }
 
     /// Retains the parser's one-based script content coordinates as owned data.
@@ -1636,6 +1659,9 @@ impl NodeHandle {
             if matches!(name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
             }
+            if name == "async" {
+                element.script_force_async = false;
+            }
             if name == "form" {
                 element.parser_form_owner = None;
             }
@@ -1737,6 +1763,9 @@ impl NodeHandle {
         replace_qualified_name: bool,
     ) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            if namespace_uri.is_none() && local_name == "async" {
+                element.script_force_async = false;
+            }
             if namespace_uri.is_none() && qualified_name == "form" {
                 element.parser_form_owner = None;
             }

@@ -361,6 +361,7 @@ impl PageOwner {
         session.set_deferred_document_startup(true);
         session.set_nonblocking_image_loading(true);
         session.set_nonblocking_font_loading(true);
+        session.set_nonblocking_script_loading(true);
         if let Some(reporter) = reporter {
             session.set_error_reporter(reporter, ExecutionSurface::Gui);
         }

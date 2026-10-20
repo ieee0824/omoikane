@@ -193,6 +193,7 @@ mod html_sanitizer;
 mod html_serialization;
 mod image_loading;
 mod resource_loading;
+mod script_loading;
 mod security_reporting;
 mod storage;
 mod storage_access;
@@ -1679,6 +1680,8 @@ enum TimerPayload {
     },
     /// A connected iframe/object resource load, followed by `load` dispatch.
     ResourceLoad { node_id: usize },
+    /// A prepared script result; removing its element does not undo preparation.
+    ScriptResourceReady { node_id: usize },
     /// Decoded image completion, checked again against its live owning document.
     ImageResourceEvent {
         node_id: usize,
@@ -2069,6 +2072,7 @@ impl TimerPayload {
             Self::Source(_) => "source",
             Self::Callback { .. } => "callback",
             Self::ResourceLoad { .. } => "resource-load",
+            Self::ScriptResourceReady { .. } => "script-resource-ready",
             Self::ImageResourceEvent { .. } => "image-resource-event",
             Self::JavascriptDocumentLoad { .. } => "javascript-document-load",
             Self::FormSubmission { .. } => "form-submission",
@@ -2401,6 +2405,8 @@ struct HostState {
     image_resources: HashMap<usize, Rc<RefCell<crate::layout::ImageDocumentState>>>,
     nonblocking_image_loading: bool,
     nonblocking_font_loading: bool,
+    nonblocking_script_loading: bool,
+    script_loads: script_loading::ScriptLoads,
     resource_queue: crate::resource_worker::ResourceQueue,
     pending_image_events: Vec<image_loading::PendingImageEvent>,
     visible_image_playbacks: Vec<Arc<crate::paint::animation::ImagePlayback>>,
@@ -3186,6 +3192,8 @@ impl HostState {
             image_resources: HashMap::new(),
             nonblocking_image_loading: false,
             nonblocking_font_loading: false,
+            nonblocking_script_loading: false,
+            script_loads: Default::default(),
             resource_queue: Default::default(),
             pending_image_events: Vec::new(),
             visible_image_playbacks: Vec::new(),
@@ -5743,6 +5751,7 @@ impl HostState {
         self.document_styles.remove(&document_id);
         self.registered_custom_properties.remove(&document_id);
         self.font_loading.remove_document(document_id);
+        self.script_loads.remove_document(document_id);
         self.write_parsers.remove(&document_id);
         self.written_script_queue
             .retain(|script| script.document.identity() != document_id);
@@ -5877,6 +5886,7 @@ impl HostState {
         self.document_styles.remove(&document_id);
         self.registered_custom_properties.remove(&document_id);
         self.font_loading.remove_document(document_id);
+        self.script_loads.remove_document(document_id);
         self.write_parsers.remove(&document_id);
         self.written_script_queue
             .retain(|script| script.document.identity() != document_id);
@@ -10291,6 +10301,7 @@ impl JsRuntime {
         }
         self.poll_image_resource_loads()?;
         font_loading::poll_resource_loads(&mut self.host_state.borrow_mut());
+        self.host_state.borrow_mut().poll_script_loads();
         // An embedder call may have completed a script task and left promise
         // jobs pending. Its checkpoint can itself enqueue host tasks.
         self.run_jobs()?;
@@ -10472,6 +10483,7 @@ impl JsRuntime {
         }
         self.poll_image_resource_loads()?;
         font_loading::poll_resource_loads(&mut self.host_state.borrow_mut());
+        self.host_state.borrow_mut().poll_script_loads();
         self.run_jobs()?;
         self.dispatch_cookie_changes()?;
         self.run_worklet_background_tasks();
@@ -10547,6 +10559,12 @@ impl JsRuntime {
                             self.record_error_from::<()>("timer callback", Err(error));
                         }
                     }
+                }
+                Task::Timer {
+                    payload: TimerPayload::ScriptResourceReady { node_id },
+                    ..
+                } => {
+                    self.run_dynamic_script_resource_async(node_id).await?;
                 }
                 Task::Timer {
                     payload: TimerPayload::ResourceLoad { node_id },
@@ -11083,31 +11101,23 @@ impl JsRuntime {
         {
             return self.run_written_script(node_id);
         }
-        let csp_source = self
-            .host_state
-            .borrow_mut()
-            .pending_script_csp_sources
-            .remove(&node_id);
-        let Some((script_node, src, kind, base_url, document_id)) = ({
-            let mut state = self.host_state.borrow_mut();
-            state.pending_resource_loads.remove(&node_id);
-            state.get_node(node_id).and_then(|node| {
-                if !state.node_is_in_active_document(&node) {
-                    return None;
-                }
-                let document_id = document_root_for_node(&node)?.identity();
-                let src = node.get_attribute("src")?;
-                if !state.begin_inserted_external_script(&node) {
-                    return None;
-                }
-                Some((
-                    node.clone(),
-                    src,
-                    ScriptKind::from_type_attribute(node.get_attribute("type").as_deref()),
-                    state.base_url_for_document(document_id),
-                    document_id,
-                ))
-            })
+        let ready = self.host_state.borrow_mut().take_ready_script(node_id);
+        let (csp_source, prepared_info, prefetched) = if let Some((prepared, response)) = ready {
+            (prepared.source, Some(prepared.script), Some(response))
+        } else {
+            (
+                self.host_state
+                    .borrow_mut()
+                    .pending_script_csp_sources
+                    .remove(&node_id),
+                None,
+                None,
+            )
+        };
+        let Some((script_node, src, kind, base_url, document_id)) = prepared_info.or_else(|| {
+            self.host_state
+                .borrow_mut()
+                .prepare_inserted_external_script(node_id)
         }) else {
             return Ok(());
         };
@@ -11132,7 +11142,10 @@ impl JsRuntime {
             }
             return Ok(());
         }
-        let nonce = script_node.get_attribute("nonce");
+        let nonce = prefetched
+            .as_ref()
+            .map(|response| response.nonce.clone())
+            .unwrap_or_else(|| script_node.get_attribute("nonce"));
         let request = csp::ScriptRequest {
             nonce: nonce.as_deref(),
             parser_inserted: false,
@@ -11149,26 +11162,33 @@ impl JsRuntime {
         {
             return Ok(());
         }
-        let fetch_start = std::time::Instant::now();
-        let fetched = {
-            let mut state = self.host_state.borrow_mut();
-            if kind == ScriptKind::Module {
-                state.fetch_classic_source_for_document(
+        if prefetched.is_none() && self.host_state.borrow().nonblocking_script_loading {
+            let prepared = script_loading::Prepared {
+                script: (
+                    script_node.clone(),
+                    src.clone(),
+                    kind,
+                    base_url.clone(),
                     document_id,
-                    &src,
-                    base_url.as_ref(),
-                    Some(""),
-                )
-            } else {
-                state.fetch_classic_source_for_document(
-                    document_id,
-                    &src,
-                    base_url.as_ref(),
-                    script_node.get_attribute("crossorigin").as_deref(),
-                )
-            }
-        };
-        let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
+                ),
+                dispatch_document: document_id,
+                dispatch_load: true,
+                source: csp_source,
+            };
+            self.defer_dynamic_script(prepared);
+            return Ok(());
+        }
+        let response = prefetched.unwrap_or_else(|| {
+            self.host_state.borrow_mut().fetch_dynamic_script(
+                document_id,
+                &script_node,
+                &src,
+                kind,
+                base_url.as_ref(),
+            )
+        });
+        let fetched = response.fetched;
+        let elapsed_ms = response.elapsed_ms;
         let Some((effective_url, source, redirect_count, muted_errors)) = fetched else {
             self.record_task_error(format!("[dynamic script: {src}] failed to fetch"));
             let dispatch =
@@ -11186,7 +11206,8 @@ impl JsRuntime {
         if !self
             .host_state
             .borrow_mut()
-            .csp_allows_response_for_script_node_with_source(
+            .csp_allows_prepared_script_response(
+                document_id,
                 &script_node,
                 &effective_url,
                 redirect_count,
@@ -11212,84 +11233,18 @@ impl JsRuntime {
             return Ok(());
         }
 
-        let marked = self
-            .eval_async_for_document(
-                &format!("__omoikane_set_current_script({node_id})"),
-                document_id,
-            )
-            .await;
-        if let Err(error) = marked {
-            if is_wall_clock_timeout(&error) {
-                return Err(error);
-            }
-            self.record_error_from::<()>(&src, Err(error));
-        }
-        let result = match kind {
-            ScriptKind::Module => {
-                let module_document =
-                    document_root_for_node(&script_node).unwrap_or_else(|| self.document());
-                self.eval_module_async(
-                    &source,
-                    &module_script_url(&src, base_url.as_ref(), false),
-                    module_document,
-                    module_script_credentials(&script_node),
-                )
-                .await
-            }
-            _ => {
-                let host_state = Rc::clone(&self.host_state);
-                ActiveDocumentFuture {
-                    future: Box::pin(self.eval_async_source(
-                        &source,
-                        Some(&effective_url),
-                        Some(&timing_name),
-                        muted_errors,
-                        (1, 1),
-                    )),
-                    host_state,
-                    document_id,
-                }
-                .await
-            }
-        };
-        let _ = self.eval("__omoikane_set_current_script(null)");
-        if let Err(error) = result {
-            if is_wall_clock_timeout(&error) {
-                return Err(error);
-            }
-            if kind != ScriptKind::Module {
-                let _ = self.with_active_host(|context| {
-                    script_errors::report_exception_with_muting(
-                        context,
-                        &error,
-                        document_id,
-                        muted_errors,
-                    )
-                });
-            }
-            let context = script_source_context(&source);
-            self.record_task_error(format!("[dynamic script: {src}; {context}] {error}"));
-        }
-        let dispatched = self
-            .eval_async_for_document(
-                &dispatch_resource_timing_script(
-                    "load",
-                    node_id,
-                    &effective_url,
-                    redirected,
-                    elapsed_ms,
-                ),
-                document_id,
-            )
-            .await;
-        if let Err(error) = dispatched {
-            if is_wall_clock_timeout(&error) {
-                return Err(error);
-            }
-            self.record_error_from::<()>("resource load", Err(error));
-        }
-        self.sync_module_csp_violations();
-        Ok(())
+        self.execute_dynamic_source_async(
+            script_loading::Execution {
+                script: (script_node, src, kind, base_url, document_id),
+                source,
+                effective_url,
+                requested_url: timing_name,
+                muted_errors,
+            },
+            redirected,
+            elapsed_ms,
+        )
+        .await
     }
 
     /// Records a page-script error raised while a task ran.
@@ -12556,6 +12511,7 @@ impl JsRuntime {
                 self.run_timer_payload(TimerPayload::ResourceLoad { node_id })
             }
             TimerPayload::ResourceLoad { node_id } => self.run_resource_load_timer(node_id),
+            TimerPayload::ScriptResourceReady { node_id } => self.run_ready_script_load(node_id),
             TimerPayload::ImageResourceEvent {
                 node_id,
                 document_id,
@@ -12585,6 +12541,35 @@ impl JsRuntime {
     /// runs a parser-inserted script directly; otherwise gathers the node's
     /// pending initial iframe scripts and dynamic script, runs them, and
     /// dispatches the resulting `load` (or `error`) event.
+    fn run_ready_script_load(&mut self, node_id: usize) -> JsResult<()> {
+        let ready = self.host_state.borrow_mut().take_ready_script(node_id);
+        if let Some((prepared, response)) = ready {
+            let document = prepared.dispatch_document;
+            if !self.host_state.borrow().document_is_active(document) {
+                return Ok(());
+            }
+            if let Some(source) = prepared.source {
+                self.host_state
+                    .borrow_mut()
+                    .pending_script_csp_sources
+                    .insert(node_id, source);
+            }
+            let (loaded, timing) = self.run_dynamic_timer_script(
+                node_id,
+                document,
+                prepared.script,
+                prepared.dispatch_load,
+                false,
+                Some(response),
+            );
+            if loaded {
+                self.dispatch_resource_load_event(node_id, document, timing);
+            }
+            return Ok(());
+        }
+        Ok(())
+    }
+
     fn run_resource_load_timer(&mut self, node_id: usize) -> JsResult<()> {
         if self.run_image_resource_load(node_id)? {
             return Ok(());
@@ -12647,6 +12632,7 @@ impl JsRuntime {
                 dynamic_script,
                 dispatch_load,
                 false,
+                None,
             );
             dispatch_load = updated_load;
             dispatch_timing = updated_timing;
@@ -12959,6 +12945,7 @@ impl JsRuntime {
             (script.clone(), src, kind, base, document_id),
             true,
             true,
+            None,
         );
         if loaded && self.host_state.borrow().node_is_in_active_document(script) {
             self.dispatch_resource_load_event(script.identity(), document_id, timing);
@@ -12976,6 +12963,7 @@ impl JsRuntime {
         dynamic_script: DynamicScriptInfo,
         mut dispatch_load: bool,
         parser_inserted: bool,
+        prefetched: Option<script_loading::Response>,
     ) -> (bool, Option<(String, bool, f64)>) {
         let (script_node, src, kind, base_url, document_id) = dynamic_script;
         let csp_source = self
@@ -12983,7 +12971,10 @@ impl JsRuntime {
             .borrow_mut()
             .pending_script_csp_sources
             .remove(&node_id);
-        let nonce = script_node.get_attribute("nonce");
+        let nonce = prefetched
+            .as_ref()
+            .map(|response| response.nonce.clone())
+            .unwrap_or_else(|| script_node.get_attribute("nonce"));
         let request = csp::ScriptRequest {
             nonce: nonce.as_deref(),
             parser_inserted,
@@ -13030,41 +13021,37 @@ impl JsRuntime {
                 eprintln!("[omoikane][script] loading dynamic {src} kind={kind:?}");
             }
             let timing_name = resource_reference_timing_name(&src, base_url.as_ref());
-            let fetch_start = std::time::Instant::now();
-            let fetched = {
-                let mut state = self.host_state.borrow_mut();
-                if kind == ScriptKind::Module {
-                    state.fetch_classic_source_for_document(
-                        dispatch_document_id,
-                        &src,
-                        base_url.as_ref(),
-                        Some(
-                            script_node
-                                .get_attribute("crossorigin")
-                                .as_deref()
-                                .unwrap_or(""),
-                        ),
-                    )
-                } else {
-                    state.fetch_classic_source_for_document(
-                        dispatch_document_id,
-                        &src,
-                        base_url.as_ref(),
-                        script_node.get_attribute("crossorigin").as_deref(),
-                    )
-                }
-            };
-            let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
-            if std::env::var_os("OMOIKANE_TRACE_TASKS").is_some() && elapsed_ms >= 50.0 {
-                eprintln!(
-                    "OMOIKANE_SCRIPT_PHASE {}",
-                    serde_json::json!({
-                        "phase": "fetch",
-                        "elapsed_ms": elapsed_ms,
-                        "kind": format!("{kind:?}"),
-                    })
-                );
+            if prefetched.is_none()
+                && !parser_inserted
+                && self.host_state.borrow().nonblocking_script_loading
+            {
+                let prepared = script_loading::Prepared {
+                    script: (
+                        script_node.clone(),
+                        src.clone(),
+                        kind,
+                        base_url.clone(),
+                        document_id,
+                    ),
+                    dispatch_document: dispatch_document_id,
+                    dispatch_load,
+                    source: csp_source,
+                };
+                self.defer_dynamic_script(prepared);
+                return (false, None);
             }
+            let response = prefetched.unwrap_or_else(|| {
+                self.host_state.borrow_mut().fetch_dynamic_script(
+                    dispatch_document_id,
+                    &script_node,
+                    &src,
+                    kind,
+                    base_url.as_ref(),
+                )
+            });
+            let fetched = response.fetched;
+            let elapsed_ms = response.elapsed_ms;
+            script_loading::trace_fetch(elapsed_ms, kind);
             match fetched {
                 // Every failure below is the page's, not the engine's:
                 // it is recorded and execution continues, exactly as
@@ -13093,7 +13080,8 @@ impl JsRuntime {
                     if !self
                         .host_state
                         .borrow_mut()
-                        .csp_allows_response_for_script_node_with_source(
+                        .csp_allows_prepared_script_response(
+                            dispatch_document_id,
                             &script_node,
                             &effective_url,
                             redirect_count,
@@ -13121,54 +13109,16 @@ impl JsRuntime {
                     let redirected =
                         resource_reference_was_redirected(&src, &effective_url, base_url.as_ref());
                     dispatch_timing = Some((effective_url.clone(), redirected, elapsed_ms));
-                    let execution_started = std::time::Instant::now();
-                    let result = match kind {
-                        ScriptKind::Module => {
-                            self.eval_module_in_document_realm_timed(
-                                dispatch_document_id,
-                                script_node.identity(),
-                                &source,
-                                &module_script_url(&src, base_url.as_ref(), false),
-                                document_root_for_node(&script_node)
-                                    .unwrap_or_else(|| self.document()),
-                            )
-                            .0
-                        }
-                        _ => self
-                            .eval_script_in_document_realm(
-                                dispatch_document_id,
-                                script_node.identity(),
-                                &source,
-                                &effective_url,
-                                &timing_name,
-                                muted_errors,
-                                (1, 1),
-                                true,
-                            )
-                            .map(|_| JsValue::undefined())
-                            .map_err(JsEvaluationError::JavaScript),
-                    };
-                    let execution_ms = execution_started.elapsed().as_secs_f64() * 1_000.0;
-                    if std::env::var_os("OMOIKANE_TRACE_TASKS").is_some() && execution_ms >= 50.0 {
-                        eprintln!(
-                            "OMOIKANE_SCRIPT_PHASE {}",
-                            serde_json::json!({
-                                "phase": "execute",
-                                "elapsed_ms": execution_ms,
-                                "kind": format!("{kind:?}"),
-                                "success": result.is_ok(),
-                            })
-                        );
-                    }
-                    if let Err(error) = result {
-                        let context = script_source_context(&source);
-                        self.record_task_error(format!(
-                            "[dynamic script: {src}; {context}] {error}"
-                        ));
-                    }
-                    if log_scripts {
-                        eprintln!("[omoikane][script] completed dynamic {src}");
-                    }
+                    self.execute_dynamic_source(
+                        script_loading::Execution {
+                            script: (script_node, src, kind, base_url, dispatch_document_id),
+                            source,
+                            effective_url,
+                            requested_url: timing_name,
+                            muted_errors,
+                        },
+                        log_scripts,
+                    );
                 }
             }
         }
@@ -13861,6 +13811,7 @@ impl Drop for JsRuntime {
         let _guard = activate_host_state(Rc::clone(&self.host_state));
         self.terminate_workers();
         self.host_state.borrow_mut().cancel_image_loads();
+        self.host_state.borrow_mut().script_loads = Default::default();
 
         let (storage_manager, clients) = {
             let mut state = self.host_state.borrow_mut();
@@ -15491,6 +15442,16 @@ fn register_host_bindings(
             js_string!("__omoikane_attribute_records"),
             1,
             NativeFunction::from_copy_closure(attribute_records_native),
+        ),
+        (
+            js_string!("__omoikane_script_is_async"),
+            1,
+            NativeFunction::from_copy_closure(script_loading::is_async_native),
+        ),
+        (
+            js_string!("__omoikane_clear_script_force_async"),
+            1,
+            NativeFunction::from_copy_closure(script_loading::clear_force_async_native),
         ),
         (
             js_string!("__omoikane_attribute_record_count"),

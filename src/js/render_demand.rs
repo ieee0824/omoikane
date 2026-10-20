@@ -100,6 +100,7 @@ impl JsRuntime {
             || workers
             || images
             || state.font_loading.has_pending()
+            || state.script_loads.has_pending()
             || state.worklet.has_pending_render_work()
         {
             return NextRendering::EveryFrame;

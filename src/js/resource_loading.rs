@@ -3,6 +3,12 @@ use super::JsRuntime;
 use crate::resource_worker::ResourceQueue;
 
 impl JsRuntime {
+    /// Fetches dynamic external scripts on the shared resource workers.
+    /// Script execution and completion events remain on the owning runtime.
+    pub fn set_nonblocking_script_loading(&mut self, enabled: bool) {
+        self.host_state.borrow_mut().nonblocking_script_loading = enabled;
+    }
+
     /// Fetches and decodes fonts on the document's shared resource workers.
     /// Completion is applied when the host pumps page tasks; the initial paint
     /// can use fallback fonts without waiting for transport or decoding.

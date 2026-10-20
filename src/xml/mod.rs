@@ -244,6 +244,7 @@ impl<'a> Parser<'a> {
             return self.err("undeclared namespace prefix");
         }
         let node = NodeHandle::xml_element(&name, namespace);
+        node.set_script_force_async(false);
         for (attr, value) in attributes {
             let (attr_prefix, local_name) = attr
                 .split_once(':')

@@ -14190,9 +14190,10 @@ export const __omoikane_service_worker_lifecycle = {};
       else this.setAttribute("crossorigin", intrinsicString(value));
     }
     get async() {
-      return this.hasAttribute("async");
+      return __omoikane_script_is_async(internalNodeId(this));
     }
     set async(value) {
+      __omoikane_clear_script_force_async(internalNodeId(this));
       if (value) this.setAttribute("async", "");
       else this.removeAttribute("async");
     }

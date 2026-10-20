@@ -1076,6 +1076,33 @@ impl HostState {
         )
     }
 
+    /// Checks a prepared script against its owning Document even after detachment.
+    pub(super) fn csp_allows_prepared_script_response(
+        &mut self,
+        document_id: usize,
+        node: &NodeHandle,
+        reference: &str,
+        redirects: usize,
+        report_reference: &str,
+        request: csp::ScriptRequest<'_>,
+        source: Option<&CspSourceLocation>,
+    ) -> bool {
+        let Some(document) = self.get_node(document_id) else {
+            return false;
+        };
+        let policy = self.csp_policy_for_document(&document);
+        self.check_external_script_request(
+            &document,
+            node,
+            &policy,
+            reference,
+            redirects,
+            report_reference,
+            request,
+            source,
+        )
+    }
+
     pub(super) fn csp_allows_script_for_node(
         &mut self,
         node: &NodeHandle,

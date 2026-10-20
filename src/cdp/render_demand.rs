@@ -50,7 +50,13 @@ pub struct RenderDemand {
 }
 
 impl CdpSession {
-    /// Shares font I/O and decoding workers with other document resources.
+    /// Shares dynamic script fetch workers with other document resources.
+    pub fn set_nonblocking_script_loading(&mut self, enabled: bool) {
+        self.nonblocking_script_loading = enabled;
+        self.runtime.set_nonblocking_script_loading(enabled);
+    }
+
+    /// Keeps font fetches and decoding off the interactive owner thread.
     pub fn set_nonblocking_font_loading(&mut self, enabled: bool) {
         self.nonblocking_font_loading = enabled;
         self.runtime.set_nonblocking_font_loading(enabled);
