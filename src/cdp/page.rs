@@ -33,11 +33,14 @@ fn finish_document_startup(
 fn trace_startup_page(phase: &str, started: std::time::Instant) {
     if std::env::var_os("OMOIKANE_TRACE_STARTUP").is_some() {
         eprintln!(
-            "OMOIKANE_STARTUP_PAGE {}",
-            json!({
-                "phase": phase,
-                "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
-            })
+            "{}",
+            crate::diagnostics::json_record(
+                "OMOIKANE_STARTUP_PAGE",
+                &json!({
+                    "phase": phase,
+                    "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+                })
+            )
         );
     }
 }

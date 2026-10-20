@@ -734,6 +734,8 @@ enum StyleAttributeSelectorDependency {
     NonLocal,
 }
 
+type AttributeSelectorDependency = StyleAttributeSelectorDependency;
+
 /// Computes styles and caches results per node.
 #[derive(Debug, Default)]
 pub struct StyleResolver {
@@ -749,6 +751,12 @@ pub struct StyleResolver {
     selector_match_cache: SelectorMatchCache,
     /// Furthest reach of a registered selector that observes the raw `style` attribute.
     style_attribute_selector_dependency: StyleAttributeSelectorDependency,
+    /// Lazily classified selector reach for ordinary HTML `data-*` attributes.
+    ///
+    /// The cache is dropped whenever a stylesheet is registered. A missing entry
+    /// therefore means "not classified for the current stylesheet set", rather
+    /// than "no selector observes the attribute".
+    data_attribute_selector_dependencies: HashMap<String, AttributeSelectorDependency>,
     visited_paint_state: Option<VisitedPaintState>,
     /// Root element's computed font-size in px (for `rem` unit resolution).
     root_font_size: f32,
@@ -1903,12 +1911,231 @@ fn rules_style_attribute_dependency(rules: &[Rule]) -> StyleAttributeSelectorDep
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttributeTokenObservation {
+    Absent,
+    Named,
+    Unknown,
+}
+
+/// Looks for one attribute name in raw selector text retained by functional
+/// pseudos and `@scope`. Unknown bracket syntax is deliberately not treated as
+/// absence: a future parser extension could make it observable.
+fn selector_tokens_observe_attribute(
+    input: &str,
+    attribute_name: &str,
+) -> AttributeTokenObservation {
+    let Ok(tokens) = super::tokenize(input) else {
+        return AttributeTokenObservation::Unknown;
+    };
+    let mut observation = AttributeTokenObservation::Absent;
+    for (index, token) in tokens.iter().enumerate() {
+        if *token != CssToken::BracketOpen {
+            continue;
+        }
+        let Some(close_offset) = tokens[index + 1..]
+            .iter()
+            .position(|token| *token == CssToken::BracketClose)
+        else {
+            return AttributeTokenObservation::Unknown;
+        };
+        let contents = &tokens[index + 1..index + 1 + close_offset];
+        match attribute_selector_local_name(contents) {
+            Some(name) if name.eq_ignore_ascii_case(attribute_name) => {
+                return AttributeTokenObservation::Named;
+            }
+            Some(_) => {}
+            None => observation = AttributeTokenObservation::Unknown,
+        }
+    }
+    observation
+}
+
+fn functional_selector_observes_data_attribute(value: &str, attribute_name: &str) -> bool {
+    let Some((_, rest)) = value.split_once('(') else {
+        return false;
+    };
+    let Some(argument) = rest.strip_suffix(')') else {
+        return true;
+    };
+    selector_tokens_observe_attribute(argument, attribute_name) != AttributeTokenObservation::Absent
+}
+
+fn selector_observes_data_attribute(selector: &Selector, attribute_name: &str) -> bool {
+    selector.parts.iter().any(|part| {
+        part.simples.iter().any(|simple| match simple {
+            SimpleSelector::Attribute { name, .. } => name.eq_ignore_ascii_case(attribute_name),
+            SimpleSelector::Is(selectors)
+            | SimpleSelector::Where(selectors)
+            | SimpleSelector::Not(selectors) => selectors
+                .iter()
+                .any(|selector| selector_observes_data_attribute(selector, attribute_name)),
+            SimpleSelector::Has(selectors) => selectors.iter().any(|relative| {
+                selector_observes_data_attribute(&relative.selector, attribute_name)
+            }),
+            SimpleSelector::PseudoClass(name) | SimpleSelector::PseudoElement(name) => {
+                functional_selector_observes_data_attribute(name, attribute_name)
+            }
+            _ => false,
+        })
+    })
+}
+
+fn selector_data_attribute_dependency(
+    selector: &Selector,
+    attribute_name: &str,
+) -> AttributeSelectorDependency {
+    let Some(subject_index) = selector.parts.len().checked_sub(1) else {
+        return AttributeSelectorDependency::None;
+    };
+    let mut dependency = AttributeSelectorDependency::None;
+    for (part_index, part) in selector.parts.iter().enumerate() {
+        for simple in &part.simples {
+            dependency = dependency.max(simple_data_attribute_dependency(
+                simple,
+                attribute_name,
+                part_index == subject_index,
+            ));
+        }
+    }
+    if dependency == AttributeSelectorDependency::SubjectOnly
+        && (selector_contains_has(selector) || selector_contains_shadow_pseudo(selector))
+    {
+        AttributeSelectorDependency::NonLocal
+    } else {
+        dependency
+    }
+}
+
+fn simple_data_attribute_dependency(
+    simple: &SimpleSelector,
+    attribute_name: &str,
+    in_subject: bool,
+) -> AttributeSelectorDependency {
+    match simple {
+        SimpleSelector::Attribute { name, .. } if name.eq_ignore_ascii_case(attribute_name) => {
+            if in_subject {
+                AttributeSelectorDependency::SubjectOnly
+            } else {
+                AttributeSelectorDependency::NonLocal
+            }
+        }
+        SimpleSelector::Is(selectors)
+        | SimpleSelector::Where(selectors)
+        | SimpleSelector::Not(selectors) => {
+            selectors
+                .iter()
+                .fold(AttributeSelectorDependency::None, |dependency, selector| {
+                    let nested = selector_data_attribute_dependency(selector, attribute_name);
+                    let nested = match nested {
+                        AttributeSelectorDependency::None => nested,
+                        AttributeSelectorDependency::SubjectOnly
+                            if in_subject && selector.parts.len() == 1 =>
+                        {
+                            nested
+                        }
+                        _ => AttributeSelectorDependency::NonLocal,
+                    };
+                    dependency.max(nested)
+                })
+        }
+        SimpleSelector::Has(selectors) => {
+            if selectors.iter().any(|relative| {
+                selector_observes_data_attribute(&relative.selector, attribute_name)
+            }) {
+                AttributeSelectorDependency::NonLocal
+            } else {
+                AttributeSelectorDependency::None
+            }
+        }
+        SimpleSelector::PseudoClass(name) | SimpleSelector::PseudoElement(name)
+            if functional_selector_observes_data_attribute(name, attribute_name) =>
+        {
+            AttributeSelectorDependency::NonLocal
+        }
+        _ => AttributeSelectorDependency::None,
+    }
+}
+
+fn rules_data_attribute_dependency(
+    rules: &[Rule],
+    attribute_name: &str,
+    inside_nested_style: bool,
+) -> AttributeSelectorDependency {
+    rules
+        .iter()
+        .fold(AttributeSelectorDependency::None, |dependency, rule| {
+            let rule_dependency = match rule {
+                Rule::Style(rule) => {
+                    let selector_dependency = rule
+                        .selectors
+                        .iter()
+                        .map(|selector| {
+                            selector_data_attribute_dependency(selector, attribute_name)
+                        })
+                        .max()
+                        .unwrap_or_default();
+                    let nested_dependency =
+                        rules_data_attribute_dependency(&rule.rules, attribute_name, true);
+                    let dependency = selector_dependency.max(nested_dependency);
+                    if inside_nested_style && dependency != AttributeSelectorDependency::None {
+                        AttributeSelectorDependency::NonLocal
+                    } else if selector_dependency != AttributeSelectorDependency::None
+                        && !rule.rules.is_empty()
+                    {
+                        // A nested selector can project an outer subject's
+                        // attribute dependency onto a sibling or ancestor.
+                        AttributeSelectorDependency::NonLocal
+                    } else {
+                        dependency
+                    }
+                }
+                Rule::At(rule) => {
+                    let scope_observes = rule.name.eq_ignore_ascii_case("scope")
+                        && (super::parse_scope_prelude(&rule.prelude).is_some_and(|scope| {
+                            scope
+                                .start
+                                .iter()
+                                .chain(scope.end.iter())
+                                .flatten()
+                                .any(|selector| {
+                                    selector_observes_data_attribute(selector, attribute_name)
+                                })
+                        }) || selector_tokens_observe_attribute(&rule.prelude, attribute_name)
+                            != AttributeTokenObservation::Absent);
+                    let scope_dependency = if scope_observes {
+                        AttributeSelectorDependency::NonLocal
+                    } else {
+                        AttributeSelectorDependency::None
+                    };
+                    scope_dependency.max(
+                        rule.block
+                            .as_deref()
+                            .map(|rules| {
+                                rules_data_attribute_dependency(
+                                    rules,
+                                    attribute_name,
+                                    inside_nested_style,
+                                )
+                            })
+                            .unwrap_or_default(),
+                    )
+                }
+                Rule::FontFace(_) => AttributeSelectorDependency::None,
+            };
+            dependency.max(rule_dependency)
+        })
+}
+
 fn parsed_inline_style(source: Option<&str>) -> Vec<Declaration> {
     source.map(super::parse_style_attribute).unwrap_or_default()
 }
 
 fn is_local_inline_property(name: &str) -> bool {
-    matches!(canonical_property_name(name), "bottom" | "transform")
+    matches!(
+        canonical_property_name(name),
+        "background-image" | "bottom" | "transform"
+    )
 }
 
 fn is_flow_relative_inset(name: &str) -> bool {
@@ -2184,6 +2411,30 @@ impl StyleResolver {
             .cancel_detached_transitions(active_node_ids);
     }
 
+    fn data_attribute_selector_dependency(
+        &mut self,
+        attribute_name: &str,
+    ) -> AttributeSelectorDependency {
+        let attribute_name = attribute_name.to_ascii_lowercase();
+        if let Some(dependency) = self
+            .data_attribute_selector_dependencies
+            .get(&attribute_name)
+        {
+            return *dependency;
+        }
+        let dependency = self
+            .stylesheets
+            .iter()
+            .map(|input| {
+                rules_data_attribute_dependency(&input.stylesheet.rules, &attribute_name, false)
+            })
+            .max()
+            .unwrap_or_default();
+        self.data_attribute_selector_dependencies
+            .insert(attribute_name, dependency);
+        dependency
+    }
+
     /// Drops values derived from the current DOM while retaining parsed
     /// stylesheets, rule indexes, and condition-prelude parse caches.
     pub(crate) fn invalidate_style_cache(&mut self) {
@@ -2249,6 +2500,57 @@ impl StyleResolver {
             "local_raw_style_subject"
         } else {
             "local"
+        }
+    }
+
+    /// Invalidates computed styles after one ordinary HTML `data-*` mutation.
+    ///
+    /// Even when no selector observes the attribute, the target subtree is
+    /// evicted because `attr()` in declarations and inherited custom properties
+    /// can depend on its value. Selectors are always invalidated.
+    pub(crate) fn invalidate_data_attribute_subtree(
+        &mut self,
+        node: &NodeHandle,
+        attribute_name: &str,
+        has_non_scalar_dom_string: bool,
+    ) -> &'static str {
+        self.selector_match_cache = SelectorMatchCache::default();
+        let dependency = self.data_attribute_selector_dependency(attribute_name);
+        let is_document_element = node.node_type() == NodeType::Element
+            && node
+                .parent_node()
+                .is_some_and(|parent| parent.node_type() == NodeType::Document);
+        let fallback = if dependency == AttributeSelectorDependency::NonLocal {
+            Some("fallback_data_attribute_selector")
+        } else if self.has_running_transitions() {
+            Some("fallback_active_transition")
+        } else if self.has_running_animations() {
+            Some("fallback_active_animation")
+        } else if is_document_element {
+            Some("fallback_document_root")
+        } else if has_non_scalar_dom_string {
+            Some("fallback_non_scalar_dom_string")
+        } else {
+            None
+        };
+        if let Some(reason) = fallback {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return reason;
+        }
+        let Some(identities) = inline_invalidation_subtree(node) else {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return "fallback_shadow_or_slot";
+        };
+        self.cache
+            .retain(|identity, _| !identities.contains(identity));
+        self.pseudo_cache
+            .retain(|key, _| !identities.contains(&key.0));
+        if dependency == AttributeSelectorDependency::SubjectOnly {
+            "local_data_attribute_subject"
+        } else {
+            "local_data_attribute_none"
         }
     }
 
@@ -2511,6 +2813,7 @@ impl StyleResolver {
         scope_root: Option<usize>,
         stylesheet: &Stylesheet,
     ) -> usize {
+        self.data_attribute_selector_dependencies.clear();
         self.style_attribute_selector_dependency = self
             .style_attribute_selector_dependency
             .max(rules_style_attribute_dependency(&stylesheet.rules));

@@ -137,7 +137,7 @@ impl CdpSession {
             .and_then(Value::as_u64)
             .filter(|id| *id > 0)
             .unwrap_or(1);
-        let (client_x, client_y, scroll_x, scroll_y) =
+        let (client_x, client_y, scroll_x, scroll_y, target_document_id) =
             self.runtime.input_position_for_node(&target_node, x, y);
         let mut init = json!({
             "clientX": client_x, "clientY": client_y,
@@ -159,9 +159,10 @@ impl CdpSession {
             init["deltaY"] = json!(optional_f64(params, "deltaY", 0.0)?);
             init["deltaZ"] = json!(0);
             init["deltaMode"] = json!(0);
-            let outcome = self.eval_input_number(&format!(
-                "__omoikane_dispatch_wheel_input({target_id}, {init})"
-            ))?;
+            let outcome = self.eval_input_number_in_document(
+                target_document_id,
+                &format!("__omoikane_dispatch_wheel_input({target_id}, {init})"),
+            )?;
             let not_canceled = outcome & 1 != 0;
             return Ok(json!({
                 "defaultPrevented": !not_canceled,
@@ -411,6 +412,23 @@ impl CdpSession {
         let outcome = self
             .runtime
             .eval(script)
+            .and_then(|value| {
+                self.runtime.run_jobs()?;
+                Ok(value.as_number().unwrap_or(1.0) as u8)
+            })
+            .map_err(js_error)?;
+        self.commit_pending_navigation_requests()?;
+        Ok(outcome)
+    }
+
+    fn eval_input_number_in_document(
+        &mut self,
+        document_id: usize,
+        script: &str,
+    ) -> Result<u8, JsonRpcError> {
+        let outcome = self
+            .runtime
+            .eval_input_in_document_realm(document_id, script)
             .and_then(|value| {
                 self.runtime.run_jobs()?;
                 Ok(value.as_number().unwrap_or(1.0) as u8)

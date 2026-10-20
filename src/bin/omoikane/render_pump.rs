@@ -39,7 +39,10 @@ impl PaintTrace {
             "scale": layout.scale().factor(),
             "viewport": layout.page_viewport(),
         });
-        eprintln!("OMOIKANE_PAINT {record}");
+        eprintln!(
+            "{}",
+            omoikane::diagnostics::json_record("OMOIKANE_PAINT", &record)
+        );
     }
 }
 

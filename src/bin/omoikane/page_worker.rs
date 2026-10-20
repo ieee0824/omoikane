@@ -1,5 +1,6 @@
 //! The GUI page owner. Boa and DOM handles are created and used on this thread.
 use std::cell::Cell;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -16,6 +17,21 @@ use omoikane::platform_input::{
 };
 use serde_json::json;
 use winit::event_loop::EventLoopProxy;
+
+const DEFAULT_GUI_RESOURCE_WORKERS: usize = 4;
+const MAX_GUI_RESOURCE_WORKERS: usize = 64;
+
+fn configured_resource_worker_count(value: Option<&str>) -> NonZeroUsize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|workers| (1..=MAX_GUI_RESOURCE_WORKERS).contains(workers))
+        .and_then(NonZeroUsize::new)
+        .unwrap_or(NonZeroUsize::new(DEFAULT_GUI_RESOURCE_WORKERS).unwrap())
+}
+
+fn gui_resource_worker_count() -> NonZeroUsize {
+    configured_resource_worker_count(std::env::var("OMOIKANE_RESOURCE_WORKERS").ok().as_deref())
+}
 
 /// Native-loop notification from the page owner or cookie jar.
 pub(super) enum AsyncEvent {
@@ -261,17 +277,14 @@ impl PageWorker {
                     let result = owner.apply(command);
                     if let (Some(input), Some(queue_ms), Some(started)) = (input, queue_ms, started)
                     {
-                        eprintln!(
-                            "OMOIKANE_PAGE_INPUT {}",
-                            json!({
+                        eprintln!("{}", omoikane::diagnostics::json_record("OMOIKANE_PAGE_INPUT", &json!({
                                 "sequence": input.sequence, "first_sequence": input.sequence,
                                 "last_sequence": input.last_sequence, "source_count": input.source_count,
                                 "kind": input.kind,
                                 "queue_ms": queue_ms,
                                 "execute_ms": started.elapsed().as_secs_f64() * 1000.0,
                                 "success": result.is_ok(),
-                            })
-                        );
+                            })));
                     }
                     let update = owner.snapshot(
                         frame_completed,
@@ -356,6 +369,7 @@ impl PageOwner {
         cookie_waker: std::task::Waker,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut session = CdpSession::new()?;
+        session.set_resource_worker_count(gui_resource_worker_count());
         session.set_task_pump_limit(std::num::NonZeroUsize::new(1));
         session.set_pointer_lock_deferred(true);
         session.set_deferred_document_startup(true);
@@ -430,11 +444,14 @@ impl PageOwner {
                 let result = self.input.wheel(&mut self.session, x, y);
                 if let Some(started) = started {
                     eprintln!(
-                        "OMOIKANE_WHEEL {}",
-                        json!({
-                            "dispatch_ms":started.elapsed().as_secs_f64()*1000.0,
-                            "delta_x":x,"delta_y":y,"success":result.is_ok(),
-                        })
+                        "{}",
+                        omoikane::diagnostics::json_record(
+                            "OMOIKANE_WHEEL",
+                            &json!({
+                                "dispatch_ms":started.elapsed().as_secs_f64()*1000.0,
+                                "delta_x":x,"delta_y":y,"success":result.is_ok(),
+                            })
+                        )
                     );
                 }
                 result?;
@@ -578,6 +595,21 @@ impl PageOwner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_worker_count_accepts_only_bounded_nonzero_values() {
+        for (value, expected) in [
+            (None, 4),
+            (Some(""), 4),
+            (Some("0"), 4),
+            (Some("8"), 8),
+            (Some("64"), 64),
+            (Some("65"), 4),
+            (Some("invalid"), 4),
+        ] {
+            assert_eq!(configured_resource_worker_count(value).get(), expected);
+        }
+    }
 
     struct NoWake;
     impl std::task::Wake for NoWake {

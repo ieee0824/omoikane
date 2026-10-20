@@ -138,8 +138,11 @@ impl AsyncBrowserApp {
     pub(super) fn trace_startup(&self, phase: &str) {
         if let Some(started) = self.startup_trace {
             eprintln!(
-                "OMOIKANE_STARTUP {}",
-                json!({"phase":phase,"elapsed_ms":started.elapsed().as_secs_f64()*1000.0})
+                "{}",
+                omoikane::diagnostics::json_record(
+                    "OMOIKANE_STARTUP",
+                    &json!({"phase":phase,"elapsed_ms":started.elapsed().as_secs_f64()*1000.0})
+                )
             );
         }
     }
@@ -367,17 +370,20 @@ impl AsyncBrowserApp {
         if let (Some(started), Some(trace)) = (started, self.pending_paint_trace.take()) {
             self.paint_sequence += 1;
             eprintln!(
-                "OMOIKANE_PAINT {}",
-                json!({
-                    "sequence":self.paint_sequence,
-                    "elapsed_ms":self.trace_paint_started.map_or(0,|origin|origin.elapsed().as_millis()),
-                    "frame_ms":trace.frame.as_secs_f64()*1000.0,
-                    "adjusted_layout_ms":trace.timings.layout.as_secs_f64()*1000.0,
-                    "paint_ms":trace.timings.paint.as_secs_f64()*1000.0,
-                    "present_ms":started.elapsed().as_secs_f64()*1000.0,
-                    "scale":layout.scale().factor(),
-                    "viewport":layout.page_viewport(),
-                })
+                "{}",
+                omoikane::diagnostics::json_record(
+                    "OMOIKANE_PAINT",
+                    &json!({
+                        "sequence":self.paint_sequence,
+                        "elapsed_ms":self.trace_paint_started.map_or(0,|origin|origin.elapsed().as_millis()),
+                        "frame_ms":trace.frame.as_secs_f64()*1000.0,
+                        "adjusted_layout_ms":trace.timings.layout.as_secs_f64()*1000.0,
+                        "paint_ms":trace.timings.paint.as_secs_f64()*1000.0,
+                        "present_ms":started.elapsed().as_secs_f64()*1000.0,
+                        "scale":layout.scale().factor(),
+                        "viewport":layout.page_viewport(),
+                    })
+                )
             );
         }
         if self.frame.is_some() && !self.initial_navigation_pending && self.first_page_redraw {
@@ -819,7 +825,10 @@ impl AsyncBrowserApp {
         };
         self.input_sequence += 1;
         record["sequence"] = json!(self.input_sequence);
-        eprintln!("OMOIKANE_INPUT {record}");
+        eprintln!(
+            "{}",
+            omoikane::diagnostics::json_record("OMOIKANE_INPUT", &record)
+        );
     }
 }
 

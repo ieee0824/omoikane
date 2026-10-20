@@ -8,6 +8,7 @@ pub mod canvas;
 pub mod cdp;
 pub mod css;
 pub mod data;
+pub mod diagnostics;
 pub mod dom;
 pub mod error_reporting;
 pub mod ffi;

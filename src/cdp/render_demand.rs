@@ -2,6 +2,7 @@
 
 use super::CdpSession;
 use crate::js::render_demand::RuntimePaintKey;
+use crate::resource_worker::ResourceQueue;
 use std::time::Duration;
 
 /// When a host should provide the next page rendering opportunity.
@@ -50,6 +51,28 @@ pub struct RenderDemand {
 }
 
 impl CdpSession {
+    /// Sets resource concurrency while keeping navigation generations independent.
+    ///
+    /// The active document receives a fresh queue. Later navigations create new
+    /// queues with this limit, so retired blocking requests cannot occupy their slots.
+    /// Configure this before starting resource loads; it clears explicit queue sharing.
+    pub fn set_resource_worker_count(&mut self, workers: std::num::NonZeroUsize) {
+        self.resource_worker_count = workers;
+        self.resource_queue = None;
+        self.runtime.set_resource_queue(ResourceQueue::new(workers));
+    }
+
+    /// Explicitly shares one queue across the active document and later navigations.
+    ///
+    /// Clones share their concurrency limit, including slots held by retired
+    /// in-flight transports. The default policy instead gives each navigation a
+    /// fresh queue. Configure sharing before loads; it does not migrate submitted work.
+    pub fn set_resource_queue(&mut self, queue: ResourceQueue) {
+        self.resource_worker_count = queue.worker_count();
+        self.runtime.set_resource_queue(queue.clone());
+        self.resource_queue = Some(queue);
+    }
+
     /// Shares Fetch/XHR transport workers with other document resources.
     pub fn set_nonblocking_fetch_loading(&mut self, enabled: bool) {
         self.nonblocking_fetch_loading = enabled;

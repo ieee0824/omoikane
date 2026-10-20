@@ -46,10 +46,23 @@ pub(super) fn module_csp_metadata(requested_url: &str) -> boa_engine::HostDefine
     metadata
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static CSP_SOURCE_CAPTURE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn take_csp_source_capture_calls() -> usize {
+    CSP_SOURCE_CAPTURE_CALLS.with(|calls| calls.replace(0))
+}
+
 /// Finds the immediate author-script frame whose immutable metadata
 /// and source position belong to that same frame. Only frames from this
 /// bootstrap invocation are skipped; an unmarked author frame stops capture.
 pub(super) fn capture_csp_source(context: &Context) -> Option<CspSourceLocation> {
+    #[cfg(test)]
+    CSP_SOURCE_CAPTURE_CALLS.with(|calls| calls.set(calls.get() + 1));
+
     let mut frames = context.stack_trace();
     // This private binding is invoked by the trusted bootstrap module. Skip
     // only frames belonging to that exact runnable; the first different
@@ -4547,6 +4560,108 @@ mod tests {
             runtime.eval("replayed.length").unwrap().as_number(),
             Some(2.0)
         );
+    }
+
+    #[test]
+    fn attribute_mutations_capture_csp_source_only_for_resource_attributes() {
+        let document = crate::html::TreeBuilder::parse("<html><body></body></html>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        runtime
+            .eval(
+                "globalThis.captureOrdinary=document.createElement('div');\
+                 globalThis.captureScript=document.createElement('script');",
+            )
+            .unwrap();
+        take_csp_source_capture_calls();
+
+        runtime
+            .eval(
+                "captureOrdinary.setAttribute('style','color:red');\
+                 captureOrdinary.removeAttribute('style');\
+                 captureOrdinary.setAttribute('data-loaded','true');\
+                 captureOrdinary.removeAttribute('data-loaded');\
+                 captureOrdinary.setAttributeNS(null,'data-state','ready');\
+                 captureOrdinary.removeAttributeNS(null,'data-state');\
+                 captureScript.setAttribute('unknown','value');\
+                 captureScript.removeAttribute('unknown');\
+                 captureScript.setAttributeNS('urn:test','src','namespaced');\
+                 captureScript.removeAttributeNS('urn:test','src');\
+                 captureScript.setAttributeNS(null,'SRC','case-sensitive');\
+                 captureScript.removeAttributeNS(null,'SRC');",
+            )
+            .unwrap();
+        assert_eq!(take_csp_source_capture_calls(), 0);
+        assert!(
+            runtime
+                .eval(
+                    "!captureOrdinary.hasAttribute('style') &&\
+                     !captureOrdinary.hasAttribute('data-loaded') &&\
+                     !captureOrdinary.hasAttributeNS(null,'data-state') &&\
+                     !captureScript.hasAttribute('unknown') &&\
+                     !captureScript.hasAttributeNS('urn:test','src') &&\
+                     !captureScript.hasAttributeNS(null,'SRC')",
+                )
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+
+        runtime
+            .eval(
+                "captureScript.setAttribute('src','first.js');\
+                 captureScript.removeAttribute('src');\
+                 captureScript.setAttributeNS(null,'src','second.js');\
+                 captureScript.removeAttributeNS(null,'src');",
+            )
+            .unwrap();
+        assert_eq!(take_csp_source_capture_calls(), 4);
+        assert!(
+            runtime
+                .eval("!captureScript.hasAttributeNS(null,'src')")
+                .unwrap()
+                .as_boolean()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn connected_script_attribute_capture_keeps_author_source_position() {
+        let document = crate::html::TreeBuilder::parse(
+            "<html><body><script id='capture-target'></script></body></html>",
+        )
+        .document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+        let script_id = {
+            let mut state = runtime.host_state.borrow_mut();
+            let script = state.document.query_selector("#capture-target").unwrap();
+            let script_id = script.identity();
+            state.runnable_inserted_scripts.insert(script_id);
+            state.started_inserted_scripts.remove(&script_id);
+            script_id
+        };
+        take_csp_source_capture_calls();
+
+        let (evaluated, ..) = runtime.eval_safe_timed_source(
+            "const target=document.getElementById('capture-target');\n\
+             target.setAttribute('src','https://blocked.test/script.js');",
+            Some("https://private.test/effective-attribute.js"),
+            Some("https://example.test/requested-attribute.js"),
+            (41, 9),
+            false,
+        );
+        evaluated.unwrap();
+
+        assert_eq!(take_csp_source_capture_calls(), 1);
+        let state = runtime.host_state.borrow();
+        let source = &state.pending_script_csp_sources[&script_id];
+        assert_eq!(
+            source.source_file,
+            "https://example.test/requested-attribute.js"
+        );
+        assert_eq!(source.line_number, 42);
+        assert!(source.column_number > 0);
     }
 
     #[test]

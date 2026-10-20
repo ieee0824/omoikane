@@ -283,12 +283,15 @@ impl JsRuntime {
 pub(super) fn trace_fetch(elapsed_ms: f64, kind: ScriptKind) {
     if std::env::var_os("OMOIKANE_TRACE_TASKS").is_some() && elapsed_ms >= 50.0 {
         eprintln!(
-            "OMOIKANE_SCRIPT_PHASE {}",
-            serde_json::json!({
-                "phase": "fetch",
-                "elapsed_ms": elapsed_ms,
-                "kind": format!("{kind:?}"),
-            })
+            "{}",
+            crate::diagnostics::json_record(
+                "OMOIKANE_SCRIPT_PHASE",
+                &serde_json::json!({
+                    "phase": "fetch",
+                    "elapsed_ms": elapsed_ms,
+                    "kind": format!("{kind:?}"),
+                })
+            )
         );
     }
 }
@@ -339,13 +342,16 @@ impl JsRuntime {
         let execution_ms = execution_started.elapsed().as_secs_f64() * 1_000.0;
         if std::env::var_os("OMOIKANE_TRACE_TASKS").is_some() && execution_ms >= 50.0 {
             eprintln!(
-                "OMOIKANE_SCRIPT_PHASE {}",
-                serde_json::json!({
-                    "phase": "execute",
-                    "elapsed_ms": execution_ms,
-                    "kind": format!("{kind:?}"),
-                    "success": result.is_ok(),
-                })
+                "{}",
+                crate::diagnostics::json_record(
+                    "OMOIKANE_SCRIPT_PHASE",
+                    &serde_json::json!({
+                        "phase": "execute",
+                        "elapsed_ms": execution_ms,
+                        "kind": format!("{kind:?}"),
+                        "success": result.is_ok(),
+                    })
+                )
             );
         }
         if let Err(error) = result {
@@ -506,14 +512,17 @@ fn trace_gc_phase(
         })
     };
     eprintln!(
-        "OMOIKANE_CLASSIC_GC {}",
-        serde_json::json!({
-            "phase": phase,
-            "source_bytes": source_bytes,
-            "success": success,
-            "minor": delta(before.minor, after.minor),
-            "major": delta(before.major, after.major),
-        })
+        "{}",
+        crate::diagnostics::json_record(
+            "OMOIKANE_CLASSIC_GC",
+            &serde_json::json!({
+                "phase": phase,
+                "source_bytes": source_bytes,
+                "success": success,
+                "minor": delta(before.minor, after.minor),
+                "major": delta(before.major, after.major),
+            })
+        )
     );
 }
 
@@ -604,15 +613,18 @@ impl JsRuntime {
             if std::env::var_os("OMOIKANE_TRACE_TASKS").is_some() && parse_ms + evaluate_ms >= 50.0
             {
                 eprintln!(
-                    "OMOIKANE_CLASSIC_SCRIPT {}",
-                    serde_json::json!({
-                        "source_bytes": source.len(),
-                        "parse_ms": parse_ms,
-                        "compile_ms": compile_ms,
-                        "run_ms": compile_ms.filter(|_| did_run).map(|_| run_ms),
-                        "evaluate_ms": evaluate_ms,
-                        "success": result.is_ok(),
-                    })
+                    "{}",
+                    crate::diagnostics::json_record(
+                        "OMOIKANE_CLASSIC_SCRIPT",
+                        &serde_json::json!({
+                            "source_bytes": source.len(),
+                            "parse_ms": parse_ms,
+                            "compile_ms": compile_ms,
+                            "run_ms": compile_ms.filter(|_| did_run).map(|_| run_ms),
+                            "evaluate_ms": evaluate_ms,
+                            "success": result.is_ok(),
+                        })
+                    )
                 );
             }
             result

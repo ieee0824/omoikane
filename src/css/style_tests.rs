@@ -10586,6 +10586,258 @@ fn hidden_attribute_uses_overridable_user_agent_styles() {
 }
 
 #[test]
+fn background_image_locality_compares_normalized_non_image_declarations() {
+    let previous =
+        "background:url(old.png) center / cover no-repeat rgb(255, 0, 0);position:relative";
+    assert!(inline_style_change_is_subtree_local(
+        Some(previous),
+        Some("background:url(next.png) center / cover no-repeat rgb(255, 0, 0);position:relative"),
+    ));
+    assert!(inline_style_change_is_subtree_local(
+        None,
+        Some("background-image:linear-gradient(red, blue)"),
+    ));
+
+    for current in [
+        "background:url(next.png);position:relative",
+        "background:url(next.png) center / cover no-repeat rgb(255, 0, 0);position:absolute",
+        "background-image:url(next.png);position:relative;background-color:red",
+    ] {
+        assert!(
+            !inline_style_change_is_subtree_local(Some(previous), Some(current)),
+            "non-image declaration changes must use document invalidation: {current}",
+        );
+    }
+}
+
+#[test]
+fn inline_background_image_invalidation_refreshes_inheritance_and_pseudos() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let target = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    let unrelated = NodeHandle::element("aside");
+    target.set_attribute("id", "target");
+    child.set_attribute("id", "child");
+    unrelated.set_attribute("id", "unrelated");
+    child.set_attribute("style", "background-image:inherit");
+    let previous = "background-image:linear-gradient(red, blue)";
+    target.set_attribute("style", previous);
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(target.clone());
+    target.append_child(child.clone());
+    body.append_child(unrelated.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#target::before,#child::before{content:'cached';background-image:inherit}\
+             #unrelated::before{content:'cached'}",
+        )
+        .unwrap(),
+    );
+    let target_before = resolver.computed_style_shared(&target);
+    let child_before = resolver.computed_style_shared(&child);
+    let target_pseudo_before = resolver
+        .computed_pseudo_style_shared(&target, PseudoElement::Before)
+        .unwrap();
+    let child_pseudo_before = resolver
+        .computed_pseudo_style_shared(&child, PseudoElement::Before)
+        .unwrap();
+    let unrelated_before = resolver.computed_style_shared(&unrelated);
+    let unrelated_pseudo_before = resolver
+        .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+        .unwrap();
+    assert_eq!(
+        child_before.get("background-image"),
+        target_before.get("background-image"),
+    );
+    assert_eq!(
+        target_pseudo_before.get("background-image"),
+        target_before.get("background-image"),
+    );
+
+    let current = "background-image:linear-gradient(green, yellow)";
+    target.set_attribute("style", current);
+    assert_eq!(
+        resolver.invalidate_inline_style_subtree(
+            &target,
+            Some(previous),
+            Some(current),
+            false,
+            false,
+        ),
+        "local",
+    );
+
+    let target_after = resolver.computed_style_shared(&target);
+    let child_after = resolver.computed_style_shared(&child);
+    let target_pseudo_after = resolver
+        .computed_pseudo_style_shared(&target, PseudoElement::Before)
+        .unwrap();
+    let child_pseudo_after = resolver
+        .computed_pseudo_style_shared(&child, PseudoElement::Before)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&target_before, &target_after));
+    assert!(!Arc::ptr_eq(&child_before, &child_after));
+    assert!(!Arc::ptr_eq(&target_pseudo_before, &target_pseudo_after));
+    assert!(!Arc::ptr_eq(&child_pseudo_before, &child_pseudo_after));
+    assert_ne!(
+        target_before.get("background-image"),
+        target_after.get("background-image"),
+    );
+    assert_eq!(
+        child_after.get("background-image"),
+        target_after.get("background-image"),
+    );
+    assert_eq!(
+        target_pseudo_after.get("background-image"),
+        target_after.get("background-image"),
+    );
+    assert_eq!(
+        child_pseudo_after.get("background-image"),
+        child_after.get("background-image"),
+    );
+    assert!(Arc::ptr_eq(
+        &unrelated_before,
+        &resolver.computed_style_shared(&unrelated),
+    ));
+    assert!(Arc::ptr_eq(
+        &unrelated_pseudo_before,
+        &resolver
+            .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+            .unwrap(),
+    ));
+}
+
+#[test]
+fn background_image_raw_style_subject_is_local_but_nonlocal_selector_falls_back() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let target = NodeHandle::element("div");
+    let unrelated = NodeHandle::element("aside");
+    document.append_child(body.clone());
+    body.append_child(target.clone());
+    body.append_child(unrelated.clone());
+    let current = "background-image:linear-gradient(red, blue)";
+
+    let mut subject = StyleResolver::new();
+    subject.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("[style='background-image:linear-gradient(red, blue)']{color:red}")
+            .unwrap(),
+    );
+    let unrelated_before = subject.computed_style_shared(&unrelated);
+    target.set_attribute("style", current);
+    assert_eq!(
+        subject.invalidate_inline_style_subtree(&target, None, Some(current), false, false),
+        "local_raw_style_subject",
+    );
+    assert!(Arc::ptr_eq(
+        &unrelated_before,
+        &subject.computed_style_shared(&unrelated),
+    ));
+    assert_eq!(
+        subject.computed_style_shared(&target).get("color"),
+        Some(&ComputedValue::Color("red".to_string())),
+    );
+
+    let mut nonlocal = StyleResolver::new();
+    nonlocal.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body:has([style='background-image:linear-gradient(red, blue)']) aside{color:red}",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        nonlocal.invalidate_inline_style_subtree(&target, None, Some(current), false, false),
+        "fallback_raw_style_selector",
+    );
+}
+
+#[test]
+fn background_image_changes_keep_existing_full_invalidation_guards() {
+    let current = "background-image:linear-gradient(red, blue)";
+
+    let plain = NodeHandle::element("div");
+    let mut csp = StyleResolver::new();
+    assert_eq!(
+        csp.invalidate_inline_style_subtree(&plain, None, Some(current), false, true),
+        "fallback_csp_block_state_change",
+    );
+
+    let shadow_host = NodeHandle::element("x-host");
+    shadow_host.attach_shadow(ShadowRootMode::Open).unwrap();
+    let mut shadow = StyleResolver::new();
+    assert_eq!(
+        shadow.invalidate_inline_style_subtree(&shadow_host, None, Some(current), false, false,),
+        "fallback_shadow_or_slot",
+    );
+
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    document.append_child(html.clone());
+    let mut root = StyleResolver::new();
+    assert_eq!(
+        root.invalidate_inline_style_subtree(&html, None, Some(current), false, false),
+        "fallback_document_root",
+    );
+
+    let animated = NodeHandle::element("div");
+    animated.set_attribute("id", "animated");
+    let mut animation = StyleResolver::new();
+    animation.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes fade{from{opacity:0}to{opacity:1}}#animated{animation:fade 10s linear}",
+        )
+        .unwrap(),
+    );
+    animation.set_animation_time_ms(0.0);
+    animation.computed_style_shared(&animated);
+    assert_eq!(
+        animation.invalidate_inline_style_subtree(&plain, None, Some(current), false, false),
+        "fallback_active_animation",
+    );
+
+    let transitioning = NodeHandle::element("div");
+    let transition_before = "transform:translateX(0px);transition:transform 1s linear";
+    let transition_started = "transform:translateX(20px);transition:transform 1s linear";
+    transitioning.set_attribute("style", transition_before);
+    let mut transition = StyleResolver::new();
+    transition.computed_style_shared(&transitioning);
+    transitioning.set_attribute("style", transition_started);
+    assert_eq!(
+        transition.invalidate_inline_style_subtree(
+            &transitioning,
+            Some(transition_before),
+            Some(transition_started),
+            false,
+            false,
+        ),
+        "local",
+    );
+    transition.computed_style_shared(&transitioning);
+    assert!(transition.has_running_transitions());
+    let transition_next = format!("{transition_started};{current}");
+    transitioning.set_attribute("style", &transition_next);
+    assert_eq!(
+        transition.invalidate_inline_style_subtree(
+            &transitioning,
+            Some(transition_started),
+            Some(&transition_next),
+            false,
+            false,
+        ),
+        "fallback_active_transition",
+    );
+}
+
+#[test]
 fn inline_transform_and_bottom_invalidation_retains_unrelated_style_entries() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
@@ -11123,6 +11375,381 @@ fn shadow_participation_and_document_root_keep_full_invalidation() {
         unrelated_after_root.get("width"),
         Some(&ComputedValue::Px(32.0)),
         "the document-root fallback must refresh rem resolution",
+    );
+}
+
+#[test]
+fn data_attribute_dependency_classifies_local_and_external_reach() {
+    let dependency = |selector: &str| {
+        let stylesheet = parse_stylesheet(&format!("{selector}{{color:red}}"))
+            .expect("selector fixture should parse");
+        rules_data_attribute_dependency(&stylesheet.rules, "data-state", false)
+    };
+    for selector in [
+        "[data-state]",
+        "body [data-state]",
+        "div:is([data-state], .plain)",
+        "div:where([data-state])",
+        "div:not([data-state])",
+        "[data-state]::before",
+        r"[data-\73 tate]",
+    ] {
+        assert_eq!(
+            dependency(selector),
+            AttributeSelectorDependency::SubjectOnly,
+            "{selector}",
+        );
+    }
+    assert_eq!(
+        dependency("[data-other]"),
+        AttributeSelectorDependency::None,
+    );
+    for selector in [
+        "[data-state] span",
+        "[data-state] + span",
+        "body:has([data-state])",
+        "[data-state]:has(.child)",
+        "div:is(.ancestor [data-state])",
+        "div:where(.ancestor [data-state])",
+        "div:not(.ancestor [data-state])",
+        "div:nth-child(1 of [data-state])",
+        "x-card[data-state]::part(label)",
+        "slot::slotted([data-state])",
+    ] {
+        assert_eq!(
+            dependency(selector),
+            AttributeSelectorDependency::NonLocal,
+            "{selector}",
+        );
+    }
+
+    for stylesheet in [
+        "@scope ([data-state]) { div { color:red } }",
+        "@scope (.root) to ([data-state]) { div { color:red } }",
+        "@scope ([*|data-state]) { div { color:red } }",
+        ".card { &[data-state] { color:red } }",
+        "[data-state] { & + .peer { color:red } }",
+    ] {
+        let stylesheet = parse_stylesheet(stylesheet).expect("dependency fixture should parse");
+        assert_eq!(
+            rules_data_attribute_dependency(&stylesheet.rules, "data-state", false),
+            AttributeSelectorDependency::NonLocal,
+            "{stylesheet:?}",
+        );
+    }
+    assert_eq!(
+        selector_tokens_observe_attribute("[*|data-state]", "data-state"),
+        AttributeTokenObservation::Named,
+    );
+    assert_eq!(
+        selector_tokens_observe_attribute("[*|]", "data-state"),
+        AttributeTokenObservation::Unknown,
+    );
+}
+
+#[test]
+fn nested_data_attribute_subject_reaching_a_sibling_falls_back() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let target = NodeHandle::element("div");
+    let peer = NodeHandle::element("div");
+    peer.set_attribute("class", "peer");
+    document.append_child(body.clone());
+    body.append_child(target.clone());
+    body.append_child(peer.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(".peer{color:blue}[data-loaded]{& + .peer{color:red}}")
+            .expect("nested selector fixture should parse"),
+    );
+    let peer_before = resolver.computed_style_shared(&peer);
+    assert_eq!(
+        peer_before.get("color"),
+        Some(&ComputedValue::Color("blue".to_string())),
+    );
+
+    target.set_attribute("data-loaded", "true");
+    assert_eq!(
+        resolver.invalidate_data_attribute_subtree(&target, "data-loaded", false),
+        "fallback_data_attribute_selector",
+    );
+    let peer_after = resolver.computed_style_shared(&peer);
+    assert!(!Arc::ptr_eq(&peer_before, &peer_after));
+    assert_eq!(
+        peer_after.get("color"),
+        Some(&ComputedValue::Color("red".to_string())),
+    );
+}
+
+#[test]
+fn data_attribute_dependency_cache_is_reset_by_a_new_stylesheet() {
+    let mut resolver = StyleResolver::new();
+    assert_eq!(
+        resolver.data_attribute_selector_dependency("data-state"),
+        AttributeSelectorDependency::None,
+    );
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("[data-state]{color:red}").unwrap(),
+    );
+    assert_eq!(
+        resolver.data_attribute_selector_dependency("data-state"),
+        AttributeSelectorDependency::SubjectOnly,
+    );
+}
+
+#[test]
+fn unobserved_data_attribute_still_evicts_computed_and_pseudo_subtree() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let target = NodeHandle::element("section");
+    let child = NodeHandle::element("span");
+    let unrelated = NodeHandle::element("aside");
+    target.set_attribute("id", "target");
+    child.set_attribute("id", "child");
+    unrelated.set_attribute("id", "unrelated");
+    // Neither attr() occurrence is a selector dependency. The custom property
+    // can be inherited by the child, and generated content observes the target.
+    target.set_attribute(
+        "style",
+        "--payload:attr(data-loaded);content:attr(data-loaded)",
+    );
+    child.set_attribute("style", "--inherited:var(--payload)");
+    document.append_child(body.clone());
+    body.append_child(target.clone());
+    target.append_child(child.clone());
+    body.append_child(unrelated.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#target::after{content:attr(data-loaded)}\
+             #child::before,#unrelated::before{content:'cached'}",
+        )
+        .unwrap(),
+    );
+    let target_before = resolver.computed_style_shared(&target);
+    let child_before = resolver.computed_style_shared(&child);
+    let target_pseudo_before = resolver
+        .computed_pseudo_style_shared(&target, PseudoElement::After)
+        .unwrap();
+    let child_pseudo_before = resolver
+        .computed_pseudo_style_shared(&child, PseudoElement::Before)
+        .unwrap();
+    let unrelated_before = resolver.computed_style_shared(&unrelated);
+    let unrelated_pseudo_before = resolver
+        .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+        .unwrap();
+
+    target.set_attribute("data-loaded", "ready");
+    assert_eq!(
+        resolver.invalidate_data_attribute_subtree(&target, "data-loaded", false),
+        "local_data_attribute_none",
+    );
+
+    assert!(!Arc::ptr_eq(
+        &target_before,
+        &resolver.computed_style_shared(&target),
+    ));
+    assert!(!Arc::ptr_eq(
+        &child_before,
+        &resolver.computed_style_shared(&child),
+    ));
+    assert!(!Arc::ptr_eq(
+        &target_pseudo_before,
+        &resolver
+            .computed_pseudo_style_shared(&target, PseudoElement::After)
+            .unwrap(),
+    ));
+    assert!(!Arc::ptr_eq(
+        &child_pseudo_before,
+        &resolver
+            .computed_pseudo_style_shared(&child, PseudoElement::Before)
+            .unwrap(),
+    ));
+    assert!(Arc::ptr_eq(
+        &unrelated_before,
+        &resolver.computed_style_shared(&unrelated),
+    ));
+    assert!(Arc::ptr_eq(
+        &unrelated_pseudo_before,
+        &resolver
+            .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+            .unwrap(),
+    ));
+}
+
+#[test]
+fn subject_data_selector_is_local_but_external_selector_falls_back() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let target = NodeHandle::element("div");
+    let observer = NodeHandle::element("aside");
+    document.append_child(body.clone());
+    body.append_child(target.clone());
+    body.append_child(observer.clone());
+
+    let mut subject = StyleResolver::new();
+    subject.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("[data-loaded]{color:red}[data-loaded]::before{content:'loaded'}")
+            .unwrap(),
+    );
+    let observer_before = subject.computed_style_shared(&observer);
+    target.set_attribute("data-loaded", "true");
+    assert_eq!(
+        subject.invalidate_data_attribute_subtree(&target, "data-loaded", false),
+        "local_data_attribute_subject",
+    );
+    assert_eq!(
+        subject.computed_style_shared(&target).get("color"),
+        Some(&ComputedValue::Color("red".to_string())),
+    );
+    assert!(
+        subject
+            .computed_pseudo_style_shared(&target, PseudoElement::Before)
+            .is_some()
+    );
+    assert!(Arc::ptr_eq(
+        &observer_before,
+        &subject.computed_style_shared(&observer),
+    ));
+
+    target.remove_attribute("data-loaded");
+    let mut external = StyleResolver::new();
+    external.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("aside{color:blue}[data-loaded]+aside{color:red}").unwrap(),
+    );
+    let observer_before = external.computed_style_shared(&observer);
+    target.set_attribute("data-loaded", "true");
+    assert_eq!(
+        external.invalidate_data_attribute_subtree(&target, "data-loaded", false),
+        "fallback_data_attribute_selector",
+    );
+    let observer_after = external.computed_style_shared(&observer);
+    assert!(!Arc::ptr_eq(&observer_before, &observer_after));
+    assert_eq!(
+        observer_after.get("color"),
+        Some(&ComputedValue::Color("red".to_string())),
+    );
+}
+
+#[test]
+fn data_attribute_local_invalidation_preserves_csp_blocked_inline_state() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let target = NodeHandle::element("div");
+    let unrelated = NodeHandle::element("aside");
+    target.set_attribute("style", "color:red");
+    document.append_child(body.clone());
+    body.append_child(target.clone());
+    body.append_child(unrelated.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet("div{color:blue}").unwrap());
+    assert!(resolver.set_blocked_inline_style_node(target.identity(), true));
+    let target_before = resolver.computed_style_shared(&target);
+    let unrelated_before = resolver.computed_style_shared(&unrelated);
+    assert_eq!(
+        target_before.get("color"),
+        Some(&ComputedValue::Color("blue".to_string())),
+    );
+
+    target.set_attribute("data-loaded", "true");
+    assert_eq!(
+        resolver.invalidate_data_attribute_subtree(&target, "data-loaded", false),
+        "local_data_attribute_none",
+    );
+    let target_after = resolver.computed_style_shared(&target);
+    assert!(!Arc::ptr_eq(&target_before, &target_after));
+    assert_eq!(
+        target_after.get("color"),
+        Some(&ComputedValue::Color("blue".to_string())),
+        "a data mutation must not re-enable a CSP-blocked style attribute",
+    );
+    assert!(Arc::ptr_eq(
+        &unrelated_before,
+        &resolver.computed_style_shared(&unrelated),
+    ));
+}
+
+#[test]
+fn data_attribute_invalidation_keeps_nonlocal_runtime_guards() {
+    let unrelated = NodeHandle::element("aside");
+
+    let target = NodeHandle::element("div");
+    let mut non_scalar = StyleResolver::new();
+    let unrelated_before = non_scalar.computed_style_shared(&unrelated);
+    assert_eq!(
+        non_scalar.invalidate_data_attribute_subtree(&target, "data-loaded", true),
+        "fallback_non_scalar_dom_string",
+    );
+    assert!(!Arc::ptr_eq(
+        &unrelated_before,
+        &non_scalar.computed_style_shared(&unrelated),
+    ));
+
+    let host = NodeHandle::element("x-host");
+    let root = host.attach_shadow(ShadowRootMode::Open).unwrap();
+    root.append_child(NodeHandle::element("slot"));
+    let slotted = NodeHandle::element("span");
+    host.append_child(slotted.clone());
+    assert!(slotted.assigned_slot().is_some());
+    let mut shadow = StyleResolver::new();
+    assert_eq!(
+        shadow.invalidate_data_attribute_subtree(&host, "data-loaded", false),
+        "fallback_shadow_or_slot",
+    );
+    assert_eq!(
+        shadow.invalidate_data_attribute_subtree(&slotted, "data-loaded", false),
+        "fallback_shadow_or_slot",
+    );
+
+    let animated = NodeHandle::element("div");
+    animated.set_attribute("id", "animated-data-guard");
+    let mut animation = StyleResolver::new();
+    animation.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@keyframes fade{from{opacity:0}to{opacity:1}}\
+             #animated-data-guard{animation:fade 10s linear}",
+        )
+        .unwrap(),
+    );
+    animation.set_animation_time_ms(0.0);
+    animation.computed_style_shared(&animated);
+    assert!(animation.has_running_animations());
+    assert_eq!(
+        animation.invalidate_data_attribute_subtree(&target, "data-loaded", false),
+        "fallback_active_animation",
+    );
+
+    let transitioning = NodeHandle::element("div");
+    let previous = "transform:translateX(0px);transition:transform 1s linear";
+    transitioning.set_attribute("style", previous);
+    let mut transition = StyleResolver::new();
+    transition.computed_style_shared(&transitioning);
+    let current = "transform:translateX(20px);transition:transform 1s linear";
+    transitioning.set_attribute("style", current);
+    assert_eq!(
+        transition.invalidate_inline_style_subtree(
+            &transitioning,
+            Some(previous),
+            Some(current),
+            false,
+            false,
+        ),
+        "local",
+    );
+    transition.computed_style_shared(&transitioning);
+    assert!(transition.has_running_transitions());
+    assert_eq!(
+        transition.invalidate_data_attribute_subtree(&target, "data-loaded", false),
+        "fallback_active_transition",
     );
 }
 

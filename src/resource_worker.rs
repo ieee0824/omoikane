@@ -212,6 +212,11 @@ impl Default for ResourceQueue {
 }
 
 impl ResourceQueue {
+    /// Returns the maximum number of jobs executing concurrently in this queue.
+    pub fn worker_count(&self) -> NonZeroUsize {
+        self.pool.workers
+    }
+
     /// Configures a concurrency limit without starting threads or performing I/O.
     pub fn new(workers: NonZeroUsize) -> Self {
         Self {

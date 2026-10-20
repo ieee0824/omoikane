@@ -4,6 +4,8 @@ use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use super::event_loop::ScriptSourceLocation;
+
 fn raf_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_RAF").is_some())
@@ -23,12 +25,11 @@ fn source_label(source: &str) -> String {
     }
 }
 
-pub(super) fn raf_source(context: &boa_engine::Context) -> Option<serde_json::Value> {
-    if !raf_enabled() {
-        return None;
-    }
+/// Captures the first JavaScript caller using a sanitized, owned source label.
+pub(super) fn current_script_source(context: &boa_engine::Context) -> Option<ScriptSourceLocation> {
     // requestAnimationFrame is a direct public native binding, so the first
-    // JavaScript frame is its caller; no trusted-bootstrap frame is skipped.
+    // JavaScript frame is its caller. setTimeout and setInterval use the same
+    // direct binding shape, so no trusted-bootstrap frame is skipped.
     let frame = context.stack_trace().next()?;
     let location = frame.position();
     let position = location.position?;
@@ -36,8 +37,20 @@ pub(super) fn raf_source(context: &boa_engine::Context) -> Option<serde_json::Va
         boa_engine::vm::SourcePath::Path(path) => source_label(&path.to_string_lossy()),
         _ => "<anonymous>".into(),
     };
+    Some(ScriptSourceLocation {
+        file,
+        line: position.line_number(),
+        column: position.column_number(),
+    })
+}
+
+pub(super) fn raf_source(context: &boa_engine::Context) -> Option<serde_json::Value> {
+    if !raf_enabled() {
+        return None;
+    }
+    let source = current_script_source(context)?;
     Some(serde_json::json!({
-        "file": file, "line": position.line_number(), "column": position.column_number(),
+        "file": source.file, "line": source.line, "column": source.column,
     }))
 }
 
@@ -48,10 +61,13 @@ pub(super) fn record_raf_schedule(
 ) {
     if raf_enabled() {
         eprintln!(
-            "OMOIKANE_RAF_SCHEDULE {}",
-            serde_json::json!({
-                "id": id, "document_id": document, "source": source,
-            })
+            "{}",
+            crate::diagnostics::json_record(
+                "OMOIKANE_RAF_SCHEDULE",
+                &serde_json::json!({
+                    "id": id, "document_id": document, "source": source,
+                })
+            )
         );
     }
 }
@@ -63,11 +79,14 @@ pub(super) fn start_raf_callback() -> Option<Instant> {
 pub(super) fn record_raf_execution(id: u64, document: Option<usize>, started: Option<Instant>) {
     if let Some(started) = started {
         eprintln!(
-            "OMOIKANE_RAF_EXECUTE {}",
-            serde_json::json!({
-                "id": id, "document_id": document,
-                "duration_ms": started.elapsed().as_secs_f64() * 1000.0,
-            })
+            "{}",
+            crate::diagnostics::json_record(
+                "OMOIKANE_RAF_EXECUTE",
+                &serde_json::json!({
+                    "id": id, "document_id": document,
+                    "duration_ms": started.elapsed().as_secs_f64() * 1000.0,
+                })
+            )
         );
     }
 }
@@ -122,12 +141,15 @@ pub(super) fn record_style_cache_invalidation(
 ) {
     if style_cache_invalidation_trace_enabled() {
         eprintln!(
-            "OMOIKANE_STYLE_CACHE_INVALIDATION {}",
-            serde_json::json!({
-                "document_id": document_id,
-                "node_id": node_id,
-                "outcome": outcome,
-            })
+            "{}",
+            crate::diagnostics::json_record(
+                "OMOIKANE_STYLE_CACHE_INVALIDATION",
+                &serde_json::json!({
+                    "document_id": document_id,
+                    "node_id": node_id,
+                    "outcome": outcome,
+                })
+            )
         );
     }
 }
@@ -157,11 +179,14 @@ impl ScrollTargetScope {
         };
         SCROLL_TARGETS.with(|targets| targets.borrow_mut().push(target));
         eprintln!(
-            "OMOIKANE_SCROLL_TARGET {}",
-            serde_json::json!({
-                "phase": "begin", "document_id": document_id,
-                "target_id": node_id, "viewport": viewport,
-            })
+            "{}",
+            crate::diagnostics::json_record(
+                "OMOIKANE_SCROLL_TARGET",
+                &serde_json::json!({
+                    "phase": "begin", "document_id": document_id,
+                    "target_id": node_id, "viewport": viewport,
+                })
+            )
         );
         Self {
             started: Some(Instant::now()),
@@ -176,12 +201,15 @@ impl Drop for ScrollTargetScope {
         let target = SCROLL_TARGETS.with(|targets| targets.borrow_mut().pop());
         if let Some(target) = target {
             eprintln!(
-                "OMOIKANE_SCROLL_TARGET {}",
-                serde_json::json!({
-                    "phase": "end", "document_id": target.document_id,
-                    "target_id": target.node_id, "viewport": target.viewport,
-                    "elapsed_ms": elapsed_ms,
-                })
+                "{}",
+                crate::diagnostics::json_record(
+                    "OMOIKANE_SCROLL_TARGET",
+                    &serde_json::json!({
+                        "phase": "end", "document_id": target.document_id,
+                        "target_id": target.node_id, "viewport": target.viewport,
+                        "elapsed_ms": elapsed_ms,
+                    })
+                )
             );
         }
     }
@@ -194,11 +222,14 @@ pub(super) fn record_scroll_invalidation(document_id: usize) {
     SCROLL_TARGETS.with(|targets| {
         if let Some(target) = targets.borrow().last().copied() {
             eprintln!(
-                "OMOIKANE_SCROLL_INVALIDATE {}",
-                serde_json::json!({
-                    "document_id": document_id, "target_id": target.node_id,
-                    "target_document_id": target.document_id,
-                })
+                "{}",
+                crate::diagnostics::json_record(
+                    "OMOIKANE_SCROLL_INVALIDATE",
+                    &serde_json::json!({
+                        "document_id": document_id, "target_id": target.node_id,
+                        "target_document_id": target.document_id,
+                    })
+                )
             );
         }
     });
@@ -216,11 +247,14 @@ pub(super) fn record_scroll_mutation(
         if let Some(target) = targets.borrow().last().copied() {
             let kind = attribute_name.map_or("text", attribute_kind);
             eprintln!(
-                "OMOIKANE_SCROLL_MUTATION {}",
-                serde_json::json!({
-                    "api": api, "kind": kind, "node_id": node_id,
-                    "target_id": target.node_id, "document_id": target.document_id,
-                })
+                "{}",
+                crate::diagnostics::json_record(
+                    "OMOIKANE_SCROLL_MUTATION",
+                    &serde_json::json!({
+                        "api": api, "kind": kind, "node_id": node_id,
+                        "target_id": target.node_id, "document_id": target.document_id,
+                    })
+                )
             );
         }
     });
@@ -242,11 +276,14 @@ fn record_scroll_layout(rebuilt: bool, elapsed_ms: f64) {
     SCROLL_TARGETS.with(|targets| {
         if let Some(target) = targets.borrow().last().copied() {
             eprintln!(
-                "OMOIKANE_SCROLL_LAYOUT {}",
-                serde_json::json!({
-                    "document_id": target.document_id, "target_id": target.node_id,
-                    "rebuild": rebuilt, "elapsed_ms": elapsed_ms,
-                })
+                "{}",
+                crate::diagnostics::json_record(
+                    "OMOIKANE_SCROLL_LAYOUT",
+                    &serde_json::json!({
+                        "document_id": target.document_id, "target_id": target.node_id,
+                        "rebuild": rebuilt, "elapsed_ms": elapsed_ms,
+                    })
+                )
             );
         }
     });
@@ -321,19 +358,22 @@ fn emit_frame_sample(callbacks_ms: f64, completed: bool) {
     let sample = FRAMES.with(|frames| frames.borrow_mut().pop());
     if let Some(sample) = sample {
         eprintln!(
-            "OMOIKANE_FRAME_CALLBACK_DETAIL {}",
-            serde_json::json!({
-                "document_id": sample.document_id,
-                "callbacks_ms": callbacks_ms,
-                "completed": completed,
-                "scroll_events_ms": sample.scroll_events_ms,
-                "media_ms": sample.media_ms,
-                "raf_call_ms": sample.raf_call_ms,
-                "jobs_ms": sample.jobs_ms,
-                "ensure_layout_calls": sample.layout_calls,
-                "ensure_layout_rebuilds": sample.layout_rebuilds,
-                "ensure_layout_ms": sample.layout_ms,
-            })
+            "{}",
+            crate::diagnostics::json_record(
+                "OMOIKANE_FRAME_CALLBACK_DETAIL",
+                &serde_json::json!({
+                    "document_id": sample.document_id,
+                    "callbacks_ms": callbacks_ms,
+                    "completed": completed,
+                    "scroll_events_ms": sample.scroll_events_ms,
+                    "media_ms": sample.media_ms,
+                    "raf_call_ms": sample.raf_call_ms,
+                    "jobs_ms": sample.jobs_ms,
+                    "ensure_layout_calls": sample.layout_calls,
+                    "ensure_layout_rebuilds": sample.layout_rebuilds,
+                    "ensure_layout_ms": sample.layout_ms,
+                })
+            )
         );
     }
 }

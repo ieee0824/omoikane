@@ -63,12 +63,15 @@ pub(super) fn prepare_counter_values(node: &NodeHandle, resolver: &mut StyleReso
 fn trace_counter_prepass(started: Option<std::time::Instant>, required: bool, guard_ms: f64) {
     if let Some(started) = started {
         eprintln!(
-            "OMOIKANE_COUNTER_PREPASS {}",
-            serde_json::json!({
-                "required": required,
-                "guard_ms": guard_ms,
-                "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
-            })
+            "{}",
+            crate::diagnostics::json_record(
+                "OMOIKANE_COUNTER_PREPASS",
+                &serde_json::json!({
+                    "required": required,
+                    "guard_ms": guard_ms,
+                    "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+                })
+            )
         );
     }
 }

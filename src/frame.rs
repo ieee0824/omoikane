@@ -270,11 +270,14 @@ impl BrowserFrameCache {
         let advance_result = advance_browser_frame(session, width, height, elapsed_ms);
         if let Some(started) = started {
             eprintln!(
-                "OMOIKANE_FRAME_EVENT_LOOP {}",
-                serde_json::json!({
-                    "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
-                    "success": advance_result.is_ok(),
-                })
+                "{}",
+                crate::diagnostics::json_record(
+                    "OMOIKANE_FRAME_EVENT_LOOP",
+                    &serde_json::json!({
+                        "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+                        "success": advance_result.is_ok(),
+                    })
+                )
             );
         }
         advance_result?;

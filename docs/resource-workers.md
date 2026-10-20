@@ -29,6 +29,16 @@
 
 上限は**共有するqueue単位**であり、プロセス全体の上限ではない。独立したqueueは別々のworker群を持つ。待ちジョブ数は無制限なので、呼び出し側が重複取得や不要な投入を抑える必要がある。
 
+`CdpSession::set_resource_worker_count`は並列数を設定する。top-level navigationの
+replacement runtimeには同じ並列数で新しいqueueを作り、退役したページの遅い通信が
+次のページのworker枠を塞がないようにする。ひとつの世代ではiframe Documentと
+Dedicated/SharedWorkerもqueueを共有する。
+
+GUIでは`OMOIKANE_RESOURCE_WORKERS`へ1から64の整数を指定できる。既定は4で、
+不正値は既定値へ戻る。`CdpSession::set_resource_queue`はnavigationをまたぐ共有の
+明示的な選択肢であり、退役後も実行中の通信が占めるworker枠も共有する。
+並列数の効果は同一workloadで計測し、ページ全体の改善とは区別する。
+
 ## キャンセルと終了
 
 Documentの退役時には、そのDocumentが持つ未完了要求を削除してscopeを破棄する。完了済みでも、退役したDocumentへの通知は配送しない。Dedicated/SharedWorkerは作成元のqueueと非同期取得の設定を引き継ぐ。
@@ -43,7 +53,7 @@ Documentの退役時には、そのDocumentが持つ未完了要求を削除し�
 
 GUIは画像・フォント・動的な外部スクリプト・Fetch/非同期XHRのworker経路を有効にする。ライブラリ利用では`JsRuntime::set_nonblocking_*_loading`で選択し、`set_resource_queue`で共有するqueueを指定できる。通信結果の適用とスクリプトの実行順序は、各アダプター側が管理する。
 
-この仕組みだけでは、初期のparser経由のスクリプト取得、CSSの取得・import、子Documentの取得などに残る同期待機は解消しない。JS実行・GC・スタイル計算・レイアウトも所有者側に残る。通信の並列化を、ページ全体の表示速度やフレームレート改善の保証として扱わない。
+この仕組みだけでは、初期のparser経由のスクリプト取得、CSSの取得・import、子Documentの取得などに残る同期待機は解消しない。module graphは別の固定4-worker poolを使う。JS実行・GC・スタイル計算・レイアウトも所有者側に残る。通信の並列化を、ページ全体の表示速度やフレームレート改善の保証として扱わない。
 
 ## 検証の分担
 

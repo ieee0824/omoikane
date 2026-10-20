@@ -3,6 +3,11 @@ use super::{HostState, JsRuntime};
 use crate::resource_worker::ResourceQueue;
 
 impl JsRuntime {
+    /// Returns the configured concurrency limit for this runtime's resource queue.
+    pub fn resource_worker_count(&self) -> std::num::NonZeroUsize {
+        self.host_state.borrow().resource_queue.worker_count()
+    }
+
     /// Runs Fetch and asynchronous XHR transport on the shared resource workers.
     /// Completion callbacks stay in the owning runtime and settle through tasks.
     pub fn set_nonblocking_fetch_loading(&mut self, enabled: bool) {

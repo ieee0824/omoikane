@@ -62,13 +62,16 @@ fn trace_animation_frame_phases(
     let total_ms = background_ms + tasks_ms + callbacks_ms + finish_ms;
     if enabled && total_ms >= 50.0 {
         eprintln!(
-            "OMOIKANE_FRAME_PHASE {}",
-            serde_json::json!({
-                "background_ms": background_ms,
-                "tasks_ms": tasks_ms,
-                "callbacks_ms": callbacks_ms,
-                "finish_ms": finish_ms,
-            })
+            "{}",
+            crate::diagnostics::json_record(
+                "OMOIKANE_FRAME_PHASE",
+                &serde_json::json!({
+                    "background_ms": background_ms,
+                    "tasks_ms": tasks_ms,
+                    "callbacks_ms": callbacks_ms,
+                    "finish_ms": finish_ms,
+                })
+            )
         );
     }
 }
@@ -183,6 +186,7 @@ mod service_worker_tests;
 mod shared_worker;
 use shared_worker::terminate_shared_worker_connections;
 mod task_diagnostics;
+use task_diagnostics::TaskTurnDiagnostics;
 mod text_selection;
 mod text_stream;
 mod web_locks;
@@ -2954,6 +2958,12 @@ struct DocumentStyleEntry {
     child_layout: Option<(Rect, LayoutBox)>,
 }
 
+#[derive(Clone, Copy)]
+enum NonInlineFullStyleInvalidation {
+    OrdinaryNodeMutation,
+    Other,
+}
+
 struct InlineStyleCspSnapshot {
     node: WeakNodeHandle,
     document_id: usize,
@@ -5516,12 +5526,15 @@ impl HostState {
         });
         if std::env::var_os("OMOIKANE_TRACE_TASKS").is_some() {
             eprintln!(
-                "OMOIKANE_IFRAME_RESOURCE {}",
-                serde_json::json!({
-                    "fetch_ms": fetch_ms,
-                    "parse_ms": parse_started.elapsed().as_secs_f64() * 1000.0,
-                    "loaded": loaded.url.is_some(),
-                })
+                "{}",
+                crate::diagnostics::json_record(
+                    "OMOIKANE_IFRAME_RESOURCE",
+                    &serde_json::json!({
+                        "fetch_ms": fetch_ms,
+                        "parse_ms": parse_started.elapsed().as_secs_f64() * 1000.0,
+                        "loaded": loaded.url.is_some(),
+                    })
+                )
             );
         }
         loaded
@@ -6513,6 +6526,7 @@ impl HostState {
     /// dropped, because layout is only maintained for the main document.
     fn mark_document_style_dirty(&mut self, document: &NodeHandle) {
         self.form_validation.invalidate();
+        task_diagnostics::record_document_dirty();
         let document_id = document.identity();
         let entry = self.document_styles.entry(document_id).or_default();
         entry.dirty = true;
@@ -6531,18 +6545,33 @@ impl HostState {
     /// stylesheet/rule-index portion of an existing resolver.
     fn invalidate_document_style_cache(&mut self, document: &NodeHandle) {
         self.form_validation.invalidate();
-        self.invalidate_document_style_cache_keeping_validation(document);
+        self.invalidate_document_style_cache_keeping_validation(
+            document,
+            NonInlineFullStyleInvalidation::Other,
+        );
     }
 
     /// Invalidates cascade-derived values for `document` while keeping the
     /// cached constraint-validation snapshot, for changes that cannot affect
     /// form validity.
-    fn invalidate_document_style_cache_keeping_validation(&mut self, document: &NodeHandle) {
+    fn invalidate_document_style_cache_keeping_validation(
+        &mut self,
+        document: &NodeHandle,
+        kind: NonInlineFullStyleInvalidation,
+    ) {
         let document_id = document.identity();
         if let Some(entry) = self.document_styles.get_mut(&document_id) {
             entry.needs_full_sample = true;
             entry.child_layout = None;
             if let Some(resolver) = entry.resolver.as_mut() {
+                match kind {
+                    NonInlineFullStyleInvalidation::OrdinaryNodeMutation => {
+                        task_diagnostics::record_ordinary_node_mutation_full();
+                    }
+                    NonInlineFullStyleInvalidation::Other => {
+                        task_diagnostics::record_other_full();
+                    }
+                }
                 resolver.invalidate_style_cache();
             }
         }
@@ -6588,8 +6617,11 @@ impl HostState {
             && *TRACE_PAINT.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_PAINT").is_some())
         {
             eprintln!(
-                "OMOIKANE_LAYOUT_INVALIDATE {}",
-                serde_json::json!({"reason": reason})
+                "{}",
+                crate::diagnostics::json_record(
+                    "OMOIKANE_LAYOUT_INVALIDATE",
+                    &serde_json::json!({"reason": reason})
+                )
             );
         }
         self.layout_root = None;
@@ -6647,7 +6679,63 @@ impl HostState {
                 node.identity(),
                 outcome,
             );
+            task_diagnostics::record_inline_style_invalidation(outcome);
             self.invalidate_document_style_outputs(&document, preserve_main_layout);
+        }
+        if matches!(node.tag_name().as_deref(), Some("iframe" | "frame"))
+            && let Some(child) = self.iframe_documents.get(&node.identity())
+        {
+            let child_document = child.document.clone();
+            self.mark_document_style_dirty(&child_document);
+        }
+    }
+
+    /// Invalidates styles after one ordinary HTML `data-*` attribute mutation.
+    /// Layout remains document-wide: this path only retains computed-style and
+    /// pseudo-style cache entries outside the affected light-DOM subtree.
+    fn invalidate_data_attribute_for_node(
+        &mut self,
+        node: &NodeHandle,
+        attribute_name: &str,
+        has_non_scalar_dom_string: bool,
+    ) {
+        self.form_validation.invalidate();
+        if let Some(document) = document_root_for_node(node) {
+            if !document.is_html_document() {
+                self.invalidate_document_style_cache_keeping_validation(
+                    &document,
+                    NonInlineFullStyleInvalidation::OrdinaryNodeMutation,
+                );
+            } else {
+                let mut outcome = "deferred_resolver";
+                if let Some(entry) = self.document_styles.get_mut(&document.identity()) {
+                    entry.needs_full_sample = true;
+                    entry.child_layout = None;
+                    if let Some(resolver) = entry.resolver.as_mut() {
+                        outcome = resolver.invalidate_data_attribute_subtree(
+                            node,
+                            attribute_name,
+                            has_non_scalar_dom_string,
+                        );
+                        if matches!(
+                            outcome,
+                            "local_data_attribute_none" | "local_data_attribute_subject"
+                        ) {
+                            task_diagnostics::record_local_data_attribute_invalidation();
+                        } else if outcome.starts_with("fallback_") {
+                            task_diagnostics::record_ordinary_node_mutation_full();
+                        }
+                    }
+                }
+                frame_diagnostics::record_style_cache_invalidation(
+                    document.identity(),
+                    node.identity(),
+                    outcome,
+                );
+                // A visible subtree can still affect document geometry. This
+                // optimization deliberately stops at resolver cache locality.
+                self.invalidate_document_style_outputs(&document, false);
+            }
         }
         if matches!(node.tag_name().as_deref(), Some("iframe" | "frame"))
             && let Some(child) = self.iframe_documents.get(&node.identity())
@@ -6692,7 +6780,10 @@ impl HostState {
 
     fn invalidate_style_cache_for_node_keeping_validation(&mut self, node: &NodeHandle) {
         if let Some(document) = document_root_for_node(node) {
-            self.invalidate_document_style_cache_keeping_validation(&document);
+            self.invalidate_document_style_cache_keeping_validation(
+                &document,
+                NonInlineFullStyleInvalidation::OrdinaryNodeMutation,
+            );
         }
         if matches!(node.tag_name().as_deref(), Some("iframe" | "frame"))
             && let Some(child) = self.iframe_documents.get(&node.identity())
@@ -6838,8 +6929,11 @@ impl HostState {
             static TRACE_PAINT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             if *TRACE_PAINT.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_PAINT").is_some()) {
                 eprintln!(
-                    "OMOIKANE_USER_ACTION {}",
-                    serde_json::json!({"kind": kind, "affected_documents": affected.len()})
+                    "{}",
+                    crate::diagnostics::json_record(
+                        "OMOIKANE_USER_ACTION",
+                        &serde_json::json!({"kind": kind, "affected_documents": affected.len()})
+                    )
                 );
             }
         }
@@ -7569,12 +7663,15 @@ impl HostState {
         if trace {
             let translated_layout = started.elapsed();
             eprintln!(
-                "OMOIKANE_ADJUSTED_LAYOUT {}",
-                serde_json::json!({
-                    "ensure_layout_ms": ensured_layout.as_secs_f64() * 1000.0,
-                    "clone_ms": (cloned_layout - ensured_layout).as_secs_f64() * 1000.0,
-                    "translate_ms": (translated_layout - cloned_layout).as_secs_f64() * 1000.0,
-                })
+                "{}",
+                crate::diagnostics::json_record(
+                    "OMOIKANE_ADJUSTED_LAYOUT",
+                    &serde_json::json!({
+                        "ensure_layout_ms": ensured_layout.as_secs_f64() * 1000.0,
+                        "clone_ms": (cloned_layout - ensured_layout).as_secs_f64() * 1000.0,
+                        "translate_ms": (translated_layout - cloned_layout).as_secs_f64() * 1000.0,
+                    })
+                )
             );
         }
         self.adjusted_layout_cache = Some(AdjustedLayoutCache {
@@ -7853,6 +7950,28 @@ impl HostState {
             }
         }
     }
+}
+
+/// Returns a normalized name only for the narrow mutation class whose style
+/// cache effect can be localized. Namespace-aware setters keep the existing
+/// full path and never call this helper.
+fn local_html_data_attribute_name(node: &NodeHandle, name: &str) -> Option<String> {
+    if !name.is_ascii() || name.contains(':') {
+        return None;
+    }
+    let prefix = name.get(..5)?;
+    let suffix = name.get(5..)?;
+    if !prefix.eq_ignore_ascii_case("data-")
+        || suffix.is_empty()
+        || !suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        || !node.is_html_element()
+        || node.prefix().is_some()
+    {
+        return None;
+    }
+    Some(name.to_ascii_lowercase())
 }
 
 /// Returns the root [`Document`] node of `node`'s tree, or `node` itself when it
@@ -9057,18 +9176,56 @@ impl JsRuntime {
     }
 
     /// Converts embedder pointer coordinates to the target document's viewport
-    /// and returns that document's scroll offset for MouseEvent page positions.
+    /// and returns that document's scroll offset and native identity for input.
     pub(crate) fn input_position_for_node(
         &mut self,
         node: &NodeHandle,
         x: f64,
         y: f64,
-    ) -> (f64, f64, f32, f32) {
+    ) -> (f64, f64, f32, f32, usize) {
         let mut state = self.host_state.borrow_mut();
-        let document = owner_document_for_node(node).unwrap_or_else(|| state.document.clone());
+        let document = document_root_for_node(node).unwrap_or_else(|| state.document.clone());
         let origin = nested_rendering::document_origin(&mut state, &document);
         let scroll = state.window_scroll_for_document(document.identity());
-        (x - origin.0, y - origin.1, scroll.0, scroll.1)
+        (
+            x - origin.0,
+            y - origin.1,
+            scroll.0,
+            scroll.1,
+            document.identity(),
+        )
+    }
+
+    /// Evaluates trusted browser input in the Realm that owns `document_id`.
+    ///
+    /// Callers must derive `document_id` from a host-owned hit-test target,
+    /// never from page-supplied input. Entering the target Realm before calling
+    /// the existing JavaScript dispatcher avoids exposing a cross-origin node
+    /// wrapper in the top-level Realm while retaining normal same-origin checks
+    /// for author calls to the dispatcher.
+    pub(crate) fn eval_input_in_document_realm(
+        &mut self,
+        document_id: usize,
+        source: &str,
+    ) -> JsResult<JsValue> {
+        if !self.host_state.borrow().document_is_active(document_id) {
+            return Err(JsNativeError::error()
+                .with_message("input Document Realm is not active")
+                .into());
+        }
+        let main_document = self.document().identity();
+        let realm = if document_id == main_document {
+            self.host_state.borrow().main_realm.clone()
+        } else {
+            self.realm_for_document(document_id)?
+        }
+        .ok_or_else(|| {
+            JsNativeError::error().with_message("input Document Realm is not available")
+        })?;
+        let previous = self.context.enter_realm(realm);
+        let result = self.eval(source);
+        self.context.enter_realm(previous);
+        result
     }
 
     /// Sets the User-Agent exposed to scripts in this runtime.
@@ -10484,61 +10641,86 @@ impl JsRuntime {
                 Task::WebLock { document_id, .. } => Some(*document_id),
                 _ => None,
             };
-            static TRACE_SLOW_TASKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            let trace_slow_tasks = *TRACE_SLOW_TASKS
-                .get_or_init(|| std::env::var_os("OMOIKANE_TRACE_TASKS").is_some());
-            let task_kind = trace_slow_tasks.then(|| match &task {
-                Task::Timer {
-                    payload: TimerPayload::ResourceLoad { node_id },
-                    ..
-                } => self
-                    .host_state
-                    .borrow()
-                    .get_node(*node_id)
-                    .and_then(|node| node.tag_name())
-                    .map_or_else(
-                        || "resource:detached".to_string(),
-                        |tag| format!("resource:{tag}"),
-                    ),
-                Task::Timer {
-                    payload: TimerPayload::FormSubmission { .. },
-                    ..
-                } => "form_submission".to_string(),
-                Task::Timer {
-                    payload: TimerPayload::JavascriptDocumentLoad { .. },
-                    ..
-                } => "javascript_document_load".to_string(),
-                Task::Timer { .. } => "timer".to_string(),
-                Task::SecurityPolicyViolation { .. } => "security_policy_violation".to_string(),
-                _ => "other".to_string(),
+            let trace_slow_tasks = task_diagnostics::tracing_enabled();
+            let mut task_diagnostics = trace_slow_tasks.then(|| {
+                let timer_metadata = match &task {
+                    Task::Timer { metadata, .. } => metadata.as_deref().cloned(),
+                    _ => None,
+                };
+                let task_kind = match &task {
+                    Task::Timer {
+                        payload: TimerPayload::ResourceLoad { node_id },
+                        ..
+                    } => self
+                        .host_state
+                        .borrow()
+                        .get_node(*node_id)
+                        .and_then(|node| node.tag_name())
+                        .map_or_else(
+                            || "resource:detached".to_string(),
+                            |tag| format!("resource:{tag}"),
+                        ),
+                    Task::Timer {
+                        payload: TimerPayload::FormSubmission { .. },
+                        ..
+                    } => "form_submission".to_string(),
+                    Task::Timer {
+                        payload: TimerPayload::JavascriptDocumentLoad { .. },
+                        ..
+                    } => "javascript_document_load".to_string(),
+                    Task::Timer { .. } => "timer".to_string(),
+                    Task::SecurityPolicyViolation { .. } => "security_policy_violation".to_string(),
+                    _ => "other".to_string(),
+                };
+                TaskTurnDiagnostics::new(format!("{source:?}"), task_kind, timer_metadata)
             });
-            let task_started = trace_slow_tasks.then(std::time::Instant::now);
             let task_result = self.run_task(task);
-            if let Some(started) = task_started {
-                let elapsed = started.elapsed();
-                if elapsed >= std::time::Duration::from_millis(50) {
-                    eprintln!(
-                        "OMOIKANE_TASK {}",
-                        serde_json::json!({
-                            "source": format!("{source:?}"),
-                            "kind": task_kind,
-                            "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
-                            "success": task_result.is_ok(),
-                        })
-                    );
-                }
+            if let Some(diagnostics) = task_diagnostics.as_mut() {
+                diagnostics.finish_callback(task_result.is_ok());
             }
-            task_result?;
+            if let Err(error) = task_result {
+                if let Some(diagnostics) = task_diagnostics.take() {
+                    diagnostics.finish_and_emit(false);
+                }
+                return Err(error);
+            }
             self.run_worker_background_tasks();
             self.run_worklet_background_tasks();
             self.run_shared_worker_background_tasks();
+            if let Some(diagnostics) = task_diagnostics.as_mut() {
+                diagnostics.finish_background();
+            }
             if self.is_terminated_worker() {
+                if let Some(diagnostics) = task_diagnostics.take() {
+                    diagnostics.finish_and_emit(true);
+                }
                 break;
             }
             // HTML performs a microtask checkpoint after every task, including
             // host-only navigation tasks that do not directly invoke script.
-            self.run_jobs_for_document(task_document_id)?;
-            self.dispatch_cookie_changes()?;
+            let jobs_result = self.run_jobs_for_document(task_document_id);
+            if let Some(diagnostics) = task_diagnostics.as_mut() {
+                diagnostics.finish_jobs();
+            }
+            if let Err(error) = jobs_result {
+                if let Some(diagnostics) = task_diagnostics.take() {
+                    diagnostics.finish_and_emit(false);
+                }
+                return Err(error);
+            }
+            let cookie_result = self.dispatch_cookie_changes();
+            if let Some(diagnostics) = task_diagnostics.as_mut() {
+                diagnostics.finish_cookie();
+            }
+            if let Err(error) = cookie_result {
+                if let Some(diagnostics) = task_diagnostics.take() {
+                    diagnostics.finish_and_emit(false);
+                }
+                return Err(error);
+            }
+            if let Some(diagnostics) = task_diagnostics.take() {
+                diagnostics.finish_and_emit(true);
+            }
         }
         Ok(())
     }
@@ -10666,6 +10848,7 @@ impl JsRuntime {
                 Task::Timer {
                     payload: TimerPayload::Source(source),
                     owner_document_id: Some(document_id),
+                    ..
                 } => {
                     let result = self.eval_async_for_document(&source, document_id).await;
                     if let Err(error) = result {
@@ -10678,6 +10861,7 @@ impl JsRuntime {
                 Task::Timer {
                     payload: TimerPayload::Source(source),
                     owner_document_id: None,
+                    ..
                 } => {
                     let result = self.eval_async(&source).await;
                     if let Err(error) = result {
@@ -10690,6 +10874,7 @@ impl JsRuntime {
                 Task::Timer {
                     payload: TimerPayload::Callback { callback, args },
                     owner_document_id,
+                    ..
                 } => {
                     if let Some(callable) = callback.as_callable() {
                         let this = JsValue::undefined();
@@ -12133,6 +12318,7 @@ impl JsRuntime {
             Task::Timer {
                 payload,
                 owner_document_id,
+                ..
             } => {
                 let _document = owner_document_id
                     .map(|document_id| activate_module_document(&self.host_state, document_id));
@@ -12807,11 +12993,14 @@ impl JsRuntime {
         self.run_initial_iframe_scripts(initial_scripts, iframe_context);
         if trace_iframe {
             eprintln!(
-                "OMOIKANE_IFRAME_TASK {}",
-                serde_json::json!({
-                    "gather_ms": gather_ms,
-                    "initial_scripts_ms": scripts_started.elapsed().as_secs_f64() * 1000.0,
-                })
+                "{}",
+                crate::diagnostics::json_record(
+                    "OMOIKANE_IFRAME_TASK",
+                    &serde_json::json!({
+                        "gather_ms": gather_ms,
+                        "initial_scripts_ms": scripts_started.elapsed().as_secs_f64() * 1000.0,
+                    })
+                )
             );
         }
         // A script whose type Omoikane does not execute is not fetched and
@@ -13088,11 +13277,14 @@ impl JsRuntime {
                 && std::env::var_os("OMOIKANE_TRACE_TASKS").is_some()
             {
                 eprintln!(
-                    "OMOIKANE_IFRAME_SCRIPT {}",
-                    serde_json::json!({
-                        "kind": kind,
-                        "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
-                    })
+                    "{}",
+                    crate::diagnostics::json_record(
+                        "OMOIKANE_IFRAME_SCRIPT",
+                        &serde_json::json!({
+                            "kind": kind,
+                            "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
+                        })
+                    )
                 );
             }
         };
@@ -19649,6 +19841,9 @@ fn schedule_timer_from_js(
     context: &mut Context,
     repeat: bool,
 ) -> JsResult<JsValue> {
+    // Capture the direct author caller before argument conversion or Trusted
+    // Types hooks can re-enter JavaScript and replace the active frame.
+    let timer_metadata = task_diagnostics::timer_schedule_metadata(context);
     let handler = args.first().cloned().unwrap_or_default();
     let delay_ms = args
         .get(1)
@@ -19693,9 +19888,13 @@ fn schedule_timer_from_js(
         let mut state = state.borrow_mut();
         let owner_is_live =
             owner_document_id.is_none_or(|document_id| state.document_is_active(document_id));
-        let id = state
-            .event_loop
-            .schedule_timer(payload, delay_ms, repeat, owner_document_id);
+        let id = state.event_loop.schedule_script_timer(
+            payload,
+            delay_ms,
+            repeat,
+            owner_document_id,
+            timer_metadata,
+        );
         if !owner_is_live {
             state.event_loop.clear_timer(id);
         }
@@ -21386,7 +21585,6 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
     let is_name_attribute = name.eq_ignore_ascii_case("name");
     let is_style_attribute = name.eq_ignore_ascii_case("style");
     let is_meta_referrer_attribute = is_name_attribute || name.eq_ignore_ascii_case("content");
-    let csp_source = security_reporting::capture_csp_source(context);
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -21397,6 +21595,10 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             .flatten();
         let previous_inline_style_is_non_scalar =
             is_style_attribute && node.attribute_has_non_scalar_value("style");
+        let local_data_attribute = local_html_data_attribute_name(&node, &name);
+        let previous_data_attribute_is_non_scalar = local_data_attribute
+            .as_deref()
+            .is_some_and(|name| node.attribute_has_non_scalar_value(name));
         // Setting the resource attribute of a connected `<iframe>`/`<object>`
         // starts a fresh navigation; detect it before `name` is moved into
         // `set_attribute`. Any other attribute leaves navigation untouched.
@@ -21418,6 +21620,11 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
                 None
             }
         });
+        let csp_source = if resource_attr.is_some() {
+            security_reporting::capture_csp_source(context)
+        } else {
+            None
+        };
         frame_diagnostics::record_scroll_mutation("set_attribute", node_id, Some(&name));
         node.set_attribute_owned(name, dom_string::from_js(&value));
         if node.has_tag_name("meta") && is_meta_referrer_attribute {
@@ -21439,6 +21646,14 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             );
         } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
             state.borrow_mut().mark_style_dirty_for_node(&node);
+        } else if let Some(attribute_name) = local_data_attribute.as_deref() {
+            let has_non_scalar_dom_string = previous_data_attribute_is_non_scalar
+                || node.attribute_has_non_scalar_value(attribute_name);
+            state.borrow_mut().invalidate_data_attribute_for_node(
+                &node,
+                attribute_name,
+                has_non_scalar_dom_string,
+            );
         } else {
             state.borrow_mut().invalidate_style_cache_for_node(&node);
         }
@@ -21492,7 +21707,6 @@ fn set_attribute_ns_native(
     let is_meta_referrer_attribute = namespace.is_none()
         && (qualified_name.eq_ignore_ascii_case("name")
             || qualified_name.eq_ignore_ascii_case("content"));
-    let csp_source = security_reporting::capture_csp_source(context);
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -21503,23 +21717,32 @@ fn set_attribute_ns_native(
             .flatten();
         let previous_inline_style_is_non_scalar =
             is_style_attribute && node.attribute_has_non_scalar_value("style");
-        let resource_attr = namespace.as_ref().is_none().then(|| {
-            node.tag_name().and_then(|tag| {
-                if tag.eq_ignore_ascii_case("iframe") && qualified_name == "srcdoc" {
-                    Some("srcdoc")
-                } else if (is_nested_frame_tag(&tag)
-                    || tag.eq_ignore_ascii_case("script")
-                    || tag.eq_ignore_ascii_case("img"))
-                    && qualified_name == "src"
-                {
-                    Some("src")
-                } else if tag.eq_ignore_ascii_case("object") && qualified_name == "data" {
-                    Some("data")
-                } else {
-                    None
-                }
+        let resource_attr = namespace
+            .as_ref()
+            .is_none()
+            .then(|| {
+                node.tag_name().and_then(|tag| {
+                    if tag.eq_ignore_ascii_case("iframe") && qualified_name == "srcdoc" {
+                        Some("srcdoc")
+                    } else if (is_nested_frame_tag(&tag)
+                        || tag.eq_ignore_ascii_case("script")
+                        || tag.eq_ignore_ascii_case("img"))
+                        && qualified_name == "src"
+                    {
+                        Some("src")
+                    } else if tag.eq_ignore_ascii_case("object") && qualified_name == "data" {
+                        Some("data")
+                    } else {
+                        None
+                    }
+                })
             })
-        });
+            .flatten();
+        let csp_source = if resource_attr.is_some() {
+            security_reporting::capture_csp_source(context)
+        } else {
+            None
+        };
         node.set_xml_attribute_ns_owned(
             qualified_name,
             namespace.clone(),
@@ -21546,7 +21769,7 @@ fn set_attribute_ns_native(
         } else {
             state.borrow_mut().invalidate_style_cache_for_node(&node);
         }
-        if let Some(Some(resource_attr)) = resource_attr {
+        if let Some(resource_attr) = resource_attr {
             state
                 .borrow_mut()
                 .schedule_resource_load_on_attribute_change(
@@ -25264,7 +25487,6 @@ fn remove_attribute_native(
         .to_string(context)?
         .to_std_string_escaped();
     let is_style_attribute = name.eq_ignore_ascii_case("style");
-    let csp_source = security_reporting::capture_csp_source(context);
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -25275,6 +25497,10 @@ fn remove_attribute_native(
             .flatten();
         let previous_inline_style_is_non_scalar =
             is_style_attribute && node.attribute_has_non_scalar_value("style");
+        let local_data_attribute = local_html_data_attribute_name(&node, &name);
+        let previous_data_attribute_is_non_scalar = local_data_attribute
+            .as_deref()
+            .is_some_and(|name| node.attribute_has_non_scalar_value(name));
         let resource_attr = node.tag_name().and_then(|tag| {
             if tag.eq_ignore_ascii_case("iframe") && name.eq_ignore_ascii_case("srcdoc") {
                 Some("srcdoc")
@@ -25291,6 +25517,11 @@ fn remove_attribute_native(
             }
         });
         let resource_attr = resource_attr.filter(|_| node.has_attribute(&name));
+        let csp_source = if resource_attr.is_some() {
+            security_reporting::capture_csp_source(context)
+        } else {
+            None
+        };
         let removed_name =
             name.eq_ignore_ascii_case("name") && node.get_attribute("name").is_some();
         frame_diagnostics::record_scroll_mutation("remove_attribute", id, Some(&name));
@@ -25310,6 +25541,12 @@ fn remove_attribute_native(
             );
         } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
             state.borrow_mut().mark_style_dirty_for_node(&node);
+        } else if let Some(attribute_name) = local_data_attribute.as_deref() {
+            state.borrow_mut().invalidate_data_attribute_for_node(
+                &node,
+                attribute_name,
+                previous_data_attribute_is_non_scalar,
+            );
         } else {
             state.borrow_mut().invalidate_style_cache_for_node(&node);
         }
@@ -25352,7 +25589,6 @@ fn remove_attribute_ns_native(
         .to_string(context)?
         .to_std_string_escaped();
     let is_style_attribute = namespace.is_none() && qualified_name == "style";
-    let csp_source = security_reporting::capture_csp_source(context);
     with_host_state(|state| {
         let node = state
             .borrow()
@@ -25363,24 +25599,33 @@ fn remove_attribute_ns_native(
             .flatten();
         let previous_inline_style_is_non_scalar =
             is_style_attribute && node.attribute_has_non_scalar_value("style");
-        let resource_attr = namespace.as_ref().is_none().then(|| {
-            node.tag_name().and_then(|tag| {
-                if tag.eq_ignore_ascii_case("iframe") && qualified_name == "srcdoc" {
-                    Some("srcdoc")
-                } else if (is_nested_frame_tag(&tag)
-                    || tag.eq_ignore_ascii_case("script")
-                    || tag.eq_ignore_ascii_case("img"))
-                    && qualified_name == "src"
-                {
-                    Some("src")
-                } else if tag.eq_ignore_ascii_case("object") && qualified_name == "data" {
-                    Some("data")
-                } else {
-                    None
-                }
+        let resource_attr = namespace
+            .as_ref()
+            .is_none()
+            .then(|| {
+                node.tag_name().and_then(|tag| {
+                    if tag.eq_ignore_ascii_case("iframe") && qualified_name == "srcdoc" {
+                        Some("srcdoc")
+                    } else if (is_nested_frame_tag(&tag)
+                        || tag.eq_ignore_ascii_case("script")
+                        || tag.eq_ignore_ascii_case("img"))
+                        && qualified_name == "src"
+                    {
+                        Some("src")
+                    } else if tag.eq_ignore_ascii_case("object") && qualified_name == "data" {
+                        Some("data")
+                    } else {
+                        None
+                    }
+                })
             })
-        });
+            .flatten();
         let resource_attr = resource_attr.filter(|_| node.has_attribute(&qualified_name));
+        let csp_source = if resource_attr.is_some() {
+            security_reporting::capture_csp_source(context)
+        } else {
+            None
+        };
         let removed_name = qualified_name == "name" && node.get_attribute("name").is_some();
         node.remove_xml_attribute_ns(namespace.as_deref(), &local_name);
         if removed_name {
@@ -25399,7 +25644,7 @@ fn remove_attribute_ns_native(
         } else {
             state.borrow_mut().invalidate_style_cache_for_node(&node);
         }
-        if let Some(Some(resource_attr)) = resource_attr {
+        if let Some(resource_attr) = resource_attr {
             state
                 .borrow_mut()
                 .schedule_resource_load_on_attribute_change(

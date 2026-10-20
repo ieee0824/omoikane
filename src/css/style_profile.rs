@@ -48,14 +48,17 @@ impl Drop for StyleProfileScope {
         let profile = PROFILES.with(|profiles| profiles.borrow_mut().pop());
         if let Some(profile) = profile {
             eprintln!(
-                "OMOIKANE_LAYOUT_STYLE {}",
-                serde_json::json!({
-                    "document_id": self.document_id,
-                    "scope_ms": started.elapsed().as_secs_f64() * 1000.0,
-                    "cache_hits": profile.cache_hits,
-                    "cache_misses": profile.cache_misses,
-                    "outer_compute_ms": profile.outer_compute_ms,
-                })
+                "{}",
+                crate::diagnostics::json_record(
+                    "OMOIKANE_LAYOUT_STYLE",
+                    &serde_json::json!({
+                        "document_id": self.document_id,
+                        "scope_ms": started.elapsed().as_secs_f64() * 1000.0,
+                        "cache_hits": profile.cache_hits,
+                        "cache_misses": profile.cache_misses,
+                        "outer_compute_ms": profile.outer_compute_ms,
+                    })
+                )
             );
         }
     }

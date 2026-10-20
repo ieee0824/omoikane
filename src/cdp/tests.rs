@@ -94,6 +94,212 @@ fn navigation_replaces_unstarted_document_scripts() {
 }
 
 #[test]
+fn configured_resource_worker_count_keeps_replacement_free_of_retired_requests() {
+    struct Release(Option<Vec<std::sync::mpsc::Sender<()>>>);
+    impl Release {
+        fn release(&mut self) {
+            if let Some(senders) = self.0.take() {
+                for sender in senders {
+                    let _ = sender.send(());
+                }
+            }
+        }
+    }
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+    struct Transport {
+        started: std::sync::mpsc::Sender<String>,
+        finished: std::sync::mpsc::Sender<String>,
+        release: Vec<Mutex<std::sync::mpsc::Receiver<()>>>,
+    }
+    impl crate::http::HttpTransport for Transport {
+        fn send(
+            &self,
+            request: &crate::http::HttpRequest,
+            _: Option<std::time::Duration>,
+        ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+            let url = request.url().to_string();
+            self.started.send(url.clone()).unwrap();
+            let gate = if url.ends_with("/held") {
+                Some(0)
+            } else if url.ends_with("/configured") {
+                Some(1)
+            } else {
+                None
+            };
+            if let Some(index) = gate {
+                self.release[index].lock().unwrap().recv().unwrap();
+                self.finished.send(url).unwrap();
+            }
+            Ok(crate::http::HttpResponse::new(
+                200,
+                "OK",
+                vec![("Access-Control-Allow-Origin".into(), "*".into())],
+                b"ready".to_vec(),
+            ))
+        }
+    }
+    let (started, observed) = std::sync::mpsc::channel();
+    let (release, gates): (Vec<_>, Vec<_>) = (0..2).map(|_| std::sync::mpsc::channel()).unzip();
+    let (finished, completion) = std::sync::mpsc::channel();
+    let transport = Arc::new(Transport {
+        started,
+        finished,
+        release: gates.into_iter().map(Mutex::new).collect(),
+    });
+    let mut session = CdpSession::new().unwrap();
+    let mut release = Release(Some(release));
+    session.set_resource_queue(crate::resource_worker::ResourceQueue::new(
+        NonZeroUsize::new(1).unwrap(),
+    ));
+    session.set_nonblocking_fetch_loading(true);
+    session
+        .runtime
+        .set_http_resource_transport(Some(transport.clone()));
+    session
+        .runtime
+        .eval("void fetch('https://example.test/held')")
+        .unwrap();
+    session.runtime.run_jobs().unwrap();
+    assert_eq!(
+        observed.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "https://example.test/held"
+    );
+    assert_eq!(session.runtime.resource_worker_count().get(), 1);
+    session.set_resource_worker_count(NonZeroUsize::new(1).unwrap());
+    session
+        .runtime
+        .eval("void fetch('https://example.test/configured')")
+        .unwrap();
+    session.runtime.run_jobs().unwrap();
+    assert_eq!(
+        observed.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "https://example.test/configured"
+    );
+
+    session
+        .install_document(
+            "https://example.test/replacement",
+            "<body>next</body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    assert_eq!(session.runtime.resource_worker_count().get(), 1);
+    session.runtime.set_http_resource_transport(Some(transport));
+    session
+        .runtime
+        .eval("void fetch('https://example.test/next')")
+        .unwrap();
+    session.runtime.run_jobs().unwrap();
+    assert_eq!(
+        observed.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "https://example.test/next",
+        "new navigation must have its own worker while the retired request remains held",
+    );
+    assert_eq!(
+        completion.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    );
+    release.release();
+    let mut finished = (0..2)
+        .map(|_| completion.recv_timeout(Duration::from_secs(5)).unwrap())
+        .collect::<Vec<_>>();
+    finished.sort();
+    assert_eq!(
+        finished,
+        [
+            "https://example.test/configured",
+            "https://example.test/held"
+        ]
+    );
+}
+
+#[test]
+fn configured_resource_queue_is_shared_by_current_and_replacement_documents() {
+    struct Transport;
+    impl crate::http::HttpTransport for Transport {
+        fn send(
+            &self,
+            _: &crate::http::HttpRequest,
+            _: Option<std::time::Duration>,
+        ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+            Ok(crate::http::HttpResponse::new(
+                200,
+                "OK",
+                vec![("Access-Control-Allow-Origin".into(), "*".into())],
+                b"loaded".to_vec(),
+            ))
+        }
+    }
+    let queue = crate::resource_worker::ResourceQueue::new(NonZeroUsize::new(1).unwrap());
+    let mut session = CdpSession::new().unwrap();
+    session.set_resource_queue(queue.clone());
+    session.set_nonblocking_fetch_loading(true);
+    session
+        .runtime
+        .set_http_resource_transport(Some(Arc::new(Transport)));
+    session
+        .runtime
+        .eval("fetch('https://example.test/current').catch(error => { globalThis.queueFetchError = String(error); })")
+        .unwrap();
+    session.runtime.run_jobs().unwrap();
+    assert_eq!(
+        session
+            .runtime
+            .eval("globalThis.queueFetchError")
+            .unwrap()
+            .as_string(),
+        None,
+        "the fetch must reach queue admission without rejecting",
+    );
+
+    session
+        .install_document(
+            "https://example.test/replacement",
+            "<body>replacement</body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session
+        .runtime
+        .set_http_resource_transport(Some(Arc::new(Transport)));
+    session
+        .runtime
+        .eval("fetch('https://example.test/resource').catch(error => { globalThis.queueFetchError = String(error); })")
+        .unwrap();
+    session.runtime.run_jobs().unwrap();
+    assert_eq!(
+        session
+            .runtime
+            .eval("globalThis.queueFetchError")
+            .unwrap()
+            .as_string(),
+        None,
+        "the fetch must reach queue admission without rejecting",
+    );
+
+    let scope = crate::resource_worker::ResourceScope::default();
+    let probe = queue
+        .submit(
+            &scope,
+            crate::resource_worker::ResourcePriority::Background,
+            crate::resource_worker::ResourceKind::Other,
+            |_| (),
+        )
+        .unwrap();
+    assert_eq!(
+        probe.id(),
+        2,
+        "both runtimes must allocate task IDs from the configured queue",
+    );
+}
+
+#[test]
 fn static_render_settles_deferred_document_startup() {
     let mut session = CdpSession::new().unwrap();
     session.set_deferred_document_startup(true);
@@ -4373,6 +4579,181 @@ fn native_input_does_not_run_due_timer_tasks() {
     assert_eq!(
         session.runtime.eval("timerFired").unwrap().as_boolean(),
         Some(true),
+    );
+}
+
+fn cross_origin_wheel_session(child_html: &str) -> (CdpSession, NodeHandle, usize) {
+    let child = format!(
+        "data:text/html;base64,{}",
+        BASE64_STANDARD.encode(child_html)
+    );
+    let mut session = CdpSession::new().unwrap();
+    session.set_viewport(200, 100);
+    session
+        .install_document(
+            "https://top.test/",
+            &format!(
+                "<style>*{{margin:0}}iframe{{display:block;border:0;width:200px;height:100px}}</style>\
+                 <iframe id=child src='{child}'></iframe>"
+            ),
+            1,
+            "null",
+        )
+        .unwrap();
+    for _ in 0..8 {
+        session.drive_event_loop(0).unwrap();
+    }
+    assert_eq!(
+        session
+            .runtime
+            .eval("document.getElementById('child').contentDocument === null")
+            .unwrap()
+            .as_boolean(),
+        Some(true),
+        "the data URL child must remain cross-origin to the parent Realm",
+    );
+
+    let target = session
+        .runtime
+        .hit_test(10.0, 10.0)
+        .expect("the child target must be hit");
+    assert_eq!(target.get_attribute("id").as_deref(), Some("target"));
+    let target_document_id = session
+        .runtime
+        .input_position_for_node(&target, 10.0, 10.0)
+        .4;
+    (session, target, target_document_id)
+}
+
+#[test]
+fn native_wheel_enters_cross_origin_hit_target_realm_without_exposing_it_to_author_code() {
+    let (mut session, target, _) = cross_origin_wheel_session(
+        "<style>*{margin:0}#target{height:1000px}</style><div id=target>child</div>\
+         <script>const target=document.getElementById('target');\
+         target.addEventListener('wheel',event=>target.setAttribute('data-wheel',\
+         [event.deltaY,Object.getPrototypeOf(event)===WheelEvent.prototype,\
+         event.target.ownerDocument===document].join(':')));\
+         target.addEventListener('wheel',()=>Promise.resolve().then(()=>\
+         target.setAttribute('data-job',String(target.ownerDocument===document))))</script>",
+    );
+    let target_id = target.identity();
+    let author_result = session
+        .runtime
+        .eval(&format!(
+            "(()=>{{try{{__omoikane_dispatch_wheel_input({target_id},{{deltaX:0,deltaY:40}});\
+             return 'allowed'}}catch(error){{return error.name}}}})()"
+        ))
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(author_result, "SecurityError");
+
+    let result = session
+        .dispatch(
+            "Input.dispatchMouseEvent",
+            json!({"type":"mouseWheel","x":10,"y":10,"deltaX":0,"deltaY":40}),
+        )
+        .unwrap();
+    assert_eq!(result["defaultPrevented"], json!(false));
+    assert_eq!(result["hostOverscrollY"], json!(false));
+    assert_eq!(
+        target.get_attribute("data-wheel").as_deref(),
+        Some("40:true:true"),
+        "the child listener and WheelEvent must use the child Realm",
+    );
+    assert_eq!(target.get_attribute("data-job").as_deref(), Some("true"));
+}
+
+#[test]
+fn native_cross_origin_wheel_propagates_prevent_default_to_the_host_result() {
+    let (mut session, target, _) = cross_origin_wheel_session(
+        "<style>*{margin:0}#target{height:1000px}</style><div id=target>child</div>\
+         <script>const target=document.getElementById('target');\
+         target.addEventListener('wheel',event=>{event.preventDefault();\
+         target.setAttribute('data-cancel',\
+         [event.cancelable,event.defaultPrevented,event.target.ownerDocument===document].join(':'))})\
+         </script>",
+    );
+
+    let result = session
+        .dispatch(
+            "Input.dispatchMouseEvent",
+            json!({"type":"mouseWheel","x":10,"y":10,"deltaX":0,"deltaY":40}),
+        )
+        .unwrap();
+    assert_eq!(result["defaultPrevented"], json!(true));
+    assert_eq!(result["hostOverscrollX"], json!(false));
+    assert_eq!(result["hostOverscrollY"], json!(false));
+    assert_eq!(
+        target.get_attribute("data-cancel").as_deref(),
+        Some("true:true:true"),
+        "the child Realm must cancel the trusted event before the host reads the outcome",
+    );
+}
+
+#[test]
+fn input_realm_evaluation_restores_the_main_realm_after_an_error() {
+    let (mut session, _, target_document_id) = cross_origin_wheel_session(
+        "<style>*{margin:0}#target{height:1000px}</style><div id=target>child</div>\
+         <script>globalThis.realmMarker='child'</script>",
+    );
+    session
+        .runtime
+        .eval("globalThis.realmMarker = 'top'")
+        .unwrap();
+
+    let error = session
+        .runtime
+        .eval_input_in_document_realm(target_document_id, "throw new Error('input realm failure')")
+        .expect_err("the child input evaluation must propagate its exception");
+    assert!(
+        error.to_string().contains("input realm failure"),
+        "unexpected child error: {error}",
+    );
+    assert_eq!(
+        session
+            .runtime
+            .eval("realmMarker + ':' + document.URL")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "top:https://top.test/",
+        "an exceptional child evaluation must restore the calling main Realm",
+    );
+}
+
+#[test]
+fn input_realm_evaluation_rejects_a_retired_document() {
+    let (mut session, _, target_document_id) = cross_origin_wheel_session(
+        "<style>*{margin:0}#target{height:1000px}</style><div id=target>child</div>",
+    );
+    session
+        .runtime
+        .eval("document.getElementById('child').remove()")
+        .unwrap();
+
+    let error = session
+        .runtime
+        .eval_input_in_document_realm(target_document_id, "globalThis.retiredInputRan = true")
+        .expect_err("a retired iframe Document must reject trusted input evaluation");
+    assert!(
+        error
+            .to_string()
+            .contains("input Document Realm is not active"),
+        "unexpected retired Document error: {error}",
+    );
+    assert_eq!(
+        session
+            .runtime
+            .eval("document.URL")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "https://top.test/",
+        "rejecting a retired child Document must leave the main Realm active",
     );
 }
 

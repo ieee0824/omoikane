@@ -42,6 +42,47 @@ computed style解決回数で、pseudo専用の計算は含まない。`outer_co
 遅延読み込みのプレースホルダーだけなら、通常コンテンツ表示後の性能を検証したことには
 ならない。画像とログを保存し、操作・表示位置・読み込み状態が揃った結果を比較する。
 
+## タスクと後続処理の計測
+
+`OMOIKANE_TRACE_TASKS=1`は、タスク本体とその後の処理を合わせて50ms以上かかった
+区間を`OMOIKANE_TASK`へ記録する。`elapsed_ms`と`success`は従来どおりタスク本体の
+時間と成否である。`background_ms`はWorker等の背景処理、`jobs_ms`は後続の
+microtask checkpoint、`cookie_ms`はCookie変更の配信を示す。`turn_ms`はこれらを
+含む区間全体で、`turn_success`は後続処理のエラーも反映する。未到達の区間は`null`。
+これらはフレーム時間の内数なので、フレーム時間へ加算しない。
+
+authorの`setTimeout`/`setInterval`由来なら、`timer_id`と登録時の
+`timer_source`（`file`・`line`・`column`）も出る。HTTP(S) URLはcredential・query・
+fragmentを除き、data URLやローカル/inline sourceは本文を出さない。intervalの各発火は
+同じID/sourceを使う。resource loadなど内部Timerと、登録位置を取得できなかったauthor
+Timerでは`timer_source`が`null`になるが、後者は`timer_id`で区別できる。診断無効時は
+登録時のstackを読まず、Timer metadataを保持しない。
+
+`gc-profile`有効時は`gc.callback`・`gc.background`・`gc.jobs`・`gc.cookie`・
+`gc.turn`にminor/major別のGC差分も出る。`gc.turn`は各区間を含む合計であり、
+内訳と重ねて加算しない。別スレッドで実行されるWorkerのGCは含まない。
+
+この計測はキューから取得したタスクごとの区間である。タスク取得前に行うresourceの
+poll、最初のPromise jobs・Cookie配信・背景処理は対象外で、
+`run_until_idle()`全体を測る値とは一致しない。診断を無効にすると追加の時計と
+GCカウンターの取得は行わない。
+
+`style_invalidations`は同じタスク区間内の無効化回数を集約する。
+`local`・`local_raw_style_subject`・`local_data_attribute`は局所無効化である。
+`local_data_attribute`はHTMLの`data-*`属性変更について、セレクターへの影響が
+変更要素のlight-DOM部分木に収まると確認できた場合を数える。兄弟要素などへ
+影響する場合は全体無効化へ戻す。レイアウトと描画の要求範囲は縮めない。
+`fallback_*`はinline style変更が
+全体無効化へ戻った理由を表す。`ordinary_node_mutation_full`は通常のDOM変更に
+よるresolverキャッシュの全消去、`other_full`はそれ以外の共通全消去経路である。
+`document_dirty`はstylesheetを含むresolver再構築の要求回数で、同じDocumentへの
+重複要求も数える。これらはノード数やDocument数ではない。
+
+カウンターはタスクのcallback・背景処理・jobs・Cookie配信の合計で、区間別には
+分けない。タスク取得前の処理、CSS内部で直接行うキャッシュ消去、別スレッドの
+Worker処理は含まない。未知のinline理由は`unknown_inline`へ集約し、属性値や
+任意の理由文字列を保持しない。診断を無効にすると集計用TLSにもアクセスしない。
+
 ## 任意のGC計測
 
 既存のBoa GC計測を有効にするには、`gc-profile`を追加する。
@@ -76,3 +117,8 @@ minor/majorごとに収集回数と`total_ms`・`mark_ms`・`finalize_ms`・`swe
 含まない。ネストしたスクリプトの区間は重なるため合算しない。
 `jit-stress`だけではこのclassic scriptログ用のroot featureは有効にならない。
 計測自体にも負荷があるので、通常ビルドとの比較ではfeatureと環境変数を記録する。
+
+JSON診断行はメモリ上で整形してからstderrへ出力し、JSONの各断片ごとの
+書き込みを避ける。イベント名・JSON・末尾改行の形式は従来と同じである。
+共有ファイルシステムへの保存や診断行数自体にも負荷があるため、実際の操作性能を
+比較するときは診断の有無とログの保存先を揃える。

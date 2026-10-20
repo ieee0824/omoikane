@@ -342,6 +342,53 @@ fn inline_form_controls_expose_painted_border_boxes_and_invalidate_when_hidden()
 }
 
 #[test]
+fn visible_background_image_cssom_change_rebuilds_layout_and_refreshes_inheritance() {
+    let mut runtime = runtime(
+        r#"<html><head><style>
+          html,body{margin:0}#target{width:100px;height:20px}
+          #child{background-image:inherit}
+          #target::before{content:'cached';background-image:inherit}
+        </style></head><body>
+          <div id="target" style="background-image:none"><span id="child"></span></div>
+        </body></html>"#,
+    );
+    runtime.set_viewport(320.0, 200.0);
+    assert!(
+        runtime
+            .eval(
+                r#"globalThis.target=document.getElementById('target');
+                   globalThis.child=document.getElementById('child');
+                   target.getBoundingClientRect().width===100&&
+                   getComputedStyle(child).backgroundImage==='none'&&
+                   getComputedStyle(target,'::before').backgroundImage==='none'"#,
+            )
+            .unwrap()
+            .to_boolean(),
+    );
+    let layout_generation = runtime.render_generations().layout;
+
+    runtime
+        .eval("target.style.backgroundImage='linear-gradient(red, blue)'")
+        .unwrap();
+    assert!(
+        runtime
+            .eval(
+                r#"(() => {
+                  const targetImage=getComputedStyle(target).backgroundImage;
+                  return target.style.backgroundImage.includes('linear-gradient')&&
+                    targetImage.includes('linear-gradient')&&
+                    getComputedStyle(child).backgroundImage===targetImage&&
+                    getComputedStyle(target,'::before').backgroundImage===targetImage&&
+                    target.getBoundingClientRect().width===100;
+                })()"#,
+            )
+            .unwrap()
+            .to_boolean(),
+    );
+    assert!(runtime.render_generations().layout > layout_generation);
+}
+
+#[test]
 fn localized_inline_style_cache_keeps_geometry_cssom_and_container_queries_fresh() {
     let mut runtime = runtime(
         "<html><head><style>html,body{margin:0}#target{position:relative;width:100px;height:20px;container-type:inline-size}#inside{height:5px}@container (min-width:80px){#inside{color:red}}</style></head><body><div id='target'><span id='inside'></span></div><aside id='unrelated'></aside></body></html>",
@@ -450,6 +497,106 @@ fn hidden_subject_raw_style_keeps_geometry_and_shared_layout_snapshots() {
 }
 
 #[test]
+fn hidden_background_image_subject_raw_style_keeps_geometry_and_shared_layout_snapshots() {
+    let mut runtime = runtime(
+        r#"<html><head><style>
+          html,body{margin:0}body{counter-reset:item 0}
+          #target{display:none}#child{color:var(--tone,black)}
+          #target[style*="linear-gradient"]{--tone:red;counter-reset:item 7;container-type:inline-size}
+          #container{container-type:inline-size;width:100px}#consumer{color:black}
+          @container (min-width:80px){#consumer{color:green}}
+          #peer{width:80px;height:20px}#peer::before{content:counter(item)}
+        </style></head><body>
+          <div id="target" style="background-image:none"><span id="child"></span></div>
+          <section id="container"><span id="consumer"></span></section><div id="peer"></div>
+        </body></html>"#,
+    );
+    runtime.set_viewport(320.0, 200.0);
+    assert!(
+        runtime
+            .eval(
+                r#"(() => {
+                  globalThis.target=document.getElementById('target');
+                  globalThis.child=document.getElementById('child');
+                  globalThis.peer=document.getElementById('peer');
+                  globalThis.beforePeer=peer.getBoundingClientRect();
+                  const hidden=target.getBoundingClientRect();
+                  return hidden.width===0&&hidden.height===0&&beforePeer.width===80&&
+                    getComputedStyle(child).color==='rgb(0, 0, 0)'&&
+                    getComputedStyle(document.getElementById('consumer')).color==='rgb(0, 128, 0)';
+                })()"#,
+            )
+            .unwrap()
+            .to_boolean(),
+    );
+    let generations = runtime.render_generations();
+    let calls = metric_calls();
+    let resolver_snapshot = |runtime: &JsRuntime| {
+        let state = runtime.host_state.borrow();
+        let document_id = state.document.identity();
+        let peer = state.document.query_selector("#peer").unwrap();
+        let resolver = state.document_styles[&document_id]
+            .resolver
+            .as_ref()
+            .unwrap();
+        (
+            resolver
+                .counter_values(&peer, crate::css::PseudoElement::Before, "item")
+                .map(|values| values.to_vec()),
+            resolver.container_contexts_snapshot(),
+        )
+    };
+    let snapshot = resolver_snapshot(&runtime);
+    assert_eq!(snapshot.0, Some(vec![0]));
+    assert!(!snapshot.1.is_empty());
+
+    runtime
+        .eval("target.style.backgroundImage='linear-gradient(red, blue)'")
+        .unwrap();
+    let invalidated = runtime.render_generations();
+    assert!(invalidated.style > generations.style);
+    assert_eq!(invalidated.layout, generations.layout);
+    assert!(invalidated.paint > generations.paint);
+    let observed = runtime
+        .eval(
+            r#"(() => {
+        const style=getComputedStyle(target),after=peer.getBoundingClientRect();
+        const hidden=target.getBoundingClientRect();
+        return JSON.stringify({display:style.display,backgroundImage:style.backgroundImage,
+          inlineBackgroundImage:target.style.backgroundImage,tone:style.getPropertyValue('--tone'),
+          childColor:getComputedStyle(child).color,hidden:[hidden.width,hidden.height],
+          peer:[after.x,after.y,after.width,after.height],
+          before:[beforePeer.x,beforePeer.y,beforePeer.width,beforePeer.height]});
+    })()"#,
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    let observed: serde_json::Value = serde_json::from_str(&observed).unwrap();
+    assert_eq!(observed["display"], "none", "{observed}");
+    assert!(
+        observed["inlineBackgroundImage"]
+            .as_str()
+            .is_some_and(|value| value.contains("linear-gradient")),
+        "{observed}",
+    );
+    assert!(
+        observed["backgroundImage"]
+            .as_str()
+            .is_some_and(|value| value.contains("linear-gradient")),
+        "{observed}",
+    );
+    assert_eq!(observed["tone"], "red", "{observed}");
+    assert_eq!(observed["childColor"], "rgb(255, 0, 0)", "{observed}");
+    assert_eq!(observed["hidden"], serde_json::json!([0, 0]), "{observed}");
+    assert_eq!(observed["peer"], observed["before"], "{observed}");
+    assert_eq!(runtime.render_generations().layout, generations.layout);
+    assert!(metric_calls() > calls);
+    assert_eq!(resolver_snapshot(&runtime), snapshot);
+}
+
+#[test]
 fn hidden_subject_raw_style_that_reveals_target_rebuilds_peer_flow() {
     let mut runtime = runtime(
         r#"<html><head><style>
@@ -483,6 +630,39 @@ fn hidden_subject_raw_style_that_reveals_target_rebuilds_peer_flow() {
 }
 
 #[test]
+fn hidden_background_image_subject_raw_style_that_reveals_target_rebuilds_peer_flow() {
+    let mut runtime = runtime(
+        r#"<html><head><style>
+          html,body{margin:0}#target{display:block;height:30px}
+          #target[style*="background-image: none"]{display:none}#peer{height:10px}
+        </style></head><body><div id="target" style="background-image: none"></div><div id="peer"></div></body></html>"#,
+    );
+    runtime.set_viewport(320.0, 200.0);
+    assert!(
+        runtime
+            .eval(
+                "globalThis.target=document.getElementById('target');globalThis.peer=document.getElementById('peer');target.getBoundingClientRect().height===0&&peer.getBoundingClientRect().y===0",
+            )
+            .unwrap()
+            .to_boolean(),
+    );
+    let layout_generation = runtime.render_generations().layout;
+
+    runtime
+        .eval("target.style.backgroundImage='linear-gradient(red, blue)'")
+        .unwrap();
+    assert!(
+        runtime
+            .eval(
+                "getComputedStyle(target).display!=='none'&&target.getBoundingClientRect().height===30&&peer.getBoundingClientRect().y===30",
+            )
+            .unwrap()
+            .to_boolean(),
+    );
+    assert!(runtime.render_generations().layout > layout_generation);
+}
+
+#[test]
 fn hidden_nonlocal_raw_selector_rebuilds_peer_geometry() {
     let mut runtime = runtime(
         r#"<html><head><style>
@@ -502,6 +682,37 @@ fn hidden_nonlocal_raw_selector_rebuilds_peer_geometry() {
 
     runtime
         .eval("target.style.transform='translateX(1px)'")
+        .unwrap();
+    assert_eq!(
+        number(
+            &mut runtime,
+            "document.getElementById('peer').getBoundingClientRect().width",
+        ),
+        80.0,
+    );
+    assert!(runtime.render_generations().layout > layout_generation);
+}
+
+#[test]
+fn hidden_background_image_nonlocal_raw_selector_rebuilds_peer_geometry() {
+    let mut runtime = runtime(
+        r#"<html><head><style>
+          html,body{margin:0}#target{display:none}#peer{width:20px;height:10px}
+          body:has(#target[style]) #peer{width:80px}
+        </style></head><body><div id="target"></div><div id="peer"></div></body></html>"#,
+    );
+    runtime.set_viewport(320.0, 200.0);
+    assert_eq!(
+        number(
+            &mut runtime,
+            "globalThis.target=document.getElementById('target');document.getElementById('peer').getBoundingClientRect().width",
+        ),
+        20.0,
+    );
+    let layout_generation = runtime.render_generations().layout;
+
+    runtime
+        .eval("target.style.backgroundImage='linear-gradient(red, blue)'")
         .unwrap();
     assert_eq!(
         number(

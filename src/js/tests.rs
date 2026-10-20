@@ -32247,3 +32247,37 @@ fn initial_owned_document_task_mutes_cross_origin_script_reports() {
         "Script error.:true"
     );
 }
+
+#[test]
+fn local_data_attribute_gate_accepts_only_simple_html_names() {
+    let html = NodeHandle::element("div");
+    assert_eq!(
+        local_html_data_attribute_name(&html, "DATA-Loaded"),
+        Some("data-loaded".to_string()),
+    );
+    assert_eq!(
+        local_html_data_attribute_name(&html, "data-player_state.2"),
+        Some("data-player_state.2".to_string()),
+    );
+    for name in [
+        "data-",
+        "data-qualified:name",
+        "data-状態",
+        "class",
+        "id",
+        "lang",
+        "dir",
+        "style",
+        "checked",
+    ] {
+        assert_eq!(local_html_data_attribute_name(&html, name), None, "{name}",);
+    }
+
+    let xml = NodeHandle::xml_element("div", None);
+    assert_eq!(local_html_data_attribute_name(&xml, "data-loaded"), None,);
+    let qualified_html = NodeHandle::html_element_ns("p:div", "http://www.w3.org/1999/xhtml");
+    assert_eq!(
+        local_html_data_attribute_name(&qualified_html, "data-loaded"),
+        None,
+    );
+}

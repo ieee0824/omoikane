@@ -221,11 +221,14 @@ impl BrowserApp {
     fn trace_startup(&self, phase: &str) {
         if let Some(started) = self.startup_trace {
             eprintln!(
-                "OMOIKANE_STARTUP {}",
-                json!({
-                    "phase": phase,
-                    "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
-                })
+                "{}",
+                omoikane::diagnostics::json_record(
+                    "OMOIKANE_STARTUP",
+                    &json!({
+                        "phase": phase,
+                        "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+                    })
+                )
             );
         }
     }
@@ -489,7 +492,10 @@ impl BrowserApp {
         };
         self.input_trace_sequence += 1;
         record["sequence"] = json!(self.input_trace_sequence);
-        eprintln!("OMOIKANE_INPUT {record}");
+        eprintln!(
+            "{}",
+            omoikane::diagnostics::json_record("OMOIKANE_INPUT", &record)
+        );
     }
 
     fn dispatch_key_input(
@@ -623,13 +629,16 @@ impl BrowserApp {
         let result = self.input.wheel(&mut self.session, delta_x, delta_y);
         if let Some(started) = started {
             eprintln!(
-                "OMOIKANE_WHEEL {}",
-                json!({
-                    "dispatch_ms": started.elapsed().as_secs_f64() * 1000.0,
-                    "delta_x": delta_x,
-                    "delta_y": delta_y,
-                    "success": result.is_ok(),
-                })
+                "{}",
+                omoikane::diagnostics::json_record(
+                    "OMOIKANE_WHEEL",
+                    &json!({
+                        "dispatch_ms": started.elapsed().as_secs_f64() * 1000.0,
+                        "delta_x": delta_x,
+                        "delta_y": delta_y,
+                        "success": result.is_ok(),
+                    })
+                )
             );
         }
         result
@@ -1443,11 +1452,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
     if let Some(started) = startup_trace {
         eprintln!(
-            "OMOIKANE_STARTUP {}",
-            json!({
-                "phase": "event_loop_ready",
-                "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
-            })
+            "{}",
+            omoikane::diagnostics::json_record(
+                "OMOIKANE_STARTUP",
+                &json!({
+                    "phase": "event_loop_ready",
+                    "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+                })
+            )
         );
     }
     let mut app = BrowserApp::new(&url)?;
@@ -1479,8 +1491,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<page_worker::AsyncEvent>::with_user_event().build()?;
     if let Some(started) = startup_trace {
         eprintln!(
-            "OMOIKANE_STARTUP {}",
-            json!({"phase":"event_loop_ready","elapsed_ms":started.elapsed().as_secs_f64()*1000.0})
+            "{}",
+            omoikane::diagnostics::json_record(
+                "OMOIKANE_STARTUP",
+                &json!({"phase":"event_loop_ready","elapsed_ms":started.elapsed().as_secs_f64()*1000.0})
+            )
         );
     }
     let mut app =

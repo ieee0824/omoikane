@@ -33,6 +33,7 @@ use crate::js::{
     JavaScriptDialogKind, JsRuntime, NavigationRequest, OwnedPageTask, PageTaskError,
     PointerLockTransition, StorageManager, VisitSource,
 };
+use crate::resource_worker::ResourceQueue;
 
 mod render_demand;
 pub use render_demand::{NextRendering, PaintStateKey, RenderDemand};
@@ -184,6 +185,8 @@ pub(crate) struct SessionSettleTimings {
 #[derive(Debug)]
 pub struct CdpSession {
     runtime: JsRuntime,
+    resource_queue: Option<ResourceQueue>,
+    resource_worker_count: std::num::NonZeroUsize,
     task_pump_limit: Option<std::num::NonZeroUsize>,
     defer_document_startup: bool,
     nonblocking_image_loading: bool,
@@ -326,11 +329,16 @@ impl CdpSession {
             storage_session_id,
         )
         .map_err(CdpSessionError::JavaScript)?;
+        let resource_queue = ResourceQueue::default();
+        let resource_worker_count = resource_queue.worker_count();
+        runtime.set_resource_queue(resource_queue.clone());
         Self::configure_runtime_playback(&mut runtime, &cookie_store);
         let mut http_client = Client::new();
         http_client.set_shared_cookie_store(Arc::clone(&cookie_store));
         let mut session = Self {
             runtime,
+            resource_queue: None,
+            resource_worker_count,
             task_pump_limit: None,
             defer_document_startup: false,
             nonblocking_image_loading: false,
@@ -409,6 +417,11 @@ impl CdpSession {
             runtime.set_error_reporter(reporter, surface);
         }
         Self::configure_runtime_playback(runtime, &self.cookie_store);
+        runtime.set_resource_queue(
+            self.resource_queue
+                .clone()
+                .unwrap_or_else(|| ResourceQueue::new(self.resource_worker_count)),
+        );
         runtime.set_task_pump_limit(self.task_pump_limit);
         runtime.set_nonblocking_image_loading(self.nonblocking_image_loading);
         runtime.set_nonblocking_font_loading(self.nonblocking_font_loading);

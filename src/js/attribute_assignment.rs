@@ -172,18 +172,21 @@ pub(super) fn trace(
     }
     let (old_length, same_value) = previous_value(node, name, value);
     eprintln!(
-        "OMOIKANE_ATTRIBUTE_SET {}",
-        serde_json::json!({
-            "node": node.identity(), "name": name,
-            "old_length": old_length, "new_length": value.len(),
-            "same_value": same_value,
-            "cached_style_state": if name.eq_ignore_ascii_case("style") {
-                Some(cached_state())
-            } else {
-                None
-            },
-            "declarations": parsed_difference(node, name, value),
-        })
+        "{}",
+        crate::diagnostics::json_record(
+            "OMOIKANE_ATTRIBUTE_SET",
+            &serde_json::json!({
+                "node": node.identity(), "name": name,
+                "old_length": old_length, "new_length": value.len(),
+                "same_value": same_value,
+                "cached_style_state": if name.eq_ignore_ascii_case("style") {
+                    Some(cached_state())
+                } else {
+                    None
+                },
+                "declarations": parsed_difference(node, name, value),
+            })
+        )
     );
 }
 
