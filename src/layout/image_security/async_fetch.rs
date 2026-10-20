@@ -1,60 +1,50 @@
 //! Owned HTTP/decode jobs. DOM handles and Boa values stay on the GUI thread.
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::resource_worker::{
+    ResourceKind, ResourceOutcome, ResourcePriority, ResourceQueue, ResourceScope, ResourceTask,
+};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Weak, mpsc};
 
 #[cfg(test)]
 mod tests;
 
-type Job = Box<dyn FnOnce() + Send>;
-const WORKERS: usize = 4;
-
 pub(super) struct State {
     enabled: bool,
-    live: Arc<AtomicBool>,
+    scope: ResourceScope,
     owner: Option<ImageCacheOwner>,
-    pending: HashMap<String, mpsc::Receiver<Response>>,
-    pool: Option<mpsc::Sender<Job>>,
+    pending: HashMap<String, ResourceTask<Response>>,
+    pool: ResourceQueue,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
             enabled: false,
-            live: Arc::new(AtomicBool::new(true)),
+            scope: ResourceScope::default(),
             owner: None,
             pending: HashMap::new(),
-            pool: None,
+            pool: ResourceQueue::default(),
         }
     }
 }
 
 impl State {
-    fn send(&mut self, job: Job) -> Result<(), &'static str> {
-        if self.pool.is_none() {
-            self.pool = Some(new_pool().map_err(|_| "image workers unavailable")?);
-        }
-        self.pool
-            .as_ref()
-            .unwrap()
-            .send(job)
-            .map_err(|_| "image workers unavailable")
-    }
-
     pub fn reset(&mut self) {
         let enabled = self.enabled;
+        let pool = self.pool.clone();
         *self = Self::default();
         self.enabled = enabled;
-    }
-}
-
-impl Drop for State {
-    fn drop(&mut self) {
-        self.live.store(false, Ordering::Release);
+        self.pool = pool;
     }
 }
 
 impl ImageDocumentState {
+    /// Shares resource execution slots with fonts and other document loaders.
+    pub(crate) fn set_resource_queue(&mut self, queue: ResourceQueue) {
+        self.asynchronous.pool = queue;
+    }
+
     /// Selects nonblocking network images for a native interactive host.
     pub(crate) fn set_async_loading(&mut self, enabled: bool) {
         self.asynchronous.enabled = enabled;
@@ -116,7 +106,7 @@ pub(crate) fn start(url: &str) -> bool {
             policy: active.policy.clone(),
             client: HTTP_CLIENT.with(|slot| slot.borrow().fork_for_worker()),
             owner,
-            live: Arc::downgrade(&asynchronous.live),
+            live: asynchronous.scope.weak_liveness(),
         };
         match request.start(asynchronous) {
             Ok(receiver) => {
@@ -156,11 +146,12 @@ pub(crate) fn poll() -> bool {
             .asynchronous
             .pending
             .retain(|url, receiver| match receiver.try_recv() {
-                Ok(response) => {
+                Ok(ResourceOutcome::Complete(response)) => {
                     completed.push((url.clone(), Some(response)));
                     false
                 }
-                Err(mpsc::TryRecvError::Disconnected) => {
+                Ok(ResourceOutcome::Cancelled | ResourceOutcome::Panicked)
+                | Err(mpsc::TryRecvError::Disconnected) => {
                     completed.push((url.clone(), None));
                     false
                 }
@@ -221,42 +212,17 @@ pub(super) struct Response {
     pub coep: Vec<CorpViolation>,
 }
 
-// Each Document owns its execution slots, as well as its pending queue. Retired
-// transports may finish under their HTTP timeout without blocking a new page.
-fn new_pool() -> std::io::Result<mpsc::Sender<Job>> {
-    let (sender, receiver) = mpsc::channel::<Job>();
-    let receiver = Arc::new(Mutex::new(receiver));
-    for index in 0..WORKERS {
-        let receiver = Arc::clone(&receiver);
-        std::thread::Builder::new()
-            .name(format!("omoikane-image-{index}"))
-            .spawn(move || {
-                loop {
-                    let job = receiver.lock().unwrap().recv();
-                    let Ok(job) = job else { break };
-                    job();
-                }
-            })?;
-    }
-    Ok(sender)
-}
-
 impl Request {
-    pub fn start(self, state: &mut State) -> Result<mpsc::Receiver<Response>, &'static str> {
-        let (result, receiver) = mpsc::channel();
-        state.send(Box::new(move || {
-            let Some(live) = self.live.upgrade() else {
-                return;
-            };
-            if !live.load(Ordering::Acquire) {
-                return;
-            }
-            let response = self.run();
-            if live.load(Ordering::Acquire) {
-                let _ = result.send(response);
-            }
-        }))?;
-        Ok(receiver)
+    pub fn start(self, state: &mut State) -> Result<ResourceTask<Response>, &'static str> {
+        state
+            .pool
+            .submit(
+                &state.scope,
+                ResourcePriority::Normal,
+                ResourceKind::Image,
+                move |_| self.run(),
+            )
+            .map_err(|_| "resource workers unavailable")
     }
 
     fn run(self) -> Response {

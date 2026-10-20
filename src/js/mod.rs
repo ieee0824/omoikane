@@ -192,6 +192,7 @@ mod html_parsing;
 mod html_sanitizer;
 mod html_serialization;
 mod image_loading;
+mod resource_loading;
 mod security_reporting;
 mod storage;
 mod storage_access;
@@ -2399,6 +2400,8 @@ struct HostState {
     image_timeline: crate::paint::animation::ImageTimeline,
     image_resources: HashMap<usize, Rc<RefCell<crate::layout::ImageDocumentState>>>,
     nonblocking_image_loading: bool,
+    nonblocking_font_loading: bool,
+    resource_queue: crate::resource_worker::ResourceQueue,
     pending_image_events: Vec<image_loading::PendingImageEvent>,
     visible_image_playbacks: Vec<Arc<crate::paint::animation::ImagePlayback>>,
     /// Committed URL per live Document. Nested Window/Document access must not
@@ -2508,6 +2511,7 @@ unsafe impl Trace for HostState {
         if let Some(maps) = &self.font_loading.maps {
             unsafe { maps.trace(tracer) };
         }
+        unsafe { self.font_loading.trace_pending(tracer) };
         // Iframe and auxiliary Document realms, plus rendering callbacks
         // retained by the event loop, are Boa `Realm` handles backed by
         // `Rooted<RealmInner>`. Retaining those handles keeps child intrinsics
@@ -3181,6 +3185,8 @@ impl HostState {
             image_timeline: Arc::new(Mutex::new(HashMap::new())),
             image_resources: HashMap::new(),
             nonblocking_image_loading: false,
+            nonblocking_font_loading: false,
+            resource_queue: Default::default(),
             pending_image_events: Vec::new(),
             visible_image_playbacks: Vec::new(),
             document_urls,
@@ -10284,6 +10290,7 @@ impl JsRuntime {
             return Ok(());
         }
         self.poll_image_resource_loads()?;
+        font_loading::poll_resource_loads(&mut self.host_state.borrow_mut());
         // An embedder call may have completed a script task and left promise
         // jobs pending. Its checkpoint can itself enqueue host tasks.
         self.run_jobs()?;
@@ -10464,6 +10471,7 @@ impl JsRuntime {
             return Ok(());
         }
         self.poll_image_resource_loads()?;
+        font_loading::poll_resource_loads(&mut self.host_state.borrow_mut());
         self.run_jobs()?;
         self.dispatch_cookie_changes()?;
         self.run_worklet_background_tasks();

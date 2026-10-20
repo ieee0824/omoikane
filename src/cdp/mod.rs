@@ -187,6 +187,7 @@ pub struct CdpSession {
     task_pump_limit: Option<std::num::NonZeroUsize>,
     defer_document_startup: bool,
     nonblocking_image_loading: bool,
+    nonblocking_font_loading: bool,
     pending_document_startup: Option<page::PendingDocumentStartup>,
     media_emulation: emulation::State,
     _storage_lifetime: TabStorageLifetime,
@@ -331,6 +332,7 @@ impl CdpSession {
             task_pump_limit: None,
             defer_document_startup: false,
             nonblocking_image_loading: false,
+            nonblocking_font_loading: false,
             pending_document_startup: None,
             _storage_lifetime: storage_lifetime,
             storage_manager,
@@ -405,6 +407,7 @@ impl CdpSession {
         Self::configure_runtime_playback(runtime, &self.cookie_store);
         runtime.set_task_pump_limit(self.task_pump_limit);
         runtime.set_nonblocking_image_loading(self.nonblocking_image_loading);
+        runtime.set_nonblocking_font_loading(self.nonblocking_font_loading);
         runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
         let (width, height) = self.runtime.presentation_viewport();
         runtime.set_viewport(width, height);

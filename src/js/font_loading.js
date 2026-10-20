@@ -97,10 +97,10 @@
     try { return JSON.parse(native('parse-source', JSON.stringify({input: value}))); }
     catch (_) { throw syntax(); }
   }
-  function host(face, operation, binding = native, source = null) {
+  function host(face, operation, binding = native, source = null, completion = undefined) {
     const state = faceState(face);
     return binding(operation, JSON.stringify({ id: state.id, ...state.descriptors,
-      family: unquote(state.descriptors.family) }), undefined, source);
+      family: unquote(state.descriptors.family) }), undefined, source, completion);
   }
   function beginSet(set, face) {
     const state = setState(set);
@@ -148,15 +148,23 @@
     const source = native('capture-source');
     state.status = 'loading';
     for (const set of state.sets) beginSet(set, face);
-    task(() => {
-      try { host(face, 'load', native, source); state.status = 'loaded'; state.resolve(face); }
-      catch (_) { state.status = 'error'; state.reject(exception(state.binary ? 'SyntaxError' : 'NetworkError', 'Font could not be loaded')); }
+    const finish = success => {
+      if (state.status !== 'loading') return;
+      if (success) { state.status = 'loaded'; state.resolve(face); }
+      else { state.status = 'error'; state.reject(exception(state.binary ? 'SyntaxError' : 'NetworkError', 'Font could not be loaded')); }
       for (const set of state.sets) {
         const membership = setState(set);
         membership.pending.delete(face);
         (state.status === 'loaded' ? membership.loaded : membership.failed).push(face);
         finishSet(set);
       }
+    };
+    task(() => {
+      try {
+        const pending = host(face, 'load', native, source,
+          [() => finish(true), () => finish(false)]);
+        if (pending !== true) finish(true);
+      } catch (_) { finish(false); }
     });
   }
   class FontFace {
@@ -204,8 +212,8 @@
       }
     });
   }
-  function matched(set, font, text) {
-    syncCSS(set);
+  function matched(set, font, text, refresh = true) {
+    if (refresh) syncCSS(set);
     let query;
     try { query = JSON.parse(native('parse-font', JSON.stringify({input: String(font)}))); }
     catch (_) { throw syntax(); }
@@ -267,8 +275,9 @@
   function loadUsedFonts(set) {
     const state = setState(set);
     if (!state.document || !Array.from(state.members).some(face => faceState(face).status === 'unloaded')) return;
+    syncCSS(set);
     for (const sample of JSON.parse(state.native('used', '{}'))) {
-      for (const face of matched(set, sample.font, sample.text)) start(face);
+      for (const face of matched(set, sample.font, sample.text, false)) start(face);
     }
   }
   function requestUsedFonts(set) {
@@ -376,10 +385,10 @@
         for (const [name, property] of Object.entries(descriptorProperties)) {
           const raw = rule && rule.style.getPropertyValue(property);
           data.descriptors[name] = descriptor(name,
-            raw || (name === 'family' ? snapshot.family : name === 'weight' ? snapshot.weight : name === 'style' ? snapshot.style : name === 'stretch' ? snapshot.stretch : name === 'unicodeRange' ? snapshot.unicodeRange : defaults[name]));
+            raw || (name === 'family' ? JSON.stringify(snapshot.family) : name === 'weight' ? snapshot.weight : name === 'style' ? snapshot.style : name === 'stretch' ? snapshot.stretch : name === 'unicodeRange' ? snapshot.unicodeRange : defaults[name]));
         }
         if (rule) cssRuleFaces.set(rule, face);
-        if (data.status === 'unloaded') start(face);
+        if (data.status === 'unloaded' && snapshot.loaded) start(face);
       }
       for (const [id, face] of state.css) {
         if (current.has(id)) continue;
@@ -447,14 +456,28 @@
     const set = new FontFaceSet();
     setState(set).document = document;
     documents.set(document, set);
-    installMutationHook(document, currentDocument => {
+    // The parsed document can already contain CSS without a later DOM
+    // mutation. Start used-face discovery in a task, after the host has had
+    // an opportunity to paint the parsed page with fallback fonts.
+    if (native('has-stylesheets', '{}')) {
+      setState(set).queue(() => {
+        if (!native('is-live')) return;
+        syncCSS(set);
+        requestUsedFonts(set);
+      });
+    }
+    installMutationHook(document, (currentDocument, sourceChanged = true) => {
       // A queued maintenance notification may outlive its browsing context.
       // Retired windows must not create internal rejection reports or restart
       // font work. The private host predicate uses this callback's Realm.
       if (!native('is-live')) return;
       if (documents.has(currentDocument)) {
-        const set = documents.get(currentDocument); syncCSS(set); requestUsedFonts(set);
+        const set = documents.get(currentDocument);
+        if (!sourceChanged && !Array.from(setState(set).members).some(face => faceState(face).status === 'unloaded')) return;
+        if (sourceChanged) syncCSS(set);
+        requestUsedFonts(set);
       }
-    });
+    }, sourceChanged => native('is-live') && (sourceChanged ||
+      Array.from(setState(set).members).some(face => faceState(face).status === 'unloaded')));
   }
 })();

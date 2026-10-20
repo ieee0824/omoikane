@@ -20469,25 +20469,33 @@ export const __omoikane_service_worker_lifecycle = {};
     (browsingInput.fontMutationHooks = new WeakMap());
   let fontMutationDocument = null;
   let fontMutationPending = false;
+  let fontMutationNeedsSourceSync = false;
   const createFontMutationPromise = Promise.resolve.bind(Promise);
   const enqueueFontMutation = Function.prototype.call.bind(Promise.prototype.then);
   const setFontPromiseProperty = Object.defineProperty.bind(Object);
-  globalThis.__omoikane_install_font_mutation_hook = (doc, callback) => {
+  globalThis.__omoikane_install_font_mutation_hook = (doc, callback, shouldNotify) => {
     fontMutationDocument = createNodeWeakRef(doc);
-    safeWeakMapSet(fontMutationHooks, doc, callback);
+    safeWeakMapSet(fontMutationHooks, doc, { callback, shouldNotify });
     delete globalThis.__omoikane_install_font_mutation_hook;
   };
 
   function notifyFontMutation(target, type, init) {
-    if (!fontMutationDocument || fontMutationPending) return;
-    if (type === "attributes" && init.attributeName !== "href" &&
-        init.attributeName !== "rel" && init.attributeName !== "media" &&
-        init.attributeName !== "disabled") return;
+    if (!fontMutationDocument) return;
     if (type !== "childList" && type !== "characterData" && type !== "attributes") return;
     const doc = weakRefDeref(fontMutationDocument);
     if (!doc || (target !== doc && !isInclusiveDescendant(target, doc))) return;
-    const callback = safeWeakMapGet(fontMutationHooks, doc);
-    if (!callback) return;
+    const hook = safeWeakMapGet(fontMutationHooks, doc);
+    if (!hook) return;
+    const sourceChanged = type !== "attributes" || init.attributeName === "href" ||
+        init.attributeName === "rel" || init.attributeName === "media" ||
+        init.attributeName === "disabled";
+    // Do not retain a retired Realm in a promise merely because one of its
+    // surviving nodes changed an attribute. Selection-only mutations with no
+    // unloaded faces do not need a maintenance notification either.
+    if (!hook.shouldNotify(sourceChanged)) return;
+    const callback = hook.callback;
+    if (sourceChanged) fontMutationNeedsSourceSync = true;
+    if (fontMutationPending) return;
     fontMutationPending = true;
     // A completed notification must not leave a promise owned by the Realm's
     // long-lived bootstrap environment. Allocate only when a batch is dirty.
@@ -20495,7 +20503,9 @@ export const __omoikane_service_worker_lifecycle = {};
     setFontPromiseProperty(promise, "constructor", {value: undefined});
     enqueueFontMutation(promise, () => {
       fontMutationPending = false;
-      callback(doc);
+      const sourceChanged = fontMutationNeedsSourceSync;
+      fontMutationNeedsSourceSync = false;
+      callback(doc, sourceChanged);
     });
   }
 

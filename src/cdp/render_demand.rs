@@ -50,6 +50,12 @@ pub struct RenderDemand {
 }
 
 impl CdpSession {
+    /// Shares font I/O and decoding workers with other document resources.
+    pub fn set_nonblocking_font_loading(&mut self, enabled: bool) {
+        self.nonblocking_font_loading = enabled;
+        self.runtime.set_nonblocking_font_loading(enabled);
+    }
+
     /// Fetches network images on workers while the host keeps driving frames.
     pub fn set_nonblocking_image_loading(&mut self, enabled: bool) {
         self.nonblocking_image_loading = enabled;

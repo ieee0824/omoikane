@@ -221,7 +221,7 @@ unsafe impl Trace for EventLoop {
     fn run_finalizer(&self) {}
 }
 
-unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tracer) {
+pub(super) unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tracer) {
     match payload {
         TimerPayload::Callback { callback, args } => {
             unsafe { callback.trace(tracer) };

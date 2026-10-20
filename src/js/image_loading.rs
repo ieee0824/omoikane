@@ -77,6 +77,9 @@ impl HostState {
         cache
             .borrow_mut()
             .set_async_loading(self.nonblocking_image_loading);
+        cache
+            .borrow_mut()
+            .set_resource_queue(self.resource_queue.clone());
         DocumentImageEnvironment {
             document_id,
             cache,

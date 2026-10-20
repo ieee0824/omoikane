@@ -29,6 +29,76 @@ fn font_url() -> String {
 }
 
 #[test]
+fn first_paint_defers_network_fonts_and_only_used_faces_are_requested() {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let listener = bind_loopback().unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let requested = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&requested);
+    let worker = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+        observed.store(true, Ordering::Release);
+        let bytes =
+            include_bytes!("../../tests/fixtures/anonymized-arabic-fallback/DejaVuSans.ttf");
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: font/ttf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+        stream.write_all(bytes).unwrap();
+        request
+    });
+    let document = TreeBuilder::parse(&format!(
+        "<!doctype html><style>\
+         @font-face{{font-family:UsedFace;src:url({origin}/used.ttf);unicode-range:U+0-7F}}\
+         @font-face{{font-family:UsedFace;src:url({origin}/unused-range.ttf);unicode-range:U+600-6FF}}\
+         @font-face{{font-family:UnusedFace;src:url({origin}/unused-family.ttf)}}\
+         body{{font:20px UsedFace,monospace}}</style><body>AAAA</body>"
+    )).document();
+    let mut runtime = JsRuntime::with_document_and_url(document, &origin).unwrap();
+    runtime.paint_current_document().unwrap();
+    assert!(
+        !requested.load(Ordering::Acquire),
+        "first paint must not wait for font I/O"
+    );
+    assert_eq!(
+        eval_json(&mut runtime, "Array.from(document.fonts,f=>f.status)"),
+        json!(["unloaded", "unloaded", "unloaded"])
+    );
+    runtime.run_until_idle().unwrap();
+    let request = worker.join();
+    assert!(request.starts_with("GET /used.ttf "), "{request}");
+    assert_eq!(
+        eval_json(&mut runtime, "Array.from(document.fonts,f=>f.status)"),
+        json!(["loaded", "unloaded", "unloaded"])
+    );
+}
+
+#[test]
+fn imported_font_family_preserves_quoting_for_numeric_name_components() {
+    let css = "@font-face { font-family: 'M PLUS Rounded 1c'; src: url(missing.ttf); }";
+    let source = format!(
+        "data:text/css;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(css)
+    );
+    let document = TreeBuilder::parse(&format!(
+        "<!doctype html><style>@import url('{source}');</style><body>serif text</body>"
+    ))
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "Array.from(document.fonts,f=>[f.family,f.status])"
+        ),
+        json!([["\"M PLUS Rounded 1c\"", "unloaded"]])
+    );
+    runtime.run_until_idle().unwrap();
+}
+
+#[test]
 fn ch_width_recomputes_when_its_web_font_finishes_loading() {
     let document = TreeBuilder::parse(
         "<!doctype html><style>#sample{font-family:RuntimeFont,monospace;font-size:20px;width:10ch}</style><div id=sample></div>",
@@ -1102,4 +1172,39 @@ fn invalid_font_promise_is_exposed_lazily_and_keeps_its_rejection() {
         .unwrap();
     runtime.run_until_idle().unwrap();
     assert_eq!(eval_json(&mut runtime, "observed"), json!("SyntaxError"));
+}
+
+#[test]
+fn class_change_loads_a_newly_used_css_font_without_explicit_font_api_calls() {
+    let (origin, worker) = serve_font(true);
+    let document = TreeBuilder::parse(&format!(
+        "<!doctype html><style>@font-face{{font-family:LaterFont;src:url({origin}/later.ttf)}}\
+         body.with-font{{font-family:LaterFont}}</style><body>AAAA</body>"
+    ))
+    .document();
+    let mut runtime = JsRuntime::with_document_and_url(document, &origin).unwrap();
+    runtime.set_nonblocking_font_loading(true);
+    runtime.paint_current_document().unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_json(&mut runtime, "Array.from(document.fonts,f=>f.status)"),
+        json!(["unloaded"])
+    );
+    runtime.eval("document.body.className='with-font'").unwrap();
+    runtime.run_until_idle().unwrap();
+    let request = worker.join();
+    assert!(request.starts_with("GET /later.ttf "), "{request}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        runtime.run_until_idle().unwrap();
+        if !runtime.host_state.borrow().font_loading.has_pending() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "newly used font did not settle");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        eval_json(&mut runtime, "Array.from(document.fonts,f=>f.status)"),
+        json!(["loaded"])
+    );
 }
