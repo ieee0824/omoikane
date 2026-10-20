@@ -20310,6 +20310,7 @@ export const __omoikane_service_worker_lifecycle = {};
   function applyWindowScroll(x, y, smooth = false) {
     __omoikane_set_window_scroll(Number(x), Number(y), Boolean(smooth));
   }
+  let queueIntersectionObserverChecks = () => {};
   globalThis.__omoikane_dispatch_scroll_event = function(nodeId, viewport) {
     const target = viewport ? document : wrapNode(nodeId);
     if (!target) return;
@@ -29468,9 +29469,17 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
+  queueIntersectionObserverChecks = function() {
+    for (const observer of activeIntersectionObservers) observer.__queueCheck();
+  };
+  // The host calls this after all animation-frame callbacks for Documents
+  // whose scroll geometry changed during the rendering opportunity.
+  globalThis.__omoikane_intersection_observers_changed = function() {
+    queueIntersectionObserverChecks();
+  };
   globalThis.__omoikane_layout_observers_changed = function() {
     for (const observer of activeResizeObservers) observer.__queueCheck();
-    for (const observer of activeIntersectionObservers) observer.__queueCheck();
+    queueIntersectionObserverChecks();
   };
   globalThis.ResizeObserver = ResizeObserver;
   globalThis.ResizeObserverEntry = ResizeObserverEntry;

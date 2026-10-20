@@ -11356,6 +11356,236 @@ fn intersection_observer_computes_partial_and_outside_geometry() {
 }
 
 #[test]
+fn intersection_observer_rechecks_window_scroll_after_scroll_event_and_raf() {
+    let mut runtime = runtime_from_html(
+        r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            body { height: 600px; }
+            #target { position: absolute; top: 300px; width: 20px; height: 20px; }
+        </style></head><body><div id="target"></div></body></html>"#,
+    );
+    runtime.set_viewport(200.0, 100.0);
+    runtime
+        .eval(
+            r#"globalThis.windowIntersectionLog = [];
+               globalThis.windowIntersectionTarget = document.getElementById('target');
+               globalThis.windowIntersectionObserver = new IntersectionObserver(entries => {
+                 for (const entry of entries) {
+                   windowIntersectionLog.push(
+                     `io:${entry.isIntersecting}:${entry.boundingClientRect.top}`
+                   );
+                 }
+               });
+               addEventListener('scroll', () => windowIntersectionLog.push(
+                 `scroll:${windowIntersectionTarget.getBoundingClientRect().top}`
+               ));
+               windowIntersectionObserver.observe(windowIntersectionTarget);"#,
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "windowIntersectionLog.join('/')"),
+        "io:false:300"
+    );
+
+    runtime
+        .eval(
+            r#"scrollTo(0, 250);
+               windowIntersectionLog.push(
+                 `sync:${windowIntersectionTarget.getBoundingClientRect().top}`
+               );
+               requestAnimationFrame(() => windowIntersectionLog.push(
+                 `raf:${windowIntersectionTarget.getBoundingClientRect().top}`
+               ));"#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "windowIntersectionLog.join('/')"),
+        "io:false:300/sync:50",
+        "scrolling changes client geometry synchronously but defers the observer callback"
+    );
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "windowIntersectionLog.join('/')"),
+        "io:false:300/sync:50/scroll:50/raf:50/io:true:50"
+    );
+
+    runtime
+        .eval(
+            r#"scrollTo(0, 0);
+               requestAnimationFrame(() => windowIntersectionLog.push(
+                 `raf-out:${windowIntersectionTarget.getBoundingClientRect().top}`
+               ));"#,
+        )
+        .unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "windowIntersectionLog.join('/')"),
+        "io:false:300/sync:50/scroll:50/raf:50/io:true:50/scroll:300/raf-out:300/io:false:300"
+    );
+
+    let callback_count = eval_num(
+        &mut runtime,
+        "windowIntersectionLog.filter(value => value.startsWith('io:')).length",
+    );
+    runtime.eval("scrollTo(0, 0)").unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_num(
+            &mut runtime,
+            "windowIntersectionLog.filter(value => value.startsWith('io:')).length"
+        ),
+        callback_count,
+        "an unchanged scroll offset must not queue a duplicate intersection callback"
+    );
+}
+
+#[test]
+fn intersection_observer_async_frame_observes_final_raf_scroll_geometry() {
+    let mut runtime = runtime_from_html(
+        "<style>*{margin:0;padding:0}body{height:600px}#target{position:absolute;top:300px;width:20px;height:20px}</style><div id='target'></div>",
+    );
+    runtime.set_viewport(200.0, 100.0);
+    runtime
+        .eval(
+            r#"
+        globalThis.asyncIntersectionLog=[];
+        globalThis.asyncIntersectionTarget=document.getElementById('target');
+        new IntersectionObserver(entries=>{
+            for(const entry of entries) asyncIntersectionLog.push(
+                `io:${entry.isIntersecting}:${entry.boundingClientRect.top}`);
+        }).observe(asyncIntersectionTarget);
+        addEventListener('scroll',()=>asyncIntersectionLog.push(
+            `scroll:${asyncIntersectionTarget.getBoundingClientRect().top}`));
+    "#,
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+    runtime
+        .eval(
+            r#"
+        scrollTo(0,50);
+        requestAnimationFrame(()=>{
+            scrollTo(0,250);
+            asyncIntersectionLog.push(`raf:${asyncIntersectionTarget.getBoundingClientRect().top}`);
+        });
+    "#,
+        )
+        .unwrap();
+    {
+        let mut frame = Box::pin(runtime.run_animation_frame_async(16));
+        let mut context = FutureContext::from_waker(Waker::noop());
+        loop {
+            if let Poll::Ready(result) = frame.as_mut().poll(&mut context) {
+                assert_eq!(result.unwrap(), 1);
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        eval_str(&mut runtime, "asyncIntersectionLog.join('/')"),
+        "io:false:300/scroll:250/raf:50/io:true:50"
+    );
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "asyncIntersectionLog.join('/')"),
+        "io:false:300/scroll:250/raf:50/io:true:50/scroll:50"
+    );
+}
+
+#[test]
+fn intersection_observer_rechecks_element_scroll_in_and_out_of_root() {
+    let mut runtime = runtime_from_html(
+        r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #scroller { position: absolute; left: 0; top: 0; width: 100px; height: 100px; overflow: auto; }
+            #content { position: relative; width: 100px; height: 300px; }
+            #target { position: absolute; left: 0; top: 200px; width: 20px; height: 20px; }
+        </style></head><body>
+          <div id="scroller"><div id="content"><div id="target"></div></div></div>
+        </body></html>"#,
+    );
+    runtime.set_viewport(300.0, 200.0);
+    runtime
+        .eval(
+            r#"globalThis.elementIntersectionLog = [];
+               globalThis.elementIntersectionRoot = document.getElementById('scroller');
+               globalThis.elementIntersectionTarget = document.getElementById('target');
+               globalThis.elementIntersectionObserver = new IntersectionObserver(entries => {
+                 for (const entry of entries) {
+                   elementIntersectionLog.push(
+                     `io:${entry.isIntersecting}:${entry.boundingClientRect.top}`
+                   );
+                 }
+               }, { root: elementIntersectionRoot });
+               elementIntersectionRoot.addEventListener('scroll', () => {
+                 elementIntersectionLog.push(
+                   `scroll:${elementIntersectionTarget.getBoundingClientRect().top}`
+                 );
+               });
+               elementIntersectionObserver.observe(elementIntersectionTarget);"#,
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "elementIntersectionLog.join('/')"),
+        "io:false:200"
+    );
+
+    runtime
+        .eval(
+            r#"elementIntersectionRoot.scrollTo(0, 150);
+               elementIntersectionLog.push(
+                 `sync:${elementIntersectionTarget.getBoundingClientRect().top}`
+               );
+               requestAnimationFrame(() => elementIntersectionLog.push(
+                 `raf:${elementIntersectionTarget.getBoundingClientRect().top}`
+               ));"#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "elementIntersectionLog.join('/')"),
+        "io:false:200/sync:50"
+    );
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "elementIntersectionLog.join('/')"),
+        "io:false:200/sync:50/scroll:50/raf:50/io:true:50"
+    );
+
+    runtime
+        .eval(
+            r#"elementIntersectionRoot.scrollTo(0, 0);
+               requestAnimationFrame(() => elementIntersectionLog.push(
+                 `raf-out:${elementIntersectionTarget.getBoundingClientRect().top}`
+               ));"#,
+        )
+        .unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "elementIntersectionLog.join('/')"),
+        "io:false:200/sync:50/scroll:50/raf:50/io:true:50/scroll:200/raf-out:200/io:false:200"
+    );
+
+    let callback_count = eval_num(
+        &mut runtime,
+        "elementIntersectionLog.filter(value => value.startsWith('io:')).length",
+    );
+    runtime
+        .eval("elementIntersectionRoot.scrollTo(0, 0)")
+        .unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_num(
+            &mut runtime,
+            "elementIntersectionLog.filter(value => value.startsWith('io:')).length"
+        ),
+        callback_count,
+        "an unchanged element scroll offset must not duplicate the callback"
+    );
+}
+
+#[test]
 fn intersection_observer_take_records_drains_before_callback() {
     let mut runtime = runtime_from_html(r#"<div id="box" style="width:10px;height:10px"></div>"#);
     runtime

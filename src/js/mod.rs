@@ -2256,6 +2256,9 @@ struct HostState {
     /// Scroll targets waiting for the next rendering opportunity. This is an
     /// ordered set: first-queue order is retained and duplicate ids are skipped.
     pending_scroll_targets: Vec<usize>,
+    /// Documents whose changed scroll geometry requires an IntersectionObserver
+    /// update after all animation-frame callbacks in the rendering opportunity.
+    pending_scroll_intersection_documents: Vec<usize>,
     smooth_scrolls: Vec<SmoothScrollAnimation>,
     /// Effective element offsets captured before invalidating layout. Reflow
     /// compares these with the rebuilt scrolling extents to detect clamps.
@@ -3134,6 +3137,7 @@ impl HostState {
             pending_visual_viewport_resize_documents: Vec::new(),
             pending_visual_viewport_scroll_documents: Vec::new(),
             pending_scroll_targets: Vec::new(),
+            pending_scroll_intersection_documents: Vec::new(),
             smooth_scrolls: Vec::new(),
             scroll_offsets_before_layout: HashMap::new(),
             document_styles,
@@ -5782,6 +5786,8 @@ impl HostState {
             .retain(|id| *id != document_id);
         self.pending_visual_viewport_scroll_documents
             .retain(|id| *id != document_id);
+        self.pending_scroll_intersection_documents
+            .retain(|id| *id != document_id);
         tree_ids.extend(self.retired_document_node_ids(document_id));
         for id in &tree_ids {
             self.nodes.remove(id);
@@ -5917,6 +5923,8 @@ impl HostState {
         self.pending_visual_viewport_resize_documents
             .retain(|id| *id != document_id);
         self.pending_visual_viewport_scroll_documents
+            .retain(|id| *id != document_id);
+        self.pending_scroll_intersection_documents
             .retain(|id| *id != document_id);
         tree_ids.extend(self.retired_document_node_ids(document_id));
         for id in &tree_ids {
@@ -6914,6 +6922,13 @@ impl HostState {
     fn queue_scroll_target(&mut self, node_id: usize) {
         if !self.pending_scroll_targets.contains(&node_id) {
             self.pending_scroll_targets.push(node_id);
+        }
+        if let Some(document_id) = self
+            .get_node(node_id)
+            .and_then(|node| document_root_for_node(&node))
+            .map(|document| document.identity())
+        {
+            Self::queue_document_once(&mut self.pending_scroll_intersection_documents, document_id);
         }
     }
 
@@ -11637,10 +11652,12 @@ impl JsRuntime {
             }
         }
 
-        // DOM mutations performed by frame callbacks queue observer delivery;
-        // the microtask checkpoint completes that work before the embedder
-        // proceeds to style/layout/paint.
+        // DOM mutations performed by frame callbacks queue observer delivery.
+        // Scroll-driven intersection checks wait until every animation-frame
+        // callback has observed the new geometry. The microtask checkpoint
+        // completes that work before the embedder proceeds to style/layout/paint.
         let stage_started = detail.stage_start();
+        self.flush_pending_scroll_intersection_observers()?;
         let jobs_result = self.run_jobs();
         detail.record_jobs(stage_started);
         if callbacks_run > 0 && jobs_result.is_err() {
@@ -11790,6 +11807,7 @@ impl JsRuntime {
                 }
             }
         }
+        self.flush_pending_scroll_intersection_observers()?;
         let jobs_result = self.run_jobs();
         if callbacks_run > 0 && jobs_result.is_err() {
             self.record_js_task_failure("JS_ANIMATION_FRAME_JOB_FAILED", "animation-frame");
@@ -11848,6 +11866,25 @@ impl JsRuntime {
             self.eval_in_document_realm(
                 *document_id,
                 "__omoikane_dispatch_viewport_events(false, false, true)",
+            )?;
+        }
+        Ok(documents.len())
+    }
+
+    /// Queues scroll-driven IntersectionObserver checks after animation-frame
+    /// callbacks, without also walking active ResizeObservers.
+    fn flush_pending_scroll_intersection_observers(&mut self) -> JsResult<usize> {
+        let documents = std::mem::take(
+            &mut self
+                .host_state
+                .borrow_mut()
+                .pending_scroll_intersection_documents,
+        );
+        for document_id in &documents {
+            self.eval_in_document_realm(
+                *document_id,
+                "if (typeof globalThis.__omoikane_intersection_observers_changed === 'function') \
+                 globalThis.__omoikane_intersection_observers_changed();",
             )?;
         }
         Ok(documents.len())
