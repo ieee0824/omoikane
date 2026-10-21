@@ -2,6 +2,7 @@
 use std::cell::Cell;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Instant;
@@ -278,7 +279,46 @@ pub(super) struct PagePaintTrace {
     pub(super) timings: omoikane::paint::RenderTimings,
 }
 
+/// Always-on GUI ingress identities, independent from diagnostic sequences.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CanonicalIngressId(u64);
+
+#[derive(Default)]
+struct CanonicalIngress {
+    sent: Cell<u64>,
+    completed: Arc<AtomicU64>,
+    exhausted: Cell<bool>,
+}
+
+impl CanonicalIngress {
+    fn enqueue(&self) -> Option<CanonicalIngressId> {
+        let Some(next) = self.sent.get().checked_add(1) else {
+            self.exhausted.set(true);
+            return None;
+        };
+        self.sent.set(next);
+        Some(CanonicalIngressId(next))
+    }
+
+    fn drained(&self) -> bool {
+        !self.exhausted.get() && self.completed.load(Ordering::Acquire) == self.sent.get()
+    }
+}
+
+impl PageCommand {
+    fn needs_canonical_ingress_barrier(&self) -> bool {
+        !matches!(
+            self,
+            Self::Frame { .. }
+                | Self::NativeScrollAccepted(_)
+                | Self::NativeScrollFallback(_)
+                | Self::Stop
+        )
+    }
+}
+
 struct QueuedCommand {
+    canonical_ingress: Option<CanonicalIngressId>,
     command: PageCommand,
     input: Option<QueuedInput>,
 }
@@ -314,6 +354,7 @@ fn next_command(
             *pending = Some(next);
             break;
         }
+        current.canonical_ingress = next.canonical_ingress;
         source_count += 1;
         if let (Some(current), Some(next)) = (&mut current.input, next.input) {
             current.last_sequence = next.last_sequence;
@@ -368,6 +409,7 @@ impl PageCommand {
 
 pub(super) struct PageWorker {
     sender: Sender<QueuedCommand>,
+    canonical_ingress: CanonicalIngress,
     trace_input: bool,
     input_sequence: Cell<u64>,
     updates: Receiver<PageUpdate>,
@@ -381,6 +423,8 @@ impl PageWorker {
     ) -> std::io::Result<Self> {
         let (sender, commands) = mpsc::channel();
         let (updates, receiver) = mpsc::channel();
+        let canonical_ingress = CanonicalIngress::default();
+        let completed_ingress = Arc::clone(&canonical_ingress.completed);
         thread::Builder::new()
             .name("omoikane-page".into())
             .spawn(move || {
@@ -416,7 +460,7 @@ impl PageWorker {
                     }
                 };
                 let mut pending = None;
-                while let Some(QueuedCommand { command, input }) = next_command(&commands, &mut pending, owner.session.document_generation()) {
+                while let Some(QueuedCommand { command, input, canonical_ingress }) = next_command(&commands, &mut pending, owner.session.document_generation()) {
                     let queue_ms = input
                         .as_ref()
                         .map(|input| input.queued_at.elapsed().as_secs_f64() * 1000.0);
@@ -461,6 +505,11 @@ impl PageWorker {
                         navigation_completed,
                         result.err().map(|error| error.to_string()),
                     );
+                    // Complete the whole owner turn, including snapshot work,
+                    // before permitting a newer receipt to bypass this FIFO.
+                    if let Some(id) = canonical_ingress {
+                        completed_ingress.store(id.0, Ordering::Release);
+                    }
                     if updates.send(update).is_err() {
                         break;
                     }
@@ -469,13 +518,23 @@ impl PageWorker {
             })?;
         Ok(Self {
             sender,
+            canonical_ingress,
             trace_input: std::env::var_os("OMOIKANE_TRACE_INPUT").is_some(),
             input_sequence: Cell::new(0),
             updates: receiver,
         })
     }
 
+    /// No newer native receipt may bypass an unfinished canonical owner turn.
+    pub(super) fn native_ingress_is_drained(&self) -> bool {
+        self.canonical_ingress.drained()
+    }
+
     pub(super) fn send(&self, command: PageCommand) {
+        let canonical_ingress = command
+            .needs_canonical_ingress_barrier()
+            .then(|| self.canonical_ingress.enqueue())
+            .flatten();
         let input = if self.trace_input {
             command.input_kind().map(|kind| {
                 let sequence = self.input_sequence.get().saturating_add(1);
@@ -492,7 +551,15 @@ impl PageWorker {
         } else {
             None
         };
-        if self.sender.send(QueuedCommand { command, input }).is_err() {
+        if self
+            .sender
+            .send(QueuedCommand {
+                command,
+                input,
+                canonical_ingress,
+            })
+            .is_err()
+        {
             eprintln!("page worker exited");
         }
     }
@@ -505,6 +572,7 @@ impl PageWorker {
 impl Drop for PageWorker {
     fn drop(&mut self) {
         let _ = self.sender.send(QueuedCommand {
+            canonical_ingress: None,
             command: PageCommand::Stop,
             input: None,
         });
@@ -1462,6 +1530,190 @@ mod tests {
     }
 
     #[test]
+    fn normal_frame_must_not_let_new_native_default_overtake_queued_canonical_wheel() {
+        let mut page = native_scroll_policy_page(
+            "<body style='margin:0'><div style='height:2000px;background:blue'></div>\
+             <script>globalThis.observed=[];document.body.addEventListener('wheel',()=>{\
+             observed.push(scrollY);document.body.setAttribute('data-events',JSON.stringify(observed));\
+             },{passive:true})</script></body>",
+        );
+        let ingress = CanonicalIngress::default();
+        let (sender, commands) = mpsc::channel();
+        sender
+            .send(QueuedCommand {
+                canonical_ingress: None,
+                command: PageCommand::Frame {
+                    at: Instant::now(),
+                    run_tasks: false,
+                },
+                input: None,
+            })
+            .unwrap();
+        sender
+            .send(QueuedCommand {
+                canonical_ingress: ingress.enqueue(),
+                command: PageCommand::NativeWheel(native_wheel(&page, (0.0, 10.0))),
+                input: None,
+            })
+            .unwrap();
+        page.apply(commands.recv().unwrap().command).unwrap();
+        let update = page.snapshot(true, false, None);
+        assert!(
+            update.native_scroll.is_some(),
+            "ordinary Frame produced a candidate"
+        );
+        // These are the same always-on predicates used at GUI commit and
+        // native receipt admission, independent of trace/native sequence IDs.
+        assert!(!ingress.drained());
+        assert!(update.native_scroll.filter(|_| ingress.drained()).is_none());
+        // Newer B remains canonical while older A is outstanding. Neither
+        // receipt is discarded or given a default ahead of its FIFO turn.
+        sender
+            .send(QueuedCommand {
+                canonical_ingress: ingress.enqueue(),
+                command: PageCommand::NativeWheel(native_wheel(&page, (0.0, 40.0))),
+                input: None,
+            })
+            .unwrap();
+        let a = commands.recv().unwrap();
+        page.apply(a.command).unwrap();
+        let _update = page.snapshot(false, false, None);
+        ingress
+            .completed
+            .store(a.canonical_ingress.unwrap().0, Ordering::Release);
+        assert_eq!(background_events(&page).as_deref(), Some("[0]"));
+        assert!(
+            !ingress.drained(),
+            "B remains an outstanding canonical barrier"
+        );
+        let b = commands.recv().unwrap();
+        page.apply(b.command).unwrap();
+        let _update = page.snapshot(false, false, None);
+        ingress
+            .completed
+            .store(b.canonical_ingress.unwrap().0, Ordering::Release);
+        assert_eq!(background_events(&page).as_deref(), Some("[0,10]"));
+        assert!(ingress.drained());
+        // A subsequent normal Frame can restore native authority after all
+        // older canonical receipts have completed, rather than latching off.
+        page.frame(Instant::now(), false).unwrap();
+        let update = page.snapshot(true, false, None);
+        let publication = update.native_scroll.filter(|_| ingress.drained()).unwrap();
+        commit_pending_publication(&publication);
+        assert!(matches!(
+            publication.handle.scroll(Offset { x: 0.0, y: 1.0 }),
+            omoikane::js::native_scroll::ScrollDecision::Accepted(_)
+        ));
+    }
+
+    #[test]
+    fn completed_canonical_scroll_cannot_authorize_an_older_normal_frame_candidate() {
+        let (mut page, update) = pending_native_scroll_page_with_viewport((32, 32));
+        let publication = update.native_scroll.unwrap();
+        let ingress = CanonicalIngress::default();
+        let id = ingress.enqueue().unwrap();
+        assert!(!ingress.drained());
+        page.apply(PageCommand::Wheel(0.0, 10.0)).unwrap();
+        let _update = page.snapshot(false, false, None);
+        ingress.completed.store(id.0, Ordering::Release);
+        assert!(
+            ingress.drained(),
+            "the ingress guard alone now allows a commit attempt"
+        );
+        assert_eq!(
+            evaluate(&mut page, "scrollY"),
+            json!(10),
+            "the queued canonical input performed a real root-scroll default"
+        );
+        assert!(publication.handle.publication_gate().policy_epoch > publication.policy_epoch);
+        // The counter is intentionally drained. Freshness must still come
+        // from the existing protocol's exact gate/scene validation.
+        assert_eq!(
+            publication.handle.commit_scene_publication(
+                publication.key,
+                publication.policy_epoch,
+                publication.acceptance_epoch,
+                PublicationSequence::new(publication.publication_sequence),
+                publication.owner_default_sequence,
+                publication.pending_scene,
+                true,
+            ),
+            omoikane::js::native_scroll::PublicationReconciliation::StaleUpdate
+        );
+        assert!(
+            !matches!(
+                publication.handle.scroll(Offset { x: 0.0, y: 1.0 }),
+                omoikane::js::native_scroll::ScrollDecision::Accepted(_)
+            ),
+            "completion of a newer canonical turn must not revive old geometry"
+        );
+    }
+
+    #[test]
+    fn completed_noop_canonical_wheel_keeps_the_older_normal_frame_candidate_usable() {
+        let (mut page, update) = pending_native_scroll_page_with_viewport((32, 32));
+        let publication = update.native_scroll.unwrap();
+        let ingress = CanonicalIngress::default();
+        let id = ingress.enqueue().unwrap();
+        assert!(!ingress.drained());
+        // Unlike a zero NativeWheel phase marker, direct Wheel dispatches an
+        // actual canonical input; its zero default does not move geometry.
+        page.apply(PageCommand::Wheel(0.0, 0.0)).unwrap();
+        let _update = page.snapshot(false, false, None);
+        ingress.completed.store(id.0, Ordering::Release);
+        assert!(ingress.drained());
+        assert_eq!(
+            publication.handle.publication_gate().policy_epoch,
+            publication.policy_epoch
+        );
+        commit_pending_publication(&publication);
+        assert!(
+            matches!(
+                publication.handle.scroll(Offset { x: 0.0, y: 1.0 }),
+                omoikane::js::native_scroll::ScrollDecision::Accepted(_)
+            ),
+            "draining a no-op canonical input must permit the next native receipt"
+        );
+    }
+
+    #[test]
+    fn canonical_ingress_counts_untraced_controls_and_fails_closed_on_exhaustion() {
+        let ingress = CanonicalIngress::default();
+        assert!(ingress.drained());
+        let first = ingress.enqueue().unwrap();
+        let second = ingress.enqueue().unwrap();
+        assert_ne!(first, second);
+        ingress.completed.store(first.0, Ordering::Release);
+        assert!(!ingress.drained());
+        ingress.completed.store(second.0, Ordering::Release);
+        assert!(ingress.drained());
+        for command in [
+            PageCommand::Navigate("about:blank".into()),
+            PageCommand::Viewport(10, 10),
+            PageCommand::Cursor(1.0, 1.0),
+            PageCommand::Focus(true),
+            PageCommand::Modifiers(InputModifiers::default()),
+            PageCommand::Wheel(0.0, 10.0),
+        ] {
+            assert!(command.needs_canonical_ingress_barrier());
+        }
+        assert!(
+            !PageCommand::Frame {
+                at: Instant::now(),
+                run_tasks: false
+            }
+            .needs_canonical_ingress_barrier()
+        );
+        ingress.sent.set(u64::MAX);
+        ingress.completed.store(u64::MAX, Ordering::Release);
+        assert!(ingress.enqueue().is_none());
+        assert!(
+            !ingress.drained(),
+            "exhaustion must never wrap into an idle identity"
+        );
+    }
+
+    #[test]
     fn v50_shared_visited_revocation_gates_default_gui_authority() {
         let mut page = owner();
         page.native_scroll_requested = true;
@@ -2392,6 +2644,46 @@ mod native_wheel_tests {
     use std::time::Duration;
     use winit::event::{DeviceId, TouchPhase};
 
+    #[test]
+    fn untraced_wheel_merge_preserves_last_canonical_ingress_ack_and_frame_barrier() {
+        let ingress = CanonicalIngress::default();
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..2 {
+            tx.send(QueuedCommand {
+                canonical_ingress: ingress.enqueue(),
+                command: PageCommand::NativeWheel(wheel()),
+                input: None,
+            })
+            .unwrap();
+        }
+        tx.send(QueuedCommand {
+            canonical_ingress: None,
+            command: PageCommand::Frame {
+                at: Instant::now(),
+                run_tasks: false,
+            },
+            input: None,
+        })
+        .unwrap();
+        let mut pending = None;
+        let merged = next_command(&rx, &mut pending, 7).unwrap();
+        assert_eq!(merged.canonical_ingress, Some(CanonicalIngressId(2)));
+        assert!(merged.input.is_none());
+        let PageCommand::NativeWheel(wheel) = merged.command else {
+            panic!("raw wheel expected")
+        };
+        assert_eq!(wheel.delta, (0.0, 80.0));
+        assert!(!ingress.drained());
+        ingress
+            .completed
+            .store(merged.canonical_ingress.unwrap().0, Ordering::Release);
+        assert!(ingress.drained());
+        assert!(matches!(
+            next_command(&rx, &mut pending, 7).unwrap().command,
+            PageCommand::Frame { .. }
+        ));
+    }
+
     fn wheel() -> NativeWheel {
         NativeWheel {
             gui_sequence: 0,
@@ -2414,6 +2706,7 @@ mod native_wheel_tests {
     fn queued(wheel: NativeWheel, sequence: u64) -> QueuedCommand {
         let queued_at = wheel.received;
         QueuedCommand {
+            canonical_ingress: Some(CanonicalIngressId(sequence)),
             command: PageCommand::NativeWheel(wheel),
             input: Some(QueuedInput {
                 sequence,
@@ -2432,6 +2725,7 @@ mod native_wheel_tests {
             y: wheel.delta.1,
         };
         QueuedCommand {
+            canonical_ingress: None,
             command: PageCommand::NativeScrollAccepted(NativeScrollAccepted {
                 input: AcceptedScroll {
                     key: TargetKey::default(),
@@ -2481,6 +2775,7 @@ mod native_wheel_tests {
         second.received += Duration::from_millis(15);
         tx.send(queued(second, 2)).unwrap();
         tx.send(QueuedCommand {
+            canonical_ingress: None,
             command: PageCommand::Modifiers(InputModifiers::default()),
             input: None,
         })
@@ -2623,12 +2918,14 @@ mod native_wheel_tests {
         let first = wheel();
         for _ in 0..130 {
             tx.send(QueuedCommand {
+                canonical_ingress: None,
                 command: PageCommand::NativeWheel(first.clone()),
                 input: None,
             })
             .unwrap();
         }
         tx.send(QueuedCommand {
+            canonical_ingress: None,
             command: PageCommand::Cursor(11.0, 12.0),
             input: None,
         })
@@ -2724,6 +3021,7 @@ mod native_wheel_tests {
         tx.send(queued(wheel(), 1)).unwrap();
         tx.send(queued(wheel(), 2)).unwrap();
         tx.send(QueuedCommand {
+            canonical_ingress: None,
             command: PageCommand::Wheel(0.0, 40.0),
             input: None,
         })

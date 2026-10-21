@@ -667,7 +667,13 @@ impl AsyncBrowserApp {
                 })
             }
         });
-        let native_scroll = update.native_scroll;
+        // A Frame can precede canonical inputs still waiting in the owner
+        // FIFO. Show its pixels without granting authority over newer receipts.
+        let ingress_drained = self.worker.native_ingress_is_drained();
+        if update.native_scroll.is_some() && !ingress_drained {
+            self.native_scroll_recovery.request();
+        }
+        let native_scroll = update.native_scroll.filter(|_| ingress_drained);
         let pending_visual_bundle = update.frame.map(|frame| {
             let retained_scene = update
                 .retained_scene
@@ -1684,6 +1690,9 @@ impl AsyncBrowserApp {
     }
 
     fn try_native_scroll(&mut self, wheel: &NativeWheel) -> bool {
+        if !self.worker.native_ingress_is_drained() {
+            return false;
+        }
         let Some(publication) = self.native_scroll.clone() else {
             return false;
         };
