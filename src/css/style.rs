@@ -822,6 +822,10 @@ pub struct StyleResolver {
     /// therefore means "not classified for the current stylesheet set", rather
     /// than "no selector observes the attribute".
     data_attribute_selector_dependencies: HashMap<String, AttributeSelectorDependency>,
+    /// Whether declarations in the current stylesheet set read a given
+    /// `data-*` attribute through `attr()`. This is separate from selector
+    /// reach because an unobserved attribute can still affect computed values.
+    data_attribute_value_dependencies: HashMap<String, bool>,
     visited_paint_state: Option<VisitedPaintState>,
     /// Root element's computed font-size in px (for `rem` unit resolution).
     root_font_size: f32,
@@ -2192,6 +2196,51 @@ fn rules_data_attribute_dependency(
         })
 }
 
+fn value_reads_data_attribute(value: &Value, attribute_name: &str) -> bool {
+    match value {
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("attr") => {
+            let Some(first) = arguments.first() else {
+                return true;
+            };
+            match first {
+                Value::Keyword(name) | Value::String(name) => {
+                    name.trim().eq_ignore_ascii_case(attribute_name)
+                }
+                _ => true,
+            }
+        }
+        Value::Function { arguments, .. }
+        | Value::List(arguments)
+        | Value::CommaList(arguments) => arguments
+            .iter()
+            .any(|value| value_reads_data_attribute(value, attribute_name)),
+        _ => false,
+    }
+}
+
+fn declarations_read_data_attribute(declarations: &[Declaration], attribute_name: &str) -> bool {
+    declarations
+        .iter()
+        .any(|declaration| value_reads_data_attribute(&declaration.value, attribute_name))
+}
+
+fn rules_read_data_attribute(rules: &[Rule], attribute_name: &str) -> bool {
+    rules.iter().any(|rule| match rule {
+        Rule::Style(rule) => {
+            declarations_read_data_attribute(&rule.declarations, attribute_name)
+                || rules_read_data_attribute(&rule.rules, attribute_name)
+        }
+        Rule::At(rule) => {
+            declarations_read_data_attribute(&rule.declarations, attribute_name)
+                || rule
+                    .block
+                    .as_deref()
+                    .is_some_and(|rules| rules_read_data_attribute(rules, attribute_name))
+        }
+        Rule::FontFace(_) => false,
+    })
+}
+
 fn parsed_inline_style(source: Option<&str>) -> Vec<Declaration> {
     source.map(super::parse_style_attribute).unwrap_or_default()
 }
@@ -2615,6 +2664,25 @@ impl StyleResolver {
         dependency
     }
 
+    fn data_attribute_value_dependency(&mut self, node: &NodeHandle, attribute_name: &str) -> bool {
+        let attribute_name = attribute_name.to_ascii_lowercase();
+        let stylesheet_dependency =
+            if let Some(dependency) = self.data_attribute_value_dependencies.get(&attribute_name) {
+                *dependency
+            } else {
+                let dependency = self.stylesheets.iter().any(|input| {
+                    rules_read_data_attribute(&input.stylesheet.rules, &attribute_name)
+                });
+                self.data_attribute_value_dependencies
+                    .insert(attribute_name.clone(), dependency);
+                dependency
+            };
+        stylesheet_dependency
+            || parsed_inline_style(node.get_attribute("style").as_deref())
+                .iter()
+                .any(|declaration| value_reads_data_attribute(&declaration.value, &attribute_name))
+    }
+
     /// Drops values derived from the current DOM while retaining parsed
     /// stylesheets, rule indexes, and condition-prelude parse caches.
     pub(crate) fn invalidate_style_cache(&mut self) {
@@ -2685,9 +2753,8 @@ impl StyleResolver {
 
     /// Invalidates computed styles after one ordinary HTML `data-*` mutation.
     ///
-    /// Even when no selector observes the attribute, the target subtree is
-    /// evicted because `attr()` in declarations and inherited custom properties
-    /// can depend on its value. Selectors are always invalidated.
+    /// Selectors are always invalidated. Computed styles are retained only when
+    /// neither selectors nor `attr()` declarations observe the attribute.
     pub(crate) fn invalidate_data_attribute_subtree(
         &mut self,
         node: &NodeHandle,
@@ -2696,16 +2763,13 @@ impl StyleResolver {
     ) -> &'static str {
         self.selector_match_cache = SelectorMatchCache::default();
         let dependency = self.data_attribute_selector_dependency(attribute_name);
+        let value_dependency = self.data_attribute_value_dependency(node, attribute_name);
         let is_document_element = node.node_type() == NodeType::Element
             && node
                 .parent_node()
                 .is_some_and(|parent| parent.node_type() == NodeType::Document);
         let fallback = if dependency == AttributeSelectorDependency::NonLocal {
             Some("fallback_data_attribute_selector")
-        } else if self.has_running_transitions() {
-            Some("fallback_active_transition")
-        } else if self.has_running_animations() {
-            Some("fallback_active_animation")
         } else if is_document_element {
             Some("fallback_document_root")
         } else if has_non_scalar_dom_string {
@@ -2723,6 +2787,19 @@ impl StyleResolver {
             self.pseudo_cache.clear();
             return "fallback_shadow_or_slot";
         };
+        if dependency == AttributeSelectorDependency::None && !value_dependency {
+            return "local_data_attribute_inert";
+        }
+        if self.has_running_transitions() {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return "fallback_active_transition";
+        }
+        if self.has_running_animations() {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return "fallback_active_animation";
+        }
         self.cache
             .retain(|identity, _| !identities.contains(identity));
         self.pseudo_cache
@@ -2994,6 +3071,7 @@ impl StyleResolver {
         stylesheet: &Stylesheet,
     ) -> usize {
         self.data_attribute_selector_dependencies.clear();
+        self.data_attribute_value_dependencies.clear();
         self.style_attribute_selector_dependency = self
             .style_attribute_selector_dependency
             .max(rules_style_attribute_dependency(&stylesheet.rules));

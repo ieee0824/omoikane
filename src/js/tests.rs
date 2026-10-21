@@ -20527,6 +20527,54 @@ fn live_html_collection_reuses_one_snapshot_until_dom_mutation() {
 }
 
 #[test]
+fn unobserved_data_attribute_keeps_layout_but_attr_value_dependency_rebuilds() {
+    let mut runtime = runtime_from_html(
+        r#"<html><head><style>
+             #dependent::after { content: attr(data-title) }
+           </style></head><body>
+             <a id="inert">link</a><span id="dependent">value</span>
+           </body></html>"#,
+    );
+    assert_js_ok(
+        &mut runtime,
+        "document.getElementById('inert').offsetWidth >= 0 ? 0 : 1",
+    );
+    let initial_generation = runtime.host_state.borrow().layout_generation;
+    let document_id = runtime.document().identity();
+    runtime
+        .host_state
+        .borrow_mut()
+        .document_styles
+        .get_mut(&document_id)
+        .expect("document styles after the initial layout")
+        .needs_full_sample = false;
+    assert_js_ok(
+        &mut runtime,
+        "document.getElementById('inert').setAttribute('data-cl-index', '1'); \
+         document.getElementById('inert').innerText === 'link' ? 0 : 1",
+    );
+    assert_eq!(
+        runtime.host_state.borrow().layout_generation,
+        initial_generation,
+        "an attribute unused by selectors and values must retain layout"
+    );
+    assert!(
+        !runtime.host_state.borrow().document_styles[&document_id].needs_full_sample,
+        "an inert attribute must not schedule a full-document style sample"
+    );
+
+    assert_js_ok(
+        &mut runtime,
+        "document.getElementById('dependent').setAttribute('data-title', 'changed'); \
+         document.getElementById('dependent').offsetWidth >= 0 ? 0 : 1",
+    );
+    assert!(
+        runtime.host_state.borrow().layout_generation > initial_generation,
+        "attr() value dependencies must still rebuild layout"
+    );
+}
+
+#[test]
 fn document_images_and_anchors_collections() {
     use crate::html::TreeBuilder;
     let doc = TreeBuilder::parse(

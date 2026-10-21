@@ -104,13 +104,16 @@ fn leaf_data_loaded_with_a_selector_change_falls_back() {
 }
 
 #[test]
-fn leaf_other_data_attributes_keep_existing_geometry_fallback() {
-    assert_leaf_fallback(
-        "",
-        "",
-        "document.getElementById('target').dataset.other='true'",
-        "data-other='true'",
-    );
+fn leaf_other_unobserved_data_attributes_keep_clean_geometry() {
+    let mut runtime = leaf_runtime(&leaf_fixture("", ""));
+    let before = runtime.paint_current_document().unwrap();
+    let generation = runtime.render_generations().layout;
+    runtime
+        .eval("document.getElementById('target').dataset.other='true'")
+        .unwrap();
+    let after = runtime.paint_current_document().unwrap();
+    assert_eq!(after.pixels(), before.pixels());
+    assert_eq!(runtime.render_generations().layout, generation);
 }
 
 #[test]

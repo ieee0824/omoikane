@@ -7128,8 +7128,6 @@ impl HostState {
                 };
                 let mut outcome = "deferred_resolver";
                 if let Some(entry) = self.document_styles.get_mut(&document.identity()) {
-                    entry.needs_full_sample = true;
-                    entry.child_layout = None;
                     if let Some(resolver) = entry.resolver.as_mut() {
                         outcome = resolver.invalidate_data_attribute_subtree(
                             node,
@@ -7138,12 +7136,18 @@ impl HostState {
                         );
                         if matches!(
                             outcome,
-                            "local_data_attribute_none" | "local_data_attribute_subject"
+                            "local_data_attribute_inert"
+                                | "local_data_attribute_none"
+                                | "local_data_attribute_subject"
                         ) {
                             task_diagnostics::record_local_data_attribute_invalidation();
                         } else if outcome.starts_with("fallback_") {
                             task_diagnostics::record_ordinary_node_mutation_full();
                         }
+                    }
+                    if outcome != "local_data_attribute_inert" {
+                        entry.needs_full_sample = true;
+                        entry.child_layout = None;
                     }
                 }
                 frame_diagnostics::record_style_cache_invalidation(
@@ -7151,12 +7155,13 @@ impl HostState {
                     node.identity(),
                     outcome,
                 );
-                let preserve_main_layout = self.finish_leaf_paint(
-                    node,
-                    leaf_candidate,
-                    leaf_paint::Mutation::DataLoaded,
-                    outcome,
-                );
+                let preserve_main_layout = outcome == "local_data_attribute_inert"
+                    || self.finish_leaf_paint(
+                        node,
+                        leaf_candidate,
+                        leaf_paint::Mutation::DataLoaded,
+                        outcome,
+                    );
                 self.invalidate_document_style_outputs(&document, preserve_main_layout);
             }
         }

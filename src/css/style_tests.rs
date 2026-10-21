@@ -12825,10 +12825,10 @@ fn data_attribute_local_invalidation_preserves_csp_blocked_inline_state() {
     target.set_attribute("data-loaded", "true");
     assert_eq!(
         resolver.invalidate_data_attribute_subtree(&target, "data-loaded", false),
-        "local_data_attribute_none",
+        "local_data_attribute_inert",
     );
     let target_after = resolver.computed_style_shared(&target);
-    assert!(!Arc::ptr_eq(&target_before, &target_after));
+    assert!(Arc::ptr_eq(&target_before, &target_after));
     assert_eq!(
         target_after.get("color"),
         Some(&ComputedValue::Color("blue".to_string())),
@@ -12879,7 +12879,8 @@ fn data_attribute_invalidation_keeps_nonlocal_runtime_guards() {
         Origin::Author,
         parse_stylesheet(
             "@keyframes fade{from{opacity:0}to{opacity:1}}\
-             #animated-data-guard{animation:fade 10s linear}",
+             #animated-data-guard{animation:fade 10s linear}\
+             [data-animation-observed]{color:red}",
         )
         .unwrap(),
     );
@@ -12888,6 +12889,10 @@ fn data_attribute_invalidation_keeps_nonlocal_runtime_guards() {
     assert!(animation.has_running_animations());
     assert_eq!(
         animation.invalidate_data_attribute_subtree(&target, "data-loaded", false),
+        "local_data_attribute_inert",
+    );
+    assert_eq!(
+        animation.invalidate_data_attribute_subtree(&target, "data-animation-observed", false),
         "fallback_active_animation",
     );
 
@@ -12912,6 +12917,14 @@ fn data_attribute_invalidation_keeps_nonlocal_runtime_guards() {
     assert!(transition.has_running_transitions());
     assert_eq!(
         transition.invalidate_data_attribute_subtree(&target, "data-loaded", false),
+        "local_data_attribute_inert",
+    );
+    transition.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("[data-transition-observed]{color:red}").unwrap(),
+    );
+    assert_eq!(
+        transition.invalidate_data_attribute_subtree(&target, "data-transition-observed", false),
         "fallback_active_transition",
     );
 }
