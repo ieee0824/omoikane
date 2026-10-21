@@ -368,25 +368,17 @@ fn vertical_overscan_preserves_translucent_run_order_at_tile_boundaries() {
 }
 
 #[test]
-fn overscan_unproven_sticky_scene_repaints_the_current_scroll() {
+fn overscan_nonzero_top_sticky_is_fixed_when_the_phase_is_linear() {
     let html = "<style>*{margin:0;padding:0}html{background:white}body{height:96px}\
         #sticky{position:sticky;top:8px;width:16px;height:16px;background:red}\
         </style><div id=sticky></div>";
-    let expected = ordinary_fixture(html, (0.0, 32.0), |_| {});
     let plan = VerticalOverscanPlan::new(0, 0, 3, 1).unwrap();
-    match overscan_fixture(html, plan, |_| {}) {
-        RetainedOverscanOutcome::Fallback {
-            canvas,
-            reason: RetainedPaintError::StickyPosition,
-            discarded_tiles: 0,
-        } => assert_same_canvas(&canvas, &expected),
-        RetainedOverscanOutcome::Fallback { reason, .. } => {
-            panic!("unexpected overscan fallback: {reason:?}")
-        }
-        RetainedOverscanOutcome::Extracted(_) => panic!("unproven sticky overscan must fall back"),
-        RetainedOverscanOutcome::Rejected { reason } => {
-            panic!("bounded sticky fixture was rejected: {reason:?}")
-        }
+    let frame = expect_overscan(overscan_fixture(html, plan, |_| {}));
+    for y in 0..=64 {
+        assert_same_canvas(
+            &frame.compose_integer((0, y)).unwrap(),
+            &ordinary_fixture(html, (0.0, y as f32), |_| {}),
+        );
     }
 }
 
@@ -1495,6 +1487,49 @@ fn overscan_origin_sticky_uses_ordered_fixed_run_with_positioned_descendants() {
 }
 
 #[test]
+fn overscan_bottom_sticky_is_fixed_within_one_linear_phase() {
+    let html = "<style>*{margin:0;padding:0}html{background:white}body{height:128px}\
+        #space{height:48px}#wrap{height:112px}\
+        #pin{position:sticky;bottom:2px;width:16px;height:60px;background:red}\
+        </style><div id=wrap><div id=space></div><div id=pin></div></div>";
+    let frame = expect_overscan(overscan_fixture(
+        html,
+        VerticalOverscanPlan::new(0, 8, 2, 0).unwrap(),
+        |_| {},
+    ));
+    assert!(
+        frame
+            .runs()
+            .iter()
+            .any(|run| run.space() == RetainedPaintSpace::ViewportFixed)
+    );
+    for y in 8..=40 {
+        assert_same_canvas(
+            &frame.compose_integer((0, y)).unwrap(),
+            &ordinary_fixture(html, (0.0, y as f32), |_| {}),
+        );
+    }
+}
+
+#[test]
+fn overscan_sticky_accepts_a_fractional_bound_beyond_complete_coverage() {
+    let html = "<style>*{margin:0;padding:0}html{background:white}\
+        body{height:80.5px}#pin{position:sticky;top:0;width:16px;height:16px;background:red}\
+        </style><div id=pin></div>";
+    let frame = expect_overscan(overscan_fixture(
+        html,
+        VerticalOverscanPlan::new(0, 0, 3, 1).unwrap(),
+        |_| {},
+    ));
+    for y in 0..=64 {
+        assert_same_canvas(
+            &frame.compose_integer((0, y)).unwrap(),
+            &ordinary_fixture(html, (0.0, y as f32), |_| {}),
+        );
+    }
+}
+
+#[test]
 fn overscan_document_sticky_auto_and_zero_scrollport_have_exact_pixels() {
     for (body, inset) in [("", ""), ("overflow:hidden;", "top:0;")] {
         let html = format!(
@@ -1575,9 +1610,7 @@ fn overscan_equal_sticky_endpoint_pixels_do_not_prove_constant_phase() {
 #[test]
 fn overscan_sticky_uncertain_geometry_keeps_ordinary_fallback() {
     for (parent, sticky, height) in [
-        ("", "top:8px", "160"),
         ("", "top:0", "79.75"),
-        ("", "top:0", "80.5"),
         ("transform:translate(0px)", "top:0", "160"),
         ("position:sticky", "top:0", "160"),
     ] {

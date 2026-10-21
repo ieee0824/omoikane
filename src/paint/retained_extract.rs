@@ -1760,23 +1760,17 @@ fn scan_sticky_proofs(
         || is_fixed_for_paint(&style)
         || crate::layout::establishes_fixed_containing_block(&style);
     if sticky {
-        let space = (!unsupported && !context.nested)
+        let entry = (!unsupported && !context.nested)
             .then(|| classify_sticky(layout, &style, coverage, context))
             .flatten();
-        let Some(space) = space else {
+        let Some(entry) = entry else {
             trace_unsupported_sticky(layout, &style, coverage, context, unsupported);
             return Err(RetainedPaintError::StickyPosition);
         };
         if result.entries.len() >= MAX_VIEWPORT_FIXED_ROOTS
             || result
                 .entries
-                .insert(
-                    layout.node.identity(),
-                    StickyEntry {
-                        space,
-                        content: layout.dimensions.content,
-                    },
-                )
+                .insert(layout.node.identity(), entry)
                 .is_some()
         {
             return Err(RetainedPaintError::StickyPosition);
@@ -1812,7 +1806,7 @@ fn classify_sticky(
     style: &ComputedStyle,
     coverage: StickyCoverage,
     context: StickyContext,
-) -> Option<StickySpace> {
+) -> Option<StickyEntry> {
     let parent = context.parent?;
     // Horizontal scroll is constant across this vertical coverage, but keep
     // the proof and adjusted-coordinate check on the exact uncorrected path.
@@ -1846,26 +1840,77 @@ fn classify_sticky(
         coverage,
         context.scrollport,
     ) {
-        return Some(StickySpace::Document);
+        return Some(StickyEntry {
+            space: StickySpace::Document,
+            content: layout.dimensions.content,
+        });
     }
-    // An exact cancellation proof, NOT equality of captured endpoint images.
-    // Here margin_start is -scroll, lower is exactly scroll, desired is scroll,
-    // and (-scroll + desired) is exactly zero for every representable offset.
     if matches!(context.scrollport, StickyScrollport::Viewport)
         && coverage.viewport.y == 0.0
-        && start == 0.0
-        && parent.y == 0.0
-        && top == Some(0.0)
-        && bottom.is_none()
-        && size >= 0.0
-        && coverage.minimum_y >= 0.0
-        && coverage.viewport.height - size >= 1.0
-        && parent.height - size - coverage.maximum_y >= 1.0
-        && coverage.maximum_y + parent.height.max(coverage.viewport.height).max(size) <= 1_048_576.0
+        && let Some(offset) =
+            viewport_sticky_linear_offset(start, size, parent, top, bottom, coverage)
     {
-        return Some(StickySpace::Viewport);
+        let mut content = layout.dimensions.content;
+        content.y += offset;
+        return Some(StickyEntry {
+            space: StickySpace::Viewport,
+            content,
+        });
     }
     None
+}
+
+/// Proves that the viewport sticky translation is `scroll + offset` over the
+/// complete retained range. The adjusted box position is therefore constant
+/// and may be extracted into a viewport-fixed paint run.
+fn viewport_sticky_linear_offset(
+    start: f32,
+    size: f32,
+    parent: Rect,
+    top: Option<f32>,
+    bottom: Option<f32>,
+    coverage: StickyCoverage,
+) -> Option<f32> {
+    let top = top.unwrap_or(0.0);
+    let mut bottom = bottom.unwrap_or(0.0);
+    let view_size = coverage.viewport.height - top - bottom;
+    if view_size < size {
+        bottom -= size - view_size;
+    }
+    let lower_offset = coverage.viewport.y + top - start;
+    let upper_offset = coverage.viewport.y + coverage.viewport.height - bottom - start - size;
+    let low = lower_offset.min(upper_offset);
+    let high = lower_offset.max(upper_offset);
+    let offset = if coverage.minimum_y + low >= 0.0 {
+        low
+    } else if coverage.maximum_y + high <= 0.0 {
+        high
+    } else {
+        return None;
+    };
+    let containing_low = (parent.y - start).min(parent.y + parent.height - start - size);
+    let containing_high = (parent.y - start).max(parent.y + parent.height - start - size);
+    let desired_min = coverage.minimum_y + offset;
+    let desired_max = coverage.maximum_y + offset;
+    let proof_values = [
+        start,
+        size,
+        parent.y,
+        parent.height,
+        coverage.viewport.height,
+        coverage.minimum_y,
+        coverage.maximum_y,
+        offset,
+        containing_low,
+        containing_high,
+        desired_min,
+        desired_max,
+    ];
+    proof_values
+        .into_iter()
+        .all(|value| value.is_finite() && value.abs() <= 1_048_576.0)
+        .then_some(())?;
+    (desired_min >= containing_low && desired_max <= containing_high).then_some(offset)
 }
 
 #[derive(Clone, Copy)]
