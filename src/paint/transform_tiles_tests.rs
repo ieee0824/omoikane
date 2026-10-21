@@ -178,6 +178,8 @@ fn paint_with_test_shadow_cache(
             nested_snapshot_draw_calls: None,
             propagated_background_node: None,
             shadow_masks: use_cache.then_some(&shadow_masks),
+            retained_collector: None,
+            retained_destination: retained_extract::PaintDestination::RootDocument,
         },
         PaintBoxOptions {
             inherited_clip: None,
@@ -266,6 +268,8 @@ fn paint_with_persistent_test_shadow_cache(
             nested_snapshot_draw_calls: None,
             propagated_background_node: None,
             shadow_masks: Some(shadow_masks),
+            retained_collector: None,
+            retained_destination: retained_extract::PaintDestination::RootDocument,
         },
         PaintBoxOptions {
             inherited_clip: None,
@@ -401,6 +405,8 @@ pub(super) fn paint_reference(
         nested_snapshot_draw_calls: None,
         propagated_background_node: None,
         shadow_masks: None,
+        retained_collector: None,
+        retained_destination: retained_extract::PaintDestination::RootDocument,
     };
     let Some(source_region) = intersect(
         subtree_paint_bounds(layout, resolver, context),
@@ -447,6 +453,8 @@ pub(super) fn paint_reference(
                     nested_snapshot_draw_calls: None,
                     propagated_background_node: None,
                     shadow_masks: None,
+                    retained_collector: None,
+                    retained_destination: retained_extract::PaintDestination::Temporary,
                 },
                 PaintBoxOptions {
                     inherited_clip: None,

@@ -11,8 +11,13 @@ pub(crate) mod image;
 mod image_scale;
 mod outline;
 mod print_budget;
+mod retained_extract;
 
 pub use print_budget::{MAX_PRINT_DOCUMENT_PIXELS, MAX_PRINT_PAGE_DIMENSION};
+pub(crate) use retained_extract::{
+    RetainedPaintError, RetainedPaintFrame, RetainedPaintOutcome, RetainedPaintRun,
+    RetainedPaintSpace, paint_layout_with_retained_fallback,
+};
 pub(crate) mod stylesheet;
 pub(crate) mod text;
 
@@ -1447,6 +1452,8 @@ fn paint_layout_with_document_snapshots_internal(
                 nested_snapshot_draw_calls: collect_diagnostics.then_some(&snapshot_draw_calls),
                 propagated_background_node: viewport_background.propagated_node,
                 shadow_masks: Some(shadow_masks),
+                retained_collector: None,
+                retained_destination: retained_extract::PaintDestination::RootDocument,
             },
             PaintBoxOptions {
                 inherited_clip: None,
@@ -2316,6 +2323,8 @@ struct PaintContext<'a> {
     nested_snapshot_draw_calls: Option<&'a Cell<usize>>,
     propagated_background_node: Option<usize>,
     shadow_masks: Option<&'a border::FrameShadowMaskCache>,
+    retained_collector: Option<&'a RefCell<retained_extract::RetainedPaintCollector>>,
+    retained_destination: retained_extract::PaintDestination,
 }
 
 /// Per-box traversal state in the destination surface's coordinate system.
@@ -2356,6 +2365,8 @@ fn paint_box(
             nested_snapshot_draw_calls: None,
             propagated_background_node,
             shadow_masks: Some(shadow_masks),
+            retained_collector: None,
+            retained_destination: retained_extract::PaintDestination::RootDocument,
         },
         PaintBoxOptions {
             inherited_clip,
@@ -2387,6 +2398,10 @@ fn paint_box_internal(
         paint_generated_box(canvas, viewport, &backdrop, Some(viewport), viewport);
     }
     if layout.visibility == Visibility::Hidden {
+        return;
+    }
+
+    if retained_extract::intercept_viewport_fixed_root(canvas, layout, resolver, context, options) {
         return;
     }
 
@@ -2694,6 +2709,7 @@ fn paint_transformed_box(
                 resolver,
                 PaintContext {
                     viewport: translated_viewport,
+                    retained_destination: retained_extract::PaintDestination::Temporary,
                     ..context
                 },
                 PaintBoxOptions {
@@ -3731,6 +3747,7 @@ fn paint_box_internal_untransformed(
             resolver,
             PaintContext {
                 viewport: offset_viewport,
+                retained_destination: retained_extract::PaintDestination::Temporary,
                 ..context
             },
             &style,
@@ -8001,6 +8018,8 @@ mod image_scale_baseline_tests;
 mod image_scale_post_tests;
 #[cfg(test)]
 mod outline_tests;
+#[cfg(test)]
+mod retained_extract_tests;
 #[cfg(test)]
 mod tests;
 

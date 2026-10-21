@@ -263,6 +263,8 @@ pub(crate) fn paint_text_with_registry(
             nested_snapshot_draw_calls: None,
             propagated_background_node: None,
             shadow_masks: None,
+            retained_collector: None,
+            retained_destination: super::retained_extract::PaintDestination::RootDocument,
         },
         offset,
     );
@@ -963,7 +965,7 @@ fn fragment_text_color(style: &FragmentStyle) -> Option<Color> {
     style.color.as_deref().and_then(parse_color)
 }
 
-fn fragment_box_paint_style(
+pub(super) fn fragment_box_paint_style(
     fragment: &crate::layout::InlineFragment,
     resolver: &mut crate::css::StyleResolver,
 ) -> Option<Arc<ComputedStyle>> {
