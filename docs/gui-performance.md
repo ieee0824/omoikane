@@ -14,6 +14,12 @@ OMOIKANE_TRACE_STARTUP=1 OMOIKANE_TRACE_PAINT=1 OMOIKANE_TRACE_INPUT=1 \
 `CARGO_PROFILE_DEV_OPT_LEVEL=2`を付けてビルドすると、debug assertionsを保ちながら
 最適化したdebug版を作れる。設定が違うビルドの時間は同じ基準値として比較しない。
 
+`OMOIKANE_TRACE_STARTUP=1` の起動ログ先頭には `OMOIKANE_BUILD` も出力する。
+`commit` はビルド時の完全なGit commit ID、`tracked_dirty` はビルド時に追跡済みファイルの変更があったかを表す。
+ログやsampleなどの未追跡ファイルはdirty判定に含めない。Git情報のない配布ソースでは `commit: "unknown"`、`tracked_dirty: null` とし、親ディレクトリの別リポジトリのIDを使わない。
+`profile`、`opt_level`、`target`、`debug_assertions` も記録するため、O2 debugとreleaseを区別できる。
+情報は実行時のcheckoutではなくバイナリへ埋め込まれる。linked worktreeのHEAD・branch ref・indexと追跡ファイルの変更もビルドの監視対象にする。
+
 `OMOIKANE_STARTUP`の窓の初回描画と、ページ本文の表示完了は異なる。
 本文の表示は画面でも確認する。`OMOIKANE_PAINT.frame_ms`にはページの処理・
 レイアウト・描画が含まれるので、`paint_ms`を再び加算しない。

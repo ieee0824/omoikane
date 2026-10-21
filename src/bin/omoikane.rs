@@ -41,6 +41,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Fullscreen as WindowFullscreen, Window, WindowId};
 
+#[path = "omoikane/build_info.rs"]
+mod build_info;
+
 #[path = "omoikane/async_gui.rs"]
 mod async_gui;
 #[path = "omoikane/chrome_layout.rs"]
@@ -1442,6 +1445,9 @@ impl std::task::Wake for CookieStoreWake {
 #[cfg(test)]
 fn main() -> Result<(), Box<dyn Error>> {
     let startup_trace = std::env::var_os("OMOIKANE_TRACE_STARTUP").map(|_| Instant::now());
+    if startup_trace.is_some() {
+        build_info::trace();
+    }
     let url = std::env::args().nth(1).unwrap_or_else(|| {
         "data:text/html,<title>Omoikane</title><style>body{font:32px sans-serif;padding:2rem}</style><h1>Omoikane</h1><p>Pass a URL as the first argument.</p>".to_string()
     });
@@ -1481,6 +1487,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(not(test))]
 fn main() -> Result<(), Box<dyn Error>> {
     let startup_trace = std::env::var_os("OMOIKANE_TRACE_STARTUP").map(|_| Instant::now());
+    if startup_trace.is_some() {
+        build_info::trace();
+    }
     let url = std::env::args().nth(1).unwrap_or_else(|| {
         "data:text/html,<title>Omoikane</title><style>body{font:32px sans-serif;padding:2rem}</style><h1>Omoikane</h1><p>Pass a URL as the first argument.</p>".into()
     });

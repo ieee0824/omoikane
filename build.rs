@@ -1,10 +1,20 @@
+#[path = "build_support/revision.rs"]
+mod revision;
+
 fn main() {
-    // with_crate parses the root module tree and uses Cargo metadata. Keep
-    // generated headers and unrelated tests/docs out of the input watch set.
-    for input in ["cbindgen.toml", "Cargo.toml", "Cargo.lock", "src"] {
+    // cbindgen watches its Rust/config inputs; revision::emit separately
+    // watches Git metadata and tracked files for the embedded dirty state.
+    for input in [
+        "cbindgen.toml",
+        "Cargo.toml",
+        "Cargo.lock",
+        "src",
+        "build_support",
+    ] {
         println!("cargo::rerun-if-changed={input}");
     }
     let crate_dir = std::env::var("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR");
+    revision::emit(std::path::Path::new(&crate_dir));
     let include_dir = std::path::Path::new(&crate_dir).join("include");
     std::fs::create_dir_all(&include_dir).expect("failed to create include directory");
 
