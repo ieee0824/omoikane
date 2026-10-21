@@ -3466,7 +3466,8 @@ fn overscan_atomic_inline_source_replays_owner_clip_and_empty_sample_hook() {
 #[test]
 fn overscan_atomic_inline_source_uses_selected_text_overflow_order() {
     let html = "<style>*{margin:0;padding:0}html{background:white}body{height:160px}\
-        #owner{margin-top:20px;width:32px;height:18px;color:rgba(0,0,0,.55)}\
+        #owner{margin-top:20px;width:32px;height:18px;font:8px monospace;\
+        color:rgba(0,0,0,.55)}\
         .atomic{display:inline-block;width:9px;height:11px;filter:blur(2px)}\
         #a{background:rgba(255,0,0,.65)}#b{background:rgba(0,0,255,.65)}\
         </style><div id=owner><span class=atomic id=a></span>M<span class=atomic id=b></span></div>";
