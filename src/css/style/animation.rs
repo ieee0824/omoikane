@@ -620,12 +620,12 @@ impl StyleResolver {
             return BTreeMap::new();
         };
         let mut spec = AnimationSpec::from_properties(&name, scope, properties);
-        // Opacity is sampled by paint and does not change containing blocks or
-        // geometry. Unknown/custom properties retain conservative reflow.
+        // Paint-only properties do not change containing blocks or geometry.
+        // Unknown/custom properties retain conservative reflow.
         spec.requires_layout = steps.iter().any(|step| {
-            step.declarations
-                .iter()
-                .any(|declaration| declaration.name != "opacity")
+            step.declarations.iter().any(|declaration| {
+                super::super::transition::animated_property_requires_layout(&declaration.name)
+            })
         });
         let paused = matches!(
             properties.get(&PropertyId::AnimationPlayState),
@@ -850,6 +850,38 @@ mod property_name_diagnostic_tests {
                 .animation_diagnostic_property_names(previous, |_| None)
                 .2,
             1
+        );
+    }
+
+    #[test]
+    fn background_position_animation_invalidates_paint_without_rebuilding_layout() {
+        let node = NodeHandle::element("div");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            crate::css::parse_stylesheet(
+                "@keyframes move {from{background-position:0px 0px}\
+                 to{background-position:100px 50px}}\
+                 div{animation:move 1s linear infinite}",
+            )
+            .unwrap(),
+        );
+        resolver.set_animation_time_ms(0.0);
+        let before = resolver.computed_style_shared(&node);
+        let effects = resolver.advance_style_clocks(750.0, true);
+        let after = resolver.computed_style_shared(&node);
+
+        assert!(effects.animation_changed);
+        assert!(!effects.animation_requires_layout);
+        assert!(!effects.requires_layout());
+        assert!(!Arc::ptr_eq(&before, &after));
+        assert_ne!(
+            before.get("background-position-x"),
+            after.get("background-position-x")
+        );
+        assert_ne!(
+            before.get("background-position-y"),
+            after.get("background-position-y")
         );
     }
 }

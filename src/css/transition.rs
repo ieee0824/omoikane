@@ -121,6 +121,22 @@ pub(crate) fn transition_cache_scope(property: &str) -> TransitionCacheScope {
     }
 }
 
+/// Returns whether a sampled property can change layout geometry.
+///
+/// These properties are consumed only while painting. Keeping this shared
+/// between transitions and keyframe animations prevents the two clocks from
+/// assigning different invalidation costs to the same visual change.
+pub(crate) fn animated_property_requires_layout(property: &str) -> bool {
+    !matches!(
+        property,
+        "opacity"
+            | "filter"
+            | "backdrop-filter"
+            | "background-position-x"
+            | "background-position-y"
+    )
+}
+
 impl TransitionPropertyCounts {
     fn add(&mut self, property: &str) {
         self.properties += 1;
@@ -409,9 +425,10 @@ impl TransitionTimeline {
 
     pub(crate) fn running_transitions_require_layout(&self) -> bool {
         self.elements.values().any(|state| {
-            state.running.keys().any(|property| {
-                !matches!(property.as_str(), "opacity" | "filter" | "backdrop-filter")
-            })
+            state
+                .running
+                .keys()
+                .any(|property| animated_property_requires_layout(property))
         })
     }
 
