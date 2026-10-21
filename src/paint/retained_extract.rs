@@ -1126,7 +1126,7 @@ impl OverscanPaintView<'_> {
             if current_plan.expected_runs != plan.expected_runs {
                 return Err(RetainedPaintError::TraversalMismatch);
             }
-            let (document_layers, _) = plan_retained_layers(
+            let planning = plan_retained_layers(
                 &current_layout,
                 resolver,
                 self.viewport,
@@ -1137,12 +1137,13 @@ impl OverscanPaintView<'_> {
                 current_plan,
             )
             .map_err(|failure| failure.reason)?;
-            let document_layers = Arc::new(document_layers);
+            let document_layers = Arc::new(planning.layers);
             Ok(OverscanPreflight {
                 expected_runs: plan.expected_runs,
                 sticky,
                 filters,
                 document_layers,
+                current_frame: planning.current_frame.map(|frame| (planning.plan, frame)),
             })
         })();
         resolver.end_visited_paint();
@@ -2039,6 +2040,7 @@ struct OverscanPreflight {
     sticky: StickyPlan,
     filters: FilterSourcePlan,
     document_layers: Arc<RetainedLayerPlan>,
+    current_frame: Option<(ExtractionPlan, RetainedPaintFrame)>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -2924,7 +2926,7 @@ impl RetainedPaintCollector {
     fn finish_layer_plan(
         mut self,
         canvas: Canvas,
-    ) -> Result<(RetainedLayerPlan, ExtractionPlan), PaintAttemptFailure> {
+    ) -> Result<RetainedLayerPlanningResult, PaintAttemptFailure> {
         if self.error.is_none() {
             let identity = RetainedPaintRunIdentity::Document(self.document_runs);
             self.push(canvas, RetainedPaintSpace::Document, identity);
@@ -2953,8 +2955,27 @@ impl RetainedPaintCollector {
                 discarded_runs: self.runs.len(),
             });
         };
-        Ok((RetainedLayerPlan { runs }, self.plan))
+        // Document(0) is painted without a layer recorder. When no fixed or
+        // filter root splits the traversal, its full canvas is already the
+        // exact current sample. Other planning runs contain metadata rather
+        // than captured layer pixels and must still be painted in capture mode.
+        let current_frame = (self.plan.expected_runs == 1).then(|| RetainedPaintFrame {
+            width: self.plan.width,
+            height: self.plan.height,
+            runs: self.runs,
+        });
+        Ok(RetainedLayerPlanningResult {
+            layers: RetainedLayerPlan { runs },
+            plan: self.plan,
+            current_frame,
+        })
     }
+}
+
+struct RetainedLayerPlanningResult {
+    layers: RetainedLayerPlan,
+    plan: ExtractionPlan,
+    current_frame: Option<RetainedPaintFrame>,
 }
 
 struct PaintAttemptFailure {
@@ -3464,9 +3485,11 @@ pub(crate) fn paint_layout_with_vertical_overscan(
         preflight.sticky,
         preflight.filters,
         preflight.document_layers,
+        preflight.current_frame,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_vertical_overscan(
     view: OverscanPaintView<'_>,
     resolver: &mut StyleResolver,
@@ -3474,15 +3497,29 @@ fn capture_vertical_overscan(
     sticky: StickyPlan,
     filters: FilterSourcePlan,
     document_layers: Arc<RetainedLayerPlan>,
+    current_frame: Option<(ExtractionPlan, RetainedPaintFrame)>,
 ) -> RetainedOverscanOutcome {
     let current_y = plan.sample_y[plan.current_index];
-    let frame = match view.sample(
-        resolver,
-        (plan.document_x, current_y),
-        &sticky,
-        &filters,
-        &document_layers,
-    ) {
+    let current = match current_frame {
+        Some((mut current_plan, frame)) => {
+            // Keep the capture-mode allocation guard even though the base
+            // document pixels need no second traversal. Do this after the
+            // complete overscan plan resolves, matching normal sample order.
+            if let Err(reason) = current_plan.install_document_layers(Arc::clone(&document_layers))
+            {
+                return view.fallback(resolver, &plan, reason, 0);
+            }
+            RetainedPaintOutcome::Extracted(frame)
+        }
+        None => view.sample(
+            resolver,
+            (plan.document_x, current_y),
+            &sticky,
+            &filters,
+            &document_layers,
+        ),
+    };
+    let frame = match current {
         RetainedPaintOutcome::Extracted(frame) => frame,
         RetainedPaintOutcome::Fallback {
             canvas,
@@ -3595,6 +3632,16 @@ pub(super) fn paint_layout_with_injected_collection_failure(
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    static RETAINED_RASTER_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn retained_raster_count() -> usize {
+    RETAINED_RASTER_COUNT.with(std::cell::Cell::get)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_retained_canvas(
     layout: &LayoutBox,
@@ -3607,6 +3654,8 @@ fn paint_retained_canvas(
     external_shadow_masks: Option<&border::FrameShadowMaskCache>,
     collector: &RefCell<RetainedPaintCollector>,
 ) -> Canvas {
+    #[cfg(test)]
+    RETAINED_RASTER_COUNT.with(|count| count.set(count.get() + 1));
     let mut canvas = Canvas::new(dimensions.width, dimensions.height);
     let viewport_background = viewport_background_color(layout, resolver);
     if let Some(background) = viewport_background.color {
@@ -3664,7 +3713,7 @@ fn plan_retained_layers(
     nested_documents: Option<&HashMap<usize, Image>>,
     external_shadow_masks: Option<&border::FrameShadowMaskCache>,
     plan: ExtractionPlan,
-) -> Result<(RetainedLayerPlan, ExtractionPlan), PaintAttemptFailure> {
+) -> Result<RetainedLayerPlanningResult, PaintAttemptFailure> {
     plan.ensure_layer_planning_capacity()
         .map_err(|reason| PaintAttemptFailure {
             reason,
@@ -3729,7 +3778,7 @@ fn paint_layout_with_retained_fallback_impl(
             let layers = match document_layers {
                 Some(layers) => layers,
                 None => {
-                    let (layers, returned_plan) = plan_retained_layers(
+                    let planning = plan_retained_layers(
                         layout,
                         resolver,
                         viewport,
@@ -3739,8 +3788,8 @@ fn paint_layout_with_retained_fallback_impl(
                         external_shadow_masks,
                         plan,
                     )?;
-                    plan = returned_plan;
-                    Arc::new(layers)
+                    plan = planning.plan;
+                    Arc::new(planning.layers)
                 }
             };
             plan.install_document_layers(layers)

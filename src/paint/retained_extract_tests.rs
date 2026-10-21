@@ -223,7 +223,44 @@ fn overscan_fixture(
 }
 
 #[test]
+fn flat_overscan_reuses_planning_pixels_without_reducing_coverage() {
+    let html = "<style>*{margin:0;padding:0}html{background:white}\
+        body{height:128px;background:linear-gradient(red,blue)}\
+        #overlay{position:absolute;left:3px;top:18px;width:20px;height:58px;\
+        background:rgba(0,255,0,.5)}</style><div id=overlay></div>";
+    for current_index in 0..3 {
+        let before = super::retained_extract::retained_raster_count();
+        let frame = expect_overscan(overscan_fixture(
+            html,
+            VerticalOverscanPlan::new(0, 0, 3, current_index).unwrap(),
+            |_| {},
+        ));
+        assert_eq!(super::retained_extract::retained_raster_count() - before, 3);
+        assert_eq!(frame.coverage(), ((0, 0), (0, 64)));
+        assert_eq!(frame.current_scroll(), (0, i32::from(current_index) * 32));
+        assert_eq!(frame.runs().len(), 1);
+        assert_eq!(
+            frame.runs()[0]
+                .tiles()
+                .iter()
+                .map(|tile| tile.origin())
+                .collect::<Vec<_>>(),
+            [(0, 0), (0, 32), (0, 64)]
+        );
+        for scroll_y in [0, 16, 32, 48, 64] {
+            let expected = ordinary_fixture(html, (0.0, scroll_y as f32), |_| {});
+            assert_same_canvas(&frame.compose_integer((0, scroll_y)).unwrap(), &expected);
+        }
+        assert!(matches!(
+            frame.compose_integer((0, 65)),
+            Err(RetainedPaintError::OutsideOverscanCoverage)
+        ));
+    }
+}
+
+#[test]
 fn vertical_overscan_matches_real_painter_between_samples() {
+    let before = super::retained_extract::retained_raster_count();
     let html = "<style>*{margin:0;padding:0}html{background:white}body{height:96px}\
         .band{position:absolute;left:0;width:32px;height:32px}\
         #a{top:0;background:red}#b{top:32px;background:#ff8000}\
@@ -235,6 +272,7 @@ fn vertical_overscan_matches_real_painter_between_samples() {
         <div id=c class=band></div><div id=pin></div><div id=late></div>";
     let plan = VerticalOverscanPlan::new(0, 0, 3, 1).unwrap();
     let frame = expect_overscan(overscan_fixture(html, plan, |_| {}));
+    assert_eq!(super::retained_extract::retained_raster_count() - before, 4);
     assert_eq!(frame.coverage(), ((0, 0), (0, 64)));
     assert_eq!(frame.current_scroll(), (0, 32));
     assert_eq!(
@@ -379,6 +417,7 @@ fn overscan_nested_effect_filter_keeps_exact_ordinary_fallback() {
 
 #[test]
 fn overscan_rejects_invalid_coordinates_and_peak_bytes_before_raster() {
+    let before = super::retained_extract::retained_raster_count();
     assert_eq!(
         VerticalOverscanPlan::new(-1, 0, 1, 0),
         Err(RetainedPaintError::InvalidOverscanPlan)
@@ -448,6 +487,7 @@ fn overscan_rejects_invalid_coordinates_and_peak_bytes_before_raster() {
             reason: RetainedPaintError::InvalidOverscanPlan
         }
     ));
+    assert_eq!(super::retained_extract::retained_raster_count(), before);
 }
 
 #[test]
