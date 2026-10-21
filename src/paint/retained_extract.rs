@@ -1997,6 +1997,18 @@ fn classify_sticky(
     if matches!(context.scrollport, StickyScrollport::Viewport)
         && coverage.viewport.y == 0.0
         && let Some(offset) =
+            viewport_sticky_constant_offset(start, size, parent, top, bottom, coverage)
+    {
+        let mut content = layout.dimensions.content;
+        content.y += offset;
+        return Some(StickyEntry {
+            space: StickySpace::Document,
+            content,
+        });
+    }
+    if matches!(context.scrollport, StickyScrollport::Viewport)
+        && coverage.viewport.y == 0.0
+        && let Some(offset) =
             viewport_sticky_linear_offset(start, size, parent, top, bottom, coverage)
     {
         let mut content = layout.dimensions.content;
@@ -2007,6 +2019,104 @@ fn classify_sticky(
         });
     }
     None
+}
+
+/// Proves that the containing-block clamp keeps a viewport sticky box at one
+/// document-space offset throughout the retained range.
+fn viewport_sticky_constant_offset(
+    start: f32,
+    size: f32,
+    parent: Rect,
+    top: Option<f32>,
+    bottom: Option<f32>,
+    coverage: StickyCoverage,
+) -> Option<f32> {
+    if top.is_none() && bottom.is_none() {
+        return Some(0.0);
+    }
+    let top = top.unwrap_or(0.0);
+    let mut bottom = bottom.unwrap_or(0.0);
+    let view_size = coverage.viewport.height - top - bottom;
+    if view_size < size {
+        bottom -= size - view_size;
+    }
+    let desired_at = |scroll: f32| {
+        let box_start = start - scroll;
+        let view_start = coverage.viewport.y + top;
+        let view_end = coverage.viewport.y + coverage.viewport.height - bottom;
+        let lower = view_start - box_start;
+        let upper = view_end - (box_start + size);
+        0.0_f32.clamp(lower.min(upper), lower.max(upper))
+    };
+    let desired_min = desired_at(coverage.minimum_y);
+    let desired_max = desired_at(coverage.maximum_y);
+    let containing_lower = parent.y - start;
+    let containing_upper = parent.y + parent.height - (start + size);
+    let values = [desired_min, desired_max, containing_lower, containing_upper];
+    values
+        .into_iter()
+        .all(|value| value.is_finite() && value.abs() <= 1_048_576.0)
+        .then_some(())?;
+    if containing_lower > containing_upper {
+        return Some(containing_lower);
+    }
+    if desired_min >= containing_upper {
+        Some(containing_upper)
+    } else if desired_max <= containing_lower {
+        Some(containing_lower)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod viewport_sticky_constant_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_fractional_box_has_a_constant_containing_start_offset() {
+        let coverage = StickyCoverage {
+            viewport: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1280.0,
+                height: 680.0,
+            },
+            minimum_y: 0.0,
+            maximum_y: 20.0,
+        };
+        let offset = viewport_sticky_constant_offset(
+            1087.493_2,
+            933.406_86,
+            Rect {
+                x: 145.0,
+                y: 228.9,
+                width: 990.0,
+                height: 1792.0,
+            },
+            None,
+            Some(10.0),
+            coverage,
+        )
+        .expect("the containing start clamp must be constant across the retained range");
+        assert_eq!(offset, 228.9_f32 - 1087.493_2_f32);
+        for scroll in 0..=20 {
+            assert_eq!(
+                super::super::sticky_axis_translation(
+                    1087.493_2 - scroll as f32,
+                    933.406_86,
+                    0.0,
+                    680.0,
+                    228.9 - scroll as f32,
+                    1792.0,
+                    None,
+                    Some(10.0),
+                ),
+                offset,
+                "scroll={scroll}"
+            );
+        }
+    }
 }
 
 /// Proves that the viewport sticky translation is `scroll + offset` over the
