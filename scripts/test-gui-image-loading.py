@@ -10,7 +10,32 @@ import threading
 import time
 
 from PIL import Image
-from gui_x11 import GuiSession, geometry, trace_records
+from gui_x11 import GuiSession, geometry
+
+
+def wheel_progress(text):
+    """Observe delivery and presentation after the test's input boundary."""
+    inputs, presented = [], set()
+    painted_after_delivery = False
+    for line in text.rpartition('\n')[0].splitlines():
+        if line.startswith('OMOIKANE_PAGE_INPUT '):
+            row = json.loads(line.split(' ', 1)[1])
+            if row['kind'] in ('wheel', 'native_scroll_accepted', 'native_scroll_fallback'):
+                assert row['success'], row
+                sources = row['gui_sequences']
+                assert not sources['truncated'], row
+                assert len(sources['ids']) == sources['total_count'] == row['source_count'], row
+                inputs.extend(sources['ids'])
+                painted_after_delivery = False
+        elif line.startswith('OMOIKANE_PAINT '):
+            painted_after_delivery = bool(inputs)
+        elif line.startswith('OMOIKANE_NATIVE_SCROLL_PROBE '):
+            row = json.loads(line.split(' ', 1)[1])
+            if row['event'] == 'present' and row['success']:
+                presented.add(row['gui_sequence'])
+    assert len(inputs) == len(set(inputs)), ('duplicate wheel delivery', inputs)
+    return {'sources': len(inputs),
+            'presented': painted_after_delivery or bool(presented.intersection(inputs))}
 
 
 @contextlib.contextmanager
@@ -70,17 +95,17 @@ def verify(binary, artifacts):
             gui.command('xdotool', 'mousemove', str(bounds['X'] + 500), str(bounds['Y'] + 300))
             gui.wait_for('image request started', requested.is_set, bool)
             log = gui.out / 'browser.log'
-            previous = len(trace_records(log, 'WHEEL'))
+            # Retain a line boundary so earlier paints cannot satisfy the test.
+            previous = log.read_text().rfind('\n') + 1
             started = time.monotonic()
             try:
                 gui.command('xdotool', 'click', '5')
                 gui.wait_for('wheel processed before image response',
-                             lambda: len(trace_records(log, 'WHEEL')),
-                             lambda count: count > previous, seconds=5)
-                assert all(row['success'] for row in trace_records(log, 'WHEEL')[previous:])
+                             lambda: wheel_progress(log.read_text()[previous:]),
+                             lambda result: result['sources'] == 2, seconds=5)
                 gui.wait_for('page painted after wheel while image response is held',
-                             log.read_text,
-                             lambda text: 'OMOIKANE_PAINT ' in text[text.rfind('OMOIKANE_WHEEL '):],
+                             lambda: wheel_progress(log.read_text()[previous:]),
+                             lambda result: result['sources'] == 2 and result['presented'],
                              seconds=5)
                 wheel_ms = (time.monotonic() - started) * 1000
                 assert not release.is_set()

@@ -70,12 +70,15 @@ jobs:
         run: /usr/bin/python3 scripts/test-gui-render-demand.py --verify --binary target/debug/omoikane --artifacts .artifacts/gui-render-demand
       - name: Verify continuous wheel rendering at both device scales
         run: |
+          /usr/bin/python3 -m unittest discover -s scripts/tests -p test_gui_scroll.py
           /usr/bin/python3 scripts/test-gui-scroll.py --binary target/debug/omoikane --scale 1 --artifacts .artifacts/gui-scroll-1
           /usr/bin/python3 scripts/test-gui-scroll.py --binary target/debug/omoikane --scale 2 --artifacts .artifacts/gui-scroll-2
       - name: Verify parsed page is presented before slow initial scripts
         run: /usr/bin/python3 scripts/test-gui-startup.py --binary target/debug/omoikane --artifacts .artifacts/gui-startup
       - name: Verify image network waits do not block wheel input
-        run: /usr/bin/python3 scripts/test-gui-image-loading.py --binary target/debug/omoikane --artifacts .artifacts/gui-image-loading
+        run: |
+          /usr/bin/python3 -m unittest discover -s scripts/tests -p test_gui_image_trace.py
+          /usr/bin/python3 scripts/test-gui-image-loading.py --binary target/debug/omoikane --artifacts .artifacts/gui-image-loading
       - name: Verify native window responds during busy page scripts
         run: /usr/bin/python3 scripts/test-gui-page-worker.py --binary target/debug/omoikane --artifacts .artifacts/gui-page-worker
       - uses: actions/upload-artifact@v4
