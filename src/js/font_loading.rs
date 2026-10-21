@@ -703,6 +703,10 @@ pub(super) fn native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     } else {
         None
     };
+    let render_mutation = matches!(
+        operation.as_str(),
+        "load" | "add" | "delete" | "clear" | "update"
+    );
     with_host_state(|host| {
         let mut state = host.borrow_mut();
         let document = state.csp_document_for_context(context)?;
@@ -791,12 +795,28 @@ pub(super) fn native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
                 return Err(error("font belongs to a different origin"));
             }
         }
+        let load_owner = if operation == "load" {
+            let owner_id = state.font_loading.faces[&id].owner;
+            Some(
+                state
+                    .get_node(owner_id)
+                    .ok_or_else(|| error("font document is no longer live"))?,
+            )
+        } else {
+            None
+        };
+        let native_scroll = render_mutation.then(|| state.native_scroll.clone());
+        drop(state);
+        if let Some(native_scroll) = native_scroll {
+            // Every author-reentrant conversion and document/owner validation
+            // has completed. Take the protocol lock with no HostState borrow,
+            // immediately before the first render-visible mutation.
+            native_scroll.revoke_policy();
+        }
+        let mut state = host.borrow_mut();
         match operation.as_str() {
             "load" => {
-                let owner_id = state.font_loading.faces[&id].owner;
-                let owner = state
-                    .get_node(owner_id)
-                    .ok_or_else(|| error("font document is no longer live"))?;
+                let owner = load_owner.as_ref().unwrap();
                 if state.nonblocking_font_loading {
                     let completion =
                         completion.ok_or_else(|| error("font completion callbacks required"))?;

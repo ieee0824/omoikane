@@ -269,6 +269,7 @@ pub(super) unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tr
         | TimerPayload::ScriptResourceReady { .. }
         | TimerPayload::ImageResourceEvent { .. }
         | TimerPayload::JavascriptDocumentLoad { .. }
+        | TimerPayload::IframeNavigationReady { .. }
         | TimerPayload::FormSubmission { .. }
         | TimerPayload::GeolocationTimeout { .. } => {}
     }
@@ -378,6 +379,7 @@ impl EventLoop {
             TimerPayload::ResourceLoad { .. }
             | TimerPayload::ScriptResourceReady { .. }
             | TimerPayload::JavascriptDocumentLoad { .. }
+            | TimerPayload::IframeNavigationReady { .. }
             | TimerPayload::FormSubmission { .. } => TaskSource::Networking,
             TimerPayload::ImageResourceEvent { .. } => TaskSource::DomManipulation,
             TimerPayload::GeolocationTimeout { .. } => TaskSource::Geolocation,
@@ -407,6 +409,7 @@ impl EventLoop {
                         payload: TimerPayload::ResourceLoad { node_id }
                             | TimerPayload::ImageResourceEvent { node_id, .. }
                             | TimerPayload::FormSubmission { node_id, .. }
+                            | TimerPayload::IframeNavigationReady { node_id, .. }
                             | TimerPayload::JavascriptDocumentLoad { iframe_id: node_id, .. },
                         ..
                     }
@@ -1096,6 +1099,64 @@ mod tests {
                 }
             ))
         ));
+        assert!(event_loop.pop_task().is_none());
+    }
+
+    #[test]
+    fn iframe_ready_commits_on_the_networking_source_in_enqueue_order() {
+        let mut event_loop = EventLoop::default();
+        event_loop.enqueue_timer(TimerPayload::Source("before".into()));
+        event_loop.enqueue_timer_for_document(
+            TimerPayload::IframeNavigationReady {
+                node_id: 4,
+                epoch: 9,
+            },
+            Some(2),
+        );
+        event_loop.enqueue_timer(TimerPayload::ResourceLoad { node_id: 4 });
+
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((TaskSource::Timer, Task::Timer { payload: TimerPayload::Source(source), .. }))
+                if source == "before"
+        ));
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((
+                TaskSource::Networking,
+                Task::Timer {
+                    payload: TimerPayload::IframeNavigationReady {
+                        node_id: 4,
+                        epoch: 9
+                    },
+                    owner_document_id: Some(2),
+                    ..
+                }
+            ))
+        ));
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((
+                TaskSource::Networking,
+                Task::Timer {
+                    payload: TimerPayload::ResourceLoad { node_id: 4 },
+                    ..
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn retiring_an_iframe_node_drops_its_uncommitted_ready_task() {
+        let mut event_loop = EventLoop::default();
+        event_loop.enqueue_timer_for_document(
+            TimerPayload::IframeNavigationReady {
+                node_id: 4,
+                epoch: 9,
+            },
+            Some(2),
+        );
+        event_loop.cancel_resource_loads_for_nodes(&HashSet::from([4]));
         assert!(event_loop.pop_task().is_none());
     }
 

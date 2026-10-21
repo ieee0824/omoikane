@@ -106,6 +106,8 @@ pub enum CdpSessionError {
     PageTaskTimedOut,
     /// The browser session no longer has an active page.
     Unavailable,
+    /// Native-scroll owner generations cannot advance without reusing an old owner.
+    NativeScrollOwnerExhausted,
 }
 
 impl std::fmt::Display for CdpSessionError {
@@ -120,6 +122,9 @@ impl std::fmt::Display for CdpSessionError {
                 write!(f, "page startup task exceeded its wall-clock timeout")
             }
             Self::Unavailable => write!(f, "Browser session is unavailable"),
+            Self::NativeScrollOwnerExhausted => {
+                write!(f, "native scroll owner generation exhausted")
+            }
         }
     }
 }
@@ -185,6 +190,8 @@ pub(crate) struct SessionSettleTimings {
 #[derive(Debug)]
 pub struct CdpSession {
     runtime: JsRuntime,
+    /// Next owner identity reserved before a replacement runtime can run script.
+    next_native_scroll_owner_generation: Option<u64>,
     resource_queue: Option<ResourceQueue>,
     resource_worker_count: std::num::NonZeroUsize,
     task_pump_limit: Option<std::num::NonZeroUsize>,
@@ -193,6 +200,8 @@ pub struct CdpSession {
     nonblocking_font_loading: bool,
     nonblocking_script_loading: bool,
     nonblocking_fetch_loading: bool,
+    nonblocking_iframe_loading: bool,
+    retained_scroll_capture: bool,
     pending_document_startup: Option<page::PendingDocumentStartup>,
     media_emulation: emulation::State,
     _storage_lifetime: TabStorageLifetime,
@@ -332,11 +341,19 @@ impl CdpSession {
         let resource_queue = ResourceQueue::default();
         let resource_worker_count = resource_queue.worker_count();
         runtime.set_resource_queue(resource_queue.clone());
+        let initial_scroll_key = crate::js::native_scroll::TargetKey {
+            document: 0,
+            owner_generation: 1,
+            viewport_epoch: 0,
+            scroll_node: runtime.document().identity() as u64,
+        };
+        runtime.activate_native_scroll(initial_scroll_key);
         Self::configure_runtime_playback(&mut runtime, &cookie_store);
         let mut http_client = Client::new();
         http_client.set_shared_cookie_store(Arc::clone(&cookie_store));
         let mut session = Self {
             runtime,
+            next_native_scroll_owner_generation: Some(2),
             resource_queue: None,
             resource_worker_count,
             task_pump_limit: None,
@@ -345,6 +362,8 @@ impl CdpSession {
             nonblocking_font_loading: false,
             nonblocking_script_loading: false,
             nonblocking_fetch_loading: false,
+            nonblocking_iframe_loading: false,
+            retained_scroll_capture: false,
             pending_document_startup: None,
             _storage_lifetime: storage_lifetime,
             storage_manager,
@@ -410,8 +429,9 @@ impl CdpSession {
 
     /// Carries host configuration into a replacement document runtime.
     fn configure_replacement_runtime(
-        &self,
+        &mut self,
         runtime: &mut JsRuntime,
+        document_generation: u64,
     ) -> Result<(), CdpSessionError> {
         if let Some((reporter, surface)) = self.runtime.error_reporter_destination() {
             runtime.set_error_reporter(reporter, surface);
@@ -427,6 +447,8 @@ impl CdpSession {
         runtime.set_nonblocking_font_loading(self.nonblocking_font_loading);
         runtime.set_nonblocking_script_loading(self.nonblocking_script_loading);
         runtime.set_nonblocking_fetch_loading(self.nonblocking_fetch_loading);
+        runtime.set_nonblocking_iframe_loading(self.nonblocking_iframe_loading);
+        runtime.set_retained_scroll_capture(self.retained_scroll_capture);
         runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
         let (width, height) = self.runtime.presentation_viewport();
         runtime.set_viewport(width, height);
@@ -440,7 +462,18 @@ impl CdpSession {
             .set_pointer_lock_focus(self.pointer_lock_focused)
             .map_err(CdpSessionError::JavaScript)?;
         runtime.set_fullscreen_transition_allowed(self.fullscreen_transition_allowed);
-        Self::install_runtime_helpers_on(runtime).map_err(CdpSessionError::JavaScript)
+        Self::install_runtime_helpers_on(runtime).map_err(CdpSessionError::JavaScript)?;
+        let owner_generation = self
+            .next_native_scroll_owner_generation
+            .ok_or(CdpSessionError::NativeScrollOwnerExhausted)?;
+        self.next_native_scroll_owner_generation = owner_generation.checked_add(1);
+        runtime.activate_native_scroll(crate::js::native_scroll::TargetKey {
+            document: document_generation,
+            owner_generation,
+            viewport_epoch: 0,
+            scroll_node: runtime.document().identity() as u64,
+        });
+        Ok(())
     }
 
     fn runtime_timeout(&self) -> Duration {
@@ -569,6 +602,35 @@ impl CdpSession {
         &mut self,
     ) -> Result<crate::paint::Canvas, crate::paint::PaintError> {
         self.runtime.paint_current_document()
+    }
+
+    /// Enables bounded, owned scroll-image capture alongside ordinary painting.
+    /// This does not authorize asynchronous input or change its default action.
+    pub fn set_retained_scroll_capture(&mut self, enabled: bool) {
+        self.retained_scroll_capture = enabled;
+        self.runtime.set_retained_scroll_capture(enabled);
+    }
+
+    /// Updates owner-local capture interest without changing the configuration
+    /// inherited by a replacement runtime.
+    pub fn set_retained_scroll_capture_interest(&mut self, interested: bool) {
+        self.runtime
+            .set_retained_scroll_capture_interest(interested);
+    }
+
+    /// Takes the latest capture if its document and render inputs are unchanged.
+    /// Raster coordinates are CSS pixels, independently of the native device scale.
+    pub fn take_retained_scroll_scene(&mut self) -> Option<crate::frame::RetainedScrollScene> {
+        let captured = self.runtime.take_retained_scroll_capture()?;
+        crate::frame::RetainedScrollScene::new(
+            captured.frame,
+            1.0,
+            self.document_generation(),
+            self.runtime.render_generations().paint,
+            captured.logical_scroll,
+            captured.extent,
+        )
+        .ok()
     }
 
     /// Attaches the optional error reporter to this session's runtime and HTTP client.

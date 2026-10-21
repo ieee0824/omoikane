@@ -13,6 +13,25 @@ pub struct InputModifiers {
     pub shift: bool,
 }
 
+/// Host-owned target and coordinates for one asynchronous native wheel.
+///
+/// Every identity comes from browser hit testing. Page code cannot construct
+/// or refresh this value, and the owner revalidates the Document Realm before
+/// dispatching a notification.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NativeScrollTarget {
+    /// Active Document identity that owns the event target and Realm.
+    pub document: usize,
+    /// Exact DOM node identity selected by trusted hit testing.
+    pub node: usize,
+    /// Embedder coordinates in the top-level page viewport.
+    pub cursor: (f64, f64),
+    /// Coordinates in the target Document viewport.
+    pub client: (f64, f64),
+    /// Coordinates in the target Document page at publication time.
+    pub page: (f64, f64),
+}
+
 impl InputModifiers {
     fn cdp_bits(self) -> u8 {
         u8::from(self.alt)
@@ -230,17 +249,45 @@ impl PlatformInput {
         delta_x: f64,
         delta_y: f64,
     ) -> Result<(), JsonRpcError> {
+        self.wheel_at(
+            session,
+            self.cursor,
+            self.modifiers,
+            self.buttons,
+            delta_x,
+            delta_y,
+        )
+    }
+
+    /// Dispatches a canonical wheel with the immutable cursor and modifiers
+    /// captured at native receipt time.
+    ///
+    /// This is used by an ordered native-scroll fallback after it passes the
+    /// shared notification barrier. It does not synthesize a preceding move.
+    pub fn wheel_at(
+        &mut self,
+        session: &mut CdpSession,
+        cursor: (f64, f64),
+        modifiers: InputModifiers,
+        buttons: u8,
+        delta_x: f64,
+        delta_y: f64,
+    ) -> Result<(), JsonRpcError> {
+        self.cursor = cursor;
+        self.cursor_initialized = true;
+        self.modifiers = modifiers;
+        self.buttons = buttons;
         let result = session.dispatch(
             "Input.dispatchMouseEvent",
             json!({
                 "type": "mouseWheel",
-                "x": self.cursor.0,
-                "y": self.cursor.1,
+                "x": cursor.0,
+                "y": cursor.1,
                 "deltaX": delta_x,
                 "deltaY": delta_y,
                 "button": "none",
-                "buttons": self.buttons,
-                "modifiers": self.modifiers.cdp_bits(),
+                "buttons": buttons,
+                "modifiers": modifiers.cdp_bits(),
             }),
         )?;
         self.host_overscroll = (

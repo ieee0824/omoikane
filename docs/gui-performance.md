@@ -20,6 +20,45 @@ OMOIKANE_TRACE_STARTUP=1 OMOIKANE_TRACE_PAINT=1 OMOIKANE_TRACE_INPUT=1 \
 `profile`、`opt_level`、`target`、`debug_assertions` も記録するため、O2 debugとreleaseを区別できる。
 情報は実行時のcheckoutではなくバイナリへ埋め込まれる。linked worktreeのHEAD・branch ref・indexと追跡ファイルの変更もビルドの監視対象にする。
 
+`OMOIKANE_TRACE_RETAINED_SCROLL=1` は、通常描画と同じ画像環境で画面外の保持画像を追加生成し、
+`OMOIKANE_RETAINED_CAPTURE` に生成可否・未対応理由・生成時間・CSS座標のcoverageを出す。
+GUIへ渡すsceneのraster scaleは現在1で、ウィンドウのdevice scaleとは別である。
+この計測では追加の描画費用が発生する。通常GUIのnative scrollは既定で有効である。
+入力経路を無効にした保持画像だけの診断には、`OMOIKANE_NATIVE_SCROLL=0`も併用する。
+
+### GUIスクロール経路
+
+通常GUIは、再利用可能な保持画像と入力の適格性を確認できた場合に、
+ページのJavaScript処理を待たずGUI側で画像を移動する。
+`OMOIKANE_NATIVE_SCROLL=0`は緊急時の明示的な無効化、`OMOIKANE_NATIVE_SCROLL=1`は
+明示的な有効化である。環境変数を指定しない通常起動でも有効になる。
+ページのホスト名ではなく、描画・入力状態によって利用可否を判定する。
+未対応の効果や配置、入力の状態変更では通常の入力経路へ戻る。
+
+`OMOIKANE_TRACE_INPUT=1`との併用で出る`OMOIKANE_NATIVE_SCROLL_PROBE`は、入力の受信、
+`accepted`/`fallback`/`canonical`の判定、画像の表示、ページ側への配信を記録する。
+保持画像の生成成功だけでは、高速経路を実際に利用したことの証拠にはならない。
+受信した入力と判定・表示のsequenceを対応させて確認する。
+ローカルfixtureでの成功と、実ページでの適格性・応答時間は別に検証する。
+
+計測ログの保存先も操作に影響し得る。共有領域への読み書きが遅い環境では、
+一時領域へ記録してから共有先へコピーし、元のログも保持する。
+自動入力では画像比較やPNG保存を入力送信の後に行い、実際の受信時刻から入力間隔を検証する。
+
+`OMOIKANE_TRACE_RETAINED_FILTER=1` を併用すると、保持画像を拒否した最初のフィルターについて
+`OMOIKANE_RETAINED_FILTER` に要素ID・タグ・配置・ぼかし半径や影の数値を出す。
+フィルター列は16個までで、CSS文字列やURL、本文は記録しない。
+`OMOIKANE_TRACE_RETAINED_STICKY=1` は同様にsticky配置の最初の未対応箇所を記録する。
+これらの診断は再利用の判定を変更しない。
+
+通常GUIのnative scrollは既定で有効だが、保持画像の生成要求は入力位置があり、
+ownerに恒久的なblockerがない場合に限る。
+`OMOIKANE_NATIVE_SCROLL=0`と`OMOIKANE_TRACE_RETAINED_SCROLL=1`を併用した場合は、
+診断用の保持画像だけを生成し、native入力のauthorityは与えない。
+対象・画像・ページ状態が一致する入力をGUIで処理し、その通知と既定動作の進捗をページ側へ引き渡す。
+未対応の描画効果や入力、状態変更による失効は通常の入力処理へ戻す。
+入力の成功数だけでなく、連続操作中の表示位置、通常処理への待ち時間、失効後の再認可を確認する。
+
 `OMOIKANE_STARTUP`の窓の初回描画と、ページ本文の表示完了は異なる。
 本文の表示は画面でも確認する。`OMOIKANE_PAINT.frame_ms`にはページの処理・
 レイアウト・描画が含まれるので、`paint_ms`を再び加算しない。

@@ -286,13 +286,8 @@ pub(super) fn paint_text_with_context(
     // Fallback color from the containing block's style (used when fragment
     // style has no explicit color).
     let fallback_color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
-    for line in &layout.lines {
-        let fragments = line
-            .text_overflow
-            .as_ref()
-            .map_or(line.fragments.as_slice(), |overflow| {
-                overflow.fragments.as_slice()
-            });
+    for (line_index, line) in layout.lines.iter().enumerate() {
+        let fragments = super::selected_line_fragments(line);
         shadow::paint_line_shadows(
             canvas,
             line,
@@ -307,7 +302,7 @@ pub(super) fn paint_text_with_context(
         // line; descendants cannot substitute their own font or underline data.
         let mut decorations = HashMap::new();
         let mut decoration_colors = HashMap::new();
-        for fragment in fragments {
+        for (fragment_index, fragment) in fragments.iter().enumerate() {
             if fragment.style.visibility == crate::layout::Visibility::Hidden {
                 continue;
             }
@@ -344,11 +339,12 @@ pub(super) fn paint_text_with_context(
                     );
                 }
                 InlineFragmentContent::AtomicInline(_) => {
-                    if let Some(child) = layout
-                        .children
-                        .iter()
-                        .find(|child| child.node == fragment.node)
-                    {
+                    if let Some((child, invocation)) = super::atomic_inline_invocation(
+                        layout,
+                        line_index,
+                        fragment_index,
+                        fragment,
+                    ) {
                         super::paint_box_internal(
                             canvas,
                             child,
@@ -359,6 +355,8 @@ pub(super) fn paint_text_with_context(
                                 include_phase_descendants: true,
                                 paint_decorations: true,
                                 offset,
+                                retained_paint_owner: Some(layout.node.identity()),
+                                retained_atomic_inline: Some(invocation),
                             },
                         );
                     }

@@ -25826,18 +25826,29 @@ fn outer_iframe_navigation_retires_saved_descendant_window_proxy() {
             .unwrap();
 
     pump_zero_delay_tasks(&mut runtime);
+    runtime
+        .eval(
+            "globalThis.outer = document.getElementById('outer'); \
+             globalThis.outerLoaded = false; \
+             outer.addEventListener('load', () => { outerLoaded = true }); \
+             outer.src = '/outer-one.html';",
+        )
+        .unwrap();
+    wait_for_outer_load(&mut runtime);
+    runtime
+        .eval(
+            "globalThis.oldOuterDocument = outer.contentDocument; \
+             const inner = oldOuterDocument.getElementById('inner'); \
+             globalThis.nestedProxy = inner.contentWindow; \
+             globalThis.nestedDocument = inner.contentDocument; \
+             outerLoaded = false; outer.src = '/outer-two.html';",
+        )
+        .unwrap();
+    wait_for_outer_load(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
             r#"(()=> {
-                  const outer = document.getElementById('outer');
-                  outer.src = '/outer-one.html';
-                  const oldOuterDocument = outer.contentDocument;
-                  const inner = oldOuterDocument.getElementById('inner');
-                  const nestedProxy = inner.contentWindow;
-                  const nestedDocument = inner.contentDocument;
-
-                  outer.src = '/outer-two.html';
                   const replacement = outer.contentDocument;
                   return [
                     nestedProxy.closed,
@@ -25852,6 +25863,21 @@ fn outer_iframe_navigation_retires_saved_descendant_window_proxy() {
         Some("true|true|true|true|replacement"),
         "navigating an ancestor must close every saved descendant WindowProxy"
     );
+
+    fn wait_for_outer_load(runtime: &mut JsRuntime) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            runtime.run_until_idle().unwrap();
+            if runtime.eval("outerLoaded").unwrap().as_boolean() == Some(true) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "iframe load did not complete"
+            );
+            std::thread::yield_now();
+        }
+    }
 }
 
 /// Reloading an iframe must discard the previous sub-document's per-document
@@ -32508,4 +32534,75 @@ fn local_data_attribute_gate_accepts_only_simple_html_names() {
         local_html_data_attribute_name(&qualified_html, "data-loaded"),
         None,
     );
+}
+
+#[test]
+fn iframe_form_reservation_survives_history_preparation_and_document_reads() {
+    let (port, _server) = spawn_static_http_server(
+        "text/html",
+        "<html><body><p id=loaded>posted</p></body></html>",
+    );
+    for (workers, nonblocking) in [(1, false), (2, false), (2, true)] {
+        let document =
+            crate::html::TreeBuilder::parse("<iframe id=sink name=sink></iframe>").document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            document,
+            &format!("http://127.0.0.1:{port}/parent.html"),
+        )
+        .unwrap();
+        runtime.set_resource_queue(crate::resource_worker::ResourceQueue::new(
+            std::num::NonZeroUsize::new(workers).unwrap(),
+        ));
+        runtime.set_nonblocking_iframe_loading(nonblocking);
+        pump_zero_delay_tasks(&mut runtime);
+        runtime.eval("globalThis.sink=document.getElementById('sink');            const form=document.createElement('form');form.target='sink';form.method='post';            form.action='/submit';document.body.appendChild(form);form.submit()").unwrap();
+        let iframe = runtime
+            .document()
+            .query_selector("#sink")
+            .unwrap()
+            .identity();
+        let epoch = runtime
+            .host_state
+            .borrow()
+            .current_iframe_navigation_epoch(iframe)
+            .expect("history prepare must not consume the form task's reservation");
+        runtime
+            .eval("void sink.contentWindow.document; void sink.contentDocument")
+            .unwrap();
+        assert_eq!(
+            runtime
+                .host_state
+                .borrow()
+                .current_iframe_navigation_epoch(iframe),
+            Some(epoch)
+        );
+        assert_eq!(
+            runtime.host_state.borrow().iframe_documents[&iframe].document_url,
+            "about:blank"
+        );
+        let expected_url = format!("http://127.0.0.1:{port}/submit");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            runtime.run_until_idle().unwrap();
+            if runtime.host_state.borrow().iframe_documents[&iframe].document_url == expected_url {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "form task must commit its own response"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let state = runtime.host_state.borrow();
+        let entry = &state.iframe_documents[&iframe];
+        assert_eq!(entry.submission.as_ref().unwrap().method, "POST");
+        assert_eq!(
+            crate::dom::collect_descendant_text(
+                &entry.document.query_selector("#loaded").unwrap(),
+                crate::dom::TextTraversal::Containers,
+            ),
+            "posted"
+        );
+        assert_eq!(state.current_iframe_navigation_epoch(iframe), None);
+    }
 }

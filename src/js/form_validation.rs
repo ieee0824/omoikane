@@ -95,6 +95,21 @@ pub(super) fn flush(node_id: usize, context: &mut Context) -> JsResult<()> {
             .to_std_string_escaped();
         let values: Vec<(usize, Option<bool>)> = serde_json::from_str(&json)
             .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
+        // The validation callback and JSON conversion above may run author
+        // code. Revoke only after they finish, before :valid/:invalid state is
+        // written into any live node, and outside a HostState borrow.
+        let validity_changes = {
+            let state = host.borrow();
+            values.iter().any(|(id, value)| {
+                state
+                    .get_node(*id)
+                    .is_some_and(|node| node.css_validity() != *value)
+            })
+        };
+        if validity_changes {
+            let native_scroll = host.borrow().native_scroll.clone();
+            native_scroll.revoke_policy();
+        }
         let mut state = host.borrow_mut();
         #[cfg(test)]
         {
@@ -186,6 +201,57 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computed_style_without_validity_changes_preserves_native_policy_epoch() {
+        let document = crate::html::TreeBuilder::parse("<div>content</div>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        let handle = runtime.native_scroll_handle();
+        let before = handle.publication_gate().policy_epoch;
+        runtime
+            .eval("getComputedStyle(document.querySelector('div')).overscrollBehaviorX")
+            .unwrap();
+        assert_eq!(handle.publication_gate().policy_epoch, before);
+        assert_eq!(
+            runtime.host_state.borrow().form_validation.completed_scans,
+            1
+        );
+    }
+
+    #[test]
+    fn validity_rescans_revoke_only_when_live_selector_state_changes() {
+        let document = crate::html::TreeBuilder::parse("<form><input required></form>").document();
+        let input = document.query_selector("input").unwrap();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        let handle = runtime.native_scroll_handle();
+        let before = handle.publication_gate().policy_epoch;
+        runtime
+            .eval("globalThis.control=document.querySelector('input');control.matches(':invalid')")
+            .unwrap();
+        assert_eq!(input.css_validity(), Some(false));
+        assert!(handle.publication_gate().policy_epoch > before);
+
+        runtime.host_state.borrow_mut().form_validation.invalidate();
+        let unchanged = handle.publication_gate().policy_epoch;
+        runtime.eval("control.matches(':invalid')").unwrap();
+        assert_eq!(handle.publication_gate().policy_epoch, unchanged);
+        assert_eq!(
+            runtime.host_state.borrow().form_validation.completed_scans,
+            2
+        );
+
+        runtime.eval("control.value='filled'").unwrap();
+        let before_change = handle.publication_gate();
+        assert!(handle.authorize_policy(before_change.key, before_change.policy_epoch));
+        runtime.eval("control.matches(':valid')").unwrap();
+        assert_eq!(input.css_validity(), Some(true));
+        assert!(handle.publication_gate().policy_epoch > before_change.policy_epoch);
+        assert!(!handle.authorize_policy(before_change.key, before_change.policy_epoch));
+        assert_eq!(
+            runtime.host_state.borrow().form_validation.completed_scans,
+            3
+        );
+    }
 
     #[test]
     fn repeated_css_queries_share_one_validation_scan_until_a_mutation() {

@@ -1121,6 +1121,13 @@ pub(crate) fn paint_gradient(
     area: Rect,
     clip: Option<Rect>,
 ) {
+    if canvas.with_retained_operation(
+        super::retained_layers::RetainedPrimitiveKind::Gradient,
+        area,
+        |canvas| paint_gradient(canvas, gradient, area, clip),
+    ) {
+        return;
+    }
     let Some(area) = normalize_rect(area) else {
         return;
     };

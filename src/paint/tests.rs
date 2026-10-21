@@ -11933,3 +11933,37 @@ fn profile_fixed_transform_property_lookup_hot_paths() {
         );
     }
 }
+
+#[test]
+fn unit_scale_image_blit_preserves_every_pixel_at_odd_extents() {
+    for (width, height) in [(26, 23), (23, 26), (13, 29)] {
+        let mut source = Canvas::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                source.set_pixel(x, y, Color::rgb(x as u8, y as u8, 173));
+            }
+        }
+        let image = source.into_image();
+        for (left, top) in [(0, 0), (6, 9), (-3, -5)] {
+            let mut actual = Canvas::new(40, 40);
+            actual.draw_image(&image, left as f32, top as f32);
+            for y in 0..40 {
+                for x in 0..40 {
+                    let sx = x as i32 - left;
+                    let sy = y as i32 - top;
+                    let expected =
+                        if (0..width as i32).contains(&sx) && (0..height as i32).contains(&sy) {
+                            Color::rgb(sx as u8, sy as u8, 173)
+                        } else {
+                            Color::rgba(0, 0, 0, 0)
+                        };
+                    assert_eq!(
+                        actual.pixel(x, y),
+                        Some(expected),
+                        "extent={width}x{height} origin=({left},{top}) pixel=({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+}

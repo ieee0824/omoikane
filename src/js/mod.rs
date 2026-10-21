@@ -88,6 +88,9 @@ mod main_shadow_mask_cache;
 #[cfg(test)]
 mod main_shadow_mask_cache_tests;
 mod media_environment;
+pub mod native_scroll;
+mod navigation_transport;
+mod retained_scroll;
 use child_document::{FetchedChildResource, LoadedChildDocument, NavigationRedirect};
 use cross_origin_isolation::{
     Disposition, GroupSwitchDecision, IsolationPolicy, OpenerPolicy, OpenerPolicyValue,
@@ -125,11 +128,16 @@ mod inline_style_assignment_tests;
 #[cfg(test)]
 mod leaf_background_paint_tests;
 mod leaf_paint;
+#[cfg(test)]
+mod native_scroll_clock_tests;
 mod trusted_types;
 #[cfg(test)]
 mod trusted_types_tests;
 use errors::JsHostError;
 pub use errors::{FindInPageError, JsEvaluationError, NotificationPermissionError};
+use navigation_transport::{
+    NavigationParentPolicy, NavigationTransportResult, OwnedNavigationTransport,
+};
 #[cfg(test)]
 mod document_shadow_mask_baseline_tests;
 #[cfg(test)]
@@ -1720,9 +1728,12 @@ enum TimerPayload {
         iframe_id: usize,
         document_id: usize,
     },
+    /// An owned iframe HTTP result ready for owner-thread parse and commit.
+    IframeNavigationReady { node_id: usize, epoch: u64 },
     /// A form navigation into an existing iframe without changing its attributes.
     FormSubmission {
         node_id: usize,
+        epoch: u64,
         request: form_submission::Submission,
         source_document_id: usize,
         client_security: Option<NavigationSecuritySnapshot>,
@@ -2099,6 +2110,7 @@ impl TimerPayload {
             Self::ScriptResourceReady { .. } => "script-resource-ready",
             Self::ImageResourceEvent { .. } => "image-resource-event",
             Self::JavascriptDocumentLoad { .. } => "javascript-document-load",
+            Self::IframeNavigationReady { .. } => "iframe-navigation-ready",
             Self::FormSubmission { .. } => "form-submission",
             Self::GeolocationTimeout { .. } => "geolocation-timeout",
             Self::Realm { payload, .. } => payload.kind(),
@@ -2255,6 +2267,14 @@ struct HostState {
     visual_viewport_follows_layout: bool,
     /// Top-level Window scroll offset in document CSS pixels.
     window_scroll: (f32, f32),
+    /// Shared numeric-only retained-scroll protocol state. The accompanying
+    /// key is this page owner's immutable incarnation and is checked on every
+    /// owner-side materialization so a retired owner cannot consume new input.
+    native_scroll: native_scroll::NativeScrollHandle,
+    native_scroll_owner: native_scroll::TargetKey,
+    /// Programmatic top-level smooth scroll whose native publication gate must
+    /// remain closed until its last canonical animation sample is committed.
+    native_scroll_smooth_token: Option<native_scroll::ProgrammaticScrollToken>,
     /// Nested browsing contexts keep an independent layout viewport scroll.
     /// Child layout is not painted by the top-level renderer yet, but its
     /// Window and VisualViewport geometry must not borrow the parent's offset.
@@ -2321,6 +2341,8 @@ struct HostState {
     adjusted_layout_cache: Option<AdjustedLayoutCache>,
     #[cfg(test)]
     adjusted_layout_builds: u64,
+    #[cfg(test)]
+    window_scroll_extent_calls: u64,
     #[cfg(test)]
     child_layout_builds: u64,
     #[cfg(test)]
@@ -2435,6 +2457,7 @@ struct HostState {
     nonblocking_font_loading: bool,
     nonblocking_script_loading: bool,
     nonblocking_fetch_loading: bool,
+    nonblocking_iframe_loading: bool,
     fetch_loads: fetch_loading::FetchLoads,
     script_loads: script_loading::ScriptLoads,
     resource_queue: crate::resource_worker::ResourceQueue,
@@ -2697,6 +2720,65 @@ enum ForcedIframeNavigation {
     Location,
     Refresh,
     RestoreDeclaredOrigin(Option<DocumentSecurityOrigin>),
+}
+
+struct PreloadedIframeNavigation {
+    loaded: LoadedChildDocument,
+    storage_access_origin: Option<StorageOrigin>,
+    source: NavigationReferrerSource,
+    /// Base URL captured when the worker request was resolved. The owner may
+    /// mutate `<base>` while transport is in flight; commit/history must keep
+    /// the same requested URL as the transmitted request.
+    resource_base: Option<crate::http::Url>,
+}
+
+struct IframeNavigationCommitInput {
+    owner_document_id: usize,
+    resource_base: Option<crate::http::Url>,
+    navigation_url: String,
+    source: NavigationReferrerSource,
+    initial_about_blank: bool,
+    inherits_creator_origin: bool,
+    inherited_creator_id: usize,
+    loaded: LoadedChildDocument,
+    storage_access_origin: Option<StorageOrigin>,
+}
+
+/// Fully owned iframe navigation state prepared before the active child is
+/// retired. No field borrows the old Document or an author-owned submission.
+struct PreparedIframeDocumentCommit {
+    iframe_id: usize,
+    resource_attribute: &'static str,
+    resource: String,
+    initial_blank: bool,
+    javascript_resource: bool,
+    generation: u64,
+    new_context_id: Option<u64>,
+    owner_document_id: usize,
+    resource_base: Option<crate::http::Url>,
+    navigation_url: String,
+    document: NodeHandle,
+    security_headers: Vec<(String, String)>,
+    response_status: u16,
+    child_url: Option<String>,
+    storage_access_origin: Option<StorageOrigin>,
+    isolation: IsolationPolicy,
+    inherited_csp: Option<CspPolicy>,
+    inherited_referrer_policy: Option<security_reporting::ReferrerPolicy>,
+    referrer: String,
+    child_base_url: Option<crate::http::Url>,
+    sandbox: IframeSandboxPolicy,
+    storage_origin: Option<StorageOrigin>,
+    security_origin: Option<DocumentSecurityOrigin>,
+    declared_src_origin: Option<DocumentSecurityOrigin>,
+    inherited_features: HashSet<PolicyFeature>,
+}
+
+struct PreparedIframeDocumentOrigins {
+    storage: Option<StorageOrigin>,
+    security: DocumentSecurityOrigin,
+    declared_src: Option<DocumentSecurityOrigin>,
+    inherited_features: HashSet<PolicyFeature>,
 }
 
 /// A popup's active Document and Realm. The numeric context id survives
@@ -3034,6 +3116,8 @@ impl HostState {
         storage_manager: StorageManager,
         storage_session_id: u64,
     ) -> Self {
+        let native_scroll = native_scroll::NativeScrollHandle::default();
+        storage_manager.register_native_scroll(native_scroll.weak_invalidator());
         // Seed the main document's style entry immediately so its identity is a
         // known key from the start; iframe sub-document entries are created when
         // their content document is first loaded (see `iframe_content_document`).
@@ -3152,6 +3236,9 @@ impl HostState {
             },
             visual_viewport_follows_layout: true,
             window_scroll: (0.0, 0.0),
+            native_scroll,
+            native_scroll_owner: native_scroll::TargetKey::default(),
+            native_scroll_smooth_token: None,
             iframe_window_scrolls: HashMap::new(),
             observed_iframe_viewports: HashMap::new(),
             pending_window_resize_documents: Vec::new(),
@@ -3186,6 +3273,8 @@ impl HostState {
             adjusted_layout_cache: None,
             #[cfg(test)]
             adjusted_layout_builds: 0,
+            #[cfg(test)]
+            window_scroll_extent_calls: 0,
             #[cfg(test)]
             child_layout_builds: 0,
             #[cfg(test)]
@@ -3240,6 +3329,7 @@ impl HostState {
             nonblocking_font_loading: false,
             nonblocking_script_loading: false,
             nonblocking_fetch_loading: false,
+            nonblocking_iframe_loading: false,
             fetch_loads: Default::default(),
             script_loads: Default::default(),
             resource_queue: Default::default(),
@@ -3318,6 +3408,7 @@ impl HostState {
         if previous == next {
             return;
         }
+        self.native_scroll.revoke_policy();
         if let Some(previous) = previous {
             previous.set_user_action_state("target", false);
         }
@@ -3639,7 +3730,19 @@ impl HostState {
                     }
                 }
                 if is_nested_frame_tag(&tag) {
-                    state.note_iframe_navigation_source(node);
+                    if state
+                        .current_iframe_navigation_epoch(node.identity())
+                        .is_none()
+                    {
+                        // An explicit navigation already captured its client
+                        // before reserving the epoch. Re-enqueuing its resource
+                        // task must not replace that client with the container.
+                        state.note_iframe_navigation_source(node);
+                        state.reserve_iframe_navigation(
+                            node,
+                            iframe_navigation::IframeNavigationClass::Embedded,
+                        );
+                    }
                 }
                 state.event_loop.enqueue_timer(TimerPayload::ResourceLoad {
                     node_id: node.identity(),
@@ -3736,6 +3839,12 @@ impl HostState {
             .cancel_resource_loads_for_nodes(&HashSet::from([node.identity()]));
         self.pending_resource_loads.remove(&node.identity());
         if self.pending_resource_loads.insert(node.identity()) {
+            if is_iframe {
+                self.reserve_iframe_navigation(
+                    node,
+                    iframe_navigation::IframeNavigationClass::Embedded,
+                );
+            }
             if is_html_script_node(node) {
                 if let Some(source) = source {
                     self.pending_script_csp_sources
@@ -3761,6 +3870,15 @@ impl HostState {
     /// parsed as HTML or XML (including SVG) according to their content type;
     /// unsupported content types and load failures yield the empty skeleton.
     fn iframe_content_document(&mut self, iframe: &NodeHandle) -> Result<NodeHandle, JsHostError> {
+        if self.iframe_form_submission_is_reserved(iframe.identity()) {
+            // History preparation and WindowProxy reads can run before the form
+            // task. They must not consume its epoch as an attribute navigation
+            // without the task-owned URL/method/body or request-client snapshot.
+            if let Some(entry) = self.iframe_documents.get(&iframe.identity()) {
+                return Ok(entry.document.clone());
+            }
+            return self.iframe_document_with_submission(iframe, None, None, true);
+        }
         let initial_blank = iframe.has_tag_name("iframe")
             && !iframe.has_attribute("srcdoc")
             && iframe
@@ -3781,7 +3899,40 @@ impl HostState {
         if initial_blank && let Some(entry) = self.iframe_documents.get(&iframe.identity()) {
             return Ok(entry.document.clone());
         }
-        self.iframe_document_with_submission(iframe, None, None, initial_blank)
+        let javascript_resource = iframe.has_tag_name("iframe")
+            && !iframe.has_attribute("srcdoc")
+            && iframe.get_attribute("src").is_some_and(|src| {
+                url::Url::parse(src.trim()).is_ok_and(|url| url.scheme() == "javascript")
+            });
+        if javascript_resource && let Some(entry) = self.iframe_documents.get(&iframe.identity()) {
+            // The resource task owns the reservation across script evaluation,
+            // including an optional string-result document replacement.
+            return Ok(entry.document.clone());
+        }
+        let mut local_restore = None;
+        if !initial_blank
+            && self
+                .current_iframe_navigation_epoch(iframe.identity())
+                .is_some()
+            && self.iframe_documents.contains_key(&iframe.identity())
+        {
+            match self.begin_reserved_iframe_navigation(iframe, None, None, None)? {
+                iframe_navigation::IframeNavigationStart::Deferred
+                | iframe_navigation::IframeNavigationStart::Stale => {
+                    if let Some(entry) = self.iframe_documents.get(&iframe.identity()) {
+                        return Ok(entry.document.clone());
+                    }
+                }
+                iframe_navigation::IframeNavigationStart::Local(restore) => {
+                    local_restore = restore;
+                }
+            }
+        }
+        let document = self.iframe_document_with_submission(iframe, None, None, initial_blank)?;
+        if let Some(restore) = local_restore {
+            let _ = form_state::queue_iframe_history_restore(self, iframe.identity(), restore);
+        }
+        Ok(document)
     }
 
     fn iframe_document_with_submission(
@@ -3790,6 +3941,123 @@ impl HostState {
         submission: Option<&form_submission::Submission>,
         submission_source_document_id: Option<usize>,
         initial_blank: bool,
+    ) -> Result<NodeHandle, JsHostError> {
+        self.iframe_document_with_submission_inner(
+            iframe,
+            submission,
+            submission_source_document_id,
+            initial_blank,
+            None,
+        )
+    }
+
+    fn iframe_document_with_preloaded_submission(
+        &mut self,
+        iframe: &NodeHandle,
+        submission: Option<&form_submission::Submission>,
+        submission_source_document_id: Option<usize>,
+        initial_blank: bool,
+        preloaded: (LoadedChildDocument, Option<StorageOrigin>),
+        source: NavigationReferrerSource,
+        resource_base: Option<crate::http::Url>,
+    ) -> Result<NodeHandle, JsHostError> {
+        self.iframe_document_with_submission_inner(
+            iframe,
+            submission,
+            submission_source_document_id,
+            initial_blank,
+            Some(PreloadedIframeNavigation {
+                loaded: preloaded.0,
+                storage_access_origin: preloaded.1,
+                source,
+                resource_base,
+            }),
+        )
+    }
+
+    fn prepare_iframe_navigation_commit(
+        &mut self,
+        iframe: &NodeHandle,
+        iframe_id: usize,
+        resource_attribute: &'static str,
+        resource: &str,
+        submission: Option<&form_submission::Submission>,
+        submission_source_document_id: Option<usize>,
+        javascript_resource: bool,
+        preloaded: Option<PreloadedIframeNavigation>,
+    ) -> Result<IframeNavigationCommitInput, JsHostError> {
+        let owner_document =
+            owner_document_for_node(iframe).unwrap_or_else(|| self.document.clone());
+        let owner_document_id = owner_document.identity();
+        let current_resource_base = if owner_document_id == self.document.identity() {
+            self.base_url.clone()
+        } else {
+            self.document_base_urls.get(&owner_document_id).cloned()
+        };
+        let navigation_url =
+            submission.map_or_else(|| resource.to_owned(), |request| request.url.clone());
+        let (resource_base, source, loaded, storage_access_origin) =
+            if let Some(preloaded) = preloaded {
+                (
+                    preloaded.resource_base,
+                    preloaded.source,
+                    preloaded.loaded,
+                    preloaded.storage_access_origin,
+                )
+            } else {
+                let source = self.referrer_source_for_iframe_navigation(
+                    iframe,
+                    owner_document_id,
+                    submission.is_some(),
+                );
+                let (loaded, storage_access_origin) = self.load_iframe_navigation_resource(
+                    iframe_id,
+                    owner_document_id,
+                    resource_attribute,
+                    resource,
+                    current_resource_base.as_ref(),
+                    submission,
+                    submission_source_document_id,
+                    &source,
+                    javascript_resource,
+                )?;
+                (current_resource_base, source, loaded, storage_access_origin)
+            };
+        let initiator_document_id = source.document_id;
+        let initial_about_blank = !self.iframe_documents.contains_key(&iframe_id)
+            && submission.is_none()
+            && (navigation_url.is_empty() || javascript_resource);
+        let inherits_creator_origin = submission.is_none() && resource_attribute == "srcdoc"
+            || navigation_url.is_empty()
+            || matches_about_blank_url(&navigation_url)
+            || javascript_resource;
+        let inherited_creator_id = if resource_attribute == "srcdoc" {
+            owner_document_id
+        } else {
+            initiator_document_id
+                .filter(|id| self.document_is_active(*id))
+                .unwrap_or(owner_document_id)
+        };
+        Ok(IframeNavigationCommitInput {
+            owner_document_id,
+            resource_base,
+            navigation_url,
+            source,
+            initial_about_blank,
+            inherits_creator_origin,
+            inherited_creator_id,
+            loaded,
+            storage_access_origin,
+        })
+    }
+
+    fn iframe_document_with_submission_inner(
+        &mut self,
+        iframe: &NodeHandle,
+        submission: Option<&form_submission::Submission>,
+        submission_source_document_id: Option<usize>,
+        initial_blank: bool,
+        preloaded: Option<PreloadedIframeNavigation>,
     ) -> Result<NodeHandle, JsHostError> {
         if !self.node_is_in_active_document(iframe) {
             return Err(JsHostError::InactiveIframeOwner);
@@ -3859,54 +4127,134 @@ impl HostState {
                 "iframe browsing context",
             )?)
         };
-        let owner_document =
-            owner_document_for_node(iframe).unwrap_or_else(|| self.document.clone());
-        let owner_document_id = owner_document.identity();
-        let resource_base = if owner_document_id == self.document.identity() {
-            // `set_base_url` is the public override for resources owned by the
-            // top-level document.
-            self.base_url.clone()
-        } else {
-            // Nested documents must use their own effective base. Missing
-            // metadata (notably `data:`) fails closed instead of borrowing the
-            // unrelated top-level base URL.
-            self.document_base_urls.get(&owner_document_id).cloned()
-        };
-        let navigation_url =
-            submission.map_or_else(|| resource.clone(), |request| request.url.clone());
-        let source = self.referrer_source_for_iframe_navigation(
+        let input = self.prepare_iframe_navigation_commit(
             iframe,
-            owner_document_id,
-            submission.is_some(),
-        );
-        let initiator_document_id = source.document_id;
-        let initial_about_blank = !self.iframe_documents.contains_key(&iframe_id)
-            && submission.is_none()
-            && (navigation_url.is_empty() || javascript_resource);
-        let inherits_creator_origin = submission.is_none() && resource_attribute == "srcdoc"
-            || navigation_url.is_empty()
-            || matches_about_blank_url(&navigation_url)
-            || javascript_resource;
-        // srcdoc uses the iframe container's policy container. Other local
-        // navigations use the Document that initiated the navigation.
-        let inherited_creator_id = if resource_attribute == "srcdoc" {
-            owner_document_id
-        } else {
-            initiator_document_id
-                .filter(|id| self.document_is_active(*id))
-                .unwrap_or(owner_document_id)
-        };
-        let (mut loaded, storage_access_origin) = self.load_iframe_navigation_resource(
             iframe_id,
-            owner_document_id,
             resource_attribute,
             &resource,
-            resource_base.as_ref(),
             submission,
             submission_source_document_id,
-            &source,
             javascript_resource,
+            preloaded,
         )?;
+        let mut prepared = self.prepare_loaded_iframe_document_commit(
+            iframe,
+            iframe_id,
+            resource_attribute,
+            resource,
+            submission,
+            initial_blank,
+            force_navigation,
+            javascript_resource,
+            generation,
+            new_context_id,
+            input,
+        )?;
+        let committed_url = self.commit_iframe_document_metadata(iframe, &mut prepared);
+        Ok(self.finish_iframe_document_commit(prepared, submission, committed_url))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_iframe_document_origins(
+        &mut self,
+        iframe: &NodeHandle,
+        iframe_id: usize,
+        owner_document_id: usize,
+        initial_blank: bool,
+        has_submission: bool,
+        force_navigation: Option<ForcedIframeNavigation>,
+        inherits_creator_origin: bool,
+        inherited_creator_id: usize,
+        child_url: Option<&str>,
+        sandbox: IframeSandboxPolicy,
+    ) -> Result<PreparedIframeDocumentOrigins, JsHostError> {
+        let (storage, security) = if sandbox.active && !sandbox.allow_same_origin {
+            (None, self.new_opaque_security_origin()?)
+        } else if inherits_creator_origin {
+            (
+                self.document_origins
+                    .get(&inherited_creator_id)
+                    .cloned()
+                    .flatten(),
+                match self
+                    .document_security_origins
+                    .get(&inherited_creator_id)
+                    .cloned()
+                {
+                    Some(origin) => origin,
+                    None => self.new_opaque_security_origin()?,
+                },
+            )
+        } else {
+            match child_url.and_then(StorageOrigin::from_document_url) {
+                Some(origin) => (Some(origin.clone()), DocumentSecurityOrigin::Tuple(origin)),
+                None => (None, self.new_opaque_security_origin()?),
+            }
+        };
+        let declared_src = if initial_blank {
+            if sandbox.active && !sandbox.allow_same_origin {
+                Some(security.clone())
+            } else {
+                self.document_security_origins
+                    .get(&owner_document_id)
+                    .cloned()
+            }
+        } else if has_submission
+            || matches!(&force_navigation, Some(ForcedIframeNavigation::Location))
+        {
+            self.iframe_documents
+                .get(&iframe_id)
+                .and_then(|entry| entry.declared_src_origin.clone())
+                .or_else(|| {
+                    self.declared_iframe_origin(iframe, owner_document_id, &security, sandbox)
+                })
+        } else if let Some(ForcedIframeNavigation::RestoreDeclaredOrigin(origin)) = force_navigation
+        {
+            origin
+        } else {
+            self.declared_iframe_origin(iframe, owner_document_id, &security, sandbox)
+        };
+        let inherited_features = self.inherited_permissions_for_iframe(
+            iframe,
+            owner_document_id,
+            &security,
+            declared_src.as_ref(),
+        );
+        Ok(PreparedIframeDocumentOrigins {
+            storage,
+            security,
+            declared_src,
+            inherited_features,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_loaded_iframe_document_commit(
+        &mut self,
+        iframe: &NodeHandle,
+        iframe_id: usize,
+        resource_attribute: &'static str,
+        resource: String,
+        submission: Option<&form_submission::Submission>,
+        initial_blank: bool,
+        force_navigation: Option<ForcedIframeNavigation>,
+        javascript_resource: bool,
+        generation: u64,
+        new_context_id: Option<u64>,
+        input: IframeNavigationCommitInput,
+    ) -> Result<PreparedIframeDocumentCommit, JsHostError> {
+        let IframeNavigationCommitInput {
+            owner_document_id,
+            resource_base,
+            navigation_url,
+            source,
+            initial_about_blank,
+            inherits_creator_origin,
+            inherited_creator_id,
+            mut loaded,
+            storage_access_origin,
+        } = input;
+        let initiator_document_id = source.document_id;
         let reported_url = resolve_url_reference(&navigation_url, resource_base.as_ref());
         let (isolation, blocked) = self.child_response_isolation(
             owner_document_id,
@@ -3961,151 +4309,173 @@ impl HostState {
         } else {
             IframeSandboxPolicy::default()
         };
-        let (storage_origin, security_origin) = if sandbox.active && !sandbox.allow_same_origin {
-            (None, self.new_opaque_security_origin()?)
-        } else if inherits_creator_origin {
-            (
-                self.document_origins
-                    .get(&inherited_creator_id)
-                    .cloned()
-                    .flatten(),
-                match self
-                    .document_security_origins
-                    .get(&inherited_creator_id)
-                    .cloned()
-                {
-                    Some(origin) => origin,
-                    None => self.new_opaque_security_origin()?,
-                },
-            )
-        } else {
-            match child_url
-                .as_deref()
-                .and_then(StorageOrigin::from_document_url)
-            {
-                Some(origin) => (Some(origin.clone()), DocumentSecurityOrigin::Tuple(origin)),
-                None => (None, self.new_opaque_security_origin()?),
-            }
-        };
-        let declared_src_origin = if initial_blank {
-            if sandbox.active && !sandbox.allow_same_origin {
-                Some(security_origin.clone())
-            } else {
-                self.document_security_origins
-                    .get(&owner_document_id)
-                    .cloned()
-            }
-        } else if submission.is_some()
-            || matches!(&force_navigation, Some(ForcedIframeNavigation::Location))
-        {
-            self.iframe_documents
-                .get(&iframe_id)
-                .and_then(|entry| entry.declared_src_origin.clone())
-                .or_else(|| {
-                    self.declared_iframe_origin(
-                        iframe,
-                        owner_document_id,
-                        &security_origin,
-                        sandbox,
-                    )
-                })
-        } else if let Some(ForcedIframeNavigation::RestoreDeclaredOrigin(origin)) = force_navigation
-        {
-            origin
-        } else {
-            self.declared_iframe_origin(iframe, owner_document_id, &security_origin, sandbox)
-        };
-        let inherited_features = self.inherited_permissions_for_iframe(
+        let PreparedIframeDocumentOrigins {
+            storage,
+            security,
+            declared_src,
+            inherited_features,
+        } = self.prepare_iframe_document_origins(
             iframe,
+            iframe_id,
             owner_document_id,
-            &security_origin,
-            declared_src_origin.as_ref(),
-        );
+            initial_blank,
+            submission.is_some(),
+            force_navigation,
+            inherits_creator_origin,
+            inherited_creator_id,
+            child_url.as_deref(),
+            sandbox,
+        )?;
+        Ok(PreparedIframeDocumentCommit {
+            iframe_id,
+            resource_attribute,
+            resource,
+            initial_blank,
+            javascript_resource,
+            generation,
+            new_context_id,
+            owner_document_id,
+            resource_base,
+            navigation_url,
+            document,
+            security_headers,
+            response_status,
+            child_url,
+            storage_access_origin,
+            isolation,
+            inherited_csp,
+            inherited_referrer_policy,
+            referrer,
+            child_base_url,
+            sandbox,
+            storage_origin: storage,
+            security_origin: Some(security),
+            declared_src_origin: declared_src,
+            inherited_features,
+        })
+    }
 
+    fn commit_iframe_document_metadata(
+        &mut self,
+        iframe: &NodeHandle,
+        prepared: &mut PreparedIframeDocumentCommit,
+    ) -> String {
         // Prepare every fallible component before committing the navigation.
         // This keeps an exhausted monotonic-id space fail-closed without a
         // half-created context and keeps the previous Rc alive while the
         // replacement tree is allocated, preventing immediate pointer reuse.
-        self.retire_iframe_document(iframe_id);
-        if let Some(context_id) = new_context_id {
-            self.iframe_context_ids.insert(iframe_id, context_id);
-            self.browsing_context_names
-                .insert(iframe_id, iframe.get_attribute("name").unwrap_or_default());
+        // Replacing a child Document changes nested layout and pixels while the
+        // embedding element stays in the same main-document tree. Close any
+        // retained native-scroll authority before the replacement is visible.
+        self.native_scroll.revoke_policy();
+        self.retire_iframe_document(prepared.iframe_id);
+        if let Some(context_id) = prepared.new_context_id {
+            self.iframe_context_ids
+                .insert(prepared.iframe_id, context_id);
+            self.browsing_context_names.insert(
+                prepared.iframe_id,
+                iframe.get_attribute("name").unwrap_or_default(),
+            );
         }
-        self.register_tree(&document);
+        self.register_tree(&prepared.document);
         self.document_origins
-            .insert(document.identity(), storage_origin);
-        let committed_url = child_url
+            .insert(prepared.document.identity(), prepared.storage_origin.take());
+        let committed_url = prepared
+            .child_url
             .clone()
             .unwrap_or_else(|| "about:blank".to_string());
         self.document_urls
-            .insert(document.identity(), committed_url.clone());
-        self.register_document_reporting(document.identity(), &committed_url, response_status);
-        if let Some(metadata) = self.document_reporting.get_mut(&document.identity()) {
-            metadata.referrer = referrer;
-            metadata.referrer_policy = inherited_referrer_policy.unwrap_or_else(|| {
-                security_reporting::response_referrer_policy(&security_headers).unwrap_or_default()
-            });
+            .insert(prepared.document.identity(), committed_url.clone());
+        self.register_document_reporting(
+            prepared.document.identity(),
+            &committed_url,
+            prepared.response_status,
+        );
+        if let Some(metadata) = self
+            .document_reporting
+            .get_mut(&prepared.document.identity())
+        {
+            metadata.referrer = std::mem::take(&mut prepared.referrer);
+            metadata.referrer_policy =
+                prepared
+                    .inherited_referrer_policy
+                    .take()
+                    .unwrap_or_else(|| {
+                        security_reporting::response_referrer_policy(&prepared.security_headers)
+                            .unwrap_or_default()
+                    });
         }
-        self.apply_connected_referrer_metas(&document);
-        self.update_document_target(&document, &committed_url);
-        if let Some(child_base_url) = child_base_url.clone() {
+        self.apply_connected_referrer_metas(&prepared.document);
+        self.update_document_target(&prepared.document, &committed_url);
+        if let Some(child_base_url) = prepared.child_base_url.clone() {
             self.document_base_urls
-                .insert(document.identity(), child_base_url);
+                .insert(prepared.document.identity(), child_base_url);
         }
-        self.document_security_origins
-            .insert(document.identity(), security_origin);
-        self.document_inherited_permissions
-            .insert(document.identity(), inherited_features);
+        self.document_security_origins.insert(
+            prepared.document.identity(),
+            prepared
+                .security_origin
+                .take()
+                .expect("prepared iframe security origin"),
+        );
+        self.document_inherited_permissions.insert(
+            prepared.document.identity(),
+            std::mem::take(&mut prepared.inherited_features),
+        );
         self.document_permissions.insert(
-            document.identity(),
-            DocumentPolicy::from_response_headers(&security_headers),
+            prepared.document.identity(),
+            DocumentPolicy::from_response_headers(&prepared.security_headers),
         );
         let group_id = self
             .document_group_ids
-            .get(&owner_document_id)
+            .get(&prepared.owner_document_id)
             .copied()
             .unwrap_or(1);
         self.document_group_ids
-            .insert(document.identity(), group_id);
+            .insert(prepared.document.identity(), group_id);
         self.document_isolation_policies
-            .insert(document.identity(), isolation.clone());
-        self.document_sandbox.insert(document.identity(), sandbox);
-        // `data:` documents have an opaque origin.  They must not inherit the
+            .insert(prepared.document.identity(), prepared.isolation.clone());
+        self.document_sandbox
+            .insert(prepared.document.identity(), prepared.sandbox);
+        // `data:` documents have an opaque origin. They must not inherit the
         // embedding document's URL as the CSP base, otherwise `'self'` in a
         // meta policy would incorrectly match the parent origin.
-        let policy_base = if navigation_url
+        let policy_base = if prepared
+            .navigation_url
             .get(..5)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
         {
             String::new()
         } else {
-            child_url
+            prepared
+                .child_url
                 .as_deref()
                 .map(str::to_owned)
-                .or_else(|| child_base_url.as_ref().map(ToString::to_string))
+                .or_else(|| prepared.child_base_url.as_ref().map(ToString::to_string))
                 .unwrap_or_default()
         };
-        let policy = if let Some(inherited_csp) = inherited_csp {
+        let policy = if let Some(inherited_csp) = prepared.inherited_csp.take() {
             inherited_csp.with_document_meta(
-                &document,
-                &child_base_url
+                &prepared.document,
+                &prepared
+                    .child_base_url
                     .as_ref()
                     .map(ToString::to_string)
                     .unwrap_or_default(),
             )
         } else {
             CspPolicy::from_response_headers_and_document(
-                &security_headers,
-                &document,
+                &prepared.security_headers,
+                &prepared.document,
                 &policy_base,
             )
         };
-        self.document_csp.insert(document.identity(), policy);
+        self.document_csp
+            .insert(prepared.document.identity(), policy);
         // Seed a dirty style cache entry for the freshly loaded sub-document so
         // its resolver is built from its own `<style>` rules on first query.
         self.document_styles.insert(
-            document.identity(),
+            prepared.document.identity(),
             DocumentStyleEntry {
                 viewport_size: None,
                 resolver: None,
@@ -4116,22 +4486,30 @@ impl HostState {
                 child_layout: None,
             },
         );
+        committed_url
+    }
+
+    fn finish_iframe_document_commit(
+        &mut self,
+        mut prepared: PreparedIframeDocumentCommit,
+        submission: Option<&form_submission::Submission>,
+        committed_url: String,
+    ) -> NodeHandle {
         // A failed or policy-blocked load commits the blank fallback, not the
         // requested resource URL. Keep the iframe entry and document URL map
         // in agreement so the child Realm exposes the committed URL.
-        let document_url = committed_url;
         self.iframe_documents.insert(
-            iframe_id,
+            prepared.iframe_id,
             IframeDocument {
-                document: document.clone(),
-                document_url,
+                document: prepared.document.clone(),
+                document_url: committed_url,
                 realm: None,
-                loaded_attribute: resource_attribute,
-                loaded_resource: resource,
+                loaded_attribute: prepared.resource_attribute,
+                loaded_resource: prepared.resource,
                 initial_resource_task_completed: false,
-                declared_src_origin,
+                declared_src_origin: prepared.declared_src_origin.take(),
                 submission: submission.cloned(),
-                initial_scripts: collect_script_elements(&document)
+                initial_scripts: collect_script_elements(&prepared.document)
                     .into_iter()
                     .filter(|script| {
                         script.is_html_element()
@@ -4140,39 +4518,48 @@ impl HostState {
                     })
                     .map(|script| script.identity())
                     .collect(),
-                generation,
+                generation: prepared.generation,
                 javascript_replacement: false,
             },
         );
-        self.inherit_storage_access_navigation(document.identity(), storage_access_origin);
-        let isolated =
-            self.isolated_child_capability(owner_document_id, document.identity(), &isolation);
+        self.inherit_storage_access_navigation(
+            prepared.document.identity(),
+            prepared.storage_access_origin,
+        );
+        let isolated = self.isolated_child_capability(
+            prepared.owner_document_id,
+            prepared.document.identity(),
+            &prepared.isolation,
+        );
         self.document_isolated_capabilities
-            .insert(document.identity(), isolated);
+            .insert(prepared.document.identity(), isolated);
         // A parsed child Document can itself contain connected iframes. Their
         // initial about:blank navigations must enqueue load events even when no
         // script ever reads their contentDocument.
-        self.schedule_connected_resource_loads(&document, false, None);
-        let visit_source = if initial_blank {
+        self.schedule_connected_resource_loads(&prepared.document, false, None);
+        let visit_source = if prepared.initial_blank {
             None
         } else {
-            self.pending_iframe_visits.remove(&iframe_id)
+            self.pending_iframe_visits.remove(&prepared.iframe_id)
         };
-        if !initial_blank {
-            self.pending_iframe_referrers.remove(&iframe_id);
-            if !javascript_resource {
-                self.pending_iframe_clients.remove(&iframe_id);
+        if !prepared.initial_blank {
+            self.pending_iframe_referrers.remove(&prepared.iframe_id);
+            if !prepared.javascript_resource {
+                self.pending_iframe_clients.remove(&prepared.iframe_id);
             }
         }
-        if let (Some(visit_source), Some(committed_url)) = (visit_source, child_url.as_deref()) {
-            let requested_url = resolve_url_reference(&navigation_url, resource_base.as_ref());
+        if let (Some(visit_source), Some(committed_url)) =
+            (visit_source, prepared.child_url.as_deref())
+        {
+            let requested_url =
+                resolve_url_reference(&prepared.navigation_url, prepared.resource_base.as_ref());
             self.storage_manager.record_page_navigation(
                 &requested_url,
                 committed_url,
                 visit_source,
             );
         }
-        Ok(document)
+        prepared.document
     }
 
     /// Replaces an iframe's active Document with a javascript: string result.
@@ -4240,6 +4627,9 @@ impl HostState {
             })
             .map(|script| script.identity())
             .collect();
+        // A javascript: replacement swaps the nested render source in place.
+        // Revoke before retiring the old tree or installing the new one.
+        self.native_scroll.revoke_policy();
         self.retire_iframe_document(iframe_id);
         self.register_tree(&document);
         self.document_urls.insert(document_id, old_url.clone());
@@ -5656,49 +6046,12 @@ impl HostState {
         Option<(crate::http::HttpResponse, Vec<NavigationRedirect>)>,
         crate::http::HttpParseError,
     > {
-        let parent = container_document_id.map(|id| {
-            (
-                script_errors::document_fetch_origin(self, id),
-                self.isolation_policy_for_document(id).embedder,
-            )
-        });
-        let initial_url = request.url().to_string();
-        let mut redirects = Vec::new();
-        let mut violations = Vec::new();
-        let response =
-            self.http_client
-                .send_observing_navigation(request, &mut |request, response| {
-                    if !matches!(response.status_code(), 301 | 302 | 303 | 307 | 308) {
-                        return true;
-                    }
-                    if let Some((origin, embedder)) = &parent {
-                        let check = crate::http::corp::check_response(
-                            origin,
-                            request.url(),
-                            response.headers(),
-                            embedder.value.into(),
-                            embedder.report_only_value.into(),
-                            true,
-                            true,
-                        );
-                        if check.enforced_violation || check.report_only_violation {
-                            violations.push(crate::http::cors::CorpViolation {
-                                blocked_url: initial_url.clone(),
-                                report_only: check.report_only_violation,
-                                enforced: check.enforced_violation,
-                            });
-                        }
-                        if check.blocked {
-                            return false;
-                        }
-                    }
-                    redirects.push(NavigationRedirect {
-                        url: request.url().to_string(),
-                        headers: response.headers().to_vec(),
-                        request_referrer: request.header("Referer").unwrap_or_default().to_owned(),
-                    });
-                    true
-                });
+        let parent = container_document_id.map(|id| self.navigation_parent_policy(id));
+        let NavigationTransportResult {
+            response,
+            redirects,
+            violations,
+        } = OwnedNavigationTransport::new(request, parent).run(&mut self.http_client);
         if let Some(id) = container_document_id {
             self.queue_coep_corp_violations(id, "document", violations);
         }
@@ -5779,7 +6132,7 @@ impl HostState {
         self.pointer_lock.retire_document(document_id);
         self.input_bridge.retire_document(document_id);
         self.form_state.retire_document(document_id);
-        self.iframe_navigation.retire_document(document_id);
+        self.retire_iframe_navigation_document(document_id);
         self.form_validation.retire_document(document_id);
         self.worklet.retire_document(document_id);
         if self.fullscreen_elements.contains_key(&document_id) {
@@ -5911,8 +6264,7 @@ impl HostState {
             .retire_document(previous.document.identity());
         self.form_state
             .retire_document(previous.document.identity());
-        self.iframe_navigation
-            .retire_document(previous.document.identity());
+        self.retire_iframe_navigation_document(previous.document.identity());
         self.form_validation
             .retire_document(previous.document.identity());
         self.worklet.retire_document(previous.document.identity());
@@ -6028,6 +6380,7 @@ impl HostState {
     }
 
     fn destroy_iframe_context(&mut self, iframe_id: usize) {
+        self.cancel_iframe_navigation(iframe_id);
         self.retire_iframe_document(iframe_id);
         self.pending_forced_iframe_navigations.remove(&iframe_id);
         self.pending_iframe_visits.remove(&iframe_id);
@@ -6035,6 +6388,18 @@ impl HostState {
         self.pending_iframe_clients.remove(&iframe_id);
         self.iframe_context_ids.remove(&iframe_id);
         self.browsing_context_names.remove(&iframe_id);
+    }
+
+    fn retire_iframe_navigation_document(&mut self, document_id: usize) {
+        let cancelled = self
+            .iframe_navigation
+            .retire_document(document_id)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        self.event_loop.cancel_resource_loads_for_nodes(&cancelled);
+        for iframe_id in cancelled {
+            self.clear_iframe_navigation_intent(iframe_id);
+        }
     }
 
     /// Destroys every nested browsing context owned by iframe elements in a
@@ -6410,6 +6775,7 @@ impl HostState {
         let Some(chain) = self.fullscreen_chain(element) else {
             return false;
         };
+        self.native_scroll.revoke_policy();
         for (document_id, node) in chain {
             let stack = self.fullscreen_elements.entry(document_id).or_default();
             stack.retain(|id| *id != node.identity());
@@ -6431,6 +6797,7 @@ impl HostState {
         if require_host_approval && !self.fullscreen_transition_allowed {
             return false;
         }
+        self.native_scroll.revoke_policy();
         let stacks = std::mem::take(&mut self.fullscreen_elements);
         for node_id in stacks.into_values().flatten() {
             if let Some(node) = self.get_node(node_id) {
@@ -6539,6 +6906,7 @@ impl HostState {
     /// identity. When it is the main document, the cached layout tree is also
     /// dropped, because layout is only maintained for the main document.
     fn mark_document_style_dirty(&mut self, document: &NodeHandle) {
+        self.native_scroll.revoke_policy();
         self.form_validation.invalidate();
         task_diagnostics::record_document_dirty();
         let document_id = document.identity();
@@ -6558,6 +6926,7 @@ impl HostState {
     /// Drops geometry derived from a document resource while retaining its
     /// parsed cascade and computed-style caches.
     fn mark_document_layout_dirty(&mut self, document: &NodeHandle, reason: &'static str) {
+        self.native_scroll.revoke_policy();
         let document_id = document.identity();
         if document_id == self.document.identity() {
             self.capture_scroll_offsets_before_layout();
@@ -6586,6 +6955,7 @@ impl HostState {
         document: &NodeHandle,
         kind: NonInlineFullStyleInvalidation,
     ) {
+        self.native_scroll.revoke_policy();
         let document_id = document.identity();
         if let Some(entry) = self.document_styles.get_mut(&document_id) {
             entry.needs_full_sample = true;
@@ -6923,6 +7293,7 @@ impl HostState {
         if unchanged {
             return;
         }
+        self.native_scroll.revoke_policy();
         let old_subjects = next_subjects
             .as_ref()
             .map(|subjects| std::mem::replace(&mut self.focus_subjects, subjects.clone()));
@@ -6999,6 +7370,7 @@ impl HostState {
         let Some(document) = document_root_for_node(node) else {
             return;
         };
+        self.native_scroll.revoke_policy();
         if document.identity() == self.document.identity() {
             self.capture_scroll_offsets_before_layout();
             self.invalidate_layout_root("node_layout_invalidated");
@@ -7036,6 +7408,7 @@ impl HostState {
     /// change, because every resolver shares the same viewport for `vw`/`vh`
     /// resolution.
     fn mark_all_document_styles_dirty(&mut self) {
+        self.native_scroll.revoke_policy();
         self.style_generation = self.style_generation.saturating_add(1);
         for entry in self.document_styles.values_mut() {
             entry.dirty = true;
@@ -7145,6 +7518,9 @@ impl HostState {
         if !needs_rebuild {
             let transition_time_ms = self.event_loop.rendering_time_ms();
             let live_animations = self.live_css_animations;
+            // Sampling changes the next visual candidate, not the committed
+            // scene. GUI publication installs new geometry with its matching
+            // retained pixels; hard input-policy changes revoke separately.
             let (clock_effects, transition_properties) = self.advance_document_style_clocks(
                 document_id,
                 transition_time_ms,
@@ -7435,8 +7811,104 @@ impl HostState {
         }
     }
 
+    fn native_scroll_geometry(&mut self) -> (native_scroll::Offset, native_scroll::Bounds) {
+        let current = native_scroll::Offset {
+            x: f64::from(self.window_scroll.0),
+            y: f64::from(self.window_scroll.1),
+        };
+        let (max_x, max_y) = self.window_scroll_extent();
+        let extent = native_scroll::Bounds {
+            min: native_scroll::Offset::default(),
+            max: native_scroll::Offset {
+                x: f64::from(max_x),
+                y: f64::from(max_y),
+            },
+        };
+        (current, extent)
+    }
+
+    /// Commits accepted GUI defaults through the canonical setter before a
+    /// geometry read. The shared mutex is released before layout invalidation,
+    /// scroll-event queuing, or any subsequent script can run.
+    fn materialize_native_scroll_defaults(&mut self) {
+        let handle = self.native_scroll.clone();
+        if !handle.needs_owner_materialization(self.native_scroll_owner) {
+            return;
+        }
+        let trace_input = std::env::var_os("OMOIKANE_TRACE_INPUT").is_some();
+        let probe_before = trace_input
+            .then(|| handle.owner_sequences(self.native_scroll_owner).ok())
+            .flatten();
+        let (current, extent) = self.native_scroll_geometry();
+        let Ok(materialized) =
+            handle.materialize_pending(self.native_scroll_owner, current, extent)
+        else {
+            if trace_input {
+                crate::diagnostics::input_probe(serde_json::json!({
+                    "event":"materialization", "success":false,
+                    "key":format!("{:?}",self.native_scroll_owner),
+                }));
+            }
+            return;
+        };
+        if materialized.applied_count != 0 {
+            self.set_window_scroll_from_native_default(
+                materialized.offset.x as f32,
+                materialized.offset.y as f32,
+            );
+        }
+        if trace_input {
+            let after = handle.owner_sequences(self.native_scroll_owner).ok();
+            crate::diagnostics::input_probe(serde_json::json!({
+                "event":"materialization", "success":true, "key":format!("{:?}",self.native_scroll_owner),
+                "default_before":probe_before.map(|owner|owner.0),
+                "notified_before":probe_before.map(|owner|owner.1),
+                "default_after":after.map(|owner|owner.0),
+                "notified_after":after.map(|owner|owner.1),
+                "applied_count":materialized.applied_count,
+                "default_applied_sequence":materialized.default_applied_sequence,
+            }));
+        }
+    }
+
+    fn prepare_native_programmatic_scroll(
+        &mut self,
+        document_id: usize,
+    ) -> Option<native_scroll::ProgrammaticScrollToken> {
+        if document_id != self.document.identity() {
+            return None;
+        }
+        let (current, extent) = self.native_scroll_geometry();
+        let handle = self.native_scroll.clone();
+        let prepared = handle
+            .prepare_programmatic_scroll(self.native_scroll_owner, current, extent)
+            .ok()?;
+        if let Ok(materialized) = prepared.materialization
+            && materialized.applied_count != 0
+        {
+            self.set_window_scroll_from_native_default(
+                materialized.offset.x as f32,
+                materialized.offset.y as f32,
+            );
+        }
+        prepared.token
+    }
+
+    fn finish_native_programmatic_scroll(
+        &mut self,
+        token: Option<native_scroll::ProgrammaticScrollToken>,
+    ) {
+        let Some(token) = token else {
+            return;
+        };
+        let (actual, extent) = self.native_scroll_geometry();
+        let handle = self.native_scroll.clone();
+        let _ = handle.finish_programmatic_scroll(token, actual, extent);
+    }
+
     fn window_scroll_for_document(&mut self, document_id: usize) -> (f32, f32) {
         if document_id == self.document.identity() {
+            self.materialize_native_scroll_defaults();
             let current = self.window_scroll;
             if current != (0.0, 0.0) {
                 self.set_window_scroll(current.0, current.1);
@@ -7473,6 +7945,7 @@ impl HostState {
         if current == next {
             return false;
         }
+        self.native_scroll.revoke_policy();
         self.iframe_window_scrolls.insert(document_id, next);
         self.invalidate_paint_cache();
         self.queue_scroll_target(document_id);
@@ -7630,18 +8103,21 @@ impl HostState {
         focus: Option<HashSet<usize>>,
         selection: Option<HashSet<usize>>,
     ) {
-        let mut changed = false;
-        if let Some(focus) = focus
-            && self.content_visibility_focus_nodes != focus
-        {
-            self.content_visibility_focus_nodes = focus;
-            changed = true;
+        let focus_changed = focus
+            .as_ref()
+            .is_some_and(|focus| self.content_visibility_focus_nodes != *focus);
+        let selection_changed = selection
+            .as_ref()
+            .is_some_and(|selection| self.content_visibility_selection_nodes != *selection);
+        let changed = focus_changed || selection_changed;
+        if changed {
+            self.native_scroll.revoke_policy();
         }
-        if let Some(selection) = selection
-            && self.content_visibility_selection_nodes != selection
-        {
+        if focus_changed && let Some(focus) = focus {
+            self.content_visibility_focus_nodes = focus;
+        }
+        if selection_changed && let Some(selection) = selection {
             self.content_visibility_selection_nodes = selection;
-            changed = true;
         }
         if changed {
             self.capture_scroll_offsets_before_layout();
@@ -7689,6 +8165,7 @@ impl HostState {
         {
             return;
         }
+        self.native_scroll.revoke_policy();
         self.content_visibility_forced_nodes.extend(ancestors);
         self.capture_scroll_offsets_before_layout();
         self.invalidate_layout_root("content_visibility_geometry");
@@ -7728,6 +8205,9 @@ impl HostState {
         static TRACE_PAINT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let trace = *TRACE_PAINT.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_PAINT").is_some());
         let started = Instant::now();
+        // getBoundingClientRect, hit testing, paint and other adjusted-layout
+        // users must observe every default already accepted by the GUI.
+        self.materialize_native_scroll_defaults();
         self.ensure_layout();
         let ensured_layout = started.elapsed();
         let current = (
@@ -7789,6 +8269,10 @@ impl HostState {
     }
 
     fn window_scroll_extent(&mut self) -> (f32, f32) {
+        #[cfg(test)]
+        {
+            self.window_scroll_extent_calls = self.window_scroll_extent_calls.saturating_add(1);
+        }
         self.ensure_layout();
         let (scroll_width, scroll_height) = self
             .layout_root
@@ -7803,10 +8287,24 @@ impl HostState {
     }
 
     fn set_window_scroll(&mut self, x: f32, y: f32) -> bool {
+        self.set_window_scroll_impl(x, y, true)
+    }
+
+    /// Applies an already accepted FIFO default without revoking the authority
+    /// that accepted it. All other root-scroll mutations use
+    /// `set_window_scroll` and close policy before changing the canonical value.
+    fn set_window_scroll_from_native_default(&mut self, x: f32, y: f32) -> bool {
+        self.set_window_scroll_impl(x, y, false)
+    }
+
+    fn set_window_scroll_impl(&mut self, x: f32, y: f32, revoke: bool) -> bool {
         let (max_x, max_y) = self.window_scroll_extent();
         let next = (x.clamp(0.0, max_x), y.clamp(0.0, max_y));
         if self.window_scroll == next {
             return false;
+        }
+        if revoke {
+            self.native_scroll.revoke_policy();
         }
         self.window_scroll = next;
         self.scroll_generation = self.scroll_generation.saturating_add(1);
@@ -7856,19 +8354,27 @@ impl HostState {
         let previous = layout.scroll_offset();
         let (max_x, max_y) = layout.max_scroll_offset();
         let next = (x.clamp(0.0, max_x), y.clamp(0.0, max_y));
-        node.set_scroll_offset(next.0, next.1);
-        let changed = previous != next;
-        if changed {
-            self.scroll_generation = self.scroll_generation.saturating_add(1);
-            self.invalidate_paint_cache();
-            self.queue_scroll_target(node.identity());
+        if previous == next {
+            return false;
         }
-        changed
+        self.native_scroll.revoke_policy();
+        node.set_scroll_offset(next.0, next.1);
+        self.scroll_generation = self.scroll_generation.saturating_add(1);
+        self.invalidate_paint_cache();
+        self.queue_scroll_target(node.identity());
+        true
     }
 
     fn cancel_smooth_scroll(&mut self, target: SmoothScrollTarget) {
+        let before = self.smooth_scrolls.len();
         self.smooth_scrolls
             .retain(|animation| animation.target != target);
+        if before != self.smooth_scrolls.len()
+            && target == SmoothScrollTarget::Document(self.document.identity())
+        {
+            let token = self.native_scroll_smooth_token.take();
+            self.finish_native_programmatic_scroll(token);
+        }
     }
 
     fn scroll_snap_geometry(
@@ -7955,14 +8461,14 @@ impl HostState {
         }
     }
 
-    fn scroll_document_to(&mut self, document_id: usize, x: f32, y: f32, smooth: bool) {
+    fn scroll_document_to(&mut self, document_id: usize, x: f32, y: f32, smooth: bool) -> bool {
         let target = SmoothScrollTarget::Document(document_id);
         self.cancel_smooth_scroll(target);
         let (x, y) =
             self.snapped_scroll_endpoint(target, (x, y), scroll_snap::Selection::default());
         if !smooth {
             self.set_window_scroll_for_document(document_id, x, y);
-            return;
+            return false;
         }
         let current = self.window_scroll_for_document(document_id);
         let end = if document_id == self.document.identity() {
@@ -7972,7 +8478,7 @@ impl HostState {
             (x.max(0.0), y.max(0.0))
         };
         if current == end {
-            return;
+            return false;
         }
         self.smooth_scrolls.push(SmoothScrollAnimation {
             target,
@@ -7980,6 +8486,7 @@ impl HostState {
             end,
             started_ms: self.event_loop.rendering_time_ms(),
         });
+        true
     }
 
     fn scroll_element_to(&mut self, node: &NodeHandle, x: f32, y: f32, smooth: bool) {
@@ -8049,6 +8556,15 @@ impl HostState {
             if live && progress < 1.0 {
                 self.smooth_scrolls.push(animation);
             }
+        }
+        let main_target = SmoothScrollTarget::Document(self.document.identity());
+        if !self
+            .smooth_scrolls
+            .iter()
+            .any(|animation| animation.target == main_target)
+        {
+            let token = self.native_scroll_smooth_token.take();
+            self.finish_native_programmatic_scroll(token);
         }
     }
 }
@@ -8304,6 +8820,7 @@ pub struct JsRuntime {
     module_loader: Rc<HttpModuleLoader>,
     sandbox: SandboxConfig,
     task_pump_limit: usize,
+    retained_scroll: retained_scroll::RetainedScrollCapture,
 }
 
 /// Operation on the browser-owned page search session.
@@ -8510,6 +9027,7 @@ impl JsRuntime {
             module_loader,
             sandbox,
             task_pump_limit: usize::MAX,
+            retained_scroll: retained_scroll::RetainedScrollCapture::default(),
         };
         let bindings = register_host_bindings(&mut runtime.context, &runtime.host_state)?;
         {
@@ -9179,10 +9697,37 @@ impl JsRuntime {
         }
     }
 
+    /// Activates one numeric native-scroll target and returns its shared handle.
+    ///
+    /// The caller must allocate a fresh document or owner generation before a
+    /// replacement. Activation retires old accepted inputs, notifications,
+    /// publications, fallbacks, and programmatic-scroll completion tokens.
+    pub fn activate_native_scroll(
+        &mut self,
+        key: native_scroll::TargetKey,
+    ) -> native_scroll::NativeScrollHandle {
+        let mut state = self.host_state.borrow_mut();
+        let handle = state.native_scroll.clone();
+        handle.activate(key);
+        state.native_scroll_owner = key;
+        state.native_scroll_smooth_token = None;
+        let main_target = SmoothScrollTarget::Document(state.document.identity());
+        state
+            .smooth_scrolls
+            .retain(|animation| animation.target != main_target);
+        handle
+    }
+
+    /// Returns the opaque numeric-only handle for the active page owner.
+    pub fn native_scroll_handle(&self) -> native_scroll::NativeScrollHandle {
+        self.host_state.borrow().native_scroll.clone()
+    }
+
     /// Paints the current document with the layout used by CSSOM and input.
     pub(crate) fn paint_current_document(
         &mut self,
     ) -> Result<crate::paint::Canvas, crate::paint::PaintError> {
+        self.retained_scroll.clear_frame();
         let timeline = Arc::clone(&self.host_state.borrow().image_timeline);
         let canvas = crate::layout::with_image_animation_timeline(timeline, || {
             self.paint_document_at_current_image_time()
@@ -9200,6 +9745,7 @@ impl JsRuntime {
         let start = Instant::now();
         state.ensure_adjusted_layout();
         let layout_time = start.elapsed();
+        let retained_request = self.retained_scroll.prepare(&mut state);
         let document_id = state.document.identity();
         let mut paint_attribution = frame_diagnostics::PaintAttributionScope::begin(document_id);
         let visited_link_ids = state.visited_link_ids_for_paint(&state.document);
@@ -9245,16 +9791,25 @@ impl JsRuntime {
         let ((canvas, raster_summary), image_reports) = image_environment.run(false, || {
             crate::layout::with_image_base_url(base, || {
                 crate::layout::with_image_animation_time(animation_time, || {
-                    nested_rendering::paint_layout_with_snapshot_attribution(
+                    let painted = nested_rendering::paint_layout_with_snapshot_attribution(
                         diagnostics_enabled,
                         &layout,
                         resolver,
                         viewport,
                         &entry.web_fonts,
-                        visited_link_ids,
+                        visited_link_ids.iter().copied(),
                         &snapshots,
                         Some(shadow_masks),
-                    )
+                    );
+                    self.retained_scroll.capture(
+                        retained_request,
+                        resolver,
+                        &entry.web_fonts,
+                        &visited_link_ids,
+                        &snapshots,
+                        shadow_masks,
+                    );
+                    painted
                 })
             })
         });
@@ -9386,12 +9941,14 @@ impl JsRuntime {
         // consistent and well-defined.
         let width = sanitize_viewport_dimension(width);
         let height = sanitize_viewport_dimension(height);
-        {
+        let native_scroll = {
             let state = self.host_state.borrow();
             if state.viewport.width == width && state.viewport.height == height {
                 return;
             }
-        }
+            state.native_scroll.clone()
+        };
+        native_scroll.revoke_policy();
         {
             let mut state = self.host_state.borrow_mut();
             let previous_viewport = state.viewport;
@@ -9480,17 +10037,31 @@ impl JsRuntime {
         } else {
             1.0
         };
-        let mut state = self.host_state.borrow_mut();
-        let previous = state.visual_viewport;
-        let width = width.min(state.viewport.width);
-        let height = height.min(state.viewport.height);
-        state.visual_viewport = VisualViewportState {
-            width,
-            height,
-            offset_left: offset_left.min((state.viewport.width - width).max(0.0)),
-            offset_top: offset_top.min((state.viewport.height - height).max(0.0)),
-            scale,
+        let (previous, next, follows_layout, native_scroll) = {
+            let state = self.host_state.borrow();
+            let previous = state.visual_viewport;
+            let width = width.min(state.viewport.width);
+            let height = height.min(state.viewport.height);
+            let next = VisualViewportState {
+                width,
+                height,
+                offset_left: offset_left.min((state.viewport.width - width).max(0.0)),
+                offset_top: offset_top.min((state.viewport.height - height).max(0.0)),
+                scale,
+            };
+            (
+                previous,
+                next,
+                state.visual_viewport_follows_layout,
+                state.native_scroll.clone(),
+            )
         };
+        if previous == next && !follows_layout {
+            return;
+        }
+        native_scroll.revoke_policy();
+        let mut state = self.host_state.borrow_mut();
+        state.visual_viewport = next;
         state.visual_viewport_follows_layout = false;
         let document_id = state.document.identity();
         if previous.width != state.visual_viewport.width
@@ -10709,6 +11280,7 @@ impl JsRuntime {
     /// callbacks re-scheduled from within a firing callback (e.g. an
     /// `setTimeout(update, delay)` chain) become due on subsequent ticks.
     pub fn tick(&mut self, elapsed_ms: u64) -> JsResult<()> {
+        self.revoke_native_scroll_for_render_clock_advance(elapsed_ms);
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.advance_worker_clocks(elapsed_ms);
         self.advance_worklet_clocks(elapsed_ms);
@@ -10739,6 +11311,7 @@ impl JsRuntime {
         font_loading::poll_resource_loads(&mut self.host_state.borrow_mut());
         self.host_state.borrow_mut().poll_script_loads();
         fetch_loading::poll(self);
+        self.host_state.borrow_mut().poll_iframe_navigation_loads();
         // An embedder call may have completed a script task and left promise
         // jobs pending. Its checkpoint can itself enqueue host tasks.
         self.run_jobs()?;
@@ -10789,6 +11362,10 @@ impl JsRuntime {
                         payload: TimerPayload::JavascriptDocumentLoad { .. },
                         ..
                     } => "javascript_document_load".to_string(),
+                    Task::Timer {
+                        payload: TimerPayload::IframeNavigationReady { .. },
+                        ..
+                    } => "iframe_navigation_ready".to_string(),
                     Task::Timer { .. } => "timer".to_string(),
                     Task::SecurityPolicyViolation { .. } => "security_policy_violation".to_string(),
                     _ => "other".to_string(),
@@ -10947,6 +11524,7 @@ impl JsRuntime {
         font_loading::poll_resource_loads(&mut self.host_state.borrow_mut());
         self.host_state.borrow_mut().poll_script_loads();
         fetch_loading::poll(self);
+        self.host_state.borrow_mut().poll_iframe_navigation_loads();
         self.run_jobs()?;
         self.dispatch_cookie_changes()?;
         self.run_worklet_background_tasks();
@@ -12005,12 +12583,14 @@ impl JsRuntime {
     /// Native hosts use this before input so newly created timers start at the
     /// current page time while slow page tasks remain deferred.
     pub fn advance_clock_without_tasks(&mut self, elapsed_ms: u64) {
+        self.revoke_native_scroll_for_render_clock_advance(elapsed_ms);
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.advance_worker_clocks(elapsed_ms);
         self.advance_worklet_clocks(elapsed_ms);
     }
 
     async fn run_animation_frame_async(&mut self, elapsed_ms: u64) -> JsResult<usize> {
+        self.revoke_native_scroll_for_render_clock_advance(elapsed_ms);
         self.host_state.borrow_mut().event_loop.advance(elapsed_ms);
         self.advance_worker_clocks(elapsed_ms);
         self.advance_worklet_clocks(elapsed_ms);
@@ -12340,6 +12920,7 @@ impl JsRuntime {
             {
                 break;
             }
+            self.revoke_native_scroll_for_render_clock_advance(step);
             self.host_state.borrow_mut().event_loop.advance(step);
             self.advance_worker_clocks(step);
             self.advance_worklet_clocks(step);
@@ -12869,6 +13450,209 @@ impl JsRuntime {
         Ok(())
     }
 
+    fn restore_pending_iframe_document(&mut self, iframe: usize) -> JsResult<()> {
+        let document = self
+            .host_state
+            .borrow()
+            .iframe_documents
+            .get(&iframe)
+            .map(|entry| entry.document.identity());
+        if let Some(document) = document {
+            form_state::restore_pending_document(&self.host_state, document, &mut self.context)?;
+        }
+        Ok(())
+    }
+
+    fn queue_iframe_history_restore(
+        &mut self,
+        iframe: usize,
+        restore: form_state::PendingIframeHistoryRestore,
+    ) -> JsResult<()> {
+        let document = form_state::queue_iframe_history_restore(
+            &mut self.host_state.borrow_mut(),
+            iframe,
+            restore,
+        );
+        if let Some(document) = document {
+            let host = Rc::clone(&self.host_state);
+            let _document = activate_module_document(&host, document);
+            self.with_active_host(|context| {
+                form_state::restore_pending_document(&host, document, context)
+            })?;
+        }
+        Ok(())
+    }
+
+    fn run_javascript_iframe_form_submission(
+        &mut self,
+        frame: &NodeHandle,
+        node_id: usize,
+        epoch: u64,
+        request: &form_submission::Submission,
+        source_document_id: usize,
+        client_security: Option<&NavigationSecuritySnapshot>,
+    ) -> JsResult<()> {
+        let target_document_id = {
+            let mut state = self.host_state.borrow_mut();
+            if state.current_iframe_navigation_epoch(node_id) != Some(epoch) {
+                return Ok(());
+            }
+            if !state.iframe_documents.contains_key(&node_id) {
+                state
+                    .iframe_document_with_submission(frame, None, None, true)
+                    .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
+            }
+            state.pending_resource_loads.remove(&node_id);
+            state.pending_forced_iframe_navigations.remove(&node_id);
+            state.pending_iframe_visits.remove(&node_id);
+            state.pending_iframe_referrers.remove(&node_id);
+            state.pending_iframe_clients.remove(&node_id);
+            state
+                .iframe_documents
+                .get(&node_id)
+                .map(|entry| entry.document.identity())
+        };
+        let completion = if let Some(target_document_id) = target_document_id {
+            let same_origin = {
+                let state = self.host_state.borrow();
+                client_security.is_some_and(|client| {
+                    state.document_security_origins.get(&target_document_id)
+                        == Some(&client.security_origin)
+                })
+            };
+            if same_origin {
+                if let Some(realm) = self.realm_for_document(target_document_id)? {
+                    let previous = self.context.enter_realm(realm);
+                    let completion = self.with_active_host_value(|context| {
+                        evaluate_javascript_url_in_context(
+                            &request.url,
+                            source_document_id,
+                            target_document_id,
+                            client_security.map(|client| &client.csp),
+                            context,
+                        )
+                    });
+                    self.context.enter_realm(previous);
+                    completion.map(|markup| (target_document_id, markup))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let restore = {
+            let mut state = self.host_state.borrow_mut();
+            let Some(restore) = state.finish_local_iframe_navigation(node_id, epoch) else {
+                return Ok(());
+            };
+            restore
+        };
+        if let Some((target_document_id, markup)) = completion {
+            let committed = self
+                .host_state
+                .borrow_mut()
+                .commit_javascript_iframe_document(node_id, target_document_id, &markup)
+                .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
+            if committed.is_none() {
+                return Ok(());
+            }
+        }
+        if let Some(restore) = restore {
+            self.queue_iframe_history_restore(node_id, restore)?;
+        }
+        Ok(())
+    }
+
+    fn run_iframe_form_submission(
+        &mut self,
+        node_id: usize,
+        epoch: u64,
+        request: form_submission::Submission,
+        source_document_id: usize,
+        client_security: Option<NavigationSecuritySnapshot>,
+        visit_source: Option<VisitSource>,
+        referrer_source: NavigationReferrerSource,
+    ) -> JsResult<()> {
+        if self
+            .host_state
+            .borrow()
+            .current_iframe_navigation_epoch(node_id)
+            != Some(epoch)
+        {
+            return Ok(());
+        }
+        let Some(frame) = self.host_state.borrow().get_node(node_id) else {
+            let mut state = self.host_state.borrow_mut();
+            state.cancel_iframe_navigation(node_id);
+            state.clear_iframe_navigation_intent(node_id);
+            return Ok(());
+        };
+        if !self.host_state.borrow().node_is_in_active_document(&frame) {
+            let mut state = self.host_state.borrow_mut();
+            state.cancel_iframe_navigation(node_id);
+            state.clear_iframe_navigation_intent(node_id);
+            return Ok(());
+        }
+        if url::Url::parse(&request.url).is_ok_and(|url| url.scheme() == "javascript") {
+            return self.run_javascript_iframe_form_submission(
+                &frame,
+                node_id,
+                epoch,
+                &request,
+                source_document_id,
+                client_security.as_ref(),
+            );
+        }
+        {
+            let mut state = self.host_state.borrow_mut();
+            if let Some(visit_source) = visit_source {
+                state.pending_iframe_visits.insert(node_id, visit_source);
+            } else {
+                state.pending_iframe_visits.remove(&node_id);
+            }
+            state
+                .pending_iframe_referrers
+                .insert(node_id, referrer_source);
+        }
+        let local_restore = match self
+            .host_state
+            .borrow_mut()
+            .begin_reserved_iframe_navigation(
+                &frame,
+                Some(epoch),
+                Some(&request),
+                Some(source_document_id),
+            )
+            .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?
+        {
+            iframe_navigation::IframeNavigationStart::Stale => return Ok(()),
+            iframe_navigation::IframeNavigationStart::Deferred => return Ok(()),
+            iframe_navigation::IframeNavigationStart::Local(restore) => restore,
+        };
+        let loaded = self
+            .host_state
+            .borrow_mut()
+            .iframe_document_with_submission(
+                &frame,
+                Some(&request),
+                Some(source_document_id),
+                false,
+            );
+        if let Err(error) = loaded {
+            self.host_state
+                .borrow_mut()
+                .clear_iframe_navigation_intent(node_id);
+            return Err(JsNativeError::typ().with_message(error.to_string()).into());
+        }
+        if let Some(restore) = local_restore {
+            self.queue_iframe_history_restore(node_id, restore)?;
+        }
+        self.run_timer_payload(TimerPayload::ResourceLoad { node_id })
+    }
+
     /// Executes a single timer payload: evaluates a source string, or invokes a
     /// retained function callback with its bound extra arguments.
     fn run_timer_payload(&mut self, payload: TimerPayload) -> JsResult<()> {
@@ -12907,103 +13691,23 @@ impl JsRuntime {
             }
             TimerPayload::FormSubmission {
                 node_id,
+                epoch,
                 request,
                 source_document_id,
                 client_security,
                 visit_source,
                 referrer_source,
-            } => {
-                let frame = self.host_state.borrow().get_node(node_id);
-                let Some(frame) = frame else {
-                    let mut state = self.host_state.borrow_mut();
-                    state.pending_iframe_visits.remove(&node_id);
-                    state.pending_iframe_referrers.remove(&node_id);
-                    return Ok(());
-                };
-                let frame_is_active = self.host_state.borrow().node_is_in_active_document(&frame);
-                if !frame_is_active {
-                    let mut state = self.host_state.borrow_mut();
-                    state.pending_iframe_visits.remove(&node_id);
-                    state.pending_iframe_referrers.remove(&node_id);
-                    return Ok(());
-                }
-                if url::Url::parse(&request.url).is_ok_and(|url| url.scheme() == "javascript") {
-                    let target_document_id = {
-                        let mut state = self.host_state.borrow_mut();
-                        let target = state.iframe_content_document(&frame).ok();
-                        state.pending_iframe_visits.remove(&node_id);
-                        state.pending_iframe_referrers.remove(&node_id);
-                        target.map(|document| document.identity())
-                    };
-                    if let Some(target_document_id) = target_document_id {
-                        let same_origin = {
-                            let state = self.host_state.borrow();
-                            client_security.as_ref().is_some_and(|client| {
-                                state.document_security_origins.get(&target_document_id)
-                                    == Some(&client.security_origin)
-                            })
-                        };
-                        if same_origin
-                            && let Some(realm) = self.realm_for_document(target_document_id)?
-                        {
-                            let previous = self.context.enter_realm(realm);
-                            let completion = self.with_active_host_value(|context| {
-                                evaluate_javascript_url_in_context(
-                                    &request.url,
-                                    source_document_id,
-                                    target_document_id,
-                                    client_security.as_ref().map(|client| &client.csp),
-                                    context,
-                                )
-                            });
-                            self.context.enter_realm(previous);
-                            if let Some(markup) = completion {
-                                self.host_state
-                                    .borrow_mut()
-                                    .commit_javascript_iframe_document(
-                                        node_id,
-                                        target_document_id,
-                                        &markup,
-                                    )
-                                    .map_err(|error| {
-                                        JsNativeError::error().with_message(error.to_string())
-                                    })?;
-                            }
-                        }
-                    }
-                    return Ok(());
-                }
-                if let Some(visit_source) = visit_source {
-                    self.host_state
-                        .borrow_mut()
-                        .pending_iframe_visits
-                        .insert(node_id, visit_source);
-                } else {
-                    self.host_state
-                        .borrow_mut()
-                        .pending_iframe_visits
-                        .remove(&node_id);
-                }
-                self.host_state
-                    .borrow_mut()
-                    .pending_iframe_referrers
-                    .insert(node_id, referrer_source);
-                let loaded = self
-                    .host_state
-                    .borrow_mut()
-                    .iframe_document_with_submission(
-                        &frame,
-                        Some(&request),
-                        Some(source_document_id),
-                        false,
-                    );
-                if let Err(error) = loaded {
-                    let mut state = self.host_state.borrow_mut();
-                    state.pending_iframe_visits.remove(&node_id);
-                    state.pending_iframe_referrers.remove(&node_id);
-                    return Err(JsNativeError::typ().with_message(error.to_string()).into());
-                }
-                self.run_timer_payload(TimerPayload::ResourceLoad { node_id })
+            } => self.run_iframe_form_submission(
+                node_id,
+                epoch,
+                request,
+                source_document_id,
+                client_security,
+                visit_source,
+                referrer_source,
+            ),
+            TimerPayload::IframeNavigationReady { node_id, epoch } => {
+                self.run_ready_iframe_navigation(node_id, epoch)
             }
             TimerPayload::ResourceLoad { node_id } => self.run_resource_load_timer(node_id),
             TimerPayload::ScriptResourceReady { node_id } => self.run_ready_script_load(node_id),
@@ -13028,6 +13732,31 @@ impl JsRuntime {
             } => self.run_javascript_iframe_document_load(iframe_id, document_id),
             TimerPayload::GeolocationTimeout { request_id } => {
                 self.run_geolocation_delivery(request_id, true)
+            }
+        }
+    }
+
+    fn run_ready_iframe_navigation(&mut self, node_id: usize, epoch: u64) -> JsResult<()> {
+        let committed = self
+            .host_state
+            .borrow_mut()
+            .commit_ready_iframe_navigation(node_id, epoch);
+        match committed {
+            Ok(iframe_navigation::IframeNavigationReady::Ignored) => Ok(()),
+            Ok(iframe_navigation::IframeNavigationReady::Committed(restore_document)) => {
+                if let Some(document) = restore_document {
+                    form_state::restore_pending_document(
+                        &self.host_state,
+                        document,
+                        &mut self.context,
+                    )?;
+                }
+                self.run_timer_payload(TimerPayload::ResourceLoad { node_id })
+            }
+            Err(error) => {
+                let mut state = self.host_state.borrow_mut();
+                state.clear_iframe_navigation_intent(node_id);
+                Err(JsNativeError::typ().with_message(error).into())
             }
         }
     }
@@ -13096,6 +13825,7 @@ impl JsRuntime {
                 .remove(&node_id);
             return Ok(());
         };
+        self.restore_pending_iframe_document(node_id)?;
         let gather_ms = gather_started.elapsed().as_secs_f64() * 1000.0;
         let dispatch_document_id = dynamic_script
             .as_ref()
@@ -13220,7 +13950,7 @@ impl JsRuntime {
     /// owner's Document is the request client, while the existing iframe
     /// Document supplies the execution Realm and inline CSP check.
     fn try_run_javascript_iframe_resource(&mut self, node_id: usize) -> JsResult<bool> {
-        let Some((url, client, target_document_id, same_origin)) = (|| {
+        let Some((url, client, target_document_id, same_origin, epoch)) = (|| {
             let mut state = self.host_state.borrow_mut();
             let frame = state.get_node(node_id)?;
             if !frame.has_tag_name("iframe")
@@ -13233,12 +13963,19 @@ impl JsRuntime {
             if !url::Url::parse(&url).is_ok_and(|url| url.scheme() == "javascript") {
                 return None;
             }
-            let target_document_id = state.iframe_content_document(&frame).ok()?.identity();
+            let epoch = state.current_iframe_navigation_epoch(node_id);
+            if !state.iframe_documents.contains_key(&node_id) {
+                state
+                    .iframe_document_with_submission(&frame, None, None, true)
+                    .ok()?;
+            }
+            let target_document_id = state.iframe_documents.get(&node_id)?.document.identity();
             let client = state.pending_iframe_clients.remove(&node_id).or_else(|| {
                 owner_document_for_node(&frame)
                     .and_then(|owner| state.navigation_security_snapshot(owner.identity()))
             })?;
             state.pending_resource_loads.remove(&node_id);
+            state.pending_forced_iframe_navigations.remove(&node_id);
             if let Some(entry) = state.iframe_documents.get_mut(&node_id) {
                 entry.initial_resource_task_completed = true;
             }
@@ -13246,32 +13983,54 @@ impl JsRuntime {
             state.pending_iframe_referrers.remove(&node_id);
             let same_origin = state.document_security_origins.get(&target_document_id)
                 == Some(&client.security_origin);
-            Some((url, client, target_document_id, same_origin))
+            Some((url, client, target_document_id, same_origin, epoch))
         })() else {
             return Ok(false);
         };
-        if !same_origin {
-            return Ok(true);
-        }
-        let Some(realm) = self.realm_for_document(target_document_id)? else {
-            return Ok(true);
+        let completion = if same_origin {
+            if let Some(realm) = self.realm_for_document(target_document_id)? {
+                let previous = self.context.enter_realm(realm);
+                let completion = self.with_active_host_value(|context| {
+                    evaluate_javascript_url_in_context(
+                        &url,
+                        client.document_id,
+                        target_document_id,
+                        Some(&client.csp),
+                        context,
+                    )
+                });
+                self.context.enter_realm(previous);
+                completion
+            } else {
+                None
+            }
+        } else {
+            None
         };
-        let previous = self.context.enter_realm(realm);
-        let completion = self.with_active_host_value(|context| {
-            evaluate_javascript_url_in_context(
-                &url,
-                client.document_id,
-                target_document_id,
-                Some(&client.csp),
-                context,
-            )
-        });
-        self.context.enter_realm(previous);
+        let restore = if let Some(epoch) = epoch {
+            let Some(restore) = self
+                .host_state
+                .borrow_mut()
+                .finish_local_iframe_navigation(node_id, epoch)
+            else {
+                return Ok(true);
+            };
+            restore
+        } else {
+            None
+        };
         if let Some(markup) = completion {
-            self.host_state
+            let committed = self
+                .host_state
                 .borrow_mut()
                 .commit_javascript_iframe_document(node_id, target_document_id, &markup)
                 .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
+            if committed.is_none() {
+                return Ok(true);
+            }
+        }
+        if let Some(restore) = restore {
+            self.queue_iframe_history_restore(node_id, restore)?;
         }
         Ok(true)
     }
@@ -13286,21 +14045,33 @@ impl JsRuntime {
         node_id: usize,
     ) -> JsResult<Option<(bool, Vec<NodeHandle>, Option<DynamicScriptInfo>, usize)>> {
         let mut state = self.host_state.borrow_mut();
-        state.pending_resource_loads.remove(&node_id);
-        state.pending_iframe_clients.remove(&node_id);
         let Some(node) = state.get_node(node_id) else {
-            state.pending_iframe_visits.remove(&node_id);
-            state.pending_iframe_referrers.remove(&node_id);
+            state.cancel_iframe_navigation(node_id);
+            state.clear_iframe_navigation_intent(node_id);
             return Ok(None);
         };
         let resource_document_id = document_root_for_node(&node)
             .map(|document| document.identity())
             .unwrap_or_else(|| state.document.identity());
         if !state.node_is_in_active_document(&node) {
-            state.pending_iframe_visits.remove(&node_id);
-            state.pending_iframe_referrers.remove(&node_id);
+            state.cancel_iframe_navigation(node_id);
+            state.clear_iframe_navigation_intent(node_id);
             Ok(Some((false, Vec::new(), None, resource_document_id)))
         } else {
+            let local_restore = if node.tag_name().is_some_and(|tag| is_nested_frame_tag(&tag)) {
+                match state
+                    .begin_reserved_iframe_navigation(&node, None, None, None)
+                    .map_err(|error| JsNativeError::error().with_message(error.to_string()))?
+                {
+                    iframe_navigation::IframeNavigationStart::Deferred
+                    | iframe_navigation::IframeNavigationStart::Stale => return Ok(None),
+                    iframe_navigation::IframeNavigationStart::Local(restore) => restore,
+                }
+            } else {
+                None
+            };
+            state.pending_resource_loads.remove(&node_id);
+            state.pending_iframe_clients.remove(&node_id);
             let mut initial_scripts: Vec<NodeHandle> = Vec::new();
             if is_html_script_node(&node) && !state.begin_inserted_external_script(&node) {
                 return Ok(None);
@@ -13340,13 +14111,15 @@ impl JsRuntime {
                 let document = match state.iframe_content_document(&node) {
                     Ok(document) => document,
                     Err(error) => {
-                        state.pending_iframe_visits.remove(&node_id);
-                        state.pending_iframe_referrers.remove(&node_id);
+                        state.clear_iframe_navigation_intent(node_id);
                         return Err(JsNativeError::error()
                             .with_message(error.to_string())
                             .into());
                     }
                 };
+                if let Some(restore) = local_restore {
+                    let _ = form_state::queue_iframe_history_restore(&mut state, node_id, restore);
+                }
                 if let Some(entry) = state.iframe_documents.get_mut(&node_id) {
                     entry.initial_resource_task_completed = true;
                 }
@@ -14387,6 +15160,7 @@ impl Drop for JsRuntime {
         state.trusted_script_text_approvals.clear();
         state.pending_resource_loads.clear();
         state.pending_forced_iframe_navigations.clear();
+        state.iframe_navigation.clear_loads();
         state.worker_owner_realm = None;
         state.main_realm = None;
         state.write_parsers.clear();
@@ -15137,8 +15911,7 @@ fn ensure_iframe_realm(
             .retire_document(document_id);
         host_state
             .borrow_mut()
-            .iframe_navigation
-            .retire_document(document_id);
+            .retire_iframe_navigation_document(document_id);
         host_state
             .borrow_mut()
             .form_validation
@@ -16783,6 +17556,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(window_scroll_offset_native),
         ),
         (
+            js_string!("__omoikane_native_scroll_axes_have_no_range"),
+            3,
+            NativeFunction::from_copy_closure(input_bridge::native_scroll_axes_have_no_range),
+        ),
+        (
+            js_string!("__omoikane_will_add_blocking_wheel_listener"),
+            0,
+            NativeFunction::from_copy_closure(will_add_blocking_wheel_listener_native),
+        ),
+        (
             js_string!("__omoikane_set_window_scroll"),
             3,
             NativeFunction::from_copy_closure(set_window_scroll_native),
@@ -17053,6 +17836,96 @@ fn with_host_state<T>(f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>) ->
         })?;
         f(&state)
     })
+}
+
+/// Runs one render-affecting native mutation after closing retained native
+/// scroll eligibility. Callers must finish all author-reentrant argument
+/// conversion before entering this helper. The HostState borrow and protocol
+/// mutex are both released before `f` can touch DOM or render state.
+#[track_caller]
+fn with_render_mutation<T>(f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>) -> JsResult<T> {
+    with_node_render_mutation(&[], f)
+}
+
+/// Closes native eligibility before changing any active target. Callers pass
+/// both the destination and moved source for tree operations. An empty target
+/// set is conservative and always revokes. Resolve IDs under a short owner
+/// borrow; release it and the protocol lock before invoking the mutation.
+#[track_caller]
+fn with_node_render_mutation<T>(
+    node_ids: &[usize],
+    f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>,
+) -> JsResult<T> {
+    let caller = std::panic::Location::caller();
+    with_host_state(|state| {
+        let (native_scroll, affects_active_document) = {
+            let state = state.borrow();
+            let affects = node_ids.is_empty()
+                || node_ids.iter().any(|id| {
+                    state
+                        .get_node(*id)
+                        .is_some_and(|node| state.node_is_in_active_document(&node))
+                });
+            (state.native_scroll.clone(), affects)
+        };
+        trace_render_mutation(caller, &native_scroll, affects_active_document);
+        if affects_active_document {
+            native_scroll.revoke_policy();
+        }
+        f(state)
+    })
+}
+
+/// Keeps a committed visual scene usable while an active canvas replaces only
+/// pixels in an existing same-sized backing store. First backing creation and
+/// dimension changes can alter replaced-element layout and revoke normally.
+#[track_caller]
+fn with_canvas_render_mutation<T>(
+    node_id: usize,
+    width: u32,
+    height: u32,
+    f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>,
+) -> JsResult<T> {
+    let caller = std::panic::Location::caller();
+    with_host_state(|state| {
+        let (native_scroll, affects_active_document, preserves_layout) = {
+            let state = state.borrow();
+            let node = state.get_node(node_id);
+            let affects = node
+                .as_ref()
+                .is_some_and(|node| state.node_is_in_active_document(node));
+            let preserves_layout = node.is_some_and(|node| {
+                node.has_tag_name("canvas")
+                    && crate::canvas::backing_dimensions(node_id) == Some((width, height))
+            });
+            (state.native_scroll.clone(), affects, preserves_layout)
+        };
+        trace_render_mutation(caller, &native_scroll, affects_active_document);
+        if affects_active_document && !preserves_layout {
+            native_scroll.revoke_policy();
+        }
+        f(state)
+    })
+}
+
+fn trace_render_mutation(
+    caller: &std::panic::Location<'_>,
+    handle: &native_scroll::NativeScrollHandle,
+    affects_active_document: bool,
+) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    if !*ENABLED.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_NATIVE_POLICY").is_some())
+        || COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 4096
+    {
+        return;
+    }
+    let gate = handle.publication_gate();
+    crate::diagnostics::input_probe(serde_json::json!({
+        "event":"render_mutation", "caller_file":caller.file(),
+        "caller_line":caller.line(), "policy_epoch":gate.policy_epoch,
+        "affects_active_document":affects_active_document,
+    }));
 }
 
 fn cross_origin_access_error(context: &mut Context) -> JsResult<JsError> {
@@ -19046,7 +19919,7 @@ fn set_content_visibility_focus_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node = optional_node_argument(args.first(), context)?;
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         state
             .borrow_mut()
             .set_content_visibility_focus(node.as_ref());
@@ -19062,7 +19935,7 @@ fn set_content_visibility_selection_native(
 ) -> JsResult<JsValue> {
     let start = optional_node_argument(args.first(), context)?;
     let end = optional_node_argument(args.get(1), context)?;
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         state
             .borrow_mut()
             .set_content_visibility_selection(start.as_ref(), end.as_ref());
@@ -19194,7 +20067,7 @@ fn set_form_associated_custom_native(
     let node_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, node_id)?;
     let associated = args.get(1).is_some_and(JsValue::to_boolean);
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         let node = state
             .borrow()
             .get_node(node_id)
@@ -19588,7 +20461,7 @@ fn set_element_scroll_native(
     let x = coordinate(args.get(1), context)?;
     let y = coordinate(args.get(2), context)?;
     let smooth = args.get(3).and_then(JsValue::as_boolean).unwrap_or(false);
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         let node = state.borrow().get_node(node_id);
         let Some(node) = node else {
             return Ok(JsValue::undefined());
@@ -19638,6 +20511,21 @@ fn window_viewport_dimension_native(
             viewport.width
         };
         Ok(JsValue::from(f64::from(dimension).round()))
+    })
+}
+
+/// Revokes retained defaults before a blocking wheel listener is observable.
+fn will_add_blocking_wheel_listener_native(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        // Clone under the RefCell borrow and revoke afterwards. The native
+        // protocol mutex therefore never encloses DOM or script state.
+        let handle = state.borrow().native_scroll.clone();
+        handle.revoke_for_blocking_listener();
+        Ok(JsValue::undefined())
     })
 }
 
@@ -19702,7 +20590,15 @@ fn set_window_scroll_native(
     with_host_state(|state| {
         let mut state = state.borrow_mut();
         let document_id = context_document_id(context, &state);
-        state.scroll_document_to(document_id, x, y, smooth);
+        // ToNumber above may run author code. Only after all conversions have
+        // completed do we apply older accepted defaults, revoke, and mutate.
+        let native_scroll = state.prepare_native_programmatic_scroll(document_id);
+        let smooth_active = state.scroll_document_to(document_id, x, y, smooth);
+        if smooth_active && document_id == state.document.identity() {
+            state.native_scroll_smooth_token = native_scroll;
+        } else {
+            state.finish_native_programmatic_scroll(native_scroll);
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -20154,7 +21050,7 @@ fn set_popover_open_native(
     let node_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, node_id)?;
     let open = args.get(1).is_some_and(JsValue::to_boolean);
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         let node = state.borrow().get_node(node_id).ok_or_else(|| {
             JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
         })?;
@@ -20172,7 +21068,7 @@ fn set_modal_dialog_native(
     let node_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, node_id)?;
     let modal = args.get(1).is_some_and(JsValue::to_boolean);
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         let node = state.borrow().get_node(node_id).ok_or_else(|| {
             JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
         })?;
@@ -20488,7 +21384,7 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
     let child_id = parse_node_id(args.get(1), context)?;
     ensure_same_origin_node(context, child_id)?;
     let csp_source = security_reporting::capture_csp_source(context);
-    with_host_state(|state| {
+    with_node_render_mutation(&[parent_id, child_id], |state| {
         let (parent, child) = {
             let borrowed = state.borrow();
             (borrowed.get_node(parent_id), borrowed.get_node(child_id))
@@ -20675,7 +21571,7 @@ fn commit_history_api_url_native(
     if !allowed {
         return Err(cross_origin_access_error(context)?);
     }
-    with_host_state(|host| {
+    with_render_mutation(|host| {
         let mut state = host.borrow_mut();
         let document_id = state.document.identity();
         state.location_href = url.clone();
@@ -20704,7 +21600,7 @@ fn commit_fragment_url_native(
     if !allowed {
         return Err(cross_origin_access_error(context)?);
     }
-    with_host_state(|host| {
+    with_render_mutation(|host| {
         let mut state = host.borrow_mut();
         let current_base = state.location_href.split('#').next().unwrap_or("");
         let next_base = url.split('#').next().unwrap_or("");
@@ -21339,7 +22235,7 @@ fn register_property_native(
     ) else {
         return Ok(js_string!("invalid").into());
     };
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         let mut state = state.borrow_mut();
         let document = state.csp_document_for_context(context)?;
         let document_id = document.identity();
@@ -21709,7 +22605,7 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
     let is_name_attribute = name.eq_ignore_ascii_case("name");
     let is_style_attribute = name.eq_ignore_ascii_case("style");
     let is_meta_referrer_attribute = is_name_attribute || name.eq_ignore_ascii_case("content");
-    with_host_state(|state| {
+    with_node_render_mutation(&[node_id], |state| {
         let node = state
             .borrow()
             .get_node(node_id)
@@ -21831,7 +22727,7 @@ fn set_attribute_ns_native(
     let is_meta_referrer_attribute = namespace.is_none()
         && (qualified_name.eq_ignore_ascii_case("name")
             || qualified_name.eq_ignore_ascii_case("content"));
-    with_host_state(|state| {
+    with_node_render_mutation(&[node_id], |state| {
         let node = state
             .borrow()
             .get_node(node_id)
@@ -21922,7 +22818,7 @@ fn set_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     let node_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, node_id)?;
     let checked = args.get(1).is_some_and(JsValue::to_boolean);
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         let node = state
             .borrow()
             .get_node(node_id)
@@ -21961,7 +22857,7 @@ fn set_option_selected_native(
     let node_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, node_id)?;
     let selected = args.get(1).is_some_and(JsValue::to_boolean);
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         let node = state.borrow().get_node(node_id).ok_or_else(|| {
             JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
         })?;
@@ -21995,7 +22891,7 @@ fn set_text_control_state_native(
         .unwrap_or_default()
         .to_number(context)? as usize;
     let focused = args.get(4).is_some_and(JsValue::to_boolean);
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         let node = state
             .borrow()
             .get_node(node_id)
@@ -22209,7 +23105,7 @@ fn set_adopted_stylesheets_native(
     let stylesheets: Vec<String> = serde_json::from_str(&encoded).map_err(|_| {
         JsError::from(JsNativeError::typ().with_message("invalid adoptedStyleSheets payload"))
     })?;
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         let mut host = state.borrow_mut();
         let root = host.get_node(root_id).ok_or_else(|| {
             JsError::from(JsNativeError::error().with_message("adoptedStyleSheets root not found"))
@@ -23700,7 +24596,7 @@ fn canvas_commit_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         .unwrap_or_default()
         .to_number(context)? as u32;
     let pixels = body_bytes_argument(args.get(3), context)?.unwrap_or_default();
-    with_host_state(|state| {
+    with_canvas_render_mutation(id, width, height, |state| {
         let mut state = state.borrow_mut();
         let Some(node) = state.get_node(id) else {
             return Ok(JsValue::from(false));
@@ -24298,7 +25194,7 @@ fn set_text_content_native(
         .to_string(context)?;
     let data = dom_string::from_js(&text);
     let creator = caller_document_id(context);
-    with_host_state(|state| {
+    with_node_render_mutation(&[id], |state| {
         let node = state
             .borrow()
             .get_node(id)
@@ -24395,7 +25291,7 @@ fn set_inner_html_native(
         .unwrap_or_default()
         .to_string(context)?
         .to_std_string_escaped();
-    with_host_state(|state| {
+    with_node_render_mutation(&[id], |state| {
         let node = state
             .borrow()
             .get_node(id)
@@ -25008,7 +25904,7 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         .unwrap_or_default()
         .to_number(context)? as usize;
     ensure_same_origin_node(context, child_id)?;
-    with_host_state(|state| {
+    with_node_render_mutation(&[parent_id, child_id], |state| {
         let (parent, child) = {
             let state = state.borrow();
             let parent = state.get_node(parent_id).ok_or_else(|| {
@@ -25074,7 +25970,7 @@ fn insert_before_native_impl(
         Some(id)
     };
     let csp_source = security_reporting::capture_csp_source(context);
-    with_host_state(|state| {
+    with_node_render_mutation(&[parent_id, new_id], |state| {
         let ref_node = ref_id.and_then(|id| state.borrow().get_node(id));
         let (parent, new_node) = {
             let state = state.borrow();
@@ -25199,7 +26095,7 @@ fn set_user_action_target_native(
         ensure_same_origin_node(context, target_id)?;
     }
     let visible = args.get(2).is_some_and(JsValue::to_boolean);
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         state
             .borrow_mut()
             .update_user_action_target(&kind, target_id, visible);
@@ -25611,7 +26507,7 @@ fn remove_attribute_native(
         .to_string(context)?
         .to_std_string_escaped();
     let is_style_attribute = name.eq_ignore_ascii_case("style");
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         let node = state
             .borrow()
             .get_node(id)
@@ -25713,7 +26609,7 @@ fn remove_attribute_ns_native(
         .to_string(context)?
         .to_std_string_escaped();
     let is_style_attribute = namespace.is_none() && qualified_name == "style";
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         let node = state
             .borrow()
             .get_node(id)
@@ -25871,7 +26767,7 @@ fn attach_shadow_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         ShadowRootMode::Open
     };
     let creator = caller_document_id(context);
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         let host = state
             .borrow()
             .get_node(id)
@@ -26248,7 +27144,7 @@ fn document_reset_native(
 ) -> JsResult<JsValue> {
     let id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, id)?;
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         let (node, is_main_document) = {
             let s = state.borrow();
             let node = s.get_node(id).ok_or_else(|| {
@@ -26615,7 +27511,7 @@ fn document_write_native(
         .unwrap_or_default()
         .to_string(context)?;
     let text = dom_string::from_js(&text);
-    with_host_state(|state| document_write::write(state, target_id, text, false, context))
+    with_render_mutation(|state| document_write::write(state, target_id, text, false, context))
 }
 
 fn document_close_native(
@@ -26625,7 +27521,7 @@ fn document_close_native(
 ) -> JsResult<JsValue> {
     let target_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_document(context, target_id)?;
-    with_host_state(|state| {
+    with_render_mutation(|state| {
         document_write::write(
             state,
             target_id,
@@ -26923,11 +27819,21 @@ fn iframe_force_navigation_native(
                 state.pending_iframe_visits.insert(iframe_id, source);
             }
         }
+        let Some(epoch) = state.reserve_iframe_navigation(
+            &iframe,
+            iframe_navigation::IframeNavigationClass::Foreground,
+        ) else {
+            return Ok(JsValue::null());
+        };
+        state
+            .event_loop
+            .cancel_resource_loads_for_nodes(&HashSet::from([iframe_id]));
+        state.pending_resource_loads.remove(&iframe_id);
         state
             .pending_forced_iframe_navigations
             .insert(iframe_id, navigation);
         state.schedule_connected_resource_loads(&iframe, true, None);
-        Ok(JsValue::from(true))
+        Ok(js_string!(epoch.to_string()).into())
     })
 }
 

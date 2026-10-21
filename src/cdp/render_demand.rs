@@ -73,6 +73,15 @@ impl CdpSession {
         self.resource_queue = Some(queue);
     }
 
+    /// Keeps child-document HTTP transport off an interactive owner thread.
+    ///
+    /// The setting persists across navigations. Existing pending loads finish
+    /// normally when disabled; later loads use the synchronous embedding path.
+    pub fn set_nonblocking_iframe_loading(&mut self, enabled: bool) {
+        self.nonblocking_iframe_loading = enabled;
+        self.runtime.set_nonblocking_iframe_loading(enabled);
+    }
+
     /// Shares Fetch/XHR transport workers with other document resources.
     pub fn set_nonblocking_fetch_loading(&mut self, enabled: bool) {
         self.nonblocking_fetch_loading = enabled;

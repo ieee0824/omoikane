@@ -146,6 +146,7 @@ pub(super) fn write(
     let _depth = WriteDepth(state.clone());
     parser.borrow_mut().parser.push_input_owned(&input);
     drop(input);
+    let mut render_policy_revoked = false;
     loop {
         if !state
             .borrow()
@@ -158,6 +159,15 @@ pub(super) fn write(
         if parser.borrow().blocking_script.is_some() {
             parser.borrow_mut().finish_requested |= eof;
             return Ok(JsValue::undefined());
+        }
+        if !render_policy_revoked {
+            // Parser resumption can enter here from an asynchronous written
+            // script, bypassing the public bindings. Revoke once per resume,
+            // after a blocking parser has returned and before `advance` can
+            // attach its first created node.
+            let native_scroll = state.borrow().native_scroll.clone();
+            native_scroll.revoke_policy();
+            render_policy_revoked = true;
         }
         let script = parser.borrow_mut().parser.advance(eof);
         let created = parser.borrow_mut().parser.take_created_nodes();

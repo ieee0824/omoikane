@@ -54,3 +54,33 @@ mod tests {
         assert_eq!(decoded, value);
     }
 }
+
+/// Emits a test-only input probe on one process-wide monotonic timeline.
+/// Callers must guard both this call and JSON construction with TRACE_INPUT.
+/// Wall-clock pairing connects screenshots/server evidence without assuming
+/// that separate processes share an Instant epoch.
+pub fn input_probe(mut record: serde_json::Value) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let origin = input_probe_clock();
+    let before = origin.elapsed().as_nanos() as u64;
+    let unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos() as u64);
+    let after = origin.elapsed().as_nanos() as u64;
+    record["mono_ns"] = serde_json::json!(before);
+    record["unix_ns"] = serde_json::json!(unix);
+    record["clock_width_ns"] = serde_json::json!(after.saturating_sub(before));
+    eprintln!("{}", json_record("OMOIKANE_NATIVE_SCROLL_PROBE", &record));
+}
+
+/// Returns a span boundary on the same timeline as [`input_probe`].
+/// Calls are restricted to opt-in instrumentation paths.
+pub fn input_probe_boundary() -> u64 {
+    // Read through the same helper clock rather than creating a second epoch.
+    input_probe_clock().elapsed().as_nanos() as u64
+}
+
+fn input_probe_clock() -> &'static std::time::Instant {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    ORIGIN.get_or_init(std::time::Instant::now)
+}

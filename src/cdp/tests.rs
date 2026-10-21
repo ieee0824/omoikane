@@ -14,6 +14,205 @@ use std::io::{Read, Write};
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 
+fn install_test_native_scroll_scene(
+    handle: &crate::js::native_scroll::NativeScrollHandle,
+) -> crate::js::native_scroll::TargetKey {
+    use crate::js::native_scroll::{Bounds, FallbackTicket, Offset, PublicationSequence, Scene};
+
+    let gate = handle.publication_gate();
+    assert!(handle.authorize_policy(gate.key, gate.policy_epoch));
+    let extent = Bounds {
+        min: Offset::default(),
+        max: Offset { x: 100.0, y: 100.0 },
+    };
+    assert!(handle.install_scene(Scene {
+        key: gate.key,
+        publication: PublicationSequence::new(1),
+        policy_epoch: gate.policy_epoch,
+        acceptance_epoch: gate.acceptance_epoch,
+        acknowledged: 0,
+        completed_fallback: FallbackTicket::default(),
+        offset: Offset::default(),
+        extent,
+        coverage: extent,
+        eligible: true,
+    }));
+    gate.key
+}
+
+#[test]
+fn replacement_runtime_activates_fresh_native_scroll_owner_before_startup_script() {
+    use crate::js::native_scroll::{Offset, ScrollDecision};
+
+    let mut session = CdpSession::new().unwrap();
+    let old_handle = session.runtime.native_scroll_handle();
+    let old_key = install_test_native_scroll_scene(&old_handle);
+    assert_eq!(old_key.document, 0);
+    assert_eq!(old_key.owner_generation, 1);
+    let old_accepted = match old_handle.scroll(Offset { x: 0.0, y: 10.0 }) {
+        ScrollDecision::Accepted(accepted) => accepted,
+        decision => panic!("old owner must accept before replacement: {decision:?}"),
+    };
+
+    session
+        .install_document(
+            "https://example.test/replacement",
+            "<script>
+             addEventListener('wheel', () => {}, { passive: false });
+             globalThis.startupScrollX = scrollX;
+             </script>",
+            1,
+            "null",
+        )
+        .unwrap();
+
+    let new_handle = session.runtime.native_scroll_handle();
+    let new_gate = new_handle.publication_gate();
+    assert_ne!(new_gate.key, old_key);
+    assert_eq!(new_gate.key.document, session.document_generation);
+    assert!(new_gate.key.owner_generation > old_key.owner_generation);
+    assert_eq!(new_handle.accepted_barrier(), None);
+    assert_eq!(old_handle.notification_backlog(old_key), Ok(1));
+    assert!(!old_handle.validate_for_presentation(old_accepted));
+    assert!(matches!(
+        old_handle.scroll(Offset { x: 0.0, y: 1.0 }),
+        ScrollDecision::Fallback(_)
+    ));
+    assert_eq!(
+        session.runtime.eval("startupScrollX").unwrap().as_number(),
+        Some(0.0)
+    );
+    assert!(!new_handle.authorize_policy(new_gate.key, new_gate.policy_epoch));
+}
+
+#[test]
+fn pending_replacement_activates_fresh_native_scroll_owner_before_startup_script() {
+    use crate::js::native_scroll::{Offset, ScrollDecision};
+
+    let mut session = CdpSession::new().unwrap();
+    let old_handle = session.runtime.native_scroll_handle();
+    let old_key = install_test_native_scroll_scene(&old_handle);
+    let old_accepted = match old_handle.scroll(Offset { x: 0.0, y: 10.0 }) {
+        ScrollDecision::Accepted(accepted) => accepted,
+        decision => panic!("old owner must accept before preparation: {decision:?}"),
+    };
+
+    let (task, pending) = session
+        .prepare_document_page_task(
+            "https://example.test/pending-replacement",
+            &DecodedHtml::from_string(
+                "<script>
+                 addEventListener('wheel', () => {}, { passive: false });
+                 globalThis.startupScrollX = scrollX;
+                 </script>",
+            ),
+            1,
+            "null",
+            &[],
+            200,
+            None,
+        )
+        .unwrap();
+    let mut task = Box::pin(task);
+    let mut context = TaskContext::from_waker(Waker::noop());
+    let started = std::time::Instant::now();
+    let mut completed = loop {
+        assert!(started.elapsed() < Duration::from_secs(10));
+        if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+            break completed;
+        }
+    };
+    assert!(completed.result.as_ref().unwrap().is_empty());
+
+    let new_handle = completed.runtime.native_scroll_handle();
+    let new_gate = new_handle.publication_gate();
+    assert_ne!(new_gate.key, old_key);
+    assert_eq!(new_gate.key.document, pending.generation);
+    assert!(new_gate.key.owner_generation > old_key.owner_generation);
+    assert_eq!(new_handle.accepted_barrier(), None);
+    assert_eq!(old_handle.notification_backlog(old_key), Ok(1));
+    assert_eq!(
+        completed
+            .runtime
+            .eval("startupScrollX")
+            .unwrap()
+            .as_number(),
+        Some(0.0)
+    );
+    assert!(!new_handle.authorize_policy(new_gate.key, new_gate.policy_epoch));
+    assert_eq!(
+        session
+            .runtime
+            .native_scroll_handle()
+            .publication_gate()
+            .key,
+        old_key
+    );
+    assert!(old_handle.validate_for_presentation(old_accepted));
+
+    session
+        .commit_document_page_task(completed, pending)
+        .unwrap();
+    assert_eq!(
+        session
+            .runtime
+            .native_scroll_handle()
+            .publication_gate()
+            .key,
+        new_gate.key
+    );
+    assert!(!old_handle.validate_for_presentation(old_accepted));
+    assert!(matches!(
+        old_handle.scroll(Offset { x: 0.0, y: 1.0 }),
+        ScrollDecision::Fallback(_)
+    ));
+}
+
+#[test]
+fn exhausted_native_scroll_owner_generation_keeps_the_committed_runtime() {
+    use crate::js::native_scroll::{Offset, ScrollDecision};
+
+    let mut session = CdpSession::new().unwrap();
+    let previous_url = session.current_url().to_string();
+    let old_handle = session.runtime.native_scroll_handle();
+    let previous_key = install_test_native_scroll_scene(&old_handle);
+    let old_accepted = match old_handle.scroll(Offset { x: 0.0, y: 10.0 }) {
+        ScrollDecision::Accepted(accepted) => accepted,
+        decision => panic!("old owner must accept before failed replacement: {decision:?}"),
+    };
+    session.next_native_scroll_owner_generation = None;
+
+    let error = session
+        .install_document(
+            "https://example.test/not-committed",
+            "<script>globalThis.mustNotRun = true</script>",
+            1,
+            "null",
+        )
+        .unwrap_err();
+    assert!(matches!(error, CdpSessionError::NativeScrollOwnerExhausted));
+    assert_eq!(session.current_url(), previous_url);
+    assert_eq!(
+        session
+            .runtime
+            .native_scroll_handle()
+            .publication_gate()
+            .key,
+        previous_key
+    );
+    assert_eq!(
+        session
+            .runtime
+            .eval("typeof mustNotRun")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "undefined"
+    );
+    assert!(old_handle.validate_for_presentation(old_accepted));
+}
+
 #[test]
 fn native_startup_paints_parsed_document_before_scripts_and_load() {
     let mut session = CdpSession::new().unwrap();
@@ -5297,4 +5496,74 @@ fn keyboard_input_edits_focused_text_control_end_to_end() {
         state["result"]["value"],
         r#"{"value":"miu","start":2,"end":2,"events":["beforeinput:insertText:m","input:insertText:m","beforeinput:insertText:i","input:insertText:i","beforeinput:insertText:k","input:insertText:k","beforeinput:insertText:u","input:insertText:u","beforeinput:deleteContentBackward:null","input:deleteContentBackward:null"]}"#
     );
+}
+
+#[test]
+fn iframe_transport_mode_survives_navigation_and_can_restore_sync_embedding() {
+    struct Transport;
+    impl crate::http::HttpTransport for Transport {
+        fn send(
+            &self,
+            _: &crate::http::HttpRequest,
+            _: Option<std::time::Duration>,
+        ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+            Ok(crate::http::HttpResponse::new(
+                200,
+                "OK",
+                vec![("Content-Type".into(), "text/html".into())],
+                b"<!doctype html><title>worker child</title>".to_vec(),
+            ))
+        }
+    }
+    let mut session = CdpSession::new().unwrap();
+    for (generation, asynchronous) in [(1, true), (2, true), (3, false)] {
+        if generation != 2 {
+            session.set_nonblocking_iframe_loading(asynchronous);
+        }
+        session
+            .install_document(
+                &format!("https://iframe.example.test/parent-{generation}"),
+                "<iframe id=f></iframe>",
+                generation,
+                "null",
+            )
+            .unwrap();
+        session
+            .runtime
+            .set_http_resource_transport(Some(std::sync::Arc::new(Transport)));
+        let immediate = session
+            .runtime
+            .eval(
+                "globalThis.frame=document.getElementById('f'); \
+                 frame.src='/child'; frame.contentDocument.title",
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            immediate,
+            if asynchronous { "" } else { "worker child" },
+            "replacement must preserve the configured transport mode"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            session.runtime.run_until_idle().unwrap();
+            let title = session
+                .runtime
+                .eval("frame.contentDocument.title")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped();
+            if title == "worker child" {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "iframe did not commit"
+            );
+            std::thread::yield_now();
+        }
+    }
 }

@@ -595,7 +595,22 @@ impl JsRuntime {
             #[cfg(feature = "gc-profile")]
             let before_evaluate = boa_gc::profile();
             let evaluate_started = std::time::Instant::now();
+            let probe_busy = std::env::var_os("OMOIKANE_TRACE_INPUT").is_some()
+                && filename.ends_with("/hold.js")
+                && source.starts_with("/*OMOIKANE_V53_BUSY*/");
+            let probe_start = probe_busy.then(crate::diagnostics::input_probe_boundary);
+            if let Some(start) = probe_start {
+                crate::diagnostics::input_probe(serde_json::json!({
+                    "event":"script_start", "fixture_busy":true, "start_ns":start,
+                }));
+            }
             let result = compile_result.and_then(|()| script.evaluate(context));
+            if let Some(start) = probe_start {
+                crate::diagnostics::input_probe(serde_json::json!({
+                    "event":"script_end", "fixture_busy":true, "start_ns":start,
+                    "success":result.is_ok(),
+                }));
+            }
             let run_ms = evaluate_started.elapsed().as_secs_f64() * 1000.0;
             // Retain the old total's meaning even when profiling moves the
             // initial compilation into its own measurement.

@@ -22,8 +22,34 @@ pub(crate) struct RuntimePaintKey {
 }
 
 impl JsRuntime {
+    /// Revokes committed scrolling before advancing a canonical smooth scroll.
+    /// Animated styles and images only dirty the next visual snapshot; their
+    /// clock must not retire the complete scene currently owned by the GUI.
+    pub(super) fn revoke_native_scroll_for_render_clock_advance(&self, elapsed_ms: u64) {
+        if elapsed_ms == 0 {
+            return;
+        }
+        let native_scroll = {
+            let state = self.host_state.borrow();
+            (!state.smooth_scrolls.is_empty()).then(|| state.native_scroll.clone())
+        };
+        if let Some(native_scroll) = native_scroll {
+            native_scroll.revoke_policy();
+        }
+    }
+
     /// Selects the browser's live animation clock rather than static snapshots.
     pub(crate) fn enable_live_css_animations(&mut self) {
+        let native_scroll = {
+            let state = self.host_state.borrow();
+            if state.live_css_animations {
+                return;
+            }
+            state.native_scroll.clone()
+        };
+        // Switching clocks changes the sampled pixels and can change layout on
+        // the next style sample. Close retained authority before flipping it.
+        native_scroll.revoke_policy();
         let mut state = self.host_state.borrow_mut();
         state.live_css_animations = true;
         state.mark_all_document_styles_dirty();
@@ -118,6 +144,7 @@ impl JsRuntime {
             || state.font_loading.has_pending()
             || state.script_loads.has_pending()
             || state.fetch_loads.has_pending()
+            || state.iframe_navigation.has_pending_loads()
             || state.worklet.has_pending_render_work()
         {
             return NextRendering::EveryFrame;

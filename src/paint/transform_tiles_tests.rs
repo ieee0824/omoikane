@@ -186,6 +186,8 @@ fn paint_with_test_shadow_cache(
             include_phase_descendants: true,
             paint_decorations: true,
             offset: PaintOffset::default(),
+            retained_paint_owner: None,
+            retained_atomic_inline: None,
         },
     );
     (canvas, shadow_masks.summary().unwrap())
@@ -276,6 +278,8 @@ fn paint_with_persistent_test_shadow_cache(
             include_phase_descendants: true,
             paint_decorations: true,
             offset: PaintOffset::default(),
+            retained_paint_owner: None,
+            retained_atomic_inline: None,
         },
     );
     (
@@ -461,6 +465,8 @@ pub(super) fn paint_reference(
                     include_phase_descendants: true,
                     paint_decorations,
                     offset: PaintOffset::default(),
+                    retained_paint_owner: None,
+                    retained_atomic_inline: None,
                 },
             );
             let tile_transform = layout

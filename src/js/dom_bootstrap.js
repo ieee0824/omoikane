@@ -1911,6 +1911,12 @@ export const __omoikane_service_worker_lifecycle = {};
     return owner;
   }
 
+  const nativeScrollAxesHaveNoRange = globalThis.__omoikane_native_scroll_axes_have_no_range;
+  delete globalThis.__omoikane_native_scroll_axes_have_no_range;
+  const nativeWillAddBlockingWheelListener =
+    globalThis.__omoikane_will_add_blocking_wheel_listener;
+  delete globalThis.__omoikane_will_add_blocking_wheel_listener;
+
   function eventListenerOptions(options, target, type) {
     const dictionary = options != null && typeof options !== "boolean" ? Object(options) : null;
     const capture = typeof options === "boolean" ? options : !!dictionary?.capture;
@@ -1962,6 +1968,11 @@ export const __omoikane_service_worker_lifecycle = {};
     const list = listenerList(store, key);
     if (list.some(entry => entry.listener === listener && entry.capture === capture)) return;
     const entry = { listener, capture, once, passive, signal, abortHandler: null, removed: false };
+    // Revocation precedes the first author-observable store mutation. Removal
+    // never re-authorizes; only trusted native policy validation may do that.
+    if ((key === "wheel" || key === "mousewheel") && !passive) {
+      nativeWillAddBlockingWheelListener();
+    }
     list.push(entry);
     setListenerList(store, key, list);
     safeWeakMapGet(listenerStoreChanges, store)?.();
@@ -10770,19 +10781,27 @@ export const __omoikane_service_worker_lifecycle = {};
           const entry = historyEntries[historyIndex];
           if (entry.generation === activeGeneration) entry.persisted = nativeCaptureIframeFormState(iframe.__id);
         };
-        const restoreHistoryState = (entry, restoreName = true) => {
+        const immediateHistoryRestore = {};
+        const restoreHistoryState = (
+          entry, restoreName = true, epoch = immediateHistoryRestore) => {
           if (entry.persisted !== null) {
-            nativeRestoreIframeFormState(iframe.__id, entry.persisted, entry.href, restoreName);
+            if (epoch !== immediateHistoryRestore && typeof epoch !== "string") return;
+            nativeRestoreIframeFormState(
+              iframe.__id, entry.persisted, entry.href, restoreName,
+              epoch === immediateHistoryRestore ? null : epoch);
             forgetDiscardedNodeWrappers();
           }
         };
         const forceNavigation = (preserveDeclaredOrigin = false, declaredOriginSnapshot) => {
+          let epoch;
           if (declaredOriginSnapshot === undefined) {
-            nativeIframeForceNavigation(iframe.__id, preserveDeclaredOrigin);
+            epoch = nativeIframeForceNavigation(iframe.__id, preserveDeclaredOrigin);
           } else {
-            nativeIframeForceNavigation(iframe.__id, preserveDeclaredOrigin, declaredOriginSnapshot);
+            epoch = nativeIframeForceNavigation(
+              iframe.__id, preserveDeclaredOrigin, declaredOriginSnapshot);
           }
           forgetDiscardedNodeWrappers();
+          return epoch;
         };
         const notePendingResourceNavigation = () => {
           const attribute = hasFrameSrcdoc(iframe) ? "srcdoc" : "src";
@@ -10859,9 +10878,10 @@ export const __omoikane_service_worker_lifecycle = {};
           const entry = historyEntries[historyIndex];
           if (entry.submission !== null) {
             pendingHistoryAction = "reload";
-            nativeIframeReplaySubmission(iframe.__id, entry.submission, entry.href);
+            const epoch =
+              nativeIframeReplaySubmission(iframe.__id, entry.submission, entry.href);
             forgetDiscardedNodeWrappers();
-            restoreHistoryState(entry);
+            restoreHistoryState(entry, true, epoch);
             return;
           }
           const reloadsSrcdoc = entry.attribute === "srcdoc" && entry.href === "about:srcdoc";
@@ -10874,9 +10894,9 @@ export const __omoikane_service_worker_lifecycle = {};
           pendingLocationURL = entry.href;
           pendingHistoryAction = "reload";
           pendingHistoryPreservesDeclaredOrigin = entry.preservesDeclaredOrigin;
-          forceNavigation(entry.preservesDeclaredOrigin,
+          const epoch = forceNavigation(entry.preservesDeclaredOrigin,
             entry.preservesDeclaredOrigin ? entry.declaredOriginSnapshot : undefined);
-          restoreHistoryState(entry);
+          restoreHistoryState(entry, true, epoch);
         };
         const requireHistoryAccess = expectedGeneration => {
           refresh();
@@ -10918,9 +10938,10 @@ export const __omoikane_service_worker_lifecycle = {};
           dispatchIframeNavigationDeparture(iframe);
           if (entry.submission !== null) {
             pendingHistoryAction = "traverse";
-            nativeIframeReplaySubmission(iframe.__id, entry.submission, entry.href);
+            const epoch =
+              nativeIframeReplaySubmission(iframe.__id, entry.submission, entry.href);
             forgetDiscardedNodeWrappers();
-            restoreHistoryState(entry);
+            restoreHistoryState(entry, true, epoch);
             return;
           }
           if (entry.attribute === "srcdoc") {
@@ -10932,9 +10953,9 @@ export const __omoikane_service_worker_lifecycle = {};
           pendingLocationURL = entry.href;
           pendingHistoryAction = "traverse";
           pendingHistoryPreservesDeclaredOrigin = entry.preservesDeclaredOrigin;
-          forceNavigation(entry.preservesDeclaredOrigin,
+          const epoch = forceNavigation(entry.preservesDeclaredOrigin,
             entry.preservesDeclaredOrigin ? entry.declaredOriginSnapshot : undefined);
-          restoreHistoryState(entry);
+          restoreHistoryState(entry, true, epoch);
         };
         const sameDocumentHistoryURL = (value, expectedGeneration) => {
           requireHistoryAccess(expectedGeneration);
@@ -18066,6 +18087,88 @@ export const __omoikane_service_worker_lifecycle = {};
       }
     }
     return (hostOverscrollX ? 2 : 0) | (hostOverscrollY ? 4 : 0);
+  }
+  function nativeScrollTargetRejection(explain, reason, nodeId) {
+    return explain ? reason + ":" + (nodeId ?? 0) : false;
+  }
+  function nativeScrollRootTarget(id, explain = false) {
+    if (nativePointerLockTarget() !== null) {
+      return nativeScrollTargetRejection(explain, "pointer_lock", id);
+    }
+    const target = wrapNode(id);
+    if (!target || !isLiveNode(target) || !nativeNodeIsConnected(id) ||
+        internalNodeType(target) === 9) {
+      return nativeScrollTargetRejection(explain, "inactive_target", id);
+    }
+    const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
+    if (internalNodeId(inputDocument) !== __omoikane_document_id) {
+      return nativeScrollTargetRejection(explain, "cross_document", id);
+    }
+    let current = target;
+    let reachedRoot = false;
+    while (current) {
+      const elementId = internalNodeId(current);
+      const nodeType = internalNodeType(current);
+      if (elementId === undefined || nativeNodeHasSlotAncestor(elementId) ||
+          internalAssignedSlot(elementId) != null) {
+        return nativeScrollTargetRejection(explain, "slot_boundary", elementId);
+      }
+      if (nodeType === 9) {
+        return reachedRoot && elementId === __omoikane_document_id ? true :
+          nativeScrollTargetRejection(explain, "root_not_reached", elementId);
+      }
+      if (nodeType !== 1) {
+        // A text hit may take its ordinary light-tree parent. ShadowRoot and
+        // every other unknown flat-tree boundary stay on the canonical owner.
+        if (current !== target || nodeType !== 3) {
+          return nativeScrollTargetRejection(explain, "tree_boundary", elementId);
+        }
+        const parent = nativeParentNode(elementId);
+        current = parent == null ? null : wrapNode(parent);
+        continue;
+      }
+      const parent = nativeParentNode(elementId);
+      const viewport = parent === __omoikane_document_id;
+      if (viewport) reachedRoot = true;
+      const style = platformGetComputedStyleForInnerText(current);
+      if (viewport) {
+        // The numeric protocol does not model CSS scroll snapping.
+        if (style.scrollSnapType !== "none") {
+          return nativeScrollTargetRejection(explain, "scroll_snap", elementId);
+        }
+      } else {
+        const acceptsX = style.overflowX === "auto" || style.overflowX === "scroll";
+        const acceptsY = style.overflowY === "auto" || style.overflowY === "scroll";
+        const blocksX = style.overscrollBehaviorX !== "auto" &&
+          style.overscrollBehaviorX !== "chain";
+        const blocksY = style.overscrollBehaviorY !== "auto" &&
+          style.overscrollBehaviorY !== "chain";
+        // Keep the conservative policy unchanged; the optional trusted-host
+        // diagnostic identifies the first boundary without invoking author code.
+        if (blocksX) return nativeScrollTargetRejection(explain, "overscroll_boundary_x", elementId);
+        if (blocksY) return nativeScrollTargetRejection(explain, "overscroll_boundary_y", elementId);
+        // A declaration alone does not make this ancestor consume a wheel.
+        // Only the trusted current layout can prove an empty scroll range.
+        if ((acceptsX || acceptsY) && !nativeScrollAxesHaveNoRange(elementId, acceptsX, acceptsY)) {
+          return nativeScrollTargetRejection(explain,
+            acceptsX ? "nested_overflow_x" : "nested_overflow_y", elementId);
+        }
+      }
+      current = parent == null ? null : wrapNode(parent);
+    }
+    return nativeScrollTargetRejection(explain, "root_not_reached", id);
+  }
+  function dispatchNativeScrollNotification(id, init) {
+    const target = wrapNode(id);
+    if (!target || !isLiveNode(target) || !nativeNodeIsConnected(id)) return false;
+    const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
+    if (internalNodeId(inputDocument) !== __omoikane_document_id) return false;
+    // The default was already accepted and committed by the trusted host.
+    // Cancellation remains observable, but cannot run a second default.
+    target.dispatchEvent(new WheelEvent("wheel", {
+      ...init, bubbles: true, cancelable: true, composed: true, deltaMode: 0,
+    }));
+    return true;
   }
   globalThis.__omoikane_dispatch_wheel_input = function(id, init) {
     const locked = wrapNode(nativePointerLockTarget());
@@ -29521,6 +29624,8 @@ export const __omoikane_service_worker_lifecycle = {};
     focus: (kind, ...args) => safeApply(focusDocumentCommands[kind], undefined, args),
     mouse: globalThis.__omoikane_dispatch_mouse_input,
     wheel: globalThis.__omoikane_dispatch_wheel_input,
+    "native-scroll-eligible": nativeScrollRootTarget,
+    "native-scroll-notification": dispatchNativeScrollNotification,
     touch: globalThis.__omoikane_dispatch_touch_input,
     keyboard: globalThis.__omoikane_dispatch_keyboard_input,
     composition: globalThis.__omoikane_dispatch_composition_input,

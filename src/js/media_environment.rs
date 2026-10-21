@@ -33,11 +33,19 @@ impl JsRuntime {
             .device_height
             .filter(|value| value.is_finite() && *value >= 0.0);
         let resolution = environment.resolution_dppx;
-        {
-            let mut state = self.host_state.borrow_mut();
+        let native_scroll = {
+            let state = self.host_state.borrow();
             if state.media_environment == environment {
                 return Ok(());
             }
+            state.native_scroll.clone()
+        };
+        // Media features can replace computed style, layout, and paint without
+        // changing the DOM. Revoke before the new snapshot is observable, and
+        // without holding a HostState borrow across the protocol lock.
+        native_scroll.revoke_policy();
+        {
+            let mut state = self.host_state.borrow_mut();
             state.media_environment = environment;
             state.pending_media_query_report = true;
             state.mark_all_document_styles_dirty();

@@ -45,6 +45,17 @@ pub fn image(id: usize) -> Option<Image> {
     })
 }
 
+/// Returns backing dimensions without cloning its RGBA pixels.
+pub(crate) fn backing_dimensions(id: usize) -> Option<(u32, u32)> {
+    BACKING_STORES.with(|stores| {
+        let mut stores = stores.borrow_mut();
+        stores.retain(|_, store| store.owner.is_alive());
+        stores
+            .get(&id)
+            .map(|store| (store.image.width(), store.image.height()))
+    })
+}
+
 /// Encodes a canvas element as a PNG data URL.
 pub fn png_data_url(id: usize) -> Option<String> {
     let image = image(id)?;

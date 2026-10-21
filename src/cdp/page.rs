@@ -785,7 +785,8 @@ impl CdpSession {
         )
         .map_err(CdpSessionError::JavaScript)?;
         trace_startup_page("runtime_ready", install_started);
-        self.configure_replacement_runtime(&mut runtime)?;
+        let generation = self.document_generation.saturating_add(1);
+        self.configure_replacement_runtime(&mut runtime, generation)?;
         runtime.install_response_security_headers(response_headers);
         runtime.set_document_response_status(response_status);
         runtime.install_isolation_policy(response_headers);
@@ -830,6 +831,7 @@ impl CdpSession {
         };
 
         self.pending_document_startup = pending_startup;
+        self.runtime.native_scroll_handle().revoke_policy();
         self.runtime = runtime;
         self.mouse_pressed_target = None;
         self.touch_target = None;
@@ -837,7 +839,7 @@ impl CdpSession {
         self.touch_scroll_allowed = true;
         self.drag_candidate = false;
         self.drag_active = false;
-        self.document_generation = self.document_generation.saturating_add(1);
+        self.document_generation = generation;
         self.remote_object_generations.clear();
         self.current_url = url.to_string();
         self.last_html = html.text.clone();
@@ -865,7 +867,8 @@ impl CdpSession {
             self.storage_session_id,
         )
         .map_err(CdpSessionError::JavaScript)?;
-        self.configure_replacement_runtime(&mut runtime)?;
+        let generation = self.document_generation.saturating_add(1);
+        self.configure_replacement_runtime(&mut runtime, generation)?;
         runtime.install_response_security_headers(response_headers);
         runtime.set_document_response_status(response_status);
         runtime.install_isolation_policy(response_headers);
@@ -881,7 +884,6 @@ impl CdpSession {
             .and_then(|_| runtime.run_jobs())
             .map_err(CdpSessionError::JavaScript)?;
 
-        let generation = self.document_generation.saturating_add(1);
         let base_url = url.parse::<crate::http::Url>().ok();
         let task = runtime.into_document_page_task(generation, base_url);
         Ok((
@@ -947,6 +949,7 @@ impl CdpSession {
         self.dispatch_document_departure();
 
         self.pending_document_startup = None;
+        self.runtime.native_scroll_handle().revoke_policy();
         self.runtime = runtime;
         self.mouse_pressed_target = None;
         self.touch_target = None;

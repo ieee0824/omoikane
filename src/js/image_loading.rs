@@ -158,11 +158,24 @@ impl JsRuntime {
             };
             let (effects, reports) =
                 environment.run(false, crate::layout::poll_async_image_effects);
-            let mut state = self.host_state.borrow_mut();
-            state.queue_image_reports(document_id, reports);
-            if effects.changed
-                && let Some(document) = state.get_node(document_id)
-            {
+            let render_change = {
+                let mut state = self.host_state.borrow_mut();
+                state.queue_image_reports(document_id, reports);
+                effects.changed.then(|| {
+                    state
+                        .get_node(document_id)
+                        .filter(|document| state.document_is_active(document.identity()))
+                        .map(|document| (state.native_scroll.clone(), document))
+                })
+            }
+            .flatten();
+            if let Some((native_scroll, document)) = render_change {
+                // Decode completion can change only pixels, so it does not
+                // necessarily pass through a style/layout invalidator. Revoke
+                // after confirming the live owner and before either cache is
+                // made stale, without holding HostState across the lock.
+                native_scroll.revoke_policy();
+                let mut state = self.host_state.borrow_mut();
                 if effects.requires_layout {
                     state.mark_document_layout_dirty(&document, "image_resource_completed");
                 } else {
