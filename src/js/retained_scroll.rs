@@ -63,7 +63,7 @@ fn plan(viewport: Rect, scroll: (f32, f32)) -> Result<VerticalOverscanPlan, Reta
     let tile = (y / height).floor();
     let current_index = u8::from(tile >= 1.0);
     let first_y = ((tile - f64::from(current_index)) * height) as i32;
-    VerticalOverscanPlan::new(x as i32, first_y, 3, current_index)
+    VerticalOverscanPlan::new(x as i32, first_y, 3, current_index)?.with_focus_y(y.floor() as i32)
 }
 
 impl RetainedScrollCapture {

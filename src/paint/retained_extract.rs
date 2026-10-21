@@ -69,6 +69,7 @@ pub(crate) struct RetainedPaintFrame {
 pub(crate) struct RetainedOverscanTile {
     origin: (i32, i32),
     image: Image,
+    coverage: OverscanRasterRect,
 }
 
 impl RetainedOverscanTile {
@@ -254,7 +255,19 @@ impl RetainedOverscanFrame {
                     .collect(),
                 tiles: tiles
                     .into_iter()
-                    .map(|(origin, image)| RetainedOverscanTile { origin, image })
+                    .map(|(origin, image)| {
+                        let coverage = OverscanRasterRect {
+                            left: i64::from(origin.0),
+                            top: i64::from(origin.1),
+                            right: i64::from(origin.0) + i64::from(image.width()),
+                            bottom: i64::from(origin.1) + i64::from(image.height()),
+                        };
+                        RetainedOverscanTile {
+                            origin,
+                            image,
+                            coverage,
+                        }
+                    })
                     .collect(),
             })
             .collect();
@@ -289,7 +302,16 @@ impl RetainedOverscanFrame {
                     }
                     RetainedPaintSpace::ViewportFixed => (0, 0),
                 };
-                canvas.draw_image(&tile.image, destination.0 as f32, destination.1 as f32);
+                canvas.draw_image_scaled_clipped(
+                    &tile.image,
+                    Rect {
+                        x: destination.0 as f32,
+                        y: destination.1 as f32,
+                        width: tile.image.width() as f32,
+                        height: tile.image.height() as f32,
+                    },
+                    Some(translated_layer_coverage(tile.coverage, run.space, scroll)),
+                );
             }
             for layer in &run.document_layers {
                 for sample in &layer.samples {
@@ -353,7 +375,16 @@ impl RetainedOverscanFrame {
             match run.space {
                 RetainedPaintSpace::ViewportFixed => {
                     for tile in &run.tiles {
-                        canvas.draw_image(&tile.image, 0.0, 0.0);
+                        canvas.draw_image_scaled_clipped(
+                            &tile.image,
+                            Rect {
+                                x: 0.0,
+                                y: 0.0,
+                                width: tile.image.width() as f32,
+                                height: tile.image.height() as f32,
+                            },
+                            Some(translated_layer_coverage(tile.coverage, run.space, (0, 0))),
+                        );
                     }
                     for layer in &run.document_layers {
                         for sample in &layer.samples {
@@ -381,7 +412,20 @@ impl RetainedOverscanFrame {
                     for tile in &run.tiles {
                         let x = i64::from(tile.origin.0) - translation.base_x;
                         let y = i64::from(tile.origin.1) - translation.base_y;
-                        canvas.draw_image(&tile.image, x as f32, y as f32);
+                        canvas.draw_image_scaled_clipped(
+                            &tile.image,
+                            Rect {
+                                x: x as f32,
+                                y: y as f32,
+                                width: tile.image.width() as f32,
+                                height: tile.image.height() as f32,
+                            },
+                            Some(translated_layer_coverage_f64(
+                                tile.coverage,
+                                translation.base_x,
+                                translation.base_y,
+                            )),
+                        );
                     }
                     for layer in &run.document_layers {
                         for sample in &layer.samples {
@@ -568,17 +612,22 @@ fn validate_overscan_tiles(run: &RetainedOverscanRun) -> Result<(), RetainedPain
         }
         if run.tiles[..index]
             .iter()
-            .any(|previous| overscan_tile_rect(previous).overlaps(overscan_tile_rect(tile)))
+            .any(|previous| previous.coverage.overlaps(tile.coverage))
         {
             return Err(RetainedPaintError::OverlappingOverscanTiles);
         }
-        if !run.sample_coverages.iter().any(|coverage| {
-            let tile = overscan_tile_rect(tile);
-            coverage.left <= tile.left
-                && coverage.top <= tile.top
-                && coverage.right >= tile.right
-                && coverage.bottom >= tile.bottom
-        }) {
+        let image = overscan_tile_rect(tile);
+        if tile.coverage.left < image.left
+            || tile.coverage.top < image.top
+            || tile.coverage.right > image.right
+            || tile.coverage.bottom > image.bottom
+            || !run.sample_coverages.iter().any(|sample| {
+                sample.left <= tile.coverage.left
+                    && sample.top <= tile.coverage.top
+                    && sample.right >= tile.coverage.right
+                    && sample.bottom >= tile.coverage.bottom
+            })
+        {
             return Err(RetainedPaintError::InvalidOverscanFrame);
         }
     }
@@ -631,6 +680,13 @@ fn overscan_rects_cover(rects: &[OverscanRasterRect], required: OverscanRasterRe
 
 fn overscan_run_pixel(run: &RetainedOverscanRun, x: i64, y: i64) -> [u8; 4] {
     for tile in &run.tiles {
+        if x < tile.coverage.left
+            || x >= tile.coverage.right
+            || y < tile.coverage.top
+            || y >= tile.coverage.bottom
+        {
+            continue;
+        }
         let rect = overscan_tile_rect(tile);
         if x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom {
             continue;
@@ -850,7 +906,7 @@ fn record_fractional_overscan_layer_animation(
     scroll: (f64, f64),
     raster_scale: f64,
 ) {
-    let clip = Rect {
+    let viewport_clip = Rect {
         x: 0.0,
         y: 0.0,
         width: canvas.width() as f32,
@@ -858,6 +914,12 @@ fn record_fractional_overscan_layer_animation(
     };
     for sample in &layer.samples {
         let Some(tile) = &sample.tile else {
+            continue;
+        };
+        let Some(clip) = intersect_rect(
+            viewport_clip,
+            translated_animation_coverage(sample.coverage, scroll, raster_scale),
+        ) else {
             continue;
         };
         let destination = Rect {
@@ -876,13 +938,19 @@ fn record_fractional_overscan_animation(
     scroll: (f64, f64),
     raster_scale: f64,
 ) {
-    let clip = Rect {
+    let viewport_clip = Rect {
         x: 0.0,
         y: 0.0,
         width: canvas.width() as f32,
         height: canvas.height() as f32,
     };
     for tile in &run.tiles {
+        let Some(clip) = intersect_rect(
+            viewport_clip,
+            translated_animation_coverage(tile.coverage, scroll, raster_scale),
+        ) else {
+            continue;
+        };
         let destination = Rect {
             x: (f64::from(tile.origin.0) - scroll.0 * raster_scale) as f32,
             y: (f64::from(tile.origin.1) - scroll.1 * raster_scale) as f32,
@@ -891,6 +959,32 @@ fn record_fractional_overscan_animation(
         };
         canvas.record_animation_regions_from_scaled_image(&tile.image, destination, clip);
     }
+}
+
+fn translated_animation_coverage(
+    coverage: OverscanRasterRect,
+    scroll: (f64, f64),
+    raster_scale: f64,
+) -> Rect {
+    Rect {
+        x: (coverage.left as f64 - scroll.0 * raster_scale) as f32,
+        y: (coverage.top as f64 - scroll.1 * raster_scale) as f32,
+        width: (coverage.right - coverage.left) as f32,
+        height: (coverage.bottom - coverage.top) as f32,
+    }
+}
+
+fn intersect_rect(left: Rect, right: Rect) -> Option<Rect> {
+    let x = left.x.max(right.x);
+    let y = left.y.max(right.y);
+    let right_edge = (left.x + left.width).min(right.x + right.width);
+    let bottom_edge = (left.y + left.height).min(right.y + right.height);
+    (right_edge > x && bottom_edge > y).then_some(Rect {
+        x,
+        y,
+        width: right_edge - x,
+        height: bottom_edge - y,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -912,6 +1006,8 @@ pub(crate) struct VerticalOverscanPlan {
     first_y: i32,
     sample_count: u8,
     current_index: u8,
+    step_y: Option<u32>,
+    focus_y: Option<i32>,
 }
 
 impl VerticalOverscanPlan {
@@ -934,7 +1030,56 @@ impl VerticalOverscanPlan {
             first_y,
             sample_count,
             current_index,
+            step_y: None,
+            focus_y: None,
         })
+    }
+
+    /// Uses a smaller positive distance between samples. Overlapping viewport
+    /// rasters are partitioned at the next sample origin during composition.
+    pub(crate) fn with_step_y(mut self, step_y: u32) -> Result<Self, RetainedPaintError> {
+        if step_y == 0 {
+            return Err(RetainedPaintError::InvalidOverscanPlan);
+        }
+        self.step_y = Some(step_y);
+        Ok(self)
+    }
+
+    /// Records the live integer scroll used to center a smaller sticky-safe
+    /// retry range when the preferred coverage crosses sticky phases.
+    pub(crate) fn with_focus_y(mut self, focus_y: i32) -> Result<Self, RetainedPaintError> {
+        if focus_y < 0 {
+            return Err(RetainedPaintError::InvalidOverscanPlan);
+        }
+        self.focus_y = Some(focus_y);
+        Ok(self)
+    }
+
+    fn sticky_retry_plans(self, viewport_height: u32) -> Vec<Self> {
+        let Some(focus_y) = self.focus_y else {
+            return Vec::new();
+        };
+        let mut plans = Vec::new();
+        let mut step_y = viewport_height / 2;
+        while step_y >= 8 {
+            let (first_y, current_index) = if focus_y >= step_y as i32 {
+                (focus_y - step_y as i32, 1)
+            } else {
+                (focus_y, 0)
+            };
+            let candidate = Self {
+                first_y,
+                sample_count: 3,
+                current_index,
+                step_y: None,
+                ..self
+            };
+            if let Ok(candidate) = candidate.with_step_y(step_y) {
+                plans.push(candidate);
+            }
+            step_y /= 2;
+        }
+        plans
     }
 
     fn resolve(
@@ -949,11 +1094,15 @@ impl VerticalOverscanPlan {
             return Err(RetainedPaintError::InvalidOverscanPlan);
         }
         let height = i64::from(dimensions.height);
+        let step_y = i64::from(self.step_y.unwrap_or(dimensions.height));
+        if step_y > height {
+            return Err(RetainedPaintError::InvalidOverscanPlan);
+        }
         let first_y = i64::from(self.first_y);
         let last_index = i64::from(self.sample_count - 1);
         let last_y = first_y
             .checked_add(
-                height
+                step_y
                     .checked_mul(last_index)
                     .ok_or(RetainedPaintError::InvalidOverscanPlan)?,
             )
@@ -983,7 +1132,7 @@ impl VerticalOverscanPlan {
             .ok_or(RetainedPaintError::Capacity)?;
         let sample_y = (0..self.sample_count)
             .map(|index| {
-                let y = first_y + height * i64::from(index);
+                let y = first_y + step_y * i64::from(index);
                 i32::try_from(y).map_err(|_| RetainedPaintError::InvalidOverscanPlan)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -3067,20 +3216,38 @@ fn overscan_sample_coverage(
 fn retained_sparse_tile(
     image: RetainedSparseImage,
     origin: (i32, i32),
-) -> Result<RetainedOverscanTile, RetainedPaintError> {
-    Ok(RetainedOverscanTile {
-        origin: (
-            origin
-                .0
-                .checked_add(image.origin.0)
-                .ok_or(RetainedPaintError::Capacity)?,
-            origin
-                .1
-                .checked_add(image.origin.1)
-                .ok_or(RetainedPaintError::Capacity)?,
-        ),
+    coverage: OverscanRasterRect,
+) -> Result<Option<RetainedOverscanTile>, RetainedPaintError> {
+    let origin = (
+        origin
+            .0
+            .checked_add(image.origin.0)
+            .ok_or(RetainedPaintError::Capacity)?,
+        origin
+            .1
+            .checked_add(image.origin.1)
+            .ok_or(RetainedPaintError::Capacity)?,
+    );
+    let image_coverage = OverscanRasterRect {
+        left: i64::from(origin.0),
+        top: i64::from(origin.1),
+        right: i64::from(origin.0) + i64::from(image.image.width()),
+        bottom: i64::from(origin.1) + i64::from(image.image.height()),
+    };
+    let coverage = OverscanRasterRect {
+        left: coverage.left.max(image_coverage.left),
+        top: coverage.top.max(image_coverage.top),
+        right: coverage.right.min(image_coverage.right),
+        bottom: coverage.bottom.min(image_coverage.bottom),
+    };
+    if coverage.left >= coverage.right || coverage.top >= coverage.bottom {
+        return Ok(None);
+    }
+    Ok(Some(RetainedOverscanTile {
+        origin,
         image: image.image,
-    })
+        coverage,
+    }))
 }
 
 fn overscan_layer(
@@ -3090,8 +3257,9 @@ fn overscan_layer(
 ) -> Result<RetainedOverscanLayer, RetainedPaintError> {
     let tile = layer
         .image
-        .map(|image| retained_sparse_tile(image, origin))
-        .transpose()?;
+        .map(|image| retained_sparse_tile(image, origin, coverage))
+        .transpose()?
+        .flatten();
     Ok(RetainedOverscanLayer {
         identity: layer.identity,
         sample_rect: layer.sample_rect,
@@ -3117,6 +3285,23 @@ fn retained_sparse_exact(
 }
 
 impl OverscanBuilder {
+    fn sample_coverage(
+        plan: &ResolvedVerticalOverscanPlan,
+        index: usize,
+        space: RetainedPaintSpace,
+        width: u32,
+        height: u32,
+    ) -> Result<OverscanRasterRect, RetainedPaintError> {
+        let mut coverage =
+            overscan_sample_coverage(space, plan.document_x, plan.sample_y[index], width, height)?;
+        if space == RetainedPaintSpace::Document
+            && let Some(&next_y) = plan.sample_y.get(index + 1)
+        {
+            coverage.bottom = i64::from(next_y);
+        }
+        Ok(coverage)
+    }
+
     fn from_current(
         frame: RetainedPaintFrame,
         plan: ResolvedVerticalOverscanPlan,
@@ -3140,10 +3325,10 @@ impl OverscanBuilder {
                         filter_source: Some(filter_source),
                     });
                 }
-                let coverage = overscan_sample_coverage(
+                let coverage = Self::sample_coverage(
+                    &plan,
+                    plan.current_index,
                     run.space,
-                    plan.document_x,
-                    current_y,
                     frame.width,
                     frame.height,
                 )?;
@@ -3158,6 +3343,7 @@ impl OverscanBuilder {
                     vec![RetainedOverscanTile {
                         origin,
                         image: run.image,
+                        coverage,
                     }]
                 };
                 Ok(RetainedOverscanRun {
@@ -3239,6 +3425,7 @@ impl OverscanBuilder {
     fn append(
         &mut self,
         frame: RetainedPaintFrame,
+        sample_index: usize,
         sample_y: i32,
     ) -> Result<(), RetainedPaintError> {
         if frame.width != self.width
@@ -3265,10 +3452,10 @@ impl OverscanBuilder {
             if retained.document_layers.len() != candidate.document_layers.len() {
                 return Err(RetainedPaintError::OverscanRunMismatch);
             }
-            let coverage = overscan_sample_coverage(
+            let coverage = Self::sample_coverage(
+                &self.plan,
+                sample_index,
                 retained.space,
-                self.plan.document_x,
-                sample_y,
                 self.width,
                 self.height,
             )?;
@@ -3283,6 +3470,7 @@ impl OverscanBuilder {
                         retained.tiles.push(RetainedOverscanTile {
                             origin,
                             image: candidate.image,
+                            coverage,
                         });
                     }
                     for (layer, candidate) in retained
@@ -3299,8 +3487,9 @@ impl OverscanBuilder {
                             coverage,
                             tile: candidate
                                 .image
-                                .map(|image| retained_sparse_tile(image, origin))
-                                .transpose()?,
+                                .map(|image| retained_sparse_tile(image, origin, coverage))
+                                .transpose()?
+                                .flatten(),
                         });
                     }
                 }
@@ -3312,6 +3501,7 @@ impl OverscanBuilder {
                             Some(RetainedOverscanTile {
                                 origin,
                                 image: candidate.image,
+                                coverage,
                             })
                         };
                     if !retained_sparse_exact(retained.tiles.first(), candidate_base.as_ref()) {
@@ -3324,8 +3514,9 @@ impl OverscanBuilder {
                     {
                         let candidate_tile = candidate
                             .image
-                            .map(|image| retained_sparse_tile(image, origin))
-                            .transpose()?;
+                            .map(|image| retained_sparse_tile(image, origin, coverage))
+                            .transpose()?
+                            .flatten();
                         if layer.identity != candidate.identity
                             || layer.sample_rect != candidate.sample_rect
                             || !retained_sparse_exact(
@@ -3517,10 +3708,11 @@ pub(crate) fn paint_layout_with_vertical_overscan(
         Ok(plan) => plan,
         Err(reason) => return RetainedOverscanOutcome::Rejected { reason },
     };
-    let preflight = match view.expected_runs(resolver, dimensions, &validated_plan) {
-        Ok(preflight) => preflight,
-        Err(reason) => return view.fallback(resolver, &validated_plan, reason, 0),
-    };
+    let (plan, preflight) =
+        match preflight_vertical_overscan(view, resolver, dimensions, plan, validated_plan) {
+            Ok(result) => result,
+            Err((plan, reason)) => return view.fallback(resolver, &plan, reason, 0),
+        };
     let plan = match plan.resolve(
         viewport,
         dimensions,
@@ -3540,6 +3732,37 @@ pub(crate) fn paint_layout_with_vertical_overscan(
         preflight.document_layers,
         preflight.current_frame,
     )
+}
+
+fn preflight_vertical_overscan(
+    view: OverscanPaintView<'_>,
+    resolver: &mut StyleResolver,
+    dimensions: SurfaceDimensions,
+    preferred: VerticalOverscanPlan,
+    validated: ResolvedVerticalOverscanPlan,
+) -> Result<
+    (VerticalOverscanPlan, OverscanPreflight),
+    (ResolvedVerticalOverscanPlan, RetainedPaintError),
+> {
+    match view.expected_runs(resolver, dimensions, &validated) {
+        Ok(preflight) => return Ok((preferred, preflight)),
+        Err(reason) if reason != RetainedPaintError::StickyPosition => {
+            return Err((validated, reason));
+        }
+        Err(_) => {}
+    }
+    for candidate in preferred.sticky_retry_plans(dimensions.height) {
+        let resolved = match candidate.resolve(view.viewport, dimensions, 1, None, None) {
+            Ok(resolved) => resolved,
+            Err(_) => continue,
+        };
+        match view.expected_runs(resolver, dimensions, &resolved) {
+            Ok(preflight) => return Ok((candidate, preflight)),
+            Err(RetainedPaintError::StickyPosition) => {}
+            Err(reason) => return Err((resolved, reason)),
+        }
+    }
+    Err((validated, RetainedPaintError::StickyPosition))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3624,7 +3847,7 @@ fn capture_vertical_overscan(
             }
         };
         let candidate_runs = frame.runs.len();
-        if let Err(reason) = builder.append(frame, sample_y) {
+        if let Err(reason) = builder.append(frame, index, sample_y) {
             return view.fallback(
                 resolver,
                 &plan,

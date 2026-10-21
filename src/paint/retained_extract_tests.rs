@@ -1512,6 +1512,64 @@ fn overscan_bottom_sticky_is_fixed_within_one_linear_phase() {
 }
 
 #[test]
+fn overscan_bottom_sticky_retries_inside_the_live_linear_phase() {
+    let html = "<style>*{margin:0;padding:0}html{background:white}body{height:128px}\
+        #space{height:48px}#wrap{height:112px}\
+        #pin{position:sticky;bottom:2px;width:16px;height:60px;background:red}\
+        </style><div id=wrap><div id=space></div><div id=pin></div></div>";
+    let plan = VerticalOverscanPlan::new(0, 0, 3, 1)
+        .unwrap()
+        .with_focus_y(24)
+        .unwrap();
+    let frame = expect_overscan(overscan_fixture(html, plan, |_| {}));
+    assert_eq!(frame.coverage(), ((0, 8), (0, 40)));
+    assert_eq!(frame.current_scroll(), (0, 24));
+    assert!(
+        frame
+            .runs()
+            .iter()
+            .any(|run| run.space() == RetainedPaintSpace::ViewportFixed)
+    );
+    for y in 8..=40 {
+        assert_same_canvas(
+            &frame.compose_integer((0, y)).unwrap(),
+            &ordinary_fixture(html, (0.0, y as f32), |_| {}),
+        );
+    }
+}
+
+#[test]
+fn overscan_overlapping_samples_partition_pixels_at_sample_origins() {
+    let html = "<style>*{margin:0;padding:0}html{background:white}body{height:160px}\
+        #top{height:24px;background:red}#middle{height:48px;background:green}\
+        #bottom{height:88px;background:blue}</style>\
+        <div id=top></div><div id=middle></div><div id=bottom></div>";
+    let plan = VerticalOverscanPlan::new(0, 8, 3, 1)
+        .unwrap()
+        .with_step_y(16)
+        .unwrap();
+    let frame = expect_overscan(overscan_fixture(html, plan, |_| {}));
+    assert_eq!(frame.coverage(), ((0, 8), (0, 40)));
+    for y in 8..=40 {
+        assert_same_canvas(
+            &frame.compose_integer((0, y)).unwrap(),
+            &ordinary_fixture(html, (0.0, y as f32), |_| {}),
+        );
+    }
+    let baseline = expect_overscan(overscan_fixture(
+        html,
+        VerticalOverscanPlan::new(0, 8, 2, 0).unwrap(),
+        |_| {},
+    ));
+    for y in [8.25, 15.5, 24.75, 39.5, 40.0] {
+        assert_same_canvas(
+            &frame.compose_logical((0.0, y), 1.0).unwrap(),
+            &baseline.compose_logical((0.0, y), 1.0).unwrap(),
+        );
+    }
+}
+
+#[test]
 fn overscan_sticky_accepts_a_fractional_bound_beyond_complete_coverage() {
     let html = "<style>*{margin:0;padding:0}html{background:white}\
         body{height:80.5px}#pin{position:sticky;top:0;width:16px;height:16px;background:red}\
