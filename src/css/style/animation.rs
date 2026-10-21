@@ -375,6 +375,80 @@ impl StyleResolver {
         untyped
     }
 
+    /// Reads the retained sample clock without changing timeline state.
+    pub(crate) fn animation_diagnostic_time_ms(&self) -> Option<f64> {
+        self.animation_timeline
+            .as_ref()
+            .map(|timeline| timeline.borrow().now_ms)
+    }
+
+    /// Node identities needed only by opt-in property-name diagnostics.
+    pub(crate) fn animation_diagnostic_node_ids(&self) -> Vec<usize> {
+        self.animation_timeline
+            .as_ref()
+            .map_or_else(Vec::new, |timeline| {
+                let mut ids: Vec<_> = timeline
+                    .borrow()
+                    .elements
+                    .keys()
+                    .map(|(node, _)| *node)
+                    .collect();
+                ids.sort_unstable();
+                ids.dedup();
+                ids
+            })
+    }
+
+    /// Returns owned, sorted property-name unions for running and changed
+    /// animation states. Names describe keyframe declarations, not proof that
+    /// each property's interpolated value changed. Missing nodes are reported
+    /// explicitly; this read does not resolve styles or advance either clock.
+    pub(crate) fn animation_diagnostic_property_names(
+        &self,
+        previous_ms: Option<f64>,
+        mut lookup: impl FnMut(usize) -> Option<NodeHandle>,
+    ) -> (Vec<String>, Vec<String>, usize) {
+        let mut running = std::collections::BTreeSet::new();
+        let mut changed = std::collections::BTreeSet::new();
+        let mut missing = 0;
+        if let Some(timeline) = self.animation_timeline.as_ref() {
+            let timeline = timeline.borrow();
+            for ((node_id, _), state) in &timeline.elements {
+                let is_running = state.running(timeline.now_ms);
+                let is_changed = previous_ms.is_some_and(|previous| {
+                    state.progress(previous) != state.progress(timeline.now_ms)
+                        || state.applies_will_change(previous)
+                            != state.applies_will_change(timeline.now_ms)
+                });
+                if !is_running && !is_changed {
+                    continue;
+                }
+                let Some(node) = lookup(*node_id) else {
+                    missing += 1;
+                    continue;
+                };
+                let Some(steps) = self.keyframes_for(&node, state.spec.scope, &state.spec.name)
+                else {
+                    missing += 1;
+                    continue;
+                };
+                for declaration in steps.iter().flat_map(|step| &step.declarations) {
+                    if is_running {
+                        running.insert(declaration.name.clone());
+                    }
+                    if is_changed {
+                        changed.insert(declaration.name.clone());
+                    }
+                }
+            }
+        }
+        (
+            running.into_iter().collect(),
+            changed.into_iter().collect(),
+            missing,
+        )
+    }
+
     /// Enables explicit live sampling, preserving the clock and start times on
     /// cache rebuilds. First activation drops static snapshots; later pseudo-only
     /// samples retain ordinary element styles. This is an effect at the rendering
@@ -742,4 +816,40 @@ pub(super) fn sample_untyped_custom_values(
                 .map(|value| (name.to_string(), value.clone()))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod property_name_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_names_are_sorted_owned_and_do_not_change_sampling() {
+        let node = NodeHandle::element("div");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            crate::css::parse_stylesheet(
+                "@keyframes move {from{width:10px;opacity:0}to{width:20px;opacity:1}} \
+             div{animation-name:move;animation-duration:1s;animation-timing-function:linear}",
+            )
+            .unwrap(),
+        );
+        resolver.set_animation_time_ms(0.0);
+        resolver.computed_style(&node);
+        let previous = resolver.animation_diagnostic_time_ms();
+        assert!(resolver.set_animation_time_ms(500.0));
+        let expected = vec!["opacity".to_owned(), "width".to_owned()];
+        let names = resolver.animation_diagnostic_property_names(previous, |id| {
+            (id == node.identity()).then(|| node.clone())
+        });
+        assert_eq!(names, (expected.clone(), expected, 0));
+        assert_eq!(resolver.animation_diagnostic_time_ms(), Some(500.0));
+        assert!(!resolver.set_animation_time_ms(500.0));
+        assert_eq!(
+            resolver
+                .animation_diagnostic_property_names(previous, |_| None)
+                .2,
+            1
+        );
+    }
 }

@@ -1044,7 +1044,9 @@ impl VerticalOverscanPlan {
             .and_then(|bytes| bytes.checked_add(scratch_bytes))
             .and_then(|bytes| bytes.checked_add(metadata_bytes))
             .ok_or(RetainedPaintError::Capacity)?;
-        if final_tiles > MAX_RETAINED_TILES || peak_bytes > MAX_RETAINED_BYTES {
+        if final_tiles > MAX_RETAINED_TILES
+            || !super::gradient_tiles::retained_peak_fits(peak_bytes, MAX_RETAINED_BYTES)
+        {
             if let Some(sources) = sources {
                 sources.diagnose_capacity("overscan", expected_runs, peak_bytes);
             }
@@ -1522,7 +1524,7 @@ impl SurfaceDimensions {
             .checked_mul(height as usize)
             .and_then(|pixels| pixels.checked_mul(4))
             .ok_or(RetainedPaintError::Capacity)?;
-        if bytes > MAX_RETAINED_BYTES {
+        if !super::gradient_tiles::retained_peak_fits(bytes, MAX_RETAINED_BYTES) {
             return Err(RetainedPaintError::Capacity);
         }
         Ok(Self {
@@ -2078,7 +2080,7 @@ impl ExtractionPlan {
             .and_then(|bytes| bytes.checked_add(recorder_metadata))
             .and_then(|bytes| bytes.checked_add(plan_metadata))
             .ok_or(RetainedPaintError::Capacity)?;
-        if peak > MAX_RETAINED_BYTES {
+        if !super::gradient_tiles::retained_peak_fits(peak, MAX_RETAINED_BYTES) {
             return Err(RetainedPaintError::Capacity);
         }
         Ok(())
@@ -2120,7 +2122,9 @@ impl ExtractionPlan {
                 bytes.checked_add(filter_sources.map_or(0, |plan| plan.metadata_bytes))
             })
             .ok_or(RetainedPaintError::Capacity)?;
-        if expected_runs > MAX_RETAINED_RUNS || retained_bytes > MAX_RETAINED_BYTES {
+        if expected_runs > MAX_RETAINED_RUNS
+            || !super::gradient_tiles::retained_peak_fits(retained_bytes, MAX_RETAINED_BYTES)
+        {
             if let Some(sources) = filter_sources {
                 sources.diagnose_capacity("capture", expected_runs, retained_bytes);
             }
@@ -2192,7 +2196,7 @@ impl ExtractionPlan {
             .and_then(|bytes| bytes.checked_add(filters.map_or(0, |plan| plan.scratch_bytes)))
             .and_then(|bytes| bytes.checked_add(filters.map_or(0, |plan| plan.metadata_bytes)))
             .ok_or(RetainedPaintError::Capacity)?;
-        if retained_bytes > MAX_RETAINED_BYTES {
+        if !super::gradient_tiles::retained_peak_fits(retained_bytes, MAX_RETAINED_BYTES) {
             return Err(RetainedPaintError::Capacity);
         }
         self.document_layers = Some(layers);
@@ -2872,7 +2876,9 @@ impl RetainedPaintCollector {
             || canvas.height() != self.plan.height
             || self.runs.len() >= self.plan.expected_runs
             || self.runs.len() >= MAX_RETAINED_RUNS
-            || next_bytes.is_none_or(|bytes| bytes > MAX_RETAINED_BYTES)
+            || next_bytes.is_none_or(|bytes| {
+                !super::gradient_tiles::retained_peak_fits(bytes, MAX_RETAINED_BYTES)
+            })
         {
             self.error = Some(RetainedPaintError::CollectionFailed);
             return false;
@@ -3163,11 +3169,12 @@ impl OverscanBuilder {
                         .map_or(0, FilterSourceLayer::bytes),
                 )
         });
-        if bytes
-            .saturating_add(self.plan.scratch_bytes)
-            .saturating_add(self.plan.metadata_bytes)
-            > MAX_RETAINED_BYTES
-        {
+        if !super::gradient_tiles::retained_peak_fits(
+            bytes
+                .saturating_add(self.plan.scratch_bytes)
+                .saturating_add(self.plan.metadata_bytes),
+            MAX_RETAINED_BYTES,
+        ) {
             return Err(RetainedPaintError::Capacity);
         }
         Ok(())
@@ -3447,6 +3454,7 @@ pub(crate) fn paint_layout_with_vertical_overscan(
     nested_documents: &HashMap<usize, Image>,
     shadow_masks: &border::FrameShadowMaskCache,
 ) -> RetainedOverscanOutcome {
+    let _gradient_tiles = super::gradient_tiles::freeze_gradient_tiles();
     let dimensions = match SurfaceDimensions::for_viewport(viewport) {
         Ok(dimensions) => dimensions,
         Err(reason) => return RetainedOverscanOutcome::Rejected { reason },
@@ -3755,6 +3763,7 @@ fn paint_layout_with_retained_fallback_impl(
     filter_sources: Option<&FilterSourcePlan>,
     document_layers: Option<Arc<RetainedLayerPlan>>,
 ) -> RetainedPaintOutcome {
+    let _gradient_tiles = super::gradient_tiles::freeze_gradient_tiles();
     #[cfg(not(test))]
     let _ = fail_after_runs;
     let dimensions = match SurfaceDimensions::for_viewport(viewport) {

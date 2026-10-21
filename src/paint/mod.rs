@@ -7,8 +7,10 @@ pub(crate) use caret::{TextCaretPoint, hit_test_caret_layout};
 pub(crate) mod color;
 pub(crate) mod color4;
 pub(crate) mod form_control;
+mod gradient_tiles;
 pub(crate) mod image;
 mod image_scale;
+pub(crate) use gradient_tiles::gradient_tile_cache_scope;
 mod outline;
 mod print_budget;
 mod retained_extract;
@@ -7980,23 +7982,7 @@ fn paint_tiled_gradient_background_sized(
     let tile_image = if repeat_x || repeat_y {
         let tw = tile_w.ceil().max(1.0) as u32;
         let th = tile_h.ceil().max(1.0) as u32;
-        if u64::from(tw) * u64::from(th) <= MAX_TILE_PIXELS {
-            let mut tile_canvas = Canvas::new(tw, th);
-            color::paint_gradient(
-                &mut tile_canvas,
-                gradient,
-                Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: tile_w,
-                    height: tile_h,
-                },
-                None,
-            );
-            Image::new(tw, th, tile_canvas.pixels).ok()
-        } else {
-            None
-        }
+        gradient_tiles::gradient_tile(gradient, tile_w, tile_h, tw, th)
     } else {
         None
     };
@@ -8047,23 +8033,7 @@ fn paint_tiled_gradient_background_auto(
     let tile_height = area.height.max(1.0);
     let tw = tile_width.ceil() as u32;
     let th = tile_height.ceil() as u32;
-    let tile_image = if u64::from(tw) * u64::from(th) <= MAX_TILE_PIXELS {
-        let mut tile_canvas = Canvas::new(tw, th);
-        color::paint_gradient(
-            &mut tile_canvas,
-            gradient,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: tile_width,
-                height: tile_height,
-            },
-            None,
-        );
-        Image::new(tw, th, tile_canvas.pixels).ok()
-    } else {
-        None
-    };
+    let tile_image = gradient_tiles::gradient_tile(gradient, tile_width, tile_height, tw, th);
     let clip_area = clip.unwrap_or(area);
     let x_start = if repeat_x {
         area.x + ((clip_area.x - area.x) / tile_width).floor() * tile_width

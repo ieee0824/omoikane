@@ -33,6 +33,7 @@ mod counters;
 mod flex;
 mod grid;
 mod inline;
+mod intrinsic;
 mod margins;
 mod multicol;
 mod paged;
@@ -1463,13 +1464,15 @@ pub(crate) fn layout_tree_with_content_visibility(
     });
     let _margin_scope = margins::Scope::new();
     counters::prepare_counter_values(node, resolver);
-    let Some(mut layout) = layout_node(
-        node,
-        resolver,
-        containing_block,
-        LayoutViewport::new(containing_block),
-        None,
-    ) else {
+    let Some(mut layout) = intrinsic::with_pass(|| {
+        layout_node(
+            node,
+            resolver,
+            containing_block,
+            LayoutViewport::new(containing_block),
+            None,
+        )
+    }) else {
         drop(scope);
         let snapshot = report.borrow().clone();
         return (None, snapshot);
@@ -1483,13 +1486,15 @@ pub(crate) fn layout_tree_with_content_visibility(
             }
             *report.borrow_mut() = ContentVisibilityLayoutReport::default();
             counters::prepare_counter_values(node, resolver);
-            let Some(next_layout) = layout_node(
-                node,
-                resolver,
-                containing_block,
-                LayoutViewport::new(containing_block),
-                None,
-            ) else {
+            let Some(next_layout) = intrinsic::with_pass(|| {
+                layout_node(
+                    node,
+                    resolver,
+                    containing_block,
+                    LayoutViewport::new(containing_block),
+                    None,
+                )
+            }) else {
                 drop(scope);
                 let snapshot = report.borrow().clone();
                 return (None, snapshot);
@@ -4778,6 +4783,19 @@ fn minimum_content_width_inner(
     resolver: &mut StyleResolver,
     ignore_own_width: bool,
 ) -> f32 {
+    intrinsic::measure(
+        node.identity(),
+        intrinsic::Kind::Minimum,
+        ignore_own_width,
+        || minimum_content_width_inner_uncached(node, resolver, ignore_own_width),
+    )
+}
+
+fn minimum_content_width_inner_uncached(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    ignore_own_width: bool,
+) -> f32 {
     match node.node_type() {
         NodeType::Text => node
             .data()
@@ -4855,6 +4873,19 @@ fn intrinsic_width_for_sizing(node: &NodeHandle, resolver: &mut StyleResolver) -
 }
 
 fn intrinsic_width_inner(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    ignore_own_width: bool,
+) -> f32 {
+    intrinsic::measure(
+        node.identity(),
+        intrinsic::Kind::Maximum,
+        ignore_own_width,
+        || intrinsic_width_inner_uncached(node, resolver, ignore_own_width),
+    )
+}
+
+fn intrinsic_width_inner_uncached(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     ignore_own_width: bool,

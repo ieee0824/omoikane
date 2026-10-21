@@ -1821,7 +1821,9 @@ fn record_recipe(
                 || collector
                     .retained_bytes
                     .checked_add(bytes)
-                    .is_none_or(|size| size > MAX_RETAINED_BYTES)
+                    .is_none_or(|size| {
+                        !super::super::gradient_tiles::retained_peak_fits(size, MAX_RETAINED_BYTES)
+                    })
             {
                 collector.error = Some(RetainedPaintError::Capacity);
                 return;

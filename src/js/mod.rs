@@ -7456,15 +7456,22 @@ impl HostState {
         document_id: usize,
         transition_time_ms: f64,
         live_animations: bool,
-    ) -> (StyleClockEffects, Option<TransitionPropertyCounts>) {
+    ) -> (
+        StyleClockEffects,
+        Option<TransitionPropertyCounts>,
+        Option<(Vec<String>, Vec<String>, usize)>,
+    ) {
         let transition_nodes = self.transition_nodes_for_document(document_id, transition_time_ms);
         let Some(resolver) = self
             .document_styles
             .get_mut(&document_id)
             .and_then(|entry| entry.resolver.as_mut())
         else {
-            return (StyleClockEffects::default(), None);
+            return (StyleClockEffects::default(), None, None);
         };
+        let previous_animation_ms = frame_diagnostics::style_clock_trace_requested()
+            .then(|| resolver.animation_diagnostic_time_ms())
+            .flatten();
         let effects = resolver.advance_style_clocks_with_node_lookup(
             transition_time_ms,
             live_animations,
@@ -7473,7 +7480,32 @@ impl HostState {
         let transition_properties = (effects.transition_changed
             && frame_diagnostics::style_clock_record_requested(effects))
         .then(|| resolver.running_transition_property_counts());
-        (effects, transition_properties)
+        let trace_animations =
+            effects.animation_changed && frame_diagnostics::style_clock_record_requested(effects);
+        let node_ids = trace_animations.then(|| resolver.animation_diagnostic_node_ids());
+        // End the mutable resolver borrow before looking up owned node handles.
+        let animation_properties = node_ids.map(|ids| {
+            let nodes: HashMap<_, _> = ids
+                .into_iter()
+                .filter_map(|id| {
+                    self.get_node(id)
+                        .filter(|node| {
+                            document_root_for_node(node)
+                                .is_some_and(|document| document.identity() == document_id)
+                        })
+                        .map(|node| (id, node))
+                })
+                .collect();
+            let resolver = self
+                .document_styles
+                .get(&document_id)
+                .and_then(|entry| entry.resolver.as_ref())
+                .expect("sampled resolver");
+            resolver.animation_diagnostic_property_names(previous_animation_ms, |id| {
+                nodes.get(&id).cloned()
+            })
+        });
+        (effects, transition_properties, animation_properties)
     }
 
     fn transition_nodes_for_document(
@@ -7521,15 +7553,13 @@ impl HostState {
             // Sampling changes the next visual candidate, not the committed
             // scene. GUI publication installs new geometry with its matching
             // retained pixels; hard input-policy changes revoke separately.
-            let (clock_effects, transition_properties) = self.advance_document_style_clocks(
-                document_id,
-                transition_time_ms,
-                live_animations,
-            );
+            let (clock_effects, transition_properties, animation_properties) = self
+                .advance_document_style_clocks(document_id, transition_time_ms, live_animations);
             frame_diagnostics::record_style_clock_effects(
                 document_id,
                 clock_effects,
                 transition_properties,
+                animation_properties,
             );
             if clock_effects.changed() {
                 if document_id == self.document.identity() {
@@ -9728,6 +9758,7 @@ impl JsRuntime {
         &mut self,
     ) -> Result<crate::paint::Canvas, crate::paint::PaintError> {
         self.retained_scroll.clear_frame();
+        let _gradient_tiles = crate::paint::gradient_tile_cache_scope();
         let timeline = Arc::clone(&self.host_state.borrow().image_timeline);
         let canvas = crate::layout::with_image_animation_timeline(timeline, || {
             self.paint_document_at_current_image_time()

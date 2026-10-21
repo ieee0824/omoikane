@@ -498,6 +498,11 @@ fn style_clock_data(
     })
 }
 
+/// Whether any style-clock diagnostics are enabled; avoids timeline inspection otherwise.
+pub(super) fn style_clock_trace_requested() -> bool {
+    style_clock_trace_enabled() || all_style_clocks_trace_enabled()
+}
+
 /// Whether the current sample will emit an opt-in style-clock record.
 ///
 /// Callers use this before collecting transition-property counts, keeping the
@@ -523,16 +528,22 @@ pub(super) fn record_style_clock_effects(
     document_id: usize,
     effects: StyleClockEffects,
     transition_properties: Option<TransitionPropertyCounts>,
+    animation_properties: Option<(Vec<String>, Vec<String>, usize)>,
 ) {
     if !style_clock_record_requested(effects) {
         return;
     }
+    let mut data = style_clock_data(document_id, effects, transition_properties);
+    if let Some((running, changed, missing)) = animation_properties {
+        data["animation_property_names"] = serde_json::json!({
+            "running_keyframe_declarations": running,
+            "changed_sample_keyframe_declarations": changed,
+            "unresolved_states": missing,
+        });
+    }
     eprintln!(
         "{}",
-        crate::diagnostics::json_record(
-            "OMOIKANE_STYLE_CLOCK",
-            &style_clock_data(document_id, effects, transition_properties)
-        )
+        crate::diagnostics::json_record("OMOIKANE_STYLE_CLOCK", &data)
     );
 }
 

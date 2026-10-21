@@ -3766,3 +3766,113 @@ fn overscan_atomic_adjacent_opaque_primitives_keep_fractional_coverage() {
         "adjacent opaque colors must retain full coverage after half-pixel sampling"
     );
 }
+
+#[test]
+fn ordinary_and_retained_samples_share_one_gradient_raster_in_one_scope() {
+    let html = "<style>*{margin:0;padding:0}body{height:128px;\
+        background:linear-gradient(red,blue)}</style>";
+    let before = super::gradient_tiles::generation_count();
+    {
+        let _scope = super::gradient_tiles::gradient_tile_cache_scope();
+        let ordinary = ordinary_fixture(html, (0.0, 32.0), |_| {});
+        assert_eq!(super::gradient_tiles::generation_count() - before, 1);
+        let frame = expect_overscan(overscan_fixture(
+            html,
+            VerticalOverscanPlan::new(0, 0, 3, 1).unwrap(),
+            |_| {},
+        ));
+        assert_eq!(
+            super::gradient_tiles::generation_count() - before,
+            1,
+            "the ordinary tile must serve planning and all retained samples"
+        );
+        assert_eq!(frame.coverage(), ((0, 0), (0, 64)));
+        assert_same_canvas(&frame.compose_integer((0, 32)).unwrap(), &ordinary);
+        for y in [0, 16, 48, 64] {
+            // A nested explicit scope must share the rendering opportunity,
+            // while canonical pixels remain identical at every captured row.
+            let _nested = super::gradient_tiles::gradient_tile_cache_scope();
+            let expected = ordinary_fixture(html, (0.0, y as f32), |_| {});
+            assert_same_canvas(&frame.compose_integer((0, y)).unwrap(), &expected);
+        }
+        assert_eq!(super::gradient_tiles::generation_count() - before, 1);
+    }
+    let _new_frame = super::gradient_tiles::gradient_tile_cache_scope();
+    let _ordinary = ordinary_fixture(html, (0.0, 32.0), |_| {});
+    assert_eq!(
+        super::gradient_tiles::generation_count() - before,
+        2,
+        "a later render must not inherit a stale gradient tile"
+    );
+}
+
+#[test]
+fn cached_explicit_background_size_keeps_fractional_repeat_pixels() {
+    for repeat in ["repeat", "repeat-x", "repeat-y"] {
+        for attachment in ["scroll", "fixed"] {
+            let html = format!(
+                "<style>*{{margin:0;padding:0}}body{{height:128px;\
+                 background-image:linear-gradient(37deg,rgba(255,0,0,.3),blue);\
+                 background-size:16.5px 11.25px;background-position:-2.75px 3.5px;\
+                 background-repeat:{repeat};background-attachment:{attachment}}}</style>"
+            );
+            let expected = ordinary_fixture(&html, (0.0, 17.0), |_| {});
+            let before = super::gradient_tiles::generation_count();
+            let _scope = super::gradient_tiles::gradient_tile_cache_scope();
+            for _ in 0..3 {
+                let actual = ordinary_fixture(&html, (0.0, 17.0), |_| {});
+                assert_same_canvas(&actual, &expected);
+            }
+            assert_eq!(
+                super::gradient_tiles::generation_count() - before,
+                1,
+                "explicit fractional background-size must reuse the same tile: {repeat}/{attachment}"
+            );
+        }
+    }
+}
+
+#[test]
+fn live_gradient_cache_does_not_override_real_retained_capacity_rejection() {
+    let html = "<style>*{margin:0;padding:0}body{height:128px;\
+        background:linear-gradient(red,blue)}</style>";
+    let _scope = super::gradient_tiles::gradient_tile_cache_scope();
+    let before = super::gradient_tiles::generation_count();
+    let _ordinary = ordinary_fixture(html, (0.0, 0.0), |_| {});
+    assert_eq!(super::gradient_tiles::generation_count() - before, 1);
+    let (layout, mut resolver) = build_raw_fixture(html, |_| {});
+    let shadows = super::border::FrameShadowMaskCache::new(false);
+    let rasters = super::retained_extract::retained_raster_count();
+    let outcome = paint_layout_with_vertical_overscan(
+        &layout,
+        &mut resolver,
+        Rect {
+            width: 4096.0,
+            height: 4096.0,
+            ..viewport()
+        },
+        VerticalOverscanPlan::new(0, 0, 2, 0).unwrap(),
+        &[],
+        None,
+        &[],
+        &std::collections::HashMap::new(),
+        &shadows,
+    );
+    assert!(matches!(
+        outcome,
+        RetainedOverscanOutcome::Rejected {
+            reason: RetainedPaintError::Capacity
+        }
+    ));
+    assert_eq!(
+        super::retained_extract::retained_raster_count(),
+        rasters,
+        "a live tile must not permit rasterizing the oversized request"
+    );
+    let _ordinary = ordinary_fixture(html, (0.0, 0.0), |_| {});
+    assert_eq!(
+        super::gradient_tiles::generation_count() - before,
+        2,
+        "capacity rejection must evict the live tile and release its freeze guard"
+    );
+}

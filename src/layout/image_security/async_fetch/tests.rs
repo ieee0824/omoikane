@@ -815,3 +815,94 @@ fn disabling_async_loading_reuses_an_existing_download_without_sync_refetch() {
     );
     assert_eq!(transport.requests.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn intrinsic_memo_preserves_pending_image_dependencies_and_new_pass_completion() {
+    use crate::css::{Origin, StyleResolver, parse_stylesheet};
+    use crate::dom::NodeHandle;
+    use crate::layout::{Rect, layout_tree};
+    let (entered, started) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let fixture = Fixture::new(Arc::new(HeldImage {
+        entered,
+        release: Mutex::new(released),
+        requests: AtomicUsize::new(0),
+        cookies: Mutex::new(Vec::new()),
+    }));
+    let url = "https://image.test/intrinsic-memo-next-pass.png";
+    let root = NodeHandle::element("div");
+    let mut parent = root.clone();
+    for _ in 0..8 {
+        let child = NodeHandle::element("div");
+        parent.append_child(child.clone());
+        parent = child;
+    }
+    let image = NodeHandle::element("img");
+    image.set_attribute("src", url);
+    parent.append_child(image);
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div{display:flex;align-items:flex-start}img{flex-shrink:0}").unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 64.0,
+        height: 64.0,
+    };
+    let mut render = |disabled| {
+        let (layout, pixels) = fixture.run(|| {
+            let layout = with_image_layout_dependency_capture(|| {
+                let layout = crate::layout::intrinsic::probe(disabled, || {
+                    layout_tree(&root, &mut resolver, viewport).unwrap()
+                })
+                .0;
+                (layout, true)
+            });
+            let pixels = crate::paint::paint_layout(&layout, &mut resolver, viewport)
+                .pixels()
+                .to_vec();
+            (layout, pixels)
+        });
+        // Compare the actual committed dependency coverage, not memo internals.
+        let dependencies = fixture
+            .state
+            .borrow()
+            .layout_dependencies
+            .references
+            .clone()
+            .unwrap();
+        (layout, pixels, dependencies)
+    };
+    let pending_uncached = render(true);
+    let pending_cached = render(false);
+    assert_eq!(pending_cached, pending_uncached);
+    assert_eq!(pending_cached.2, HashSet::from([url.to_owned()]));
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    release.send(()).unwrap();
+    // Only an explicit publication between passes makes decoded metadata visible.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut requires_layout = false;
+    while fixture.state.borrow().has_pending_images() {
+        requires_layout |= fixture.run(poll_effects).requires_layout;
+        assert!(Instant::now() < deadline, "image completion did not settle");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        requires_layout,
+        "intrinsic dependency completion must require layout"
+    );
+    let loaded_uncached = render(true);
+    let loaded_cached = render(false);
+    assert_eq!(loaded_cached, loaded_uncached);
+    assert_eq!(loaded_cached.2, pending_cached.2);
+    assert_ne!(
+        loaded_cached.0, pending_cached.0,
+        "new intrinsic image geometry must be used"
+    );
+    assert_ne!(
+        loaded_cached.1, pending_cached.1,
+        "the loaded red pixel must be visible"
+    );
+}

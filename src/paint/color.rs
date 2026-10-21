@@ -84,6 +84,15 @@ pub(crate) struct Gradient {
     repeating: bool,
 }
 
+impl Gradient {
+    /// Heap storage copied into an owned frame-cache key.
+    pub(super) fn cache_key_heap_bytes(&self) -> usize {
+        self.stops
+            .capacity()
+            .saturating_mul(std::mem::size_of::<GradientStop>())
+    }
+}
+
 pub(crate) fn parse_color(value: &str) -> Option<Color> {
     let value = value.trim();
     if value.eq_ignore_ascii_case("transparent") {
