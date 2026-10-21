@@ -1979,6 +1979,23 @@ mod tests {
     }
 
     #[test]
+    fn blank_viewport_area_can_publish_native_root_scroll() {
+        let mut page = native_scroll_policy_page(
+            "<html style='pointer-events:none'><body style='margin:0'>\
+             <div style='height:1000px;background:red'></div></body></html>",
+        );
+        let publication = page
+            .snapshot(true, false, None)
+            .native_scroll
+            .expect("blank viewport area must retain root-scroll authority");
+        commit_pending_publication(&publication);
+        assert!(matches!(
+            publication.handle.scroll(Offset { x: 0.0, y: 10.0 }),
+            omoikane::js::native_scroll::ScrollDecision::Accepted(_)
+        ));
+    }
+
+    #[test]
     fn native_scroll_range_proof_ignores_author_geometry_and_rejects_new_overflow() {
         let mut page = native_scroll_policy_page(
             "<body style='margin:0'><div id='wrap' style='overflow:auto'>\

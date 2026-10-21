@@ -44,7 +44,9 @@ impl CdpSession {
     }
 
     /// Resolves a conservative top-level root-scroll target from trusted hit
-    /// testing and the bootstrap-private policy callback.
+    /// testing and the bootstrap-private policy callback. A blank viewport
+    /// point falls back to the top-level document element so root scrolling can
+    /// remain compositor-driven while the page thread is busy.
     ///
     /// Cross-Document targets, pointer lock, nested scroll containers, and
     /// overscroll chaining boundaries are rejected. The returned node and Realm
@@ -58,7 +60,14 @@ impl CdpSession {
             return Ok(None);
         }
         let trace = std::env::var_os("OMOIKANE_TRACE_INPUT").is_some();
-        let Some(target) = self.runtime.hit_test(x as f32, y as f32) else {
+        let target = self.runtime.hit_test(x as f32, y as f32).or_else(|| {
+            self.runtime
+                .document()
+                .child_nodes()
+                .into_iter()
+                .find(|node| node.tag_name().is_some())
+        });
+        let Some(target) = target else {
             trace_native_target_rejection(trace, "hit_test_miss", None);
             return Ok(None);
         };
