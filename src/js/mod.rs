@@ -42,6 +42,7 @@ use crate::css::{
 use crate::css::{SelectorMatchCache, matches_selector_boundary_cached, matches_selector_cached};
 use crate::dom::{
     DomString, Node, NodeHandle, NodeType, ShadowRootMode, WeakNodeHandle, is_actually_disabled,
+    live_collection_epoch,
 };
 use crate::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
@@ -17257,6 +17258,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(record_inserted_script_error_native),
         ),
         (
+            js_string!("__omoikane_collection_generation"),
+            0,
+            NativeFunction::from_copy_closure(collection_generation_native),
+        ),
+        (
             js_string!("__omoikane_child_node_ids"),
             1,
             NativeFunction::from_copy_closure(child_node_ids_native),
@@ -25856,6 +25862,10 @@ fn child_node_ids_native(
             boa_engine::object::builtins::JsArray::from_iter(ids, context),
         ))
     })
+}
+
+fn collection_generation_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(boa_engine::JsBigInt::from(live_collection_epoch()).into())
 }
 
 fn first_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {

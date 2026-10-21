@@ -20476,6 +20476,57 @@ fn document_links_filters_href_and_keeps_tree_order() {
 }
 
 #[test]
+fn live_html_collection_reuses_one_snapshot_until_dom_mutation() {
+    use crate::dom::{child_snapshot_handle_clones, reset_child_snapshot_handle_clones};
+    use crate::html::TreeBuilder;
+
+    let doc = TreeBuilder::parse(
+        r#"<html><body><div class="hit"><span></span></div><div><b class="hit"></b></div></body></html>"#,
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(doc).unwrap();
+    reset_child_snapshot_handle_clones();
+    assert_eq!(
+        eval_num(
+            &mut runtime,
+            "globalThis.hits = document.getElementsByClassName('hit'); hits.length",
+        ),
+        2.0
+    );
+    let first_snapshot_work = child_snapshot_handle_clones();
+    assert!(first_snapshot_work > 0);
+
+    assert_js_ok(
+        &mut runtime,
+        r#"
+            (function () {
+                for (var i = 0; i < 100; i++) {
+                    if (hits.length !== 2 || hits[0].tagName !== 'DIV' || hits[1].tagName !== 'B') return 1;
+                }
+                return 0;
+            })()
+        "#,
+    );
+    assert_eq!(child_snapshot_handle_clones(), first_snapshot_work);
+
+    assert_js_ok(
+        &mut runtime,
+        r#"
+            (function () {
+                var added = document.createElement('i');
+                added.className = 'hit';
+                document.body.appendChild(added);
+                if (hits.length !== 3 || hits[2] !== added) return 1;
+                added.className = '';
+                if (hits.length !== 2 || hits[2] != null) return 2;
+                return 0;
+            })()
+        "#,
+    );
+    assert!(child_snapshot_handle_clones() > first_snapshot_work);
+}
+
+#[test]
 fn document_images_and_anchors_collections() {
     use crate::html::TreeBuilder;
     let doc = TreeBuilder::parse(
