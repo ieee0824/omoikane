@@ -190,17 +190,18 @@ pub(crate) struct AnimationTimeline {
     elements: HashMap<(usize, Option<PseudoElement>), AnimationState>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct AnimationClockEffects {
     requires_layout: bool,
     retained_elements: usize,
     retained_pseudos: usize,
     changed_elements: usize,
     changed_pseudos: usize,
+    changed_targets: Vec<(usize, Option<PseudoElement>)>,
 }
 
 impl AnimationClockEffects {
-    fn changed(self) -> bool {
+    fn changed(&self) -> bool {
         self.changed_elements != 0 || self.changed_pseudos != 0
     }
 }
@@ -254,7 +255,7 @@ impl AnimationTimeline {
             self.now_ms
         };
         let mut effects = AnimationClockEffects::default();
-        for ((_, pseudo), state) in &self.elements {
+        for ((node, pseudo), state) in &self.elements {
             if pseudo.is_some() {
                 effects.retained_pseudos += 1;
             } else {
@@ -263,6 +264,7 @@ impl AnimationTimeline {
             let sample_changed = state.progress(self.now_ms) != state.progress(next)
                 || state.applies_will_change(self.now_ms) != state.applies_will_change(next);
             if sample_changed {
+                effects.changed_targets.push((*node, *pseudo));
                 if pseudo.is_some() {
                     effects.changed_pseudos += 1;
                 } else {
@@ -458,12 +460,25 @@ impl StyleResolver {
         let timeline = self.animation_timeline.get_or_insert_with(Default::default);
         let timeline = timeline.get_mut();
         let effects = timeline.set_time(time_ms);
-        let pseudo_only = effects.changed() && effects.retained_elements == 0;
-        if first_live_sample || (effects.changed() && !pseudo_only) {
+        if first_live_sample {
             self.cache.clear();
-        }
-        if first_live_sample || effects.changed() {
             self.pseudo_cache.clear();
+        } else if effects.changed() && effects.requires_layout {
+            // Preserve the conservative fallback for layout-affecting clocks:
+            // a retained ordinary state can still supply a filled final value
+            // while only a pseudo sample advances.
+            if effects.retained_elements != 0 {
+                self.cache.clear();
+            }
+            self.pseudo_cache.clear();
+        } else if effects.changed() {
+            for (node, pseudo) in &effects.changed_targets {
+                if let Some(pseudo) = pseudo {
+                    self.pseudo_cache.remove(&(*node, *pseudo));
+                } else {
+                    self.cache.remove(node);
+                }
+            }
         }
         effects
     }
@@ -856,6 +871,7 @@ mod property_name_diagnostic_tests {
     #[test]
     fn background_position_animation_invalidates_paint_without_rebuilding_layout() {
         let node = NodeHandle::element("div");
+        let unrelated = NodeHandle::element("p");
         let mut resolver = StyleResolver::new();
         resolver.add_stylesheet(
             Origin::Author,
@@ -868,13 +884,16 @@ mod property_name_diagnostic_tests {
         );
         resolver.set_animation_time_ms(0.0);
         let before = resolver.computed_style_shared(&node);
+        let unrelated_before = resolver.computed_style_shared(&unrelated);
         let effects = resolver.advance_style_clocks(750.0, true);
         let after = resolver.computed_style_shared(&node);
+        let unrelated_after = resolver.computed_style_shared(&unrelated);
 
         assert!(effects.animation_changed);
         assert!(!effects.animation_requires_layout);
         assert!(!effects.requires_layout());
         assert!(!Arc::ptr_eq(&before, &after));
+        assert!(Arc::ptr_eq(&unrelated_before, &unrelated_after));
         assert_ne!(
             before.get("background-position-x"),
             after.get("background-position-x")
