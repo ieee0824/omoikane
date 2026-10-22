@@ -5,7 +5,10 @@
 //! the shorthand into its four longhands. Timeline sampling lives above the
 //! CSS parser and consumes the normalized longhand values produced here.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+
+#[cfg(test)]
+mod activity_tests;
 
 use crate::paint::color::{Color, parse_color};
 
@@ -32,7 +35,11 @@ struct TransitionDescriptor {
 pub(crate) struct TransitionTimeline {
     now_ms: f64,
     elements: HashMap<usize, ElementTransitionState>,
+    /// IDs with running transitions; inactive base snapshots stay in `elements`.
+    running_nodes: HashSet<usize>,
     events: Vec<TransitionEventRecord>,
+    #[cfg(test)]
+    activity_scan_visits: std::cell::Cell<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -270,11 +277,7 @@ impl TransitionTimeline {
 
     /// Whether this finite monotonic sample advances at least one transition.
     pub(crate) fn sample_will_advance(&self, time_ms: f64) -> bool {
-        self.sample_time_advances(time_ms)
-            && self
-                .elements
-                .values()
-                .any(|state| !state.running.is_empty())
+        self.sample_time_advances(time_ms) && !self.running_nodes.is_empty()
     }
 
     /// Whether this advancing sample can localize every running transition and
@@ -288,7 +291,7 @@ impl TransitionTimeline {
             return false;
         }
         let mut has_running = false;
-        for state in self.elements.values() {
+        for (_, state) in self.running_states() {
             for property in state.running.keys() {
                 has_running = true;
                 if transition_cache_scope(property) == TransitionCacheScope::Full {
@@ -304,72 +307,31 @@ impl TransitionTimeline {
             let next = self.now_ms.max(time_ms.max(0.0));
             if next > self.now_ms {
                 self.now_ms = next;
-                return self
-                    .elements
-                    .values()
-                    .any(|state| !state.running.is_empty());
+                return !self.running_nodes.is_empty();
             }
         }
         false
     }
 
     pub(crate) fn sample(&mut self, node_id: usize, properties: &mut PropertyMap) {
-        let now_ms = self.now_ms;
         let state = self.elements.entry(node_id).or_default();
-        if !state.initialized {
-            state.base_values = properties.clone();
-            state.initialized = true;
-            return;
-        }
-        // The base snapshot includes transition configuration. Equal snapshots
-        // cannot start or cancel a transition, but existing ones still advance.
-        if state.base_values == *properties {
-            sample_running_transitions(node_id, now_ms, state, properties, &mut self.events);
-            return;
-        }
-        let configuration = TransitionConfiguration::from_properties(properties);
-        if state.running.is_empty()
-            && !configuration.may_start_transition(&state.base_values, properties)
-        {
-            // Keep the latest baseline even while transitions are disabled, so
-            // enabling them later starts from the immediately preceding style.
-            state.base_values = properties.clone();
-            return;
-        }
-        cancel_unmatched_transitions(node_id, now_ms, state, &configuration, &mut self.events);
-        update_changed_transitions(
-            node_id,
-            now_ms,
-            state,
-            properties,
-            &configuration,
-            &mut self.events,
-        );
-        state.base_values = properties.clone();
-        sample_running_transitions(node_id, now_ms, state, properties, &mut self.events);
+        sample_element_transitions(node_id, self.now_ms, state, properties, &mut self.events);
+        let running = !state.running.is_empty();
+        self.update_running_node(node_id, running);
     }
 
     #[cfg(test)]
     fn sample_without_fast_paths(&mut self, node_id: usize, properties: &mut PropertyMap) {
-        let now_ms = self.now_ms;
         let state = self.elements.entry(node_id).or_default();
-        if !state.initialized {
-            state.base_values = properties.clone();
-            state.initialized = true;
-            return;
-        }
-        let configuration = TransitionConfiguration::from_properties(properties);
-        cancel_unmatched_transitions(node_id, now_ms, state, &configuration, &mut self.events);
-        update_changed_transitions(
+        sample_element_without_fast_paths(
             node_id,
-            now_ms,
+            self.now_ms,
             state,
             properties,
-            &configuration,
             &mut self.events,
         );
-        state.base_values = properties.clone();
-        sample_running_transitions(node_id, now_ms, state, properties, &mut self.events);
+        let running = !state.running.is_empty();
+        self.update_running_node(node_id, running);
     }
 
     pub(crate) fn take_events(&mut self) -> Vec<TransitionEventRecord> {
@@ -385,6 +347,7 @@ impl TransitionTimeline {
             .collect::<Vec<_>>();
         for node_id in detached {
             if let Some(state) = self.elements.remove(&node_id) {
+                self.running_nodes.remove(&node_id);
                 self.events
                     .extend(state.running.into_iter().map(|(property, running)| {
                         running.event_record(node_id, "transitioncancel", property, self.now_ms)
@@ -394,10 +357,7 @@ impl TransitionTimeline {
     }
 
     pub(crate) fn running_node_ids(&self) -> Vec<usize> {
-        self.elements
-            .iter()
-            .filter_map(|(node_id, state)| (!state.running.is_empty()).then_some(*node_id))
-            .collect()
+        self.running_nodes.iter().copied().collect()
     }
 
     /// Returns one strongest cache invalidation scope per running node.
@@ -405,31 +365,50 @@ impl TransitionTimeline {
     /// Callers collect this before advancing the clock so a transition that
     /// completes at the new sample time still has its final value recomputed.
     pub(crate) fn running_cache_scopes(&self) -> Vec<(usize, TransitionCacheScope)> {
-        self.elements
-            .iter()
+        self.running_states()
             .filter_map(|(node_id, state)| {
                 state
                     .running
                     .keys()
                     .map(|property| transition_cache_scope(property))
                     .max()
-                    .map(|scope| (*node_id, scope))
+                    .map(|scope| (node_id, scope))
             })
             .collect()
     }
 
     pub(crate) fn has_running_transitions(&self) -> bool {
-        self.elements
-            .values()
-            .any(|state| !state.running.is_empty())
+        !self.running_nodes.is_empty()
     }
 
     pub(crate) fn running_transitions_require_layout(&self) -> bool {
-        self.elements.values().any(|state| {
+        self.running_states().any(|(_, state)| {
             state
                 .running
                 .keys()
                 .any(|property| animated_property_requires_layout(property))
+        })
+    }
+
+    fn update_running_node(&mut self, node_id: usize, running: bool) {
+        if running {
+            self.running_nodes.insert(node_id);
+        } else {
+            self.running_nodes.remove(&node_id);
+        }
+    }
+
+    fn running_states(&self) -> impl Iterator<Item = (usize, &ElementTransitionState)> {
+        self.running_nodes.iter().map(|node_id| {
+            #[cfg(test)]
+            self.activity_scan_visits
+                .set(self.activity_scan_visits.get() + 1);
+            (
+                *node_id,
+                self.elements
+                    .get(node_id)
+                    .expect("running transition retains its state"),
+            )
         })
     }
 
@@ -462,6 +441,7 @@ impl TransitionTimeline {
             .collect::<Vec<_>>();
         for node_id in detached {
             if let Some(state) = self.elements.remove(&node_id) {
+                self.running_nodes.remove(&node_id);
                 self.events
                     .extend(state.running.into_iter().map(|(property, running)| {
                         running.event_record(node_id, "transitioncancel", property, self.now_ms)
@@ -469,6 +449,59 @@ impl TransitionTimeline {
             }
         }
     }
+}
+
+fn sample_element_transitions(
+    node_id: usize,
+    now_ms: f64,
+    state: &mut ElementTransitionState,
+    properties: &mut PropertyMap,
+    events: &mut Vec<TransitionEventRecord>,
+) {
+    if !state.initialized {
+        state.base_values = properties.clone();
+        state.initialized = true;
+        return;
+    }
+    // The base snapshot includes transition configuration. Equal snapshots
+    // cannot start or cancel a transition, but existing ones still advance.
+    if state.base_values == *properties {
+        sample_running_transitions(node_id, now_ms, state, properties, events);
+        return;
+    }
+    let configuration = TransitionConfiguration::from_properties(properties);
+    if state.running.is_empty()
+        && !configuration.may_start_transition(&state.base_values, properties)
+    {
+        // Keep the latest baseline even while transitions are disabled, so
+        // enabling them later starts from the immediately preceding style.
+        state.base_values = properties.clone();
+        return;
+    }
+    cancel_unmatched_transitions(node_id, now_ms, state, &configuration, events);
+    update_changed_transitions(node_id, now_ms, state, properties, &configuration, events);
+    state.base_values = properties.clone();
+    sample_running_transitions(node_id, now_ms, state, properties, events);
+}
+
+#[cfg(test)]
+fn sample_element_without_fast_paths(
+    node_id: usize,
+    now_ms: f64,
+    state: &mut ElementTransitionState,
+    properties: &mut PropertyMap,
+    events: &mut Vec<TransitionEventRecord>,
+) {
+    if !state.initialized {
+        state.base_values = properties.clone();
+        state.initialized = true;
+        return;
+    }
+    let configuration = TransitionConfiguration::from_properties(properties);
+    cancel_unmatched_transitions(node_id, now_ms, state, &configuration, events);
+    update_changed_transitions(node_id, now_ms, state, properties, &configuration, events);
+    state.base_values = properties.clone();
+    sample_running_transitions(node_id, now_ms, state, properties, events);
 }
 
 fn cancel_unmatched_transitions(
@@ -1542,6 +1575,7 @@ mod tests {
     fn assert_timeline_state_matches(actual: &TransitionTimeline, expected: &TransitionTimeline) {
         assert_eq!(actual.now_ms, expected.now_ms);
         assert_eq!(actual.elements.len(), expected.elements.len());
+        assert_eq!(actual.running_nodes, expected.running_nodes);
         for (id, state) in &actual.elements {
             let expected = &expected.elements[id];
             assert_eq!(state.initialized, expected.initialized);
@@ -1813,6 +1847,16 @@ mod tests {
             .elements
             .insert(30, ElementTransitionState::default());
 
+        for id in [10, 20] {
+            timeline.update_running_node(id, true);
+        }
+        assert_eq!(
+            timeline
+                .running_node_ids()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([10, 20])
+        );
         let counts = timeline.running_property_counts();
         assert_eq!(
             counts,
