@@ -78,6 +78,7 @@ fn trace_animation_frame_phases(
     }
 }
 
+mod async_realm;
 mod broadcast_channel;
 mod cache_storage;
 mod child_document;
@@ -10716,7 +10717,7 @@ impl JsRuntime {
         &'a mut self,
         source: &str,
     ) -> impl Future<Output = JsResult<JsValue>> + 'a {
-        self.eval_async_source(source, None, None, false, (1, 1))
+        self.eval_async_source(source, None, None, false, (1, 1), None)
     }
 
     fn eval_async_source<'a>(
@@ -10726,6 +10727,7 @@ impl JsRuntime {
         csp_requested_url: Option<&str>,
         muted_errors: bool,
         start_position: (u32, u32),
+        document_id: Option<usize>,
     ) -> impl Future<Output = JsResult<JsValue>> + 'a {
         let filename = filename.map(str::to_owned);
         let csp_requested_url = csp_requested_url.map(str::to_owned);
@@ -10734,7 +10736,12 @@ impl JsRuntime {
         let host_state = Rc::clone(&self.host_state);
         let future = ActiveHostFuture::new(
             async move {
+                let realm = match document_id {
+                    Some(id) => Some(async_realm::document_realm(self, id)?),
+                    None => None,
+                };
                 let mut context = self.context.enter_runtime_deadline(deadline);
+                let mut context = async_realm::ContextScope::new(&mut context, realm);
                 let metadata =
                     script_errors::classic_script_metadata(muted_errors, csp_requested_url);
                 let script = Script::parse_with_host_defined(
@@ -10758,7 +10765,14 @@ impl JsRuntime {
     ) -> impl Future<Output = JsResult<JsValue>> + 'a {
         let host_state = Rc::clone(&self.host_state);
         ActiveDocumentFuture {
-            future: Box::pin(self.eval_async(source)),
+            future: Box::pin(self.eval_async_source(
+                source,
+                None,
+                None,
+                false,
+                (1, 1),
+                Some(document_id),
+            )),
             host_state,
             document_id,
         }
@@ -10796,7 +10810,9 @@ impl JsRuntime {
         let module_host_state = Rc::clone(&host_state);
         let future = ActiveHostFuture::new(
             async move {
+                let realm = async_realm::document_realm(self, document_id)?;
                 let mut context = self.context.enter_runtime_deadline(deadline);
+                let mut context = async_realm::ContextScope::new(&mut context, Some(realm));
                 let module = Module::parse_with_host_defined(
                     Source::from_reader(source.as_bytes(), Some(Path::new(&url))),
                     None,
@@ -11023,6 +11039,7 @@ impl JsRuntime {
                                 csp_requested_url.as_deref(),
                                 muted_errors,
                                 start_position,
+                                None,
                             ))
                         };
                     std::future::poll_fn(|context| {

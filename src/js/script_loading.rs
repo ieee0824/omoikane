@@ -410,6 +410,7 @@ impl JsRuntime {
                         Some(&timing_name),
                         muted_errors,
                         (1, 1),
+                        Some(document_id),
                     )),
                     host_state,
                     document_id,
@@ -417,7 +418,9 @@ impl JsRuntime {
                 .await
             }
         };
-        let _ = self.eval("__omoikane_set_current_script(null)");
+        let _ = self
+            .eval_async_for_document("__omoikane_set_current_script(null)", document_id)
+            .await;
         if let Err(error) = result {
             if is_wall_clock_timeout(&error) {
                 return Err(error);
