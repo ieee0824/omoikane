@@ -1,5 +1,6 @@
 //! Flex layout: `display: flex` container layout.
 
+use crate::css::style::PropertyId;
 use crate::css::{AffineTransform, ComputedDisplay, ComputedStyle, ComputedValue, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 
@@ -586,18 +587,21 @@ fn unchanged_stretch_is_invariant(layout: &LayoutBox, resolver: &mut StyleResolv
         return false;
     }
     let style = resolver.computed_style(&layout.node);
-    if style.get("position").is_some_and(
+    if style.get_by_id(PropertyId::Position).is_some_and(
         |value| !matches!(value, ComputedValue::Keyword(keyword) if keyword == "static"),
     ) {
         return false;
     }
-    let absolute_height = matches!(style.get("height"), Some(ComputedValue::Px(_)));
+    let absolute_height = matches!(
+        style.get_by_id(PropertyId::Height),
+        Some(ComputedValue::Px(_))
+    );
     let auto_height = style
-        .get("height")
+        .get_by_id(PropertyId::Height)
         .is_none_or(|value| matches!(value, ComputedValue::Keyword(keyword) if keyword == "auto"));
     if (!absolute_height && !auto_height)
-        || !["min-height", "max-height"].iter().all(|name| {
-            style.get(name).is_none_or(|value| {
+        || ![PropertyId::MinHeight, PropertyId::MaxHeight].iter().all(|id| {
+            style.get_by_id(*id).is_none_or(|value| {
                 matches!(value, ComputedValue::Px(_) | ComputedValue::Number(_))
                     || matches!(value, ComputedValue::Keyword(keyword) if keyword == "auto" || keyword == "none")
             })
@@ -626,7 +630,7 @@ fn unchanged_stretch_is_invariant(layout: &LayoutBox, resolver: &mut StyleResolv
 fn unchanged_text_leaf_is_invariant(layout: &LayoutBox, style: &ComputedStyle) -> bool {
     !super::has_replaced_layout_semantics(&layout.node)
         && !super::has_preferred_aspect_ratio(style)
-        && style.get("writing-mode").is_none_or(
+        && style.get_by_id(PropertyId::WritingMode).is_none_or(
             |value| matches!(value, ComputedValue::Keyword(keyword) if keyword == "horizontal-tb"),
         )
         && layout
@@ -741,7 +745,7 @@ pub(super) fn is_flex_container(style: &ComputedStyle) -> bool {
 }
 
 pub(super) fn flex_direction(style: &ComputedStyle) -> FlexDirection {
-    match style.get("flex-direction") {
+    match style.get_by_id(PropertyId::FlexDirection) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("column") => {
             FlexDirection::Column
         }
@@ -750,7 +754,7 @@ pub(super) fn flex_direction(style: &ComputedStyle) -> FlexDirection {
 }
 
 fn flex_wrap(style: &ComputedStyle) -> FlexWrap {
-    match style.get("flex-wrap") {
+    match style.get_by_id(PropertyId::FlexWrap) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("wrap") => {
             FlexWrap::Wrap
         }
@@ -761,12 +765,12 @@ fn flex_wrap(style: &ComputedStyle) -> FlexWrap {
 fn main_axis_auto_margins(style: &ComputedStyle, direction: FlexDirection) -> (bool, bool) {
     match direction {
         FlexDirection::Row => (
-            super::is_auto(style.get("margin-left")),
-            super::is_auto(style.get("margin-right")),
+            super::is_auto(style.get_by_id(PropertyId::MarginLeft)),
+            super::is_auto(style.get_by_id(PropertyId::MarginRight)),
         ),
         FlexDirection::Column => (
-            super::is_auto(style.get("margin-top")),
-            super::is_auto(style.get("margin-bottom")),
+            super::is_auto(style.get_by_id(PropertyId::MarginTop)),
+            super::is_auto(style.get_by_id(PropertyId::MarginBottom)),
         ),
     }
 }
@@ -798,7 +802,7 @@ fn flex_cross_axis_gap(style: &ComputedStyle, direction: FlexDirection) -> f32 {
 }
 
 fn justify_content(style: &ComputedStyle) -> JustifyContent {
-    match style.get("justify-content") {
+    match style.get_by_id(PropertyId::JustifyContent) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center") => {
             JustifyContent::Center
         }
@@ -816,7 +820,7 @@ fn justify_content(style: &ComputedStyle) -> JustifyContent {
 }
 
 fn align_items(style: &ComputedStyle) -> AlignItems {
-    match style.get("align-items") {
+    match style.get_by_id(PropertyId::AlignItems) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("flex-start") => {
             AlignItems::FlexStart
         }
@@ -831,7 +835,7 @@ fn align_items(style: &ComputedStyle) -> AlignItems {
 }
 
 fn align_self(style: &ComputedStyle) -> Option<AlignItems> {
-    match style.get("align-self") {
+    match style.get_by_id(PropertyId::AlignSelf) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("flex-start") => {
             Some(AlignItems::FlexStart)
         }
@@ -877,10 +881,10 @@ fn flex_basis(style: &ComputedStyle, direction: FlexDirection) -> Option<f32> {
 
 /// Stretch applies only to an auto cross size without auto cross margins.
 fn stretches_height(style: &ComputedStyle, align: AlignItems) -> bool {
-    let auto_height = style.get("height").is_none()
-        || matches!(style.get("height"), Some(ComputedValue::Keyword(value)) if value == "auto");
-    let auto_margin = ["margin-top", "margin-bottom"].iter().any(
-        |name| matches!(style.get(name), Some(ComputedValue::Keyword(value)) if value == "auto"),
+    let auto_height = style.get_by_id(PropertyId::Height).is_none()
+        || matches!(style.get_by_id(PropertyId::Height), Some(ComputedValue::Keyword(value)) if value == "auto");
+    let auto_margin = [PropertyId::MarginTop, PropertyId::MarginBottom].iter().any(
+        |id| matches!(style.get_by_id(*id), Some(ComputedValue::Keyword(value)) if value == "auto"),
     );
     align == AlignItems::Stretch && auto_height && !auto_margin
 }
@@ -1015,7 +1019,7 @@ fn auto_flex_base_main_size(
 }
 
 fn item_order(style: &ComputedStyle) -> i32 {
-    match style.get("order") {
+    match style.get_by_id(PropertyId::Order) {
         Some(ComputedValue::Number(value)) if value.is_finite() && value.fract() == 0.0 => {
             *value as i32
         }
@@ -1024,7 +1028,7 @@ fn item_order(style: &ComputedStyle) -> i32 {
 }
 
 fn flex_grow(style: &ComputedStyle) -> f32 {
-    match style.get("flex-grow") {
+    match style.get_by_id(PropertyId::FlexGrow) {
         Some(ComputedValue::Number(value)) => *value,
         Some(ComputedValue::Px(value)) => *value,
         _ => 0.0,
@@ -1032,7 +1036,7 @@ fn flex_grow(style: &ComputedStyle) -> f32 {
 }
 
 fn flex_shrink(style: &ComputedStyle) -> f32 {
-    match style.get("flex-shrink") {
+    match style.get_by_id(PropertyId::FlexShrink) {
         Some(ComputedValue::Number(value)) => *value,
         Some(ComputedValue::Px(value)) => *value,
         _ => 1.0,
