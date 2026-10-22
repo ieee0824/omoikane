@@ -335,18 +335,29 @@ fn iframe_listener_registered_before_child_script_survives_realm_creation() {
 }
 
 #[test]
-fn unchanged_iframe_srcdoc_does_not_depart() {
+fn same_srcdoc_assignment_replaces_the_document_and_departs() {
     let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            "globalThis.frame = document.createElement('iframe'); \
+         frame.srcdoc = '<p>old</p>'; document.body.appendChild(frame);",
+        )
+        .unwrap();
+    runtime.run_timers(5_000, 10, 2_000);
+    runtime
+        .eval(
+            "globalThis.oldDocument = frame.contentDocument; \
+         globalThis.departures = 0; \
+         oldDocument.addEventListener('visibilitychange', () => departures++); \
+         frame.srcdoc = '<p>old</p>';",
+        )
+        .unwrap();
+    runtime.run_timers(5_000, 10, 2_000);
     assert!(
         runtime
             .eval(
-                "const frame = document.createElement('iframe'); \
-             frame.srcdoc = '<p>old</p>'; document.body.appendChild(frame); \
-             const oldDocument = frame.contentDocument; \
-             let departures = 0; \
-             oldDocument.addEventListener('visibilitychange', () => departures++); \
-             frame.srcdoc = '<p>old</p>'; \
-             departures === 0 && frame.contentDocument === oldDocument;",
+                "departures === 1 && frame.contentDocument !== oldDocument && \
+                 oldDocument.visibilityState === 'hidden';",
             )
             .unwrap()
             .to_boolean()
@@ -416,7 +427,7 @@ fn iframe_script_onload_replaces_the_body_load_handler() {
     let server = FixtureWorker::spawn(move || {
         let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
         read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
-        let body = "<body onload='parent.childBodyLoaded = true'><script>onload = () => { parent.childLoaded = true; }</script></body>";
+        let body = "<body onload='parent.childBodyLoaded = true'><script>parent.childScriptRan = true; onload = () => { parent.childLoaded = true; }</script></body>";
         write!(
             stream,
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -432,13 +443,13 @@ fn iframe_script_onload_replaces_the_body_load_handler() {
     .document();
     let mut runtime = JsRuntime::with_document_and_url(document, &url).unwrap();
     runtime
-        .eval("globalThis.childLoaded = false; globalThis.childBodyLoaded = false")
+        .eval("globalThis.childLoaded = false; globalThis.childBodyLoaded = false; globalThis.childScriptRan = false")
         .unwrap();
     let base = url.parse().unwrap();
     assert!(runtime.execute_document_scripts(Some(&base)).is_empty());
     runtime.tick(0).unwrap();
     let diagnostic = runtime
-        .eval("JSON.stringify({childLoaded, childBodyLoaded, childOnload: typeof document.querySelector('iframe').contentWindow.onload})")
+        .eval("JSON.stringify({childLoaded, childBodyLoaded, childScriptRan, childOnload: String(document.querySelector('iframe').contentWindow.onload), childBodyOnload: String(document.querySelector('iframe').contentDocument.body.onload)})")
         .unwrap()
         .as_string()
         .unwrap()
@@ -446,7 +457,7 @@ fn iframe_script_onload_replaces_the_body_load_handler() {
     let errors = runtime.take_task_errors();
     assert!(
         runtime
-            .eval("childLoaded === true && childBodyLoaded === false")
+            .eval("childScriptRan === true && childLoaded === true && childBodyLoaded === false")
             .unwrap()
             .to_boolean(),
         "{diagnostic}, errors={errors:?}"

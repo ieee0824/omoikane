@@ -14,6 +14,342 @@ use std::io::{Read, Write};
 use std::rc::Rc;
 
 #[test]
+fn javascript_navigation_keeps_history_for_non_string_and_replaces_on_html_completion() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document(
+            "https://example.test/page",
+            "<body><p id=old>old</p></body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    let original_document = session.runtime.document().identity();
+    let history_length = session.history_entries.len();
+    session
+        .dispatch(
+            "Page.navigate",
+            json!({"url":"javascript:globalThis.sideEffect = 7;"}),
+        )
+        .unwrap();
+    assert_eq!(session.runtime.document().identity(), original_document);
+    assert_eq!(session.history_entries.len(), history_length);
+    assert_eq!(session.current_url, "https://example.test/page");
+    assert_eq!(
+        session.runtime.eval("sideEffect").unwrap().as_number(),
+        Some(7.0)
+    );
+
+    session
+        .dispatch(
+            "Page.navigate",
+            json!({"url":"javascript:%27%3Cmain%20id%3Dnew%3Enew%3C%2Fmain%3E%27"}),
+        )
+        .unwrap();
+    assert_ne!(session.runtime.document().identity(), original_document);
+    assert_eq!(session.history_entries.len(), history_length);
+    assert_eq!(
+        session.history_entries[session.history_index].url,
+        "https://example.test/page"
+    );
+    assert!(
+        session
+            .runtime
+            .eval("document.getElementById('new') !== null")
+            .unwrap()
+            .as_boolean()
+            .unwrap()
+    );
+}
+
+#[test]
+fn javascript_navigation_html_completion_inherits_trusted_types_policy() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document("https://example.test/page", "<body></body>", 1, "null")
+        .unwrap();
+    session.runtime.install_response_security_headers(&[(
+        "Content-Security-Policy".into(),
+        "require-trusted-types-for 'script'".into(),
+    )]);
+    session
+        .runtime
+        .eval("trustedTypes.createPolicy('default', {createScript: source => source})")
+        .unwrap();
+    session
+        .dispatch(
+            "Page.navigate",
+            json!({"url":"javascript:%27%3Cmain%3Enew%3C%2Fmain%3E%27"}),
+        )
+        .unwrap();
+    assert_eq!(
+        session
+            .runtime
+            .eval("(() => { try { document.body.innerHTML = '<b>unsafe</b>'; return false; } catch (error) { return error instanceof TypeError; } })()")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
+fn javascript_navigation_html_completion_inherits_permissions_and_isolation_policy() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document("https://example.test/page", "<body></body>", 1, "null")
+        .unwrap();
+    let headers = vec![
+        ("Cross-Origin-Opener-Policy".into(), "same-origin".into()),
+        ("Cross-Origin-Embedder-Policy".into(), "require-corp".into()),
+        ("Permissions-Policy".into(), "fullscreen=()".into()),
+    ];
+    session.runtime.install_response_security_headers(&headers);
+    session.runtime.install_isolation_policy(&headers);
+    assert!(
+        session
+            .runtime
+            .eval("crossOriginIsolated && !document.permissionsPolicy.allowsFeature('fullscreen')")
+            .unwrap()
+            .to_boolean()
+    );
+    let previous_document = session.runtime.document().identity();
+    session
+        .dispatch(
+            "Page.navigate",
+            json!({"url":"javascript:%27%3Cmain%3Enew%3C%2Fmain%3E%27"}),
+        )
+        .unwrap();
+    assert_ne!(session.runtime.document().identity(), previous_document);
+    assert!(
+        session
+            .runtime
+            .eval("crossOriginIsolated && !document.permissionsPolicy.allowsFeature('fullscreen')")
+            .unwrap()
+            .to_boolean()
+    );
+}
+
+#[test]
+fn child_to_top_javascript_navigation_uses_child_request_client_csp() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document(
+            "https://example.test/page",
+            "<body><iframe id=child></iframe></body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    let initial_document = session.runtime.document().identity();
+    session.runtime.eval(r#"
+        globalThis.topExecuted = false;
+        const frame = document.getElementById('child');
+        frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'"><script>
+          globalThis.childViolations = [];
+          document.addEventListener('securitypolicyviolation', event => childViolations.push(event));
+          top.location.href = 'javascript:globalThis.topExecuted=true;';
+        <\/script>`;
+    "#).unwrap();
+    session.drive_navigation_requests().unwrap();
+    assert_eq!(session.runtime.document().identity(), initial_document);
+    assert_eq!(
+        session.runtime.eval("topExecuted").unwrap().as_boolean(),
+        Some(false)
+    );
+    assert_eq!(session.current_url, "https://example.test/page");
+    assert_eq!(
+        session.runtime.eval("frame.contentWindow.childViolations.length === 1 && frame.contentWindow.childViolations[0].effectiveDirective === 'require-trusted-types-for' && frame.contentWindow.childViolations[0].disposition === 'enforce'").unwrap().as_boolean(),
+        Some(true),
+    );
+}
+
+#[test]
+fn javascript_top_navigation_inside_eval_and_function_uses_top_policy() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document("https://example.test/page", "<body></body>", 1, "null")
+        .unwrap();
+    session.runtime.install_response_security_headers(&[(
+        "Content-Security-Policy".into(),
+        "require-trusted-types-for 'script'".into(),
+    )]);
+    session.runtime.eval(r#"
+        globalThis.topViolations = [];
+        document.addEventListener('securitypolicyviolation', event => topViolations.push(event));
+        globalThis.codePolicy = trustedTypes.createPolicy('code', {createScript: source => source});
+        eval(codePolicy.createScript('location.href="javascript:globalThis.evalNavigationRan=true;"'));
+    "#).unwrap();
+    session.drive_navigation_requests().unwrap();
+    session.runtime.eval(r#"
+        new Function(codePolicy.createScript('location.href="javascript:globalThis.functionNavigationRan=true;"'))();
+    "#).unwrap();
+    session.drive_navigation_requests().unwrap();
+    assert_eq!(
+        session.runtime.eval("globalThis.evalNavigationRan === undefined && globalThis.functionNavigationRan === undefined && topViolations.length === 2 && topViolations.every(event => event.effectiveDirective === 'require-trusted-types-for' && event.disposition === 'enforce')").unwrap().as_boolean(),
+        Some(true),
+    );
+}
+
+#[test]
+fn child_calling_top_author_function_uses_top_javascript_navigation_policy() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document(
+            "https://example.test/page",
+            "<body><iframe id=child></iframe></body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session.runtime.eval(r#"
+        globalThis.topNavigationRan = false;
+        globalThis.navigateFromTopFunction = () => {
+          location.href = 'javascript:globalThis.topNavigationRan=true;';
+        };
+        globalThis.frame = document.getElementById('child');
+        frame.srcdoc = `<script>globalThis.callTopFunction = () => top.navigateFromTopFunction();<\/script>`;
+    "#).unwrap();
+    session.runtime.run_until_idle().unwrap();
+    assert_eq!(
+        session
+            .runtime
+            .eval("typeof frame.contentWindow.callTopFunction === 'function'")
+            .unwrap()
+            .as_boolean(),
+        Some(true),
+    );
+    session.runtime.install_response_security_headers(&[(
+        "Content-Security-Policy".into(),
+        "require-trusted-types-for 'script'".into(),
+    )]);
+    session
+        .runtime
+        .eval(
+            r#"
+        globalThis.topViolations = [];
+        document.addEventListener('securitypolicyviolation', event => topViolations.push(event));
+        frame.contentWindow.callTopFunction();
+    "#,
+        )
+        .unwrap();
+    session.drive_navigation_requests().unwrap();
+    assert_eq!(
+        session.runtime.eval("topNavigationRan === false && topViolations.length === 1 && topViolations[0].effectiveDirective === 'require-trusted-types-for' && topViolations[0].disposition === 'enforce'").unwrap().as_boolean(),
+        Some(true),
+    );
+}
+
+#[test]
+fn child_to_sibling_javascript_location_uses_child_request_client_csp() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document(
+            "https://example.test/page",
+            "<body><iframe id=target></iframe><iframe id=source></iframe></body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session.runtime.eval(r#"
+        globalThis.targetFrame = document.getElementById('target');
+        globalThis.sourceFrame = document.getElementById('source');
+        sourceFrame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'"><script>
+          globalThis.childViolations = [];
+          document.addEventListener('securitypolicyviolation', event => childViolations.push(event));
+          parent.document.getElementById('target').contentWindow.location.href =
+            'javascript:globalThis.siblingExecuted=true;';
+        <\/script>`;
+    "#).unwrap();
+    session.drive_navigation_requests().unwrap();
+    assert_eq!(
+        session.runtime.eval("targetFrame.contentWindow.siblingExecuted === undefined && sourceFrame.contentWindow.childViolations.length === 1 && sourceFrame.contentWindow.childViolations[0].effectiveDirective === 'require-trusted-types-for'").unwrap().as_boolean(),
+        Some(true),
+    );
+}
+
+#[test]
+fn child_to_popup_javascript_location_uses_child_request_client_csp() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document(
+            "https://example.test/page",
+            "<body><iframe id=source></iframe></body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session.runtime.eval(r#"
+        globalThis.popup = window.open('', 'targetPopup');
+        globalThis.sourceFrame = document.getElementById('source');
+        sourceFrame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'"><script>
+          globalThis.childViolations = [];
+          document.addEventListener('securitypolicyviolation', event => childViolations.push(event));
+          parent.popup.location.href = 'javascript:globalThis.popupExecuted=true;';
+        <\/script>`;
+    "#).unwrap();
+    session.drive_navigation_requests().unwrap();
+    assert_eq!(
+        session.runtime.eval("popup.popupExecuted === undefined && sourceFrame.contentWindow.childViolations.length === 1 && sourceFrame.contentWindow.childViolations[0].effectiveDirective === 'require-trusted-types-for'").unwrap().as_boolean(),
+        Some(true),
+    );
+}
+
+#[test]
+fn child_opening_popup_through_top_uses_child_javascript_request_client() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document(
+            "https://example.test/page",
+            "<body><iframe id=source></iframe></body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session.runtime.eval(r#"
+        globalThis.sourceFrame = document.getElementById('source');
+        sourceFrame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'"><script>
+          globalThis.childViolations = [];
+          document.addEventListener('securitypolicyviolation', event => childViolations.push(event));
+          globalThis.popup = top.open('javascript:globalThis.popupExecuted=true;', 'targetPopup');
+        <\/script>`;
+    "#).unwrap();
+    session.drive_navigation_requests().unwrap();
+    assert_eq!(
+        session.runtime.eval("sourceFrame.contentWindow.popup.popupExecuted === undefined && sourceFrame.contentWindow.childViolations.length === 1 && sourceFrame.contentWindow.childViolations[0].effectiveDirective === 'require-trusted-types-for'").unwrap().as_boolean(),
+        Some(true),
+    );
+}
+
+#[test]
+fn child_to_top_javascript_navigation_uses_child_default_policy() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document(
+            "https://example.test/page",
+            "<body><iframe id=child></iframe></body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session.runtime.eval(r#"
+        const frame = document.getElementById('child');
+        frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'"><script>
+          trustedTypes.createPolicy('default', {createScript: source => source.replace('originalMarker', 'approvedMarker')});
+          top.location.href = 'javascript:globalThis.originalMarker=true;';
+        <\/script>`;
+    "#).unwrap();
+    session.drive_navigation_requests().unwrap();
+    assert_eq!(
+        session
+            .runtime
+            .eval("globalThis.approvedMarker === true && globalThis.originalMarker === undefined",)
+            .unwrap()
+            .as_boolean(),
+        Some(true),
+    );
+}
+
+#[test]
 fn typed_session_errors_preserve_json_rpc_messages_and_sources() {
     let mut session = CdpSession::new().unwrap();
     let error = session
@@ -734,6 +1070,67 @@ fn resumed_async_evaluation_commits_queued_location_navigation() {
     );
     let tree = browser_payloads(&mut session, client.client_id);
     assert_eq!(tree[0]["result"]["frameTree"]["frame"]["url"], next_url);
+    server.join();
+}
+
+#[test]
+fn browser_session_javascript_navigation_drains_queued_location_request() {
+    let listener = bind_loopback().unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let body = "<title>Next</title>";
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        let _ = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+    let mut session = BrowserSession::new().unwrap();
+    let client = session.accept_upgrade(sample_upgrade_request()).unwrap();
+    let start_url = format!("http://127.0.0.1:{}/start", address.port());
+    let next_url = format!("http://127.0.0.1:{}/next", address.port());
+    session
+        .state
+        .borrow_mut()
+        .session
+        .as_mut()
+        .unwrap()
+        .install_document(&start_url, "<title>Start</title>", 1, "null")
+        .unwrap();
+
+    browser_request(
+        &mut session,
+        client.client_id,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": "javascript",
+            "method": "Page.navigate",
+            "params": { "url": format!("javascript:location.href={next_url:?};void(0)") },
+        })
+        .to_string(),
+    );
+    let navigation = browser_payloads(&mut session, client.client_id);
+    assert!(
+        navigation
+            .iter()
+            .any(|value| { value["id"] == "javascript" && value["result"]["frameId"].is_string() }),
+        "{navigation:?}"
+    );
+    browser_request(
+        &mut session,
+        client.client_id,
+        r#"{"jsonrpc":"2.0","id":"tree","method":"Page.getFrameTree","params":{}}"#,
+    );
+    let tree = browser_payloads(&mut session, client.client_id);
+    assert!(
+        tree.iter().any(|value| {
+            value["id"] == "tree" && value["result"]["frameTree"]["frame"]["url"] == next_url
+        }),
+        "{tree:?}"
+    );
     server.join();
 }
 
@@ -1595,6 +1992,50 @@ fn page_domain_navigates_reloads_and_emits_network_events() {
             .any(|event| event.method == "Page.loadEventFired")
     );
 
+    server.join();
+}
+
+#[test]
+fn page_navigation_installs_isolation_headers_before_author_script() {
+    let listener = bind_loopback().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = FixtureWorker::spawn(move || {
+        for _ in 0..2 {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            let isolated = request.starts_with("GET /isolated ");
+            let policy = if isolated {
+                "Cross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\n"
+            } else {
+                ""
+            };
+            let body = "<script>globalThis.initialIsolation = crossOriginIsolated</script>";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\n{policy}Content-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            )
+            .unwrap();
+        }
+    });
+    let mut session = CdpSession::new().unwrap();
+    for (path, expected) in [("isolated", true), ("plain", false)] {
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({"url": format!("http://127.0.0.1:{port}/{path}")}),
+            )
+            .unwrap();
+        assert_eq!(
+            session
+                .runtime
+                .eval("initialIsolation")
+                .unwrap()
+                .as_boolean(),
+            Some(expected),
+            "{path}"
+        );
+    }
     server.join();
 }
 

@@ -34,7 +34,10 @@ use time::{OffsetDateTime, UtcOffset};
 ///         _realm: Realm,
 ///         _parameters: &[JsString],
 ///         _body: &JsString,
+///         _code: &JsString,
 ///         _direct: bool,
+///         _trusted_script: bool,
+///         _function_constructor: bool,
 ///         _context: &mut Context,
 ///     ) -> JsResult<()> {
 ///         Err(JsNativeError::typ()
@@ -126,24 +129,33 @@ pub trait HostHooks {
         // The default implementation of HostPromiseRejectionTracker is to return unused.
     }
 
-    /// [`HostEnsureCanCompileStrings ( calleeRealm, parameterStrings, bodyString, direct )`][spec]
+    /// [`HostEnsureCanCompileStrings ( calleeRealm, parameterStrings, bodyString, codeString, ... )`][spec]
     ///
     /// # Requirements
     ///
     /// - If the returned Completion Record is a normal completion, it must be a normal completion
     ///   containing unused. This is already ensured by the return type.
     ///
-    /// [spec]: https://tc39.es/ecma262/#sec-hostensurecancompilestrings
+    /// [spec]: https://tc39.es/proposal-dynamic-code-brand-checks/#sec-hostensurecancompilestrings
     fn ensure_can_compile_strings(
         &self,
         _realm: Realm,
         _parameters: &[JsString],
         _body: &JsString,
+        _code: &JsString,
         _direct: bool,
+        _trusted_script: bool,
+        _function_constructor: bool,
         _context: &mut Context,
     ) -> JsResult<()> {
         // The default implementation of HostEnsureCanCompileStrings is to return NormalCompletion(unused).
         Ok(())
+    }
+
+    /// Returns the source of a host-defined trusted script used by `eval` or
+    /// a dynamic function constructor. Ordinary objects return `None`.
+    fn trusted_script_value(&self, _value: &JsValue) -> Option<JsString> {
+        None
     }
 
     /// [`HostHasSourceTextAvailable ( func )`][spec]

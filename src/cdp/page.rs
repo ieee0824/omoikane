@@ -10,6 +10,58 @@ fn is_fragment_only_navigation(current: &str, target: &str) -> bool {
 }
 
 impl CdpSession {
+    fn is_javascript_url(url: &str) -> bool {
+        url::Url::parse(url).is_ok_and(|url| url.scheme() == "javascript")
+    }
+
+    /// Runs a javascript: navigation in the active Document. HTML string
+    /// completion replaces the current history entry at its existing URL.
+    fn run_javascript_navigation(
+        &mut self,
+        url: &str,
+        client: Option<&crate::js::NavigationSecuritySnapshot>,
+    ) -> Result<(), JsonRpcError> {
+        let Some(html) = self
+            .runtime
+            .evaluate_javascript_navigation_from_client(url, client)
+            .map_err(js_error)?
+        else {
+            return Ok(());
+        };
+        let current_url = self.current_url.clone();
+        self.install_document_with_headers(
+            &current_url,
+            &DecodedHtml::from_string(html.as_str()),
+            self.history_entries.len(),
+            "null",
+            &[],
+            0,
+            None,
+            true,
+        )
+        .map_err(|error| JsonRpcError {
+            code: -32000,
+            message: error.to_string(),
+        })?;
+        self.commit_history_url(&current_url, NavigationCommit::Replace, None);
+        self.sync_history_length()?;
+        self.emit(
+            "Page.frameNavigated",
+            json!({
+                "frame": {
+                    "id": self.frame_id,
+                    "url": current_url,
+                    "mimeType": "text/html",
+                }
+            }),
+        );
+        self.emit(
+            "Page.loadEventFired",
+            json!({ "timestamp": self.next_loader_id }),
+        );
+        Ok(())
+    }
+
     pub(super) fn page_set_web_lifecycle_state(
         &mut self,
         params: &Value,
@@ -59,6 +111,11 @@ impl CdpSession {
 
     pub(super) fn page_navigate(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
         let url = require_string(params, "url")?;
+        if Self::is_javascript_url(&url) {
+            self.run_javascript_navigation(&url, None)?;
+            self.drive_navigation_requests()?;
+            return Ok(json!({ "frameId": self.frame_id }));
+        }
         // The first real navigation replaces the initial empty about:blank
         // entry. Later Page.navigate calls append normal session-history
         // entries.
@@ -80,6 +137,13 @@ impl CdpSession {
         params: &Value,
     ) -> Result<PreparedPageNavigation, JsonRpcError> {
         let url = require_string(params, "url")?;
+        if Self::is_javascript_url(&url) {
+            self.run_javascript_navigation(&url, None)?;
+            self.drive_navigation_requests()?;
+            return Ok(PreparedPageNavigation::Complete(json!({
+                "frameId": self.frame_id
+            })));
+        }
         let commit = if self.current_url == "about:blank"
             && self.history_entries.len() == 1
             && self.history_index == 0
@@ -117,7 +181,7 @@ impl CdpSession {
                 "type": "Document",
             }),
         );
-        let (html, status, document_url, csp_headers) = self
+        let (html, status, document_url, response_headers) = self
             .load_page_request(url, Method::Get, None, None)
             .map_err(|error| JsonRpcError {
                 code: -32000,
@@ -131,7 +195,8 @@ impl CdpSession {
                 &html,
                 history_length,
                 &history_state,
-                &csp_headers,
+                &response_headers,
+                status,
                 form_state.as_ref(),
             )
             .map_err(|error| JsonRpcError {
@@ -204,7 +269,7 @@ impl CdpSession {
             }),
         );
 
-        let (html, status, document_url, csp_headers) = self
+        let (html, status, document_url, response_headers) = self
             .load_page_request(url, method, body, content_type)
             .map_err(|error| JsonRpcError {
                 code: -32000,
@@ -213,13 +278,15 @@ impl CdpSession {
 
         let form_state = self.navigation_form_state(commit, &document_url)?;
         let (next_history_length, next_history_state) = self.prospective_history_state(commit);
-        self.install_document_with_csp(
+        self.install_document_with_headers(
             &document_url,
             &html,
             next_history_length,
             &next_history_state,
-            &csp_headers,
+            &response_headers,
+            status,
             form_state.as_ref(),
+            false,
         )
         .map_err(|error| JsonRpcError {
             code: -32000,
@@ -300,7 +367,7 @@ impl CdpSession {
             for error in self.runtime.take_task_errors() {
                 eprintln!("[omoikane][js-error] {error}");
             }
-            let Some((request, source)) = self
+            let Some((request, source, security)) = self
                 .runtime
                 .take_navigation_requests_with_source()
                 .into_iter()
@@ -310,6 +377,10 @@ impl CdpSession {
             };
             match request {
                 NavigationRequest::Navigate { url, replace } => {
+                    if Self::is_javascript_url(&url) {
+                        self.run_javascript_navigation(&url, security.as_ref())?;
+                        continue;
+                    }
                     let previous_url = self.current_url.clone();
                     if let Err(error) = self.navigate_to(
                         &url,
@@ -330,6 +401,10 @@ impl CdpSession {
                     body,
                     content_type,
                 } => {
+                    if Self::is_javascript_url(&url) {
+                        self.run_javascript_navigation(&url, security.as_ref())?;
+                        continue;
+                    }
                     let previous_url = self.current_url.clone();
                     let method = if method.eq_ignore_ascii_case("POST") {
                         Method::Post
@@ -524,7 +599,7 @@ impl CdpSession {
         method: Method,
         body: Option<Vec<u8>>,
         content_type: Option<String>,
-    ) -> Result<(DecodedHtml, u16, String, Vec<String>), CdpSessionError> {
+    ) -> Result<(DecodedHtml, u16, String, Vec<(String, String)>), CdpSessionError> {
         if method == Method::Get {
             if url == "about:blank" {
                 return Ok((
@@ -561,17 +636,12 @@ impl CdpSession {
             .effective_url()
             .map(ToString::to_string)
             .unwrap_or_else(|| url.to_string());
-        let csp_headers = response
-            .headers()
-            .iter()
-            .filter(|(name, _)| name.eq_ignore_ascii_case("content-security-policy"))
-            .map(|(_, value)| value.clone())
-            .collect();
+        let response_headers = response.headers().to_vec();
         Ok((
             decode_html_response(&response),
             response.status_code(),
             effective_url,
-            csp_headers,
+            response_headers,
         ))
     }
 
@@ -583,24 +653,28 @@ impl CdpSession {
         history_length: usize,
         history_state_json: &str,
     ) -> Result<(), CdpSessionError> {
-        self.install_document_with_csp(
+        self.install_document_with_headers(
             url,
             &DecodedHtml::from_string(html),
             history_length,
             history_state_json,
             &[],
+            0,
             None,
+            false,
         )
     }
 
-    fn install_document_with_csp(
+    fn install_document_with_headers(
         &mut self,
         url: &str,
         html: &DecodedHtml,
         history_length: usize,
         history_state_json: &str,
-        csp_headers: &[String],
+        response_headers: &[(String, String)],
+        response_status: u16,
         form_state: Option<&FormStateSnapshot>,
+        inherit_javascript_security: bool,
     ) -> Result<(), CdpSessionError> {
         let document = TreeBuilder::parse_decoded(html).document();
         let mut runtime = JsRuntime::with_document_url_and_storage(
@@ -611,7 +685,12 @@ impl CdpSession {
         )
         .map_err(CdpSessionError::JavaScript)?;
         self.configure_replacement_runtime(&mut runtime)?;
-        runtime.install_csp_policy(csp_headers);
+        runtime.install_response_security_headers(response_headers);
+        runtime.set_document_response_status(response_status);
+        runtime.install_isolation_policy(response_headers);
+        if inherit_javascript_security {
+            runtime.inherit_javascript_navigation_security(&self.runtime);
+        }
         if let Some(state) = form_state {
             runtime
                 .restore_form_state(state, FormStateRestoreMode::Restore)
@@ -669,7 +748,8 @@ impl CdpSession {
         html: &DecodedHtml,
         history_length: usize,
         history_state_json: &str,
-        csp_headers: &[String],
+        response_headers: &[(String, String)],
+        response_status: u16,
         form_state: Option<&FormStateSnapshot>,
     ) -> Result<(OwnedPageTask, PendingDocumentCommit), CdpSessionError> {
         let document = TreeBuilder::parse_decoded(html).document();
@@ -681,7 +761,9 @@ impl CdpSession {
         )
         .map_err(CdpSessionError::JavaScript)?;
         self.configure_replacement_runtime(&mut runtime)?;
-        runtime.install_csp_policy(csp_headers);
+        runtime.install_response_security_headers(response_headers);
+        runtime.set_document_response_status(response_status);
+        runtime.install_isolation_policy(response_headers);
         if let Some(state) = form_state {
             runtime
                 .restore_form_state(state, FormStateRestoreMode::Restore)

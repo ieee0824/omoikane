@@ -156,39 +156,41 @@ fn document_window_native(
 }
 
 /// Trusted initialization lookup, also used after the public binding checks
-/// access to the Document. It never exposes its owner frame to page code.
+/// access to the Document. Popups use their retained WindowProxy; iframes use
+/// the owner Document's callback without exposing its frame to page code.
 pub(super) fn window_for_document(document: usize, context: &mut Context) -> JsResult<JsValue> {
+    let popup_proxy = with_host_state(|host| {
+        Ok(host
+            .borrow()
+            .auxiliary_contexts
+            .values()
+            .find(|entry| entry.document.identity() == document)
+            .and_then(|entry| entry.window_proxy.clone()))
+    })?;
+    if let Some(proxy) = popup_proxy {
+        return Ok(proxy);
+    }
     let owner = with_host_state(|host| {
         let state = host.borrow();
         let frame = state
             .iframe_documents
             .iter()
             .find_map(|(frame, entry)| (entry.document.identity() == document).then_some(*frame));
-        let target = if let Some(frame) = frame {
-            let owner = state
-                .get_node(frame)
-                .as_ref()
-                .and_then(owner_document_for_node)
-                .ok_or_else(|| JsNativeError::typ().with_message("iframe has no owner Document"))?;
-            Some((frame as f64, owner.identity(), "window"))
-        } else {
-            state.auxiliary_contexts.iter().find_map(|(id, entry)| {
-                (entry.document.identity() == document).then_some((
-                    *id as f64,
-                    entry.opener_document_id,
-                    "auxiliary-window",
-                ))
-            })
-        };
-        let Some((id, owner, kind)) = target else {
+        let Some(frame) = frame else {
             return Ok(None);
         };
+        let owner = state
+            .get_node(frame)
+            .as_ref()
+            .and_then(owner_document_for_node)
+            .ok_or_else(|| JsNativeError::typ().with_message("iframe has no owner Document"))?
+            .identity();
         let callback = state.iframe_navigation.owner(owner).ok_or_else(|| {
             JsNativeError::typ().with_message("browsing context owner is no longer active")
         })?;
-        Ok(Some((id, callback, kind)))
+        Ok(Some((frame as f64, callback)))
     })?;
-    let Some((id, callback, kind)) = owner else {
+    let Some((id, callback)) = owner else {
         return Ok(JsValue::null());
     };
     callback
@@ -196,7 +198,11 @@ pub(super) fn window_for_document(document: usize, context: &mut Context) -> JsR
         .expect("registered browsing context handler")
         .call(
             &JsValue::undefined(),
-            &[JsValue::from(id), JsValue::null(), js_string!(kind).into()],
+            &[
+                JsValue::from(id),
+                JsValue::null(),
+                js_string!("window").into(),
+            ],
             context,
         )
 }
@@ -331,7 +337,13 @@ fn register_proxy_native(
         .first()
         .and_then(JsValue::as_object)
         .ok_or_else(|| JsNativeError::typ().with_message("WindowProxy must be an object"))?;
-    let target = if args.get(2).and_then(JsValue::as_boolean).unwrap_or(false) {
+    let target = if args
+        .get(2)
+        .and_then(JsValue::as_string)
+        .is_some_and(|kind| kind == js_string!("main"))
+    {
+        JsValue::null()
+    } else if args.get(2).and_then(JsValue::as_boolean).unwrap_or(false) {
         js_string!(parse_node_id(args.get(1), context)?.to_string()).into()
     } else {
         JsValue::new(parse_node_id(args.get(1), context)? as f64)
@@ -383,7 +395,9 @@ fn resolve_receiver_document_id_with_pending(
         &[receiver.clone().into()],
         context,
     )?;
-    let document_id = if let Some(frame) = target.as_number() {
+    let document_id = if target.is_null() {
+        with_host_state(|host| Ok(host.borrow().document.identity()))?
+    } else if let Some(frame) = target.as_number() {
         let frame = frame as usize;
         // A genuine WindowProxy can refer to the caller's own child Window
         // even when its embedding element belongs to a cross-origin parent.
@@ -458,7 +472,14 @@ fn window_proxy_global_native(
     let create_if_missing = args.get(1).is_none_or(JsValue::to_boolean);
     let document =
         resolve_receiver_document_id_with_pending(args.first(), context, create_if_missing)?;
-    if !same_origin_document(context, document)? {
+    let caller = author_script_document_id(context);
+    let same_group = with_host_state(|host| {
+        let state = host.borrow();
+        Ok(caller.is_some_and(|caller| {
+            documents_share_group_with_retired_caller(&state, caller, document)
+        }))
+    })?;
+    if !same_group || !same_origin_document(context, document)? {
         return Ok(JsValue::null());
     }
     with_host_state(|host| {

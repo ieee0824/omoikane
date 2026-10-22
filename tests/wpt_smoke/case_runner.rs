@@ -143,6 +143,24 @@ impl SameDocumentHistory {
                 return Ok(committed);
             };
             match request {
+                NavigationRequest::Navigate { url, .. }
+                    if url::Url::parse(&url).is_ok_and(|url| url.scheme() == "javascript") =>
+                {
+                    runtime
+                        .evaluate_javascript_navigation(&url)
+                        .map_err(|error| format!("evaluate WPT javascript: navigation: {error}"))?;
+                    committed = true;
+                }
+                NavigationRequest::FormSubmit { url, .. }
+                    if url::Url::parse(&url).is_ok_and(|url| url.scheme() == "javascript") =>
+                {
+                    runtime
+                        .evaluate_javascript_navigation(&url)
+                        .map_err(|error| {
+                            format!("evaluate WPT form javascript: navigation: {error}")
+                        })?;
+                    committed = true;
+                }
                 NavigationRequest::Navigate { url, replace }
                     if is_fragment_only_navigation(self.current(), &url) =>
                 {
@@ -271,6 +289,12 @@ fn actual_status_with_allowed_exceptions(
     // allow page exceptions. Driver, loader, job and execution-limit failures
     // retain their existing ERROR classification, and all logs remain intact.
     let unallowed_error = errors.iter().any(|error| {
+        // A failed <script src> fetch fires an element error event. It is not
+        // an uncaught page exception; the completed harness decides whether
+        // that missing resource mattered to its assertions.
+        if complete && passed && error.starts_with("failed to fetch script: ") {
+            return false;
+        }
         let page_exception = error.starts_with("[script: ")
             || error.starts_with("[timer] ")
             || error.starts_with("[timer callback] ");
@@ -290,8 +314,17 @@ fn actual_status_with_allowed_exceptions(
 }
 
 pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
+    run_case_with_transport(base_url, path, None)
+}
+
+pub(super) fn run_case_with_transport(
+    base_url: &str,
+    path: &str,
+    transport: Option<std::sync::Arc<dyn omoikane::http::HttpTransport>>,
+) -> CaseExecution {
     let url = format!("{}/{}", base_url, path);
     let mut client = Client::new();
+    client.set_transport(transport.clone());
     let response = client
         .get(&url)
         .unwrap_or_else(|error| panic!("GET {url}: {error}"));
@@ -328,7 +361,22 @@ pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
         &url,
     )
     .expect("create WPT runtime");
-    if path.ends_with("/allow-crossorigin.html") || path.ends_with("/disallow-crossorigin.html") {
+    // Yield to testharness and the host even when a page keeps queuing tasks.
+    runtime.set_task_pump_limit(std::num::NonZeroUsize::new(128));
+    runtime
+        .enable_test_automation()
+        .expect("enable WPT input and permission automation");
+    runtime
+        .enable_reporting_automation()
+        .expect("enable WPT report generation");
+    // Static `.headers` fixtures govern the Document and its script resources.
+    // Apply them before parser scripts run, including report-only CSP cases.
+    runtime.install_document_response_headers(response.headers());
+    if let Some(transport) = transport {
+        runtime.set_http_resource_transport(Some(transport));
+    } else if path.ends_with("/allow-crossorigin.html")
+        || path.ends_with("/disallow-crossorigin.html")
+    {
         runtime.set_http_resource_transport(Some(super::cross_origin::transport(base_url)));
     }
     // The bootstrap itself creates a large graph of host API constructors.
@@ -486,6 +534,20 @@ mod tests {
         assert_eq!(actual_status(&[], true, true), ActualStatus::Pass);
         assert_eq!(actual_status(&[], true, false), ActualStatus::Fail);
         assert_eq!(actual_status(&[], false, false), ActualStatus::Timeout);
+    }
+
+    #[test]
+    fn failed_script_fetch_uses_completed_harness_result() {
+        let failed_fetch = ["failed to fetch script: x".to_owned()];
+        assert_eq!(actual_status(&failed_fetch, true, true), ActualStatus::Pass);
+        assert_eq!(
+            actual_status(&failed_fetch, true, false),
+            ActualStatus::Error
+        );
+        assert_eq!(
+            actual_status(&failed_fetch, false, false),
+            ActualStatus::Error
+        );
     }
 
     #[test]

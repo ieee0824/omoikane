@@ -335,6 +335,110 @@ fn font_policy_is_independent_of_connect_policy_and_errors_are_task_delivered() 
 }
 
 #[test]
+fn delayed_font_violation_keeps_load_call_source_position() {
+    let document = TreeBuilder::parse("<!doctype html><body></body>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://example.test/document").unwrap();
+    runtime.install_csp_policy(&["font-src 'none'; report-to fonts".into()]);
+    runtime.eval("globalThis.fontSourceEvents=[];globalThis.fontSourceReports=[];\
+        document.addEventListener('securitypolicyviolation',event=>fontSourceEvents.push(event));\
+        new ReportingObserver(batch=>fontSourceReports.push(...batch),{types:['csp-violation']}).observe();\
+        globalThis.delayedFace=new FontFace('Delayed','url(https://example.test/font.ttf)');").unwrap();
+    let (evaluated, ..) = runtime.eval_safe_timed_source(
+        "const pending = delayedFace.load(); pending.catch(()=>{});",
+        Some("https://private.test/effective.js"),
+        Some("https://example.test/requested.js#fragment"),
+        (23, 4),
+        false,
+    );
+    evaluated.unwrap();
+    let (unrelated, ..) = runtime.eval_safe_timed_source(
+        "globalThis.unrelatedFontSourceCall=true;",
+        Some("https://other.test/effective.js"),
+        Some("https://other.test/requested.js"),
+        (91, 1),
+        false,
+    );
+    unrelated.unwrap();
+    runtime.run_until_idle().unwrap();
+    let observed = eval_json(
+        &mut runtime,
+        "[fontSourceEvents.map(e=>[e.sourceFile,e.lineNumber,e.columnNumber]),fontSourceReports.map(r=>[r.body.sourceFile,r.body.lineNumber,r.body.columnNumber])]",
+    );
+    assert_eq!(observed[0].as_array().map(Vec::len), Some(1), "{observed}");
+    assert_eq!(observed[1], observed[0]);
+    assert_eq!(observed[0][0][0], "https://example.test/requested.js");
+    assert_eq!(observed[0][0][1], 23);
+    assert!(observed[0][0][2].as_u64().is_some_and(|column| column > 0));
+}
+
+fn observe_font_csp(runtime: &mut JsRuntime) {
+    runtime
+        .eval(
+            "globalThis.fontCspEvents=[];globalThis.fontCspReports=[];
+             document.addEventListener('securitypolicyviolation',event=>fontCspEvents.push([
+               event.effectiveDirective,event.disposition,event.blockedURI,event.originalPolicy]));
+             new ReportingObserver(batch=>fontCspReports.push(...batch.map(report=>[
+               report.body.effectiveDirective,report.body.disposition,
+               report.body.blockedURL,report.body.originalPolicy]))).observe();",
+        )
+        .unwrap();
+}
+
+#[test]
+fn report_only_font_policy_reports_data_request_and_response_without_blocking() {
+    for (scheme, monitoring) in [
+        ("data", "font-src 'none'; report-to fonts"),
+        ("DATA", "font-src *; report-to fonts"),
+    ] {
+        let document = TreeBuilder::parse("<!doctype html><body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/").unwrap();
+        runtime.install_response_security_headers(&[
+            (
+                "Content-Security-Policy".into(),
+                "font-src data:; connect-src 'none'".into(),
+            ),
+            (
+                "Content-Security-Policy-Report-Only".into(),
+                monitoring.into(),
+            ),
+        ]);
+        observe_font_csp(&mut runtime);
+        let source = format!("url({scheme}:{})", &font_url()[5..]);
+        runtime
+            .eval(&format!(
+                "globalThis.observedFace=new FontFace('ObservedFont',{});
+                 globalThis.fontOutcome='pending';document.fonts.add(observedFace);
+                 observedFace.load().then(()=>fontOutcome='loaded',error=>fontOutcome=error.name);",
+                serde_json::to_string(&source).unwrap()
+            ))
+            .unwrap();
+        assert_eq!(
+            eval_json(&mut runtime, "[fontOutcome,fontCspEvents,fontCspReports]"),
+            json!(["pending", [], []])
+        );
+        runtime.run_until_idle().unwrap();
+        let expected = json!(["font-src", "report", "data", monitoring]);
+        assert_eq!(
+            eval_json(
+                &mut runtime,
+                "[fontOutcome,observedFace.status,fontCspEvents,fontCspReports,document.cspViolations]"
+            ),
+            json!([
+                "loaded",
+                "loaded",
+                [expected.clone(), expected.clone()],
+                [expected.clone(), expected],
+                []
+            ]),
+            "{scheme} with {monitoring}"
+        );
+        assert!(runtime.take_task_errors().is_empty());
+    }
+}
+
+#[test]
 fn stylesheet_faces_are_stable_and_cannot_be_removed_by_clear() {
     let mut runtime = runtime();
     runtime.eval(&format!("globalThis.sheet=document.createElement('style');sheet.textContent={};document.head.appendChild(sheet);globalThis.cssSet=document.fonts;globalThis.cssFace=Array.from(cssSet)[0];globalThis.cssDone=false;cssSet.ready.then(()=>cssDone=true);",serde_json::to_string(&format!("@font-face{{font-family:SheetFont;src:url({})}}",font_url())).unwrap())).unwrap();
@@ -662,6 +766,31 @@ fn font_requests_enforce_cors_and_send_the_creation_documents_origin() {
 }
 
 #[test]
+fn sandboxed_child_font_request_uses_opaque_origin() {
+    let (origin, worker) = serve_font(true);
+    let mut runtime = JsRuntime::with_document_and_url(
+        TreeBuilder::parse("<!doctype html><body></body>").document(),
+        "http://127.0.0.1:1/",
+    )
+    .unwrap();
+    let source =
+        format!("<script>new FontFace('Opaque', 'url({origin}/font.ttf)').load()</script>");
+    runtime
+        .eval(&format!(
+            "const frame = document.createElement('iframe'); frame.setAttribute('sandbox', 'allow-scripts'); frame.srcdoc = {}; document.body.appendChild(frame);",
+            serde_json::to_string(&source).unwrap()
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let request = worker.join();
+    assert!(
+        request.to_ascii_lowercase().contains("origin: null\r\n"),
+        "{request}"
+    );
+    assert!(runtime.take_task_errors().is_empty());
+}
+
+#[test]
 fn font_url_keeps_the_base_used_at_construction() {
     let (origin, worker) = serve_font(false);
     let document = TreeBuilder::parse(
@@ -704,6 +833,123 @@ fn font_src_blocks_redirect_before_contacting_the_destination() {
         ),
         json!(["NetworkError", ["font-src"]])
     );
+}
+
+#[test]
+fn report_only_font_redirects_reach_transport_and_report_the_initial_url() {
+    let (final_origin, final_worker) = serve_font(true);
+    let (middle_origin, middle_worker) = serve_font_response(
+        "302 Found",
+        format!("Location: {final_origin}/final.ttf\r\nAccess-Control-Allow-Origin: *\r\n"),
+        Vec::new(),
+    );
+    let (origin, worker) = serve_font_response(
+        "302 Found",
+        format!("Location: {middle_origin}/middle.ttf\r\n"),
+        Vec::new(),
+    );
+    let document = TreeBuilder::parse("<!doctype html><body></body>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, &format!("{origin}/index.html")).unwrap();
+    runtime.install_response_security_headers(&[
+        (
+            "Content-Security-Policy".into(),
+            "font-src *; connect-src 'none'".into(),
+        ),
+        (
+            "Content-Security-Policy-Report-Only".into(),
+            "font-src 'self'; report-to fonts".into(),
+        ),
+    ]);
+    observe_font_csp(&mut runtime);
+    runtime.eval("globalThis.fontOutcome='pending';new FontFace('Redirect','url(start.ttf)').load().then(()=>fontOutcome='loaded',error=>fontOutcome=error.name);").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(worker.join().starts_with("GET /start.ttf HTTP/1.1\r\n"));
+    assert!(
+        middle_worker
+            .join()
+            .starts_with("GET /middle.ttf HTTP/1.1\r\n")
+    );
+    assert!(
+        final_worker
+            .join()
+            .starts_with("GET /final.ttf HTTP/1.1\r\n")
+    );
+    let expected = json!([
+        "font-src",
+        "report",
+        format!("{origin}/start.ttf"),
+        "font-src 'self'; report-to fonts"
+    ]);
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "[fontOutcome,fontCspEvents,fontCspReports,document.cspViolations]"
+        ),
+        json!([
+            "loaded",
+            [expected.clone(), expected.clone(), expected.clone()],
+            [expected.clone(), expected.clone(), expected],
+            []
+        ])
+    );
+    assert!(runtime.take_task_errors().is_empty());
+}
+
+#[test]
+fn font_redirects_ignore_path_after_the_first_request_for_both_policy_dispositions() {
+    use std::io::Write;
+    let listener = bind_loopback().unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let worker = FixtureWorker::spawn(move || {
+        let font = include_bytes!(
+            "../../tests/fixtures/anonymized-font-selection/OmoikaneFixture-Regular.ttf"
+        );
+        let mut requests = Vec::new();
+        for (status, headers, body) in [
+            ("302 Found", "Location: /moved.ttf\r\n", &[][..]),
+            ("302 Found", "Location: /final.ttf\r\n", &[][..]),
+            ("200 OK", "", font.as_slice()),
+        ] {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            requests.push(read_request_headers(&mut stream, READ_TIMEOUT).unwrap());
+            write!(stream,"HTTP/1.1 {status}\r\nContent-Type: font/ttf\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n",body.len()).unwrap();
+            stream.write_all(body).unwrap();
+        }
+        requests
+    });
+    let document = TreeBuilder::parse("<!doctype html><body></body>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, &format!("{origin}/index.html")).unwrap();
+    let policy = format!("font-src {origin}/allowed/; report-to fonts");
+    runtime.install_response_security_headers(&[
+        ("Content-Security-Policy".into(), policy.clone()),
+        ("Content-Security-Policy-Report-Only".into(), policy),
+    ]);
+    observe_font_csp(&mut runtime);
+    runtime.eval("globalThis.fontOutcome='pending';new FontFace('Path','url(allowed/start.ttf)').load().then(()=>fontOutcome='loaded',error=>fontOutcome=error.name);").unwrap();
+    runtime.run_until_idle().unwrap();
+    let requests = worker.join();
+    for (request, path) in requests
+        .iter()
+        .zip(["/allowed/start.ttf", "/moved.ttf", "/final.ttf"])
+    {
+        assert!(
+            request.starts_with(&format!("GET {path} HTTP/1.1\r\n")),
+            "{request}"
+        );
+    }
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "[fontOutcome,fontCspEvents,fontCspReports,document.cspViolations]"
+        ),
+        json!(["loaded", [], [], []])
+    );
+    assert!(runtime.take_task_errors().is_empty());
 }
 
 #[test]

@@ -9,6 +9,73 @@ use std::time::Duration;
 
 const CSP: &str = "default-src 'none'";
 
+#[test]
+fn unknown_response_html_signatures_require_exact_boundaries() {
+    use super::child_document::parse_child_response;
+    for source in [
+        "\t\n\x0c\r <!dOcTyPe hTmL><p>ok</p>",
+        "<ScRiPt >void 0</ScRiPt>",
+        "<!-- >comment--><p>ok</p>",
+        "<h1>heading</h1>",
+    ] {
+        assert!(
+            parse_child_response("", source.as_bytes(), &[])
+                .unwrap()
+                .is_html_document()
+        );
+    }
+    for source in [
+        "<scripture>",
+        "<script/>",
+        "<script\t>",
+        "<html",
+        "\x0b<html>",
+        "<!--comment-->",
+    ] {
+        assert!(
+            parse_child_response("", source.as_bytes(), &[]).is_none(),
+            "{source:?}"
+        );
+    }
+    let outside_header = format!("{}<html>", " ".repeat(1445));
+    assert!(parse_child_response("", outside_header.as_bytes(), &[]).is_none());
+    let truncated = format!("{}<html>", " ".repeat(1440));
+    assert!(parse_child_response("", truncated.as_bytes(), &[]).is_none());
+}
+
+#[test]
+fn unknown_response_sniffing_respects_headers_and_transport_encoding() {
+    use super::child_document::parse_child_response;
+    let body = b"<p id=x>\xe9</p>";
+    let document =
+        parse_child_response("application/unknown; charset=windows-1252", body, &[]).unwrap();
+    assert_eq!(text_of(&document, "#x").as_deref(), Some("é"));
+    let no_sniff = [("X-Content-Type-Options".into(), "NoSniff, other".into())];
+    assert!(parse_child_response("", body, &no_sniff).is_none());
+    assert!(parse_child_response("text/html", body, &no_sniff).is_some());
+    let xml = parse_child_response("", b"<?xml version='1.0'?><root/>", &[]).unwrap();
+    assert!(!xml.is_html_document());
+    assert_eq!(xml.document_content_type().as_deref(), Some("text/xml"));
+    assert!(parse_child_response("", b"<?XML version='1.0'?><root/>", &[]).is_none());
+}
+
+#[test]
+fn child_response_keeps_permissions_policy_header() {
+    let response = crate::http::HttpResponse::new(
+        200,
+        "OK",
+        vec![
+            ("Permissions-Policy".into(), "fullscreen=()".into()),
+            ("X-Unrelated".into(), "ignored".into()),
+        ],
+        Vec::new(),
+    );
+    assert_eq!(
+        super::child_document::response_security_headers(&response),
+        vec![("Permissions-Policy".into(), "fullscreen=()".into())]
+    );
+}
+
 fn text_of(document: &NodeHandle, selector: &str) -> Option<String> {
     document.query_selector(selector).map(|node| {
         node.child_nodes()
@@ -67,38 +134,89 @@ fn rendered_child_resources_parse_by_content_type() {
 #[test]
 fn get_resources_drop_csp_only_when_the_content_type_is_not_rendered() {
     let resource = |mime_type: &str| FetchedChildResource {
+        response_status: 404,
+        final_request_referrer: String::new(),
         mime_type: mime_type.to_owned(),
         body: b"<p id=x>body</p>".to_vec(),
-        csp_headers: vec![CSP.to_owned()],
+        security_headers: vec![("Content-Security-Policy".to_owned(), CSP.to_owned())],
+        response_headers: vec![(
+            "Cross-Origin-Embedder-Policy".to_owned(),
+            "require-corp".to_owned(),
+        )],
+        redirects: Vec::new(),
         effective_url: "https://child.example/a#f".to_owned(),
     };
     let html = resource("text/html").into_get_document();
     assert_eq!(text_of(&html.document, "#x").as_deref(), Some("body"));
-    assert_eq!(html.csp_headers, [CSP]);
+    assert_eq!(
+        html.security_headers,
+        [("Content-Security-Policy".to_owned(), CSP.to_owned())]
+    );
     assert_eq!(html.url.as_deref(), Some("https://child.example/a#f"));
+    assert_eq!(html.response_status, 404);
+    assert_eq!(html.response_headers[0].1, "require-corp");
 
     let image = resource("image/png").into_get_document();
     assert!(is_blank(&image.document));
-    assert!(image.csp_headers.is_empty());
+    assert!(image.security_headers.is_empty());
     assert_eq!(image.url.as_deref(), Some("https://child.example/a#f"));
+    assert_eq!(image.response_status, 404);
+    assert_eq!(image.response_headers[0].1, "require-corp");
 }
 
 #[test]
-fn documents_without_a_response_have_fixed_urls_and_no_csp() {
+fn local_and_failed_documents_have_fixed_response_metadata() {
     let blank = LoadedChildDocument::about_blank("about:blank#top".to_owned());
     assert!(is_blank(&blank.document));
     assert_eq!(blank.url.as_deref(), Some("about:blank#top"));
-    assert!(blank.csp_headers.is_empty());
+    assert!(blank.security_headers.is_empty());
+    assert_eq!(blank.response_status, 200);
 
     let srcdoc = LoadedChildDocument::srcdoc("<p id=x>inline</p>");
     assert_eq!(text_of(&srcdoc.document, "#x").as_deref(), Some("inline"));
     assert_eq!(srcdoc.url.as_deref(), Some("about:srcdoc"));
-    assert!(srcdoc.csp_headers.is_empty());
+    assert!(srcdoc.security_headers.is_empty());
+    assert_eq!(srcdoc.response_status, 200);
 
     let failed = LoadedChildDocument::fetch_failed();
     assert!(is_blank(&failed.document));
     assert_eq!(failed.url, None);
-    assert!(failed.csp_headers.is_empty());
+    assert!(failed.security_headers.is_empty());
+    assert_eq!(failed.response_status, 0);
+}
+
+#[test]
+fn initial_srcdoc_inline_script_reports_its_own_call_site() {
+    let document = crate::html::TreeBuilder::parse("<body></body>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://example.test/parent").unwrap();
+    runtime.install_csp_policy(&[
+        "script-src 'unsafe-inline'; connect-src 'none'; report-to observations".into(),
+    ]);
+    let child_html = "<body><script>\
+        globalThis.sourceEvent = null;\
+        document.addEventListener('securitypolicyviolation', event => {\
+          sourceEvent = {sourceFile: event.sourceFile, lineNumber: event.lineNumber, columnNumber: event.columnNumber};\
+        });\
+        </script><script>\n  fetch('https://blocked.test/resource').catch(() => {});\n</script>";
+    runtime
+        .eval(&format!(
+            "globalThis.frame=document.createElement('iframe');frame.srcdoc={};document.body.appendChild(frame)",
+            serde_json::to_string(child_html).unwrap()
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+
+    let observed = runtime
+        .eval("JSON.stringify(frame.contentWindow.sourceEvent)")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    let observed: serde_json::Value = serde_json::from_str(&observed).unwrap();
+    assert_eq!(observed["sourceFile"], "about");
+    assert_eq!(observed["lineNumber"], 2);
+    assert_eq!(observed["columnNumber"], 3);
 }
 
 #[test]
@@ -109,14 +227,17 @@ fn iframe_get_loads_handle_blank_data_and_unreachable_references() {
 
     let empty = state.load_iframe_document("", None);
     assert_eq!(empty.url.as_deref(), Some("about:blank"));
+    assert_eq!(empty.response_status, 200);
     let blank = state.load_iframe_document("about:blank#x", None);
     assert_eq!(blank.url.as_deref(), Some("about:blank#x"));
+    assert_eq!(blank.response_status, 200);
 
     let data = "data:text/html,<p id=x>data</p>";
     let loaded = state.load_iframe_document(data, None);
     assert_eq!(text_of(&loaded.document, "#x").as_deref(), Some("data"));
     assert_eq!(loaded.url.as_deref(), Some(data));
-    assert!(loaded.csp_headers.is_empty());
+    assert!(loaded.security_headers.is_empty());
+    assert_eq!(loaded.response_status, 200);
 
     let closed = bind_loopback().unwrap();
     let unreachable = format!("http://{}/gone", closed.local_addr().unwrap());
@@ -127,16 +248,21 @@ fn iframe_get_loads_handle_blank_data_and_unreachable_references() {
         "GET failures fall back to about:blank"
     );
     assert_eq!(failed.url, None);
-    assert!(failed.csp_headers.is_empty());
+    assert!(failed.security_headers.is_empty());
+    assert_eq!(failed.response_status, 0);
 
     let submission = Submission {
         url: unreachable,
         method: "POST".to_owned(),
         body: Some(b"q=1".to_vec()),
         content_type: Some("application/x-www-form-urlencoded".to_owned()),
+        source_document_id: None,
     };
+    let source_document_id = state.document.identity();
     assert!(
-        state.load_iframe_form_submission(&submission).is_err(),
+        state
+            .load_iframe_form_submission(&submission, source_document_id)
+            .is_err(),
         "POST failures propagate instead of committing a blank document"
     );
 }
@@ -180,7 +306,7 @@ fn serve_child_resources(count: usize) -> (String, FixtureWorker<Vec<String>>) {
 
 #[test]
 fn http_child_loads_keep_error_bodies_fragments_and_post_metadata() {
-    let (origin, server) = serve_child_resources(3);
+    let (origin, server) = serve_child_resources(4);
     let document = crate::html::TreeBuilder::parse("<p>top</p>").document();
     let runtime = JsRuntime::with_document(document).unwrap();
     let mut state = runtime.host_state.borrow_mut();
@@ -191,31 +317,61 @@ fn http_child_loads_keep_error_bodies_fragments_and_post_metadata() {
         Some("error page"),
         "an HTTP error status still renders its body"
     );
-    assert_eq!(error.csp_headers, [CSP]);
+    assert_eq!(
+        error.security_headers,
+        [("Content-Security-Policy".to_owned(), CSP.to_owned())]
+    );
     assert_eq!(error.url, Some(format!("{origin}/error#frag")));
+    assert_eq!(error.response_status, 404);
 
     let image = state.load_iframe_document(&format!("{origin}/image"), None);
     assert!(is_blank(&image.document));
     assert!(
-        image.csp_headers.is_empty(),
+        image.security_headers.is_empty(),
         "an unrendered GET drops its CSP"
     );
     assert_eq!(image.url, Some(format!("{origin}/image")));
+    assert_eq!(image.response_status, 200);
 
     let submission = Submission {
         url: format!("{origin}/image"),
         method: "POST".to_owned(),
         body: Some(b"q=1".to_vec()),
         content_type: Some("application/x-www-form-urlencoded".to_owned()),
+        source_document_id: None,
     };
-    let posted = state.load_iframe_form_submission(&submission).unwrap();
+    let source_document_id = state.document.identity();
+    let posted = state
+        .load_iframe_form_submission(&submission, source_document_id)
+        .unwrap();
     assert!(is_blank(&posted.document));
-    assert_eq!(posted.csp_headers, [CSP], "a POST keeps its CSP headers");
+    assert_eq!(
+        posted.security_headers,
+        [("Content-Security-Policy".to_owned(), CSP.to_owned())],
+        "a POST keeps its CSP headers"
+    );
     assert_eq!(posted.url, Some(format!("{origin}/image")));
+    assert_eq!(posted.response_status, 200);
+
+    let posted_error = state
+        .load_iframe_form_submission(
+            &Submission {
+                url: format!("{origin}/error"),
+                ..submission
+            },
+            source_document_id,
+        )
+        .unwrap();
+    assert_eq!(posted_error.response_status, 404);
+    assert_eq!(
+        text_of(&posted_error.document, "#x").as_deref(),
+        Some("error page")
+    );
     drop(state);
 
     let lines = server.join();
     assert!(lines[0].starts_with("GET /error"), "{lines:?}");
     assert!(lines[1].starts_with("GET /image"), "{lines:?}");
     assert!(lines[2].starts_with("POST /image"), "{lines:?}");
+    assert!(lines[3].starts_with("POST /error"), "{lines:?}");
 }

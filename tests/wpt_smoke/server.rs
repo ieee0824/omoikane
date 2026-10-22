@@ -1,6 +1,6 @@
 //! Local HTTP fixture server for WPT smoke cases.
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -130,13 +130,7 @@ fn serve(mut stream: TcpStream, root: &Path, secondary_port: u16) {
         // Omoikane exposes the real constructor but has no WebAssembly.Memory.
         // Adapt constructor discovery, retaining actual shared buffers and all
         // original test assertions (including transfer/detachment assertions).
-        let body = br#"
-const createBuffer = (type, length, opts) => {
-  if (type === "ArrayBuffer") return new ArrayBuffer(length, opts);
-  if (type === "SharedArrayBuffer") return new SharedArrayBuffer(length, opts);
-  throw new Error("type has to be ArrayBuffer or SharedArrayBuffer");
-};
-"#;
+        let body = include_bytes!("sab.js");
         respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
         return;
     }
@@ -144,18 +138,7 @@ const createBuffer = (type, length, opts) => {
         // This runner consumes result callbacks rather than the interactive
         // HTML report. Disable that report before tests start so its DOM-heavy
         // rendering cannot consume a page callback's execution budget.
-        let body = br#"
-setup({output:false});
-globalThis.__wpt_results = [];
-globalThis.__wpt_harness_status = -1;
-globalThis.__wpt_complete = false;
-globalThis.__wpt_allow_uncaught_exception = false;
-if (typeof add_start_callback === 'function') {
-  add_start_callback(properties => { globalThis.__wpt_allow_uncaught_exception = properties.allow_uncaught_exception === true; });
-}
-add_result_callback(test => globalThis.__wpt_results.push({name:String(test.name),status:Number(test.status),message:String(test.message||"")}));
-add_completion_callback((tests,status) => { globalThis.__wpt_harness_status=Number(status.status); globalThis.__wpt_harness_message=String(status.message||""); globalThis.__wpt_complete=true; });
-"#;
+        let body = include_bytes!("testharnessreport.js");
         respond(&mut stream, 200, "text/javascript; charset=utf-8", body);
         return;
     }
@@ -181,17 +164,125 @@ add_completion_callback((tests,status) => { globalThis.__wpt_harness_status=Numb
     }
     let file = root.join(relative);
     match fs::read(&file) {
-        Ok(body) => respond(&mut stream, 200, content_type(&file), &body),
+        Ok(body) => match fixture_headers(&file, target) {
+            Ok(headers) => {
+                respond_with_headers(&mut stream, 200, content_type(&file), &body, &headers)
+            }
+            Err(_) => respond(&mut stream, 500, "text/plain", b"invalid static headers"),
+        },
         Err(_) => respond(&mut stream, 404, "text/plain", b"not found"),
     }
 }
 
+/// Reads static `.headers`/`.sub.headers` sidecars and `pipe=header(...)`
+/// stages. Repeated fields retain their order and remain separate.
+fn fixture_headers(file: &Path, target: &str) -> io::Result<Vec<(String, String)>> {
+    let mut headers = Vec::new();
+    for suffix in [".headers", ".sub.headers"] {
+        let mut sidecar_name = file.as_os_str().to_os_string();
+        sidecar_name.push(suffix);
+        let source = match fs::read_to_string(PathBuf::from(sidecar_name)) {
+            Ok(source) => source,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for line in source
+            .lines()
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .filter(|line| !line.is_empty() && !line.trim_start().starts_with('#'))
+        {
+            headers.push(parse_fixture_header(line)?);
+        }
+        break;
+    }
+    if let Some((_, query)) = target.split_once('?') {
+        for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
+            if name != "pipe" {
+                continue;
+            }
+            for stage in value.split('|') {
+                let Some(argument) = stage
+                    .trim()
+                    .strip_prefix("header(")
+                    .and_then(|stage| stage.strip_suffix(')'))
+                else {
+                    continue;
+                };
+                let Some((name, value)) = argument.split_once(',') else {
+                    continue;
+                };
+                let value = value
+                    .strip_suffix(",True")
+                    .or_else(|| value.strip_suffix(",False"))
+                    .unwrap_or(value);
+                // wptserve permits encoded ASCII whitespace in a CSP header
+                // stage. Fold controls to spaces before writing HTTP headers
+                // so they separate directive tokens without injecting fields.
+                let value = value
+                    .chars()
+                    .map(|ch| match ch {
+                        '\t' | '\n' | '\x0c' | '\r' => ' ',
+                        _ => ch,
+                    })
+                    .collect::<String>();
+                if let Ok(header) = parse_fixture_header(&format!("{name}: {value}")) {
+                    headers.push(header);
+                }
+            }
+        }
+    }
+    Ok(headers)
+}
+
+fn parse_fixture_header(line: &str) -> io::Result<(String, String)> {
+    let (name, value) = line
+        .split_once(':')
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid static header"))?;
+    let name = name.trim();
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || value.bytes().any(|byte| byte == b'\r' || byte == b'\n')
+        || name.eq_ignore_ascii_case("content-length")
+        || name.eq_ignore_ascii_case("connection")
+        || name.eq_ignore_ascii_case("transfer-encoding")
+        || name.eq_ignore_ascii_case("trailer")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid static header",
+        ));
+    }
+    Ok((name.to_owned(), value.trim().to_owned()))
+}
+
 pub(super) fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) {
+    respond_with_headers(stream, status, content_type, body, &[]);
+}
+
+fn respond_with_headers(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    headers: &[(String, String)],
+) {
     let reason = if status == 200 { "OK" } else { "Error" };
-    let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+    let mut header = format!("HTTP/1.1 {status} {reason}\r\n");
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        header.push_str(&format!("Content-Type: {content_type}\r\n"));
+    }
+    for (name, value) in headers {
+        header.push_str(&format!("{name}: {value}\r\n"));
+    }
+    header.push_str(&format!(
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
-    );
+    ));
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(body);
 }
@@ -250,6 +341,12 @@ mod tests {
         ));
         fs::create_dir(&root).unwrap();
         fs::write(root.join("hello.html"), b"hello").unwrap();
+        fs::write(root.join("policy.html"), b"<p>controlled</p>").unwrap();
+        fs::write(
+            root.join("policy.html.headers"),
+            b"Permissions-Policy: fullscreen=()\r\n",
+        )
+        .unwrap();
         fs::create_dir_all(root.join("resources/webidl2/lib")).unwrap();
         fs::write(
             root.join("resources/webidl2/lib/webidl2.js"),
@@ -265,10 +362,28 @@ mod tests {
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 5\r\nConnection: close"
         );
         assert_eq!(body, b"hello");
+        let (header, body) = get(&server, "/policy.html");
+        assert!(header.contains("Permissions-Policy: fullscreen=()\r\n"));
+        assert_eq!(body, b"<p>controlled</p>");
+        let (header, body) = get(&server, "/hello.html?pipe=header(Content-Length,0)");
+        assert_eq!(header.matches("Content-Length: ").count(), 1);
+        assert!(header.contains("Content-Length: 5\r\n"));
+        assert_eq!(body, b"hello");
         let (header, body) = get(&server, "/resources/WebIDLParser.js");
         assert!(header.starts_with("HTTP/1.1 200 OK"));
         assert!(header.contains("Content-Type: text/javascript"));
         assert_eq!(body, b"var WebIDL2 = {};");
+
+        for invalid in [
+            "Content-Length: 0\n",
+            "Transfer-Encoding: chunked\n",
+            "Trailer: X-Test\n",
+        ] {
+            fs::write(root.join("policy.html.headers"), invalid).unwrap();
+            let (header, body) = get(&server, "/policy.html");
+            assert!(header.starts_with("HTTP/1.1 500 Error\r\n"));
+            assert_eq!(body, b"invalid static headers");
+        }
 
         for (path, expected_header, expected_body) in [
             (
@@ -286,6 +401,53 @@ mod tests {
             assert_eq!(header, expected_header, "{path}");
             assert_eq!(body, expected_body, "{path}");
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn serves_sidecar_and_pipe_csp_headers_as_separate_fields() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "omoikane-wpt-smoke-csp-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("page.html"), b"<body>page</body>").unwrap();
+        fs::write(
+            root.join("page.html.headers"),
+            "Content-Security-Policy-Report-Only: require-trusted-types-for 'script'\n",
+        )
+        .unwrap();
+        fs::write(root.join("worker.js"), b"postMessage('loaded');").unwrap();
+        fs::write(
+            root.join("worker.js.sub.headers"),
+            "Content-Security-Policy: script-src 'none'\n",
+        )
+        .unwrap();
+        let server = StaticServer::start(root.clone());
+        let (header, body) = get(
+            &server,
+            "/page.html?pipe=header(Content-Security-Policy,connect-src%20%27none%27)%7Cheader(Content-Security-Policy,require-trusted-types-for%20%27script%27,True)",
+        );
+        assert_eq!(body, b"<body>page</body>");
+        assert!(header.contains(
+            "Content-Security-Policy-Report-Only: require-trusted-types-for 'script'\r\n"
+        ));
+        assert!(header.contains("Content-Security-Policy: connect-src 'none'\r\n"));
+        assert!(header.contains("Content-Security-Policy: require-trusted-types-for 'script'\r\n"));
+        assert_eq!(header.matches("Content-Security-Policy: ").count(), 2);
+        let (header, body) = get(&server, "/worker.js");
+        assert_eq!(body, b"postMessage('loaded');");
+        assert!(header.contains("Content-Security-Policy: script-src 'none'\r\n"));
+        let (header, _) = get(
+            &server,
+            "/page.html?pipe=header(Content-Security-Policy,require-trusted-types-for%20%27script%27%09%27script%27%0A%27script%27%0C%27script%27%0D%27script%27%20%27script%27,True)",
+        );
+        assert!(header.contains("Content-Security-Policy: require-trusted-types-for 'script' 'script' 'script' 'script' 'script' 'script'\r\n"));
+        assert_eq!(header.matches("Content-Security-Policy: ").count(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 

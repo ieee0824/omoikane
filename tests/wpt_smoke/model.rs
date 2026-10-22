@@ -11,8 +11,20 @@ pub(super) struct Manifest {
 pub(super) struct WptCase {
     pub(super) path: String,
     #[serde(default)]
+    pub(super) server: FixtureServer,
+    #[serde(default)]
     pub(super) known_failure: Option<KnownFailure>,
 }
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum FixtureServer {
+    #[default]
+    Static,
+    Wptserve,
+    /// Real upstream HTTP on a non-loopback host, for insecure-context tests.
+    WptserveHttp,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct KnownFailure {

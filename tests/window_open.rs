@@ -160,7 +160,9 @@ fn closing_popup_fires_hidden_visibility_change_before_retirement() {
         .eval(
             r#"
             globalThis.replies = [];
-            addEventListener('message', event => replies.push(event.data));
+            addEventListener('message', event => replies.push({
+              data: event.data, source: event.source === popup,
+            }));
             const popup = window.open('', 'closing');
             popup.eval(`document.addEventListener('visibilitychange', event => {
               opener.postMessage({state: document.visibilityState, bubbles: event.bubbles}, '*');
@@ -171,7 +173,7 @@ fn closing_popup_fires_hidden_visibility_change_before_retirement() {
         .unwrap();
     runtime.run_until_idle().unwrap();
     assert!(runtime
-        .eval("replies.length === 1 && replies[0].state === 'hidden' && replies[0].bubbles === true")
+        .eval("replies.length === 1 && replies[0].data.state === 'hidden' && replies[0].data.bubbles === true && replies[0].source")
         .unwrap()
         .to_boolean());
 }
@@ -189,7 +191,7 @@ fn cross_origin_popup_exposes_only_safe_window_access_and_can_reply() {
               data: event.data, origin: event.origin, source: event.source === popup,
             }));
             globalThis.popup = window.open(
-              'data:text/html,<script>addEventListener("message", e => opener.postMessage({sourceIsOpener:e.source===opener,openerDocumentHidden:opener.document===undefined}, "*"))</script>',
+              'data:text/html,<script>addEventListener("message", e => { let openerDocumentBlocked = false; try { void opener.document; } catch (error) { openerDocumentBlocked = error.name === "SecurityError"; } opener.postMessage({sourceIsOpener:e.source===opener,openerDocumentBlocked}, "*"); })</script>',
               'cross');
         "#,
         )
@@ -210,7 +212,7 @@ fn cross_origin_popup_exposes_only_safe_window_access_and_can_reply() {
     runtime.eval("popup.postMessage('ping', '*')").unwrap();
     runtime.run_until_idle().unwrap();
     assert!(runtime
-        .eval("replies.length === 1 && replies[0].data.sourceIsOpener && replies[0].data.openerDocumentHidden && replies[0].origin === 'null' && replies[0].source")
+        .eval("replies.length === 1 && replies[0].data.sourceIsOpener && replies[0].data.openerDocumentBlocked && replies[0].origin === 'null' && replies[0].source")
         .unwrap()
         .to_boolean());
 }

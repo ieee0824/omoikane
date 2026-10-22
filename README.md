@@ -356,9 +356,11 @@ issue ベースの開発状況では、以下の大きな実装フェーズは�
 
 ## ライセンス
 
-TBD
+Omoikane 本体は [MIT License](LICENSE) で公開しています。
+同梱する第三者コードのライセンスは、各コードのライセンス表記に従います。
+取り込み済み Boa のライセンスは [engine/README.md](engine/README.md) を参照してください。
 
-### Dependency advisory checks
+## Dependency advisory checks
 
 Install `cargo-deny` 0.20.2, then run from the repository root:
 

@@ -8,6 +8,7 @@ pub(crate) mod color;
 pub(crate) mod color4;
 pub(crate) mod form_control;
 pub(crate) mod image;
+mod outline;
 mod print_budget;
 
 pub use print_budget::{MAX_PRINT_DOCUMENT_PIXELS, MAX_PRINT_PAGE_DIMENSION};
@@ -406,9 +407,10 @@ pub enum DataUri {
     Binary { mime_type: String, data: Vec<u8> },
 }
 
-/// ボーダー描画で使う領域区分（角丸ボーダー時の色割り当て用）。
+/// Regions for rounded border and outline annulus painting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BorderRegion {
+    All,
     Top,
     Bottom,
     Left,
@@ -734,10 +736,10 @@ impl Canvas {
             .min(outer.height / 2.0)
             .max(0.0);
 
-        // Scan narrow edge strips plus corner squares. This keeps thin pill
-        // borders proportional to their perimeter instead of scanning the
-        // entire border-box area.
+        // Scan narrow edge strips plus corner squares. A uniform outline
+        // uses All so translucent rounded corners are blended only once.
         let strip = match region {
+            BorderRegion::All => outer,
             BorderRegion::Top => Rect {
                 x: outer.x,
                 y: outer.y,
@@ -813,38 +815,79 @@ impl Canvas {
         let y0 = strip.y.floor().max(0.0) as i32;
         let x1 = (strip.x + strip.width).ceil().min(self.width as f32) as i32;
         let y1 = (strip.y + strip.height).ceil().min(self.height as f32) as i32;
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
 
-        for py in y0..y1 {
-            for px in x0..x1 {
-                let fx = px as f32 + 0.5;
-                let fy = py as f32 + 0.5;
+        let mut scan_regions = [(x0, y0, x1, y1); 4];
+        let scan_count = if region == BorderRegion::All {
+            // The corner squares fit within the top/bottom bands. Split any
+            // overlapping bands at the midpoint, then scan only the side
+            // strips between them. These four ranges are disjoint, so an
+            // antialiased, translucent pixel is never blended twice.
+            let middle_y = ((outer.y + outer.height / 2.0).floor() as i32).clamp(y0, y1);
+            let top_reach = border_width.max(outer_tl.max(outer_tr));
+            let bottom_reach = border_width.max(outer_bl.max(outer_br));
+            let top_end = ((outer.y + top_reach).ceil() as i32)
+                .clamp(y0, y1)
+                .min(middle_y);
+            let bottom_start = ((outer.y + outer.height - bottom_reach).floor() as i32)
+                .clamp(y0, y1)
+                .max(middle_y);
+            let middle_x = ((outer.x + outer.width / 2.0).floor() as i32).clamp(x0, x1);
+            let left_end = ((outer.x + border_width).ceil() as i32)
+                .clamp(x0, x1)
+                .min(middle_x);
+            let right_start = ((outer.x + outer.width - border_width).floor() as i32)
+                .clamp(x0, x1)
+                .max(middle_x);
+            scan_regions = [
+                (x0, y0, x1, top_end),
+                (x0, bottom_start, x1, y1),
+                (x0, top_end, left_end, bottom_start),
+                (right_start, top_end, x1, bottom_start),
+            ];
+            4
+        } else {
+            1
+        };
 
-                // クリップチェック（ピクセル中心を基準に判定）
-                if let Some(ca) = clip_area
-                    && (fx < ca.x || fx >= ca.x + ca.width || fy < ca.y || fy >= ca.y + ca.height)
-                {
-                    continue;
+        for &(region_x0, region_y0, region_x1, region_y1) in &scan_regions[..scan_count] {
+            for py in region_y0..region_y1 {
+                for px in region_x0..region_x1 {
+                    let fx = px as f32 + 0.5;
+                    let fy = py as f32 + 0.5;
+
+                    // クリップチェック（ピクセル中心を基準に判定）
+                    if let Some(ca) = clip_area
+                        && (fx < ca.x
+                            || fx >= ca.x + ca.width
+                            || fy < ca.y
+                            || fy >= ca.y + ca.height)
+                    {
+                        continue;
+                    }
+
+                    let outer_coverage = rounded_rect_pixel_coverage(
+                        px,
+                        py,
+                        outer,
+                        (outer_tl, outer_tr, outer_br, outer_bl),
+                    );
+                    let inner_coverage = rounded_rect_pixel_coverage(
+                        px,
+                        py,
+                        inner,
+                        (inner_tl, inner_tr, inner_br, inner_bl),
+                    );
+                    let coverage = (outer_coverage - inner_coverage).clamp(0.0, 1.0);
+                    if coverage <= 0.0 {
+                        continue;
+                    }
+
+                    let index = ((py as u32 * self.width + px as u32) * 4) as usize;
+                    blend_pixel_with_coverage(&mut self.pixels[index..index + 4], color, coverage);
                 }
-
-                let outer_coverage = rounded_rect_pixel_coverage(
-                    px,
-                    py,
-                    outer,
-                    (outer_tl, outer_tr, outer_br, outer_bl),
-                );
-                let inner_coverage = rounded_rect_pixel_coverage(
-                    px,
-                    py,
-                    inner,
-                    (inner_tl, inner_tr, inner_br, inner_bl),
-                );
-                let coverage = (outer_coverage - inner_coverage).clamp(0.0, 1.0);
-                if coverage <= 0.0 {
-                    continue;
-                }
-
-                let index = ((py as u32 * self.width + px as u32) * 4) as usize;
-                blend_pixel_with_coverage(&mut self.pixels[index..index + 4], color, coverage);
             }
         }
     }
@@ -883,6 +926,9 @@ impl Canvas {
     /// browser screenshots use this before encoding to match the opaque page
     /// surface produced by desktop browsers.
     pub(crate) fn composite_over(&mut self, background: Color) {
+        if self.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255) {
+            return;
+        }
         for pixel in self.pixels.chunks_exact_mut(4) {
             let alpha = u32::from(pixel[3]);
             let inverse = 255 - alpha;
@@ -931,15 +977,21 @@ impl Canvas {
 
         if color.a == 255 {
             let row_start = x0 as usize * 4;
-            let row_end = x1 as usize * 4;
+            let row_bytes = (x1 - x0) as usize * 4;
             let stride = self.width as usize * 4;
             let rgba = [color.r, color.g, color.b, color.a];
-            for y in y0 as usize..y1 as usize {
-                for pixel in
-                    self.pixels[y * stride + row_start..y * stride + row_end].chunks_exact_mut(4)
-                {
-                    pixel.copy_from_slice(&rgba);
-                }
+            let first = y0 as usize * stride + row_start;
+            self.pixels[first..first + 4].copy_from_slice(&rgba);
+            let mut filled = 4;
+            while filled < row_bytes {
+                let copied = filled.min(row_bytes - filled);
+                self.pixels
+                    .copy_within(first..first + copied, first + filled);
+                filled += copied;
+            }
+            for y in y0 as usize + 1..y1 as usize {
+                self.pixels
+                    .copy_within(first..first + row_bytes, y * stride + row_start);
             }
             return;
         }
@@ -1855,6 +1907,7 @@ fn render_document_with_url_internal(
 ) -> Result<Canvas, PaintError> {
     let mut timings = RenderTimings::default();
     let mut image_animation_time_ms = 0;
+    let mut document_runtime = None;
     let effective_base = stylesheet::extract_document_base_url(document, base_url);
     let mut resolver = StyleResolver::new();
     resolver.set_viewport(viewport.width, viewport.height);
@@ -1932,6 +1985,7 @@ fn render_document_with_url_internal(
             for error in runtime.take_task_errors() {
                 eprintln!("[omoikane][js-error] {error}");
             }
+            document_runtime = Some(runtime);
         } else {
             timings.javascript_runtime_init = runtime_init_start.elapsed();
             timings.javascript = javascript_start.elapsed();
@@ -1995,26 +2049,32 @@ fn render_document_with_url_internal(
     let layout_web_fonts = web_font_registry_opt.map(|_| Arc::clone(&web_font_registry));
     timings.fonts = fonts_start.elapsed();
 
-    let result = crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
-        crate::layout::with_image_base_url(effective_base, || {
-            crate::layout::with_image_animation_time(image_animation_time_ms, || {
-                let layout_start = Instant::now();
-                let mut layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
-                timings.layout = layout_start.elapsed();
-                apply_scroll_offsets(&mut layout, &mut resolver, viewport, scroll);
-                let paint_start = Instant::now();
-                let canvas = paint_layout_with_web_fonts(
-                    &layout,
-                    &mut resolver,
-                    viewport,
-                    all_fonts,
-                    web_font_registry_opt,
-                );
-                timings.paint = paint_start.elapsed();
-                Some(canvas)
+    let render = || {
+        crate::layout::with_layout_fonts(layout_fonts, layout_web_fonts, || {
+            crate::layout::with_image_base_url(effective_base, || {
+                crate::layout::with_image_animation_time(image_animation_time_ms, || {
+                    let layout_start = Instant::now();
+                    let mut layout = crate::layout::layout_tree(document, &mut resolver, viewport)?;
+                    timings.layout = layout_start.elapsed();
+                    apply_scroll_offsets(&mut layout, &mut resolver, viewport, scroll);
+                    let paint_start = Instant::now();
+                    let canvas = paint_layout_with_web_fonts(
+                        &layout,
+                        &mut resolver,
+                        viewport,
+                        all_fonts,
+                        web_font_registry_opt,
+                    );
+                    timings.paint = paint_start.elapsed();
+                    Some(canvas)
+                })
             })
         })
-    });
+    };
+    let result = match document_runtime.as_mut() {
+        Some(runtime) => runtime.with_document_images(document.identity(), render),
+        None => render(),
+    };
     record_render_timings(&timings);
     result.ok_or(PaintError::InvalidImageBuffer)
 }
@@ -3773,6 +3833,9 @@ fn subtree_paint_bounds_internal(
     }
 
     let style = paint_box_style(layout, resolver);
+    if let Some(outline_bounds) = outline::solid_outline_bounds(&style, border_box_rect(layout)) {
+        bounds = union_rect(bounds, outline_bounds);
+    }
     let shadow_value = match style.get("box-shadow") {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
             Some(value.as_str())
@@ -4379,6 +4442,7 @@ fn paint_box_internal_to(
         // empty child list.
         if paint_decorations {
             border::paint_borders(canvas, layout, style, inherited_clip, offset);
+            outline::paint_solid_outline(canvas, style, border_box, inherited_clip);
         }
         return;
     }
@@ -4458,6 +4522,9 @@ fn paint_box_internal_to(
     for child in positive_positioned_children {
         paint_box_internal(canvas, child, resolver, context, phase_options);
     }
+    if paint_decorations {
+        outline::paint_solid_outline(canvas, style, border_box, inherited_clip);
+    }
 }
 
 /// Uses the same child categories as hit-testing. Atomic inline boxes are
@@ -4482,13 +4549,15 @@ fn partition_children_for_paint<'a>(
     let mut auto_positioned_children = Vec::new();
     let mut positive_positioned_children = Vec::new();
     let item_container = is_flex_or_grid_container(&paint_box_style(layout, resolver));
+    let atomic_inline_nodes: HashSet<_> = layout
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .filter(|fragment| matches!(fragment.content, InlineFragmentContent::AtomicInline(_)))
+        .map(|fragment| fragment.node.identity())
+        .collect();
     for child in &layout.children {
-        if layout.lines.iter().any(|line| {
-            line.fragments.iter().any(|fragment| {
-                matches!(fragment.content, InlineFragmentContent::AtomicInline(_))
-                    && fragment.node == child.node
-            })
-        }) {
+        if atomic_inline_nodes.contains(&child.node.identity()) {
             continue;
         }
         let child_style = paint_box_style(child, resolver);
@@ -7737,6 +7806,8 @@ impl Canvas {
 mod font_data_url_tests;
 #[cfg(test)]
 mod font_selection_tests;
+#[cfg(test)]
+mod outline_tests;
 #[cfg(test)]
 mod tests;
 

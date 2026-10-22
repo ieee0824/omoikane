@@ -2142,6 +2142,7 @@ impl Array {
 
         // 12. Let A be ? ArraySpeciesCreate(O, count).
         let a = Self::array_species_create(&o, count, context)?;
+        let _a_root = a.clone().root();
 
         // 13. Let n be 0.
         let mut n: u64 = 0;

@@ -6,10 +6,12 @@ use super::*;
 pub(super) struct State {
     shared: Option<JsObject>,
     dispatchers: HashMap<usize, JsValue>,
+    pub(super) automation: automation::State,
 }
 
 impl State {
     pub(super) unsafe fn trace(&self, tracer: &mut Tracer) {
+        unsafe { self.automation.trace(tracer) };
         if let Some(shared) = &self.shared {
             unsafe { shared.trace(tracer) };
         }
@@ -20,7 +22,56 @@ impl State {
 
     pub(super) fn retire_document(&mut self, document: usize) {
         self.dispatchers.remove(&document);
+        self.automation.retire_document(document);
     }
+}
+
+/// Browser-internal focus traversal returns identities, never foreign DOM
+/// wrappers. Each document's input dispatcher applies its own part of a move.
+pub(super) fn focus_chain_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document = parse_node_id(args.first(), context)?;
+    let chain = with_host_state(|host| {
+        let state = host.borrow();
+        let mut current = document;
+        let mut chain = Vec::new();
+        for _ in 0..=state.iframe_documents.len() {
+            if !state.document_is_active(current) {
+                return Ok(None);
+            }
+            if current == state.document.identity()
+                || state
+                    .auxiliary_contexts
+                    .values()
+                    .any(|entry| entry.document.identity() == current)
+            {
+                chain.push((current, None, None));
+                return Ok(Some(chain));
+            }
+            let Some((&frame, _)) = state
+                .iframe_documents
+                .iter()
+                .find(|(_, entry)| entry.document.identity() == current)
+            else {
+                return Ok(None);
+            };
+            let Some(parent) = state
+                .get_node(frame)
+                .and_then(|node| owner_document_for_node(&node))
+            else {
+                return Ok(None);
+            };
+            chain.push((current, Some(parent.identity()), Some(frame)));
+            current = parent.identity();
+        }
+        Ok(None)
+    })?;
+    Ok(chain.map_or(JsValue::null(), |chain| {
+        js_string!(serde_json::to_string(&chain).expect("focus identity chain")).into()
+    }))
 }
 
 pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {

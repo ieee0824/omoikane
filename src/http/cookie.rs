@@ -3,11 +3,17 @@
 //! Provides [`Cookie`] for individual cookies parsed from `Set-Cookie` headers,
 //! and [`CookieJar`] for storing and retrieving cookies across requests.
 
+use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
 use super::request::Method;
 use super::{SchemefulSite, url::Url};
+
+mod changes;
+#[cfg(test)]
+mod partitioned_tests;
+pub use changes::CookieChangeSubscription;
 
 /// The `SameSite` attribute of a cookie.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +54,8 @@ pub struct Cookie {
     secure: bool,
     http_only: bool,
     same_site: SameSite,
+    partitioned: bool,
+    partition_key: Option<SchemefulSite>,
 }
 
 impl Cookie {
@@ -80,6 +88,8 @@ impl Cookie {
             secure: false,
             http_only: false,
             same_site: SameSite::Lax,
+            partitioned: false,
+            partition_key: None,
         };
 
         // Parse attributes
@@ -94,6 +104,7 @@ impl Cookie {
                     let attr_name = attr_name.trim();
                     let attr_value = attr_value.trim();
                     match attr_name.to_ascii_lowercase().as_str() {
+                        "partitioned" => cookie.partitioned = true,
                         "domain" => {
                             let d = attr_value.strip_prefix('.').unwrap_or(attr_value);
                             cookie.domain = Some(d.to_ascii_lowercase());
@@ -121,6 +132,7 @@ impl Cookie {
                     match attr.to_ascii_lowercase().as_str() {
                         "secure" => cookie.secure = true,
                         "httponly" => cookie.http_only = true,
+                        "partitioned" => cookie.partitioned = true,
                         _ => {}
                     }
                 }
@@ -182,21 +194,20 @@ impl Cookie {
 
     /// Returns `true` if this cookie has expired relative to `now`.
     fn is_expired(&self, now: SystemTime) -> bool {
-        if let Some(max_age) = self.max_age {
-            if max_age <= 0 {
-                return true;
-            }
-
-            if let Ok(elapsed) = now.duration_since(self.received_at) {
-                return elapsed >= Duration::from_secs(max_age as u64);
-            }
-
-            return false;
+        if self.max_age.is_some_and(|max_age| max_age <= 0) {
+            return true;
         }
-        if let Some(expires) = self.expires {
-            return now > expires;
+        self.expiration_time().is_some_and(|expires| now >= expires)
+    }
+
+    fn expiration_time(&self) -> Option<SystemTime> {
+        match self.max_age {
+            Some(max_age) if max_age <= 0 => Some(self.received_at),
+            Some(max_age) => self
+                .received_at
+                .checked_add(Duration::from_secs(max_age as u64)),
+            None => self.expires,
         }
-        false
     }
 
     /// Returns `true` if this cookie should be sent with a request to `url`.
@@ -220,8 +231,8 @@ impl Cookie {
             return false;
         }
 
-        // Secure flag: only send over HTTPS
-        if self.secure && url.scheme() != "https" {
+        // Secure cookies are available on HTTPS and trustworthy loopback HTTP.
+        if self.secure && !secure_cookie_transport(url) {
             return false;
         }
 
@@ -246,6 +257,87 @@ impl Cookie {
 #[derive(Debug, Clone)]
 pub struct CookieJar {
     cookies: Vec<(Cookie, String)>, // (cookie, origin_domain)
+    service_worker_subscriptions: HashMap<(String, SchemefulSite), RegistrationCookieSubscriptions>,
+    next_service_worker_registration_id: u64,
+    changes: VecDeque<RecordedCookieChange>,
+    change_sequence: u64,
+    change_subscriptions: changes::ChangeSubscriptions,
+}
+
+/// Subscription ownership survives worker updates, but not unregister/re-register.
+#[derive(Debug, Clone)]
+struct RegistrationCookieSubscriptions {
+    id: u64,
+    entries: Vec<ActiveCookieSubscription>,
+}
+
+/// A newly added subscription observes only mutations after it was installed.
+#[derive(Debug, Clone)]
+struct ActiveCookieSubscription {
+    entry: CookieStoreSubscription,
+    after_sequence: u64,
+}
+
+/// Cookie namespace and unpartitioned-storage permission of an environment.
+/// The top-level site is independent of SameSite and Storage Access grants.
+#[derive(Debug, Clone)]
+pub(crate) struct CookieAccessContext {
+    pub top_level_site: Option<SchemefulSite>,
+    pub unpartitioned: bool,
+}
+
+impl CookieAccessContext {
+    pub(crate) fn first_party(url: &Url) -> Self {
+        Self {
+            top_level_site: Some(SchemefulSite::from_url(url)),
+            unpartitioned: true,
+        }
+    }
+
+    fn permits(&self, cookie: &Cookie) -> bool {
+        if cookie.partitioned {
+            self.top_level_site.is_some() && cookie.partition_key == self.top_level_site
+        } else {
+            self.unpartitioned
+        }
+    }
+}
+
+/// A cookie change subscription owned by a Service Worker registration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CookieStoreSubscription {
+    pub name: Option<String>,
+    pub url: String,
+}
+
+#[derive(Debug, Clone)]
+struct RecordedCookieChange {
+    sequence: u64,
+    cookie: Cookie,
+    deleted: bool,
+    individual_event: bool,
+}
+
+/// One script-visible cookie change after URL and HttpOnly filtering.
+#[derive(Debug, Clone)]
+pub(crate) struct CookieStoreChange {
+    pub name: String,
+    pub value: Option<String>,
+    pub deleted: bool,
+    pub individual_event: bool,
+}
+
+/// Values accepted by the Cookie Store API's set and delete operations.
+#[derive(Debug, Clone)]
+pub(crate) struct CookieStoreWrite {
+    pub name: String,
+    pub value: String,
+    pub domain: Option<String>,
+    pub path: String,
+    pub expires: Option<SystemTime>,
+    pub max_age: Option<i64>,
+    pub same_site: SameSite,
+    pub partitioned: bool,
 }
 
 impl CookieJar {
@@ -253,7 +345,123 @@ impl CookieJar {
     pub fn new() -> Self {
         Self {
             cookies: Vec::new(),
+            service_worker_subscriptions: HashMap::new(),
+            next_service_worker_registration_id: 1,
+            changes: VecDeque::new(),
+            change_sequence: 0,
+            change_subscriptions: changes::ChangeSubscriptions::default(),
         }
+    }
+
+    /// Returns a registration's subscribed cookie names and request URLs.
+    pub(crate) fn service_worker_subscriptions(
+        &self,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+    ) -> Vec<CookieStoreSubscription> {
+        self.service_worker_subscriptions
+            .get(&(scope.to_owned(), top_level_site.clone()))
+            .map(|registration| {
+                registration
+                    .entries
+                    .iter()
+                    .map(|subscription| subscription.entry.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Reserves a registration identity before script evaluation; updates retain it.
+    pub(crate) fn register_service_worker_scope(
+        &mut self,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+    ) -> u64 {
+        let key = (scope.to_owned(), top_level_site.clone());
+        if let Some(registration) = self.service_worker_subscriptions.get(&key) {
+            return registration.id;
+        }
+        let id = self.next_service_worker_registration_id;
+        self.next_service_worker_registration_id = id
+            .checked_add(1)
+            .expect("Service Worker registration identity exhausted");
+        self.service_worker_subscriptions.insert(
+            key,
+            RegistrationCookieSubscriptions {
+                id,
+                entries: Vec::new(),
+            },
+        );
+        id
+    }
+
+    /// Returns the current registration generation for a scope and storage partition.
+    pub(crate) fn service_worker_registration_id(
+        &self,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+    ) -> Option<u64> {
+        self.service_worker_subscriptions
+            .get(&(scope.to_owned(), top_level_site.clone()))
+            .map(|registration| registration.id)
+    }
+
+    /// Reports whether the scope has a live registration in this jar.
+    pub(crate) fn has_service_worker_scope(
+        &self,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+    ) -> bool {
+        self.service_worker_registration_id(scope, top_level_site)
+            .is_some()
+    }
+
+    /// Adds or removes subscriptions without resurrecting an unregistered scope.
+    pub(crate) fn update_service_worker_subscriptions(
+        &mut self,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+        entries: Vec<CookieStoreSubscription>,
+        subscribe: bool,
+    ) {
+        let Some(registration) = self
+            .service_worker_subscriptions
+            .get_mut(&(scope.to_owned(), top_level_site.clone()))
+        else {
+            return;
+        };
+        let subscriptions = &mut registration.entries;
+        for entry in entries {
+            if subscribe {
+                if !subscriptions.iter().any(|current| current.entry == entry) {
+                    subscriptions.push(ActiveCookieSubscription {
+                        entry,
+                        after_sequence: self.change_sequence,
+                    });
+                }
+            } else {
+                subscriptions.retain(|current| current.entry != entry);
+            }
+        }
+    }
+
+    /// Removes the registration identity and its subscriptions together.
+    pub(crate) fn clear_service_worker_subscriptions(
+        &mut self,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+    ) {
+        self.service_worker_subscriptions
+            .remove(&(scope.to_owned(), top_level_site.clone()));
+    }
+
+    /// Subscribes a host event loop to future script-visible cookie mutations.
+    ///
+    /// Retain the returned subscription and acknowledge each wake with
+    /// [`CookieChangeSubscription::take_changed`]. The waker must schedule work
+    /// without synchronously re-entering this jar or its enclosing mutex.
+    pub fn subscribe_changes(&mut self, waker: std::task::Waker) -> CookieChangeSubscription {
+        self.change_subscriptions.subscribe(waker)
     }
 
     /// Parses a `Set-Cookie` header value and stores the cookie.
@@ -269,7 +477,14 @@ impl CookieJar {
 
     /// Parses a `Set-Cookie` header value and stores the cookie for `origin_url`.
     pub fn add_from_header_for_url(&mut self, header_value: &str, origin_url: &Url) {
-        self.add_with_context(header_value, origin_url, origin_url, true, true);
+        self.add_with_context(
+            header_value,
+            origin_url,
+            origin_url,
+            true,
+            true,
+            &CookieAccessContext::first_party(origin_url),
+        );
     }
 
     /// Stores a response cookie with the request's site and navigation context.
@@ -280,18 +495,55 @@ impl CookieJar {
         site_for_cookies: &Url,
         top_level_navigation: bool,
     ) {
+        self.add_from_header_for_request_with_access(
+            header_value,
+            origin_url,
+            site_for_cookies,
+            top_level_navigation,
+            &CookieAccessContext::first_party(if top_level_navigation {
+                origin_url
+            } else {
+                site_for_cookies
+            }),
+        )
+    }
+
+    pub(crate) fn add_from_header_for_request_with_access(
+        &mut self,
+        header_value: &str,
+        origin_url: &Url,
+        site_for_cookies: &Url,
+        top_level_navigation: bool,
+        access: &CookieAccessContext,
+    ) {
         self.add_with_context(
             header_value,
             origin_url,
             site_for_cookies,
             top_level_navigation,
             true,
+            access,
         );
     }
 
     /// Stores a cookie set by `document.cookie`, without HTTP-only privileges.
     pub fn add_from_document(&mut self, value: &str, document_url: &Url, site_for_cookies: &Url) {
-        self.add_with_context(value, document_url, site_for_cookies, false, false);
+        self.add_from_document_with_access(
+            value,
+            document_url,
+            site_for_cookies,
+            &CookieAccessContext::first_party(site_for_cookies),
+        )
+    }
+
+    pub(crate) fn add_from_document_with_access(
+        &mut self,
+        value: &str,
+        document_url: &Url,
+        site_for_cookies: &Url,
+        access: &CookieAccessContext,
+    ) {
+        self.add_with_context(value, document_url, site_for_cookies, false, false, access);
     }
 
     fn add_with_context(
@@ -301,114 +553,418 @@ impl CookieJar {
         site_for_cookies: &Url,
         top_level_navigation: bool,
         from_http: bool,
+        access: &CookieAccessContext,
     ) {
-        if let Some(mut cookie) = Cookie::parse(header_value) {
-            let origin_domain = origin_url.host().to_ascii_lowercase();
+        if let Some(cookie) = Cookie::parse(header_value) {
+            let explicit_root_path = header_value.split(';').skip(1).any(|attribute| {
+                attribute
+                    .trim()
+                    .split_once('=')
+                    .is_some_and(|(name, value)| {
+                        name.trim().eq_ignore_ascii_case("path") && value.trim() == "/"
+                    })
+            });
+            self.store_cookie(
+                cookie,
+                origin_url,
+                site_for_cookies,
+                top_level_navigation,
+                from_http,
+                explicit_root_path,
+                !from_http,
+                access,
+            );
+        }
+    }
 
-            if let Some(domain) = &cookie.domain {
-                if domain.is_empty() || !domain_matches(&origin_domain, domain) {
-                    return;
-                }
-                if is_public_suffix(domain) {
-                    if domain != &origin_domain {
-                        return;
-                    }
-                    cookie.host_only = true;
-                } else {
-                    cookie.host_only = false;
-                }
-            } else {
-                cookie.host_only = true;
-            }
-            if cookie.host_only {
-                cookie.domain = Some(origin_domain.clone());
-            }
-
-            if cookie
-                .path
-                .as_deref()
-                .is_none_or(|path| !path.starts_with('/'))
-            {
-                cookie.path = Some(default_path(origin_url.path()));
-            }
-
-            let secure_origin = origin_url.scheme() == "https";
-            if cookie.secure && !secure_origin {
-                return;
-            }
-            if !from_http && cookie.http_only {
-                return;
-            }
-            if cookie.same_site == SameSite::None && !cookie.secure {
-                return;
-            }
-            if !same_site(origin_url, site_for_cookies)
-                && cookie.same_site != SameSite::None
-                && (!from_http || !top_level_navigation)
-            {
-                return;
-            }
-            let lower_name = cookie.name.to_ascii_lowercase();
-            if lower_name.starts_with("__secure-") && !cookie.secure {
-                return;
-            }
-            if lower_name.starts_with("__host-")
-                && (!cookie.secure
-                    || !cookie.host_only
-                    || cookie.path.as_deref() != Some("/")
-                    || !header_value.split(';').skip(1).any(|attribute| {
-                        attribute
-                            .trim()
-                            .split_once('=')
-                            .is_some_and(|(name, value)| {
-                                name.trim().eq_ignore_ascii_case("path") && value.trim() == "/"
-                            })
-                    }))
-            {
-                return;
-            }
-
-            if !secure_origin
-                && !cookie.secure
-                && self.cookies.iter().any(|(old, _)| {
-                    old.secure
-                        && old.name == cookie.name
-                        && old
-                            .domain
-                            .as_deref()
-                            .zip(cookie.domain.as_deref())
-                            .is_some_and(|(a, b)| domain_matches(a, b) || domain_matches(b, a))
-                        && old
-                            .path
-                            .as_deref()
-                            .zip(cookie.path.as_deref())
-                            .is_some_and(|(old, new)| path_matches(new, old))
-                })
-            {
-                return;
-            }
-
-            // Remove existing cookie with same name+domain+path
-            let name = cookie.name.clone();
-            let domain = cookie.domain.clone();
-            let path = cookie.path.clone();
-            if let Some((old, _)) = self
-                .cookies
+    /// Writes a Cookie Store cookie through the same jar as HTTP and
+    /// `document.cookie`. Invalid API inputs fail; cookie policy rejections
+    /// (including an HttpOnly collision) follow the HTTP storage model and
+    /// leave the jar unchanged.
+    pub(crate) fn set_from_cookie_store_with_access(
+        &mut self,
+        mut options: CookieStoreWrite,
+        url: &Url,
+        site_for_cookies: &Url,
+        access: &CookieAccessContext,
+    ) -> Result<(), &'static str> {
+        options.name = options.name.trim_matches([' ', '\t']).to_string();
+        options.value = options.value.trim_matches([' ', '\t']).to_string();
+        options.domain = options.domain.map(|domain| domain.to_ascii_lowercase());
+        if options.expires.is_some() && options.max_age.is_some() {
+            return Err("expires and maxAge cannot both be set");
+        }
+        if options.name.contains('=')
+            || options.name.len() + options.value.len() > 4096
+            || [options.name.as_str(), options.value.as_str()]
                 .iter()
-                .find(|(old, _)| old.name == name && old.domain == domain && old.path == path)
+                .any(|text| {
+                    text.chars()
+                        .any(|c| c == ';' || (c <= '\u{1f}' && c != '\t') || c == '\u{7f}')
+                })
+            || (options.name.is_empty()
+                && (options.value.is_empty() || options.value.contains('=')))
+        {
+            return Err("Invalid cookie name or value");
+        }
+        let lower_name = options.name.to_ascii_lowercase();
+        let lower_value = options.value.to_ascii_lowercase();
+        if lower_name.starts_with("__http-")
+            || lower_name.starts_with("__host-http-")
+            || (options.name.is_empty()
+                && ["__host-", "__host-http-", "__http-", "__secure-"]
+                    .iter()
+                    .any(|prefix| lower_value.starts_with(prefix)))
+        {
+            return Err("Cookie name requires HTTP-only privileges");
+        }
+        if let Some(domain) = &options.domain {
+            if domain.starts_with('.')
+                || domain.is_empty()
+                || domain.len() > 1024
+                || !domain_matches(url.host(), domain)
+                || (is_public_suffix(domain) && !domain.eq_ignore_ascii_case(url.host()))
+                || lower_name.starts_with("__host-")
             {
-                if !from_http && old.http_only {
-                    return;
-                }
-                cookie.created_at = old.created_at;
-            }
-            self.cookies
-                .retain(|(c, _)| !(c.name == name && c.domain == domain && c.path == path));
-
-            if !cookie.is_expired(SystemTime::now()) {
-                self.cookies.push((cookie, origin_domain));
+                return Err("Invalid cookie domain");
             }
         }
+        if options.path.is_empty() {
+            options.path = default_path(url.path());
+        }
+        if !options.path.starts_with('/')
+            || options.path.len() > 1024
+            || (lower_name.starts_with("__host-") && options.path != "/")
+            || options.path.contains(';')
+            || options
+                .path
+                .chars()
+                .any(|c| (c <= '\u{1f}' && c != '\t') || c == '\u{7f}')
+        {
+            return Err("Invalid cookie path");
+        }
+        let now = SystemTime::now();
+        let cookie = Cookie {
+            name: options.name,
+            value: options.value,
+            domain: options.domain,
+            host_only: true,
+            path: Some(options.path),
+            created_at: now,
+            received_at: now,
+            expires: options.expires,
+            max_age: options.max_age,
+            secure: true,
+            http_only: false,
+            same_site: options.same_site,
+            partitioned: options.partitioned,
+            partition_key: None,
+        };
+        let explicit_root_path = cookie.path.as_deref() == Some("/");
+        self.store_cookie(
+            cookie,
+            url,
+            site_for_cookies,
+            false,
+            false,
+            explicit_root_path,
+            true,
+            access,
+        );
+        Ok(())
+    }
+
+    fn store_cookie(
+        &mut self,
+        mut cookie: Cookie,
+        origin_url: &Url,
+        site_for_cookies: &Url,
+        top_level_navigation: bool,
+        from_http: bool,
+        explicit_root_path: bool,
+        individual_event: bool,
+        access: &CookieAccessContext,
+    ) {
+        if !prepare_cookie_for_storage(
+            &mut cookie,
+            origin_url,
+            site_for_cookies,
+            top_level_navigation,
+            from_http,
+            explicit_root_path,
+            access,
+        ) {
+            return;
+        }
+        let origin_domain = origin_url.host().to_ascii_lowercase();
+        let secure_origin = secure_cookie_transport(origin_url);
+
+        // A write can race the scheduled expiry checkpoint. Remove expired
+        // records before replacement so their deletion is not lost.
+        let now = SystemTime::now();
+        self.evict_expired_at(now);
+
+        if !secure_origin
+            && !cookie.secure
+            && self.cookies.iter().any(|(old, _)| {
+                old.partition_key == cookie.partition_key
+                    && old.secure
+                    && old.name == cookie.name
+                    && old
+                        .domain
+                        .as_deref()
+                        .zip(cookie.domain.as_deref())
+                        .is_some_and(|(a, b)| domain_matches(a, b) || domain_matches(b, a))
+                    && old
+                        .path
+                        .as_deref()
+                        .zip(cookie.path.as_deref())
+                        .is_some_and(|(old, new)| path_matches(new, old))
+            })
+        {
+            return;
+        }
+
+        // The host-only flag distinguishes an omitted Domain from an explicit
+        // Domain equal to the origin host for Cookie Store reads.
+        let name = cookie.name.clone();
+        let domain = cookie.domain.clone();
+        let path = cookie.path.clone();
+        let host_only = cookie.host_only;
+        if !from_http
+            && self.cookies.iter().any(|(old, _)| {
+                old.partition_key == cookie.partition_key
+                    && old.http_only
+                    && old.name == name
+                    && old.domain == domain
+                    && old.path == path
+            })
+        {
+            return;
+        }
+        let replaced = self
+            .cookies
+            .iter()
+            .find(|(old, _)| {
+                old.partition_key == cookie.partition_key
+                    && old.name == name
+                    && old.domain == domain
+                    && old.path == path
+                    && old.host_only == host_only
+            })
+            .map(|(old, _)| old.clone());
+        if let Some(old) = &replaced {
+            if !from_http && old.http_only {
+                return;
+            }
+            cookie.created_at = old.created_at;
+        }
+        self.cookies.retain(|(c, _)| {
+            !(c.partition_key == cookie.partition_key
+                && c.name == name
+                && c.domain == domain
+                && c.path == path
+                && c.host_only == host_only)
+        });
+
+        if cookie.is_expired(now) {
+            // An immediately expired new cookie is itself an observable
+            // deletion, even when there was no previous cookie to replace.
+            self.record_change(cookie, true, individual_event);
+        } else {
+            let unchanged = replaced.as_ref().is_some_and(|old| {
+                !old.is_expired(now)
+                    && old.value == cookie.value
+                    && old.secure == cookie.secure
+                    && old.http_only == cookie.http_only
+                    && old.same_site == cookie.same_site
+                    && old.expires == cookie.expires
+                    && old.max_age == cookie.max_age
+            });
+            if cookie.http_only
+                && let Some(old) = replaced.filter(|old| !old.is_expired(now))
+            {
+                self.record_change(old, true, individual_event);
+            }
+            if !unchanged {
+                self.record_change(cookie.clone(), false, individual_event);
+            }
+            self.cookies.push((cookie, origin_domain));
+        }
+    }
+
+    /// Deletes cookies associated with a WebDriver document address, including
+    /// HttpOnly cookies, while preserving cookies for other domains and paths.
+    pub(crate) fn delete_associated_cookies(&mut self, url: &Url, now: SystemTime) {
+        let access = CookieAccessContext::first_party(url);
+        let mut deleted = Vec::new();
+        self.cookies.retain(|(cookie, _)| {
+            if access.permits(cookie) && !cookie.is_expired(now) && cookie.matches_url(url) {
+                deleted.push(cookie.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for cookie in deleted {
+            self.record_change(cookie, true, false);
+        }
+    }
+
+    fn record_change(&mut self, cookie: Cookie, deleted: bool, individual_event: bool) {
+        if cookie.http_only {
+            return;
+        }
+        self.change_sequence = self.change_sequence.saturating_add(1);
+        self.changes.push_back(RecordedCookieChange {
+            sequence: self.change_sequence,
+            cookie,
+            deleted,
+            individual_event,
+        });
+        if self.changes.len() > 4096 {
+            self.changes.pop_front();
+        }
+        self.change_subscriptions.notify();
+    }
+
+    /// Returns the latest change sequence and changes visible at a script URL.
+    /// A new browsing context starts from `change_sequence()` so old writes
+    /// are not replayed as events.
+    #[cfg(test)]
+    pub(crate) fn script_visible_changes_since(
+        &self,
+        sequence: u64,
+        url: &Url,
+        site_for_cookies: &Url,
+    ) -> (u64, Vec<CookieStoreChange>) {
+        self.script_visible_changes_since_with_access(
+            sequence,
+            url,
+            site_for_cookies,
+            &CookieAccessContext::first_party(site_for_cookies),
+        )
+    }
+
+    pub(crate) fn script_visible_changes_since_with_access(
+        &self,
+        sequence: u64,
+        url: &Url,
+        site_for_cookies: &Url,
+        access: &CookieAccessContext,
+    ) -> (u64, Vec<CookieStoreChange>) {
+        let same_site = same_site(url, site_for_cookies);
+        let changes = self
+            .changes
+            .iter()
+            .filter(|change| change.sequence > sequence)
+            .filter(|change| {
+                let cookie = &change.cookie;
+                access.permits(cookie)
+                    && !cookie.http_only
+                    && cookie.matches_url(url)
+                    && (same_site || cookie.same_site == SameSite::None)
+            })
+            .map(|change| CookieStoreChange {
+                name: change.cookie.name.clone(),
+                value: (!change.deleted).then(|| change.cookie.value.clone()),
+                deleted: change.deleted,
+                individual_event: change.individual_event,
+            })
+            .collect();
+        (self.change_sequence, changes)
+    }
+
+    /// Returns each change at most once when it matches a registration's subscriptions.
+    pub(crate) fn service_worker_changes_since_with_access(
+        &self,
+        sequence: u64,
+        scope: &str,
+        top_level_site: &SchemefulSite,
+        site_for_cookies: &Url,
+        unpartitioned: bool,
+    ) -> (u64, Vec<CookieStoreChange>) {
+        let access = CookieAccessContext {
+            top_level_site: Some(top_level_site.clone()),
+            unpartitioned,
+        };
+        let subscriptions = self
+            .service_worker_subscriptions
+            .get(&(scope.to_owned(), top_level_site.clone()))
+            .into_iter()
+            .flat_map(|registration| registration.entries.iter())
+            .filter_map(|subscription| {
+                subscription
+                    .entry
+                    .url
+                    .parse::<Url>()
+                    .ok()
+                    .map(|url| (subscription, url))
+            })
+            .collect::<Vec<_>>();
+        let changes = self
+            .changes
+            .iter()
+            .filter(|change| change.sequence > sequence)
+            .filter(|change| {
+                access.permits(&change.cookie)
+                    && subscriptions.iter().any(|(subscription, url)| {
+                        change.sequence > subscription.after_sequence
+                            && subscription
+                                .entry
+                                .name
+                                .as_ref()
+                                .is_none_or(|name| name == &change.cookie.name)
+                            && change.cookie.matches_url(url)
+                            && (same_site(url, site_for_cookies)
+                                || change.cookie.same_site == SameSite::None)
+                    })
+            })
+            .map(|change| CookieStoreChange {
+                name: change.cookie.name.clone(),
+                value: (!change.deleted).then(|| change.cookie.value.clone()),
+                deleted: change.deleted,
+                individual_event: change.individual_event,
+            })
+            .collect();
+        (self.change_sequence, changes)
+    }
+
+    /// Returns the latest change cursor for a newly created CookieStore.
+    pub(crate) fn change_sequence(&self) -> u64 {
+        self.change_sequence
+    }
+
+    /// Evicts cookies expired at `now` and records their script-visible removals.
+    ///
+    /// This mutation is called at an event-loop checkpoint so expiration can
+    /// produce a Cookie Store change without another cookie read or write.
+    pub(crate) fn evict_expired_at(&mut self, now: SystemTime) -> usize {
+        let mut expired = Vec::new();
+        self.cookies.retain(|(cookie, _)| {
+            if cookie.is_expired(now) {
+                expired.push(cookie.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let count = expired.len();
+        for cookie in expired {
+            self.record_change(cookie, true, false);
+        }
+        count
+    }
+
+    /// Returns the time until the next stored cookie expires.
+    ///
+    /// A zero duration means an expired cookie is waiting to be evicted.
+    pub(crate) fn next_expiry_delay_at(&self, now: SystemTime) -> Option<Duration> {
+        self.cookies
+            .iter()
+            .filter_map(|(cookie, _)| cookie.expiration_time())
+            .map(|expires| expires.duration_since(now).unwrap_or_default())
+            .min()
     }
 
     /// Builds the `Cookie` header value for a request to `url`.
@@ -428,13 +984,83 @@ impl CookieJar {
         top_level_navigation: bool,
         method: Method,
     ) -> Option<String> {
-        self.cookie_string(url, site_for_cookies, top_level_navigation, method, false)
+        self.cookie_header_for_request_with_access(
+            url,
+            site_for_cookies,
+            top_level_navigation,
+            method,
+            &CookieAccessContext::first_party(if top_level_navigation {
+                url
+            } else {
+                site_for_cookies
+            }),
+        )
+    }
+
+    pub(crate) fn cookie_header_for_request_with_access(
+        &self,
+        url: &Url,
+        site_for_cookies: &Url,
+        top_level_navigation: bool,
+        method: Method,
+        access: &CookieAccessContext,
+    ) -> Option<String> {
+        self.cookie_string(
+            url,
+            site_for_cookies,
+            top_level_navigation,
+            method,
+            false,
+            access,
+        )
     }
 
     /// Returns the cookies visible to script for this document.
     pub fn document_cookie(&self, url: &Url, site_for_cookies: &Url) -> String {
-        self.cookie_string(url, site_for_cookies, false, Method::Get, true)
+        self.document_cookie_with_access(
+            url,
+            site_for_cookies,
+            &CookieAccessContext::first_party(site_for_cookies),
+        )
+    }
+
+    pub(crate) fn document_cookie_with_access(
+        &self,
+        url: &Url,
+        site_for_cookies: &Url,
+        access: &CookieAccessContext,
+    ) -> String {
+        self.cookie_string(url, site_for_cookies, false, Method::Get, true, access)
             .unwrap_or_default()
+    }
+
+    /// Returns ordered name/value pairs visible to non-HTTP cookie APIs.
+    ///
+    /// The same URL, site, expiry, and HttpOnly checks as `document.cookie`
+    /// apply.
+    #[cfg(test)]
+    pub(crate) fn script_visible_cookie_pairs(
+        &self,
+        url: &Url,
+        site_for_cookies: &Url,
+    ) -> Vec<(String, String)> {
+        self.script_visible_cookie_pairs_with_access(
+            url,
+            site_for_cookies,
+            &CookieAccessContext::first_party(site_for_cookies),
+        )
+    }
+
+    pub(crate) fn script_visible_cookie_pairs_with_access(
+        &self,
+        url: &Url,
+        site_for_cookies: &Url,
+        access: &CookieAccessContext,
+    ) -> Vec<(String, String)> {
+        self.matching_cookies(url, site_for_cookies, false, Method::Get, true, access)
+            .into_iter()
+            .map(|cookie| (cookie.name.clone(), cookie.value.clone()))
+            .collect()
     }
 
     fn cookie_string(
@@ -444,7 +1070,37 @@ impl CookieJar {
         top_level_navigation: bool,
         method: Method,
         non_http: bool,
+        access: &CookieAccessContext,
     ) -> Option<String> {
+        let pairs: Vec<String> = self
+            .matching_cookies(
+                url,
+                site_for_cookies,
+                top_level_navigation,
+                method,
+                non_http,
+                access,
+            )
+            .into_iter()
+            .map(|cookie| format!("{}={}", cookie.name, cookie.value))
+            .collect();
+
+        if pairs.is_empty() {
+            None
+        } else {
+            Some(pairs.join("; "))
+        }
+    }
+
+    fn matching_cookies(
+        &self,
+        url: &Url,
+        site_for_cookies: &Url,
+        top_level_navigation: bool,
+        method: Method,
+        non_http: bool,
+        access: &CookieAccessContext,
+    ) -> Vec<&Cookie> {
         let now = SystemTime::now();
         let same_site = same_site(url, site_for_cookies);
         let safe_navigation =
@@ -453,7 +1109,8 @@ impl CookieJar {
             .cookies
             .iter()
             .filter(|(c, _)| {
-                !c.is_expired(now)
+                access.permits(c)
+                    && !c.is_expired(now)
                     && c.matches_url(url)
                     && (!non_http || !c.http_only)
                     && (same_site
@@ -470,16 +1127,7 @@ impl CookieJar {
                 .cmp(&a.path.as_deref().unwrap_or("/").len())
                 .then_with(|| a.created_at.cmp(&b.created_at))
         });
-        let pairs: Vec<String> = cookies
-            .iter()
-            .map(|c| format!("{}={}", c.name, c.value))
-            .collect();
-
-        if pairs.is_empty() {
-            None
-        } else {
-            Some(pairs.join("; "))
-        }
+        cookies
     }
 
     /// Returns the number of stored cookies (including expired ones).
@@ -491,6 +1139,85 @@ impl CookieJar {
     pub fn is_empty(&self) -> bool {
         self.cookies.is_empty()
     }
+}
+
+/// Normalizes scope and applies cookie creation policy before mutating the jar.
+fn prepare_cookie_for_storage(
+    cookie: &mut Cookie,
+    origin_url: &Url,
+    site_for_cookies: &Url,
+    top_level_navigation: bool,
+    from_http: bool,
+    explicit_root_path: bool,
+    access: &CookieAccessContext,
+) -> bool {
+    if cookie.partitioned {
+        if !cookie.secure || access.top_level_site.is_none() {
+            return false;
+        }
+        cookie.partition_key = access.top_level_site.clone();
+    } else if !access.unpartitioned {
+        return false;
+    }
+    let origin_domain = origin_url.host().to_ascii_lowercase();
+
+    if let Some(domain) = &cookie.domain {
+        if domain.is_empty() || !domain_matches(&origin_domain, domain) {
+            return false;
+        }
+        if is_public_suffix(domain) {
+            if domain != &origin_domain {
+                return false;
+            }
+            cookie.host_only = true;
+        } else {
+            cookie.host_only = false;
+        }
+    } else {
+        cookie.host_only = true;
+    }
+    if cookie.host_only {
+        cookie.domain = Some(origin_domain.clone());
+    }
+
+    if cookie
+        .path
+        .as_deref()
+        .is_none_or(|path| !path.starts_with('/'))
+    {
+        cookie.path = Some(default_path(origin_url.path()));
+    }
+
+    let secure_origin = secure_cookie_transport(origin_url);
+    if cookie.secure && !secure_origin {
+        return false;
+    }
+    if !from_http && cookie.http_only {
+        return false;
+    }
+    if cookie.same_site == SameSite::None && !cookie.secure {
+        return false;
+    }
+    if !same_site(origin_url, site_for_cookies)
+        && cookie.same_site != SameSite::None
+        && (!from_http || !top_level_navigation)
+    {
+        return false;
+    }
+    let lower_name = cookie.name.to_ascii_lowercase();
+    if lower_name.starts_with("__secure-") && !cookie.secure {
+        return false;
+    }
+    if lower_name.starts_with("__host-")
+        && (!cookie.secure
+            || !cookie.host_only
+            || cookie.path.as_deref() != Some("/")
+            || !explicit_root_path)
+    {
+        return false;
+    }
+
+    true
 }
 
 impl Default for CookieJar {
@@ -522,6 +1249,19 @@ fn is_public_suffix(domain: &str) -> bool {
 
 fn same_site(a: &Url, b: &Url) -> bool {
     SchemefulSite::from_url(a) == SchemefulSite::from_url(b)
+}
+
+fn secure_cookie_transport(url: &Url) -> bool {
+    if url.scheme() == "https" {
+        return true;
+    }
+    url.scheme() == "http"
+        && (url.host().eq_ignore_ascii_case("localhost")
+            || url
+                .host()
+                .trim_matches(['[', ']'])
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback()))
 }
 
 /// Returns `true` if `request_path` path-matches `cookie_path` per RFC 6265 §5.1.4.
@@ -665,6 +1405,29 @@ fn is_leap_year(y: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_worker_cookie_subscriptions_are_partitioned_by_top_level_site() {
+        let mut jar = CookieJar::new();
+        let scope = "https://worker.example/app/";
+        let site_a = SchemefulSite::from_url(&"https://a.example/".parse().unwrap());
+        let site_b = SchemefulSite::from_url(&"https://b.example/".parse().unwrap());
+        jar.register_service_worker_scope(scope, &site_a);
+        jar.register_service_worker_scope(scope, &site_b);
+        jar.update_service_worker_subscriptions(
+            scope,
+            &site_a,
+            vec![CookieStoreSubscription {
+                name: Some("session".to_owned()),
+                url: "https://worker.example/app/page".to_owned(),
+            }],
+            true,
+        );
+        assert_eq!(jar.service_worker_subscriptions(scope, &site_a).len(), 1);
+        assert!(jar.service_worker_subscriptions(scope, &site_b).is_empty());
+        jar.clear_service_worker_subscriptions(scope, &site_a);
+        assert!(jar.has_service_worker_scope(scope, &site_b));
+    }
 
     // --- Cookie::parse tests ---
 
@@ -819,6 +1582,34 @@ mod tests {
     }
 
     #[test]
+    fn webdriver_deletion_includes_httponly_but_preserves_unrelated_cookies() {
+        let url: Url = "https://example.com/path/page".parse().unwrap();
+        let other: Url = "https://other.test/path/page".parse().unwrap();
+        let mut jar = CookieJar::new();
+        for cookie in [
+            "visible=1; Secure; SameSite=None; Path=/",
+            "hidden=1; Secure; HttpOnly; Path=/",
+            "otherpath=1; Secure; Path=/elsewhere",
+        ] {
+            jar.add_from_header_for_url(cookie, &url);
+        }
+        jar.add_from_header_for_url("otherhost=1; Secure; Path=/", &other);
+        let cursor = jar.change_sequence();
+        jar.delete_associated_cookies(&url, SystemTime::now());
+        assert_eq!(jar.cookie_header(&url), None);
+        assert_eq!(jar.cookie_header(&other).as_deref(), Some("otherhost=1"));
+        assert_eq!(
+            jar.cookie_header(&"https://example.com/elsewhere/page".parse().unwrap())
+                .as_deref(),
+            Some("otherpath=1")
+        );
+        let (_, changes) = jar.script_visible_changes_since(cursor, &url, &url);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].name, "visible");
+        assert!(changes[0].deleted);
+    }
+
+    #[test]
     fn jar_multiple_cookies() {
         let mut jar = CookieJar::new();
         jar.add_from_header("a=1; Path=/; Domain=example.com", "example.com");
@@ -869,6 +1660,16 @@ mod tests {
 
         let https_url: Url = "https://example.com/".parse().unwrap();
         assert_eq!(jar.cookie_header(&https_url), Some("s=secret".to_string()));
+    }
+
+    #[test]
+    fn secure_cookie_is_available_on_trustworthy_loopback_http() {
+        let mut jar = CookieJar::new();
+        let local: Url = "http://localhost/".parse().unwrap();
+        jar.add_from_header_for_url("local=1; Secure; Path=/", &local);
+        assert_eq!(jar.document_cookie(&local, &local), "local=1");
+        let unrelated: Url = "http://example.test/".parse().unwrap();
+        assert!(jar.document_cookie(&unrelated, &unrelated).is_empty());
     }
 
     #[test]
@@ -1027,13 +1828,107 @@ mod tests {
     }
 
     #[test]
+    fn replacing_script_cookie_with_httponly_reports_only_deletion() {
+        let mut jar = CookieJar::new();
+        let url: Url = "https://example.com/".parse().unwrap();
+        jar.add_from_header_for_url("visible=one; Path=/", &url);
+        let cursor = jar.change_sequence();
+        jar.add_from_header_for_url("visible=hidden; HttpOnly; Path=/", &url);
+        let (_, changes) = jar.script_visible_changes_since(cursor, &url, &url);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].name, "visible");
+        assert_eq!(changes[0].value, None);
+        assert!(changes[0].deleted);
+        assert!(jar.script_visible_cookie_pairs(&url, &url).is_empty());
+    }
+
+    #[test]
+    fn identical_cookie_replacement_does_not_report_a_change() {
+        let mut jar = CookieJar::new();
+        let url: Url = "https://example.com/".parse().unwrap();
+        jar.add_from_document("same=one; Path=/", &url, &url);
+        let cursor = jar.change_sequence();
+        jar.add_from_document("same=one; Path=/", &url, &url);
+        assert_eq!(jar.change_sequence(), cursor);
+        jar.add_from_document("same=two; Path=/", &url, &url);
+        let (_, changes) = jar.script_visible_changes_since(cursor, &url, &url);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].value.as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn expiration_evicts_once_and_reports_only_script_visible_deletions() {
+        let mut jar = CookieJar::new();
+        let url: Url = "https://example.com/".parse().unwrap();
+        jar.add_from_header_for_url("visible=one; Max-Age=2; Path=/", &url);
+        jar.add_from_header_for_url("hidden=secret; Max-Age=2; HttpOnly; Path=/", &url);
+        jar.add_from_header_for_url("later=two; Path=/", &url);
+        let start = jar.cookies[0].0.received_at;
+        for (cookie, _) in &mut jar.cookies {
+            cookie.received_at = start;
+        }
+        jar.cookies[2].0.expires = Some(start + Duration::from_secs(4));
+        let cursor = jar.change_sequence();
+
+        assert_eq!(
+            jar.next_expiry_delay_at(start),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(jar.evict_expired_at(start + Duration::from_secs(1)), 0);
+        assert_eq!(jar.evict_expired_at(start + Duration::from_secs(2)), 2);
+        assert_eq!(jar.len(), 1);
+        let (after_first, changes) = jar.script_visible_changes_since(cursor, &url, &url);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].name, "visible");
+        assert!(changes[0].deleted);
+        assert_eq!(changes[0].value, None);
+        assert_eq!(
+            jar.next_expiry_delay_at(start + Duration::from_secs(2)),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(jar.evict_expired_at(start + Duration::from_secs(2)), 0);
+        assert_eq!(jar.change_sequence(), after_first);
+
+        assert_eq!(jar.evict_expired_at(start + Duration::from_secs(4)), 1);
+        assert_eq!(
+            jar.next_expiry_delay_at(start + Duration::from_secs(4)),
+            None
+        );
+        let (_, changes) = jar.script_visible_changes_since(after_first, &url, &url);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].name, "later");
+        assert!(changes[0].deleted);
+    }
+
+    #[test]
+    fn replacement_after_expiration_keeps_the_deletion_event() {
+        let mut jar = CookieJar::new();
+        let url: Url = "https://example.com/".parse().unwrap();
+        jar.add_from_header_for_url("race=old; Max-Age=60; Path=/", &url);
+        jar.cookies[0].0.received_at = SystemTime::now() - Duration::from_secs(61);
+        let cursor = jar.change_sequence();
+
+        jar.add_from_header_for_url("race=new; Path=/", &url);
+
+        let (_, changes) = jar.script_visible_changes_since(cursor, &url, &url);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].name, "race");
+        assert!(changes[0].deleted);
+        assert_eq!(changes[1].name, "race");
+        assert_eq!(changes[1].value.as_deref(), Some("new"));
+        assert!(!changes[1].deleted);
+        assert_eq!(jar.cookie_header(&url), Some("race=new".to_string()));
+    }
+
+    #[test]
     fn replacement_preserves_creation_order_but_renews_max_age() {
         let mut jar = CookieJar::new();
         let url: Url = "https://example.com/".parse().unwrap();
         jar.add_from_header_for_url("session=old; Max-Age=3600", &url);
         let old_creation = SystemTime::now() - Duration::from_secs(7200);
+        // The original creation time can be old while the Max-Age clock is
+        // still current; replacing an expired cookie starts a new lifetime.
         jar.cookies[0].0.created_at = old_creation;
-        jar.cookies[0].0.received_at = old_creation;
 
         jar.add_from_header_for_url("session=new; Max-Age=3600", &url);
         assert_eq!(jar.cookie_header(&url), Some("session=new".to_string()));

@@ -401,7 +401,19 @@ impl HostState {
     /// Style resolvers can own native DOM handles. A document record's death,
     /// not the DOM Rc count, determines cache reclamation after JS collection.
     pub(super) fn sweep_node_lifetimes(&mut self) {
+        self.retired_document_group_ids.retain(|id, _| {
+            self.node_lifetimes
+                .documents
+                .get(id)
+                .is_some_and(|document| document.strong_count() != 0)
+        });
         self.retired_document_security_origins.retain(|id, _| {
+            self.node_lifetimes
+                .documents
+                .get(id)
+                .is_some_and(|document| document.strong_count() != 0)
+        });
+        self.retired_document_csp.retain(|id, _| {
             self.node_lifetimes
                 .documents
                 .get(id)
@@ -501,6 +513,12 @@ pub(super) fn set_owner_native(
             .get_node(owner_id)
             .filter(|node| node.node_type() == NodeType::Document)
             .ok_or_else(|| JsNativeError::typ().with_message("owner must be a document"))?;
+        if state
+            .node_lifetime_owner(id)
+            .is_some_and(|previous| previous.identity() != owner_id)
+        {
+            state.trusted_script_text_approvals.remove(&id);
+        }
         state.set_node_lifetime_owner(&node, &document);
         Ok(JsValue::undefined())
     })

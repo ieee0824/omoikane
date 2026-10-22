@@ -2,9 +2,13 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::io::Cursor;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use omoikane::html::TreeBuilder;
+use omoikane::http::{HttpParseError, HttpRequest, HttpResponse, HttpTransport};
 use omoikane::js::{JsRuntime, NavigationRequest};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +26,9 @@ struct Feature {
     area: String,
     description: String,
     setup: Option<String>,
+    /// Same-origin JavaScript responses needed by this probe.
+    #[serde(default)]
+    http_scripts: BTreeMap<String, String>,
     #[serde(default)]
     run_animation_frame: bool,
     /// Drains queued tasks before probing. Needed for features whose results
@@ -78,7 +85,43 @@ fn load_manifest() -> Manifest {
         .expect("parse Web API manifest")
 }
 
+struct ScriptFixtureTransport(BTreeMap<String, String>);
+
+impl HttpTransport for ScriptFixtureTransport {
+    fn send(
+        &self,
+        request: &HttpRequest,
+        _: Option<Duration>,
+    ) -> Result<HttpResponse, HttpParseError> {
+        let body = (request.url().scheme() == "http" && request.url().host() == "localhost")
+            .then(|| self.0.get(request.url().path()))
+            .flatten();
+        let status = if body.is_some() {
+            "200 OK"
+        } else {
+            "404 Not Found"
+        };
+        let body = body.map_or("", String::as_str);
+        HttpResponse::parse(&mut Cursor::new(format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ).into_bytes()))
+    }
+}
+
 fn run_probe(runtime: &mut JsRuntime, feature: &Feature) -> ProbeResult {
+    if feature.http_scripts.is_empty() {
+        return run_probe_inner(runtime, feature);
+    }
+    runtime.set_http_resource_transport(Some(Arc::new(ScriptFixtureTransport(
+        feature.http_scripts.clone(),
+    ))));
+    let result = run_probe_inner(runtime, feature);
+    runtime.set_http_resource_transport(None);
+    result
+}
+
+fn run_probe_inner(runtime: &mut JsRuntime, feature: &Feature) -> ProbeResult {
     if let Some(setup) = &feature.setup
         && let Err(error) = runtime.eval(setup)
     {

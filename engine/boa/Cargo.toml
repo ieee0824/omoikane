@@ -263,3 +263,4 @@ pedantic = { level = "warn", priority = -1 }
 # Retain full-input sticky matching without scanning later positions.
 [patch.crates-io]
 regress = { path = "../regress" }
+icu_provider_source = { path = "vendor/icu_provider_source" }

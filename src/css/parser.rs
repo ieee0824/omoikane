@@ -67,6 +67,115 @@ pub fn parse_selector_list(input: &str) -> Result<Vec<Selector>, CssParseError> 
     Ok(selectors)
 }
 
+/// Tests one complex selector for `@supports selector()` and `CSS.supports()`.
+/// This uses the stylesheet's selector grammar, including selectors that DOM
+/// queries currently reject.
+pub(crate) fn supports_selector(input: &str) -> bool {
+    let Ok(tokens) = tokenize(input) else {
+        return false;
+    };
+    if !forgiving_pseudo_branches_supported(&tokens) {
+        return false;
+    }
+    let mut parser = Parser::new(tokens);
+    parser.skip_whitespace();
+    let Ok(selectors) = parser.parse_selector_list_until(false) else {
+        return false;
+    };
+    parser.skip_whitespace();
+    parser.peek().is_none()
+        && selectors.len() == 1
+        && selector_is_supported(
+            &selectors[0],
+            SelectorSupportContext {
+                style_query: true,
+                inside_has: false,
+                allow_pseudo_element: true,
+            },
+        )
+}
+
+/// `:is()` and `:where()` parse invalid branches forgivingly for styling,
+/// but a selector support query must reject every unsupported branch.
+fn forgiving_pseudo_branches_supported(tokens: &[CssToken]) -> bool {
+    if !has_no_nested_has_functions(tokens) {
+        return false;
+    }
+    for index in 0..tokens.len().saturating_sub(2) {
+        if !matches!(tokens.get(index), Some(CssToken::Colon))
+            || !matches!(tokens.get(index + 1), Some(CssToken::Ident(name)) if name.eq_ignore_ascii_case("is") || name.eq_ignore_ascii_case("where"))
+            || !matches!(tokens.get(index + 2), Some(CssToken::ParenOpen))
+        {
+            continue;
+        }
+        let start = index + 3;
+        let mut depth = 0usize;
+        let mut end = None;
+        for (offset, token) in tokens[start..].iter().enumerate() {
+            match token {
+                CssToken::ParenOpen => depth += 1,
+                CssToken::ParenClose if depth == 0 => {
+                    end = Some(start + offset);
+                    break;
+                }
+                CssToken::ParenClose => depth -= 1,
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            return false;
+        };
+        let argument = &tokens[start..end];
+        let mut parens = 0usize;
+        let mut brackets = 0usize;
+        let mut branches = 1usize;
+        for token in argument {
+            match token {
+                CssToken::ParenOpen => parens += 1,
+                CssToken::ParenClose if parens > 0 => parens -= 1,
+                CssToken::BracketOpen => brackets += 1,
+                CssToken::BracketClose if brackets > 0 => brackets -= 1,
+                CssToken::ParenClose | CssToken::BracketClose => return false,
+                CssToken::Comma if parens == 0 && brackets == 0 => branches += 1,
+                _ => {}
+            }
+        }
+        if parens != 0 || brackets != 0 || parse_forgiving_selector_list(argument).len() != branches
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Rejects nested `:has()` before forgiving parsing can discard its branch.
+fn has_no_nested_has_functions(tokens: &[CssToken]) -> bool {
+    let mut function_stack = Vec::new();
+    let mut has_depth = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            CssToken::ParenOpen => {
+                let is_has = index >= 2
+                    && matches!(tokens.get(index - 2), Some(CssToken::Colon))
+                    && matches!(tokens.get(index - 1), Some(CssToken::Ident(name)) if name.eq_ignore_ascii_case("has"));
+                if is_has && has_depth > 0 {
+                    return false;
+                }
+                has_depth += usize::from(is_has);
+                function_stack.push(is_has);
+            }
+            CssToken::ParenClose => {
+                let Some(is_has) = function_stack.pop() else {
+                    return false;
+                };
+                has_depth -= usize::from(is_has);
+            }
+            _ => {}
+        }
+    }
+    function_stack.is_empty()
+}
+
 /// Parses an inline `style` attribute as a forgiving declaration list.
 ///
 /// Invalid declarations are skipped independently. If tokenization of the
@@ -127,6 +236,24 @@ fn is_location_pseudo_class(name: &str) -> bool {
 }
 
 fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
+    selector_is_supported(
+        selector,
+        SelectorSupportContext {
+            style_query: false,
+            inside_has: false,
+            allow_pseudo_element: true,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+struct SelectorSupportContext {
+    style_query: bool,
+    inside_has: bool,
+    allow_pseudo_element: bool,
+}
+
+fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -> bool {
     selector.parts.iter().all(|part| {
         part.simples.iter().all(|simple| match simple {
             SimpleSelector::PseudoClass(name) => {
@@ -171,9 +298,16 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
                     base.as_str(),
                     "hover" | "active" | "focus" | "focus-visible" | "focus-within"
                 );
-                (known || location)
+                let host = context.style_query && base == "host";
+                (known || location || host)
                     && (!location || !name.contains('('))
                     && (!user_action || !name.contains('('))
+                    && (!host
+                        || !name.contains('(')
+                        || name
+                            .split_once('(')
+                            .and_then(|(_, rest)| rest.strip_suffix(')'))
+                            .is_some_and(|argument| supported_compound_selector(argument, context)))
                     && (!base.starts_with("nth-")
                         || name
                             .split_once('(')
@@ -182,20 +316,94 @@ fn selector_is_supported_for_dom_query(selector: &Selector) -> bool {
                             .is_some())
             }
             SimpleSelector::PseudoElement(name) => {
-                name.eq_ignore_ascii_case("before")
-                    || name.eq_ignore_ascii_case("after")
-                    || name.eq_ignore_ascii_case("backdrop")
+                (!context.style_query || context.allow_pseudo_element)
+                    && (name.eq_ignore_ascii_case("before")
+                        || name.eq_ignore_ascii_case("after")
+                        || name.eq_ignore_ascii_case("backdrop")
+                        || (context.style_query
+                            && (matches!(
+                                name.to_ascii_lowercase().as_str(),
+                                "marker"
+                                    | "first-letter"
+                                    | "first-line"
+                                    | "placeholder"
+                                    | "selection"
+                                    | "file-selector-button"
+                            ) || name.split_once('(').is_some_and(|(function, rest)| {
+                                let argument = rest.strip_suffix(')').unwrap_or("");
+                                function.eq_ignore_ascii_case("part")
+                                    || (function.eq_ignore_ascii_case("slotted")
+                                        && supported_compound_selector(argument, context))
+                            }))))
             }
             // :is() and :where() use forgiving selector lists. Unsupported
             // branches remain non-matching but do not invalidate the outer
             // selector in DOM selector APIs.
-            SimpleSelector::Is(_) | SimpleSelector::Where(_) | SimpleSelector::Has(_) => true,
-            SimpleSelector::Not(selectors) => {
-                selectors.iter().all(selector_is_supported_for_dom_query)
+            SimpleSelector::Is(selectors) | SimpleSelector::Where(selectors) => {
+                !context.style_query
+                    || (!selectors.is_empty()
+                        && selectors.iter().all(|selector| {
+                            selector_is_supported(
+                                selector,
+                                SelectorSupportContext {
+                                    allow_pseudo_element: false,
+                                    ..context
+                                },
+                            )
+                        }))
             }
+            SimpleSelector::Has(selectors) => {
+                !context.style_query
+                    || (!context.inside_has
+                        && !selectors.is_empty()
+                        && selectors.iter().all(|selector| {
+                            selector_is_supported(
+                                &selector.selector,
+                                SelectorSupportContext {
+                                    inside_has: true,
+                                    allow_pseudo_element: false,
+                                    ..context
+                                },
+                            )
+                        }))
+            }
+            SimpleSelector::Not(selectors) => selectors.iter().all(|selector| {
+                selector_is_supported(
+                    selector,
+                    SelectorSupportContext {
+                        allow_pseudo_element: false,
+                        ..context
+                    },
+                )
+            }),
             _ => true,
         })
     })
+}
+
+fn supported_compound_selector(input: &str, context: SelectorSupportContext) -> bool {
+    let Ok(tokens) = tokenize(input) else {
+        return false;
+    };
+    if !forgiving_pseudo_branches_supported(&tokens) {
+        return false;
+    }
+    let mut parser = Parser::new(tokens);
+    parser.skip_whitespace();
+    let Ok(selectors) = parser.parse_selector_list_until(false) else {
+        return false;
+    };
+    parser.skip_whitespace();
+    parser.peek().is_none()
+        && selectors.len() == 1
+        && selectors[0].parts.len() == 1
+        && selector_is_supported(
+            &selectors[0],
+            SelectorSupportContext {
+                allow_pseudo_element: false,
+                ..context
+            },
+        )
 }
 
 struct Parser {

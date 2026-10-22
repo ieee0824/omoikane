@@ -521,6 +521,35 @@ fn slice() {
 }
 
 #[test]
+fn slice_roots_result_during_getter_gc() {
+    run_test_actions([
+        TestAction::inspect_context(|ctx| {
+            ctx.register_global_callable(
+                js_string!("forceCollect"),
+                0,
+                NativeFunction::from_fn_ptr(|_, _, _| {
+                    boa_gc::force_collect();
+                    Ok(JsValue::undefined())
+                }),
+            )
+            .unwrap();
+        }),
+        TestAction::assert(indoc! {r#"
+            const source = [1, 2, 3];
+            Object.defineProperty(source, 1, {
+                get() {
+                    forceCollect();
+                    return 42;
+                }
+            });
+            const result = source.slice();
+            result.length === 3 && result[0] === 1 &&
+                result[1] === 42 && result[2] === 3;
+        "#}),
+    ]);
+}
+
+#[test]
 fn for_each() {
     run_test_actions([
         TestAction::run(indoc! {r#"

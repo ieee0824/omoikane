@@ -26,10 +26,16 @@ mod server;
 mod summary;
 #[path = "wpt_smoke/testdriver.rs"]
 mod testdriver;
-use case_runner::{CaseExecution, run_case};
+#[path = "wpt_smoke/upstream.rs"]
+mod upstream;
+#[path = "wpt_smoke/upstream_transport.rs"]
+mod upstream_transport;
+use case_runner::{CaseExecution, run_case, run_case_with_transport};
 use classification::classify_with_subtests;
 use manifest::validate_manifest;
-use model::{ActualStatus, Classification, KnownFailure, Manifest, WptReport, WptResult};
+use model::{
+    ActualStatus, Classification, FixtureServer, KnownFailure, Manifest, WptReport, WptResult,
+};
 use report::{junit_xml, read_revision_report, write_revision_reports};
 use server::StaticServer;
 use summary::{area_for_path, diff_revision_reports, summarize};
@@ -52,6 +58,47 @@ fn mismatch_message(
         "WPT {path} {kind}: expected={expected} actual={}; script errors={errors:?}; results={details}",
         actual.as_str()
     ))
+}
+
+struct CaseServers {
+    static_server: StaticServer,
+    upstream: Option<upstream::UpstreamServer>,
+    force_upstream: bool,
+}
+
+impl CaseServers {
+    fn start(root: PathBuf, manifest: &Manifest, force_upstream: bool) -> Self {
+        let static_server = StaticServer::start(root.clone());
+        let needs_upstream = force_upstream
+            || manifest
+                .tests
+                .iter()
+                .any(|case| case.server != FixtureServer::Static);
+        let upstream = needs_upstream.then(|| {
+            upstream::UpstreamServer::start(&root).expect("start pinned upstream WPT server")
+        });
+        Self {
+            static_server,
+            upstream,
+            force_upstream,
+        }
+    }
+
+    fn run(&self, case: &model::WptCase) -> CaseExecution {
+        if let Some(upstream) = self
+            .upstream
+            .as_ref()
+            .filter(|_| case.server != FixtureServer::Static || self.force_upstream)
+        {
+            run_case_with_transport(
+                upstream.case_base_url(case.server),
+                &case.path,
+                Some(std::sync::Arc::clone(&upstream.transport)),
+            )
+        } else {
+            run_case(&self.static_server.base_url, &case.path)
+        }
+    }
 }
 
 #[test]
@@ -84,16 +131,21 @@ fn selected_wpt_testharness_cases_match_expectations() {
         .expect("read WPT revision")
         .trim()
         .to_string();
-    let server = StaticServer::start(root);
+    let servers = CaseServers::start(
+        root,
+        &manifest,
+        std::env::var("WPT_UPSTREAM").as_deref() == Ok("1"),
+    );
     let mut results = Vec::new();
     let mut mismatches = Vec::new();
     for case in manifest.tests {
+        eprintln!("WPT START {}", case.path);
         let CaseExecution {
             actual,
             script_errors: errors,
             subtests,
             details,
-        } = run_case(&server.base_url, &case.path);
+        } = servers.run(&case);
         let classification = classify_with_subtests(actual, case.known_failure.as_ref(), &subtests);
         println!(
             "WPT {}: actual={} classification={classification:?}",

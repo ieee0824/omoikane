@@ -11,7 +11,10 @@ use boa_engine::{JsValue, realm::Realm};
 use boa_gc::{Finalize, Trace, Tracer};
 
 use super::script_errors::WorkerErrorNotification;
-use super::{DocumentSecurityOrigin, NavigationRequest, TimerPayload, VisitSource};
+use super::{
+    DocumentSecurityOrigin, NavigationReferrerSource, NavigationRequest,
+    NavigationSecuritySnapshot, TimerPayload, VisitSource,
+};
 
 /// The HTML task source responsible for a queued task.
 #[allow(dead_code)]
@@ -51,14 +54,27 @@ pub(crate) enum Task {
         request_id: u64,
         stolen: bool,
     },
+    /// A CSP violation delivered asynchronously in its document's realm.
+    SecurityPolicyViolation {
+        document_id: usize,
+        element_id: Option<usize>,
+        payload: String,
+    },
     Navigation {
         request: NavigationRequest,
         source: Option<VisitSource>,
+        security: Option<NavigationSecuritySnapshot>,
     },
     AuxiliaryNavigate {
         id: u64,
         url: String,
+        client_document_id: usize,
+        /// The target group observed when navigation was queued. The source
+        /// Document can retire before this task runs.
+        source_group_id: u64,
+        client_security: Option<NavigationSecuritySnapshot>,
         source: Option<VisitSource>,
+        referrer_source: NavigationReferrerSource,
     },
     PostedMessage {
         port: JsValue,
@@ -70,6 +86,9 @@ pub(crate) enum Task {
         target_iframe: Option<(usize, u64)>,
         target_auxiliary_id: Option<u64>,
         source_document_id: usize,
+        /// The sender's group when the message was queued. The source may
+        /// close before delivery, while the target must remain in this group.
+        source_group_id: u64,
         source_iframe_id: Option<usize>,
         source_auxiliary_id: Option<u64>,
         sender_security_origin: Option<DocumentSecurityOrigin>,
@@ -92,6 +111,19 @@ pub(crate) enum Task {
     WorkerMessage {
         worker_id: u64,
         data: String,
+        ports: JsValue,
+    },
+    /// Completion of all lifetime promises for a ServiceWorker lifecycle event.
+    ServiceWorkerLifecycle {
+        worker_id: u64,
+        installing: bool,
+        failed: bool,
+    },
+    /// Registration operations cross runtimes using only owned identifiers.
+    ServiceWorkerRegistrationRequest {
+        worker_id: u64,
+        request: String,
+        operation: String,
     },
     /// A message sent from a dedicated worker back to its owner page.
     WorkerOwnerMessage {
@@ -103,6 +135,7 @@ pub(crate) enum Task {
         /// iframe.
         realm: Option<Realm>,
         data: String,
+        ports: JsValue,
     },
     /// A message sent from a page-owned `SharedWorkerPort` to the shared
     /// worker runtime.  The endpoint is identified by a process-local id;
@@ -204,6 +237,8 @@ unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tracer) {
         }
         TimerPayload::Source(_)
         | TimerPayload::ResourceLoad { .. }
+        | TimerPayload::ImageResourceEvent { .. }
+        | TimerPayload::JavascriptDocumentLoad { .. }
         | TimerPayload::FormSubmission { .. }
         | TimerPayload::GeolocationTimeout { .. } => {}
     }
@@ -217,17 +252,23 @@ unsafe fn trace_task(task: &Task, tracer: &mut Tracer) {
             unsafe { data.trace(tracer) };
         }
         Task::WindowPostedMessage { ports, .. } => unsafe { ports.trace(tracer) },
-        Task::WorkerOwnerMessage { owner, .. } => unsafe { owner.trace(tracer) },
+        Task::WorkerMessage { ports, .. } => unsafe { ports.trace(tracer) },
+        Task::WorkerOwnerMessage { owner, ports, .. } => {
+            unsafe { owner.trace(tracer) };
+            unsafe { ports.trace(tracer) };
+        }
         Task::SharedWorkerOwnerMessage { port, .. } => unsafe { port.trace(tracer) },
         Task::WorkerError {
             owner: Some(owner), ..
         } => unsafe { owner.trace(tracer) },
         Task::Geolocation { .. }
         | Task::WebLock { .. }
+        | Task::SecurityPolicyViolation { .. }
         | Task::Navigation { .. }
         | Task::AuxiliaryNavigate { .. }
         | Task::BroadcastChannelMessage { .. }
-        | Task::WorkerMessage { .. }
+        | Task::ServiceWorkerLifecycle { .. }
+        | Task::ServiceWorkerRegistrationRequest { .. }
         | Task::SharedWorkerMessage { .. }
         | Task::WorkerError { owner: None, .. } => {}
     }
@@ -273,15 +314,32 @@ impl EventLoop {
         );
     }
 
+    pub(crate) fn enqueue_security_policy_violation(
+        &mut self,
+        document_id: usize,
+        element_id: Option<usize>,
+        payload: String,
+    ) {
+        self.enqueue(
+            TaskSource::Networking,
+            Task::SecurityPolicyViolation {
+                document_id,
+                element_id,
+                payload,
+            },
+        );
+    }
+
     pub(super) fn enqueue_timer_for_document(
         &mut self,
         payload: TimerPayload,
         owner_document_id: Option<usize>,
     ) {
         let source = match payload {
-            TimerPayload::ResourceLoad { .. } | TimerPayload::FormSubmission { .. } => {
-                TaskSource::Networking
-            }
+            TimerPayload::ResourceLoad { .. }
+            | TimerPayload::JavascriptDocumentLoad { .. }
+            | TimerPayload::FormSubmission { .. } => TaskSource::Networking,
+            TimerPayload::ImageResourceEvent { .. } => TaskSource::DomManipulation,
             TimerPayload::GeolocationTimeout { .. } => TaskSource::Geolocation,
             _ => TaskSource::Timer,
         };
@@ -305,7 +363,10 @@ impl EventLoop {
                 let cancelled = matches!(
                     task,
                     Task::Timer {
-                        payload: TimerPayload::ResourceLoad { node_id } | TimerPayload::FormSubmission { node_id, .. },
+                        payload: TimerPayload::ResourceLoad { node_id }
+                            | TimerPayload::ImageResourceEvent { node_id, .. }
+                            | TimerPayload::FormSubmission { node_id, .. }
+                            | TimerPayload::JavascriptDocumentLoad { iframe_id: node_id, .. },
                         ..
                     }
                         if node_ids.contains(node_id)
@@ -321,26 +382,46 @@ impl EventLoop {
     }
 
     pub(crate) fn enqueue_navigation(&mut self, request: NavigationRequest) {
-        self.enqueue_navigation_from_source(request, None);
+        self.enqueue_navigation_from_source(request, None, None);
     }
 
     pub(crate) fn enqueue_navigation_from_source(
         &mut self,
         request: NavigationRequest,
         source: Option<VisitSource>,
+        security: Option<NavigationSecuritySnapshot>,
     ) {
-        self.enqueue(TaskSource::Navigation, Task::Navigation { request, source });
+        self.enqueue(
+            TaskSource::Navigation,
+            Task::Navigation {
+                request,
+                source,
+                security,
+            },
+        );
     }
 
     pub(crate) fn enqueue_auxiliary_navigation(
         &mut self,
         id: u64,
         url: String,
+        client_document_id: usize,
+        source_group_id: u64,
+        client_security: Option<NavigationSecuritySnapshot>,
         source: Option<VisitSource>,
+        referrer_source: NavigationReferrerSource,
     ) {
         self.enqueue(
             TaskSource::Navigation,
-            Task::AuxiliaryNavigate { id, url, source },
+            Task::AuxiliaryNavigate {
+                id,
+                url,
+                client_document_id,
+                source_group_id,
+                client_security,
+                source,
+                referrer_source,
+            },
         );
     }
 
@@ -442,10 +523,46 @@ impl EventLoop {
         );
     }
 
-    pub(crate) fn enqueue_worker_message(&mut self, worker_id: u64, data: String) {
+    pub(crate) fn enqueue_worker_message(&mut self, worker_id: u64, data: String, ports: JsValue) {
         self.enqueue(
             TaskSource::PostedMessage,
-            Task::WorkerMessage { worker_id, data },
+            Task::WorkerMessage {
+                worker_id,
+                data,
+                ports,
+            },
+        );
+    }
+
+    pub(crate) fn enqueue_service_worker_registration_request(
+        &mut self,
+        worker_id: u64,
+        request: String,
+        operation: String,
+    ) {
+        self.enqueue(
+            TaskSource::DomManipulation,
+            Task::ServiceWorkerRegistrationRequest {
+                worker_id,
+                request,
+                operation,
+            },
+        );
+    }
+
+    pub(crate) fn enqueue_service_worker_lifecycle(
+        &mut self,
+        worker_id: u64,
+        installing: bool,
+        failed: bool,
+    ) {
+        self.enqueue(
+            TaskSource::DomManipulation,
+            Task::ServiceWorkerLifecycle {
+                worker_id,
+                installing,
+                failed,
+            },
         );
     }
 
@@ -455,6 +572,7 @@ impl EventLoop {
         owner: JsValue,
         realm: Option<Realm>,
         data: String,
+        ports: JsValue,
     ) {
         self.enqueue(
             TaskSource::PostedMessage,
@@ -463,6 +581,7 @@ impl EventLoop {
                 owner,
                 realm,
                 data,
+                ports,
             },
         );
     }
@@ -625,6 +744,16 @@ impl EventLoop {
             })
     }
 
+    pub(crate) fn has_pending_security_reporting_tasks(&self) -> bool {
+        self.queues
+            .get(&TaskSource::Networking)
+            .is_some_and(|queue| {
+                queue
+                    .iter()
+                    .any(|(_, task)| matches!(task, Task::SecurityPolicyViolation { .. }))
+            })
+    }
+
     pub(crate) fn has_pending_geolocation_tasks(&self) -> bool {
         self.queues
             .get(&TaskSource::Geolocation)
@@ -711,6 +840,12 @@ impl EventLoop {
                 ) || matches!(
                     task,
                     Task::WebLock {
+                        document_id: owner_document_id,
+                        ..
+                    } if *owner_document_id == document_id
+                ) || matches!(
+                    task,
+                    Task::SecurityPolicyViolation {
                         document_id: owner_document_id,
                         ..
                     } if *owner_document_id == document_id

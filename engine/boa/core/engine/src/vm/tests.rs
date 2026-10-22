@@ -24,6 +24,35 @@ use futures_lite::future;
 use indoc::indoc;
 use std::{cell::Cell, future::Future, path::Path, rc::Rc};
 
+#[test]
+fn linking_source_modules_releases_temporary_vm_stack_values() {
+    let mut context = Context::default();
+    let initial_stack = context.vm.stack.stack.len();
+    let initial_frames = context.vm.frames.len();
+
+    for _ in 0..80 {
+        let module = Module::parse(
+            Source::from_bytes("export const answer = 42;"),
+            None,
+            &mut context,
+        )
+        .unwrap();
+        assert!(module.load(&mut context).state().as_fulfilled().is_some());
+        module.link(&mut context).unwrap();
+        assert_eq!(context.vm.stack.stack.len(), initial_stack);
+        assert_eq!(context.vm.frames.len(), initial_frames);
+
+        let evaluation = module.evaluate(&mut context);
+        context.run_jobs().unwrap();
+        assert!(evaluation.state().as_fulfilled().is_some());
+        assert_eq!(context.vm.stack.stack.len(), initial_stack);
+        assert_eq!(context.vm.frames.len(), initial_frames);
+    }
+}
+
+#[derive(Debug, boa_gc::Trace, boa_gc::Finalize, crate::JsData)]
+struct AuthoredScriptMetadata;
+
 fn suspending_function(slot: Gc<GcRefCell<Option<NativeCallSuspension>>>) -> NativeFunction {
     NativeFunction::from_copy_closure_with_captures(
         |_, _, slot, context| {
@@ -2292,7 +2321,7 @@ fn position() {
                     CallFrameLocation {
                         function_name: js_string!("myOtherFunction"),
                         path: SourcePath::None,
-                        position: Some(Position::new(2, 16))
+                        position: Some(Position::new(2, 5))
                     }
                 );
                 assert_eq!(
@@ -2300,7 +2329,7 @@ fn position() {
                     CallFrameLocation {
                         function_name: js_string!("<eval>"),
                         path: SourcePath::Eval,
-                        position: Some(Position::new(1, 16))
+                        position: Some(Position::new(1, 1))
                     }
                 );
                 assert_eq!(
@@ -2308,7 +2337,7 @@ fn position() {
                     CallFrameLocation {
                         function_name: js_string!("myFunction"),
                         path: SourcePath::None,
-                        position: Some(Position::new(5, 9))
+                        position: Some(Position::new(5, 5))
                     }
                 );
                 assert_eq!(
@@ -2316,7 +2345,7 @@ fn position() {
                     CallFrameLocation {
                         function_name: js_string!("<main>"),
                         path: SourcePath::None,
-                        position: Some(Position::new(8, 11))
+                        position: Some(Position::new(8, 1))
                     }
                 );
                 Ok(JsValue::undefined())
@@ -2336,6 +2365,77 @@ fn position() {
         "#})],
         context,
     );
+}
+
+#[test]
+fn stack_frames_expose_their_own_script_or_module_host_defined() {
+    let context = &mut Context::default();
+    context
+        .register_global_callable(
+            js_string!("check_stack_metadata"),
+            2,
+            NativeFunction::from_copy_closure(|_, args, context| {
+                let frames = context.stack_trace().collect::<Vec<&CallFrame>>();
+                let expected_line = args[0].as_number().expect("line should be numeric") as u32;
+                let expected_column = args[1].as_number().expect("column should be numeric") as u32;
+
+                assert_eq!(frames.len(), 2);
+                assert_eq!(
+                    frames[0].position(),
+                    CallFrameLocation {
+                        function_name: js_string!("authoredFunction"),
+                        path: SourcePath::None,
+                        position: Some(Position::new(expected_line, expected_column)),
+                    }
+                );
+                let authored_metadata = frames[0]
+                    .script_or_module_host_defined()
+                    .expect("authored frame should retain its script");
+                assert!(authored_metadata.has::<AuthoredScriptMetadata>());
+
+                assert_eq!(
+                    frames[1].position(),
+                    CallFrameLocation {
+                        function_name: js_string!("<main>"),
+                        path: SourcePath::None,
+                        position: Some(Position::new(1, 1)),
+                    }
+                );
+                let bootstrap_metadata = frames[1]
+                    .script_or_module_host_defined()
+                    .expect("bootstrap frame should retain its script");
+                assert!(!bootstrap_metadata.has::<AuthoredScriptMetadata>());
+                Ok(JsValue::undefined())
+            }),
+        )
+        .expect("Could not register function");
+
+    let mut metadata = crate::HostDefined::default();
+    metadata.insert(AuthoredScriptMetadata);
+    Script::parse_with_host_defined(
+        Source::from_bytes(indoc! {r#"
+            function authoredFunction() {
+                check_stack_metadata(2, 5);
+                globalThis.check_stack_metadata(3, 16);
+                globalThis["check_stack_metadata"](4, 39);
+                (check_stack_metadata)(5, 27);
+                check_stack_metadata?.(6, 27);
+                globalThis?.check_stack_metadata(7, 17);
+                new check_stack_metadata(8, 5);
+            }
+        "#}),
+        None,
+        metadata,
+        context,
+    )
+    .expect("authored script should parse")
+    .evaluate(context)
+    .expect("authored script should evaluate");
+
+    Script::parse(Source::from_bytes("authoredFunction();"), None, context)
+        .expect("bootstrap script should parse")
+        .evaluate(context)
+        .expect("bootstrap script should evaluate");
 }
 
 #[test]

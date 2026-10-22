@@ -14,7 +14,8 @@ use crate::font::{
     ShapingDirection, WebFontCandidate, grapheme_spacing_boundaries, is_zero_advance_character,
     load_default_text_fonts_shared, select_text_font, shape_text_with_fallback_candidates,
 };
-use crate::http::{HttpRequest, Url, url::resolve_url};
+use crate::http::cors::{self, CredentialsMode, PreflightCache, RedirectMode, RequestMode};
+use crate::http::{Client, HttpRequest, HttpResponse, Url, url::resolve_url};
 use crate::paint::{DataUri, Image, parse_data_uri};
 
 use super::{
@@ -1934,11 +1935,9 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
     // Use shared HTTP client for connection reuse and cookie sharing
     let mut request = HttpRequest::get(url).ok()?;
     let context = IMAGE_COOKIE_CONTEXT.with(|cell| cell.borrow().clone());
-    let site = context
-        .as_ref()
-        .and_then(|(_, site, _)| site.clone())
-        .or_else(|| IMAGE_BASE_URL.with(|cell| cell.borrow().clone()));
-    if let Some(site) = site {
+    if let Some(context) = context.as_ref() {
+        context.cookie_context.apply(&mut request);
+    } else if let Some(site) = IMAGE_BASE_URL.with(|cell| cell.borrow().clone()) {
         request.set_cookie_context(site, false);
     }
     request.set_header(
@@ -1948,8 +1947,32 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
     let response = HTTP_CLIENT.with(|client| {
         let mut client = client.borrow_mut();
         match context {
-            Some((store, _, _)) => client.send_with_shared_cookies(request, &store).ok(),
-            None => client.send(request).ok(),
+            Some(context) => {
+                client.set_shared_cookie_store(Arc::clone(&context.store));
+                let mut violations = Vec::new();
+                let mut check_redirect = |target: &Url, redirects| {
+                    super::image_security::allows_image_request(&target.to_string(), redirects, url)
+                };
+                let fetched = cors::fetch_with_embedder_policy_reporting_checked(
+                    &mut client,
+                    request,
+                    &context.origin,
+                    RequestMode::NoCors,
+                    CredentialsMode::Include,
+                    RedirectMode::Follow,
+                    &mut PreflightCache::default(),
+                    context.embedder_policy,
+                    context.report_only_embedder_policy,
+                    &mut violations,
+                    None,
+                    &mut check_redirect,
+                );
+                context.coep_reports.borrow_mut().extend(violations);
+                let response = fetched.ok().map(|fetched| fetched.response);
+                client.clear_shared_cookie_store();
+                response
+            }
+            None => fetch_image_without_document(&mut client, request, url),
         }
     })?;
 
@@ -1978,6 +2001,32 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
         return Some(image);
     }
     decode_image_bytes(body, &content_type, url)
+}
+
+/// Retains the standalone client path while checking redirect targets before I/O.
+fn fetch_image_without_document(
+    client: &mut Client,
+    request: HttpRequest,
+    initial: &str,
+) -> Option<HttpResponse> {
+    let mut redirects = 0;
+    let mut observe = |request: &HttpRequest, response: &HttpResponse| {
+        if !matches!(response.status_code(), 301 | 302 | 303 | 307 | 308) {
+            return true;
+        }
+        let Some(location) = response.header("location") else {
+            return true;
+        };
+        let Ok(target) = resolve_url(request.url(), location) else {
+            return true;
+        };
+        redirects += 1;
+        super::image_security::allows_image_request(&target.to_string(), redirects, initial)
+    };
+    client
+        .send_observing_navigation(request, &mut observe)
+        .ok()
+        .flatten()
 }
 
 /// Decodes image bytes, picking the decoder from the media type and falling back
@@ -2047,6 +2096,10 @@ fn decode_or_fetch_image(url_like: &str) -> Option<Image> {
 fn decode_or_fetch_image_with_base(url_like: &str, base_url: Option<&Url>) -> Option<Image> {
     let url_like = url_like.trim();
     if url_like.is_empty() {
+        return None;
+    }
+    let reference = canonical_image_asset_reference(url_like, base_url)?;
+    if !super::image_security::allows_image_request(&reference, 0, &reference) {
         return None;
     }
     if url_like
@@ -3809,6 +3862,128 @@ fn measure_text_width_with_fallback(
 #[cfg(test)]
 mod image_url_tests {
     use super::*;
+    use crate::http::corp::EmbedderPolicyValue;
+    use crate::http::cors::Origin as CorsOrigin;
+    use crate::http::{
+        Client, CookieJar, CookieRequestContext, HttpParseError, HttpResponse, HttpTransport,
+    };
+    use crate::test_support::http_fixture::{
+        ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
+        read_request_headers,
+    };
+    use std::io::Write;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    struct ImageTransport {
+        body: Vec<u8>,
+        requests: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    }
+
+    impl HttpTransport for ImageTransport {
+        fn send(
+            &self,
+            request: &HttpRequest,
+            _: Option<Duration>,
+        ) -> Result<HttpResponse, HttpParseError> {
+            self.requests.lock().unwrap().push((
+                request.url().to_string(),
+                request.header("cookie").map(str::to_owned),
+            ));
+            let headers = if request.url().path() == "/opted-in.png" {
+                vec![("Cross-Origin-Resource-Policy".into(), "cross-origin".into())]
+            } else {
+                Vec::new()
+            };
+            Ok(HttpResponse::new(200, "OK", headers, self.body.clone()))
+        }
+    }
+
+    struct ImageClientGuard(Client);
+
+    impl Drop for ImageClientGuard {
+        fn drop(&mut self) {
+            HTTP_CLIENT.with(|client| {
+                client.replace(std::mem::replace(&mut self.0, Client::new()));
+            });
+        }
+    }
+
+    #[test]
+    fn document_image_fetch_enforces_coep_and_credentialless_cookies() {
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[255, 0, 0, 255])
+                .unwrap();
+        }
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut client = Client::new();
+        client.set_transport(Some(Arc::new(ImageTransport {
+            body: png,
+            requests: Arc::clone(&requests),
+        })));
+        let _guard = ImageClientGuard(HTTP_CLIENT.with(|cell| cell.replace(client)));
+        let store = Arc::new(Mutex::new(CookieJar::new()));
+        store
+            .lock()
+            .unwrap()
+            .add_from_header("session=value", "resource.example.test");
+        let document: Url = "http://source.example.test/page".parse().unwrap();
+        let origin = CorsOrigin::from_url(&document);
+        let blocked = "http://resource.example.test/blocked.png";
+        let allowed = "http://resource.example.test/opted-in.png";
+
+        super::super::with_image_cookie_store_reporting(
+            Arc::clone(&store),
+            CookieRequestContext::new(Some(document.clone()), None, false),
+            1,
+            origin.clone(),
+            EmbedderPolicyValue::RequireCorp,
+            EmbedderPolicyValue::UnsafeNone,
+            || {
+                assert!(fetch_image_uncached(blocked).is_none());
+                assert!(fetch_image_uncached(allowed).is_some());
+            },
+        );
+        super::super::with_image_cookie_store_reporting(
+            Arc::clone(&store),
+            CookieRequestContext::new(Some(document.clone()), None, false),
+            1,
+            origin.clone(),
+            EmbedderPolicyValue::Credentialless,
+            EmbedderPolicyValue::UnsafeNone,
+            || assert!(fetch_image_uncached(blocked).is_some()),
+        );
+        let (loaded, reports) = super::super::with_image_cookie_store_reporting(
+            Arc::clone(&store),
+            CookieRequestContext::new(Some(document), None, false),
+            1,
+            origin,
+            EmbedderPolicyValue::UnsafeNone,
+            EmbedderPolicyValue::RequireCorp,
+            || fetch_image_uncached(blocked).is_some(),
+        );
+        assert!(loaded);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].blocked_url, blocked);
+        assert!(reports[0].report_only);
+        assert!(!reports[0].enforced);
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            [
+                (blocked.to_string(), Some("session=value".to_string())),
+                (allowed.to_string(), Some("session=value".to_string())),
+                (blocked.to_string(), None),
+                (blocked.to_string(), Some("session=value".to_string())),
+            ]
+        );
+    }
 
     #[test]
     fn canonical_reference_uses_only_the_explicit_base() {
@@ -3869,5 +4044,69 @@ mod image_url_tests {
             canonical_image_asset_reference("BLOB:https://example.test/image-id", None),
             Some("blob:https://example.test/image-id".to_string())
         );
+    }
+
+    #[test]
+    fn third_party_image_sends_and_stores_cookies_only_with_document_access() {
+        let listener = bind_loopback().unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[255, 0, 0, 255])
+                .unwrap();
+        }
+        let server = FixtureWorker::spawn(move || {
+            let mut cookies = Vec::new();
+            for phase in ["pre", "post"] {
+                let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                assert!(request.starts_with("GET /image.png HTTP/1.1"));
+                cookies.push(
+                    request
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Cookie: "))
+                        .map(str::trim)
+                        .map(str::to_owned),
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nSet-Cookie: {phase}=1; Path=/; Secure; SameSite=None\r\nConnection: close\r\n\r\n",
+                    png.len(),
+                )
+                .unwrap();
+                stream.write_all(&png).unwrap();
+            }
+            cookies
+        });
+        let target: Url = format!("http://{address}/image.png").parse().unwrap();
+        let top: Url = format!("http://localhost:{}/", address.port())
+            .parse()
+            .unwrap();
+        let store = Arc::new(Mutex::new(CookieJar::new()));
+        store
+            .lock()
+            .unwrap()
+            .add_from_header_for_url("session=pre; Path=/; Secure; SameSite=None", &target);
+        for phase in ["pre", "post"] {
+            let context = CookieRequestContext::new(
+                Some(top.clone()),
+                (phase == "post").then(|| target.clone()),
+                false,
+            );
+            let url = format!("http://{address}/image.png");
+            super::super::with_image_cookie_store(Arc::clone(&store), context, 867, || {
+                assert!(fetch_image(&url).is_some());
+            });
+        }
+        assert_eq!(server.join(), [None, Some("session=pre".to_string())]);
+        let cookies = store.lock().unwrap().document_cookie(&target, &target);
+        assert!(!cookies.contains("pre=1"));
+        assert!(cookies.contains("post=1"));
     }
 }

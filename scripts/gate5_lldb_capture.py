@@ -7,6 +7,22 @@ from pathlib import Path
 import time
 
 
+def save_native_state(process, path):
+    """Read the stopped inferior directly, independent of command selection."""
+    with path.open("w") as log:
+        log.write(f"process {process.GetProcessID()} state={process.GetState()}\n")
+        for thread in process:
+            log.write(f"thread {thread.GetThreadID()} name={thread.GetName()!r} "
+                      f"stop={thread.GetStopDescription(4096)!r}\n")
+            for index in range(thread.GetNumFrames()):
+                frame = thread.GetFrameAtIndex(index)
+                log.write(f"  frame #{index}: {frame}\n")
+                for registers in frame.GetRegisters():
+                    log.write(f"    {registers.GetName()}:\n")
+                    for register in registers:
+                        log.write(f"      {register.GetName()} = {register.GetValue()}\n")
+
+
 def capture(debugger):
     """Save all thread stacks before terminating a stopped diagnostic process."""
     import lldb
@@ -39,14 +55,15 @@ def capture(debugger):
     report.update(launch_error=str(error), pid=process.GetProcessID(),
                   seconds=time.monotonic() - started,
                   state=lldb.SBDebugger.StateAsCString(process.GetState()))
-    # The outer script command can retain a pre-launch execution context.
-    execution = lldb.SBExecutionContext(process)
-    with (output / "native-stack.log").open("w") as log:
-        for command in ["process status", "thread list", "thread backtrace all",
-                        "register read", "image list -o -f"]:
-            result = lldb.SBCommandReturnObject()
-            debugger.GetCommandInterpreter().HandleCommand(command, execution, result)
-            log.write(f"(lldb) {command}\n{result.GetOutput() or ''}{result.GetError() or ''}\n")
+    # Script commands may retain a pre-launch execution context even when an
+    # SBExecutionContext(process) is supplied. Avoid the command interpreter for
+    # frames/registers: the SBProcess returned by Launch owns the stopped threads.
+    save_native_state(process, output / "native-stack.log")
+    with (output / "native-stack.log").open("a") as log:
+        log.write("modules:\n")
+        for module in target.modules:
+            log.write(f"  {module.GetFileSpec()} "
+                      f"load_address={module.GetObjectFileHeaderAddress().GetLoadAddress(target):#x}\n")
     report["threads"] = [
         {"id": thread.GetThreadID(), "name": thread.GetName(),
          "stop_reason": thread.GetStopReason(),

@@ -155,6 +155,7 @@ struct FindUi {
 
 struct BrowserApp {
     session: CdpSession,
+    cookie_changes: Option<omoikane::http::CookieChangeSubscription>,
     initial_url: Option<String>,
     initial_navigation_error: Option<omoikane::cdp::JsonRpcError>,
     error_reporter: Option<Arc<ErrorReporter>>,
@@ -211,6 +212,7 @@ impl BrowserApp {
         let clock_document = session.document_generation();
         Ok(Self {
             session,
+            cookie_changes: None,
             initial_url: Some(url.into()),
             initial_navigation_error: None,
             error_reporter: None,
@@ -426,6 +428,18 @@ impl BrowserApp {
         }
         let mut record = match event {
             WindowEvent::Focused(focused) => json!({ "kind": "focus", "focused": focused }),
+            WindowEvent::CursorMoved { position, .. } => json!({
+                "kind": "cursor",
+                "x": position.x,
+                "y": position.y,
+                "previous_x": self.cursor_position.0,
+                "previous_y": self.cursor_position.1,
+            }),
+            WindowEvent::MouseInput { state, button, .. } => json!({
+                "kind": "mouse_button",
+                "button": format!("{button:?}"),
+                "pressed": *state == ElementState::Pressed,
+            }),
             WindowEvent::KeyboardInput {
                 event,
                 is_synthetic,
@@ -814,18 +828,32 @@ fn physical_position_css_pixels(position: PhysicalPosition<f64>, scale_factor: f
 
 fn wheel_delta_css_pixels(delta: MouseScrollDelta, scale_factor: f64) -> (f64, f64) {
     const CSS_PIXELS_PER_LINE: f64 = 40.0;
+    // Winit reports the direction in which content moves; DOM wheel deltas
+    // describe the direction in which the scroll offset increases.
     match delta {
         MouseScrollDelta::LineDelta(x, y) => (
-            f64::from(x) * CSS_PIXELS_PER_LINE,
-            f64::from(y) * CSS_PIXELS_PER_LINE,
+            -f64::from(x) * CSS_PIXELS_PER_LINE,
+            -f64::from(y) * CSS_PIXELS_PER_LINE,
         ),
         MouseScrollDelta::PixelDelta(position) => {
-            physical_position_css_pixels(position, scale_factor)
+            let (x, y) = physical_position_css_pixels(position, scale_factor);
+            (-x, -y)
         }
     }
 }
 
 impl ApplicationHandler for BrowserApp {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, (): ()) {
+        if self
+            .cookie_changes
+            .as_ref()
+            .is_some_and(|changes| changes.take_changed())
+        {
+            self.frame_scheduler
+                .request_rendering_opportunity(Instant::now());
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -901,6 +929,9 @@ impl ApplicationHandler for BrowserApp {
         }
         self.update_media_environment_for_event(&event);
         if !matches!(event, WindowEvent::RedrawRequested) {
+            // X11 and macOS can consume a wheel backlog before delivering a
+            // queued redraw. Present at most once per frame interval while
+            // processing input so the page visibly moves during the burst.
             if matches!(event, WindowEvent::MouseWheel { .. }) {
                 self.render_before_wheel(Instant::now());
             }
@@ -1130,14 +1161,14 @@ mod tests {
         );
         assert_eq!(
             wheel_delta_css_pixels(MouseScrollDelta::LineDelta(0.5, -2.0), 2.0),
-            (20.0, -80.0)
+            (-20.0, 80.0)
         );
         assert_eq!(
             wheel_delta_css_pixels(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(2.5, -7.0)),
                 2.0
             ),
-            (1.25, -3.5)
+            (-1.25, 3.5)
         );
     }
 
@@ -1268,6 +1299,18 @@ mod tests {
     }
 }
 
+struct CookieStoreWake(winit::event_loop::EventLoopProxy<()>);
+
+impl std::task::Wake for CookieStoreWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let _ = self.0.send_event(());
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let url = std::env::args().nth(1).unwrap_or_else(|| {
         "data:text/html,<title>Omoikane</title><style>body{font:32px sans-serif;padding:2rem}</style><h1>Omoikane</h1><p>Pass a URL as the first argument.</p>".to_string()
@@ -1278,6 +1321,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let event_loop = EventLoop::new()?;
     let mut app = BrowserApp::new(&url)?;
+    app.cookie_changes = Some(app.session.subscribe_cookie_changes(std::task::Waker::from(
+        Arc::new(CookieStoreWake(event_loop.create_proxy())),
+    )));
     if let Some(reporter) = reporter {
         app.set_error_reporter(reporter);
     }

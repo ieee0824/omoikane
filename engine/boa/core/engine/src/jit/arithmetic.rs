@@ -50,6 +50,43 @@ struct NativeFrame {
     poll_remaining: u64,
 }
 
+// Keep the built-in macro outside const_assert! so CodeQL can extract its AST.
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
+const NATIVE_FRAME_REGISTERS_OFFSET: usize = offset_of!(NativeFrame, registers);
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
+const NATIVE_FRAME_DIRTY_OFFSET: usize = offset_of!(NativeFrame, dirty);
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
+const NATIVE_FRAME_LOOP_ITERATIONS_OFFSET: usize = offset_of!(NativeFrame, loop_iterations);
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
+const NATIVE_FRAME_LOOP_LIMIT_OFFSET: usize = offset_of!(NativeFrame, loop_limit);
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
+const NATIVE_FRAME_PC_OFFSET: usize = offset_of!(NativeFrame, pc);
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
+const NATIVE_FRAME_STATUS_OFFSET: usize = offset_of!(NativeFrame, status);
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
+const NATIVE_FRAME_HEADER_OFFSET: usize = offset_of!(NativeFrame, header);
+
 #[derive(Debug, Clone, Copy)]
 struct NativeEntryLimits {
     loop_limit: u64,
@@ -61,37 +98,37 @@ struct NativeEntryLimits {
     any(target_arch = "x86_64", target_arch = "aarch64"),
     any(target_os = "linux", target_os = "macos")
 ))]
-static_assertions::const_assert!(offset_of!(NativeFrame, registers) == 0x00);
+static_assertions::const_assert!(NATIVE_FRAME_REGISTERS_OFFSET == 0x00);
 #[cfg(all(
     any(target_arch = "x86_64", target_arch = "aarch64"),
     any(target_os = "linux", target_os = "macos")
 ))]
-static_assertions::const_assert!(offset_of!(NativeFrame, dirty) == 0x08);
+static_assertions::const_assert!(NATIVE_FRAME_DIRTY_OFFSET == 0x08);
 #[cfg(all(
     any(target_arch = "x86_64", target_arch = "aarch64"),
     any(target_os = "linux", target_os = "macos")
 ))]
-static_assertions::const_assert!(offset_of!(NativeFrame, loop_iterations) == 0x10);
+static_assertions::const_assert!(NATIVE_FRAME_LOOP_ITERATIONS_OFFSET == 0x10);
 #[cfg(all(
     any(target_arch = "x86_64", target_arch = "aarch64"),
     any(target_os = "linux", target_os = "macos")
 ))]
-static_assertions::const_assert!(offset_of!(NativeFrame, loop_limit) == 0x18);
+static_assertions::const_assert!(NATIVE_FRAME_LOOP_LIMIT_OFFSET == 0x18);
 #[cfg(all(
     any(target_arch = "x86_64", target_arch = "aarch64"),
     any(target_os = "linux", target_os = "macos")
 ))]
-static_assertions::const_assert!(offset_of!(NativeFrame, pc) == 0x20);
+static_assertions::const_assert!(NATIVE_FRAME_PC_OFFSET == 0x20);
 #[cfg(all(
     any(target_arch = "x86_64", target_arch = "aarch64"),
     any(target_os = "linux", target_os = "macos")
 ))]
-static_assertions::const_assert!(offset_of!(NativeFrame, status) == 0x24);
+static_assertions::const_assert!(NATIVE_FRAME_STATUS_OFFSET == 0x24);
 #[cfg(all(
     any(target_arch = "x86_64", target_arch = "aarch64"),
     any(target_os = "linux", target_os = "macos")
 ))]
-static_assertions::const_assert!(offset_of!(NativeFrame, header) == 0x28);
+static_assertions::const_assert!(NATIVE_FRAME_HEADER_OFFSET == 0x28);
 
 #[derive(Debug)]
 pub(crate) struct ArithmeticCode {

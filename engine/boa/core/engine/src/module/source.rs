@@ -1794,6 +1794,9 @@ impl SourceTextModule {
             .vm
             .pop_frame()
             .expect("There should be a call frame");
+        // Linking does not execute a Return opcode, so it must release the
+        // temporary frame's values itself before restoring the caller.
+        context.vm.stack.truncate_to_frame(&frame);
 
         let env = frame
             .environments

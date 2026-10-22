@@ -3246,6 +3246,7 @@ impl StyleResolver {
             &mut component_values,
             &self.media_environment,
         );
+        resolve_outline_auto_color(&mut properties);
         let text_decorations = propagated_text_decorations(
             &properties,
             parent_style,
@@ -4712,8 +4713,16 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     // a winner, so one malformed color cannot hide an earlier valid candidate.
     // This must precede the generic comma-list handling because a single color
     // never accepts a top-level comma-separated list.
+    if name.eq_ignore_ascii_case("outline-color")
+        && matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto"))
+    {
+        return DeclarationValidation::Valid(ComputedValue::Keyword("auto".into()));
+    }
     if is_color_property(name) {
         return validate_color_value(value);
+    }
+    if let Some(validation) = validate_box_spacing_declaration(name, value) {
+        return validation;
     }
     if let Some(validation) = validate_logical_box_declaration(name, value) {
         return validation;
@@ -5499,6 +5508,38 @@ fn validate_perspective_origin_declaration(value: &Value) -> DeclarationValidati
         DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
     } else {
         DeclarationValidation::Invalid
+    }
+}
+
+fn validate_box_spacing_declaration(name: &str, value: &Value) -> Option<DeclarationValidation> {
+    if !is_margin_or_padding_longhand(name) {
+        return None;
+    }
+    Some(if box_spacing_component_is_valid(name, value) {
+        DeclarationValidation::Unvalidated
+    } else {
+        DeclarationValidation::Invalid
+    })
+}
+
+/// Checks a margin or padding component before shorthand expansion.
+pub(super) fn box_spacing_component_is_valid(name: &str, value: &Value) -> bool {
+    let margin = name.starts_with("margin-");
+    match value {
+        Value::Keyword(keyword) => {
+            is_css_wide_keyword(&keyword.to_ascii_lowercase())
+                || (margin && keyword.eq_ignore_ascii_case("auto"))
+        }
+        Value::Function { .. } if sibling_functions::contains(value) => {
+            // Element-dependent expressions must be checked structurally:
+            // their numbers are unavailable while parsing the stylesheet.
+            let length = typed_math::NumericType::LENGTH;
+            typed_math::infer(value, Some(length)) == Some(length)
+        }
+        // Math expressions may become negative after resolving relative units.
+        // Padding clamps the resulting used value to zero in layout.
+        Value::Function { .. } => valid_logical_length(value, true, true),
+        value => valid_logical_length(value, margin, true),
     }
 }
 
@@ -8597,6 +8638,8 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
         return false;
     }
     if (property.starts_with("inset")
+        || property.starts_with("margin-")
+        || property.starts_with("padding-")
         || property.starts_with("border-inline")
         || property.starts_with("border-block"))
         && super::split_top_level_commas(value).len() > 1
@@ -8679,8 +8722,8 @@ fn normalize_border_width_component(value: &Value) -> String {
     render_value(value)
 }
 
-/// Validates and canonicalizes logical inset shorthands and longhands.
-pub(crate) fn normalize_logical_inset(property: &str, text: &str) -> Option<String> {
+/// Validates and canonicalizes inset and logical margin/padding lengths.
+pub(crate) fn normalize_box_lengths(property: &str, text: &str) -> Option<String> {
     if !supports_declaration(property, text) {
         return None;
     }
@@ -9114,6 +9157,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             | "border-block-start-width"
             | "border-block-end-width"
             | "column-rule-width"
+            | "outline-width"
     ) && let Value::Keyword(keyword) = value
     {
         let pixels = match keyword.to_ascii_lowercase().as_str() {
@@ -11539,6 +11583,10 @@ const INITIAL_VALUES: &[(&str, InitialValue)] = &[
     ("column-rule-width", InitialValue::Px(3.0)),
     // `column-rule-color`'s initial value is `currentcolor`.
     ("column-rule-color", InitialValue::CurrentColor),
+    ("outline-style", InitialValue::Keyword("none")),
+    ("outline-width", InitialValue::Px(3.0)),
+    ("outline-offset", InitialValue::Px(0.0)),
+    ("outline-color", InitialValue::Keyword("auto")),
     ("break-before", InitialValue::Keyword("auto")),
     ("break-after", InitialValue::Keyword("auto")),
     ("break-inside", InitialValue::Keyword("auto")),
@@ -11762,6 +11810,20 @@ fn resolve_column_rule_current_color(properties: &mut PropertyMap) {
     );
     if is_current_color {
         properties.copy_property("color", "column-rule-color");
+    }
+}
+
+fn resolve_outline_auto_color(properties: &mut PropertyMap) {
+    let color_is_auto = matches!(
+        properties.get(&PropertyId::OutlineColor),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("auto")
+    );
+    let style_is_auto = matches!(
+        properties.get(&PropertyId::OutlineStyle),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("auto")
+    );
+    if color_is_auto && !style_is_auto {
+        properties.copy_property("color", "outline-color");
     }
 }
 

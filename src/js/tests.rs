@@ -30,6 +30,12 @@ fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
     request
 }
 
+/// Gives HTTP fixture tests a Document whose security origin matches its URL.
+/// Setting only the resource base leaves the default localhost origin intact.
+fn runtime_at_document_url(url: &str) -> JsRuntime {
+    JsRuntime::with_document_and_url(default_document(), url).unwrap()
+}
+
 fn sample_document() -> NodeHandle {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
@@ -258,7 +264,7 @@ fn worklet_add_module_is_isolated_and_drains_microtasks() {
         .eval(
             r#"globalThis.workletProbe = { result: 'pending' };
                    const source = encodeURIComponent(
-                     "registerWorklet('sync'); queueMicrotask(() => registerPaint('checker', class {}, ['--tone']));"
+                     "registerWorklet('sync'); registerWorklet('worker-scope-' + typeof DedicatedWorkerGlobalScope); queueMicrotask(() => registerPaint('checker', class {}, ['--tone']));"
                    );
                    CSS.paintWorklet.addModule('data:text/javascript,' + source).then(
                      () => workletProbe.result = [CSS.paintWorklet.moduleCount,
@@ -270,7 +276,7 @@ fn worklet_add_module_is_isolated_and_drains_microtasks() {
     runtime.run_until_idle().unwrap();
     assert_eq!(
         eval_str(&mut runtime, "workletProbe.result"),
-        "1|checker,sync|object"
+        "1|checker,sync,worker-scope-undefined|object"
     );
     assert_eq!(
         eval_str(&mut runtime, "typeof WorkletGlobalScope"),
@@ -318,19 +324,44 @@ fn worklet_module_cache_errors_and_teardown_are_deterministic() {
 }
 
 #[test]
-fn worklet_rejects_cross_origin_and_insecure_modules() {
+fn worklet_rejects_cors_denied_and_insecure_modules() {
+    struct NoCorsWorkletTransport;
+
+    impl crate::http::HttpTransport for NoCorsWorkletTransport {
+        fn send(
+            &self,
+            _: &crate::http::HttpRequest,
+            _: Option<std::time::Duration>,
+        ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+            Ok(crate::http::HttpResponse::new(
+                200,
+                "OK",
+                Vec::new(),
+                b"registerPaint('denied', class {});".to_vec(),
+            ))
+        }
+    }
+
     let mut cross_origin = JsRuntime::with_document_and_url(
         default_document(),
         "https://worklet.example.test/page.html",
     )
     .unwrap();
+    cross_origin.set_http_resource_transport(Some(std::sync::Arc::new(NoCorsWorkletTransport)));
     cross_origin
         .eval(
             "globalThis.workletError = ''; CSS.paintWorklet.addModule('https://other.example.test/module.js').catch(error => workletError = error.name);",
         )
         .unwrap();
     cross_origin.run_jobs().unwrap();
-    assert_eq!(eval_str(&mut cross_origin, "workletError"), "SecurityError");
+    assert_eq!(eval_str(&mut cross_origin, "workletError"), "AbortError");
+    assert_eq!(
+        cross_origin
+            .eval("CSS.paintWorklet.moduleCount")
+            .unwrap()
+            .as_number(),
+        Some(0.0)
+    );
 
     let mut insecure = JsRuntime::with_document_and_url(
         default_document(),
@@ -347,7 +378,7 @@ fn worklet_rejects_cross_origin_and_insecure_modules() {
 }
 
 #[test]
-fn worklet_rejects_duplicate_registration_names() {
+fn worklet_reports_duplicate_registration_without_rejecting_add_module() {
     let mut runtime = JsRuntime::new().unwrap();
     runtime
         .eval(
@@ -358,10 +389,8 @@ fn worklet_rejects_duplicate_registration_names() {
         )
         .unwrap();
     runtime.run_until_idle().unwrap();
-    assert_eq!(
-        eval_str(&mut runtime, "workletError"),
-        "InvalidModificationError"
-    );
+    assert_eq!(eval_str(&mut runtime, "workletError"), "");
+    assert!(runtime.eval("CSS.paintWorklet.moduleCount===2 && CSS.paintWorklet.registeredNames.join(',')==='same-name'").unwrap().to_boolean());
 }
 
 #[test]
@@ -409,6 +438,24 @@ fn shared_worker_connects_multiple_ports_and_round_trips_cloned_messages() {
             .unwrap()
             .to_std_string_escaped(),
         r#"[["first",{"value":1,"proto":true}],["second",{"value":2,"proto":true}]]"#
+    );
+}
+
+#[test]
+fn shared_worker_connect_event_source_is_the_message_port() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.sharedConnectSource = [];
+               const source = encodeURIComponent('addEventListener("connect", event => event.source.postMessage({ same: event.source === event.ports[0], messagePort: event.source instanceof MessagePort }));');
+               const worker = new SharedWorker('data:text/javascript,' + source, 'connect-source');
+               worker.port.onmessage = event => sharedConnectSource.push(event.data);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "JSON.stringify(sharedConnectSource)"),
+        r#"[{"same":true,"messagePort":true}]"#
     );
 }
 
@@ -487,8 +534,12 @@ fn shared_worker_startup_failure_is_observable_without_stopping_page() {
 
 #[test]
 fn shared_worker_requires_an_eligible_origin() {
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.host_state.borrow_mut().base_url = None;
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "data:text/html,<body>").unwrap();
+    assert!(matches!(
+        runtime.host_state.borrow().document_security_origins[&runtime.document().identity()],
+        DocumentSecurityOrigin::Opaque(_)
+    ));
     let result = runtime
         .eval(
             r#"try {
@@ -588,22 +639,22 @@ fn shared_worker_port_close_drops_future_messages() {
 
 #[test]
 fn service_worker_registration_scopes_lifecycle_and_controller_selection() {
+    let fixture = super::service_worker_tests::ServiceWorkerFixture::new();
     let mut runtime = JsRuntime::with_document_and_url(
         default_document(),
-        "https://service-worker.example.test/app/index.html",
+        &format!("{}/app/index.html", fixture.origin),
     )
     .unwrap();
     runtime
         .eval(
-            r#"globalThis.swProbe = { scope: '', state: '', found: false, controller: false, changes: 0, invalid: '', updateFound: 0, updateUndefined: false, replaced: false };
+            r#"globalThis.swProbe = { scope: '', state: '', found: false, controller: false, changes: 0, invalid: '', updateFound: 0, updateRegistration: false, replaced: false };
                    navigator.serviceWorker.oncontrollerchange = () => swProbe.changes++;
-                   navigator.serviceWorker.register('/worker.js', { scope: '/app/' }).then(registration => {
+                   navigator.serviceWorker.register('/app/worker.js', { scope: '/app/' }).then(registration => {
                      swProbe.scope = registration.scope;
-                     swProbe.state = registration.active.state;
-                     swProbe.controller = navigator.serviceWorker.controller === registration.active;
+                     swProbe.state = registration.installing.state;
                      globalThis.swRegistration = registration;
                      registration.onupdatefound = () => swProbe.updateFound++;
-                     registration.update().then(value => { swProbe.updateUndefined = value === undefined; });
+                     registration.update().then(value => { swProbe.updateRegistration = value === registration; });
                      navigator.serviceWorker.getRegistration('/app/page.html').then(found => { swProbe.found = found === registration; });
                    });
                    navigator.serviceWorker.register('https://other.example.test/worker.js').catch(error => { swProbe.invalid = error.name; });"#,
@@ -613,17 +664,21 @@ fn service_worker_registration_scopes_lifecycle_and_controller_selection() {
     assert_eq!(
         eval_str(
             &mut runtime,
-            "[swProbe.scope, swProbe.state, swProbe.found, swProbe.controller, swProbe.changes, swProbe.invalid].join('|')"
+            "[swProbe.scope, swRegistration.active.state, swProbe.found, navigator.serviceWorker.controller === swRegistration.active, swProbe.changes, swProbe.invalid].join('|')"
         ),
-        "https://service-worker.example.test/app/|activated|true|true|1|SecurityError",
+        format!(
+            "{}/app/|activated|true|true|1|SecurityError",
+            fixture.origin
+        ),
     );
     assert_eq!(
-        eval_str(&mut runtime, "String(swProbe.updateUndefined)"),
+        eval_str(&mut runtime, "String(swProbe.updateRegistration)"),
         "true"
     );
+    assert_eq!(eval_str(&mut runtime, "swProbe.state"), "installing");
     runtime
         .eval(
-            "navigator.serviceWorker.register('/worker-v2.js', { scope: '/app/' }).then(registration => { swProbe.replaced = registration === swRegistration; });",
+            "navigator.serviceWorker.register('/app/worker-v2.js', { scope: '/app/' }).then(registration => { swProbe.replaced = registration === swRegistration; });",
         )
         .unwrap();
     runtime.run_until_idle().unwrap();
@@ -645,6 +700,15 @@ fn service_worker_registration_scopes_lifecycle_and_controller_selection() {
         ),
         "true|true"
     );
+    drop(runtime);
+    assert_eq!(
+        fixture.finish(),
+        vec![
+            "/app/worker.js".to_owned(),
+            "/app/worker.js".to_owned(),
+            "/app/worker-v2.js".to_owned()
+        ]
+    );
 }
 
 #[test]
@@ -662,18 +726,18 @@ fn service_worker_register_rejects_insecure_and_opaque_origins() {
     insecure.run_until_idle().unwrap();
     assert_eq!(eval_str(&mut insecure, "result"), "SecurityError");
 
-    // A secure URL with an opaque origin is useful for exercising the
-    // origin gate independently of the secure-context gate.  Location's
-    // origin slot is mutable in this model, so mirror the platform's
-    // opaque-origin serialization (`"null"`) directly.
-    let mut opaque = JsRuntime::with_document_and_url(
-        default_document(),
-        "https://service-worker-opaque.example.test/",
-    )
-    .unwrap();
+    // Use a real opaque origin and override only the secure-context input
+    // so this checks the origin gate independently of the secure-context gate.
+    let mut opaque =
+        JsRuntime::with_document_and_url(default_document(), "data:text/html,").unwrap();
+    opaque.host_state.borrow_mut().secure_context_override = Some(true);
+    assert_eq!(
+        opaque.eval("isSecureContext").unwrap().as_boolean(),
+        Some(true)
+    );
     opaque
         .eval(
-            "location.origin = 'null'; globalThis.result = 'pending'; navigator.serviceWorker.register('data:text/javascript,').then(() => result = 'resolved', error => result = error.name);",
+            "globalThis.result = 'pending'; navigator.serviceWorker.register('https://service-worker-opaque.example.test/worker.js').then(() => result = 'resolved', error => result = error.name);",
         )
         .unwrap();
     opaque.run_until_idle().unwrap();
@@ -1417,23 +1481,77 @@ fn dedicated_worker_ids_round_trip_as_exact_strings() {
 
 #[test]
 fn dedicated_worker_message_origins_use_the_owner_origin() {
-    let mut runtime = JsRuntime::new().unwrap();
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://worker-origin.test/owner")
+            .unwrap();
     runtime
         .eval(
             r#"globalThis.workerValues = [];
-                   const source = encodeURIComponent('onmessage = event => postMessage({ workerEventOrigin: event.origin, workerLocationOrigin: location.origin });');
-                   const worker = new Worker('data:text/javascript,' + source);
+                   const source = encodeURIComponent('onmessage = event => postMessage({ workerEventOrigin: event.origin, workerLocationOrigin: location.origin, workerLocation: location.href, secure: isSecureContext, locksAvailable: typeof navigator.locks?.request === "function", storageAvailable: typeof navigator.storage?.estimate === "function" });');
+                   const workerUrl = 'data:text/javascript,' + source;
+                   const worker = new Worker(workerUrl);
                    worker.onmessage = event => workerValues.push({ ownerEventOrigin: event.origin, data: event.data });
                    const expectedOrigin = location.origin; location.origin = "spoofed";
                    worker.postMessage("origin");"#,
         )
         .unwrap();
     runtime.run_until_idle().unwrap();
-    assert!(runtime
-        .eval("workerValues[0].ownerEventOrigin === expectedOrigin && workerValues[0].data.workerEventOrigin === expectedOrigin")
-        .unwrap()
-        .as_boolean()
-        .unwrap_or(false));
+    let observed: serde_json::Value = serde_json::from_str(&eval_str(
+        &mut runtime,
+        "JSON.stringify({workerValues, expectedOrigin, workerUrl, ownerSecure: isSecureContext, ownerLocks: typeof navigator.locks?.request === 'function', ownerStorage: typeof navigator.storage?.estimate === 'function'})",
+    ))
+    .unwrap();
+    for property in ["ownerSecure", "ownerLocks", "ownerStorage"] {
+        assert_eq!(observed[property], true, "{property}: {observed}");
+    }
+    assert_eq!(
+        observed["expectedOrigin"], "https://worker-origin.test",
+        "{observed}"
+    );
+    assert_eq!(
+        observed["workerValues"].as_array().unwrap().len(),
+        1,
+        "{observed}"
+    );
+    let message = &observed["workerValues"][0];
+    let data = &message["data"];
+    assert_eq!(
+        message["ownerEventOrigin"], observed["expectedOrigin"],
+        "{observed}"
+    );
+    assert_eq!(
+        data["workerEventOrigin"], observed["expectedOrigin"],
+        "{observed}"
+    );
+    assert_eq!(data["workerLocation"], observed["workerUrl"], "{observed}");
+    assert_eq!(data["workerLocationOrigin"], "null", "{observed}");
+    for property in ["secure", "locksAvailable", "storageAvailable"] {
+        assert_eq!(data[property], true, "{property}: {observed}");
+    }
+    let owner = runtime.host_state.borrow();
+    let worker = owner.workers.values().next().unwrap().borrow();
+    let worker_state = worker.runtime.host_state.borrow();
+    let document_id = worker_state.document.identity();
+    assert_eq!(
+        worker_state.document_reporting[&document_id].creation_url,
+        worker_state.location_href
+    );
+    assert_eq!(
+        worker_state.document_reporting[&document_id].response_status,
+        200
+    );
+    assert!(worker_state.base_url.is_none());
+    assert_eq!(
+        worker
+            .runtime
+            .context
+            .realm()
+            .host_defined()
+            .get::<ModuleDocumentOrigin>()
+            .unwrap()
+            .0,
+        worker_state.document_security_origins[&document_id]
+    );
 }
 
 #[test]
@@ -2827,6 +2945,7 @@ fn synchronous_document_and_module_dialog_attempts_do_not_leak_state() {
         "alert('module script')",
         "https://example.test/a.js",
         runtime.document(),
+        crate::http::cors::CredentialsMode::SameOrigin,
     );
     assert!(module_result.is_err());
     assert_eq!(runtime.pending_javascript_dialog(), None);
@@ -3085,6 +3204,28 @@ fn canvas_2d_pixels_transform_clip_image_data_draw_image_and_png() {
 }
 
 #[test]
+fn canvas_clear_rect_clips_large_untransformed_rectangles() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let result = eval_str(
+        &mut runtime,
+        r#"(() => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 3; canvas.height = 2;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = 'red'; ctx.fillRect(0, 0, 3, 2);
+          ctx.clearRect(-1000000, -1000000, 2000000, 2000000);
+          const cleared = Array.from(ctx.getImageData(0, 0, 3, 2).data).every(v => v === 0);
+          ctx.fillRect(0, 0, 3, 2);
+          ctx.clearRect(1, 0, 1, 1);
+          const pixels = ctx.getImageData(0, 0, 3, 2).data;
+          return cleared && pixels[3] === 255 && pixels[7] === 0 &&
+              pixels[11] === 255 && pixels[15] === 255;
+        })()"#,
+    );
+    assert_eq!(result, "true");
+}
+
+#[test]
 fn webgl_canvas_context_state_resources_and_loss_boundary() {
     let mut runtime = JsRuntime::new().unwrap();
     let result = eval_str(
@@ -3154,6 +3295,51 @@ fn webgl_canvas_context_state_resources_and_loss_boundary() {
         result,
         "function|true|true|true|255,64,128,255|true|true|1,2,3,4|true|true|12|true|true|true|true|true|true|true|true|true|true"
     );
+}
+
+#[test]
+fn websocket_handshake_sends_first_party_document_cookie() {
+    let listener = bind_loopback().unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+        let key = request
+            .lines()
+            .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+            .unwrap();
+        write!(stream, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", crate::cdp::websocket_accept_key(key)).unwrap();
+        request
+    });
+    let mut runtime = JsRuntime::new().unwrap();
+    let document_url: crate::http::Url = format!("http://{address}/page").parse().unwrap();
+    runtime.set_base_url(document_url.clone());
+    runtime
+        .host_state
+        .borrow()
+        .cookie_store
+        .lock()
+        .unwrap()
+        .add_from_header_for_url("session=allowed; SameSite=Lax; Path=/", &document_url);
+    assert_eq!(
+        runtime
+            .host_state
+            .borrow()
+            .cookie_store
+            .lock()
+            .unwrap()
+            .cookie_header(&document_url)
+            .as_deref(),
+        Some("session=allowed")
+    );
+    runtime
+        .eval(&format!(
+            "globalThis.socket = new WebSocket('ws://{address}/socket')"
+        ))
+        .unwrap();
+    let request = server.join();
+    assert!(request.contains("Origin: http://127.0.0.1:"));
+    assert!(request.contains("Cookie: session=allowed\r\n"), "{request}");
 }
 
 #[test]
@@ -3863,13 +4049,21 @@ fn iframe_navigation_drops_old_focus_and_selection_state() {
                     oldDocument.hasFocus(),
                     oldDocument.getSelection().rangeCount,
                 ];
-                // Keep the replacement same-origin so its new Document is
-                // observable while checking that the old selection is gone.
-                frame.src = "about:blank";
                 globalThis.__issue558NavigationState = state;
                 return state.before.join("/");
             })()"#,
     );
+    // Deliver the old Document's selection event while it is still active.
+    // Navigation and DOM task queues need not choose the same relative order.
+    runtime.tick(0).unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "__issue558NavigationState.oldEvents"),
+        "1"
+    );
+    // Keep the replacement same-origin so its new Document remains observable.
+    runtime
+        .eval("__issue558NavigationState.frame.src = 'about:blank'")
+        .unwrap();
     runtime.tick(0).unwrap();
     let after_navigation = eval_str(
         &mut runtime,
@@ -3903,8 +4097,8 @@ fn iframe_navigation_drops_old_focus_and_selection_state() {
         // Navigation keeps the iframe as the top document's active
         // element, while the old child Document loses system focus and
         // the replacement starts with its viewport/body active.
-        // The old selectionchange may still be delivered to the retired
-        // Document, but it must never reach the replacement.
+        // The previously delivered selectionchange remains on the old
+        // Document; navigation must not generate one on the replacement.
         "true/false/false/true/false/0/|1|0"
     );
     // A queued selectionchange from the retired document may complete on
@@ -5443,8 +5637,7 @@ fn fetch_preserves_binary_response_bytes() {
         stream.write_all(&served).unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(
             r#"globalThis.binaryResult = {};
@@ -5675,6 +5868,67 @@ fn location_exposes_navigation_methods() {
                 replace: true,
             },
         ]
+    );
+}
+
+#[test]
+fn location_relative_navigation_uses_live_document_base() {
+    let document = crate::html::TreeBuilder::parse(
+        r#"<html><head><base href="/first/"></head><body></body></html>"#,
+    )
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://example.test/page").unwrap();
+    runtime
+        .eval(
+            r#"location.assign('one');
+               document.querySelector('base').setAttribute('href', '/second/');
+               location.replace('two');
+               location.href = 'three';
+               document.querySelector('base').remove();
+               location.assign('four');"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        runtime.take_navigation_requests(),
+        vec![
+            NavigationRequest::Navigate {
+                url: "https://example.test/first/one".into(),
+                replace: false
+            },
+            NavigationRequest::Navigate {
+                url: "https://example.test/second/two".into(),
+                replace: true
+            },
+            NavigationRequest::Navigate {
+                url: "https://example.test/second/three".into(),
+                replace: false
+            },
+            NavigationRequest::Navigate {
+                url: "https://example.test/four".into(),
+                replace: false
+            },
+        ]
+    );
+}
+
+#[test]
+fn location_relative_navigation_uses_updated_document_url() {
+    let mut runtime = JsRuntime::with_document_and_url(
+        crate::html::TreeBuilder::parse("<html><body></body></html>").document(),
+        "https://example.test/old/page",
+    )
+    .unwrap();
+    runtime.commit_history_api_url("https://example.test/new/page");
+    runtime.eval("location.assign('next')").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        runtime.take_navigation_requests(),
+        vec![NavigationRequest::Navigate {
+            url: "https://example.test/new/next".into(),
+            replace: false,
+        }]
     );
 }
 
@@ -6266,8 +6520,7 @@ fn implements_fetch_api() {
         stream.write_all(response).unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             "globalThis.fetchResult = ''; fetch('http://127.0.0.1:{}/').then(r => r.text()).then(t => {{ globalThis.fetchResult = t; }});",
@@ -6308,8 +6561,7 @@ fn fetch_body_presence_distinguishes_empty_streams_from_null_bodies() {
         }
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.bodyPresenceResult = null;
@@ -6364,8 +6616,7 @@ fn fetch_sends_method_headers_and_body_and_exposes_response_metadata() {
         stream.write_all(body).unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.fetchMetadata = null;
@@ -6428,8 +6679,7 @@ fn fetch_reports_redirected_final_url() {
             .unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.redirectResult = null;
@@ -6465,8 +6715,7 @@ fn fetch_does_not_report_url_parser_normalization_as_a_redirect() {
             .unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.normalizedResponse = null; fetch("http://127.0.0.1:{}").then(response => normalizedResponse = response);"#,
@@ -6588,8 +6837,7 @@ fn cross_origin_fetch_checks_origin_and_filters_response_headers() {
             .unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url("http://origin.test/page".parse().unwrap());
+    let mut runtime = runtime_at_document_url("http://origin.test/page");
     runtime
         .eval(&format!(
             r#"globalThis.corsResult = null;
@@ -6655,8 +6903,7 @@ fn no_cors_is_opaque_and_xhr_cors_failure_fires_error() {
         }
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url("http://origin.test/page".parse().unwrap());
+    let mut runtime = runtime_at_document_url("http://origin.test/page");
     runtime
         .eval(&format!(
             r#"globalThis.opaqueResult = null;
@@ -6703,8 +6950,7 @@ fn cors_preflight_is_validated_and_cached() {
         }
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url("http://origin.test/page".parse().unwrap());
+    let mut runtime = runtime_at_document_url("http://origin.test/page");
     runtime
         .eval(&format!(
             r#"globalThis.preflightBodies = [];
@@ -6796,8 +7042,7 @@ fn fetch_redirect_modes_follow_error_and_manual() {
         }
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url("http://origin.test/page".parse().unwrap());
+    let mut runtime = runtime_at_document_url("http://origin.test/page");
     runtime
         .eval(&format!(
             r#"globalThis.redirectModes = {{}};
@@ -6895,8 +7140,7 @@ fn xml_http_request_get_completes_and_abort_suppresses_completion() {
         stream.write_all(response).unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.xhrEvents = []; const xhr = new XMLHttpRequest(); xhr.onload = () => xhrEvents.push("load"); xhr.onloadend = () => xhrEvents.push("loadend"); xhr.open("GET", "http://127.0.0.1:{}/"); xhr.send(); globalThis.xhr = xhr;"#,
@@ -6959,8 +7203,7 @@ fn xml_http_request_sends_request_and_exposes_states_and_response_headers() {
         stream.write_all(body).unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.xhrStates = [];
@@ -7010,8 +7253,7 @@ fn xml_http_request_reports_download_and_upload_progress_events() {
             .unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.downloadEvents = [];
@@ -7067,8 +7309,7 @@ fn xml_http_request_timeout_is_exclusive_and_finishes_with_loadend() {
         let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nlate");
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.timeoutEvents = [];
@@ -7242,8 +7483,7 @@ fn xml_http_request_http_binary_response_type_preserves_bytes() {
         stream.write_all(&body).unwrap();
     });
 
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime.set_base_url(format!("http://{address}/").parse().unwrap());
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
     runtime
         .eval(&format!(
             r#"globalThis.httpBinary = null;
@@ -14718,10 +14958,11 @@ fn inline_module_resolves_relative_import_against_document_url() {
         stream.write_all(body).unwrap();
     });
 
-    let mut runtime = runtime_from_html(
-        r#"<script type="module">import { answer } from './dep.js'; globalThis.answer = answer;</script>"#,
-    );
     let base: crate::http::Url = format!("http://{address}/app/index.html").parse().unwrap();
+    let document = crate::html::TreeBuilder::parse(
+        r#"<script type="module">import { answer } from './dep.js'; globalThis.answer = answer;</script>"#,
+    ).document();
+    let mut runtime = JsRuntime::with_document_and_url(document, &base.to_string()).unwrap();
     let errors = runtime.execute_document_scripts(Some(&base));
     handle.join();
 
@@ -15422,6 +15663,7 @@ fn nested_about_blank_iframe_inherits_its_owning_documents_opaque_origin() {
         "<html><body><iframe id='outer' src='data:text/html,%3Chtml%3E%3Cbody%3E%3C/body%3E%3C/html%3E'></iframe></body></html>",
     ).document();
     let mut runtime = JsRuntime::with_document_and_url(document, "https://example.com/").unwrap();
+    pump_zero_delay_tasks(&mut runtime);
 
     assert!(
         runtime
@@ -15458,7 +15700,7 @@ fn nested_about_blank_iframe_inherits_its_owning_documents_opaque_origin() {
     {
         let mut state = runtime.host_state.borrow_mut();
         state.register_tree(&nested);
-        state.schedule_connected_resource_loads(&nested, true);
+        state.schedule_connected_resource_loads(&nested, true, None);
     }
     runtime.run_until_idle().unwrap();
 
@@ -15503,6 +15745,18 @@ fn performance_navigation_and_resource_timing_entries_have_lifecycle_semantics()
     let mut runtime =
         JsRuntime::with_document_and_url(default_document(), "https://example.test/index.html")
             .unwrap();
+    runtime
+        .eval(
+            r#"
+        performance.setResourceTimingBufferSize(2);
+        globalThis.first = new Image();
+        first.src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+        const second = new Image(); second.src = first.src;
+        const third = new Image(); third.src = first.src;
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
     assert!(runtime
         .eval(
             r#"(() => {
@@ -15516,15 +15770,7 @@ fn performance_navigation_and_resource_timing_entries_have_lifecycle_semantics()
                       entry.redirectCount !== 0 || entry.toJSON().entryType !== "navigation" ||
                       entry.toJSON().type !== "navigate" ||
                       "navigationStart" in entry || "navigationStart" in entry.toJSON()) return false;
-                  performance.clearResourceTimings();
-                  performance.setResourceTimingBufferSize(2);
                   performance.mark("survivor");
-                  const first = new Image();
-                  first.src = "data:image/png;base64,AA==";
-                  const second = new Image();
-                  second.src = "data:image/png;base64,AA==";
-                  const third = new Image();
-                  third.src = "data:image/png;base64,AA==";
                   const resources = performance.getEntriesByType("resource");
                   const resourceStart = Object.getOwnPropertyDescriptor(first, "__resourceTimingStart");
                   const resourceRecorded = Object.getOwnPropertyDescriptor(first, "__resourceTimingRecorded");
@@ -15534,7 +15780,7 @@ fn performance_navigation_and_resource_timing_entries_have_lifecycle_semantics()
                     resources.every(resource => resource instanceof PerformanceResourceTiming &&
                       resource.initiatorType === "img" && resource.responseEnd >= resource.startTime &&
                       resource.toJSON().initiatorType === "img") &&
-                    performance.getEntriesByName("data:image/png;base64,AA==").length === 2;
+                    performance.getEntriesByName("data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==").length === 2;
                 })()"#,
         )
         .unwrap()
@@ -15732,27 +15978,33 @@ fn performance_resource_timing_fetch_completion_is_idempotent() {
 #[test]
 fn performance_resource_timing_buffer_count_resets_after_clear() {
     let mut runtime = JsRuntime::with_document(default_document()).unwrap();
+    runtime.eval(r#"
+        performance.clearResourceTimings();
+        performance.setResourceTimingBufferSize(1);
+        performance.mark("before");
+        globalThis.imageSource = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+        new Image().src = imageSource;
+        new Image().src = imageSource;
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
     assert!(
         runtime
-            .eval(
-                r#"(() => {
-                  performance.clearResourceTimings();
-                  performance.setResourceTimingBufferSize(1);
-                  performance.mark("before");
-                  new Image().src = "data:image/png;base64,AA==";
-                  new Image().src = "data:image/png;base64,AA==";
-                  const full = performance.getEntriesByType("resource").length === 1;
-                  performance.clearResourceTimings();
-                  performance.mark("after");
-                  new Image().src = "data:image/png;base64,AA==";
-                  return full && performance.getEntriesByType("resource").length === 1 &&
-                    performance.getEntriesByType("mark").length === 2;
-                })()"#,
-            )
+            .eval("performance.getEntriesByType('resource').length === 1")
             .unwrap()
             .as_boolean()
             .unwrap()
     );
+    runtime
+        .eval(
+            r#"
+        performance.clearResourceTimings();
+        performance.mark("after");
+        new Image().src = imageSource;
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(runtime.eval("performance.getEntriesByType('resource').length === 1 && performance.getEntriesByType('mark').length === 2").unwrap().as_boolean().unwrap());
 }
 
 #[test]
@@ -15897,12 +16149,12 @@ fn performance_resource_timing_buffer_full_event_targets_performance() {
                       event.eventPhase === 2, event.type === "resourcetimingbufferfull",
                       event.composedPath().length === 1 && event.composedPath()[0] === performance];
                   };
-                  new Image().src = "data:image/png;base64,AA==";
-                  new Image().src = "data:image/png;base64,AA==";
+                  new Image().src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+                  new Image().src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
                 })()"#,
         )
         .unwrap();
-    runtime.run_jobs().unwrap();
+    runtime.run_until_idle().unwrap();
     assert!(runtime
         .eval("bufferFullState && bufferFullState[0] && bufferFullState[1] && bufferFullState[2] && bufferFullState[3] && bufferFullState[4]")
         .unwrap()
@@ -16735,6 +16987,32 @@ fn notifications_model_permission_and_task_queued_lifecycle() {
     assert_eq!(
         eval_str(&mut insecure, "insecurePermission"),
         "NotAllowedError"
+    );
+}
+
+#[test]
+fn permission_status_reports_queried_name() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            "globalThis.permissionNames = []; \
+             Promise.all(['notifications', 'storage-access'].map(name => \
+               navigator.permissions.query({ name }))).then(statuses => { \
+                 permissionNames = statuses.map(status => status.name); \
+               });",
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "permissionNames.join('|')"),
+        "notifications|storage-access"
+    );
+    assert_eq!(
+        runtime
+            .eval("Object.getOwnPropertyDescriptor(PermissionStatus.prototype, 'name').set === undefined")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
     );
 }
 
@@ -20471,7 +20749,7 @@ fn constructable_stylesheets_apply_to_documents_and_shadow_roots() {
 }
 
 #[test]
-fn csp_blocks_constructable_stylesheets() {
+fn csp_does_not_block_constructed_stylesheets() {
     let mut runtime = runtime_from_html("<html><body><div id=target></div></body></html>");
     runtime.install_csp_policy(&["style-src 'none'".to_string()]);
     runtime
@@ -20486,14 +20764,14 @@ fn csp_blocks_constructable_stylesheets() {
             &mut runtime,
             "getComputedStyle(document.getElementById('target')).color",
         ),
-        "rgb(0, 0, 0)"
+        "rgb(255, 0, 0)"
     );
     assert_eq!(
         eval_str(
             &mut runtime,
             "document.cspViolations.map(v => v.effectiveDirective + ':' + v.resourceType).join(',')",
         ),
-        "style-src:style"
+        ""
     );
 }
 
@@ -22616,13 +22894,18 @@ fn embedded_svg_documents_are_exposed_by_iframe_and_object() {
     let mut runtime =
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/index.html"))
             .unwrap();
+    runtime
+        .eval(
+            "var frame = document.createElement('iframe'); frame.src = '/asset.svg'; \
+             var object = document.createElement('object'); object.data = '/asset.svg'; \
+             document.body.appendChild(frame); document.body.appendChild(object);",
+        )
+        .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         runtime
             .eval(
-                r#"var frame = document.createElement('iframe'); frame.src = '/asset.svg';
-                       var object = document.createElement('object'); object.data = '/asset.svg';
-                       document.body.appendChild(frame); document.body.appendChild(object);
-                       [frame.getSVGDocument() === frame.contentDocument,
+                r#"[frame.getSVGDocument() === frame.contentDocument,
                         object.getSVGDocument() === object.contentDocument,
                         frame.getSVGDocument().documentElement instanceof frame.contentWindow.SVGSVGElement,
                         object.getSVGDocument().getElementsByTagName('text')[0] instanceof object.contentDocument.defaultView.SVGTextElement,
@@ -23028,7 +23311,7 @@ fn connected_iframe_set_attribute_src_renavigates_and_fires_load() {
 }
 
 #[test]
-fn connected_iframe_set_attribute_src_with_whitespace_only_change_is_noop() {
+fn connected_iframe_src_whitespace_reassignment_loads_a_fresh_document() {
     use crate::html::TreeBuilder;
     let (port, _port_server) = spawn_static_http_server(
         "text/html",
@@ -23052,6 +23335,9 @@ fn connected_iframe_set_attribute_src_with_whitespace_only_change_is_noop() {
     assert_eq!(runtime.eval("loads").unwrap().as_number(), Some(1.0));
 
     runtime
+        .eval("globalThis.oldFrameDocument=document.getElementById('f').contentDocument")
+        .unwrap();
+    runtime
         .eval(&format!(
             "document.getElementById('f').setAttribute('src', '  {url}  ');"
         ))
@@ -23059,8 +23345,15 @@ fn connected_iframe_set_attribute_src_with_whitespace_only_change_is_noop() {
     pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         runtime.eval("loads").unwrap().as_number(),
-        Some(1.0),
-        "whitespace-only src changes must not enqueue a new iframe navigation"
+        Some(2.0),
+        "setting src navigates even when its parsed URL is unchanged"
+    );
+    assert_eq!(
+        runtime
+            .eval("document.getElementById('f').contentDocument !== oldFrameDocument")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
     );
 }
 
@@ -23627,6 +23920,7 @@ fn iframe_html_src_is_parsed_into_content_document() {
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         runtime
             .eval("document.getElementById('f').contentDocument.getElementsByTagName('p').length")
@@ -23657,6 +23951,7 @@ fn iframe_xml_src_preserves_case_namespace_entities_and_doctype() {
     let mut runtime =
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(eval_string_value(&mut runtime,
         "var d=document.getElementById('f').contentDocument,c=d.documentElement.childNodes[0]; [d.doctype.nodeType,d.doctype.nodeName,d.doctype.name,d.doctype.systemId,d.documentElement.tagName,d.documentElement.namespaceURI,d.documentElement.getAttribute('A'),c.localName].join('|')"
     ).as_deref(), Some("10|Root|Root|urn:test|Root|urn:root|<A|Child"));
@@ -24157,10 +24452,11 @@ fn iframe_sandbox_dom_token_list_is_live_and_reflected() {
                         frame.getAttribute('sandbox') === 'allow-same-origin';
                     const absent = document.createElement('iframe');
                     absent.sandbox.remove('allow-scripts');
-                    const assignmentRejected = (() => {
+                    const assignmentForwarded = (() => {
                         "use strict";
-                        try { frame.sandbox = ''; return false; }
-                        catch (error) { return error instanceof TypeError; }
+                        frame.sandbox = 'allow-scripts';
+                        return tokens === frame.sandbox &&
+                            tokens.value === 'allow-scripts';
                     })();
                     return [
                         tokens === frame.sandbox,
@@ -24172,8 +24468,8 @@ fn iframe_sandbox_dom_token_list_is_live_and_reflected() {
                         undefinedForcesFalse,
                         duplicateToggle,
                         !absent.hasAttribute('sandbox'),
-                        assignmentRejected,
-                        frame.getAttribute('sandbox') === 'allow-same-origin'
+                        assignmentForwarded,
+                        frame.getAttribute('sandbox') === 'allow-scripts'
                     ].join('|');
                 })()"#,
         ),
@@ -24409,6 +24705,7 @@ fn iframe_relative_src_resolves_against_base_url() {
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/index.html"))
             .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -24443,6 +24740,7 @@ fn iframe_relative_src_honors_explicit_base_url_override() {
             .unwrap(),
     );
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -24475,15 +24773,22 @@ fn nested_srcdoc_inherits_owner_base_for_resources_and_history_urls() {
     let mut runtime =
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/top/parent.html"))
             .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
+
+    runtime
+        .eval(
+            r#"const outerDocument = document.getElementById('outer').contentDocument;
+               const middle = outerDocument.createElement('iframe');
+               middle.srcdoc = '<iframe id="leaf" src="asset.html"></iframe>';
+               outerDocument.body.appendChild(middle);"#,
+        )
+        .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
 
     assert_eq!(
         eval_string_value(
             &mut runtime,
             r#"(()=> {
-                  const outerDocument = document.getElementById('outer').contentDocument;
-                  const middle = outerDocument.createElement('iframe');
-                  middle.srcdoc = '<iframe id="leaf" src="asset.html"></iframe>';
-                  outerDocument.body.appendChild(middle);
                   const middleDocument = middle.contentDocument;
                   const leaf = middleDocument.getElementById('leaf');
                   const leafDocument = leaf.contentDocument;
@@ -24688,6 +24993,7 @@ fn iframe_changing_src_reloads_content_document() {
             .as_number(),
         Some(0.0)
     );
+    pump_zero_delay_tasks(&mut runtime);
 
     // Point src at the HTML resource; the next read reloads and parses it.
     runtime
@@ -24915,6 +25221,7 @@ fn retained_iframe_wrappers_never_alias_later_document_generations() {
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -24973,6 +25280,7 @@ fn outer_iframe_navigation_retires_saved_descendant_window_proxy() {
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -25017,6 +25325,7 @@ fn iframe_reload_discards_old_document_style_entry() {
     let mut runtime =
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
 
     // First load, then a computed-style query to actually build the
     // sub-document's resolver (not just seed a dirty placeholder).
@@ -25187,6 +25496,7 @@ fn iframe_content_window_is_stable_and_reflects_reload() {
         Some(0.0),
         "before load the sub-document has no <p>"
     );
+    pump_zero_delay_tasks(&mut runtime);
 
     // After a src change the stable window's document getter reflects the
     // freshly loaded sub-document.
@@ -25256,7 +25566,7 @@ fn iframe_location_navigation_resolves_relative_to_caller_document() {
         ),
     ]);
     let doc = TreeBuilder::parse(
-        r#"<html><body><iframe id="f" src="/frame/child.html"></iframe></body></html>"#,
+        r#"<html><head><base href="/caller/base/"></head><body><iframe id="f" src="/frame/child.html"></iframe></body></html>"#,
     )
     .document();
     let mut runtime = JsRuntime::with_document_and_url(
@@ -25265,6 +25575,7 @@ fn iframe_location_navigation_resolves_relative_to_caller_document() {
     )
     .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -25288,9 +25599,68 @@ fn iframe_location_navigation_resolves_relative_to_caller_document() {
                 })()"#
         ),
         Some(format!(
-            "http://127.0.0.1:{port}/caller/href.html|http://127.0.0.1:{port}/caller/assign.html|http://127.0.0.1:{port}/caller/replace.html|http://127.0.0.1:{port}/frame/state.html"
+            "http://127.0.0.1:{port}/caller/base/href.html|http://127.0.0.1:{port}/caller/base/assign.html|http://127.0.0.1:{port}/caller/base/replace.html|http://127.0.0.1:{port}/frame/state.html"
         )),
         "Location uses the caller base while History state URLs use the target Document"
+    );
+}
+
+#[test]
+fn iframe_script_location_uses_its_own_document_base() {
+    let (port, _server) = spawn_path_http_server(&[
+        (
+            "/frame/child.html",
+            "text/html",
+            "<html><head><base href='/frame/alternate/'></head><body><script>location.assign('next.html')</script></body></html>",
+        ),
+        (
+            "/frame/alternate/next.html",
+            "text/html",
+            "<html><body><p id='arrived'>done</p></body></html>",
+        ),
+    ]);
+    let document = crate::html::TreeBuilder::parse(
+        r#"<html><head><base href="/top/"></head><body><iframe id="f" src="/frame/child.html"></iframe></body></html>"#,
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document_and_url(
+        document,
+        &format!("http://127.0.0.1:{port}/top/page.html"),
+    )
+    .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            "document.getElementById('f').contentDocument.URL"
+        ),
+        Some(format!("http://127.0.0.1:{port}/frame/alternate/next.html")),
+    );
+}
+
+#[test]
+fn srcdoc_script_location_inherits_parent_document_base() {
+    let (port, _server) = spawn_path_http_server(&[(
+        "/frame/next.html",
+        "text/html",
+        "<html><body>next</body></html>",
+    )]);
+    let document = crate::html::TreeBuilder::parse(
+        r#"<html><body><iframe id="f" srcdoc="<script>location.assign('next.html')</script>"></iframe></body></html>"#,
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document_and_url(
+        document,
+        &format!("http://127.0.0.1:{port}/frame/parent.html"),
+    )
+    .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            "document.getElementById('f').contentDocument.URL"
+        ),
+        Some(format!("http://127.0.0.1:{port}/frame/next.html")),
     );
 }
 
@@ -25320,6 +25690,7 @@ fn superseded_iframe_location_navigations_fetch_only_the_committed_resource() {
     )
     .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -25401,17 +25772,21 @@ fn superseded_iframe_location_navigations_fetch_only_the_committed_resource() {
         Some(format!("http://127.0.0.1:{port}/frame/final.html")),
     );
     runtime.run_until_idle().unwrap();
-    assert_eq!(
-        runtime.host_state.borrow().iframe_documents[&iframe_id]
-            .document
-            .identity(),
-        committed_document,
-        "returning to the loaded resource must leave its Document active"
+    let reloaded_document = runtime.host_state.borrow().iframe_documents[&iframe_id]
+        .document
+        .identity();
+    assert_ne!(
+        reloaded_document, committed_document,
+        "setting src again replaces the active Document even at the same URL"
     );
     assert_eq!(
         requests.lock().unwrap().as_slice(),
-        ["/frame/child.html", "/frame/final.html"],
-        "a queued load that returns to the active resource must not fetch"
+        [
+            "/frame/child.html",
+            "/frame/final.html",
+            "/frame/final.html"
+        ],
+        "the superseded resource is skipped, while the final src assignment reloads"
     );
 
     let settled_url = format!("http://127.0.0.1:{port}/frame/final.html#settled");
@@ -25428,14 +25803,18 @@ fn superseded_iframe_location_navigations_fetch_only_the_committed_resource() {
     let settled_entry = &state.iframe_documents[&iframe_id];
     assert_eq!(
         settled_entry.document.identity(),
-        committed_document,
-        "a fragment navigation after the no-op task must stay in the active Document"
+        reloaded_document,
+        "a fragment navigation must stay in the newly active Document"
     );
     assert_eq!(settled_entry.document_url, settled_url);
     assert_eq!(
         requests.lock().unwrap().as_slice(),
-        ["/frame/child.html", "/frame/final.html"],
-        "settling the pending state must avoid a follow-up resource fetch"
+        [
+            "/frame/child.html",
+            "/frame/final.html",
+            "/frame/final.html"
+        ],
+        "the fragment navigation must avoid a follow-up resource fetch"
     );
 }
 
@@ -25478,6 +25857,7 @@ fn discarding_parent_iframe_does_not_fetch_a_pending_child_navigation() {
         &format!("http://127.0.0.1:{outer_port}/parent.html"),
     )
     .unwrap();
+    runtime.run_timers(10, 1, 2);
 
     runtime
         .eval(
@@ -25677,6 +26057,259 @@ fn cross_origin_iframe_document_events_reach_its_own_window_listeners() {
             .as_deref(),
         Some("true"),
         "a cross-origin child can still read its own WindowProxy Location"
+    );
+}
+
+#[test]
+fn cross_origin_child_can_create_and_hit_test_its_own_button() {
+    use crate::html::TreeBuilder;
+    let (port, _server) = spawn_static_http_server(
+        "text/html",
+        r#"<html><body><script>
+          const button = document.createElement('button');
+          button.style.cssText = 'display:block;width:100px;height:40px';
+          button.innerHTML = 'Click<br>here';
+          document.body.appendChild(button);
+          const rect = button.getBoundingClientRect();
+          const x = (rect.left + rect.right) / 2;
+          const y = (rect.top + rect.bottom) / 2;
+          const hits = document.elementsFromPoint(x, y);
+          const detached = document.createElement('input');
+          detached.required = true;
+          let denied = false;
+          try { parent.document.elementsFromPoint(x, y); }
+          catch (error) { denied = error.name === 'SecurityError'; }
+          document.documentElement.setAttribute('data-result', [
+            rect.width > 0 && rect.height > 0,
+            document.elementFromPoint(x, y) === button,
+            hits[0] === button,
+            hits.every(node => node.ownerDocument === document),
+            detached.matches(':invalid'),
+            denied,
+          ].join('|'));
+        </script></body></html>"#,
+    );
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe id='child' src='http://127.0.0.1:{port}/child.html'></iframe></body></html>"
+    ))
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "http://other-origin.test/page").unwrap();
+    pump_zero_delay_tasks(&mut runtime);
+    pump_zero_delay_tasks(&mut runtime);
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    let state = runtime.host_state.borrow();
+    let frame = state.document.query_selector("#child").unwrap();
+    let child = &state.iframe_documents[&frame.identity()].document;
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-result")
+            .as_deref(),
+        Some("true|true|true|true|true|true")
+    );
+}
+
+#[test]
+fn cross_origin_child_can_traverse_safe_window_ancestors() {
+    use crate::html::TreeBuilder;
+    let (port, _server) = spawn_static_http_server(
+        "text/html",
+        r#"<html><body><script>
+          let denied = false;
+          try { void parent.document; } catch (error) { denied = error.name === 'SecurityError'; }
+          document.documentElement.setAttribute('data-ancestors', [
+            parent === top,
+            parent.parent === parent,
+            parent.top === parent,
+            parent.self === parent,
+            denied,
+            parent.then === undefined,
+            Object.getOwnPropertyDescriptor(parent, 'then').value === undefined,
+            Reflect.ownKeys(parent).includes('then'),
+            Object.getOwnPropertyDescriptor(parent, Symbol.toStringTag).value === undefined,
+          ].join('|'));
+        </script></body></html>"#,
+    );
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe id='child' src='http://127.0.0.1:{port}/child.html'></iframe></body></html>"
+    ))
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "http://other-origin.test/page").unwrap();
+    pump_zero_delay_tasks(&mut runtime);
+    pump_zero_delay_tasks(&mut runtime);
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    let state = runtime.host_state.borrow();
+    let frame = state.document.query_selector("#child").unwrap();
+    let child = &state.iframe_documents[&frame.identity()].document;
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-ancestors")
+            .as_deref(),
+        Some("true|true|true|true|true|true|true|true|true")
+    );
+}
+
+#[test]
+fn sandboxed_child_keeps_parent_opaque_even_at_the_same_url_origin() {
+    use crate::html::TreeBuilder;
+    let (port, _server) = spawn_static_http_server(
+        "text/html",
+        r#"<html><body><script>
+          let denied = false;
+          try { void parent.document; } catch (error) { denied = error.name === 'SecurityError'; }
+          document.documentElement.setAttribute('data-ancestors', [
+            parent === top, parent.parent === parent, parent.top === parent, denied,
+          ].join('|'));
+        </script></body></html>"#,
+    );
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe id='child' sandbox='allow-scripts' src='http://127.0.0.1:{port}/child.html'></iframe></body></html>"
+    ))
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, &format!("http://127.0.0.1:{port}/page"))
+            .unwrap();
+    for _ in 0..2 {
+        pump_zero_delay_tasks(&mut runtime);
+    }
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    let state = runtime.host_state.borrow();
+    let frame = state.document.query_selector("#child").unwrap();
+    let child = &state.iframe_documents[&frame.identity()].document;
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-ancestors")
+            .as_deref(),
+        Some("true|true|true|true")
+    );
+}
+
+#[test]
+fn srcdoc_child_inherits_opaque_parent_window_access() {
+    use crate::html::TreeBuilder;
+    let document = TreeBuilder::parse(
+        r#"<html><body><iframe id="child" srcdoc="<script>
+          document.documentElement.setAttribute('data-parent',
+            parent === top && parent.document === top.document && parent.document !== document);
+        </script>"></iframe></body></html>"#,
+    )
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "data:text/html,<p>opaque</p>").unwrap();
+    runtime.run_until_idle().unwrap();
+    let state = runtime.host_state.borrow();
+    let frame = state.document.query_selector("#child").unwrap();
+    let child = &state.iframe_documents[&frame.identity()].document;
+    assert_eq!(
+        child
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-parent")
+            .as_deref(),
+        Some("true")
+    );
+}
+
+#[test]
+fn aba_and_abb_grandchildren_keep_ancestor_identity() {
+    use crate::html::TreeBuilder;
+    let (top_port, _top_server) = spawn_static_http_server(
+        "text/html",
+        r#"<html><body><script>
+          let denied = false;
+          try { void parent.document; } catch (error) { denied = error.name === 'SecurityError'; }
+          document.documentElement.setAttribute('data-ancestors', [
+            parent !== top,
+            parent.parent === top,
+            parent.top === top,
+            top.parent === top,
+            (() => { try { return top.document.URL.includes('/main'); } catch (_) { return false; } })(),
+            denied,
+          ].join('|'));
+        </script></body></html>"#,
+    );
+    let (middle_port, _middle_server) = spawn_static_http_server(
+        "text/html",
+        r#"<html><body><script>
+          if (location.pathname.includes('same-origin-grandchild')) {
+            let denied = false;
+            try { void top.document; } catch (error) { denied = error.name === 'SecurityError'; }
+            document.documentElement.setAttribute('data-ancestors', [
+              parent !== top,
+              parent.parent === top,
+              parent.top === top,
+              top === parent.top,
+              parent.document !== document,
+              denied,
+            ].join('|'));
+          }
+        </script></body></html>"#,
+    );
+    let document = TreeBuilder::parse(&format!(
+        "<html><body><iframe id='middle' src='http://127.0.0.1:{middle_port}/middle.html'></iframe></body></html>"
+    ))
+    .document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, &format!("http://127.0.0.1:{top_port}/main"))
+            .unwrap();
+    for _ in 0..2 {
+        pump_zero_delay_tasks(&mut runtime);
+    }
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    let (middle_id, middle_document_id) = {
+        let state = runtime.host_state.borrow();
+        let middle = state.document.query_selector("#middle").unwrap();
+        (
+            middle.identity(),
+            state.iframe_documents[&middle.identity()]
+                .document
+                .identity(),
+        )
+    };
+    runtime
+        .ensure_iframe_realm(middle_id, middle_document_id)
+        .unwrap();
+    runtime
+        .eval_in_document_realm(
+            middle_document_id,
+            &format!(
+                "const grandchild=document.createElement('iframe');grandchild.id='grandchild';grandchild.src='http://127.0.0.1:{top_port}/grandchild.html';document.body.appendChild(grandchild);const sameOriginGrandchild=document.createElement('iframe');sameOriginGrandchild.id='sameOriginGrandchild';sameOriginGrandchild.src='http://127.0.0.1:{middle_port}/same-origin-grandchild.html';document.body.appendChild(sameOriginGrandchild);"
+            ),
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+    let state = runtime.host_state.borrow();
+    let middle = state.document.query_selector("#middle").unwrap();
+    let middle_document = &state.iframe_documents[&middle.identity()].document;
+    let grandchild = middle_document.query_selector("#grandchild").unwrap();
+    let grandchild_document = &state.iframe_documents[&grandchild.identity()].document;
+    assert_eq!(
+        grandchild_document
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-ancestors")
+            .as_deref(),
+        Some("true|true|true|true|true|true")
+    );
+    let same_origin_grandchild = middle_document
+        .query_selector("#sameOriginGrandchild")
+        .unwrap();
+    let same_origin_document = &state.iframe_documents[&same_origin_grandchild.identity()].document;
+    assert_eq!(
+        same_origin_document
+            .query_selector("html")
+            .unwrap()
+            .get_attribute("data-ancestors")
+            .as_deref(),
+        Some("true|true|true|true|true|true")
     );
 }
 
@@ -25902,6 +26535,7 @@ fn iframe_window_proxy_enforces_cross_origin_boundary_and_restores_access() {
         &format!("http://127.0.0.1:{same_origin_port}/parent.html"),
     )
     .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
 
     runtime
         .eval(
@@ -26114,15 +26748,24 @@ fn iframe_about_blank_query_and_fragment_inherit_creator_origin() {
     let doc = TreeBuilder::parse("<html><body></body></html>").document();
     let mut runtime =
         JsRuntime::with_document_and_url(doc, "https://example.test/parent.html").unwrap();
+    runtime
+        .eval(
+            "globalThis.frame = document.createElement('iframe'); \
+             frame.src = 'about:blank#fragment'; document.body.appendChild(frame); \
+             globalThis.proxy = frame.contentWindow;",
+        )
+        .unwrap();
+    assert_eq!(
+        eval_string_value(&mut runtime, "frame.contentDocument.URL").as_deref(),
+        Some("about:blank"),
+        "the initial Document must remain visible until its resource task"
+    );
+    pump_zero_delay_tasks(&mut runtime);
 
     assert_eq!(
         eval_string_value(
             &mut runtime,
             r#"(()=> {
-                  const frame = document.createElement('iframe');
-                  frame.src = 'about:blank#fragment';
-                  document.body.appendChild(frame);
-                  const proxy = frame.contentWindow;
                   const fragmentDocument = frame.contentDocument;
                   const fragmentURL = fragmentDocument.URL;
                   const fragmentVisible = proxy.document === fragmentDocument;
@@ -26196,6 +26839,7 @@ fn iframe_location_reload_and_history_preserve_proxy_and_entry_rules() {
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     runtime
         .eval(
             r#"globalThis.f = document.getElementById('f');
@@ -26418,6 +27062,7 @@ fn iframe_history_rebinds_state_entries_and_reload_uses_current_url() {
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
 
+    pump_zero_delay_tasks(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
@@ -26608,12 +27253,28 @@ fn iframe_monotonic_id_exhaustion_fails_closed_without_partial_contexts() {
 
     let mut opaque_runtime = pending_frame_runtime("data:text/html,<p>opaque</p>");
     opaque_runtime.host_state.borrow_mut().next_opaque_origin_id = u64::MAX;
-    assert!(opaque_runtime.eval("frame.contentDocument").is_err());
+    assert_eq!(
+        eval_string_value(&mut opaque_runtime, "frame.contentDocument.URL").as_deref(),
+        Some("about:blank")
+    );
+    let (initial_document_id, context_id) = {
+        let state = opaque_runtime.host_state.borrow();
+        let frame_id = state.document.query_selector("iframe").unwrap().identity();
+        (
+            state.iframe_documents[&frame_id].document.identity(),
+            state.iframe_context_ids[&frame_id],
+        )
+    };
+    assert!(opaque_runtime.tick(0).is_err());
     {
         let state = opaque_runtime.host_state.borrow();
         assert_eq!(state.next_opaque_origin_id, u64::MAX);
-        assert!(state.iframe_documents.is_empty());
-        assert!(state.iframe_context_ids.is_empty());
+        let frame_id = state.document.query_selector("iframe").unwrap().identity();
+        assert_eq!(
+            state.iframe_documents[&frame_id].document.identity(),
+            initial_document_id
+        );
+        assert_eq!(state.iframe_context_ids[&frame_id], context_id);
     }
 
     let mut large_id_runtime = pending_frame_runtime("about:blank");
@@ -26768,6 +27429,7 @@ fn permanently_closed_window_location_cannot_navigate_reconnected_iframe() {
     let mut runtime =
         JsRuntime::with_document_and_url(doc, &format!("http://127.0.0.1:{port}/parent.html"))
             .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
 
     assert_eq!(
         eval_string_value(
@@ -26792,15 +27454,22 @@ fn permanently_closed_window_location_cannot_navigate_reconnected_iframe() {
                   const unchanged = frame.getAttribute('src') === originalSrc;
                   document.body.appendChild(frame);
                   const newWindow = frame.contentWindow;
+                  globalThis.reconnectedFrame = frame;
                   return [...errors, unchanged, oldWindow.closed,
-                    newWindow !== oldWindow, newWindow.document.URL,
-                    newWindow.document.getElementById('page').textContent].join('|');
+                    newWindow !== oldWindow, newWindow.document.URL].join('|');
                 })()"#
         ),
-        Some(format!(
-            "none|none|none|none|none|true|true|true|http://127.0.0.1:{port}/initial.html|initial"
-        )),
+        Some("none|none|none|none|none|true|true|true|about:blank".to_string()),
         "a detached WindowProxy and saved Location must never target the replacement context"
+    );
+    pump_zero_delay_tasks(&mut runtime);
+    assert_eq!(
+        eval_string_value(
+            &mut runtime,
+            "[reconnectedFrame.contentDocument.URL, reconnectedFrame.contentDocument.getElementById('page').textContent].join('|')"
+        ),
+        Some(format!("http://127.0.0.1:{port}/initial.html|initial")),
+        "the reconnected iframe must load its original src in a later task"
     );
 }
 
@@ -26887,6 +27556,7 @@ fn reloaded_iframe_default_view_follows_new_document() {
                  f.contentDocument;"
         ))
         .unwrap();
+    pump_zero_delay_tasks(&mut runtime);
 
     // Reload with different content.
     runtime
@@ -30757,12 +31427,14 @@ fn window_message_ports_survive_collection_during_source_resolution() {
     // and collects before the receiver's argument list reaches the VM stack.
     let ports = runtime.eval("[{marker: 42}]").unwrap();
     let document_id = runtime.host_state.borrow().document.identity();
+    let source_group_id = runtime.host_state.borrow().document_group_ids[&document_id];
     runtime
         .run_window_posted_message(
             document_id,
             None,
             None,
             document_id,
+            source_group_id,
             None,
             None,
             None,
@@ -31189,15 +31861,19 @@ fn async_dynamic_non_cors_script_mutes_exception_and_rejection() {
     {
         let mut future = Box::pin(runtime.run_until_idle_async());
         let mut context = FutureContext::from_waker(Waker::noop());
-        let mut completed = false;
-        for _ in 0..100 {
-            if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
-                result.unwrap();
-                completed = true;
-                break;
+        let deadline = std::time::Instant::now() + ACCEPT_TIMEOUT + READ_TIMEOUT;
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(result) => {
+                    result.unwrap();
+                    break;
+                }
+                Poll::Pending if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Poll::Pending => panic!("async task must complete before the HTTP fixture timeout"),
             }
         }
-        assert!(completed, "async task must complete");
     }
     runtime.run_until_idle().unwrap();
     server.join();
@@ -31231,14 +31907,16 @@ fn initial_owned_document_task_mutes_cross_origin_script_reports() {
     let base = format!("http://{address}/").parse().unwrap();
     let mut task = Box::pin(runtime.into_document_page_task(1, Some(base)));
     let mut context = FutureContext::from_waker(Waker::noop());
-    let mut completed = None;
-    for _ in 0..100 {
-        if let Poll::Ready(result) = task.as_mut().poll(&mut context) {
-            completed = Some(result);
-            break;
+    let deadline = std::time::Instant::now() + ACCEPT_TIMEOUT + READ_TIMEOUT;
+    let completed = loop {
+        match task.as_mut().poll(&mut context) {
+            Poll::Ready(result) => break result,
+            Poll::Pending if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Poll::Pending => panic!("page task must complete before the HTTP fixture timeout"),
         }
-    }
-    let completed = completed.expect("page task must complete");
+    };
     assert_eq!(completed.result.unwrap().len(), 1);
     let mut runtime = completed.runtime;
     server.join();

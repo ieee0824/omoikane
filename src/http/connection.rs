@@ -443,6 +443,11 @@ fn shared_default_client_config(enable_http2: bool) -> Arc<ClientConfig> {
     Arc::clone(config.get_or_init(|| Arc::new(default_client_config(enable_http2))))
 }
 
+/// Shares the verified HTTP/1.1 TLS roots and ALPN setup with WebSocket upgrades.
+pub(crate) fn websocket_tls_config() -> Arc<ClientConfig> {
+    shared_default_client_config(false)
+}
+
 fn send_over_tls_with_config(
     stream: TcpStream,
     request: &HttpRequest,

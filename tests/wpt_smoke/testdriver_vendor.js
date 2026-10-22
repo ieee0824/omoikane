@@ -1,5 +1,25 @@
-// Testdriver requests are executed by the host runner between page jobs.
+// Reporting commands execute through the opt-in native automation binding.
+// Input and window commands are driven by the host runner between page jobs.
 globalThis.__wpt_window_commands = [];
+let wptReportingComplete = false;
+if (typeof add_completion_callback === "function") {
+  add_completion_callback(() => { wptReportingComplete = true; });
+}
+test_driver_internal.generate_test_report = (message, context = null) => new Promise((resolve, reject) => {
+  // The host stops accepting automation commands when testharness completes.
+  // Leave late commands pending, as the previous host-driven queue did.
+  if (wptReportingComplete) return;
+  if (context !== null && context !== globalThis) {
+    reject(new Error('Reports in another browsing context are unsupported'));
+    return;
+  }
+  try {
+    globalThis.__omoikane_automation_generate_test_report(String(message));
+    resolve();
+  } catch (error) {
+    reject(error);
+  }
+});
 test_driver_internal.minimize_window = () => new Promise(resolve => {
   __wpt_window_commands.push({hidden: true, resolve});
 });
@@ -15,6 +35,27 @@ test_driver_internal.action_sequence = (sources, context = null) => new Promise(
   }
   __wpt_action_commands.push({sources, resolve, reject, tick: 0});
 });
+test_driver_internal.click = (element, coords) => {
+  if (!(element instanceof Element) || !element.isConnected || element.ownerDocument !== document) {
+    return Promise.reject(new Error('Stale element or unsupported browsing context'));
+  }
+  return test_driver_internal.action_sequence([{
+    type: 'pointer', id: 'testdriver-click', parameters: {pointerType: 'mouse'},
+    actions: [
+      {type: 'pointerMove', x: Math.floor(coords.x), y: Math.floor(coords.y), origin: 'viewport'},
+      {type: 'pointerDown', button: 0},
+      {type: 'pointerUp', button: 0},
+    ],
+  }]);
+};
+test_driver_internal.set_permission = async (params, context = null) => {
+  if (context !== null && context !== globalThis) throw new Error('Permission context is unsupported');
+  __omoikane_automation_set_permission(params.descriptor.name, params.state);
+};
+test_driver_internal.delete_all_cookies = async (context = null) => {
+  if (context !== null && context !== globalThis) throw new Error('Cookie context is unsupported');
+  __omoikane_automation_delete_all_cookies();
+};
 
 function wptActionDuration(action) {
   const duration = action.duration ?? 0;
@@ -141,3 +182,15 @@ globalThis.__wpt_advance_action_tick = function() {
     return 0;
   }
 };
+if (typeof __omoikane_automation_register_driver === 'function') {
+  __omoikane_automation_register_driver(execute => {
+    const command = __wpt_action_commands[0];
+    if (!command) return null;
+    if (execute) return __wpt_advance_action_tick();
+    return Array.isArray(command.sources) && command.sources.some(input => {
+      const action = input.actions?.[command.tick];
+      return input.type === 'pointer' &&
+        (action?.type === 'pointerDown' || action?.type === 'pointerUp');
+    });
+  });
+}

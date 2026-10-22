@@ -10,6 +10,120 @@ use crate::{
 use boa_macros::js_str;
 use indoc::indoc;
 
+#[derive(Debug, boa_gc::Trace, boa_gc::Finalize, crate::JsData)]
+struct HostTrustedScript(crate::JsString);
+
+#[test]
+fn eval_and_function_constructor_pass_native_trusted_source_to_host_hook() {
+    use std::{cell::RefCell, rc::Rc};
+
+    use crate::{Context, JsResult, JsString, Source, context::HostHooks, realm::Realm};
+
+    #[derive(Default)]
+    struct Hooks(RefCell<Vec<(Vec<String>, String, String, bool, bool)>>);
+
+    impl HostHooks for Hooks {
+        fn trusted_script_value(&self, value: &JsValue) -> Option<JsString> {
+            value.as_object().and_then(|object| {
+                object
+                    .downcast_ref::<HostTrustedScript>()
+                    .map(|trusted| trusted.0.clone())
+            })
+        }
+
+        fn ensure_can_compile_strings(
+            &self,
+            _: Realm,
+            parameters: &[JsString],
+            body: &JsString,
+            code: &JsString,
+            _: bool,
+            trusted_script: bool,
+            function_constructor: bool,
+            _: &mut Context,
+        ) -> JsResult<()> {
+            self.0.borrow_mut().push((
+                parameters
+                    .iter()
+                    .map(JsString::to_std_string_escaped)
+                    .collect(),
+                body.to_std_string_escaped(),
+                code.to_std_string_escaped(),
+                trusted_script,
+                function_constructor,
+            ));
+            Ok(())
+        }
+    }
+
+    let hooks = Rc::new(Hooks::default());
+    let mut context = Context::builder()
+        .host_hooks(hooks.clone())
+        .build()
+        .unwrap();
+    for (name, source) in [
+        ("trustedEval", "2 + 1"),
+        ("trustedBody", "return x + 4"),
+        ("trustedParameter", "x"),
+    ] {
+        context
+            .register_global_property(
+                JsString::from(name),
+                JsObject::from_proto_and_data(None, HostTrustedScript(JsString::from(source))),
+                Attribute::all(),
+            )
+            .unwrap();
+    }
+
+    let result = context
+        .eval(Source::from_bytes(
+            "eval(trustedEval) + new Function(trustedParameter, trustedBody)(1) + new Function('x', trustedBody)(2)",
+        ))
+        .unwrap();
+    assert_eq!(result, JsValue::from(14));
+    assert_eq!(
+        hooks.0.borrow().as_slice(),
+        &[
+            (vec![], "2 + 1".into(), "2 + 1".into(), true, false),
+            (
+                vec!["x".into()],
+                "return x + 4".into(),
+                "function anonymous(x\n) {\nreturn x + 4\n}".into(),
+                true,
+                true,
+            ),
+            (
+                vec!["x".into()],
+                "return x + 4".into(),
+                "function anonymous(x\n) {\nreturn x + 4\n}".into(),
+                false,
+                true,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn dynamic_function_code_string_matches_each_constructor_kind() {
+    for (r#async, generator, prefix) in [
+        (false, false, "function"),
+        (false, true, "function*"),
+        (true, false, "async function"),
+        (true, true, "async function*"),
+    ] {
+        let code = super::dynamic_function_code_string(
+            r#async,
+            generator,
+            &[js_string!("x")],
+            &js_string!("return x"),
+        );
+        assert_eq!(
+            code.to_std_string_escaped(),
+            format!("{prefix} anonymous(x\n) {{\nreturn x\n}}")
+        );
+    }
+}
+
 #[test]
 fn dynamic_function_preserves_nested_class_environment_indices() {
     run_test_actions([

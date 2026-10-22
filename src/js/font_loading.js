@@ -97,10 +97,10 @@
     try { return JSON.parse(native('parse-source', JSON.stringify({input: value}))); }
     catch (_) { throw syntax(); }
   }
-  function host(face, operation, binding = native) {
+  function host(face, operation, binding = native, source = null) {
     const state = faceState(face);
     return binding(operation, JSON.stringify({ id: state.id, ...state.descriptors,
-      family: unquote(state.descriptors.family) }));
+      family: unquote(state.descriptors.family) }), undefined, source);
   }
   function beginSet(set, face) {
     const state = setState(set);
@@ -144,10 +144,12 @@
   function start(face) {
     const state = faceState(face);
     if (state.status !== 'unloaded') return;
+    // The font request runs in a later task, after the author stack is gone.
+    const source = native('capture-source');
     state.status = 'loading';
     for (const set of state.sets) beginSet(set, face);
     task(() => {
-      try { host(face, 'load'); state.status = 'loaded'; state.resolve(face); }
+      try { host(face, 'load', native, source); state.status = 'loaded'; state.resolve(face); }
       catch (_) { state.status = 'error'; state.reject(exception(state.binary ? 'SyntaxError' : 'NetworkError', 'Font could not be loaded')); }
       for (const set of state.sets) {
         const membership = setState(set);

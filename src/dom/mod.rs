@@ -212,6 +212,9 @@ struct NodeInner {
     id: usize,
     parent: Option<Weak<RefCell<NodeInner>>>,
     parent_revision: u64,
+    /// Changes whenever this node's children or CharacterData are mutated.
+    /// Security sinks snapshot this along with the subtree's stable IDs.
+    mutation_revision: u64,
     /// Stable slot in the parent's owned child storage, validated by identity.
     /// Root/detached nodes use zero and have no parent to query.
     parent_slot: usize,
@@ -220,6 +223,13 @@ struct NodeInner {
 }
 
 impl NodeInner {
+    fn bump_mutation_revision(&mut self) {
+        self.mutation_revision = self
+            .mutation_revision
+            .checked_add(1)
+            .expect("node mutation revision exhausted");
+    }
+
     fn child_slot(&self, child: &NodeHandle) -> Option<usize> {
         #[cfg(test)]
         record_sibling_position_work(1);
@@ -899,6 +909,7 @@ impl NodeHandle {
             id: NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed),
             parent: None,
             parent_revision: 0,
+            mutation_revision: 0,
             parent_slot: 0,
             children: children::Children::default(),
             data,
@@ -914,6 +925,16 @@ impl NodeHandle {
     /// identity.
     pub(crate) fn identity(&self) -> usize {
         self.0.borrow().id
+    }
+
+    /// Monotonic direct-child and CharacterData revision for subtree checks.
+    pub(crate) fn mutation_revision(&self) -> u64 {
+        self.0.borrow().mutation_revision
+    }
+
+    /// Monotonic parent-link revision, including detach and reconnect steps.
+    pub(crate) fn parent_revision(&self) -> u64 {
+        self.0.borrow().parent_revision
     }
 
     pub(crate) fn downgrade(&self) -> WeakNodeHandle {
@@ -1120,6 +1141,7 @@ impl NodeHandle {
         child.set_parent_link(Some(self));
         let mut parent = self.0.borrow_mut();
         parent.children.push(child);
+        parent.bump_mutation_revision();
         drop(parent);
         invalidate_slot_assignments();
     }
@@ -1170,6 +1192,7 @@ impl NodeHandle {
         } else {
             parent.children.push(new_child);
         }
+        parent.bump_mutation_revision();
         drop(parent);
         invalidate_slot_assignments();
         Ok(())
@@ -1197,6 +1220,7 @@ impl NodeHandle {
             .ok_or(DomError::ChildNotFound)?;
         let mut parent = self.0.borrow_mut();
         let removed = parent.children.remove(index);
+        parent.bump_mutation_revision();
         drop(parent);
         removed.set_parent_link(None);
         clear_top_layer_state(&removed);
@@ -2233,7 +2257,9 @@ impl NodeHandle {
 
     /// Sets the data for a text or comment node. No-op for other node kinds.
     pub fn set_data(&self, data: &str) {
-        match &mut self.0.borrow_mut().data {
+        let mut inner = self.0.borrow_mut();
+        inner.bump_mutation_revision();
+        match &mut inner.data {
             NodeData::Text(text) => {
                 text.data = data.to_string();
                 text.utf16 = None;
@@ -2260,7 +2286,9 @@ impl NodeHandle {
                 (value, (unpaired != 0).then_some(units), unpaired)
             }
         };
-        match &mut self.0.borrow_mut().data {
+        let mut inner = self.0.borrow_mut();
+        inner.bump_mutation_revision();
+        match &mut inner.data {
             NodeData::Text(text) => {
                 text.data = value;
                 text.utf16 = exact;
@@ -2299,6 +2327,7 @@ impl NodeHandle {
         ) {
             return;
         }
+        inner.bump_mutation_revision();
         #[cfg(test)]
         CHARACTER_DATA_UTF16_COPY_WORK.with(|count| {
             count.set(count.get().saturating_add(units.len()));
@@ -2325,6 +2354,7 @@ impl NodeHandle {
     /// original code units. No-op for node kinds other than Text.
     pub(crate) fn append_text_data(&self, suffix: &str) {
         let mut inner = self.0.borrow_mut();
+        inner.bump_mutation_revision();
         let NodeData::Text(text) = &mut inner.data else {
             return;
         };
@@ -2347,6 +2377,7 @@ impl NodeHandle {
             .then(|| decode_utf16_lossy_with_unpaired_count(suffix));
         let suffix_unpaired = decoded_suffix.as_ref().map_or(1, |(_, count)| *count);
         let mut inner = self.0.borrow_mut();
+        inner.bump_mutation_revision();
         let NodeData::Text(text) = &mut inner.data else {
             return;
         };

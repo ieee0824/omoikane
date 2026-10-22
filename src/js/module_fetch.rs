@@ -1,7 +1,12 @@
 //! Bounded HTTP workers for module graphs. Only HTTP data crosses threads;
 //! Boa module records, parsing, and evaluation stay on the owning JS thread.
 
-use crate::http::{Client, CookieJar, HttpRequest, HttpResponse, Url};
+use super::csp::{CspPolicy, ScriptRequest};
+use crate::http::corp::EmbedderPolicyValue;
+use crate::http::cors::{self, CredentialsMode, Origin, PreflightCache, RedirectMode, RequestMode};
+use crate::http::{
+    Client, CookieJar, CookieRequestContext, HttpRequest, HttpResponse, HttpTransport,
+};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,6 +28,14 @@ type FetchResult = Result<Arc<FetchedModule>, Arc<str>>;
 struct FetchState {
     result: Option<FetchResult>,
     waiters: Vec<Waker>,
+    policy_checks: Vec<ModulePolicyCheck>,
+}
+
+/// A redirect checked on the HTTP thread and reported on the owning JS thread.
+#[derive(Debug)]
+pub(super) struct ModulePolicyCheck {
+    pub reference: String,
+    pub redirects: usize,
 }
 
 /// One download shared by all imports of a Document/URL pair. Every waiter
@@ -32,17 +45,27 @@ pub(super) struct ModuleFetch(Arc<Mutex<FetchState>>);
 
 impl ModuleFetch {
     fn complete(&self, result: FetchResult) {
+        self.complete_with_checks(result, Vec::new());
+    }
+
+    fn complete_with_checks(&self, result: FetchResult, checks: Vec<ModulePolicyCheck>) {
         let waiters = {
             let mut state = self.0.lock().unwrap();
             if state.result.is_some() {
                 return;
             }
             state.result = Some(result);
+            state.policy_checks = checks;
             std::mem::take(&mut state.waiters)
         };
         for waiter in waiters {
             waiter.wake();
         }
+    }
+
+    /// Consumes the checks once even when several graph edges share a download.
+    pub fn take_policy_checks(&self) -> Vec<ModulePolicyCheck> {
+        std::mem::take(&mut self.0.lock().unwrap().policy_checks)
     }
 
     pub fn same_request(&self, other: &Self) -> bool {
@@ -80,8 +103,18 @@ impl Future for ModuleFetch {
 struct Request {
     url: String,
     public_only: bool,
-    site_for_cookies: Option<Url>,
+    cookie_context: Option<CookieRequestContext>,
+    isolation: Option<ModuleIsolation>,
+    policy: Option<CspPolicy>,
     fetch: ModuleFetch,
+}
+
+/// The requesting document's origin, enforced COEP and graph credentials.
+#[derive(Clone)]
+pub(super) struct ModuleIsolation {
+    pub origin: Origin,
+    pub embedder: EmbedderPolicyValue,
+    pub credentials: CredentialsMode,
 }
 
 #[derive(Debug)]
@@ -90,8 +123,98 @@ pub(super) struct ModuleFetchPool {
     live: Arc<AtomicBool>,
 }
 
+fn download_module(
+    client: &mut Client,
+    cookies: &Arc<Mutex<CookieJar>>,
+    request: &Request,
+) -> (FetchResult, Vec<ModulePolicyCheck>) {
+    let started = Instant::now();
+    let mut checks = Vec::new();
+    let result = (|| {
+        let mut http =
+            HttpRequest::get(&request.url).map_err(|error| Arc::<str>::from(error.to_string()))?;
+        if request.public_only {
+            http.require_public_ip();
+        }
+        if let Some(context) = request.cookie_context.as_ref() {
+            context.apply(&mut http);
+        }
+        let response = if let Some(isolation) = request.isolation.as_ref() {
+            let mut check_redirect = |url: &crate::http::Url, redirects: usize| {
+                let Some(policy) = request.policy.as_ref() else {
+                    return true;
+                };
+                checks.push(ModulePolicyCheck {
+                    reference: url.to_string(),
+                    redirects,
+                });
+                policy
+                    .script_policy_violations(
+                        &url.to_string(),
+                        redirects,
+                        ScriptRequest {
+                            nonce: None,
+                            parser_inserted: false,
+                        },
+                        false,
+                    )
+                    .is_empty()
+            };
+            cors::fetch_with_embedder_policy_checked(
+                client,
+                http,
+                &isolation.origin,
+                RequestMode::Cors,
+                isolation.credentials,
+                RedirectMode::Follow,
+                &mut PreflightCache::default(),
+                isolation.embedder,
+                None,
+                &mut check_redirect,
+            )
+            .map_err(|error| Arc::<str>::from(error.to_string()))?
+            .response
+        } else {
+            client
+                .send_with_shared_cookies(http, cookies)
+                .map_err(|error| Arc::<str>::from(error.to_string()))?
+        };
+        Ok(Arc::new(FetchedModule {
+            response,
+            elapsed: started.elapsed(),
+        }))
+    })();
+    (result, checks)
+}
+
 impl ModuleFetchPool {
     pub fn new(cookies: Arc<Mutex<CookieJar>>) -> std::io::Result<Self> {
+        Self::new_with_transport(cookies, None)
+    }
+
+    /// Uses a synthetic transport to exercise whole module graphs in tests.
+    #[cfg(test)]
+    pub(super) fn new_for_test(
+        cookies: Arc<Mutex<CookieJar>>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> std::io::Result<Self> {
+        Self::new_with_transport(cookies, Some(transport))
+    }
+
+    fn new_with_transport(
+        cookies: Arc<Mutex<CookieJar>>,
+        transport: Option<Arc<dyn HttpTransport>>,
+    ) -> std::io::Result<Self> {
+        let mut client = Client::new();
+        client.set_transport(transport);
+        Self::new_with_client(cookies, client)
+    }
+
+    /// Copies the creator's HTTP policy into independent worker connections.
+    pub(super) fn new_with_client(
+        cookies: Arc<Mutex<CookieJar>>,
+        client: Client,
+    ) -> std::io::Result<Self> {
         let (sender, receiver) = mpsc::channel::<Request>();
         let receiver = Arc::new(Mutex::new(receiver));
         let live = Arc::new(AtomicBool::new(true));
@@ -99,10 +222,11 @@ impl ModuleFetchPool {
             let receiver = receiver.clone();
             let cookies = cookies.clone();
             let live = live.clone();
+            let mut client = client.fork_for_worker();
             std::thread::Builder::new()
                 .name(format!("omoikane-module-{index}"))
                 .spawn(move || {
-                    let mut client = Client::new();
+                    client.set_shared_cookie_store(cookies.clone());
                     loop {
                         // Release the receiver lock before doing any I/O so
                         // all workers can service independent requests.
@@ -117,25 +241,8 @@ impl ModuleFetchPool {
                         if request.fetch.is_complete() {
                             continue;
                         }
-                        let started = Instant::now();
-                        let result = (|| {
-                            let mut http = HttpRequest::get(&request.url)
-                                .map_err(|error| Arc::<str>::from(error.to_string()))?;
-                            if request.public_only {
-                                http.require_public_ip();
-                            }
-                            if let Some(site) = request.site_for_cookies.as_ref() {
-                                http.set_cookie_context(site.clone(), false);
-                            }
-                            let response = client
-                                .send_with_shared_cookies(http, &cookies)
-                                .map_err(|error| Arc::<str>::from(error.to_string()))?;
-                            Ok(Arc::new(FetchedModule {
-                                response,
-                                elapsed: started.elapsed(),
-                            }))
-                        })();
-                        request.fetch.complete(result);
+                        let (result, checks) = download_module(&mut client, &cookies, &request);
+                        request.fetch.complete_with_checks(result, checks);
                     }
                 })?;
         }
@@ -146,7 +253,41 @@ impl ModuleFetchPool {
         &self,
         url: String,
         public_only: bool,
-        site_for_cookies: Option<Url>,
+        cookie_context: Option<CookieRequestContext>,
+    ) -> ModuleFetch {
+        self.fetch_with_isolation(url, public_only, cookie_context, None)
+    }
+
+    /// Downloads a module under a COEP owner's CORS policy.
+    pub fn fetch_with_isolation(
+        &self,
+        url: String,
+        public_only: bool,
+        cookie_context: Option<CookieRequestContext>,
+        isolation: Option<ModuleIsolation>,
+    ) -> ModuleFetch {
+        self.enqueue_fetch(url, public_only, cookie_context, isolation, None)
+    }
+
+    /// Downloads with a graph policy snapshot checked before redirect I/O.
+    pub fn fetch_with_policy(
+        &self,
+        url: String,
+        public_only: bool,
+        cookie_context: Option<CookieRequestContext>,
+        isolation: ModuleIsolation,
+        policy: Option<CspPolicy>,
+    ) -> ModuleFetch {
+        self.enqueue_fetch(url, public_only, cookie_context, Some(isolation), policy)
+    }
+
+    fn enqueue_fetch(
+        &self,
+        url: String,
+        public_only: bool,
+        cookie_context: Option<CookieRequestContext>,
+        isolation: Option<ModuleIsolation>,
+        policy: Option<CspPolicy>,
     ) -> ModuleFetch {
         let fetch = ModuleFetch::default();
         if self
@@ -154,7 +295,9 @@ impl ModuleFetchPool {
             .send(Request {
                 url,
                 public_only,
-                site_for_cookies,
+                cookie_context,
+                isolation,
+                policy,
                 fetch: fetch.clone(),
             })
             .is_err()
@@ -177,6 +320,7 @@ impl Drop for ModuleFetchPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::Url;
     use crate::test_support::http_fixture::{
         ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
         read_request_headers,
@@ -225,7 +369,11 @@ mod tests {
         let pool = ModuleFetchPool::new(store).unwrap();
         let other: Url = "http://localhost/".parse().unwrap();
         for site in [other, target] {
-            let mut fetch = pool.fetch(url.clone(), false, Some(site));
+            let mut fetch = pool.fetch(
+                url.clone(),
+                false,
+                Some(CookieRequestContext::new(Some(site), None, false)),
+            );
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 let mut context = Context::from_waker(Waker::noop());
@@ -238,6 +386,136 @@ mod tests {
             }
         }
         assert_eq!(server.join(), [None, Some("strict=1; lax=2".to_string())]);
+    }
+
+    #[test]
+    fn module_downloads_keep_document_grants_out_of_worker_internal_requests() {
+        let listener = bind_loopback().unwrap();
+        let address = listener.local_addr().unwrap();
+        let target: Url = format!("http://{address}/post.js").parse().unwrap();
+        let server = FixtureWorker::spawn(move || {
+            let mut cookies = Vec::new();
+            for phase in ["pre", "post", "worker", "nested"] {
+                let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                assert!(request.starts_with(&format!("GET /{phase}.js HTTP/1.1")));
+                cookies.push(
+                    request
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Cookie: "))
+                        .map(str::trim)
+                        .map(str::to_owned),
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: 0\r\nSet-Cookie: {phase}=1; Path=/; Secure; SameSite=None\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+            cookies
+        });
+        let store = Arc::new(Mutex::new(CookieJar::new()));
+        store
+            .lock()
+            .unwrap()
+            .add_from_header_for_url("session=pre; Path=/; Secure; SameSite=None", &target);
+        let pool = ModuleFetchPool::new(Arc::clone(&store)).unwrap();
+        let top: Url = format!("http://localhost:{}/", address.port())
+            .parse()
+            .unwrap();
+        for phase in ["pre", "post", "worker", "nested"] {
+            let context = match phase {
+                "pre" => CookieRequestContext::new(Some(top.clone()), None, false),
+                "post" => CookieRequestContext::new(Some(top.clone()), Some(target.clone()), false),
+                "worker" => {
+                    CookieRequestContext::new(Some(top.clone()), Some(target.clone()), false)
+                        .for_worker_internal()
+                }
+                "nested" => {
+                    CookieRequestContext::new(Some(target.clone()), Some(target.clone()), true)
+                        .for_worker_internal()
+                }
+                _ => unreachable!(),
+            };
+            let mut fetch =
+                pool.fetch(format!("http://{address}/{phase}.js"), false, Some(context));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let mut context = Context::from_waker(Waker::noop());
+                if let Poll::Ready(result) = Pin::new(&mut fetch).poll(&mut context) {
+                    assert!(result.is_ok(), "{result:?}");
+                    break;
+                }
+                assert!(Instant::now() < deadline, "module fetch timed out");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        assert_eq!(
+            server.join(),
+            [None, Some("session=pre".to_string()), None, None]
+        );
+        let cookies = store.lock().unwrap().document_cookie(&target, &target);
+        assert!(!cookies.contains("pre=1"));
+        assert!(cookies.contains("post=1"));
+        assert!(!cookies.contains("worker=1"));
+        assert!(!cookies.contains("nested=1"));
+    }
+
+    #[test]
+    fn module_fetch_requires_cors_response_permission_with_or_without_coep() {
+        let listener = bind_loopback().unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let owner: Url = format!("http://localhost:{port}/page").parse().unwrap();
+        let origin = Origin::from_url(&owner);
+        let access_control = origin.serialize();
+        let server = FixtureWorker::spawn(move || {
+            for _ in 0..4 {
+                let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+                let permitted = request.starts_with("GET /permitted.js ");
+                let header = if permitted {
+                    format!("Access-Control-Allow-Origin: {access_control}\r\n")
+                } else {
+                    String::new()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\n{header}Content-Type: text/javascript\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+        });
+        let pool = ModuleFetchPool::new(Arc::new(Mutex::new(CookieJar::new()))).unwrap();
+        for embedder in [
+            EmbedderPolicyValue::RequireCorp,
+            EmbedderPolicyValue::UnsafeNone,
+        ] {
+            let isolation = Some(ModuleIsolation {
+                origin: origin.clone(),
+                embedder,
+                credentials: CredentialsMode::SameOrigin,
+            });
+            for (path, allowed) in [("permitted.js", true), ("denied.js", false)] {
+                let url = format!("http://127.0.0.1:{port}/{path}");
+                let mut fetch = pool.fetch_with_isolation(
+                    url,
+                    false,
+                    Some(CookieRequestContext::new(Some(owner.clone()), None, false)),
+                    isolation.clone(),
+                );
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let mut context = Context::from_waker(Waker::noop());
+                    if let Poll::Ready(result) = Pin::new(&mut fetch).poll(&mut context) {
+                        assert_eq!(result.is_ok(), allowed, "{embedder:?} {path}: {result:?}");
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "module fetch timed out");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+        server.join();
     }
 
     #[test]

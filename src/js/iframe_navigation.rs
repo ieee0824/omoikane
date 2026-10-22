@@ -23,6 +23,85 @@ impl State {
     }
 }
 
+impl HostState {
+    /// Loads one navigation and retains an eligible origin through same-origin
+    /// redirects. Network I/O finishes before any old Document is retired.
+    pub(super) fn load_iframe_navigation_resource(
+        &mut self,
+        iframe: usize,
+        owner: usize,
+        attribute: &str,
+        resource: &str,
+        base: Option<&crate::http::Url>,
+        submission: Option<&form_submission::Submission>,
+        submission_source: Option<usize>,
+        source: &NavigationReferrerSource,
+        javascript: bool,
+    ) -> Result<(LoadedChildDocument, Option<StorageOrigin>), JsHostError> {
+        let form_source = source
+            .document_id
+            .or(submission_source)
+            .or_else(|| submission.and_then(|request| request.source_document_id))
+            .filter(|id| self.document_is_active(*id))
+            .unwrap_or(owner);
+        let initiator = if submission.is_some() {
+            Some(form_source)
+        } else {
+            source.document_id
+        };
+        let grant_source = (attribute != "srcdoc" && !javascript)
+            .then(|| self.storage_access_navigation_source(iframe, initiator))
+            .flatten();
+        let origin = grant_source.and_then(|id| self.document_origins.get(&id).cloned().flatten());
+        // Fetch uses the navigation's actual source client. The reserved
+        // environment's activation below additionally requires a self-navigation.
+        let request_context = self.document_cookie_request_context(
+            initiator
+                .filter(|id| self.document_is_active(*id))
+                .unwrap_or(owner),
+        );
+        let cookie_context = self
+            .document_cookie_request_context(owner)
+            .for_navigation(Some(&request_context));
+        let loaded = if let Some(request) = submission {
+            self.load_iframe_form_submission_with_cookie_context(
+                request,
+                &cookie_context,
+                owner,
+                &source.url,
+                source.policy,
+            )?
+        } else if attribute == "srcdoc" {
+            LoadedChildDocument::srcdoc(resource)
+        } else if javascript {
+            LoadedChildDocument::about_blank("about:blank".to_owned())
+        } else {
+            self.load_iframe_document_with_cookie_context(
+                resource,
+                base,
+                Some(&cookie_context),
+                Some(owner),
+                false,
+                &source.url,
+                source.policy,
+            )
+        };
+        let inherited = origin.filter(|origin| {
+            loaded
+                .url
+                .as_deref()
+                .and_then(StorageOrigin::from_document_url)
+                .as_ref()
+                == Some(origin)
+                && loaded
+                    .redirects
+                    .iter()
+                    .all(|hop| StorageOrigin::from_url(&hop.url).as_ref() == Some(origin))
+        });
+        Ok((loaded, inherited))
+    }
+}
+
 pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {
     register_private_builtin_callable(
         context,
@@ -60,8 +139,52 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 .get(1)
                 .and_then(JsValue::as_string)
                 .is_some_and(|kind| {
-                    matches!(kind.to_std_string_escaped().as_str(), "assign" | "replace")
+                    matches!(
+                        kind.to_std_string_escaped().as_str(),
+                        "assign" | "replace" | "reload"
+                    )
                 });
+            if navigates {
+                let destination = args
+                    .get(2)
+                    .cloned()
+                    .unwrap_or_default()
+                    .to_string(context)?
+                    .to_std_string_escaped();
+                if url::Url::parse(&destination).is_ok_and(|url| url.scheme() == "javascript") {
+                    // The active child Document supplies the request client,
+                    // policy, and execution Realm. No resource load or iframe
+                    // attribute mutation occurs for a non-string completion.
+                    let completion = evaluate_javascript_url_in_context(
+                        &destination,
+                        document,
+                        document,
+                        None,
+                        context,
+                    );
+                    if let Some(markup) = completion {
+                        with_host_state(|host| {
+                            let frame_id = host.borrow().iframe_documents.iter().find_map(
+                                |(frame_id, entry)| {
+                                    (entry.document.identity() == document).then_some(*frame_id)
+                                },
+                            );
+                            if let Some(frame_id) = frame_id {
+                                host.borrow_mut()
+                                    .commit_javascript_iframe_document(frame_id, document, &markup)
+                                    .map_err(|error| {
+                                        JsNativeError::error().with_message(error.to_string())
+                                    })?;
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    return Ok(JsValue::undefined());
+                }
+            }
+            let navigation_initiator = navigates
+                .then(|| navigation_client_document_id(context))
+                .flatten();
             with_host_state(|host| {
                 let (frame, callback, document_url, event_state) = {
                     let mut state = host.borrow_mut();
@@ -116,8 +239,10 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 forwarded.push(event_state.map_or_else(JsValue::null, JsValue::from));
                 let (previous_active, source) = if navigates {
                     let mut state = host.borrow_mut();
-                    let source = state.visit_source_for_document(document);
+                    let request_client = navigation_initiator.unwrap_or(document);
+                    let source = state.visit_source_for_document(request_client);
                     state.pending_iframe_visits.remove(&frame);
+                    state.capture_iframe_referrer_source(frame, request_client);
                     if let Some(source) = &source {
                         state.pending_iframe_visits.insert(frame, source.clone());
                     }
@@ -141,6 +266,7 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                         }
                     } else {
                         state.pending_iframe_visits.remove(&frame);
+                        state.pending_iframe_referrers.remove(&frame);
                     }
                 }
                 result

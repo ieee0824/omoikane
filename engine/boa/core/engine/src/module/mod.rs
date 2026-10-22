@@ -206,6 +206,16 @@ impl Module {
         realm: Option<Realm>,
         context: &mut Context,
     ) -> JsResult<Self> {
+        Self::parse_with_host_defined(src, realm, HostDefined::default(), context)
+    }
+
+    /// Parses a module with the host's metadata attached to its runnable.
+    pub fn parse_with_host_defined<R: ReadChar>(
+        src: Source<'_, R>,
+        realm: Option<Realm>,
+        host_defined: HostDefined,
+        context: &mut Context,
+    ) -> JsResult<Self> {
         let path = src.path().map(Path::to_path_buf);
         let realm = realm.unwrap_or_else(|| context.realm().clone());
 
@@ -222,7 +232,7 @@ impl Module {
                 realm: realm.to_edge(),
                 namespace: GcRefCell::default(),
                 kind: ModuleKind::SourceText(Box::new(src)),
-                host_defined: HostDefined::default(),
+                host_defined,
                 path,
             }),
         })

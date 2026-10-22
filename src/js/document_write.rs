@@ -13,6 +13,7 @@ pub(super) struct WrittenScript {
     pub(super) document: NodeHandle,
     kind: ScriptKind,
     src: Option<String>,
+    nonce: Option<String>,
     inline_source: String,
     deferred: bool,
     async_script: bool,
@@ -26,6 +27,7 @@ impl WrittenScript {
             document: document.clone(),
             kind,
             src: node.get_attribute("src"),
+            nonce: node.get_attribute("nonce"),
             inline_source: collect_text_content(node),
             deferred: kind == ScriptKind::Module
                 || node.get_attribute("async").is_some()
@@ -166,8 +168,9 @@ pub(super) fn write(
                 if let Some(content) = node.template_content() {
                     host.nodes.insert(content.identity(), content);
                 }
+                host.apply_connected_referrer_meta(node);
                 if matches!(node.tag_name().as_deref(), Some("iframe" | "object")) {
-                    host.schedule_connected_resource_loads(node, false);
+                    host.schedule_connected_resource_loads(node, false, None);
                 }
             }
             host.mark_document_style_dirty(&document);
@@ -271,7 +274,7 @@ fn execute_classic(
         return Ok(());
     };
     let previous_realm = context.enter_realm(realm);
-    let Some((source, url)) = fetched else {
+    let Some((source, url, muted_errors)) = fetched else {
         let result = if let Some(src) = prepared.src.as_ref() {
             dispatch_script_event(context, script, "error", &src, false, elapsed)
         } else {
@@ -283,15 +286,39 @@ fn execute_classic(
     let old_current = context.eval(Source::from_bytes(
         "document.currentScript && document.currentScript.__id",
     ));
+    let (document_url, requested_url) = {
+        let host = state.borrow();
+        let document_url = host.document_urls.get(&document.identity()).cloned();
+        let requested_url = prepared
+            .src
+            .as_ref()
+            .map(|src| {
+                let base = host.base_url_for_document(document.identity());
+                resource_reference_timing_name(src, base.as_ref())
+            })
+            .or_else(|| document_url.clone());
+        (document_url, requested_url)
+    };
+    let filename = url.as_deref().or(document_url.as_deref());
+    let start_position = if prepared.src.is_some() {
+        (1, 1)
+    } else {
+        script.script_source_position().unwrap_or((1, 1))
+    };
     let result = (|| {
         context.eval(Source::from_bytes(&format!(
             "__omoikane_set_current_script({})",
             script.identity()
         )))?;
-        context.eval(Source::from_reader(
-            source.as_bytes(),
-            url.as_deref().map(Path::new),
-        ))
+        let metadata = script_errors::classic_script_metadata(muted_errors, requested_url);
+        Script::parse_with_host_defined(
+            Source::from_reader(source.as_bytes(), filename.map(Path::new))
+                .with_start_position(start_position.0, start_position.1),
+            None,
+            metadata,
+            context,
+        )?
+        .evaluate(context)
     })();
     state.borrow_mut().pending_javascript_dialog = None;
     let restore = old_current
@@ -395,7 +422,7 @@ impl JsRuntime {
         let fetched = script_source(&state, prepared);
         let elapsed = started.elapsed().as_secs_f64() * 1_000.0;
         let previous = self.context.enter_realm(realm);
-        let result = if let Some((source, fetched_url)) = fetched {
+        let result = if let Some((source, fetched_url, _)) = fetched {
             let base = state.borrow().base_url_for_document(document_id);
             let url = fetched_url.unwrap_or_else(|| {
                 module_script_url(
@@ -409,7 +436,12 @@ impl JsRuntime {
                 .as_ref()
                 .is_some_and(|src| resource_reference_was_redirected(src, &url, base.as_ref()));
             let _ = self.eval("__omoikane_set_current_script(null)");
-            let (result, _, _) = self.eval_module_timed(&source, &url, document.clone());
+            let (result, _, _) = self.eval_module_timed(
+                &source,
+                &url,
+                document.clone(),
+                module_script_credentials(script),
+            );
             let dispatched = self.with_active_host(|context| {
                 dispatch_script_event(
                     context,
@@ -561,33 +593,55 @@ pub(super) fn document_realm(
 fn script_source(
     state: &Rc<RefCell<HostState>>,
     prepared: &WrittenScript,
-) -> Option<(String, Option<String>)> {
+) -> Option<(String, Option<String>, bool)> {
     let document = &prepared.document;
     let mut host = state.borrow_mut();
     if !host.sandbox_allows_scripts_for_node(document) {
         return None;
     }
-    let policy = host.csp_policy_for_document(document);
     if let Some(src) = prepared.src.as_ref() {
-        if !policy.allows_reference(ResourceType::Script, &src) {
-            host.record_csp_violation_for_node(document, ResourceType::Script, src);
+        let base = host.base_url_for_document(document.identity());
+        let report_reference = resource_reference_timing_name(src, base.as_ref());
+        let request = csp::ScriptRequest {
+            nonce: prepared.nonce.as_deref(),
+            parser_inserted: true,
+        };
+        if !host.csp_allows_written_script_request(
+            document,
+            &prepared.node,
+            src,
+            0,
+            &report_reference,
+            request,
+        ) {
             return None;
         }
         let base = host.base_url_for_document(document.identity());
-        let Some((url, source, redirects)) =
-            fetch_script_resource_with_client(&src, base.as_ref(), &mut host.http_client)
-        else {
+        let crossorigin = prepared.node.get_attribute("crossorigin");
+        // Module scripts always use CORS, including document.write entrypoints.
+        // The document-aware loader also applies COEP to each redirect hop.
+        let mode = crossorigin
+            .as_deref()
+            .or_else(|| (prepared.kind == ScriptKind::Module).then_some("anonymous"));
+        let fetched =
+            host.fetch_classic_source_for_document(document.identity(), src, base.as_ref(), mode);
+        let Some((url, source, redirects, muted_errors)) = fetched else {
             return None;
         };
-        if !policy.allows_reference_after_redirects(ResourceType::Script, &url, redirects) {
-            host.record_csp_violation_for_node(document, ResourceType::Script, url);
+        if !host.csp_allows_written_script_request(
+            document,
+            &prepared.node,
+            &url,
+            redirects,
+            &resource_reference_timing_name(src, base.as_ref()),
+            request,
+        ) {
             return None;
         }
-        Some((source, Some(url)))
-    } else if policy.allows_inline(ResourceType::Script) {
-        Some((prepared.inline_source.clone(), None))
+        Some((source, Some(url), muted_errors))
+    } else if host.check_inline_script_source(document, &prepared.node, &prepared.inline_source) {
+        Some((prepared.inline_source.clone(), None, false))
     } else {
-        host.record_csp_violation_for_node(document, ResourceType::Script, "inline");
         None
     }
 }

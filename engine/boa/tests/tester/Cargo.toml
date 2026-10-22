@@ -17,7 +17,7 @@ boa_runtime.workspace = true
 boa_gc.workspace = true
 clap = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
-serde_yaml = "0.9.34" # TODO: Track https://github.com/saphyr-rs/saphyr.
+noyalib = { version = "0.0.57", default-features = false, features = ["std"] }
 serde_json.workspace = true
 bitflags.workspace = true
 colored.workspace = true

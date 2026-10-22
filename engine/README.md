@@ -42,10 +42,53 @@ build artifacts separate when verifying lockfile updates; the default target
 directories already provide this separation. Apply the root repository's
 capacity guard to each directory.
 
+Boa's `gen-icu4x-data` development tool uses a local copy of
+`icu_provider_source` 2.0.1 under `boa/vendor/icu_provider_source/` so its ZIP
+reader can use fixed `zip` 9. The copy's [provenance and local change](boa/vendor/icu_provider_source/OMOIKANE.md)
+are recorded there. The nested `Cargo.lock` must be updated with this patch;
+the browser's root lockfile does not include this development tool.
+
 The original `boa/.github/workflows/` files are retained as history, but GitHub
 does not execute nested workflows. Omoikane's root workflows must exercise the
 engine alongside browser compatibility and release gates. Source placement and
 successful dependency resolution alone are not completion of #552/#515.
+
+## Trusted Types dynamic-code hooks
+
+The local Trusted Types integration follows the [dynamic-code brand checks
+proposal](https://tc39.es/proposal-dynamic-code-brand-checks/) and extends
+Boa's `HostHooks` with a native `TrustedScript` source lookup. It passes the
+original brand status, compilation kind, and the exact generated source from
+`eval` and dynamic Function constructors to
+`HostEnsureCanCompileStrings`. The browser embedding checks CSP and default
+policy results before Boa parses the source. These edits live in
+`core/engine/src/context/hooks.rs`, `builtins/eval/mod.rs`, and
+`builtins/function/mod.rs`; the imported origin manifest is unchanged.
+Both interpreter and opt-in baseline JIT calls enter these common builtins and
+host hooks. Verify the engine behavior with the nested locked Boa tests and the
+`baseline-jit` tests above, then run Omoikane's Trusted Types, CSP, and dynamic
+script regressions with a separate guarded root target.
+
+Inline event-handler attributes also use Boa's Function constructor internally.
+The browser checks `script-src-attr` at the element, then grants one exact
+generated source string to that constructor call. The grant is private to the
+host call and consumed by its first matching hook, so `script-src 'unsafe-inline'`
+can authorize an event handler without authorizing page `eval` or `Function`.
+
+For `javascript:` navigation, the embedding marks its private bootstrap module
+through `Module::parse_with_host_defined` and reads each frame's execution Realm
+through `Context::stack_trace_with_realms`. Each frame retains its execution
+Realm separately from the saved caller Realm and `[[ScriptOrModule]]`, which
+indirect eval can inherit from another Realm. This also handles native calls
+that temporarily enter another Realm without pushing a VM frame.
+Script/module host metadata still identifies
+the private bootstrap frames to skip. The navigation client is the closest
+author frame's execution Realm, so a child assigning
+`top.location.href` uses the child's Trusted Types policy, while a top-level
+author function called by the child uses the top-level policy. The browser's
+navigation regressions cover both directions, plus `eval` and Function calls;
+the fixed-revision Trusted Types navigation WPT subset checks the public
+behavior. These local Boa APIs leave the imported origin record unchanged.
 
 ## RegExp exact-position matching
 

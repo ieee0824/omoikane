@@ -1,14 +1,16 @@
 //! Client-side realtime transport primitives.
 //!
 //! The WebSocket client deliberately implements RFC 6455 framing itself so the
-//! browser and CDP transports share one wire format. TLS (`wss:`), extensions,
-//! and proxies remain outside this core.
+//! browser and CDP transports share one wire format. Extensions and proxies
+//! remain outside this core.
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
+use rustls::{ClientConnection, StreamOwned};
 
 use crate::cdp::{WebSocketFrame, WebSocketOpcode, websocket_accept_key};
 use crate::http::url::UrlParseError;
@@ -19,7 +21,7 @@ const WEBSOCKET_IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Errors produced by the WebSocket client or its wire protocol.
 #[derive(Debug)]
 pub enum RealtimeError {
-    /// Only unencrypted `ws:` URLs are supported.
+    /// Only `ws:` and `wss:` URLs are supported.
     UnsupportedUrlScheme,
     /// The WebSocket URL could not be parsed.
     Url(UrlParseError),
@@ -29,6 +31,8 @@ pub enum RealtimeError {
     InvalidProtocol,
     /// The `Origin` value cannot be serialized as a single header field.
     InvalidOrigin,
+    /// The `Cookie` value cannot be serialized as a single header field.
+    InvalidCookie,
     /// The host resolved only to addresses excluded by the address policy.
     NoPermittedAddress,
     /// A client nonce or frame mask could not be generated.
@@ -68,11 +72,14 @@ pub enum RealtimeError {
 impl std::fmt::Display for RealtimeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsupportedUrlScheme => write!(f, "only ws: WebSocket URLs are supported"),
+            Self::UnsupportedUrlScheme => {
+                write!(f, "only ws: or wss: WebSocket URLs are supported")
+            }
             Self::Url(error) => write!(f, "{error}"),
             Self::Io(error) => write!(f, "{error}"),
             Self::InvalidProtocol => write!(f, "invalid WebSocket subprotocol"),
             Self::InvalidOrigin => write!(f, "invalid WebSocket origin"),
+            Self::InvalidCookie => write!(f, "invalid WebSocket cookie header"),
             Self::NoPermittedAddress => {
                 write!(f, "no permitted address for WebSocket connection")
             }
@@ -140,12 +147,15 @@ pub(crate) enum WebSocketAddressPolicy {
     PublicOnly,
 }
 
-/// Converts a `ws:` URL into the equivalent `http:` URL used for the handshake.
+/// Converts a WebSocket URL into the HTTP-equivalent handshake URL.
 pub(crate) fn websocket_http_url(url: &str) -> Result<crate::http::Url, RealtimeError> {
-    let http_url = url
-        .strip_prefix("ws://")
-        .map(|rest| format!("http://{rest}"))
-        .ok_or(RealtimeError::UnsupportedUrlScheme)?;
+    let http_url = if let Some(rest) = url.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else if let Some(rest) = url.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else {
+        return Err(RealtimeError::UnsupportedUrlScheme);
+    };
     Ok(http_url.parse::<crate::http::Url>()?)
 }
 
@@ -185,10 +195,141 @@ fn connect_stream(
     Err(last_error.map_or(RealtimeError::NoPermittedAddress, RealtimeError::Io))
 }
 
+fn connect_websocket_stream(
+    url: &crate::http::Url,
+    policy: WebSocketAddressPolicy,
+    endpoint: Option<std::net::SocketAddr>,
+    tls_config: Option<Arc<rustls::ClientConfig>>,
+) -> Result<WebSocketStream, RealtimeError> {
+    let mut tcp = if let Some(endpoint) = endpoint {
+        let stream = TcpStream::connect_timeout(&endpoint, WEBSOCKET_IO_TIMEOUT)?;
+        stream.set_read_timeout(Some(WEBSOCKET_IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(WEBSOCKET_IO_TIMEOUT))?;
+        stream
+    } else {
+        connect_stream(url, policy)?
+    };
+    if url.scheme() != "https" {
+        return Ok(WebSocketStream::Plain(tcp));
+    }
+    let server_name =
+        rustls::pki_types::ServerName::try_from(url.host().trim_matches(['[', ']']).to_string())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let mut tls = ClientConnection::new(
+        tls_config.unwrap_or_else(crate::http::websocket_tls_config),
+        server_name,
+    )
+    .map_err(io::Error::other)?;
+    tls.complete_io(&mut tcp)?;
+    Ok(WebSocketStream::Tls {
+        shared: Arc::new(Mutex::new(StreamOwned::new(tls, tcp))),
+        retry_read_timeout: false,
+    })
+}
+
+enum WebSocketStream {
+    Plain(TcpStream),
+    Tls {
+        shared: Arc<Mutex<StreamOwned<ClientConnection, TcpStream>>>,
+        retry_read_timeout: bool,
+    },
+}
+
+impl std::fmt::Debug for WebSocketStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plain(stream) => f.debug_tuple("Plain").field(stream).finish(),
+            Self::Tls { .. } => f.write_str("Tls(..)"),
+        }
+    }
+}
+
+impl WebSocketStream {
+    fn try_clone(&self) -> io::Result<Self> {
+        match self {
+            Self::Plain(stream) => Ok(Self::Plain(stream.try_clone()?)),
+            Self::Tls {
+                shared,
+                retry_read_timeout,
+            } => Ok(Self::Tls {
+                shared: Arc::clone(shared),
+                retry_read_timeout: *retry_read_timeout,
+            }),
+        }
+    }
+
+    fn enable_tls_read_poll(&mut self) -> io::Result<()> {
+        if let Self::Tls {
+            shared,
+            retry_read_timeout,
+        } = self
+        {
+            shared
+                .lock()
+                .map_err(|_| io::Error::other("WebSocket TLS state poisoned"))?
+                .sock
+                .set_read_timeout(Some(Duration::from_millis(20)))?;
+            *retry_read_timeout = true;
+        }
+        Ok(())
+    }
+}
+
+impl Read for WebSocketStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.read(buf),
+            Self::Tls {
+                shared,
+                retry_read_timeout,
+            } => loop {
+                let result = shared
+                    .lock()
+                    .map_err(|_| io::Error::other("WebSocket TLS state poisoned"))?
+                    .read(buf);
+                match result {
+                    Err(error)
+                        if *retry_read_timeout
+                            && matches!(
+                                error.kind(),
+                                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                            ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    other => return other,
+                }
+            },
+        }
+    }
+}
+
+impl Write for WebSocketStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.write(buf),
+            Self::Tls { shared, .. } => shared
+                .lock()
+                .map_err(|_| io::Error::other("WebSocket TLS state poisoned"))?
+                .write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.flush(),
+            Self::Tls { shared, .. } => shared
+                .lock()
+                .map_err(|_| io::Error::other("WebSocket TLS state poisoned"))?
+                .flush(),
+        }
+    }
+}
+
 /// A connected RFC 6455 client using masked client frames.
 #[derive(Debug)]
 pub struct WebSocketClient {
-    stream: TcpStream,
+    stream: WebSocketStream,
     protocol: String,
     read_buffer: Vec<u8>,
 }
@@ -215,12 +356,52 @@ impl WebSocketClient {
         origin: Option<&str>,
         policy: WebSocketAddressPolicy,
     ) -> Result<Self, RealtimeError> {
+        Self::connect_with_cookie_policy(url, protocols, origin, None, policy)
+    }
+
+    /// Connects with a cookie selected for the initiating Document or Worker.
+    pub(crate) fn connect_with_cookie_policy(
+        url: &str,
+        protocols: &[String],
+        origin: Option<&str>,
+        cookie: Option<&str>,
+        policy: WebSocketAddressPolicy,
+    ) -> Result<Self, RealtimeError> {
+        Self::connect_with_tls_config(url, protocols, origin, cookie, policy, None)
+    }
+
+    /// Uses a caller-supplied trust configuration for a WebSocket TLS fixture.
+    pub(crate) fn connect_with_tls_config(
+        url: &str,
+        protocols: &[String],
+        origin: Option<&str>,
+        cookie: Option<&str>,
+        policy: WebSocketAddressPolicy,
+        tls_config: Option<Arc<rustls::ClientConfig>>,
+    ) -> Result<Self, RealtimeError> {
+        Self::connect_with_route(url, protocols, origin, cookie, policy, None, tls_config)
+    }
+
+    /// Dials an endpoint selected by an explicit transport while preserving
+    /// the URL host for the HTTP Host field and verified TLS server name.
+    pub(crate) fn connect_with_route(
+        url: &str,
+        protocols: &[String],
+        origin: Option<&str>,
+        cookie: Option<&str>,
+        policy: WebSocketAddressPolicy,
+        endpoint: Option<std::net::SocketAddr>,
+        tls_config: Option<Arc<rustls::ClientConfig>>,
+    ) -> Result<Self, RealtimeError> {
         let parsed = websocket_http_url(url)?;
         validate_protocols(protocols)?;
         if origin.is_some_and(|origin| !crate::http::is_valid_header("Origin", origin)) {
             return Err(RealtimeError::InvalidOrigin);
         }
-        let mut stream = connect_stream(&parsed, policy)?;
+        if cookie.is_some_and(|cookie| !crate::http::is_valid_header("Cookie", cookie)) {
+            return Err(RealtimeError::InvalidCookie);
+        }
+        let mut stream = connect_websocket_stream(&parsed, policy, endpoint, tls_config)?;
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce).map_err(RealtimeError::Random)?;
         let key = base64::engine::general_purpose::STANDARD.encode(nonce);
@@ -239,8 +420,12 @@ impl WebSocketClient {
         if let Some(origin) = origin {
             request.push_str(&format!("Origin: {origin}\r\n"));
         }
+        if let Some(cookie) = cookie {
+            request.push_str(&format!("Cookie: {cookie}\r\n"));
+        }
         request.push_str("\r\n");
         stream.write_all(request.as_bytes())?;
+        stream.flush()?;
 
         let mut response = Vec::new();
         let mut byte = [0u8; 1];
@@ -279,6 +464,7 @@ impl WebSocketClient {
         if !protocol.is_empty() && !protocols.iter().any(|candidate| candidate == &protocol) {
             return Err(RealtimeError::UnrequestedProtocol);
         }
+        stream.enable_tls_read_poll()?;
         Ok(Self {
             stream,
             protocol,
@@ -528,7 +714,7 @@ mod tests {
     use super::*;
     use crate::test_support::http_fixture::{
         ACCEPT_TIMEOUT, FixtureWorker, READ_TIMEOUT, accept_with_timeout, bind_loopback,
-        read_request_headers,
+        read_request_headers, read_request_headers_from,
     };
     use std::net::TcpListener;
 
@@ -558,11 +744,11 @@ mod tests {
 
     #[test]
     fn typed_realtime_errors_keep_visible_messages_and_sources() {
-        let unsupported = WebSocketClient::connect("wss://example.test", &[], None).unwrap_err();
+        let unsupported = WebSocketClient::connect("ftp://example.test", &[], None).unwrap_err();
         assert!(matches!(unsupported, RealtimeError::UnsupportedUrlScheme));
         assert_eq!(
             unsupported.to_string(),
-            "only ws: WebSocket URLs are supported"
+            "only ws: or wss: WebSocket URLs are supported"
         );
 
         let invalid_url = WebSocketClient::connect("ws://", &[], None).unwrap_err();
@@ -615,6 +801,158 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, RealtimeError::InvalidOrigin));
         assert_no_connection(&listener);
+    }
+
+    #[test]
+    fn invalid_cookie_is_rejected_before_connecting() {
+        let (listener, url) = untouched_listener();
+        let error = WebSocketClient::connect_with_cookie_policy(
+            &url,
+            &[],
+            Some("http://example.test"),
+            Some("session=value\r\nX-Injected: 1"),
+            WebSocketAddressPolicy::Any,
+        )
+        .unwrap_err();
+        assert!(matches!(error, RealtimeError::InvalidCookie));
+        assert_no_connection(&listener);
+    }
+
+    #[test]
+    fn wss_uses_one_verified_tls_session_for_concurrent_read_and_write() {
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{RootCertStore, ServerConfig, ServerConnection};
+
+        let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let certificate = params.self_signed(&key_pair).unwrap().der().clone();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+        let server_config = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate.clone()], key)
+                .unwrap(),
+        );
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate).unwrap();
+        let client_config = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        );
+        let listener = bind_loopback().unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = FixtureWorker::spawn(move || {
+            let tcp = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            tcp.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+            tcp.set_write_timeout(Some(READ_TIMEOUT)).unwrap();
+            let mut stream = StreamOwned::new(ServerConnection::new(server_config).unwrap(), tcp);
+            let request =
+                read_request_headers_from(&mut stream, READ_TIMEOUT, |stream, remaining| {
+                    stream.sock.set_read_timeout(Some(remaining))
+                })
+                .unwrap();
+            let key = request
+                .lines()
+                .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+                .unwrap();
+            write!(stream, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", websocket_accept_key(key)).unwrap();
+            stream.flush().unwrap();
+            let mut bytes = Vec::new();
+            loop {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                bytes.push(byte[0]);
+                if let Ok((frame, consumed)) = WebSocketFrame::decode(&bytes)
+                    && consumed == bytes.len()
+                {
+                    assert_eq!(frame.payload, b"ping");
+                    break;
+                }
+            }
+            stream
+                .write_all(&WebSocketFrame::text("pong").encode(false))
+                .unwrap();
+            stream.flush().unwrap();
+            request
+        });
+
+        let mut client = WebSocketClient::connect_with_tls_config(
+            &format!("wss://localhost:{port}/socket"),
+            &[],
+            Some("https://localhost"),
+            Some("session=secure"),
+            WebSocketAddressPolicy::Any,
+            Some(client_config),
+        )
+        .unwrap();
+        let mut reader = client.try_clone().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(reader.read_message()).unwrap());
+        client.send(b"ping".to_vec(), false).unwrap();
+        assert!(matches!(
+            receiver.recv_timeout(READ_TIMEOUT).unwrap().unwrap(),
+            WebSocketMessage::Text(text) if text == "pong"
+        ));
+        let request = server.join();
+        assert!(request.contains("Origin: https://localhost\r\n"));
+        assert!(request.contains("Cookie: session=secure\r\n"));
+    }
+
+    #[test]
+    fn wss_rejects_untrusted_and_wrong_host_certificates() {
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{RootCertStore, ServerConfig, ServerConnection};
+
+        let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let certificate = params.self_signed(&key_pair).unwrap().der().clone();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+        let server_config = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate.clone()], key)
+                .unwrap(),
+        );
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate).unwrap();
+        let trusted = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        );
+        let listener = bind_loopback().unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = FixtureWorker::spawn(move || {
+            for _ in 0..2 {
+                let mut tcp = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+                tcp.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+                let mut tls = ServerConnection::new(Arc::clone(&server_config)).unwrap();
+                let _ = tls.complete_io(&mut tcp);
+            }
+        });
+
+        let untrusted = WebSocketClient::connect_with_tls_config(
+            &format!("wss://localhost:{port}/socket"),
+            &[],
+            None,
+            None,
+            WebSocketAddressPolicy::Any,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(untrusted, RealtimeError::Io(_)));
+        let wrong_host = WebSocketClient::connect_with_tls_config(
+            &format!("wss://127.0.0.1:{port}/socket"),
+            &[],
+            None,
+            None,
+            WebSocketAddressPolicy::Any,
+            Some(trusted),
+        )
+        .unwrap_err();
+        assert!(matches!(wrong_host, RealtimeError::Io(_)));
+        server.join();
     }
 
     #[test]

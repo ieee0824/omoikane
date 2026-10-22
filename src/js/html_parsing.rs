@@ -63,7 +63,7 @@ pub(super) fn fragment_native(
                     state.register_tree_for_document(&root, Some(owner));
                     if run_scripts {
                         mark_inserted_scripts_in_tree(&mut state, &root);
-                        state.schedule_connected_resource_loads(&root, true);
+                        state.schedule_connected_resource_loads(&root, true, None);
                     }
                     state.mark_style_dirty_for_node(&parsing_context);
                 }

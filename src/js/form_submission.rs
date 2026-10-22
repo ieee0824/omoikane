@@ -8,6 +8,9 @@ pub(super) struct Submission {
     pub method: String,
     pub body: Option<Vec<u8>>,
     pub content_type: Option<String>,
+    /// Original form owner retained for submission provenance. Reload authority
+    /// comes from the current navigation initiator, not this historic identity.
+    pub source_document_id: Option<usize>,
 }
 
 pub(super) enum NamedLinkTarget {
@@ -210,9 +213,10 @@ impl HostState {
         &mut self,
         source: &NodeHandle,
         target: FormTarget,
-        request: Submission,
+        mut request: Submission,
     ) -> Option<usize> {
         if let FormTarget::Frame(frame) = target {
+            request.source_document_id = Some(source.identity());
             // A planned navigation supersedes an initial about:blank load or
             // an earlier submission that has not started yet.
             self.event_loop
@@ -220,18 +224,26 @@ impl HostState {
             self.pending_resource_loads.remove(&frame.identity());
             let frame_id = frame.identity();
             self.pending_iframe_visits.remove(&frame_id);
+            self.pending_iframe_referrers.remove(&frame_id);
+            self.pending_iframe_clients.remove(&frame_id);
             let visit_source = self.visit_source_for_document(source.identity());
+            let referrer_source = self.navigation_referrer_source_for_document(source.identity());
+            let client_security = self.navigation_security_snapshot(source.identity());
             self.event_loop.enqueue_timer_for_document(
                 TimerPayload::FormSubmission {
                     node_id: frame.identity(),
                     request,
+                    source_document_id: source.identity(),
+                    client_security,
                     visit_source,
+                    referrer_source,
                 },
                 Some(source.identity()),
             );
             return Some(frame_id);
         } else if matches!(target, FormTarget::TopLevel) {
             let visit_source = self.visit_source_for_document(source.identity());
+            let security = self.navigation_security_snapshot(source.identity());
             self.event_loop.enqueue_navigation_from_source(
                 NavigationRequest::FormSubmit {
                     url: request.url,
@@ -240,6 +252,7 @@ impl HostState {
                     content_type: request.content_type,
                 },
                 visit_source,
+                security,
             );
         }
         None
@@ -255,32 +268,74 @@ impl HostState {
     pub(super) fn load_iframe_form_submission(
         &mut self,
         submission: &Submission,
+        source_document_id: usize,
+    ) -> Result<LoadedChildDocument, JsHostError> {
+        let cookie_context = self.document_cookie_request_context(source_document_id);
+        self.load_iframe_form_submission_with_cookie_context(
+            submission,
+            &cookie_context,
+            source_document_id,
+            "",
+            security_reporting::ReferrerPolicy::default(),
+        )
+    }
+
+    pub(super) fn load_iframe_form_submission_with_cookie_context(
+        &mut self,
+        submission: &Submission,
+        cookie_context: &crate::http::CookieRequestContext,
+        container_document_id: usize,
+        source_url: &str,
+        policy: security_reporting::ReferrerPolicy,
     ) -> Result<LoadedChildDocument, JsHostError> {
         if submission.method.eq_ignore_ascii_case("GET") {
             let site = self.location_href.parse::<crate::http::Url>().ok();
-            return Ok(self.load_iframe_document(&submission.url, site.as_ref()));
+            return Ok(self.load_iframe_document_with_cookie_context(
+                &submission.url,
+                site.as_ref(),
+                Some(cookie_context),
+                Some(container_document_id),
+                false,
+                source_url,
+                policy,
+            ));
         }
         let url: crate::http::Url = submission.url.parse()?;
         let mut request = crate::http::HttpRequest::new(crate::http::Method::Post, url);
-        if let Ok(site) = self.location_href.parse::<crate::http::Url>() {
-            request.set_cookie_context(site, false);
+        if !source_url.is_empty() {
+            request.set_referrer_source(source_url.to_owned(), policy);
         }
+        cookie_context.apply(&mut request);
         if let Some(body) = &submission.body {
             request.set_body(body.clone());
         }
         if let Some(content_type) = &submission.content_type {
             request.set_header("Content-Type", content_type);
         }
-        let response = self.http_client.send(request)?;
+        let Some((response, redirects)) =
+            self.send_navigation_request(request, Some(container_document_id))?
+        else {
+            return Ok(LoadedChildDocument::fetch_failed());
+        };
         let mime_type = response.header("Content-Type").unwrap_or("");
-        let document = child_document::parse_child_document(mime_type, response.body())
-            .unwrap_or_else(blank_html_document);
+        let document =
+            child_document::parse_child_response(mime_type, response.body(), response.headers())
+                .unwrap_or_else(blank_html_document);
         let url = response
             .effective_url()
             .map_or_else(|| submission.url.clone(), ToString::to_string);
         Ok(LoadedChildDocument {
             document,
-            csp_headers: child_document::response_csp_headers(&response),
+            response_status: response.status_code(),
+            final_request_referrer: Some(
+                response
+                    .final_request_referrer()
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
+            security_headers: child_document::response_security_headers(&response),
+            response_headers: response.headers().to_vec(),
+            redirects,
             url: Some(url),
         })
     }
@@ -407,6 +462,7 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 .to_std_string_escaped();
             with_host_state(|host| {
                 let mut state = host.borrow_mut();
+                let source_document = state.csp_document_for_context(context)?.identity();
                 let Some(frame) = state.get_node(id) else {
                     return Ok(JsValue::undefined());
                 };
@@ -417,10 +473,18 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                     .event_loop
                     .cancel_resource_loads_for_nodes(&HashSet::from([id]));
                 state.pending_resource_loads.remove(&id);
+                if state.active_child_navigation_frame != Some(id) {
+                    state.capture_iframe_referrer_source(id, source_document);
+                }
                 state
-                    .iframe_document_with_submission(&frame, Some(&request))
+                    .iframe_document_with_submission(
+                        &frame,
+                        Some(&request),
+                        request.source_document_id,
+                        false,
+                    )
                     .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
-                state.schedule_connected_resource_loads(&frame, true);
+                state.schedule_connected_resource_loads(&frame, true, None);
                 Ok(JsValue::undefined())
             })
         }),

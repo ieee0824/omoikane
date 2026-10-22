@@ -351,3 +351,46 @@ codeql bqrs decode --format=csv --output="$OUT/macros.csv" "$OUT/macros.bqrs"
 DB、元CSV、BQRS、job logはローカル証跡として保持する。共有する小さな結果は
 runnerの絶対パスをリポジトリ相対へ正規化し、元データのハッシュ・run・SHA・
 CLI版を記録する。認証情報や思考過程は含めない。
+
+## 2026-10-18: Issue #1310のソース変更後測定
+
+main `9c21acd4c4597076d21526b154bdfac4efc6db5f`からの変更を、
+Rust 1.98.1、CodeQL CLI 2.27.2、`codeql/rust-all` 0.2.23、
+`build-mode:none`、`cargo_target=aarch64-unknown-linux-gnu`で抽出した。
+本体DBの`codeql-database.yml`もCLI 2.27.2を記録する。対象ソースのSHA-256は
+`arithmetic.rs`が`dcaddceb8cb66f7172b0c2a3cd103a6dbbb3cffa0455bb68e1c1a1e5de4d5cf3`、
+`runtime_call.rs`が`4a9bbf41c943f475fcfa2bede2adfef1e13137e5c6b0bb2b034e40908637c5f9`、
+`module/loader/mod.rs`が`0c3f2cec10196a08206aac908a01fda42f20dd6ca02e8cd7d9271a6d04982f79`。
+本体DBは再現fixtureの最終rustfmt前に作成したため、同DB内のfixture行番号は
+現在のソースと異なる。fixtureの3 target結果は整形後に再測定した。
+
+ABI assertionの`offset_of!`8箇所は、全て展開AST 0から8になり、
+該当警告が消えた。`DynModuleLoader`の2つの`__Fn`呼出しは、
+dynify 0.1.2の展開型を型エイリアスで明示したためなくなった。
+同版の`r#priv`型は依存内部の非公開扱いAPIであり、dynify更新時の再検証が必要。
+ARM64有効式である`jit/mod.rs:356`と`tests/jit_code_memory.rs:53`の
+`panic_2021`にはそれぞれAST 15がある。`arithmetic.rs:2230`の
+残警告とAST 0は、ARM64解析では無効なx86_64文単位cfgの式に対応する。
+
+全129診断の内訳はマクロ展開失敗6、semantic analyzerの診断123。
+後者にはvendorのmanifestを読めない警告が含まれ、マクロ6件と混同しない。
+マクロ6件のうち、本体で残るのは上のx86_64限定式、
+`jit/platform.rs:398`のmacOS限定`format_args_nl`、および
+`jit/aarch64.rs:409`の`include_str`。
+後者はARM64 Linux DBでAST 0だが、
+[同一ソースの最小例](repros/macro-gaps/README.md)では
+`aarch64-apple-darwin`解析でAST 3・警告なしを確認した。
+本体のmacOS有効target DBは別途確認する。
+
+[全診断](results/2026-10-18-issue1310-main-RawDiagnostics.csv)、
+[対象マクロAST](results/2026-10-18-issue1310-main-MacroCoverage.csv)、
+[platformマクロAST](results/2026-10-18-issue1310-main-AdditionalMacros.csv)、
+[embedded正常系対照](results/2026-10-18-issue1310-main-EmbeddedExpansion.csv)を保存した。
+元DB・BQRS・抽出ログは`/workspace/.artifacts/issue1310-main-final/`に保持する。
+AST件数は型・データフローの完全性を証明しないため、
+[小規模DBの型照会](queries/ReproResolvedTypes.ql)で定数の`usize`宣言型、
+offset対象の構造体型、trait/implの`Fn`戻り型を確認した。
+本体DB向け[ローダー照会](queries/ModuleLoaderTypes.ql)と
+[ABI照会](queries/AbiOffsetTypes.ql)はコンパイルしたが、
+本体DBの型照会はキャッシュのアクセスエラーで完了していない。
+小規模DBの型結果もdataflowの完全性は証明しない。

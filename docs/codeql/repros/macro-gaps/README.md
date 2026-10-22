@@ -101,3 +101,42 @@ x86_64はCodeQL解析targetの比較であり、このcrateのRustテストをx8
 
 最新版APIとpack取得を確認した時点では、基準測定後の新しいextractor/libraryは
 未公開だった。これらは同じ版での再現結果であり、更新版での改善確認ではない。
+
+## 2026-10-18の修正後再測定
+
+Rust 1.98.1、CLI 2.27.2、`codeql/rust-all` 0.2.23、同じlockを用いた。
+`src/lib.rs`のSHA-256は
+`6f57d84673f2c4eb2390380b32a1d749cab3ce11f8d640d42be610c40e89f59a`。
+3つの解析targetに同じソースを与え、DB・BQRS・ログは
+`/workspace/.artifacts/issue1310-repro-rerun-{x64,arm64,macos}/`へ分けて保持した。
+
+`offset_of!`を`const_assert!`の入力から同じ値の`const`定義へ移し、
+ABI assertionは保持した。3箇所とも内側ASTが0から8になり、警告が消えた。
+ARM64の小規模DBで[型照会](../../queries/ReproResolvedTypes.ql)を実行し、
+3定数の宣言型`usize`、`offset_of!`の対象型`NativeFrame`/
+`RuntimeCallFrame`、trait/implの戻り値型`Fn`を確認した。
+`offset_of!`の対象型解決は式自体の戻り型を示さず、
+この照会はdataflowの完全性も検証しない。
+結果は[型CSV](../../results/2026-10-18-issue1310-repro-arm64-types.csv)に保存した。
+`Fn!`の戻り値型はdynify 0.1.2の展開型を明示し、借用Future・`Rc<Self>`の
+実行テストを保持した。dynifyの`r#priv`は非公開扱いの実装APIなので、
+依存版を変える際は型契約と展開結果を再検証する。
+
+| 解析target | 残るwarning | 文単位cfgの`panic_2021` AST | macOS文単位cfgの`format_args_nl` AST |
+| --- | ---: | ---: | ---: |
+| x86_64 Linux | 2 | 0（ARM64式は無効） | 0（macOS式は無効） |
+| aarch64 Linux | 1 | 15 | 0（macOS式は無効） |
+| aarch64 macOS | 0 | 15 | 3 |
+
+macOSの関数単位cfg対照と無条件`eprintln!`は有効targetでともにAST 4。
+Linux DBでの警告だけからmacOS有効式の欠落を推定しない。
+[x86診断](../../results/2026-10-18-issue1310-repro-x64-diagnostics.csv)、
+[x86マクロ](../../results/2026-10-18-issue1310-repro-x64-macros.csv)、
+[ARM64診断](../../results/2026-10-18-issue1310-repro-arm64-diagnostics.csv)、
+[ARM64マクロ](../../results/2026-10-18-issue1310-repro-arm64-macros.csv)、
+[macOS診断](../../results/2026-10-18-issue1310-repro-macos-diagnostics.csv)、
+[macOSマクロ](../../results/2026-10-18-issue1310-repro-macos-macros.csv)を保持した。
+
+ARM64 Linux hostで`cargo test --locked`の6テストが成功した。macOS行は
+Linux hostのCodeQLに`cargo_target=aarch64-apple-darwin`を指定した解析であり、
+macOS上でRustテストを実行した結果ではない。

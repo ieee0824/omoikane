@@ -45,8 +45,8 @@ impl PaintTrace {
 
 impl BrowserApp {
     /// Present a previously delivered wheel's changes before consuming more
-    /// input when the frame deadline has passed. X11 can drain an entire input
-    /// backlog before delivering its queued RedrawRequested event.
+    /// input when the frame deadline has passed. Native event loops can drain
+    /// an entire input backlog before delivering a queued RedrawRequested.
     pub(super) fn render_before_wheel(&mut self, now: Instant) {
         if self.window_occluded
             || self.window_minimized
@@ -94,9 +94,19 @@ impl BrowserApp {
 
     pub(super) fn sync_page_time_before_input(&mut self, now: Instant) {
         let elapsed = self.advance_page_clock(now);
+        let started = self.paint_trace.as_ref().map(|_| Instant::now());
         if let Err(error) = self.session.advance_tasks(elapsed) {
             report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Frame, &error);
             eprintln!("page clock advancement failed: {error}");
+        }
+        if let Some(started) = started {
+            eprintln!(
+                "OMOIKANE_INPUT_CLOCK {}",
+                json!({
+                    "page_elapsed_ms": elapsed,
+                    "advance_tasks_ms": started.elapsed().as_secs_f64() * 1000.0,
+                })
+            );
         }
         self.rebase_clock_if_document_changed();
     }
@@ -188,6 +198,25 @@ impl BrowserApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_backlog_advances_scheduler_without_a_redraw_callback() {
+        let mut app =
+            BrowserApp::new("data:text/html,<body style='height:2000px'>scroll</body>").unwrap();
+        app.start_initial_navigation().unwrap();
+        assert!(app.frame_cache.demand(&app.session).needs_paint);
+
+        let now = Instant::now();
+        app.frame_scheduler.queue_redraw();
+        app.render_before_wheel(now);
+        assert!(!app.frame_scheduler.redraw_pending());
+        assert_eq!(app.wheel_frame_deadline, now + FRAME_INTERVAL);
+
+        app.frame_scheduler.queue_redraw();
+        app.render_before_wheel(now + FRAME_INTERVAL / 2);
+        assert!(app.frame_scheduler.redraw_pending());
+        assert_eq!(app.wheel_frame_deadline, now + FRAME_INTERVAL);
+    }
 
     #[test]
     fn page_frame_errors_are_reported_with_and_without_page_area() {

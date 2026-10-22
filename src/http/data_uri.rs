@@ -36,7 +36,8 @@ pub struct DataUri {
 ///   are).
 /// - When the `;base64` flag is present, ASCII whitespace (spaces, tabs, CR,
 ///   LF) in the percent-decoded payload is stripped before base64 decoding, so
-///   line-wrapped base64 is accepted.
+///   line-wrapped base64 is accepted. Padding may be omitted and unused trailing
+///   bits are ignored, as required by Infra's forgiving-base64 algorithm.
 /// - When the flag is absent, the percent-decoded bytes are the payload.
 ///
 /// # Examples
@@ -55,37 +56,48 @@ pub fn parse_data_uri(uri: &str) -> Option<DataUri> {
     };
 
     let comma = payload.find(',')?;
-    let metadata = &payload[..comma];
+    let metadata = payload[..comma].trim_matches(' ');
     let data_section = &payload[comma + 1..];
-
-    let mut mime_type = String::from("text/plain");
-    let mut is_base64 = false;
-    for (index, part) in metadata.split(';').enumerate() {
-        if index == 0 {
-            // The media type is the first token only when it looks like
-            // `type/subtype`; otherwise the default (text/plain) stands.
-            if part.contains('/') {
-                mime_type = part.trim().to_string();
-            }
-        } else if part.eq_ignore_ascii_case("base64") {
-            is_base64 = true;
-        }
-    }
-
+    let media_type = metadata.split(';').next().unwrap_or("");
+    let mime_type = if media_type.contains('/') {
+        media_type.trim().to_owned()
+    } else {
+        "text/plain".to_owned()
+    };
+    // Fetch recognizes this marker only at the end of the media-type field.
+    let is_base64 = metadata.rsplit_once(';').is_some_and(|(_, suffix)| {
+        suffix
+            .trim_start_matches(' ')
+            .eq_ignore_ascii_case("base64")
+    });
     let percent_decoded = percent_decode_bytes(data_section);
     let data = if is_base64 {
-        let filtered: Vec<u8> = percent_decoded
-            .into_iter()
-            .filter(|byte| !byte.is_ascii_whitespace())
-            .collect();
-        base64::engine::general_purpose::STANDARD
-            .decode(filtered)
-            .ok()?
+        decode_data_base64(percent_decoded)?
     } else {
         percent_decoded
     };
 
     Some(DataUri { mime_type, data })
+}
+
+/// Implements Infra's forgiving-base64 padding, whitespace and trailing bits.
+fn decode_data_base64(bytes: Vec<u8>) -> Option<Vec<u8>> {
+    let mut filtered: Vec<u8> = bytes
+        .into_iter()
+        .filter(|byte| !matches!(byte, b'\t' | b'\n' | b'\x0c' | b'\r' | b' '))
+        .collect();
+    if filtered.len() % 4 == 0 {
+        if filtered.ends_with(b"==") {
+            filtered.truncate(filtered.len() - 2);
+        } else if filtered.ends_with(b"=") {
+            filtered.pop();
+        }
+    }
+    let decoder = base64::engine::general_purpose::GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        base64::engine::general_purpose::NO_PAD.with_decode_allow_trailing_bits(true),
+    );
+    decoder.decode(filtered).ok()
 }
 
 /// Percent-decodes a string into raw bytes, leaving malformed escapes literal.
@@ -144,6 +156,42 @@ mod tests {
         let parsed = parse_data_uri("data:,hello").unwrap();
         assert_eq!(parsed.mime_type, "text/plain");
         assert_eq!(parsed.data, b"hello");
+    }
+
+    #[test]
+    fn forgiving_base64_accepts_omitted_padding_and_unused_bits() {
+        for (encoded, decoded) in [
+            ("Zg", "f"),
+            ("Zm8", "fo"),
+            ("Zh==", "f"),
+            ("Zm9", "fo"),
+            ("Z%20g%0A==", "f"),
+        ] {
+            assert_eq!(
+                decoded_string(&format!("data:text/plain;base64,{encoded}")),
+                decoded,
+                "{encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn forgiving_base64_rejects_bad_padding_alphabet_and_vertical_tab() {
+        for encoded in ["A", "Zg=", "Zg===", "Zm8==", "Zg%0B==", "Zg-_"] {
+            assert!(
+                parse_data_uri(&format!("data:text/plain;base64,{encoded}")).is_none(),
+                "{encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn base64_marker_must_be_the_media_type_suffix() {
+        assert_eq!(decoded_string("data:text/plain; base64 ,Zg"), "f");
+        assert_eq!(
+            decoded_string("data:text/javascript;base64;charset=UTF-8,raw%20source"),
+            "raw source"
+        );
     }
 
     // The five Acid3 (test 97) data: URI vectors, each defining one variable.

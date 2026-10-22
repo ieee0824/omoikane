@@ -51,7 +51,7 @@ def verify(binary, artifacts, scale, iterations, baseline):
                 # This Winit X11 backend translates both XTest wheel-button
                 # edges. Alternate edges to measure one native wheel event.
                 edge = 'mousedown' if index % 2 == 0 else 'mouseup'
-                gui.command('xdotool', edge, '4')
+                gui.command('xdotool', edge, '5')
                 expected = (40 * (index + 1), index + 1)
                 gui.wait_for('wheel and scroll delivered', lambda: status(gui, window),
                              lambda s: s and s[:2] == expected and s[3] == index + 1)
@@ -66,10 +66,10 @@ def verify(binary, artifacts, scale, iterations, baseline):
             # delivery and accumulated default scroll while drawing progress.
             singles = iterations + 2
             if singles % 2:
-                gui.command('xdotool', 'mouseup', '4')
+                gui.command('xdotool', 'mouseup', '5')
                 singles += 1
             before_burst = len(records(gui, 'PAINT'))
-            gui.command('xdotool', 'click', '--repeat', '10', '--delay', '20', '4')
+            gui.command('xdotool', 'click', '--repeat', '10', '--delay', '20', '5')
             expected = (40 * (singles + 20), singles + 20)
             gui.wait_for('continuous wheels consumed', lambda: status(gui, window),
                          lambda s: s and s[:2] == expected, seconds=60)

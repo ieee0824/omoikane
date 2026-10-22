@@ -1,3 +1,9 @@
+export let __omoikane_queue_reporting_api_report;
+export let __omoikane_cookie_change_dispatch;
+export let __omoikane_cookie_change_reset;
+export let __omoikane_update_auxiliary_opener;
+export const __omoikane_service_worker_lifecycle = {};
+
 (() => {
   // Capture intrinsic identities before author code can replace global Symbol.
   const windowProxyToStringTag = Symbol.toStringTag;
@@ -33,7 +39,36 @@
   const nativeImportScripts = globalThis.__omoikane_import_scripts;
   const nativeReportError = globalThis.__omoikane_report_error;
   const nativeRunMicrotaskCallback = globalThis.__omoikane_run_microtask_callback;
+  const nativeCaptureCspSource = globalThis.__omoikane_capture_csp_source;
+  const nativeFetch = globalThis.__omoikane_fetch;
+  const nativeWebSocketConnect = globalThis.__omoikane_websocket_connect;
+  const nativeEventSourceFetch = globalThis.__omoikane_event_source_fetch;
+  const nativeTrustedTypeCreate = globalThis.__omoikane_trusted_type_create;
+  const nativeTrustedTypeIs = globalThis.__omoikane_trusted_type_is;
+  const nativeTrustedTypeValue = globalThis.__omoikane_trusted_type_value;
+  const nativeTrustedTypePolicyCheck = globalThis.__omoikane_trusted_type_policy_check;
+  const nativeTrustedTypeRegisterDefault = globalThis.__omoikane_trusted_type_register_default;
+  const nativeTrustedTypeDefaultForNode = globalThis.__omoikane_trusted_type_default_for_node;
+  const nativeTrustedTypeSinkRequires = globalThis.__omoikane_trusted_type_sink_requires;
+  const nativeTrustedTypeSinkViolation = globalThis.__omoikane_trusted_type_sink_violation;
+  const nativeTrustedRememberScriptText = globalThis.__omoikane_trusted_remember_script_text;
+  const nativeTrustedTakeScriptTextApproval = globalThis.__omoikane_trusted_take_script_text_approval;
+  const nativeScriptOwnerDocument = globalThis.__omoikane_owner_document;
   delete globalThis.__omoikane_import_scripts;
+  delete globalThis.__omoikane_capture_csp_source;
+  delete globalThis.__omoikane_fetch;
+  delete globalThis.__omoikane_websocket_connect;
+  delete globalThis.__omoikane_event_source_fetch;
+  delete globalThis.__omoikane_trusted_type_create;
+  delete globalThis.__omoikane_trusted_type_is;
+  delete globalThis.__omoikane_trusted_type_value;
+  delete globalThis.__omoikane_trusted_type_policy_check;
+  delete globalThis.__omoikane_trusted_type_register_default;
+  delete globalThis.__omoikane_trusted_type_default_for_node;
+  delete globalThis.__omoikane_trusted_type_sink_requires;
+  delete globalThis.__omoikane_trusted_type_sink_violation;
+  delete globalThis.__omoikane_trusted_remember_script_text;
+  delete globalThis.__omoikane_trusted_take_script_text_approval;
   const nativeCurrentWindowEvent = globalThis.__omoikane_current_window_event;
   delete globalThis.__omoikane_current_window_event;
   const nativeRegisterWindowProxy = globalThis.__omoikane_register_window_proxy;
@@ -41,11 +76,19 @@
   const nativeDocumentWindow = globalThis.__omoikane_document_window;
   const nativeWindowEventDocument = globalThis.__omoikane_window_event_document;
   const nativeWindowProxyGlobal = globalThis.__omoikane_window_proxy_global;
+  const nativeAuxiliaryWindowProxyForId = globalThis.__omoikane_auxiliary_window_proxy_for_id;
+  const nativeReportAuxiliaryWindowAccess = globalThis.__omoikane_report_auxiliary_window_access;
+  const nativeReportMainWindowAccess = globalThis.__omoikane_report_main_window_access;
+  const nativeCrossOriginAuxiliaryValue = globalThis.__omoikane_cross_origin_auxiliary_value;
   const nativeRetainedWindowGlobal = globalThis.__omoikane_retained_window_global;
   delete globalThis.__omoikane_retained_window_global;
   delete globalThis.__omoikane_document_window;
   delete globalThis.__omoikane_window_event_document;
   delete globalThis.__omoikane_window_proxy_global;
+  delete globalThis.__omoikane_auxiliary_window_proxy_for_id;
+  delete globalThis.__omoikane_report_auxiliary_window_access;
+  delete globalThis.__omoikane_report_main_window_access;
+  delete globalThis.__omoikane_cross_origin_auxiliary_value;
   const nativeRegisterPlatformEventFactory = globalThis.__omoikane_register_platform_event_factory;
   delete globalThis.__omoikane_register_platform_event_factory;
   const nativePlatformInterfaceBrand = globalThis.__omoikane_platform_interface_brand;
@@ -88,7 +131,17 @@
   const nativeClipboardPermission = globalThis.__omoikane_clipboard_permission;
   const nativeGeolocationPermission = globalThis.__omoikane_geolocation_permission;
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
+  const nativeCrossOriginIsolated = globalThis.__omoikane_cross_origin_isolated;
   const nativeStorageManager = globalThis.__omoikane_storage_manager;
+  const nativeCookieStoreAvailable = globalThis.__omoikane_cookie_store_available;
+  const nativeCookieStoreQuery = globalThis.__omoikane_cookie_store_query;
+  const nativeCookieStoreSubscriptions = globalThis.__omoikane_cookie_store_subscriptions;
+  const nativeCookieStoreSubscribedChanges = globalThis.__omoikane_cookie_store_subscribed_changes;
+  const nativeCookieStoreMutate = globalThis.__omoikane_cookie_store_mutate;
+  const nativeCookieStoreChanges = globalThis.__omoikane_cookie_store_changes;
+  const nativeStorageAccessState = globalThis.__omoikane_storage_access_state;
+  const nativeStorageAccessPermission = globalThis.__omoikane_storage_access_permission;
+  const nativeStorageAccessRequest = globalThis.__omoikane_storage_access_request;
   const nativeWebLocks = globalThis.__omoikane_web_locks;
   // Worklet lifecycle bindings are private implementation hooks. Keep them in
   // this closure so page code can only reach the standard Worklet methods.
@@ -163,12 +216,15 @@
   const nativeRequestFullscreen = globalThis.__omoikane_request_fullscreen;
   const nativeExitFullscreen = globalThis.__omoikane_exit_fullscreen;
   const nativeFullscreenSubtreeRemoved = globalThis.__omoikane_fullscreen_subtree_removed;
+  const nativePermissionsPolicyQuery = globalThis.__omoikane_permissions_policy_query;
   const nativePointerLockTarget = globalThis.__omoikane_pointer_lock_target;
   const nativePointerLockActivation = globalThis.__omoikane_pointer_lock_activation;
   const nativeRequestPointerLock = globalThis.__omoikane_request_pointer_lock;
   const nativeExitPointerLock = globalThis.__omoikane_exit_pointer_lock;
   const nativePointerLockRemoving = globalThis.__omoikane_pointer_lock_removing;
   const nativeForwardInput = globalThis.__omoikane_forward_input;
+  const nativeFocusChain = globalThis.__omoikane_focus_chain;
+  delete globalThis.__omoikane_focus_chain;
   const nativeCaretHitTest = globalThis.__omoikane_caret_hit_test;
   delete globalThis.__omoikane_caret_hit_test;
   const nativeSetUserActionTarget = globalThis.__omoikane_set_user_action_target;
@@ -189,7 +245,35 @@
   if (__omoikane_document_id !== browsingInput.topDocumentId) {
     browsingInput.removalMayAffectIframeVisibility = true;
   }
-  const topWindow = browsingInput.topWindow || (browsingInput.topWindow = globalThis);
+  let topWindow = browsingInput.topWindow || (browsingInput.topWindow = globalThis);
+  if (__omoikane_document_id === browsingInput.topDocumentId) {
+    globalThis.__omoikane_create_main_window_proxy = () => {
+      const backingWindow = globalThis;
+      delete backingWindow.__omoikane_create_main_window_proxy;
+      const reportableProperties = new Set([
+        "window", "self", "frames", "closed", "length", "top", "parent",
+        "opener", "location", "close", "focus", "blur", "postMessage",
+      ]);
+      let proxy;
+      proxy = new Proxy(backingWindow, {
+        get(target, property, receiver) {
+          if (reportableProperties.has(property)) nativeReportMainWindowAccess(property);
+          return Reflect.get(target, property,
+            windowHandlerReceiver(target, property, receiver, proxy));
+        },
+        set(target, property, value, receiver) {
+          return Reflect.set(target, property, value,
+            receiver === proxy ? target : receiver);
+        },
+      });
+      windowObjects.add(proxy);
+      nativeRegisterWindowProxy(proxy, 0, "main");
+      safeWeakSetAdd(registeredWindowProxies, proxy);
+      topWindow = proxy;
+      browsingInput.topWindow = proxy;
+      return proxy;
+    };
+  }
   const registeredWindowProxies = browsingInput.registeredWindowProxies ||
     (browsingInput.registeredWindowProxies = new WeakSet());
   const windowListenerStores = browsingInput.windowListenerStores ||
@@ -215,6 +299,7 @@
   delete globalThis.__omoikane_request_fullscreen;
   delete globalThis.__omoikane_exit_fullscreen;
   delete globalThis.__omoikane_fullscreen_subtree_removed;
+  delete globalThis.__omoikane_permissions_policy_query;
   const nativeGetTextContent = globalThis.__omoikane_get_text_content;
   const nativeAttributeRecords = globalThis.__omoikane_attribute_records;
   const nativeAttributeRecordCount = globalThis.__omoikane_attribute_record_count;
@@ -244,6 +329,7 @@
   const nativeWindowName = globalThis.__omoikane_window_name;
   delete globalThis.__omoikane_window_name;
   const nativeIframeForceNavigation = globalThis.__omoikane_iframe_force_navigation;
+  const nativeIframeDeclaredOrigin = globalThis.__omoikane_iframe_declared_origin;
   const nativeIframeSubmissionSnapshot = globalThis.__omoikane_iframe_submission_snapshot;
   const nativeIframeReplaySubmission = globalThis.__omoikane_iframe_replay_submission;
   const nativeTakeDiscardedNodeIds = globalThis.__omoikane_take_discarded_node_ids;
@@ -260,6 +346,7 @@
   delete globalThis.__omoikane_document_content_type;
   delete globalThis.__omoikane_set_document_content_type;
   const nativeDocumentURL = globalThis.__omoikane_document_url;
+  const nativeDocumentReferrer = globalThis.__omoikane_document_referrer;
   const nativeCommitHistoryApiURL = globalThis.__omoikane_commit_history_api_url;
   const nativeCommitFragmentURL = globalThis.__omoikane_commit_fragment_url;
   const nativeDocumentBaseURL = globalThis.__omoikane_document_base_url;
@@ -268,7 +355,15 @@
   delete globalThis.__omoikane_clipboard_permission;
   delete globalThis.__omoikane_geolocation_permission;
   delete globalThis.__omoikane_is_secure_context;
+  delete globalThis.__omoikane_cross_origin_isolated;
   delete globalThis.__omoikane_storage_manager;
+  delete globalThis.__omoikane_cookie_store_available;
+  delete globalThis.__omoikane_cookie_store_query;
+  delete globalThis.__omoikane_cookie_store_mutate;
+  delete globalThis.__omoikane_cookie_store_changes;
+  delete globalThis.__omoikane_storage_access_state;
+  delete globalThis.__omoikane_storage_access_permission;
+  delete globalThis.__omoikane_storage_access_request;
   delete globalThis.__omoikane_web_locks;
   delete globalThis.__omoikane_create_worklet;
   delete globalThis.__omoikane_worklet_add_module;
@@ -305,10 +400,12 @@
   delete globalThis.__omoikane_iframe_global;
   delete globalThis.__omoikane_iframe_context_state;
   delete globalThis.__omoikane_iframe_force_navigation;
+  delete globalThis.__omoikane_iframe_declared_origin;
   delete globalThis.__omoikane_iframe_submission_snapshot;
   delete globalThis.__omoikane_iframe_replay_submission;
   delete globalThis.__omoikane_take_discarded_node_ids;
   delete globalThis.__omoikane_document_url;
+  delete globalThis.__omoikane_document_referrer;
   delete globalThis.__omoikane_document_base_url;
   delete globalThis.__omoikane_set_user_action_target;
 
@@ -321,6 +418,7 @@
   // must continue to retire stale native identities even under prototype
   // poisoning.
   const safeApply = Reflect.apply;
+  const safeRegExpExec = RegExp.prototype.exec;
   const safeGetPrototypeOf = Reflect.getPrototypeOf;
   const safeGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
   const safeArrayPush = Function.prototype.call.bind(Array.prototype.push);
@@ -432,10 +530,367 @@
   const intrinsicString = globalThis.String;
   const intrinsicStringToLowerCase = String.prototype.toLowerCase;
   const stringCharCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
-  const stringCharCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
   const stringFromCharCode = String.fromCharCode;
   const hasOwnProperty = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
   const IntrinsicTypeError = globalThis.TypeError;
+
+  const trustedPolicyStates = browsingInput.trustedPolicyStates ||
+    (browsingInput.trustedPolicyStates = new WeakMap());
+  const trustedFactoryStates = browsingInput.trustedFactoryStates ||
+    (browsingInput.trustedFactoryStates = new WeakMap());
+  const trustedPolicyNames = new Set();
+  const trustedPolicyConstruction = {};
+  const trustedFactoryConstruction = {};
+  let defaultTrustedPolicy = null;
+
+  function trustedTypePrototype(kind) {
+    return kind === 0 ? TrustedHTML.prototype :
+      kind === 1 ? TrustedScript.prototype : TrustedScriptURL.prototype;
+  }
+
+  function createTrustedType(kind, value) {
+    return nativeTrustedTypeCreate(kind, intrinsicString(value), trustedTypePrototype(kind));
+  }
+
+  function policyState(policy) {
+    if (!safeWeakMapHas(trustedPolicyStates, policy)) {
+      throw new IntrinsicTypeError("Illegal TrustedTypePolicy receiver");
+    }
+    return safeWeakMapGet(trustedPolicyStates, policy);
+  }
+
+  function policyCreate(policy, kind, input, extra) {
+    const options = policyState(policy);
+    const callback = kind === 0 ? options.createHTML :
+      kind === 1 ? options.createScript : options.createScriptURL;
+    if (callback === undefined) {
+      throw new IntrinsicTypeError("TrustedTypePolicy callback is missing");
+    }
+    const output = safeApply(callback, undefined, [toDOMString(input), ...extra]);
+    return options.createTrustedType(kind, output == null ? "" : output);
+  }
+
+  function factoryState(factory) {
+    if (!safeWeakMapHas(trustedFactoryStates, factory)) {
+      throw new IntrinsicTypeError("Illegal TrustedTypePolicyFactory receiver");
+    }
+    return safeWeakMapGet(trustedFactoryStates, factory);
+  }
+
+  class TrustedHTML {
+    constructor() { throw new IntrinsicTypeError("Illegal constructor"); }
+    toString() { return nativeTrustedTypeValue(this, 0); }
+    toJSON() { return nativeTrustedTypeValue(this, 0); }
+  }
+
+  class TrustedScript {
+    constructor() { throw new IntrinsicTypeError("Illegal constructor"); }
+    toString() { return nativeTrustedTypeValue(this, 1); }
+    toJSON() { return nativeTrustedTypeValue(this, 1); }
+  }
+
+  class TrustedScriptURL {
+    constructor() { throw new IntrinsicTypeError("Illegal constructor"); }
+    toString() { return nativeTrustedTypeValue(this, 2); }
+    toJSON() { return nativeTrustedTypeValue(this, 2); }
+  }
+
+  class TrustedTypePolicy {
+    constructor(token, name, options) {
+      if (token !== trustedPolicyConstruction) throw new IntrinsicTypeError("Illegal constructor");
+      safeWeakMapSet(trustedPolicyStates, this, { name, ...options });
+    }
+    get name() { return policyState(this).name; }
+    createHTML(input, ...args) {
+      if (arguments.length === 0) throw new IntrinsicTypeError("createHTML requires 1 argument");
+      return policyCreate(this, 0, input, args);
+    }
+    createScript(input, ...args) {
+      if (arguments.length === 0) throw new IntrinsicTypeError("createScript requires 1 argument");
+      return policyCreate(this, 1, input, args);
+    }
+    createScriptURL(input, ...args) {
+      if (arguments.length === 0) throw new IntrinsicTypeError("createScriptURL requires 1 argument");
+      return policyCreate(this, 2, input, args);
+    }
+  }
+
+  class TrustedTypePolicyFactory {
+    constructor(token) {
+      if (token !== trustedFactoryConstruction) throw new IntrinsicTypeError("Illegal constructor");
+    }
+    createPolicy(name, options) {
+      const factory = factoryState(this);
+      if (arguments.length === 0) throw new IntrinsicTypeError("Policy name is required");
+      // Receiver-owned operations retain the receiver's Document and output
+      // Realm; argument conversion and TypeErrors belong to this method Realm.
+      name = toDOMString(name);
+      const dictionary = options == null ? {} : Object(options);
+      const callbacks = {
+        createHTML: dictionary.createHTML,
+        createScript: dictionary.createScript,
+        createScriptURL: dictionary.createScriptURL,
+      };
+      for (const callback of [callbacks.createHTML, callbacks.createScript, callbacks.createScriptURL]) {
+        if (callback !== undefined && typeof callback !== "function") {
+          throw new IntrinsicTypeError("TrustedTypePolicy callback must be callable");
+        }
+      }
+      if (!safeApply(factory.checkPolicy, undefined, [name, hasSetValue(factory.names, name)])) {
+        throw new IntrinsicTypeError("Trusted Types policy disallowed by CSP");
+      }
+      if (name === "default" && factory.defaultPolicy() !== null) {
+        throw new IntrinsicTypeError("The default Trusted Types policy already exists");
+      }
+      const policy = factory.makePolicy(name, callbacks);
+      if (name === "default") {
+        safeApply(factory.registerDefault, undefined, [
+          callbacks.createHTML || null,
+          callbacks.createScript || null,
+          callbacks.createScriptURL || null,
+        ]);
+        factory.setDefault(policy);
+      }
+      addSetValue(factory.names, name);
+      return policy;
+    }
+    get defaultPolicy() {
+      return factoryState(this).defaultPolicy();
+    }
+    get emptyHTML() {
+      return factoryState(this).emptyHTML;
+    }
+    get emptyScript() {
+      return factoryState(this).emptyScript;
+    }
+    isHTML(value) {
+      factoryState(this);
+      return nativeTrustedTypeIs(value, 0);
+    }
+    isScript(value) {
+      factoryState(this);
+      return nativeTrustedTypeIs(value, 1);
+    }
+    isScriptURL(value) {
+      factoryState(this);
+      return nativeTrustedTypeIs(value, 2);
+    }
+    getPropertyType(tagName, property, elementNs = "http://www.w3.org/1999/xhtml") {
+      factoryState(this);
+      if (arguments.length < 2) throw new IntrinsicTypeError("getPropertyType requires 2 arguments");
+      return trustedPropertyType(toDOMString(tagName), toDOMString(property), elementNs);
+    }
+    getAttributeType(tagName, attribute, elementNs = "http://www.w3.org/1999/xhtml", attrNs = null) {
+      factoryState(this);
+      if (arguments.length < 2) throw new IntrinsicTypeError("getAttributeType requires 2 arguments");
+      return trustedAttributeType(toDOMString(tagName), toDOMString(attribute), elementNs, attrNs);
+    }
+  }
+
+  const trustedTypes = new TrustedTypePolicyFactory(trustedFactoryConstruction);
+  const emptyTrustedHTML = createTrustedType(0, "");
+  const emptyTrustedScript = createTrustedType(1, "");
+  safeWeakMapSet(trustedFactoryStates, trustedTypes, {
+    names: trustedPolicyNames,
+    checkPolicy: nativeTrustedTypePolicyCheck,
+    makePolicy: (name, callbacks) => new TrustedTypePolicy(
+      trustedPolicyConstruction, name, { ...callbacks, createTrustedType }),
+    registerDefault: nativeTrustedTypeRegisterDefault,
+    setDefault: policy => { defaultTrustedPolicy = policy; },
+    defaultPolicy: () => defaultTrustedPolicy,
+    emptyHTML: emptyTrustedHTML,
+    emptyScript: emptyTrustedScript,
+  });
+  globalThis.TrustedHTML = TrustedHTML;
+  globalThis.TrustedScript = TrustedScript;
+  globalThis.TrustedScriptURL = TrustedScriptURL;
+  globalThis.TrustedTypePolicy = TrustedTypePolicy;
+  globalThis.TrustedTypePolicyFactory = TrustedTypePolicyFactory;
+  Object.defineProperty(globalThis, "trustedTypes", { value: trustedTypes, configurable: true });
+
+  function trustedPropertyType(tagName, property, elementNs) {
+    const ns = elementNs == null || elementNs === "" ? "http://www.w3.org/1999/xhtml" : toDOMString(elementNs);
+    const tag = asciiLowercase(tagName);
+    if (property === "innerHTML" || property === "outerHTML") return "TrustedHTML";
+    if (ns === "http://www.w3.org/1999/xhtml" && tag === "iframe" && property === "srcdoc") return "TrustedHTML";
+    if (ns === "http://www.w3.org/1999/xhtml" && tag === "script") {
+      if (property === "src") return "TrustedScriptURL";
+      if (property === "text" || property === "textContent" || property === "innerText") return "TrustedScript";
+    }
+    return null;
+  }
+
+  function trustedAttributeType(tagName, attribute, elementNs, attrNs) {
+    const ns = elementNs == null || elementNs === "" ? "http://www.w3.org/1999/xhtml" : toDOMString(elementNs);
+    const attrNamespace = attrNs == null || attrNs === "" ? null : toDOMString(attrNs);
+    const tag = asciiLowercase(tagName);
+    const name = asciiLowercase(attribute);
+    if (attrNamespace === null &&
+        (ns === "http://www.w3.org/1999/xhtml" || ns === "http://www.w3.org/2000/svg" ||
+         ns === "http://www.w3.org/1998/Math/MathML") &&
+        name.startsWith("on") && platformHandlerTypes &&
+        hasSetValue(platformHandlerTypes, name.slice(2))) return "TrustedScript";
+    if (ns === "http://www.w3.org/1999/xhtml") {
+      if (tag === "iframe" && attrNamespace === null && name === "srcdoc") return "TrustedHTML";
+      if (tag === "script" && attrNamespace === null && name === "src") return "TrustedScriptURL";
+    }
+    if (ns === "http://www.w3.org/2000/svg" && tag === "script" && name === "href" &&
+        (attrNamespace === null || attrNamespace === "http://www.w3.org/1999/xlink")) {
+      return "TrustedScriptURL";
+    }
+    return null;
+  }
+
+  function trustedAttributeValue(element, name, namespace, value, caseSensitive = false) {
+    const nodeId = internalNodeId(element);
+    const tag = internalNodeLocalName(element);
+    const ns = nativeNodeNamespaceURI(nodeId);
+    // The factory query is ASCII-case-insensitive, whereas names passed to
+    // setAttributeNS (and non-HTML setAttribute) are matched as DOM local names.
+    if (caseSensitive && (name !== asciiLowercase(name) || tag !== asciiLowercase(tag))) {
+      return toDOMString(value);
+    }
+    const kind = trustedAttributeType(tag, name, ns, namespace);
+    if (kind === null) return toDOMString(value);
+    const typeId = kind === "TrustedHTML" ? 0 : kind === "TrustedScript" ? 1 : 2;
+    const sink = kind === "TrustedScript" ? `Element ${asciiLowercase(name)}` :
+      ns === "http://www.w3.org/2000/svg" ? "SVGScriptElement href" :
+      tag === "iframe" ? "HTMLIFrameElement srcdoc" : "HTMLScriptElement src";
+    const converted = nativeTrustedTypeIs(value, typeId) ? "" : toDOMString(value);
+    return trustedValueForSink(value, nodeId, typeId, sink, converted);
+  }
+
+  function trustedValueForSink(value, nodeId, kind, sinkName, convertedString, approval, onRejection) {
+    if (nativeTrustedTypeIs(value, kind)) {
+      if (approval) approval.value = true;
+      return nativeTrustedTypeValue(value, kind);
+    }
+    // DOMParser converts its first Web IDL argument before validating MIME;
+    // reuse that string rather than invoking an author-defined coercion twice.
+    const input = arguments.length >= 5 ? convertedString :
+      value == null && (sinkName === "Element innerHTML" || sinkName === "ShadowRoot innerHTML")
+        ? "" : toDOMString(value);
+    if (!nativeTrustedTypeSinkRequires(nodeId)) return input;
+    const targetDocumentId = nativeScriptOwnerDocument(nodeId);
+    const callback = nativeTrustedTypeDefaultForNode(nodeId, kind);
+    if (typeof callback === "function") {
+      const typeName = kind === 0 ? "TrustedHTML" : kind === 1 ? "TrustedScript" : "TrustedScriptURL";
+      const converted = safeApply(callback, undefined, [input, typeName, sinkName]);
+      if (nativeScriptOwnerDocument(nodeId) !== targetDocumentId) {
+        throw new IntrinsicTypeError("Trusted Types sink moved to another Document");
+      }
+      if (converted != null) {
+        const result = toDOMString(converted);
+        // Stringifying a policy result can itself run author code. Do not
+        // apply an approval obtained for the former owner after that code
+        // adopts the sink into another Document.
+        if (nativeScriptOwnerDocument(nodeId) !== targetDocumentId) {
+          throw new IntrinsicTypeError("Trusted Types sink moved to another Document");
+        }
+        if (approval) approval.value = true;
+        return result;
+      }
+    }
+    if (nativeScriptOwnerDocument(nodeId) !== targetDocumentId) {
+      throw new IntrinsicTypeError("Trusted Types sink moved to another Document");
+    }
+    if (!nativeTrustedTypeSinkViolation(nodeId, input, sinkName)) {
+      // Script preparation reports the violation and aborts the script. The
+      // insertion operation itself does not raise an uncaught page exception.
+      if (arguments.length >= 7) return onRejection;
+      throw new IntrinsicTypeError(`Trusted Type is required for ${sinkName}`);
+    }
+    return input;
+  }
+
+  function trustedHTMLForSink(value, nodeId, sinkName = "Element innerHTML", convertedString) {
+    return arguments.length >= 4
+      ? trustedValueForSink(value, nodeId, 0, sinkName, convertedString)
+      : trustedValueForSink(value, nodeId, 0, sinkName);
+  }
+
+  // An author callback reached while parsing or replacing markup can adopt
+  // the receiver into another Document after its Trusted Types check. Keep the
+  // authorization bound to the original receiver and its owning Document.
+  function trustedSinkDocumentGuard(node) {
+    const nodeId = internalNodeId(node);
+    const documentId = nativeScriptOwnerDocument(nodeId);
+    return () => {
+      if (internalNodeId(node) !== nodeId ||
+          nativeScriptOwnerDocument(nodeId) !== documentId) {
+        throw new IntrinsicTypeError("Trusted Types sink moved to another Document");
+      }
+    };
+  }
+
+  function setAttributeWithApprovedString(element, name, value, approvedValue, guard = null) {
+    let attr = String(name);
+    if (!isValidAttributeLocalName(attr)) {
+      throw new DOMException(
+        "The attribute name provided ('" + attr + "') is not a valid name.",
+        "InvalidCharacterError"
+      );
+    }
+    const htmlElement = isHtmlElementInHtmlDocument(element);
+    if (htmlElement) attr = asciiLowercase(attr);
+    const newValue = approvedValue === undefined
+      ? trustedAttributeValue(element, attr, null, value, !htmlElement) : approvedValue;
+    let oldValue;
+    let callbackName;
+    let callbackNamespace;
+    if (htmlElement) {
+      oldValue = __omoikane_get_attribute(element.__id, attr);
+      if (guard) guard();
+      __omoikane_set_attribute(element.__id, attr, newValue);
+      refreshMaterializedAttribute(element, [attr, null, attr, newValue]);
+      callbackName = attr;
+      callbackNamespace = null;
+    } else {
+      const previous = attributeRecordByName(element, attr);
+      oldValue = previous ? previous[3] : null;
+      if (guard) guard();
+      nativeSetAttributeNS(
+        element.__id,
+        previous ? previous[1] : null,
+        previous ? previous[0] : attr,
+        previous ? previous[2] : attr,
+        newValue,
+        false
+      );
+      const current = previous
+        ? [previous[0], previous[1], previous[2], newValue]
+        : [attr, null, attr, newValue];
+      refreshMaterializedAttribute(element, current);
+      callbackName = current[2];
+      callbackNamespace = current[1];
+    }
+    queueMutation(element, "attributes", {
+      attributeName: callbackName,
+      attributeNamespace: callbackNamespace,
+      oldValue,
+    });
+    notifyCustomElementAttributeChanged(
+      element, callbackName, oldValue, newValue, callbackNamespace
+    );
+    if (callbackName === "popover") popoverAttributeChanged(element, oldValue, newValue);
+    if (callbackName === "popovertarget") clearPopoverTargetOverride(element);
+    if (callbackName === "slot" ||
+        (callbackName === "name" && element instanceof HTMLSlotElement)) {
+      refreshSlotAssignments();
+    }
+    if (safeApply(safeRegExpExec, /^on./i, [attr]) !== null) applyInlineHandlerAttribute(element, attr);
+  }
+
+  function trustedScriptTextForSink(value, nodeId, sinkName) {
+    const approval = { value: false };
+    const converted = nativeTrustedTypeIs(value, 1) ? "" :
+      value == null && sinkName === "HTMLScriptElement textContent" ? "" : toDOMString(value);
+    const text = trustedValueForSink(value, nodeId, 1, sinkName, converted, approval);
+    return [text, {
+      approved: approval.value,
+      ownerDocumentId: nativeScriptOwnerDocument(nodeId),
+    }];
+  }
 
   function canonicalWrapperId(node) {
     if ((typeof node !== "object" && typeof node !== "function") || node === null) {
@@ -567,11 +1022,21 @@
     "scroll-margin-inline-start", "scroll-margin-inline-end",
     "scroll-margin-block-start", "scroll-margin-block-end",
   ]);
+  const logicalBoxStyleProperties = new Set([
+    "margin-block", "margin-inline", "padding-block", "padding-inline",
+    "margin-block-start", "margin-block-end", "margin-inline-start", "margin-inline-end",
+    "padding-block-start", "padding-block-end", "padding-inline-start", "padding-inline-end",
+  ]);
   const needsStyleValueNormalization = (name, value) =>
     name === "transition" || name.startsWith("transition-") ||
+    logicalBoxStyleProperties.has(name) ||
     validatesSpecialStyleProperties.has(name) ||
     (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
   const styleShorthandLonghands = Object.freeze({
+    "margin-block": ["margin-block-start", "margin-block-end"],
+    "margin-inline": ["margin-inline-start", "margin-inline-end"],
+    "padding-block": ["padding-block-start", "padding-block-end"],
+    "padding-inline": ["padding-inline-start", "padding-inline-end"],
     "inset": ["top", "right", "bottom", "left"],
     "inset-inline": ["inset-inline-start", "inset-inline-end"],
     "inset-block": ["inset-block-start", "inset-block-end"],
@@ -609,18 +1074,37 @@
     const longhands = styleShorthandLonghands[kebab];
     if (!longhands) return null;
     const values = new Map();
+    const priorities = new Map();
+    let pendingValue = null;
+    let pendingOverridden = false;
     for (const declaration of declarations) {
       if (declaration.name === kebab) {
+        pendingValue = null;
+        pendingOverridden = false;
         try {
           for (const [name, value] of JSON.parse(__omoikane_expand_style_shorthand(
             kebab, declaration.value
-          ))) values.set(name, value);
+          ))) {
+            if (name === kebab && logicalBoxStyleProperties.has(kebab)) {
+              pendingValue = value;
+            }
+            values.set(name, value);
+            priorities.set(name, declaration.priority || "");
+          }
         } catch (_) {}
       } else if (longhands.includes(declaration.name)) {
+        if (pendingValue !== null) pendingOverridden = true;
         values.set(declaration.name, declaration.value);
+        priorities.set(declaration.name, declaration.priority || "");
       }
     }
+    if (pendingValue !== null) return pendingOverridden ? "" : pendingValue;
     const parts = longhands.map(name => values.get(name));
+    if (logicalBoxStyleProperties.has(kebab)) {
+      if (longhands.some(name => priorities.get(name) !== priorities.get(longhands[0]))) return "";
+      if (parts.some(value => /^(initial|inherit|unset|revert|revert-layer)$/.test(value)) &&
+          !parts.every(value => value === parts[0])) return "";
+    }
     if (kebab === "border-inline" || kebab === "border-block") {
       return parts.slice(0, 3).every((value, index) => value === parts[index + 3])
         ? parts.slice(0, 3).filter(Boolean).join(" ") : "";
@@ -643,7 +1127,8 @@
   }
 
   function computedLogicalShorthand(map, kebab) {
-    if (kebab !== "inset" && kebab !== "inset-inline" && kebab !== "inset-block" &&
+    if (!logicalBoxStyleProperties.has(kebab) &&
+        kebab !== "inset" && kebab !== "inset-inline" && kebab !== "inset-block" &&
         kebab !== "border-inline" && kebab !== "border-block" &&
         !kebab.startsWith("border-inline-") && !kebab.startsWith("border-block-")) {
       return null;
@@ -732,7 +1217,46 @@
     constructor() {
       throw new TypeError("Illegal constructor");
     }
+
+    focus() {
+      if (this !== focusDocument.defaultView && !windowObjects.has(this)) {
+        throw new TypeError("Illegal invocation");
+      }
+      focusWindowAcrossDocuments();
+    }
+
+    blur() {
+      if (this !== focusDocument.defaultView && !windowObjects.has(this)) {
+        throw new TypeError("Illegal invocation");
+      }
+    }
   }
+  // The browsing-context opener is separate from an author's own `opener`
+  // property. A named-window reuse updates this slot without replacing that
+  // property; deleting the override reveals the current relation again.
+  let browsingOpener = null;
+  __omoikane_update_auxiliary_opener = value => { browsingOpener = value; };
+  Object.defineProperty(Window.prototype, "opener", {
+    configurable: true,
+    enumerable: true,
+    get() { return browsingOpener; },
+    set(value) {
+      if (value === null) {
+        if (globalThis.__omoikane_auxiliary_context_id !== undefined) {
+          __omoikane_clear_auxiliary_opener(__omoikane_auxiliary_context_id);
+        }
+        browsingOpener = null;
+      } else {
+        Object.defineProperty(this, "opener", {
+          configurable: true, enumerable: true, writable: true, value,
+        });
+      }
+    },
+  });
+  Object.defineProperty(Window.prototype, windowProxyToStringTag, {
+    configurable: true,
+    value: "Window",
+  });
   Object.defineProperty(Window, Symbol.hasInstance, {
     value(candidate) {
       return (typeof candidate === "object" || typeof candidate === "function") &&
@@ -2049,13 +2573,32 @@
     }
   }
 
+  // A node keeps one JS wrapper when it moves between browsing-context
+  // Realms. Its constructor belongs to the old Realm, so instanceof the
+  // current Realm's Node cannot identify it during event propagation.
+  function isEventNode(node) {
+    if (node instanceof Node) return true;
+    if (node === null || (typeof node !== "object" && typeof node !== "function")) return false;
+    try {
+      const id = internalNodeId(node);
+      return id !== undefined && cachedNode(id) === node;
+    } catch (_) {
+      return false;
+    }
+  }
+  function isEventShadowRoot(node) {
+    if (node instanceof Node) return node instanceof ShadowRoot;
+    return isEventNode(node) && internalNodeType(node) === 11 &&
+      nativeShadowHost(internalNodeId(node)) !== null;
+  }
+
   function shadowRootsContaining(node) {
-    if (!(node instanceof Node)) return [];
+    if (!isEventNode(node)) return [];
     const roots = [];
     let current = node;
     while (current) {
       const root = nodeRoot(current);
-      if (!(root instanceof ShadowRoot)) break;
+      if (!isEventShadowRoot(root)) break;
       if (root.mode === "closed") roots.push(root);
       current = root.host;
     }
@@ -2063,11 +2606,11 @@
   }
 
   function isNodeInsideShadowRoot(node, root) {
-    if (!(node instanceof Node)) return false;
+    if (!isEventNode(node)) return false;
     for (let current = node; current;) {
       if (current === root) return true;
       current = current.parentNode ||
-        (current instanceof ShadowRoot ? current.host : null);
+        (isEventShadowRoot(current) ? current.host : null);
     }
     return false;
   }
@@ -2078,9 +2621,9 @@
   // because their tree root remains the outer document.
   function retargetNode(node, against) {
     let target = node;
-    while (target instanceof Node) {
+    while (isEventNode(target)) {
       const root = nodeRoot(target);
-      if (!(root instanceof ShadowRoot)) return target;
+      if (!isEventShadowRoot(root)) return target;
       if (isNodeInsideShadowRoot(against, root)) return target;
       target = root.host;
     }
@@ -2124,12 +2667,12 @@
   }
 
   function eventParent(node, event, originalRoot) {
-    if (!(node instanceof Node) || !isLiveNode(node)) return null;
+    if (!isEventNode(node) || !isLiveNode(node)) return null;
     const assignedSlotId = internalAssignedSlot(node.__id);
     if (assignedSlotId !== null && assignedSlotId !== undefined) {
       return wrapNode(assignedSlotId);
     }
-    if (node instanceof ShadowRoot) {
+    if (isEventShadowRoot(node)) {
       // A non-composed event only stops at the shadow root in which it was
       // dispatched. Events from slotted light-DOM nodes still leave the root.
       return event.composed || originalRoot !== node ? node.host : null;
@@ -2139,9 +2682,9 @@
   }
 
   function buildEventPath(target, event) {
-    if (target instanceof Node && !isLiveNode(target)) return [];
+    if (isEventNode(target) && !isLiveNode(target)) return [];
     const path = [];
-    const originalRoot = target instanceof Node ? nodeRoot(target) : null;
+    const originalRoot = isEventNode(target) ? nodeRoot(target) : null;
     let current = target;
     while (current) {
       const entry = {
@@ -2158,7 +2701,7 @@
       if (entry.relatedTarget !== null && entry.relatedTarget === entry.target) break;
       path.push(entry);
       const parent = eventParent(current, event, originalRoot);
-      if (parent && current instanceof ShadowRoot &&
+      if (parent && isEventShadowRoot(current) &&
           retargetNode(target, parent) === parent) {
         // Capturing and bubbling listeners on a host are invoked as AT_TARGET
         // when an event crosses out of its shadow root.
@@ -2444,55 +2987,169 @@
     return isDocumentNode(root) ? root.body || root.documentElement || null : null;
   }
 
-  // `doc` and its ancestor documents, innermost first, each paired with the
-  // iframe element hosting it (`null` for the top-level document).
-  //
-  // Returns `null` when the walk does not reach the top-level document, which
-  // means `doc` has no browsing context: a document created by
-  // `createHTMLDocument`, or one whose frame was removed or reloaded.
-  function documentChain(doc) {
-    const chain = [];
-    let current = doc;
-    while (isDocumentNode(current)) {
-      if (current.__id === browsingInput.topDocumentId) {
-        chain.push({ document: current, frame: null });
-        return chain;
-      }
-      const frameId = __omoikane_document_owner_iframe(current.__id);
-      const frame = (frameId === null || frameId === undefined) ? null : wrapNode(frameId);
-      if (!frame) return null;
-      chain.push({ document: current, frame });
-      current = frame.ownerDocument;
-    }
-    return null;
+  // Focus crosses origin boundaries using identities and realm-local commands.
+  // No ancestor Document or iframe wrapper is exposed to a foreign Realm.
+  function documentFocusChain(id) {
+    const chain = nativeFocusChain(id);
+    return chain === null ? null : JSON.parse(chain);
   }
 
-  // The focused document followed by its ancestor documents, up to the
-  // top-level one. A focused document that is no longer reachable (its iframe
-  // was reloaded or removed) hands focus back to the top-level document.
-  function focusChainDocuments() {
+  function focusChainIds() {
     if (browsingInput.focusedDocumentId === NO_FOCUSED_DOCUMENT) return [];
-    const top = wrapNode(browsingInput.topDocumentId);
-    if (browsingInput.focusedDocumentId === null || browsingInput.focusedDocumentId === browsingInput.topDocumentId) {
-      return [top];
-    }
-    const chain = documentChain(wrapNode(browsingInput.focusedDocumentId));
-    if (!chain) {
-      browsingInput.focusedDocumentId = null;
-      return [top];
-    }
-    return chain.map(entry => entry.document);
+    const id = browsingInput.focusedDocumentId ?? browsingInput.topDocumentId;
+    const chain = documentFocusChain(id);
+    if (chain) return chain;
+    browsingInput.focusedDocumentId = null;
+    return documentFocusChain(browsingInput.topDocumentId) || [];
   }
+
+  function focusedDocumentId() {
+    return focusChainIds()[0]?.[0] ?? null;
+  }
+
+  function focusDocumentCommand(id, kind, args = []) {
+    if (id === null) return null;
+    if (id === __omoikane_document_id) return safeApply(focusDocumentCommands[kind], undefined, args);
+    return nativeForwardInput(id, "focus", [kind, ...args]);
+  }
+
+  const focusDocumentCommands = {
+    snapshot() {
+      const node = focusedElementOf(focusDocument);
+      return node ? internalNodeId(node) : null;
+    },
+    clear() { focusDocument.__focusedElementId = null; },
+    blurElement(relatedId) {
+      const node = focusedElementOf(focusDocument);
+      focusDocument.__focusedElementId = null;
+      __omoikane_set_content_visibility_focus(null);
+      nativeSetUserActionTarget("focus", null, false);
+      if (node) {
+        const related = wrapNode(relatedId);
+        fireFocusEvent(node, "blur", related, false);
+        fireFocusEvent(node, "focusout", related, true);
+        commitTextControlChange(node);
+      }
+    },
+    windowEvent(type) {
+      fireFocusEvent(focusDocument, type, null, false);
+      const view = focusDocument.defaultView;
+      if (view) fireFocusEvent(view, type, null, false);
+    },
+    frame(id) {
+      const frame = wrapNode(id);
+      if (frame?.isConnected && internalOwnerDocument(frame) === focusDocument) focusDocument.__focusedElementId = id;
+    },
+    pointerAppearance() {
+      const node = focusedElementOf(focusDocument);
+      if (node && !isTextControl(node) && !isEditingHost(node)) {
+        nativeSetUserActionTarget("focus", internalNodeId(node), false);
+        browsingInput.focusVisibleCurrent = false;
+      }
+    },
+    focusWindow() { focusWindowAcrossDocuments(); },
+    commit(id, previousId, previousVisible, preventScroll) {
+      const node = wrapNode(id);
+      if (internalOwnerDocument(node) !== focusDocument || !canBeFocused(node)) return;
+      focusDocument.__focusedElementId = id;
+      browsingInput.focusedDocumentId = __omoikane_document_id;
+      const visible = browsingInput.focusVisibleKeyboard || isTextControl(node) || isEditingHost(node) ||
+        (!browsingInput.pointerFocusInProgress && previousVisible);
+      nativeSetUserActionTarget("focus", id, visible);
+      browsingInput.focusVisibleCurrent = visible;
+      __omoikane_set_content_visibility_focus(id);
+      if (!preventScroll) {
+        const view = focusDocument.defaultView;
+        const rect = node.getBoundingClientRect();
+        if (view && rect.bottom > view.innerHeight) view.scrollBy(0, rect.top);
+        else if (view && rect.top < 0) view.scrollBy(0, rect.top);
+      }
+      beginTextControlFocus(node);
+      const previous = wrapNode(previousId);
+      fireFocusEvent(node, "focus", previous, false);
+      fireFocusEvent(node, "focusin", previous, true);
+    },
+  };
+
+  function focusAcrossDocuments(doc, node, preventScroll) {
+    const docId = internalNodeId(doc);
+    if (!documentFocusChain(docId)) return;
+    if (!nativePermissionsPolicyQuery(docId, "allowsFeature", "focus-without-user-activation") &&
+        !fullscreenTransientActivation) return;
+    const previousChain = focusChainIds();
+    const previousDocId = previousChain[0]?.[0] ?? null;
+    const previousId = focusDocumentCommand(previousDocId, "snapshot");
+    const id = node === null ? null : internalNodeId(node);
+    if (previousDocId === docId && previousId === id) return;
+    const previousVisible = previousId !== null && browsingInput.focusVisibleCurrent;
+    const crossesDocuments = previousDocId !== docId;
+    const generation = (browsingInput.focusGeneration || 0) + 1;
+    browsingInput.focusGeneration = generation;
+    const current = () => browsingInput.focusGeneration === generation &&
+      (node === null || (canBeFocused(node) && internalNodeId(internalOwnerDocument(node)) === docId)) &&
+      documentFocusChain(docId) !== null;
+    focusDocumentCommand(previousDocId, "blurElement", [crossesDocuments ? null : id]);
+    // Nested focus from a blur handler wins over this interrupted transition.
+    if (!current()) return;
+    if (crossesDocuments) {
+      const chain = documentFocusChain(docId);
+      for (const [previous] of previousChain) {
+        if (!chain.some(entry => entry[0] === previous)) focusDocumentCommand(previous, "clear");
+      }
+      browsingInput.focusedDocumentId = NO_FOCUSED_DOCUMENT;
+      focusDocumentCommand(previousDocId, "windowEvent", ["blur"]);
+      if (!current()) return;
+      for (const [, parent, frame] of documentFocusChain(docId)) {
+        if (parent !== null) focusDocumentCommand(parent, "frame", [frame]);
+      }
+      if (node === null) focusDocumentCommand(docId, "blurElement", [null]);
+      browsingInput.focusedDocumentId = docId;
+      focusDocumentCommand(docId, "windowEvent", ["focus"]);
+      if (!current()) return;
+    }
+    if (id !== null) {
+      focusDocumentCommand(docId, "commit", [id, crossesDocuments ? null : previousId, previousVisible, preventScroll]);
+    }
+  }
+
+  function focusElementAcrossDocuments(node, preventScroll) {
+    if (canBeFocused(node)) focusAcrossDocuments(internalOwnerDocument(node), node, preventScroll);
+  }
+
+  function focusWindowAcrossDocuments() {
+    focusAcrossDocuments(focusDocument, null, true);
+  }
+
+  const parserAutofocusProcessedDocuments = new WeakSet();
+  globalThis.__omoikane_flush_parser_autofocus = function() {
+    const doc = focusDocument;
+    if (parserAutofocusProcessedDocuments.has(doc)) return;
+    parserAutofocusProcessedDocuments.add(doc);
+    const focused = focusedDocumentId();
+    if (focusDocumentCommand(focused, "snapshot") !== null) return;
+    const pending = [doc];
+    while (pending.length) {
+      const node = pending.pop();
+      if (internalNodeType(node) === 1 && node.hasAttribute("autofocus") && canBeFocused(node)) {
+        node.focus();
+        return;
+      }
+      const children = internalChildNodes(node);
+      for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
+    }
+  };
 
   // No focus event is cancelable, and all four are composed so they cross
   // shadow boundaries. Bubbling differs per event — `focusin` and `focusout`
   // bubble, `focus` and `blur` do not — so each caller passes it in.
   function fireFocusEvent(target, type, relatedTarget, bubbles) {
-    target.dispatchEvent(new FocusEvent(type, {
+    const event = new FocusEvent(type, {
       bubbles,
       composed: true,
       relatedTarget,
-    }));
+    });
+    event.isTrusted = true;
+    target.dispatchEvent(event);
   }
 
   // Boa 0.21 exposes WeakMap/WeakRef (but not FinalizationRegistry), so the
@@ -2710,7 +3367,7 @@
   // The DOM insertion algorithm is an internal operation. Resolve tree state
   // from native ids so changing a genuine wrapper's JavaScript prototype does
   // not make insertAdjacentElement/Text lose its platform-object identity.
-  function insertNodeBeforeInternal(parent, newNode, refNode, suppressObservers = false, reactions = null, validityChecked = false) {
+  function insertNodeBeforeInternal(parent, newNode, refNode, suppressObservers = false, reactions = null, validityChecked = false, trustedHTMLGuard = null) {
     const parentId = internalNodeId(parent);
     const newId = internalNodeId(newNode);
     if (parentId === undefined || newId === undefined) {
@@ -2760,6 +3417,7 @@
       }
       for (const child of children) {
         notifyImplicitRemoval(child, true);
+        if (trustedHTMLGuard) trustedHTMLGuard();
         __omoikane_insert_before(parentId, internalNodeId(child), refId);
       }
       if (children.length) {
@@ -2791,6 +3449,7 @@
 
     const connectedBeforeMove = internalIsConnected(newNode);
     notifyImplicitRemoval(newNode);
+    if (trustedHTMLGuard) trustedHTMLGuard();
     __omoikane_insert_before(parentId, newId, refId);
     stampInsertedOwnerDocument(parent, [newNode]);
     if (connectedBeforeMove) {
@@ -2962,6 +3621,104 @@
     get [Symbol.toStringTag]() { return "DOMTokenList"; }
   }
   globalThis.DOMTokenList = DOMTokenList;
+
+  function replaceNodeTextContent(node, text, scriptApproval = null) {
+    const wasConnected = node.isConnected;
+    const removedNodes = node.childNodes.slice();
+    // Native replaces all children at once. Notify from the end so boundary
+    // offsets for later siblings are decremented by preceding removals.
+    for (const child of node.childNodes.slice().reverse()) preRemove(node, child);
+    if (scriptApproval !== null &&
+        nativeScriptOwnerDocument(internalNodeId(node)) !== scriptApproval.ownerDocumentId) {
+      throw new IntrinsicTypeError("Trusted Types sink moved to another Document");
+    }
+    __omoikane_set_text_content(node.__id, text);
+    if (scriptApproval !== null) {
+      // preRemove can invoke author callbacks; a script adopted by another
+      // Document after sink validation must not carry its old approval there.
+      nativeTrustedRememberScriptText(node.__id, text,
+        scriptApproval.approved &&
+        nativeScriptOwnerDocument(internalNodeId(node)) === scriptApproval.ownerDocumentId);
+    }
+    const canonicalId = canonicalNodeId(node);
+    const canonicalType = canonicalId === undefined ? undefined : nativeNodeType(canonicalId);
+    if (canonicalType === 3 || canonicalType === 4 || canonicalType === 7 || canonicalType === 8) {
+      safeWeakMapSet(canonicalCharacterDataOverrides, node, text);
+    }
+    if (wasConnected) {
+      for (const child of removedNodes) retireIframeWindowProxies(child);
+    }
+    forgetDiscardedNodeWrappers();
+    const addedNodes = node.childNodes.slice();
+    stampInsertedOwnerDocument(node, addedNodes);
+    if (wasConnected) {
+      for (const child of removedNodes) disconnectCustomElementTree(child);
+    }
+    if (removedNodes.length || addedNodes.length) {
+      queueMutation(node, "childList", { addedNodes, removedNodes });
+    }
+    refreshSlotAssignments();
+    signalFallbackSlotChanges(node);
+  }
+
+  function setInnerHTMLWithApprovedString(receiver, html, guard) {
+    const id = internalNodeId(receiver);
+    const owner = internalOwnerDocument(receiver);
+    const hasDocumentParts = nativeNodeLocalName(id) === "html" &&
+      nativeNodeIsHtmlElement(id) && owner?.contentType === "text/html" &&
+      safeApply(safeRegExpExec, /<(?:head|body)(?:\s|>)/i, [html]) !== null;
+    guard();
+    if (hasDocumentParts) {
+      const headMatch = safeApply(safeRegExpExec,
+        /<head(?:\s[^>]*)?>([\s\S]*?)<\/head\s*>/i, [html]);
+      const bodyMatch = safeApply(safeRegExpExec,
+        /<body(?:\s[^>]*)?>([\s\S]*?)<\/body\s*>/i, [html]);
+      guard();
+      for (const child of internalChildNodes(receiver)) {
+        removeChildInternal(receiver, child);
+      }
+      guard();
+      const head = owner.createElement("head");
+      const body = owner.createElement("body");
+      const ownerId = internalNodeId(owner);
+      if (nativeScriptOwnerDocument(internalNodeId(head)) !== ownerId ||
+          nativeScriptOwnerDocument(internalNodeId(body)) !== ownerId ||
+          internalNodeLocalName(head) !== "head" || internalNodeLocalName(body) !== "body") {
+        throw new IntrinsicTypeError("HTML document part belongs to another Document");
+      }
+      guard();
+      if (headMatch) setInnerHTMLWithApprovedString(head, headMatch[1], guard);
+      if (bodyMatch) setInnerHTMLWithApprovedString(body, bodyMatch[1], guard);
+      insertNodeBeforeInternal(receiver, head, null, false, null, false, guard);
+      insertNodeBeforeInternal(receiver, body, null, false, null, false, guard);
+      return;
+    }
+    const wasConnected = internalIsConnected(receiver);
+    const removedNodes = internalChildNodes(receiver);
+    for (let index = removedNodes.length - 1; index >= 0; index--) {
+      preRemove(receiver, removedNodes[index]);
+    }
+    guard();
+    __omoikane_set_inner_html(id, html);
+    if (wasConnected) {
+      for (const child of removedNodes) retireIframeWindowProxies(child);
+    }
+    forgetDiscardedNodeWrappers();
+    const addedNodes = internalChildNodes(receiver);
+    stampInsertedOwnerDocument(receiver, addedNodes);
+    if (wasConnected) {
+      for (const child of removedNodes) disconnectCustomElementTree(child);
+    }
+    const registry = owner && safeWeakMapGet(customElementRegistryByDocument, owner);
+    if (registry) {
+      for (const node of addedNodes) upgradeCustomElementTree(registry, node);
+    }
+    if (removedNodes.length || addedNodes.length) {
+      queueMutation(receiver, "childList", { addedNodes, removedNodes });
+    }
+    refreshSlotAssignments();
+    signalFallbackSlotChanges(receiver);
+  }
 
   class Node {
     constructor(id) {
@@ -3159,60 +3916,7 @@
     }
 
     setAttribute(name, value) {
-      let attr = String(name);
-      if (!isValidAttributeLocalName(attr)) {
-        throw new DOMException(
-          "The attribute name provided ('" + attr + "') is not a valid name.",
-          "InvalidCharacterError"
-        );
-      }
-      const htmlElement = isHtmlElementInHtmlDocument(this);
-      if (htmlElement) attr = asciiLowercase(attr);
-      const newValue = String(value);
-      let oldValue;
-      let callbackName;
-      let callbackNamespace;
-      if (htmlElement) {
-        oldValue = __omoikane_get_attribute(this.__id, attr);
-        __omoikane_set_attribute(this.__id, attr, newValue);
-        refreshMaterializedAttribute(this, [attr, null, attr, newValue]);
-        callbackName = attr;
-        callbackNamespace = null;
-      } else {
-        const previous = attributeRecordByName(this, attr);
-        oldValue = previous ? previous[3] : null;
-        nativeSetAttributeNS(
-          this.__id,
-          previous ? previous[1] : null,
-          previous ? previous[0] : attr,
-          previous ? previous[2] : attr,
-          newValue,
-          false
-        );
-        const current = previous
-          ? [previous[0], previous[1], previous[2], newValue]
-          : [attr, null, attr, newValue];
-        refreshMaterializedAttribute(this, current);
-        callbackName = current[2];
-        callbackNamespace = current[1];
-      }
-      queueMutation(this, "attributes", {
-        attributeName: callbackName,
-        attributeNamespace: callbackNamespace,
-        oldValue,
-      });
-      notifyCustomElementAttributeChanged(
-        this, callbackName, oldValue, newValue, callbackNamespace
-      );
-      if (callbackName === "popover") popoverAttributeChanged(this, oldValue, newValue);
-      if (callbackName === "popovertarget") clearPopoverTargetOverride(this);
-      if (callbackName === "slot" ||
-          (callbackName === "name" && this instanceof HTMLSlotElement)) {
-        refreshSlotAssignments();
-      }
-      // A dynamically set `on*` content attribute is wired to a listener here
-      // (parse-time attributes go through the initial wireInlineHandlers pass).
-      if (/^on./i.test(attr)) applyInlineHandlerAttribute(this, attr);
+      setAttributeWithApprovedString(this, name, value);
     }
 
     get className() {
@@ -3329,7 +4033,14 @@
             if (value === null) continue;
             declaration.value = value;
           }
-          normalized.push(declaration);
+          if (logicalBoxStyleProperties.has(declaration.name) &&
+              styleShorthandLonghands[declaration.name]) {
+            for (const [name, value] of JSON.parse(__omoikane_expand_style_shorthand(
+              declaration.name, declaration.value
+            ))) normalized.push({ name, value, priority: declaration.priority });
+          } else {
+            normalized.push(declaration);
+          }
         }
         return normalized;
       };
@@ -3366,7 +4077,8 @@
       // Later declarations win, matching the inline cascade.
       const getValue = (kebab) => {
         const decls = parseDecls();
-        if (kebab === "inset" || kebab.startsWith("inset-") ||
+        if (logicalBoxStyleProperties.has(kebab) ||
+            kebab === "inset" || kebab.startsWith("inset-") ||
             kebab === "border-inline" || kebab.startsWith("border-inline-") ||
             kebab === "border-block" || kebab.startsWith("border-block-")) {
           const shorthand = logicalShorthandValue(kebab, decls);
@@ -3395,6 +4107,14 @@
       };
       const getPriority = (kebab) => {
         const decls = parseDecls();
+        const longhands = logicalBoxStyleProperties.has(kebab) && styleShorthandLonghands[kebab];
+        if (longhands) {
+          if (!logicalShorthandValue(kebab, decls)) return "";
+          for (let i = decls.length - 1; i >= 0; i--) {
+            if (decls[i].name === kebab) return decls[i].priority;
+          }
+          return getPriority(longhands[0]);
+        }
         for (let i = decls.length - 1; i >= 0; i--) {
           if (decls[i].name === kebab) return decls[i].priority;
         }
@@ -3440,6 +4160,9 @@
         const remaining = decls.filter(d => !removed.has(d.name));
         if (remaining.length === decls.length) return "";
         let old = "";
+        if (logicalBoxStyleProperties.has(kebab) && longhands.length) {
+          old = logicalShorthandValue(kebab, decls) || "";
+        }
         for (let i = decls.length - 1; i >= 0; i--) {
           if (decls[i].name === kebab) { old = decls[i].value; break; }
         }
@@ -3530,35 +4253,15 @@
     set textContent(value) {
       const type = this.nodeType;
       if (type === 9 || type === 10) return;
-      const text = value == null ? "" : String(value);
-      const wasConnected = this.isConnected;
-      const removedNodes = this.childNodes.slice();
-      // Native replaces all children at once. Notify from the end so boundary
-      // offsets for later siblings are subsequently decremented by removals of
-      // their preceding siblings, matching sequential pre-remove semantics.
-      for (const child of this.childNodes.slice().reverse()) preRemove(this, child);
-      __omoikane_set_text_content(this.__id, text);
-      const canonicalId = canonicalNodeId(this);
-      const canonicalType = canonicalId === undefined ? undefined : nativeNodeType(canonicalId);
-      if (canonicalType === 3 || canonicalType === 4 || canonicalType === 7 || canonicalType === 8) {
-        // Keep the private WTF-16 override coherent even when callers invoke
-        // this base-class descriptor setter directly on CharacterData.
-        safeWeakMapSet(canonicalCharacterDataOverrides, this, text);
+      const scriptElement = type === 1 && internalNodeLocalName(this) === "script" &&
+        nativeNodeNamespaceURI(internalNodeId(this)) === "http://www.w3.org/1999/xhtml";
+      if (scriptElement) {
+        const [text, approved] = trustedScriptTextForSink(
+          value, internalNodeId(this), "HTMLScriptElement textContent");
+        replaceNodeTextContent(this, text, approved);
+      } else {
+        replaceNodeTextContent(this, value == null ? "" : String(value));
       }
-      if (wasConnected) {
-        for (const child of removedNodes) retireIframeWindowProxies(child);
-      }
-      forgetDiscardedNodeWrappers();
-      const addedNodes = this.childNodes.slice();
-      stampInsertedOwnerDocument(this, addedNodes);
-      if (wasConnected) {
-        for (const child of removedNodes) disconnectCustomElementTree(child);
-      }
-      if (removedNodes.length || addedNodes.length) {
-        queueMutation(this, "childList", { addedNodes, removedNodes });
-      }
-      refreshSlotAssignments();
-      signalFallbackSlotChanges(this);
     }
 
     get innerHTML() {
@@ -3567,43 +4270,8 @@
     }
 
     set innerHTML(value) {
-      const html = value == null ? "" : String(value);
-      if (this instanceof HTMLHtmlElement && this.ownerDocument &&
-          this.ownerDocument.contentType === "text/html" && /<(?:head|body)(?:\s|>)/i.test(html)) {
-        const headMatch = /<head(?:\s[^>]*)?>([\s\S]*?)<\/head\s*>/i.exec(html);
-        const bodyMatch = /<body(?:\s[^>]*)?>([\s\S]*?)<\/body\s*>/i.exec(html);
-        while (this.firstChild) this.removeChild(this.firstChild);
-        const head = this.ownerDocument.createElement("head");
-        const body = this.ownerDocument.createElement("body");
-        if (headMatch) head.innerHTML = headMatch[1];
-        if (bodyMatch) body.innerHTML = bodyMatch[1];
-        this.appendChild(head);
-        this.appendChild(body);
-        return;
-      }
-      const wasConnected = this.isConnected;
-      const removedNodes = this.childNodes.slice();
-      for (const child of removedNodes.slice().reverse()) preRemove(this, child);
-      __omoikane_set_inner_html(this.__id, html);
-      if (wasConnected) {
-        for (const child of removedNodes) retireIframeWindowProxies(child);
-      }
-      forgetDiscardedNodeWrappers();
-      const addedNodes = this.childNodes.slice();
-      stampInsertedOwnerDocument(this, addedNodes);
-      if (wasConnected) {
-        for (const child of removedNodes) disconnectCustomElementTree(child);
-      }
-      const owner = this.nodeType === 9 ? this : this.ownerDocument;
-      const registry = owner && safeWeakMapGet(customElementRegistryByDocument, owner);
-      if (registry) {
-        for (const node of addedNodes) upgradeCustomElementTree(registry, node);
-      }
-      if (removedNodes.length || addedNodes.length) {
-        queueMutation(this, "childList", { addedNodes, removedNodes });
-      }
-      refreshSlotAssignments();
-      signalFallbackSlotChanges(this);
+      const html = trustedHTMLForSink(value, internalNodeId(this));
+      setInnerHTMLWithApprovedString(this, html, trustedSinkDocumentGuard(this));
     }
 
     get childNodes() {
@@ -3865,7 +4533,8 @@
       const ns = namespace == null || namespace === "" ? null : String(namespace);
       const name = String(qualifiedName);
       const { localName } = validateAndExtractAttributeNS(ns, name);
-      setAttributeValueNS(this, ns, name, localName, String(value), false);
+      setAttributeValueNS(this, ns, name, localName,
+        trustedAttributeValue(this, localName, ns, value, true), false);
     }
 
     getAttributeNS(namespace, localName) {
@@ -3912,11 +4581,30 @@
     }
 
     get innerText() {
-      return __omoikane_content_visibility_skips_inner_text(this.__id) ? "" : this.textContent;
+      if (__omoikane_content_visibility_skips_inner_text(this.__id)) return "";
+      const text = this.textContent;
+      const whiteSpace = platformGetComputedStyleForInnerText(this).whiteSpace;
+      if (whiteSpace === "pre" || whiteSpace === "pre-wrap" || whiteSpace === "break-spaces") {
+        return text;
+      }
+      // Rendered text drops trailing collapsible whitespace. document.writeln
+      // keeps its newline in the DOM, where textContent must still expose it.
+      let end = text.length;
+      while (end > 0 && (text[end - 1] === " " || text[end - 1] === "\t" ||
+             text[end - 1] === "\n" || text[end - 1] === "\r" ||
+             text[end - 1] === "\f")) end -= 1;
+      return text.slice(0, end);
     }
 
     set innerText(value) {
-      this.textContent = value;
+      if (internalNodeLocalName(this) === "script" &&
+          nativeNodeNamespaceURI(internalNodeId(this)) === "http://www.w3.org/1999/xhtml") {
+        const [text, approved] = trustedScriptTextForSink(
+          value, internalNodeId(this), "HTMLScriptElement innerText");
+        replaceNodeTextContent(this, text, approved);
+      } else {
+        this.textContent = value;
+      }
     }
 
     get outerHTML() {
@@ -3924,6 +4612,20 @@
       const id = internalNodeId(this);
       return internalOwnerDocument(this)?.contentType === "text/html"
         ? nativeGetHTML(id, false, "[]", true) : nativeSerializeXml(id);
+    }
+
+    set outerHTML(value) {
+      requireNodeReceiver(this);
+      // outerHTML has [LegacyNullToEmptyString] conversion before its
+      // Trusted Types check, including when a default policy is installed.
+      const html = value === null
+        ? trustedHTMLForSink(value, internalNodeId(this), "Element outerHTML", "")
+        : trustedHTMLForSink(value, internalNodeId(this), "Element outerHTML");
+      if (!internalParentNode(this)) return;
+      const guard = trustedSinkDocumentGuard(this);
+      insertAdjacentHTMLWithApprovedString(this, "beforebegin", html, guard);
+      guard();
+      removeChildNode.call(this);
     }
 
     get isConnected() {
@@ -4282,86 +4984,7 @@
     }
 
     focus(options) {
-      if (!canBeFocused(this)) return;
-      const doc = this.ownerDocument;
-      if (!(isDocumentNode(doc))) return;
-      const chain = documentChain(doc);
-      // A document with no browsing context cannot hold system focus.
-      if (!chain) return;
-
-      const previousChain = focusChainDocuments();
-      const previousDocument = previousChain[0];
-      const previous = focusedElementOf(previousDocument);
-      if (previousDocument === doc && previous === this) return;
-      const previousVisible = previous !== null && browsingInput.focusVisibleCurrent;
-      // A move across documents hides relatedTarget, because the element on the
-      // other side belongs to a different tree.
-      const crossesDocuments = previousDocument !== doc;
-      const related = crossesDocuments ? null : this;
-
-      // The spec takes focus away from the old element *before* dispatching
-      // blur, so the active element is the viewport fallback for that pair.
-      previousDocument.__focusedElementId = null;
-      nativeSetUserActionTarget("focus", null, false);
-      if (previous) {
-        fireFocusEvent(previous, "blur", related, false);
-        fireFocusEvent(previous, "focusout", related, true);
-        commitTextControlChange(previous);
-      }
-      // A blur/focusout handler may have focused another element. That nested
-      // focus transition wins; resuming this one would leave :focus-within and
-      // activeElement pointing at different targets.
-      const redirectedDocument = focusChainDocuments()[0];
-      if (redirectedDocument && focusedElementOf(redirectedDocument)) return;
-
-      if (crossesDocuments) {
-        // Documents dropping out of the chain lose their focused element; the
-        // ones that stay are pointed at the frame below them further down, so
-        // `parent.document.activeElement` follows the focus inwards.
-        for (const document of previousChain) {
-          if (!chain.some(entry => entry.document === document)) {
-            document.__focusedElementId = null;
-          }
-        }
-        // Each handler must observe the state its own event announces, so focus
-        // leaves the old context before its `blur` pair and the new chain is
-        // installed before the `focus` pair. Neither pair has a bubbling
-        // counterpart, unlike the element events.
-        browsingInput.focusedDocumentId = NO_FOCUSED_DOCUMENT;
-        fireFocusEvent(previousDocument, "blur", null, false);
-        const previousWindow = previousDocument.defaultView;
-        if (previousWindow) fireFocusEvent(previousWindow, "blur", null, false);
-
-        for (const entry of chain) {
-          if (entry.frame) {
-            entry.frame.ownerDocument.__focusedElementId = entry.frame.__id;
-          }
-        }
-        browsingInput.focusedDocumentId = doc.__id;
-        fireFocusEvent(doc, "focus", null, false);
-        const nextWindow = doc.defaultView;
-        if (nextWindow) fireFocusEvent(nextWindow, "focus", null, false);
-      }
-
-      doc.__focusedElementId = this.__id;
-      browsingInput.focusedDocumentId = doc.__id;
-      const focusVisible = browsingInput.focusVisibleKeyboard || isTextControl(this) ||
-        isEditingHost(this) ||
-        (!browsingInput.pointerFocusInProgress && previousVisible);
-      nativeSetUserActionTarget(
-        "focus", this.__id, focusVisible,
-      );
-      browsingInput.focusVisibleCurrent = focusVisible;
-      __omoikane_set_content_visibility_focus(this.__id);
-      if (!options?.preventScroll) {
-        const view = doc.defaultView;
-        const rect = this.getBoundingClientRect();
-        if (view && rect.bottom > view.innerHeight) view.scrollBy(0, rect.top);
-        else if (view && rect.top < 0) view.scrollBy(0, rect.top);
-      }
-      beginTextControlFocus(this);
-      fireFocusEvent(this, "focus", crossesDocuments ? null : previous, false);
-      fireFocusEvent(this, "focusin", crossesDocuments ? null : previous, true);
+      focusElementAcrossDocuments(this, Boolean(options?.preventScroll));
     }
 
     // Runs the unfocusing steps: focus returns to the document's viewport and
@@ -4372,6 +4995,7 @@
       const doc = this.nodeType === 1 ? this.ownerDocument : null;
       if (!(isDocumentNode(doc))) return;
       if (focusedElementOf(doc) !== this) return;
+      browsingInput.focusGeneration = (browsingInput.focusGeneration || 0) + 1;
       doc.__focusedElementId = null;
       __omoikane_set_content_visibility_focus(null);
       nativeSetUserActionTarget("focus", null, false);
@@ -4773,21 +5397,27 @@
     return internalNodeType(node) === 11 ? internalChildNodes(node) : [node];
   }
 
-  function replaceChildren(...values) {
-    requireParentNode(this);
-    const node = mutationArgumentsNode(convertMutationArguments(values), this);
-    const removedNodes = internalChildNodes(this);
-    ensureAppendValidity(this, node, null, removedNodes);
+  function replaceChildrenInternal(receiver, values, trustedHTMLGuard = null) {
+    requireParentNode(receiver);
+    const node = mutationArgumentsNode(convertMutationArguments(values), receiver);
+    const removedNodes = internalChildNodes(receiver);
+    ensureAppendValidity(receiver, node, null, removedNodes);
     const addedNodes = insertedMutationNodes(node);
     const reactions = [];
-    for (const child of removedNodes) removeChildInternal(this, child, true, reactions);
-    insertNodeBeforeInternal(this, node, null, true, reactions);
+    if (trustedHTMLGuard) trustedHTMLGuard();
+    for (const child of removedNodes) removeChildInternal(receiver, child, true, reactions);
+    if (trustedHTMLGuard) trustedHTMLGuard();
+    insertNodeBeforeInternal(receiver, node, null, true, reactions, false, trustedHTMLGuard);
     if (removedNodes.length || addedNodes.length) {
-      queueMutation(this, "childList", {removedNodes, addedNodes});
+      queueMutation(receiver, "childList", {removedNodes, addedNodes});
     }
-    upgradeInsertedCustomElements(this, [this], reactions);
-    try { executeRunnableInsertedScripts([this]); }
+    upgradeInsertedCustomElements(receiver, [receiver], reactions);
+    try { executeRunnableInsertedScripts([receiver]); }
     finally { for (const reaction of reactions) reaction(); }
+  }
+
+  function replaceChildren(...values) {
+    return replaceChildrenInternal(this, values);
   }
 
   function mutateSibling(receiver, values, operation) {
@@ -4854,31 +5484,59 @@
     }
   }
 
-  function insertAdjacent(element, where, node) {
+  function insertAdjacent(element, where, node, trustedHTMLGuard = null) {
     const position = asciiLowercase(where);
     switch (position) {
       case "beforebegin": {
         const parent = internalParentNode(element);
         if (parent === null) return null;
         ensureInsertAdjacentDocumentValidity(parent, node);
-        return insertNodeBeforeInternal(parent, node, element);
+        return insertNodeBeforeInternal(parent, node, element, false, null, false, trustedHTMLGuard);
       }
       case "afterbegin": {
         const childIds = nativeChildNodeIds(internalNodeId(element)) || [];
         const firstChild = childIds.length > 0 ? wrapNode(childIds[0]) : null;
-        return insertNodeBeforeInternal(element, node, firstChild);
+        return insertNodeBeforeInternal(element, node, firstChild, false, null, false, trustedHTMLGuard);
       }
       case "beforeend":
-        return insertNodeBeforeInternal(element, node, null);
+        return insertNodeBeforeInternal(element, node, null, false, null, false, trustedHTMLGuard);
       case "afterend": {
         const parent = internalParentNode(element);
         if (parent === null) return null;
         ensureInsertAdjacentDocumentValidity(parent, node);
-        return insertNodeBeforeInternal(parent, node, internalNextSibling(element));
+        return insertNodeBeforeInternal(parent, node, internalNextSibling(element), false, null, false, trustedHTMLGuard);
       }
       default:
         throw new DOMException("The provided position is not valid.", "SyntaxError");
     }
+  }
+
+  function insertAdjacentHTMLWithApprovedString(element, where, markup, guard) {
+    if (where !== "beforebegin" && where !== "afterbegin" &&
+        where !== "beforeend" && where !== "afterend") {
+      throw new DOMException("The provided position is not valid", "SyntaxError");
+    }
+    guard();
+    let context = element;
+    if (where === "beforebegin" || where === "afterend") {
+      context = internalParentNode(element);
+      if (!context || internalNodeType(context) === 9) {
+        throw new DOMException("The parent cannot contain this insertion", "NoModificationAllowedError");
+      }
+    }
+    const owner = elementNodeDocument(element);
+    const html = owner.contentType === "text/html";
+    if (internalNodeType(context) !== 1 ||
+        (html && internalNodeLocalName(context) === "html")) {
+      context = owner.createElement("body");
+    }
+    guard();
+    const fragment = wrapNode(__omoikane_parse_contextual_fragment(
+      internalNodeId(context), markup, !html,
+    ));
+    stampOwnerDoc(fragment, owner);
+    guard();
+    insertAdjacent(element, where, fragment, guard);
   }
 
   class Element extends Node {
@@ -4904,28 +5562,8 @@
       requireCanonicalElement(this, "insertAdjacentHTML called on an incompatible receiver");
       if (arguments.length < 2) throw new TypeError("insertAdjacentHTML requires 2 arguments");
       where = asciiLowercase(toDOMString(where));
-      markup = toDOMString(markup);
-      if (!["beforebegin", "afterbegin", "beforeend", "afterend"].includes(where)) {
-        throw new DOMException("The provided position is not valid", "SyntaxError");
-      }
-      let context = this;
-      if (where === "beforebegin" || where === "afterend") {
-        context = internalParentNode(this);
-        if (!context || internalNodeType(context) === 9) {
-          throw new DOMException("The parent cannot contain this insertion", "NoModificationAllowedError");
-        }
-      }
-      const owner = elementNodeDocument(this);
-      const html = owner.contentType === "text/html";
-      if (internalNodeType(context) !== 1 ||
-          (html && internalNodeLocalName(context) === "html")) {
-        context = owner.createElement("body");
-      }
-      const fragment = wrapNode(__omoikane_parse_contextual_fragment(
-        internalNodeId(context), markup, !html,
-      ));
-      stampOwnerDoc(fragment, owner);
-      insertAdjacent(this, where, fragment);
+      markup = trustedHTMLForSink(markup, internalNodeId(this), "Element insertAdjacentHTML");
+      insertAdjacentHTMLWithApprovedString(this, where, markup, trustedSinkDocumentGuard(this));
     }
 
     insertAdjacentText(where, data) {
@@ -5451,6 +6089,8 @@
       return raw === null ? "" : __omoikane_resolve_url(raw);
     }
     set href(value) { this.setAttribute("href", String(value)); }
+    get rel() { return this.getAttribute("rel") ?? ""; }
+    set rel(value) { this.setAttribute("rel", String(value)); }
   }
   class HTMLAreaElement extends HTMLElement {
     get href() {
@@ -5755,8 +6395,15 @@
         .get.call(this.content);
     }
     set innerHTML(value) {
-      Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")
-        .set.call(this.content, value);
+      const html = trustedHTMLForSink(value, internalNodeId(this));
+      const guard = trustedSinkDocumentGuard(this);
+      const content = wrapNode(__omoikane_template_content(internalNodeId(this)));
+      const owner = internalOwnerDocument(this);
+      if (content && owner && getOwnerDocumentId(ownerDocumentIds, content) === undefined) {
+        stampOwnerDoc(content, templateContentsOwnerDocument(owner));
+      }
+      guard();
+      setInnerHTMLWithApprovedString(content, html, guard);
     }
   }
   class HTMLSlotElement extends HTMLElement {
@@ -5920,9 +6567,22 @@
     }
     set value(value) {
       const state = safeWeakMapGet(attributeNodeStates, this);
-      state.value = String(value);
-      if (!state.ownerElement) return;
-      state.ownerElement.setAttributeNS(state.namespace, state.name, state.value);
+      const owner = state.ownerElement;
+      // Attr.value is DOMString in Web IDL. Its input loses a Trusted Type
+      // brand before the attribute sink checks it.
+      const stringValue = toDOMString(value);
+      const converted = owner
+        ? trustedAttributeValue(owner, state.localName, state.namespace, stringValue,
+            !isHtmlElementInHtmlDocument(owner))
+        : stringValue;
+      if (state.ownerElement !== owner) {
+        throw new IntrinsicTypeError("Attribute owner changed during value conversion");
+      }
+      if (!owner) {
+        state.value = converted;
+        return;
+      }
+      setAttributeValueNS(owner, state.namespace, state.name, state.localName, converted, false);
     }
     get nodeValue() { return this.value; }
     set nodeValue(value) { this.value = value == null ? "" : value; }
@@ -5993,18 +6653,28 @@
     const oldAttr = oldRecord ? materializeAttribute(element, oldRecord) : null;
     if (oldAttr === attr) return attr;
 
+    const sourceOwner = state.ownerElement;
+    const sourceValue = sourceOwner
+      ? (nativeAttributeValueNS(internalNodeId(sourceOwner), state.namespace, state.localName) ?? state.value)
+      : state.value;
+    // Attr.value is a DOMString. Validate the stored string for the target
+    // element before changing either the attribute map or the Attr owner.
+    const prepared = trustedAttributeValue(element, state.localName, state.namespace,
+      sourceValue, !isHtmlElementInHtmlDocument(element));
+    if (state.ownerElement !== sourceOwner) {
+      throw new IntrinsicTypeError("Attribute owner changed during value conversion");
+    }
     const oldState = oldAttr ? safeWeakMapGet(attributeNodeStates, oldAttr) : null;
-    const oldSnapshot = oldState ? { ...oldState, value: oldAttr.value } : null;
-    const value = attr.value;
+    const oldSnapshot = oldState ? { ...oldState, value: oldRecord[3] } : null;
     setAttributeValueNS(
-      element, state.namespace, state.name, state.localName, value, true
+      element, state.namespace, state.name, state.localName, prepared, true
     );
 
     if (oldState) {
       Object.assign(oldState, oldSnapshot);
       oldState.ownerElement = null;
     }
-    state.value = value;
+    state.value = prepared;
     state.ownerDocument = element.ownerDocument;
     state.ownerElement = element;
     safeMapSet(attributeCacheFor(element, state.namespace), state.localName, attr);
@@ -6429,6 +7099,8 @@
   // Script preparation is intentionally separate from parsing. Range and
   // createElement scripts become runnable only after connection; innerHTML and
   // parser-created scripts are never marked and therefore remain inert.
+  const rejectedInsertedScript = Symbol("rejected inserted script");
+
   function executeRunnableInsertedScripts(roots) {
     for (const root of roots) {
       // Parser-created on* attributes need the same initialization as initial
@@ -6438,20 +7110,36 @@
       if (scripts === null) continue;
       for (const id of scripts) {
         const node = wrapNode(id);
-        const source = __omoikane_prepare_inserted_inline_script(node.__id);
+        const nodeId = internalNodeId(node);
+        const source = __omoikane_prepare_inserted_inline_script(nodeId);
         if (typeof source === "string") {
-          const doc = node.ownerDocument;
-          const view = doc && doc.defaultView;
-          if (view) {
-            const previousScript = doc.__currentScript || null;
-            try {
-              view.__omoikane_set_current_script(node.__id);
-              view.eval(source);
-            } catch (error) {
-              __omoikane_record_inserted_script_error(node.__id, String(error));
-            } finally {
-              doc.__currentScript = previousScript;
+          try {
+            const preparedDocumentId = nativeScriptOwnerDocument(nodeId);
+            const doc = preparedDocumentId == null ? null : wrapNode(preparedDocumentId);
+            const view = doc && doc.defaultView;
+            if (view) {
+              const previousScript = doc.__currentScript || null;
+              try {
+                const scriptValue = nativeTrustedTakeScriptTextApproval(nodeId, source)
+                  ? createTrustedType(1, source) : source;
+                const checkedSource = trustedValueForSink(
+                  scriptValue, nodeId, 1, "HTMLScriptElement text", source,
+                  undefined, rejectedInsertedScript);
+                if (checkedSource === rejectedInsertedScript) continue;
+                view.__omoikane_set_current_script(nodeId);
+                if (!nativeNodeIsConnected(nodeId) ||
+                    nativeScriptOwnerDocument(nodeId) !== preparedDocumentId) {
+                  throw new IntrinsicTypeError("script moved after security checks");
+                }
+                __omoikane_eval_inserted_inline_script(nodeId, checkedSource);
+              } catch (error) {
+                __omoikane_record_inserted_script_error(nodeId, String(error));
+              } finally {
+                doc.__currentScript = previousScript;
+              }
             }
+          } finally {
+            __omoikane_discard_prepared_inline_script(id);
           }
         }
       }
@@ -6620,7 +7308,7 @@
       }
       const fragment = wrapNode(__omoikane_parse_contextual_fragment(
         context.__id,
-        String(markup),
+        trustedHTMLForSink(markup, context.__id, "Range createContextualFragment"),
         !htmlDocument,
       ));
       stampOwnerDoc(fragment, doc);
@@ -7225,6 +7913,65 @@
     return wrapNode(nativeGetElementById(root.__id, String(id)));
   }
 
+  function writeTrustedDocumentStream(document, args, sink, newline) {
+    let text = "";
+    let allTrusted = true;
+    for (const value of args) {
+      if (nativeTrustedTypeIs(value, 0)) {
+        text += nativeTrustedTypeValue(value, 0);
+      } else {
+        allTrusted = false;
+        text += toDOMString(value);
+      }
+    }
+    // The variadic arguments form one HTML source. In particular, a default
+    // policy can transform text across their boundaries before parsing.
+    const checked = allTrusted ? text : trustedHTMLForSink(text, internalNodeId(document), sink);
+    __omoikane_document_write(internalNodeId(document), newline ? checked + "\n" : checked);
+  }
+
+  const policyConstructionToken = {};
+  const policyOwnerIds = new WeakMap();
+  const nodePolicyObjects = new WeakMap();
+  function policyOwnerId(policy) {
+    const documentId = safeWeakMapGet(policyOwnerIds, policy);
+    if (documentId === undefined) throw new TypeError("Illegal invocation");
+    return documentId;
+  }
+
+  class PermissionsPolicy {
+    constructor(token, documentId) {
+      if (token !== policyConstructionToken) throw new TypeError("Illegal constructor");
+      safeWeakMapSet(policyOwnerIds, this, documentId);
+    }
+
+    allowsFeature(feature, origin = undefined) {
+      const documentId = policyOwnerId(this);
+      if (arguments.length < 1) throw new TypeError("PermissionsPolicy.allowsFeature requires a feature");
+      return Boolean(nativePermissionsPolicyQuery(
+        documentId, "allowsFeature", String(feature), origin === undefined ? undefined : String(origin)
+      ));
+    }
+
+    features() {
+      return nativePermissionsPolicyQuery(policyOwnerId(this), "features");
+    }
+
+    allowedFeatures() {
+      return nativePermissionsPolicyQuery(policyOwnerId(this), "allowedFeatures");
+    }
+
+    getAllowlistForFeature(feature) {
+      const documentId = policyOwnerId(this);
+      if (arguments.length < 1) throw new TypeError("PermissionsPolicy.getAllowlistForFeature requires a feature");
+      return nativePermissionsPolicyQuery(documentId, "getAllowlistForFeature", String(feature));
+    }
+
+    get [Symbol.toStringTag]() { return "PermissionsPolicy"; }
+  }
+  globalThis.PermissionsPolicy = PermissionsPolicy;
+  globalThis.FeaturePolicy = PermissionsPolicy;
+
   class Document extends Node {
     constructor(id, construction) {
       if (construction === DOCUMENT_CONSTRUCTION) {
@@ -7485,6 +8232,18 @@
       return documentId !== undefined && Boolean(nativeFullscreenEnabled(documentId));
     }
 
+    get permissionsPolicy() {
+      if (internalNodeType(this) !== 9) throw new TypeError("Illegal invocation");
+      let policy = safeWeakMapGet(nodePolicyObjects, this);
+      if (!policy) {
+        policy = new PermissionsPolicy(policyConstructionToken, internalNodeId(this));
+        safeWeakMapSet(nodePolicyObjects, this, policy);
+      }
+      return policy;
+    }
+
+    get featurePolicy() { return this.permissionsPolicy; }
+
     exitFullscreen() {
       return exitFullscreenDocument(this);
     }
@@ -7688,7 +8447,8 @@
     }
 
     get referrer() {
-      return "";
+      requireNodeReceiver(this);
+      return nativeDocumentReferrer(internalNodeId(this)) ?? "";
     }
 
     get contentType() {
@@ -7751,7 +8511,8 @@
     // including one created by `createHTMLDocument`, which has no browsing
     // context at all.
     hasFocus() {
-      return focusChainDocuments().includes(this);
+      if (!isDocumentNode(this)) throw new TypeError("Illegal invocation");
+      return focusChainIds().some(entry => entry[0] === internalNodeId(this));
     }
 
     getElementsByName(name) {
@@ -7763,18 +8524,12 @@
 
     // Continue this document's input stream, pausing at each script end tag.
     write(...args) {
-      let text = "";
-      for (let i = 0; i < args.length; i += 1) text += String(args[i]);
-      __omoikane_document_write(this.__id, text);
+      writeTrustedDocumentStream(this, args, "Document write", false);
     }
 
     // Like write(), but appends a newline after the concatenated arguments.
     writeln(...args) {
-      let text = "";
-      for (let i = 0; i < args.length; i += 1) {
-        text += String(args[i]);
-      }
-      return this.write(text + "\n");
+      writeTrustedDocumentStream(this, args, "Document writeln", true);
     }
 
     // Start an empty input stream for this Document. A reentrant open of
@@ -7845,8 +8600,8 @@
         .get.call(this);
     }
     set innerHTML(value) {
-      Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")
-        .set.call(this, value);
+      const html = trustedHTMLForSink(value, internalNodeId(this), "ShadowRoot innerHTML");
+      setInnerHTMLWithApprovedString(this, html, trustedSinkDocumentGuard(this));
     }
     cloneNode() {
       throw new DOMException("ShadowRoot cannot be cloned", "NotSupportedError");
@@ -7899,7 +8654,10 @@
       requireNodeReceiver(this);
       const doc = internalNodeType(this) === 9 ? this : internalOwnerDocument(this);
       if (!doc) return "about:blank";
-      const fallback = doc.URL || "about:blank";
+      const documentURL = doc.URL || "about:blank";
+      const fallback = documentURL === "about:blank" || documentURL === "about:srcdoc"
+        ? nativeDocumentBaseURL(doc.__id) || documentURL
+        : documentURL;
       const base = doc.querySelector("base[href]");
       if (base) {
         try { return new URL(base.getAttribute("href"), fallback).href; }
@@ -7909,10 +8667,11 @@
     }, enumerable: true, configurable: true,
   });
 
-  function setParsedHTML(receiver, html, options, safe) {
+  function setParsedHTML(receiver, html, options, safe, trustedHTMLGuard = null) {
     const id = internalNodeId(receiver);
     html = toDOMString(html);
     const parsedOptions = sanitizerBridge.readOptions(options, safe);
+    if (trustedHTMLGuard) trustedHTMLGuard();
     const fragmentId = nativeParseUnsafeFragment(id, html, parsedOptions.runScripts,
       parsedOptions.configuration, safe);
     if (fragmentId === null) return;
@@ -7923,7 +8682,8 @@
     if (root != null) stampOwnerDoc(wrapNode(root), owner);
     const target = nativeNodeLocalName(id) === "template" && nativeNodeIsHtmlElement(id)
       ? receiver.content : receiver;
-    replaceChildren.call(target, fragment);
+    if (trustedHTMLGuard) trustedHTMLGuard();
+    replaceChildrenInternal(target, [fragment], trustedHTMLGuard);
   }
 
   function requireHTMLSetterReceiver(receiver) {
@@ -7936,7 +8696,10 @@
   function setHTMLUnsafe(html, options = {}) {
     requireHTMLSetterReceiver(this);
     if (arguments.length === 0) throw new IntrinsicTypeError("HTML is required");
-    setParsedHTML(this, html, options, false);
+    const sink = nativeShadowHost(internalNodeId(this)) == null
+      ? "Element setHTMLUnsafe" : "ShadowRoot setHTMLUnsafe";
+    const checked = trustedHTMLForSink(html, internalNodeId(this), sink);
+    setParsedHTML(this, checked, options, false, trustedSinkDocumentGuard(this));
   }
   function setHTML(html, options = {}) {
     requireHTMLSetterReceiver(this);
@@ -7956,7 +8719,8 @@
   }
   function parseHTMLUnsafe(html, options = {}) {
     if (arguments.length === 0) throw new IntrinsicTypeError("HTML is required");
-    return parseHTMLDocument(html, options, false);
+    return parseHTMLDocument(trustedHTMLForSink(
+      html, __omoikane_document_id, "Document parseHTMLUnsafe"), options, false);
   }
   function parseHTML(html, options = {}) {
     if (arguments.length === 0) throw new IntrinsicTypeError("HTML is required");
@@ -9675,10 +10439,25 @@
   }
 
   class HTMLIFrameElement extends HTMLElement {
+    get permissionsPolicy() {
+      if (internalNodeLocalName(this) !== "iframe" ||
+          nativeNodeNamespaceURI(internalNodeId(this)) !== HTML_NAMESPACE) {
+        throw new TypeError("Illegal invocation");
+      }
+      let policy = safeWeakMapGet(nodePolicyObjects, this);
+      if (!policy) {
+        policy = new PermissionsPolicy(policyConstructionToken, internalNodeId(this));
+        safeWeakMapSet(nodePolicyObjects, this, policy);
+      }
+      return policy;
+    }
+    get featurePolicy() { return this.permissionsPolicy; }
     get width() { return this.getAttribute("width") ?? ""; }
     set width(value) { this.setAttribute("width", String(value)); }
     get height() { return this.getAttribute("height") ?? ""; }
     set height(value) { this.setAttribute("height", String(value)); }
+    get allow() { return this.getAttribute("allow") ?? ""; }
+    set allow(value) { this.setAttribute("allow", String(value)); }
 
     __prepareResourceNavigation(action = "capture") {
       if (!this.isConnected) return;
@@ -9720,10 +10499,10 @@
     }
 
     // Boa 5da9b8f miscompiles the large bootstrap when this accessor pair is
-    // reduced to a getter. Keep the setter shape, but reject assignment with
-    // TypeError so the reflected DOMTokenList remains readonly.
-    set sandbox(_value) {
-      throw new TypeError("HTMLIFrameElement.sandbox is readonly");
+    // reduced to a getter. HTML's [PutForwards=value] forwards assignment to
+    // the existing DOMTokenList, without replacing that object.
+    set sandbox(value) {
+      this.sandbox.value = value;
     }
 
     get allowFullscreen() { return this.hasAttribute("allowfullscreen"); }
@@ -9777,6 +10556,7 @@
         const historyEntries = [];
         let historyIndex = -1;
         let pendingHistoryAction = null;
+        let pendingHistoryPreservesDeclaredOrigin = false;
         let pendingLocationURL = null;
         let historyScrollRestoration = "auto";
         let childNavigationDocument = null;
@@ -9802,7 +10582,7 @@
           return new URL(String(value), base).href;
         };
         const callerBaseURL = () => {
-          return effectiveDocumentBaseURL(globalThis.document);
+          return globalThis.document.baseURI;
         };
         const captureHistoryEntry = (generation, nextAccess) => {
           const attribute = hasFrameSrcdoc(iframe) ? "srcdoc" : "src";
@@ -9824,12 +10604,16 @@
             catch (_) { href = value; }
           }
           const submission = nativeIframeSubmissionSnapshot(iframe.__id);
-          return { attribute, value, href, state: null, generation, submission, persisted: null };
+          const declaredOriginSnapshot = nativeIframeDeclaredOrigin(iframe.__id);
+          return { attribute, value, href, state: null, generation, submission,
+            declaredOriginSnapshot,
+            preservesDeclaredOrigin: pendingHistoryPreservesDeclaredOrigin, persisted: null };
         };
         const commitHistoryEntry = (generation, nextAccess) => {
           const entry = captureHistoryEntry(generation, nextAccess);
           const action = pendingHistoryAction;
           pendingHistoryAction = null;
+          pendingHistoryPreservesDeclaredOrigin = false;
           pendingLocationURL = null;
           if (historyIndex < 0) {
             historyEntries.push(entry);
@@ -9843,6 +10627,7 @@
               attribute: entry.attribute,
               value: entry.value,
               submission: entry.submission,
+              declaredOriginSnapshot: entry.declaredOriginSnapshot,
               generation,
             };
             if (action === "traverse") {
@@ -9884,13 +10669,14 @@
             access = "closed";
             return;
           }
-          const [nextAccess, context, generation, pendingResource] = raw.split(":");
+          const [nextAccess, context, generation, pendingResource, javascriptReplacement] = raw.split(":");
           if (expectedContext === null) expectedContext = context;
           if (context !== expectedContext) {
             access = "closed";
             return;
           }
           if (generation !== activeGeneration) {
+            if (javascriptReplacement === "true") pendingHistoryAction = "replace";
             commitHistoryEntry(generation, nextAccess);
             activeGeneration = generation;
             activeWindow = { __listeners: new Map() };
@@ -9901,6 +10687,7 @@
             // returns to the active resource. No generation change will clear
             // the optimistic Location/history state in that case.
             pendingHistoryAction = null;
+            pendingHistoryPreservesDeclaredOrigin = false;
             pendingLocationURL = null;
           }
           access = nextAccess;
@@ -9964,8 +10751,12 @@
             forgetDiscardedNodeWrappers();
           }
         };
-        const forceNavigation = () => {
-          nativeIframeForceNavigation(iframe.__id);
+        const forceNavigation = (preserveDeclaredOrigin = false, declaredOriginSnapshot) => {
+          if (declaredOriginSnapshot === undefined) {
+            nativeIframeForceNavigation(iframe.__id, preserveDeclaredOrigin);
+          } else {
+            nativeIframeForceNavigation(iframe.__id, preserveDeclaredOrigin, declaredOriginSnapshot);
+          }
           forgetDiscardedNodeWrappers();
         };
         const notePendingResourceNavigation = () => {
@@ -9982,6 +10773,7 @@
           // A direct src/srcdoc mutation starts a normal navigation. Location,
           // reload, and traversal replace this after their attribute writes.
           pendingHistoryAction = "push";
+          pendingHistoryPreservesDeclaredOrigin = false;
         };
         const navigate = (value, disposition) => {
           refresh();
@@ -9995,9 +10787,11 @@
           const currentURL = currentDocument ? currentDocument.URL :
             (pendingLocationURL ??
               (historyIndex < 0 ? nativeIframeDocumentURL(iframe.__id) : historyEntries[historyIndex].href));
-          if (currentURL === destination) return;
-          if (pendingLocationURL === null && currentURL &&
+          // Only a destination with a fragment can navigate within this
+          // Document. Assigning the current URL without one still reloads it.
+          if (destination.includes("#") && pendingLocationURL === null && currentURL &&
               currentURL.split("#", 1)[0] === destination.split("#", 1)[0]) {
+            if (currentURL === destination) return;
             captureActiveHistory();
             nativeCommitIframeFragment(iframe.__id, destination);
             const entry = { ...historyEntries[historyIndex], href: destination,
@@ -10024,7 +10818,8 @@
           iframe.src = destination;
           pendingLocationURL = destination;
           pendingHistoryAction = disposition;
-          forceNavigation();
+          pendingHistoryPreservesDeclaredOrigin = true;
+          forceNavigation(true);
         };
         const reloadBrowsingContext = expectedGeneration => {
           if (expectedGeneration === undefined) {
@@ -10053,7 +10848,9 @@
           }
           pendingLocationURL = entry.href;
           pendingHistoryAction = "reload";
-          forceNavigation();
+          pendingHistoryPreservesDeclaredOrigin = entry.preservesDeclaredOrigin;
+          forceNavigation(entry.preservesDeclaredOrigin,
+            entry.preservesDeclaredOrigin ? entry.declaredOriginSnapshot : undefined);
           restoreHistoryState(entry);
         };
         const requireHistoryAccess = expectedGeneration => {
@@ -10109,7 +10906,9 @@
           }
           pendingLocationURL = entry.href;
           pendingHistoryAction = "traverse";
-          forceNavigation();
+          pendingHistoryPreservesDeclaredOrigin = entry.preservesDeclaredOrigin;
+          forceNavigation(entry.preservesDeclaredOrigin,
+            entry.preservesDeclaredOrigin ? entry.declaredOriginSnapshot : undefined);
           restoreHistoryState(entry);
         };
         const sameDocumentHistoryURL = (value, expectedGeneration) => {
@@ -10268,7 +11067,16 @@
               return document ? document.querySelectorAll("iframe, frame").length : 0;
             }
             if (property === "location") return window !== null && (access === "cross" || access === "closed") ? window.location : locationFacade;
-            if (property === "close" || property === "focus" || property === "blur") return () => {};
+            if (property === "focus" && window !== null && access !== "closed") {
+              return Reflect.get(window, property, windowHandlerReceiver(window, property, receiver, proxy));
+            }
+            if (property === "focus") return () => {
+              refresh();
+              if (access === "closed") return;
+              const documentId = nativeExistingIframeDocument(iframe.__id);
+              if (documentId !== null) focusDocumentCommand(documentId, "focusWindow");
+            };
+            if (property === "close" || property === "blur") return () => {};
             if (property === "postMessage") return postMessage;
             if (access === "closed") {
               if (property === "frameElement") return null;
@@ -10450,25 +11258,26 @@
     }
 
     set srcdoc(value) {
-      this.setAttribute("srcdoc", String(value));
+      this.setAttribute("srcdoc", value);
     }
 
     setAttribute(name, value) {
-      const attribute = String(name).toLowerCase();
-      const normalized = String(value);
+      const guard = trustedSinkDocumentGuard(this);
+      const attrName = toDOMString(name);
+      const attribute = asciiLowercase(attrName);
+      const prepared = trustedAttributeValue(this, attribute, null, value,
+        nativeNodeNamespaceURI(internalNodeId(this)) !== HTML_NAMESPACE);
       let changesResource = false;
       if (attribute === "src" || (attribute === "srcdoc" && internalNodeLocalName(this) === "iframe")) {
         this.__prepareResourceNavigation();
-        const previous = this.getAttribute(attribute);
-        changesResource = attribute === "srcdoc"
-          ? previous !== normalized
-          : !hasFrameSrcdoc(this) &&
-            (previous ?? "").trim() !== normalized.trim();
+        // Setting an effective frame resource attribute starts a navigation
+        // even when its value, or the URL after trimming, is unchanged.
+        changesResource = attribute === "srcdoc" || !hasFrameSrcdoc(this);
         if (changesResource && this.isConnected) {
           dispatchIframeNavigationDeparture(this);
         }
       }
-      super.setAttribute(name, normalized);
+      setAttributeWithApprovedString(this, attrName, prepared, prepared, guard);
       if (changesResource && this.isConnected) {
         this.__prepareResourceNavigation("resource-changed");
       }
@@ -10500,7 +11309,7 @@
   // distinct interface or iframe-only sandbox/srcdoc attributes.
   class HTMLFrameElement extends HTMLElement {}
   for (const name of Object.getOwnPropertyNames(HTMLIFrameElement.prototype)) {
-    if (["constructor", "sandbox", "srcdoc", "allowFullscreen", "width", "height"].includes(name)) continue;
+    if (["constructor", "sandbox", "srcdoc", "allow", "allowFullscreen", "width", "height", "permissionsPolicy", "featurePolicy"].includes(name)) continue;
     Object.defineProperty(HTMLFrameElement.prototype, name,
       Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, name));
   }
@@ -12554,7 +13363,14 @@
       const target = submitter?.getAttribute("formtarget") ?? this.getAttribute("target") ??
         this.ownerDocument.querySelector("base[target]")?.getAttribute("target") ?? "";
       const data = formDataEntries(new FormData(this, submitter));
-      let url = nativeResolveFormAction(internalNodeId(this), this.action);
+      let url = nativeResolveFormAction(
+        internalNodeId(this), submitter?.getAttribute("formaction") ?? this.action
+      );
+      if (/^\s*javascript:/i.test(url)) {
+        // The action is script source, not a network URL to append controls to.
+        submit(url, "GET", null, null, target, internalNodeId(this));
+        return;
+      }
       if (this.method === "get") {
         const hashIndex = url.indexOf("#");
         const hash = hashIndex < 0 ? "" : url.slice(hashIndex);
@@ -13147,6 +13963,18 @@
   }
 
   class HTMLMetaElement extends HTMLElement {
+    get name() {
+      return this.getAttribute("name") || "";
+    }
+    set name(v) {
+      this.setAttribute("name", String(v));
+    }
+    get content() {
+      return this.getAttribute("content") || "";
+    }
+    set content(v) {
+      this.setAttribute("content", String(v));
+    }
     get httpEquiv() {
       return this.getAttribute("http-equiv") || "";
     }
@@ -13261,6 +14089,14 @@
   }
 
   for (const prototype of [HTMLInputElement.prototype, HTMLButtonElement.prototype]) {
+    Object.defineProperty(prototype, "formAction", {
+      configurable: true, enumerable: true,
+      get() {
+        const action = this.getAttribute("formaction") ?? this.form?.action ?? this.ownerDocument.URL;
+        return nativeResolveFormAction(internalNodeId(this), action);
+      },
+      set(value) { this.setAttribute("formaction", String(value)); },
+    });
     Object.defineProperty(prototype, "formTarget", {
       configurable: true, enumerable: true,
       get() { return this.getAttribute("formtarget") || ""; },
@@ -13311,14 +14147,28 @@
 
   class HTMLScriptElement extends HTMLElement {
     setAttribute(name, value) {
-      if (String(name).toLowerCase() === "src") noteElementResourceStart(this);
-      super.setAttribute(name, value);
+      const guard = trustedSinkDocumentGuard(this);
+      const attrName = toDOMString(name);
+      const attribute = asciiLowercase(attrName);
+      const prepared = trustedAttributeValue(this, attribute, null, value,
+        nativeNodeNamespaceURI(internalNodeId(this)) !== HTML_NAMESPACE);
+      if (attribute === "src") noteElementResourceStart(this);
+      setAttributeWithApprovedString(this, attrName, prepared, prepared, guard);
     }
     get src() {
-      return this.getAttribute("src") || "";
+      const raw = this.getAttribute("src");
+      return raw === null ? "" : __omoikane_resolve_url(raw);
     }
     set src(value) {
-      this.setAttribute("src", String(value));
+      this.setAttribute("src", value);
+    }
+    get text() {
+      return this.textContent;
+    }
+    set text(value) {
+      const [text, approved] = trustedScriptTextForSink(
+        value, internalNodeId(this), "HTMLScriptElement text");
+      replaceNodeTextContent(this, text, approved);
     }
     // Reflected, because how the element is evaluated is decided from the
     // attribute. Scripts that opt into modules by assigning the property
@@ -13359,9 +14209,6 @@
       const isSource = String(name).toLowerCase() === "src";
       if (isSource) noteElementResourceStart(this);
       super.setAttribute(name, value);
-      if (isSource && /^(?:data:|blob:)/i.test(String(value))) {
-        finishElementResourceTiming(this, 200, false);
-      }
     }
     get src() {
       return this.getAttribute("src") || "";
@@ -13464,7 +14311,24 @@
     transform(a,b,c,d,e,f){const s=this.__s,m=s.style.transform;s.style.transform=[m[0]*a+m[2]*b,m[1]*a+m[3]*b,m[0]*c+m[2]*d,m[1]*c+m[3]*d,m[0]*e+m[2]*f+m[4],m[1]*e+m[3]*f+m[5]];}
     setTransform(a,b,c,d,e,f){if(typeof a==="object"){({a,b,c,d,e,f}=a);}this.__s.style.transform=[Number(a),Number(b),Number(c),Number(d),Number(e),Number(f)];}
     resetTransform(){this.__s.style.transform=[1,0,0,1,0,0];}
-    clearRect(x,y,w,h){const s=this.__s;for(let py=Math.floor(y);py<Math.ceil(y+h);py++)for(let px=Math.floor(x);px<Math.ceil(x+w);px++){const p=transformCanvasPoint(s.style.transform,px,py);blendCanvasPixel(s,p[0],p[1],[0,0,0,0],true);}commitCanvas(this.canvas,s);}
+    clearRect(x,y,w,h){
+      const s=this.__s,m=s.style.transform;
+      if(!s.style.clip&&m[0]===1&&m[1]===0&&m[2]===0&&m[3]===1&&m[4]===0&&m[5]===0){
+        const left=Math.max(0,Math.floor(x)),top=Math.max(0,Math.floor(y));
+        const right=Math.min(s.width,Math.ceil(Number(x)+Number(w)));
+        const bottom=Math.min(s.height,Math.ceil(Number(y)+Number(h)));
+        if(left<right&&top<bottom){
+          if(left===0&&top===0&&right===s.width&&bottom===s.height)s.pixels.fill(0);
+          else for(let row=top;row<bottom;row++)s.pixels.fill(0,(row*s.width+left)*4,(row*s.width+right)*4);
+        }
+      }else{
+        for(let py=Math.floor(y);py<Math.ceil(y+h);py++)for(let px=Math.floor(x);px<Math.ceil(x+w);px++){
+          const p=transformCanvasPoint(m,px,py);
+          blendCanvasPixel(s,p[0],p[1],[0,0,0,0],true);
+        }
+      }
+      commitCanvas(this.canvas,s);
+    }
     fillRect(x,y,w,h){this.beginPath();this.rect(x,y,w,h);this.fill();}
     strokeRect(x,y,w,h){this.beginPath();this.rect(x,y,w,h);this.stroke();}
     beginPath(){const s=this.__s;s.paths=[];s.current=null;}
@@ -15997,6 +16861,19 @@
       changedDocument.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
     }
   };
+  const dispatchCspEvent = Node.prototype.dispatchEvent;
+  globalThis.__omoikane_dispatch_csp_violation = function(targetId, init, workerGlobal) {
+    const target = workerGlobal ? globalThis : wrapNode(targetId);
+    if (!target) return;
+    const event = new platformEventInterfaces.SecurityPolicyViolationEvent("securitypolicyviolation", {
+      ...init, sourceFile: init.sourceFile ?? "",
+    });
+    event.isTrusted = true;
+    safeApply(workerGlobal ? dispatchCspGlobalEvent : dispatchCspEvent, target, [event]);
+    if (init.reportToPresent && platformEventInterfaces.queueCspReport) {
+      platformEventInterfaces.queueCspReport(init);
+    }
+  };
   globalThis.__omoikane_close_auxiliary_document = function() {
     if (browsingInput.visibilityHiddenDocumentIds.has(__omoikane_document_id)) return;
     browsingInput.visibilityHiddenDocumentIds.add(__omoikane_document_id);
@@ -16561,6 +17438,7 @@
   globalThis.AnimationEvent = Event;
   globalThis.TransitionEvent = TransitionEvent;
   globalThis.document = wrapNode(__omoikane_document_id);
+  const focusDocument = globalThis.document;
   // The embedding runtime supplies the owner iframe id only while creating a
   // child browsing-context Realm. Resolve it through this Realm's wrapper
   // cache, then remove the bootstrap-only slot before page code runs. A
@@ -16652,7 +17530,7 @@
           names.add(name);
         }
         if (name && (tag === "iframe" || tag === "frame") && !firstFrameNames.has(name)) {
-          firstFrameNames.set(name, child.contentDocument !== null);
+          firstFrameNames.set(name, nativeIframeContentDocument(internalNodeId(child)) !== null);
         }
         visit(child);
       }
@@ -16749,9 +17627,9 @@
     "error", "hashchange", "popstate", "pageshow", "pagehide", "online",
     "offline", "languagechange", "message", "storage",
   ]);
-  function compileInlineHandler(source) {
+  function compileInlineHandler(node, name, source) {
     try {
-      return new Function("event", source);
+      return __omoikane_compile_inline_handler(internalNodeId(node), name, source);
     } catch (e) {
       return null;
     }
@@ -16818,7 +17696,7 @@
     // Repeated initialization must not undo a subsequent IDL assignment.
     // Explicit setAttribute calls still reinstall even an unchanged value.
     if (initial && previous?.source === source && previous.target === target) return;
-    const handler = compileInlineHandler(source);
+    const handler = compileInlineHandler(node, name, source);
     if (!handler) return;
     target["on" + type] = handler;
     store[type] = { handler, target, source };
@@ -17080,11 +17958,7 @@
     if (type === "mousedown") {
       browsingInput.focusVisibleKeyboard = false;
       nativeSetUserActionTarget("active", target instanceof Element ? target.__id : null, false);
-      const focused = focusedElementOf(focusChainDocuments()[0] || document);
-      if (focused && !isTextControl(focused) && !isEditingHost(focused)) {
-        nativeSetUserActionTarget("focus", focused.__id, false);
-        browsingInput.focusVisibleCurrent = false;
-      }
+      focusDocumentCommand(focusedDocumentId(), "pointerAppearance");
     } else if (type === "mouseup") {
       nativeSetUserActionTarget("active", null, false);
     }
@@ -17226,9 +18100,10 @@
     return 1 | performScrollBoundaryDefault(target, init.deltaX, init.deltaY);
   };
   globalThis.__omoikane_dispatch_keyboard_input = function(type, init) {
-    const focusedDocument = focusChainDocuments()[0] || document;
-    const forwarded = nativeForwardInput(internalNodeId(focusedDocument), "keyboard", [type, init]);
+    const focusedId = focusedDocumentId() ?? __omoikane_document_id;
+    const forwarded = nativeForwardInput(focusedId, "keyboard", [type, init]);
     if (forwarded !== undefined) return forwarded;
+    const focusedDocument = document;
     if (type === "keydown" && !["Shift", "Control", "Alt", "Meta"].includes(String(init && init.key || ""))) {
       browsingInput.focusVisibleKeyboard = true;
       const focused = focusedElementOf(focusedDocument);
@@ -17264,9 +18139,10 @@
   globalThis.__omoikane_dispatch_composition_input = function dispatchCompositionInput(
     action, text, selectionStart = 0, selectionEnd = selectionStart,
   ) {
-    const focusedDocument = focusChainDocuments()[0] || document;
-    const forwarded = nativeForwardInput(internalNodeId(focusedDocument), "composition", [action, text, selectionStart, selectionEnd]);
+    const focusedId = focusedDocumentId() ?? __omoikane_document_id;
+    const forwarded = nativeForwardInput(focusedId, "composition", [action, text, selectionStart, selectionEnd]);
     if (forwarded !== undefined) return forwarded;
+    const focusedDocument = document;
     const target = focusedElementOf(focusedDocument);
     const control = isTextControl(target) && !target.readOnly && !target.__isDisabledControl()
       ? target : null;
@@ -17368,6 +18244,42 @@
     set(serialized) { __omoikane_document_cookie_set(this.__id, String(serialized)); },
   });
 
+  function storageAccessDocumentId(receiver) {
+    requireNodeReceiver(receiver);
+    if (internalNodeType(receiver) !== 9) {
+      throw new IntrinsicTypeError("Storage Access requires a Document");
+    }
+    return canonicalNodeId(receiver);
+  }
+  function storageAccessRejection(status) {
+    return new DOMException(
+      status === "inactive" ? "The Document is not active." : "Storage access is not allowed.",
+      status === "inactive" ? "InvalidStateError" : "NotAllowedError",
+    );
+  }
+  Object.defineProperty(Document.prototype, "hasStorageAccess", {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: async function hasStorageAccess() {
+      const status = nativeStorageAccessState(storageAccessDocumentId(this));
+      return status === "inactive" ? Promise.reject(storageAccessRejection(status)) :
+        Promise.resolve(status === "granted");
+    },
+  });
+  Object.defineProperty(Document.prototype, "requestStorageAccess", {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: async function requestStorageAccess() {
+      const status = nativeStorageAccessRequest(
+        storageAccessDocumentId(this), fullscreenTransientActivation,
+      );
+      return status === "granted" ? Promise.resolve(undefined) :
+        Promise.reject(storageAccessRejection(status));
+    },
+  });
+
   const navigationDocumentId = __omoikane_document_id;
   const auxiliaryNavigationId = globalThis.__omoikane_auxiliary_context_id;
   const isChildWindow = navigationDocumentId !== browsingInput.topDocumentId &&
@@ -17386,6 +18298,10 @@
   };
   let __locationHref = String(__omoikane_location_href);
   const __loc = {};
+  Object.defineProperty(__loc, "toString", {
+    value() { return this.href; },
+    configurable: true,
+  });
   Object.defineProperty(__loc, "href", {
     enumerable: true,
     configurable: false,
@@ -17419,8 +18335,8 @@
   const childLocation = {
     get href() { return childNavigation("location"); },
     set href(value) { this.assign(value); },
-    assign(value) { childNavigation("assign", new URL(String(value), nativeDocumentBaseURL(navigationDocumentId) || this.href).href); },
-    replace(value) { childNavigation("replace", new URL(String(value), nativeDocumentBaseURL(navigationDocumentId) || this.href).href); },
+    assign(value) { childNavigation("assign", new URL(String(value), document.baseURI).href); },
+    replace(value) { childNavigation("replace", new URL(String(value), document.baseURI).href); },
     reload() { childNavigation("reload"); },
     toString() { return this.href; },
   };
@@ -17440,9 +18356,10 @@
     set(url) { (isChildWindow ? childLocation : __loc).assign(url); },
   });
   function __parseLocationUrl(url, requireSameOrigin) {
-    if (url == null || String(url) === "") return;
+    if (url == null) return;
     const raw = String(url);
-    const href = String(__omoikane_resolve_url(raw));
+    if (raw === "") return;
+    const href = new URL(raw, document.baseURI).href;
     const match = href.match(/^(.*?):\/\/([^/?#]+)([^?#]*)(\?[^#]*)?(#.*)?$/);
     if (!match || (requireSameOrigin && (match[1] + "://" + match[2]) !== __loc.origin)) {
       throw new DOMException("History state URL must be same-origin", "SecurityError");
@@ -17450,7 +18367,36 @@
     return { href, match };
   }
   function __requestLocationNavigation(url, kind) {
-    const parsed = __parseLocationUrl(url, false);
+    // A javascript: URL is a navigation request, not a replacement Location
+    // value. Leave its policy check and execution to the navigation task.
+    if (url == null) return;
+    const raw = String(url);
+    if (raw === "") return;
+    // Classify the same resolved URL that __parseLocationUrl will navigate to.
+    const resolved = String(__omoikane_resolve_url(raw));
+    let candidate;
+    try { candidate = new URL(resolved, __locationHref); }
+    catch (_) { throw new DOMException("Invalid navigation URL", "SecurityError"); }
+    // Resource navigation is HTTP(S); javascript: has its own policy path.
+    switch (candidate.protocol) {
+      case "javascript:":
+        scheduleWindowNavigation(kind, candidate.href);
+        return;
+      case "about:":
+        if (/^about:blank(?:[?#]|$)/i.test(candidate.href)) {
+          scheduleWindowNavigation(kind, candidate.href);
+          return;
+        }
+        throw new DOMException("Unsupported navigation URL scheme", "SecurityError");
+      case "http:":
+      case "https:":
+        break;
+      case "data:":
+      case "vbscript:":
+      default:
+        throw new DOMException("Unsupported navigation URL scheme", "SecurityError");
+    }
+    const parsed = __parseLocationUrl(raw, false);
     if (parsed !== undefined) scheduleWindowNavigation(kind, parsed.href);
   }
   function __applyLocationUrl(url, requireSameOrigin) {
@@ -17503,7 +18449,9 @@
     }
   };
   globalThis.__omoikane_set_location = function(href) {
-    __applyLocationUrl(href, false);
+    const url = new URL(String(href), __locationHref);
+    __locationHref = url.href;
+    __locationHash = url.hash;
   };
   globalThis.history = {
     scrollRestoration: "auto",
@@ -17705,6 +18653,7 @@
     }
     return __makeComputedStyle({});
   };
+  const platformGetComputedStyleForInnerText = globalThis.getComputedStyle;
   const navigatorConstructionToken = {};
   class PluginArray {
     constructor(token) {
@@ -17839,7 +18788,7 @@
       if (typeof success !== "function") throw new TypeError("success callback must be callable");
       if (error != null && typeof error !== "function") throw new TypeError("error callback must be callable");
       const normalized = normalizeGeolocationOptions(options);
-      nativeGeolocationRequest(success, error == null ? undefined : error, -1,
+      nativeGeolocationRequest(__omoikane_document_id, success, error == null ? undefined : error, -1,
         normalized.timeout, normalized.maximumAge);
     }
     watchPosition(success, error = undefined, options = undefined) {
@@ -17847,7 +18796,7 @@
       if (error != null && typeof error !== "function") throw new TypeError("error callback must be callable");
       const normalized = normalizeGeolocationOptions(options);
       const id = this.__nextWatchId++ >>> 0;
-      nativeGeolocationRequest(success, error == null ? undefined : error, id,
+      nativeGeolocationRequest(__omoikane_document_id, success, error == null ? undefined : error, id,
         normalized.timeout, normalized.maximumAge);
       return id;
     }
@@ -17881,15 +18830,77 @@
   // -------------------------------------------------------------------------
   // Service Worker registration/container lifecycle core.
   //
-  // Script execution and fetch interception are intentionally out of scope
-  // for this deterministic model.  Registrations still retain their
-  // same-origin script/scope URLs, expose the installing/active state
-  // transitions, and select the longest matching scope for the current
-  // document.  Keeping records in this realm avoids moving Boa objects across
-  // runtimes while preserving the Web IDL-facing object graph.
+  // Each classic script executes in a separate Worker global. Registrations
+  // retain their same-origin script/scope URLs in this realm while the native
+  // Worker message bridge carries structured-cloned messages across globals.
+  // Fetch interception remains outside this core.
   // -------------------------------------------------------------------------
   const serviceWorkerConstructionToken = {};
+  const serviceWorkerSelfMessageTargets = new WeakMap();
   const serviceWorkerContainerConstructionToken = {};
+  const serviceWorkerRegistrationCookies = new WeakMap();
+  const cookieStoreManagerOwners = new WeakMap();
+  const cookieStoreManagerToken = {};
+  class CookieStoreManager {
+    constructor(scope, token) {
+      if (token !== cookieStoreManagerToken) throw new TypeError("Illegal constructor");
+      const id = String(nativeCookieStoreSubscriptions(__omoikane_document_id, scope, "identity", "[]"));
+      cookieStoreManagerOwners.set(this, {scope, id});
+    }
+    static normalize(entries, scope) {
+      if (entries == null || (typeof entries !== "object" && typeof entries !== "function") ||
+          typeof entries[Symbol.iterator] !== "function") {
+        throw new TypeError("Cookie subscriptions must be iterable");
+      }
+      const base = typeof document === "undefined" ? location.href : document.baseURI;
+      return Array.from(entries, entry => {
+        if (entry != null && typeof entry !== "object" && typeof entry !== "function") {
+          throw new TypeError("Cookie subscription must be a dictionary");
+        }
+        entry ??= {};
+        const url = entry.url === undefined ? new URL(scope) : new URL(String(entry.url), base);
+        if (!url.href.startsWith(scope)) throw new TypeError("Cookie subscription URL is outside scope");
+        return {name: entry.name === undefined ? null : String(entry.name), url: url.href};
+      });
+    }
+    subscribe(entries) { return this.__update("subscribe", entries); }
+    unsubscribe(entries) { return this.__update("unsubscribe", entries); }
+    __update(operation, entries) {
+      if (!cookieStoreManagerOwners.has(this)) return Promise.reject(new TypeError("Illegal invocation"));
+      return Promise.resolve().then(() => {
+        const {scope, id} = cookieStoreManagerOwners.get(this);
+        const normalized = CookieStoreManager.normalize(entries, scope);
+        nativeCookieStoreSubscriptions(__omoikane_document_id, scope, operation, JSON.stringify(normalized), id);
+      });
+    }
+    getSubscriptions() {
+      if (!cookieStoreManagerOwners.has(this)) return Promise.reject(new TypeError("Illegal invocation"));
+      return Promise.resolve().then(() => {
+        const {scope, id} = cookieStoreManagerOwners.get(this);
+        return JSON.parse(String(nativeCookieStoreSubscriptions(
+          __omoikane_document_id, scope, "get", "[]", id)));
+      });
+    }
+    get [Symbol.toStringTag]() { return "CookieStoreManager"; }
+  }
+  function clearServiceWorkerCookieSubscriptions(registration) {
+    const manager = safeWeakMapGet(serviceWorkerRegistrationCookies, registration);
+    const {scope, id} = safeWeakMapGet(cookieStoreManagerOwners, manager);
+    nativeCookieStoreSubscriptions(__omoikane_document_id, scope, "clear", "[]", id);
+  }
+  if (nativeCookieStoreAvailable(__omoikane_document_id)) {
+    globalThis.CookieStoreManager = CookieStoreManager;
+  }
+  const serviceWorkerContainerOwnerDocuments = browsingInput.serviceWorkerContainerOwnerDocuments ||
+    (browsingInput.serviceWorkerContainerOwnerDocuments = new WeakMap());
+  const serviceWorkerMessageSources = browsingInput.serviceWorkerMessageSources ||
+    (browsingInput.serviceWorkerMessageSources = new WeakMap());
+  globalThis.__omoikane_service_worker_message_source = function(container, id) {
+    const sources = safeWeakMapGet(serviceWorkerMessageSources, container);
+    if (!sources) return undefined;
+    const worker = sources.get(String(id));
+    return worker && !worker.__terminated ? worker : null;
+  };
 
   // EventTarget is declared later in this bootstrap (after Navigator is
   // constructed).  This bridge keeps construction safe during that initial
@@ -17914,20 +18925,27 @@
   }
 
   function serviceWorkerScopeURL(scriptURL, options) {
-    const requested = options && options.scope !== undefined
-      ? serviceWorkerURL(options.scope, scriptURL.href)
+    const requestedScope = options == null ? undefined : options.scope;
+    const requested = requestedScope !== undefined
+      ? serviceWorkerURL(requestedScope)
       : serviceWorkerURL(scriptURL.pathname.slice(0, scriptURL.pathname.lastIndexOf("/") + 1), scriptURL.href);
     requested.hash = "";
     return requested;
   }
 
+  function serviceWorkerHasEncodedPathSeparator(url) {
+    return /%(?:2f|5c)/i.test(url.pathname);
+  }
+
   class ServiceWorker extends ServiceWorkerEventTarget {
-    constructor(record, state, token) {
+    constructor(record, state, id, token) {
       if (token !== serviceWorkerConstructionToken) throw new TypeError("Illegal constructor");
       super();
       this.scriptURL = record.scriptURL;
       this._state = String(state);
       this._record = record;
+      this.__id = id;
+      this.__terminated = false;
       this._onstatechange = null;
     }
     get state() { return this._state; }
@@ -17937,8 +18955,18 @@
       this._state = next;
       this.dispatchEvent(new Event("statechange"));
     }
-    postMessage() {
-      throw new DOMException("Service worker script execution is not available.", "InvalidStateError");
+    postMessage(message, options = undefined) {
+      if (this.__terminated) throw new DOMException("Service worker is stopped.", "InvalidStateError");
+      const selfTarget = serviceWorkerSelfMessageTargets.get(this);
+      if (selfTarget) {
+        const ports = [];
+        const wire = encodeWorkerMessage(message, options, ports);
+        __omoikane_enqueue_posted_message(selfTarget, {wire, ports});
+        return;
+      }
+      const ports = [];
+      const data = encodeWorkerMessage(message, options, ports);
+      __omoikane_worker_post_message(this.__id, data, ports);
     }
     get onstatechange() { return this._onstatechange; }
     set onstatechange(callback) {
@@ -17947,6 +18975,113 @@
       if (this._onstatechange) this.addEventListener("statechange", this._onstatechange);
     }
     get [Symbol.toStringTag]() { return "ServiceWorker"; }
+  }
+
+  function terminateServiceWorker(worker) {
+    if (!worker || worker.__terminated) return;
+    worker.__terminated = true;
+    const container = worker._record.registration._container;
+    safeWeakMapGet(serviceWorkerMessageSources, container).delete(String(worker.__id));
+    worker.__setState("redundant");
+    __omoikane_terminate_worker(worker.__id);
+  }
+
+  function activateServiceWorker(container, record, worker) {
+    const registration = record.registration;
+    if (container._records.get(record.scope) !== record || registration.waiting !== worker) return;
+    terminateServiceWorker(registration.active);
+    if (container._records.get(record.scope) !== record || registration.waiting !== worker) return;
+    registration.active = worker;
+    registration.waiting = null;
+    worker.__setState("activating");
+    if (container._records.get(record.scope) !== record || registration.active !== worker) return;
+    if (!__omoikane_dispatch_service_worker_activate(worker.__id)) {
+      terminateServiceWorker(worker);
+      if (container._records.get(record.scope) === record && registration.active === worker) {
+        registration.active = null;
+        container.__updateController();
+      }
+    }
+  }
+
+  __omoikane_service_worker_lifecycle.complete = function(container, id, installing, failed) {
+    const worker = safeWeakMapGet(serviceWorkerMessageSources, container)?.get(String(id));
+    if (!worker || worker.__terminated) return;
+    const record = worker._record;
+    const registration = record.registration;
+    if (container._records.get(record.scope) !== record) return;
+    if (installing) {
+      if (registration.installing !== worker) return;
+      registration.installing = null;
+      if (failed) {
+        terminateServiceWorker(worker);
+        if (!registration.active) {
+          clearServiceWorkerCookieSubscriptions(registration);
+          container._records.delete(record.scope);
+        }
+        return;
+      }
+      registration.waiting = worker;
+      worker.__setState("installed");
+      __omoikane_queue_dom_manipulation_task(() => activateServiceWorker(container, record, worker));
+    } else if (registration.active === worker && worker.state === "activating") {
+      // Activation waits for settlement, including rejected lifetime promises.
+      container.__updateController();
+      worker.__setState("activated");
+      if (!container._readyResolved && container.controller === worker) {
+        container._readyResolved = true;
+        container._readyResolve(registration);
+      }
+    }
+  };
+
+  const serviceWorkerRegistrationRequests = new Map();
+  let nextServiceWorkerRegistrationRequest = 1;
+  function requestServiceWorkerRegistration(registration, operation) {
+    if (operation === "update" && registration.installing) {
+      return Promise.reject(new DOMException("An installing worker cannot update its registration.", "InvalidStateError"));
+    }
+    const id = String(nextServiceWorkerRegistrationRequest++);
+    return new Promise((resolve, reject) => {
+      serviceWorkerRegistrationRequests.set(id, {resolve, reject, registration, operation});
+      if (!__omoikane_service_worker_registration_request(id, operation)) {
+        serviceWorkerRegistrationRequests.delete(id);
+        reject(new DOMException("The registration is unavailable.", "InvalidStateError"));
+      }
+    });
+  }
+  __omoikane_service_worker_lifecycle.registrationResponse = function(id, result, error) {
+    const pending = serviceWorkerRegistrationRequests.get(id);
+    if (!pending) return;
+    serviceWorkerRegistrationRequests.delete(id);
+    if (error) pending.reject(error === "TypeError" ? new TypeError(result) : new DOMException(result, error));
+    else pending.resolve(pending.operation === "update" ? pending.registration : result === "true");
+  };
+  __omoikane_service_worker_lifecycle.registrationRequest = function(container, id, request, operation) {
+    const worker = safeWeakMapGet(serviceWorkerMessageSources, container)?.get(String(id));
+    const registration = worker?._record.registration;
+    const respond = (result, error = "") => __omoikane_service_worker_registration_response(id, request, String(result), error);
+    if (!registration) { respond("The registration is unavailable.", "InvalidStateError"); return; }
+    const promise = operation === "update" ? registration.update() : unregisterServiceWorkerRegistration(registration, worker);
+    promise.then(result => respond(operation === "update" ? "" : result), error => respond(error.message, error.name));
+  };
+  function unregisterServiceWorkerRegistration(registration, preservedWorker = null) {
+    return Promise.resolve().then(() => {
+      const container = registration._container;
+      if (container._records.get(registration.scope) !== registration._record) return false;
+      container._records.delete(registration.scope);
+      clearServiceWorkerCookieSubscriptions(registration);
+      for (const worker of new Set([registration.installing, registration.waiting, registration.active])) {
+        // The calling worker must remain live long enough to settle its own
+        // unregister promise and any lifetime event which awaits it.
+        if (worker !== preservedWorker) terminateServiceWorker(worker);
+      }
+      registration.installing = null;
+      registration.waiting = null;
+      registration.active = null;
+      container.__updateController();
+      return true;
+    });
   }
 
   class ServiceWorkerRegistration extends ServiceWorkerEventTarget {
@@ -17960,20 +19095,51 @@
       this.waiting = null;
       this.active = null;
       this._onupdatefound = null;
+      serviceWorkerRegistrationCookies.set(this, new CookieStoreManager(record.scope, cookieStoreManagerToken));
     }
+    get cookies() { return serviceWorkerRegistrationCookies.get(this); }
     update() {
-      return Promise.resolve(undefined);
+      if (!this._container) return requestServiceWorkerRegistration(this, "update");
+      if (this._container._records.get(this.scope) !== this._record) {
+        return Promise.reject(new DOMException("The registration has no newest worker.", "InvalidStateError"));
+      }
+      if (this._updatePromise) return this._updatePromise;
+      const newest = this.installing || this.waiting || this.active;
+      if (!newest) return Promise.reject(new DOMException("The registration has no newest worker.", "InvalidStateError"));
+      const operation = Promise.resolve().then(() => {
+        if (this._container._records.get(this.scope) !== this._record) {
+          throw new DOMException("The registration has been unregistered.", "InvalidStateError");
+        }
+        const container = this._container;
+        const documentId = safeWeakMapGet(serviceWorkerContainerOwnerDocuments, container);
+        let installing = null;
+        // Queue before native install completion, but dispatch after the update
+        // promise settles so callers can observe the new installation.
+        __omoikane_queue_dom_manipulation_task(() => {
+          if (installing && this.installing === installing) this.dispatchEvent(new Event("updatefound"));
+        });
+        const id = __omoikane_start_service_worker(this._record.scriptURL, this.scope, documentId, newest.__id);
+        if (id === "stale") throw new DOMException("The registration is no longer current.", "InvalidStateError");
+        if (id === "unchanged") return this;
+        if (id === "security") throw new DOMException("Service worker response disallows its MIME type or scope.", "SecurityError");
+        if (id === null) throw new TypeError("Service worker script could not be fetched or evaluated.");
+        terminateServiceWorker(this.installing);
+        terminateServiceWorker(this.waiting);
+        installing = new ServiceWorker(this._record, "installing", id, serviceWorkerConstructionToken);
+        this._record.worker = installing;
+        this.installing = installing;
+        this.waiting = null;
+        safeWeakMapGet(serviceWorkerMessageSources, container).set(String(id), installing);
+        __omoikane_bind_worker_owner(id, container);
+        return this;
+      });
+      this._updatePromise = operation;
+      operation.then(() => { this._updatePromise = null; }, () => { this._updatePromise = null; });
+      return operation;
     }
     unregister() {
-      return Promise.resolve().then(() => {
-        if (!this._container._records.has(this.scope)) return false;
-        this._container._records.delete(this.scope);
-        this.installing = null;
-        this.waiting = null;
-        this.active = null;
-        this._container.__updateController();
-        return true;
-      });
+      if (!this._container) return requestServiceWorkerRegistration(this, "unregister");
+      return unregisterServiceWorkerRegistration(this);
     }
     get onupdatefound() { return this._onupdatefound; }
     set onupdatefound(callback) {
@@ -17988,62 +19154,90 @@
     constructor(token) {
       if (token !== serviceWorkerContainerConstructionToken) throw new TypeError("Illegal constructor");
       super();
+      safeWeakMapSet(serviceWorkerContainerOwnerDocuments, this, __omoikane_document_id);
+      safeWeakMapSet(serviceWorkerMessageSources, this, new Map());
       this._records = new Map();
       this.controller = null;
       this._readyResolved = false;
       this._readyResolve = null;
       this.ready = new Promise(resolve => { this._readyResolve = resolve; });
       this._oncontrollerchange = null;
+      this._onmessage = null;
+      this._onmessageerror = null;
     }
     __validateRegistration(scriptURL, options) {
-      const script = serviceWorkerURL(scriptURL);
       const origin = serviceWorkerCurrentOrigin();
-      if (!origin || origin === "null" || serviceWorkerOrigin(script) !== origin) {
+      if (!origin || origin === "null") {
+        throw new DOMException("Service workers require a non-opaque origin.", "SecurityError");
+      }
+      const script = serviceWorkerURL(scriptURL);
+      script.hash = "";
+      if (!/^https?:$/.test(script.protocol) || serviceWorkerHasEncodedPathSeparator(script)) {
+        throw new TypeError("Invalid service worker script URL.");
+      }
+      if (serviceWorkerOrigin(script) !== origin) {
         throw new DOMException("Service worker script must be same-origin.", "SecurityError");
       }
       const scope = serviceWorkerScopeURL(script, options || {});
+      if (!/^https?:$/.test(scope.protocol) || serviceWorkerHasEncodedPathSeparator(scope)) {
+        throw new TypeError("Invalid service worker scope URL.");
+      }
       if (serviceWorkerOrigin(scope) !== origin) {
         throw new DOMException("Service worker scope must be same-origin.", "SecurityError");
       }
       return { script: script.href, scope: scope.href };
     }
     register(scriptURL, options = undefined) {
+      const ownerDocumentId = safeWeakMapGet(serviceWorkerContainerOwnerDocuments, this);
+      if (ownerDocumentId === undefined) {
+        return Promise.reject(new IntrinsicTypeError("Illegal ServiceWorkerContainer receiver"));
+      }
+      if (arguments.length === 0) {
+        return Promise.reject(new IntrinsicTypeError("Service worker script URL is required"));
+      }
+      let checkedURL;
+      try {
+        checkedURL = trustedValueForSink(
+          scriptURL, ownerDocumentId, 2, "ServiceWorkerContainer register");
+      } catch (error) {
+        return Promise.reject(error);
+      }
       return Promise.resolve().then(() => {
         if (typeof nativeIsSecureContext !== "function" || !nativeIsSecureContext()) {
           throw new DOMException("Service workers require a secure context.", "SecurityError");
         }
-        const validated = this.__validateRegistration(scriptURL, options || {});
+        const requestedType = options == null ? undefined : options.type;
+        if (requestedType !== undefined && String(requestedType) !== "classic") {
+          throw new TypeError("Only classic service worker scripts are supported.");
+        }
+        const validated = this.__validateRegistration(checkedURL, options || {});
         let record = this._records.get(validated.scope);
+        if (record && record.scriptURL === validated.script) return record.registration;
+        const workerId = __omoikane_start_service_worker(validated.script, validated.scope, ownerDocumentId);
+        if (workerId === "security") {
+          throw new DOMException("Service worker response disallows its MIME type or scope.", "SecurityError");
+        }
+        if (workerId === null) {
+          throw new TypeError("Service worker script could not be fetched or evaluated.");
+        }
         if (record) {
-          if (record.scriptURL !== validated.script) {
-            record.scriptURL = validated.script;
-            record.worker = new ServiceWorker(record, "installing", serviceWorkerConstructionToken);
-            record.registration.installing = record.worker;
-            record.registration.waiting = null;
-            record.registration.active = null;
-            record.registration.dispatchEvent(new Event("updatefound"));
-          }
+          terminateServiceWorker(record.registration.installing);
+          terminateServiceWorker(record.registration.waiting);
+          record.scriptURL = validated.script;
+          record.worker = new ServiceWorker(record, "installing", workerId, serviceWorkerConstructionToken);
+          record.registration.installing = record.worker;
+          record.registration.waiting = null;
+          record.registration.dispatchEvent(new Event("updatefound"));
         } else {
           record = { scriptURL: validated.script, scope: validated.scope, worker: null, registration: null };
-          record.worker = new ServiceWorker(record, "installing", serviceWorkerConstructionToken);
+          record.worker = new ServiceWorker(record, "installing", workerId, serviceWorkerConstructionToken);
           record.registration = new ServiceWorkerRegistration(record, this, serviceWorkerContainerConstructionToken);
           this._records.set(validated.scope, record);
         }
         const registration = record.registration;
-        // The core has no script evaluator, so install/activate is a single
-        // deterministic microtask transition after registration creation.
-        queueMicrotask(() => {
-          if (!this._records.has(record.scope)) return;
-          record.worker.__setState("activated");
-          registration.installing = null;
-          registration.waiting = null;
-          registration.active = record.worker;
-          this.__updateController();
-          if (!this._readyResolved && this.controller === record.worker) {
-            this._readyResolved = true;
-            this._readyResolve(registration);
-          }
-        });
+        const installing = record.worker;
+        safeWeakMapGet(serviceWorkerMessageSources, this).set(String(workerId), installing);
+        __omoikane_bind_worker_owner(workerId, this);
         return registration;
       });
     }
@@ -18077,6 +19271,18 @@
       queueMicrotask(() => this.dispatchEvent(new Event("controllerchange")));
     }
     get oncontrollerchange() { return this._oncontrollerchange; }
+    get onmessage() { return this._onmessage; }
+    set onmessage(callback) {
+      if (this._onmessage) this.removeEventListener("message", this._onmessage);
+      this._onmessage = typeof callback === "function" ? callback : null;
+      if (this._onmessage) this.addEventListener("message", this._onmessage);
+    }
+    get onmessageerror() { return this._onmessageerror; }
+    set onmessageerror(callback) {
+      if (this._onmessageerror) this.removeEventListener("messageerror", this._onmessageerror);
+      this._onmessageerror = typeof callback === "function" ? callback : null;
+      if (this._onmessageerror) this.addEventListener("messageerror", this._onmessageerror);
+    }
     set oncontrollerchange(callback) {
       if (this._oncontrollerchange) this.removeEventListener("controllerchange", this._oncontrollerchange);
       this._oncontrollerchange = typeof callback === "function" ? callback : null;
@@ -18824,6 +20030,11 @@
     enumerable: true,
     get() { return nativeIsSecureContext(); },
   });
+  Object.defineProperty(globalThis, "crossOriginIsolated", {
+    configurable: true,
+    enumerable: true,
+    get() { return nativeCrossOriginIsolated(); },
+  });
   if (globalThis.TextEncoder === undefined) {
     globalThis.TextEncoder = class TextEncoder {
       get encoding() { return "utf-8"; }
@@ -19048,8 +20259,19 @@
       defaultValue === undefined ? "" : String(defaultValue),
     );
   };
-  globalThis.innerWidth = 1280;
-  globalThis.innerHeight = 720;
+  const nativeWindowViewportDimension = globalThis.__omoikane_window_viewport_dimension;
+  delete globalThis.__omoikane_window_viewport_dimension;
+  // Each Window reads its own layout viewport. Replaceable attributes can be
+  // shadowed by page code without changing the browser's viewport state.
+  for (const [name, height] of [["innerWidth", false], ["innerHeight", true]]) {
+    safeDefineProperty(globalThis, name, {
+      configurable: true, enumerable: true,
+      get() { return nativeWindowViewportDimension(height); },
+      set(value) {
+        safeDefineProperty(this, name, {value, configurable:true, enumerable:true, writable:true});
+      },
+    });
+  }
   globalThis.outerWidth = 1280;
   globalThis.outerHeight = 720;
   globalThis.screenX = 0;
@@ -20109,16 +21331,35 @@
     }, Boolean(error));
   };
 
+  const domParserOwnerDocuments = browsingInput.domParserOwnerDocuments ||
+    (browsingInput.domParserOwnerDocuments = new WeakMap());
   globalThis.DOMParser = class DOMParser {
+    constructor() {
+      safeWeakMapSet(domParserOwnerDocuments, this, __omoikane_document_id);
+    }
     parseFromString(source, type) {
+      const ownerDocumentId = safeWeakMapGet(domParserOwnerDocuments, this);
+      if (ownerDocumentId === undefined) throw new TypeError("Illegal DOMParser receiver");
       if (arguments.length < 2) throw new TypeError("parseFromString requires 2 arguments");
-      const input = String(source);
-      const mime = String(type).toLowerCase();
+      const trustedHTML = nativeTrustedTypeIs(source, 0);
+      const input = trustedHTML ? nativeTrustedTypeValue(source, 0) : toDOMString(source);
+      const mime = toDOMString(type).toLowerCase();
       const supported = ["text/html", "text/xml", "application/xml", "application/xhtml+xml", "image/svg+xml"];
       if (!supported.includes(mime)) throw new TypeError("Unsupported DOMParser MIME type: " + mime);
       if (mime === "text/html") {
-        const parsed = document.implementation.createHTMLDocument("");
-        parsed.body.innerHTML = input;
+        const html = trustedHTMLForSink(source, ownerDocumentId, "DOMParser parseFromString", input);
+        const parsed = wrapNode(ownerDocumentId).implementation.createHTMLDocument("");
+        const body = parsed.body;
+        const bodyId = internalNodeId(body);
+        if (bodyId === undefined || internalNodeType(body) !== 1) {
+          throw new IntrinsicTypeError("DOMParser requires an HTML body");
+        }
+        // A page may replace createHTMLDocument or the returned body's getter.
+        // Recheck against the actual target if it belongs to an enforcing
+        // Document; the caller Document's approval cannot authorize that sink.
+        const targetHtml = nativeTrustedTypeSinkRequires(bodyId)
+          ? trustedHTMLForSink(source, bodyId, "Element innerHTML", input) : html;
+        setInnerHTMLWithApprovedString(body, targetHtml, trustedSinkDocumentGuard(body));
         return parsed;
       }
       const parsedId = __omoikane_parse_xml(input);
@@ -20128,7 +21369,7 @@
         nativeSetDocumentContentType(parsedId, mime);
         return parsed;
       }
-      const error = document.implementation.createDocument("", "parsererror", null);
+      const error = wrapNode(ownerDocumentId).implementation.createDocument("", "parsererror", null);
       error.__documentURL = "about:blank";
       error.documentElement.textContent = "XML parse error";
       return error;
@@ -20406,6 +21647,7 @@
     }
     send(body = null) {
       if (this.readyState !== 1 || this._sendFlag) throw new Error("InvalidStateError");
+      const cspSource = nativeCaptureCspSource();
       this._sendFlag = true;
       this._terminal = false;
       const requestId = this._requestId;
@@ -20456,7 +21698,7 @@
             };
           })
         : Promise.resolve().then(() =>
-            __omoikane_fetch(
+            nativeFetch(
               this._url,
               this._method,
               JSON.stringify(Object.entries(this._headers)),
@@ -20465,6 +21707,7 @@
               this.withCredentials ? "include" : "same-origin",
               "follow",
               this._timeout,
+              cspSource,
             )
           ).then(raw => JSON.parse(String(raw)));
       payload.then(data => {
@@ -21845,16 +23088,19 @@
   // The host has deterministic permission state for the APIs that already
   // exist in this runtime (Notifications, Geolocation, and Async Clipboard).
   // Keep PermissionStatus objects in this realm and fan out host transitions
-  // through a small weak registry, so no Boa object crosses a runtime boundary
-  // and stale statuses do not keep a document alive after teardown.
+  // through a small weak registry, so no Boa object crosses a runtime boundary.
+  // Statuses with change listeners remain reachable until those listeners are
+  // removed or the document tears down.
   // -------------------------------------------------------------------------
   const permissionsConstructionToken = {};
   const permissionStatusEntries = new Map();
+  const permissionStatusNames = new WeakMap();
   const permissionStatusUsesWeakRefs = typeof WeakRef === "function";
+  const observedPermissionStatuses = new Set();
   let permissionLifecycleActive = true;
   const supportedPermissionNames = Object.freeze([
     "notifications", "geolocation", "clipboard-read", "clipboard-write", "persistent-storage",
-    "accelerometer", "gyroscope", "magnetometer",
+    "accelerometer", "gyroscope", "magnetometer", "storage-access",
   ]);
 
   function permissionDescriptorName(descriptor) {
@@ -21870,6 +23116,9 @@
   }
 
   function permissionStateFor(name) {
+    if (name === "storage-access") {
+      return String(nativeStorageAccessPermission(__omoikane_document_id));
+    }
     // No platform sensor provider is installed, so motion permission cannot
     // be granted. This is also the state reported by Permissions.query.
     if (["accelerometer", "gyroscope", "magnetometer"].includes(name)) return "denied";
@@ -21887,7 +23136,7 @@
     }
     if (name === "geolocation") {
       try {
-        return nativeGeolocationPermission() ? "granted" : "denied";
+        return nativeGeolocationPermission(__omoikane_document_id) ? "granted" : "denied";
       } catch (_) {
         return "denied";
       }
@@ -21900,9 +23149,10 @@
   }
 
   function registerPermissionStatus(status) {
-    const entries = permissionStatusEntries.get(status.__permissionName) || [];
+    const name = permissionStatusNames.get(status);
+    const entries = permissionStatusEntries.get(name) || [];
     entries.push(permissionStatusUsesWeakRefs ? new WeakRef(status) : status);
-    permissionStatusEntries.set(status.__permissionName, entries);
+    permissionStatusEntries.set(name, entries);
   }
 
   function notifyPermissionStatuses(name, state) {
@@ -21924,15 +23174,37 @@
       if (!supportedPermissionNames.includes(name)) {
         throw new TypeError("Illegal constructor");
       }
-      this.__permissionName = name;
+      permissionStatusNames.set(this, name);
       this.__state = state;
       this.__active = true;
       this.__onchange = null;
+    }
+    get name() {
+      const name = permissionStatusNames.get(this);
+      if (name === undefined) throw new TypeError("Illegal invocation");
+      return name;
     }
     get state() { return this.__state; }
     get onchange() { return this.__onchange; }
     set onchange(callback) {
       this.__onchange = typeof callback === "function" ? callback : null;
+      this.__syncObserverRetention();
+    }
+    addEventListener(type, callback, options) {
+      super.addEventListener(type, callback, options);
+      this.__syncObserverRetention();
+    }
+    removeEventListener(type, callback, options) {
+      super.removeEventListener(type, callback, options);
+      this.__syncObserverRetention();
+    }
+    __syncObserverRetention() {
+      const hasListeners = (this._listeners.get("change") || []).some(entry => !entry.removed);
+      if (this.__active && (this.__onchange || hasListeners)) {
+        observedPermissionStatuses.add(this);
+      } else {
+        observedPermissionStatuses.delete(this);
+      }
     }
     __setState(state) {
       if (!this.__active || state === this.__state) return;
@@ -21945,6 +23217,7 @@
       this.__active = false;
       this.__onchange = null;
       clearListeners(this._listeners);
+      observedPermissionStatuses.delete(this);
     }
     get [Symbol.toStringTag]() { return "PermissionStatus"; }
   }
@@ -22385,6 +23658,7 @@
     if (visualScroll) visualViewport.dispatchEvent(new Event("scroll"));
   };
   globalThis.EventTarget = EventTarget;
+  const dispatchCspGlobalEvent = EventTarget.prototype.dispatchEvent;
   // DOM nodes and the Window inherit the EventTarget interface. Their own
   // listener operations retain the document-backed event dispatch state.
   Object.setPrototypeOf(Node.prototype, EventTarget.prototype);
@@ -22392,6 +23666,14 @@
   Object.setPrototypeOf(Window.prototype, EventTarget.prototype);
   Object.setPrototypeOf(Window, EventTarget);
   Object.setPrototypeOf(globalThis, Window.prototype);
+  // Child WindowProxies replace globalThis after bootstrap. Keep the backing
+  // Window's focus methods in its own Realm for proxy forwarding.
+  Object.defineProperty(globalThis, "focus", {
+    configurable: true, writable: true, value: Window.prototype.focus,
+  });
+  Object.defineProperty(globalThis, "blur", {
+    configurable: true, writable: true, value: Window.prototype.blur,
+  });
   // XMLHttpRequestUpload is declared beside XMLHttpRequest so the latter can
   // construct it before this general EventTarget definition is reached.  Link
   // the prototype chain once EventTarget is initialized so standard brand
@@ -22403,6 +23685,164 @@
   Object.setPrototypeOf(GPUEventTarget.prototype, EventTarget.prototype);
   globalThis.AbortSignal = AbortSignal;
   globalThis.AbortController = AbortController;
+
+  const cookieStoreOwners = new WeakMap();
+  const cookieStoreToken = {};
+  const cookieStoreCreationURL = document.URL;
+  let serviceWorkerCookieStoreClass = null;
+  let serviceWorkerCookieStore = null;
+  let serviceWorkerCookieChangeDispatcher = null;
+  const cookieStoreAvailable = (() => {
+    try { return nativeCookieStoreAvailable(__omoikane_document_id) === true; }
+    catch (_) { return false; }
+  })();
+  const cookieStoreQueryName = (options, requireOptions) => {
+    if (typeof options === "string") return options;
+    if (options == null) {
+      if (requireOptions) throw new TypeError("CookieStore.get requires a name or URL");
+      return null;
+    }
+    if (typeof options !== "object") throw new TypeError("CookieStore options must be a dictionary");
+    if (requireOptions && options.name === undefined && options.url === undefined) {
+      throw new TypeError("CookieStore.get requires a name or URL");
+    }
+    if (options.url !== undefined) {
+      const base = typeof document === "undefined" ? cookieStoreCreationURL : document.baseURI;
+      const requested = new URL(String(options.url), base);
+      const current = new URL(cookieStoreCreationURL);
+      if (requested.href.split("#")[0] !== current.href.split("#")[0]) {
+        throw new TypeError("CookieStore URL must match the document URL");
+      }
+    }
+    return options.name === undefined ? null : String(options.name);
+  };
+  const queryCookieStore = (store, options, requireOptions = false) => {
+    if (!cookieStoreOwners.has(store)) return Promise.reject(new TypeError("Illegal invocation"));
+    return Promise.resolve().then(() => {
+      const result = nativeCookieStoreQuery(cookieStoreOwners.get(store), cookieStoreCreationURL);
+      if (result === null) throw new DOMException("Opaque origins cannot access cookies", "SecurityError");
+      const requestedName = cookieStoreQueryName(options, requireOptions);
+      const name = requestedName === null ? null : requestedName.replace(/^[\t ]+|[\t ]+$/g, "");
+      const items = JSON.parse(String(result));
+      return name === null ? items : items.filter(cookie => cookie.name === name);
+    });
+  };
+  const mutateCookieStore = (store, options, value, deletion, argumentCount) => {
+    if (!cookieStoreOwners.has(store)) return Promise.reject(new TypeError("Illegal invocation"));
+    return Promise.resolve().then(() => {
+      let fields;
+      if (typeof options === "string") {
+        if (!deletion && argumentCount < 2) throw new TypeError("CookieStore.set requires a value");
+        fields = { name: options, value: deletion ? "" : String(value) };
+      } else if (options !== null && typeof options === "object") {
+        if (options.name === undefined || (!deletion && options.value === undefined)) {
+          throw new TypeError("CookieStore options require name and value");
+        }
+        fields = { name: String(options.name), value: deletion ? "" : String(options.value) };
+        if (options.domain !== undefined && options.domain !== null) fields.domain = String(options.domain);
+        if (options.path !== undefined) fields.path = String(options.path);
+        if (!deletion && options.expires !== undefined && options.expires !== null) {
+          fields.expires = Number(options.expires);
+          if (!Number.isFinite(fields.expires)) throw new TypeError("Invalid Cookie Store expires");
+        }
+        if (!deletion && options.maxAge !== undefined && options.maxAge !== null) {
+          fields.maxAge = Number(options.maxAge);
+          if (!Number.isSafeInteger(fields.maxAge)) throw new TypeError("Invalid Cookie Store maxAge");
+        }
+        if (!deletion && options.sameSite !== undefined) fields.sameSite = String(options.sameSite);
+        if (options.partitioned !== undefined) fields.partitioned = Boolean(options.partitioned);
+      } else {
+        throw new TypeError("CookieStore options must be a dictionary or name");
+      }
+      fields.path ??= "/";
+      fields.sameSite ??= "strict";
+      fields.partitioned ??= false;
+      fields.deletion = deletion;
+      if (!["strict", "lax", "none"].includes(fields.sameSite)) {
+        throw new TypeError("Invalid Cookie Store sameSite");
+      }
+      if (deletion && fields.name === "") fields.value = "deleted";
+      fields.maxAge = deletion ? 0 : (fields.maxAge ?? null);
+      fields.expires ??= null;
+      const result = nativeCookieStoreMutate(cookieStoreOwners.get(store), cookieStoreCreationURL, JSON.stringify(fields));
+      if (result === null) throw new DOMException("Opaque origins cannot access cookies", "SecurityError");
+      return undefined;
+    });
+  };
+  if (cookieStoreAvailable) {
+    const cookieChangeEventData = new WeakMap();
+    const cookieChangeItem = item => {
+      const result = {};
+      if (item.name !== undefined) result.name = String(item.name);
+      if (item.value !== undefined) result.value = String(item.value);
+      return result;
+    };
+    class CookieChangeEvent extends Event {
+      constructor(type, init = {}) {
+        super(type, init);
+        cookieChangeEventData.set(this, {
+          changed: Object.freeze(Array.from(init?.changed ?? [], cookieChangeItem)),
+          deleted: Object.freeze(Array.from(init?.deleted ?? [], cookieChangeItem)),
+        });
+      }
+      get changed() { return cookieChangeEventData.get(this)?.changed; }
+      get deleted() { return cookieChangeEventData.get(this)?.deleted; }
+      get [Symbol.toStringTag]() { return "CookieChangeEvent"; }
+    }
+    class CookieStore extends EventTarget {
+      constructor(token) {
+        if (token !== cookieStoreToken) throw new TypeError("Illegal constructor");
+        super();
+        cookieStoreOwners.set(this, __omoikane_document_id);
+      }
+      get(options) { return queryCookieStore(this, options, true).then(items => items[0] || null); }
+      getAll(options) { return queryCookieStore(this, options); }
+      set(options, value) { return mutateCookieStore(this, options, value, false, arguments.length); }
+      delete(options) { return mutateCookieStore(this, options, undefined, true, arguments.length); }
+      get onchange() { return this.__onchange || null; }
+      set onchange(callback) {
+        if (this.__onchange) this.removeEventListener("change", this.__onchange);
+        this.__onchange = typeof callback === "function" ? callback : null;
+        if (this.__onchange) this.addEventListener("change", this.__onchange);
+      }
+      get [Symbol.toStringTag]() { return "CookieStore"; }
+    }
+    globalThis.CookieChangeEvent = CookieChangeEvent;
+    globalThis.CookieStore = CookieStore;
+    const activeCookieStore = new CookieStore(cookieStoreToken);
+    serviceWorkerCookieStoreClass = CookieStore;
+    serviceWorkerCookieStore = activeCookieStore;
+    Object.defineProperty(globalThis, "cookieStore", {
+      configurable: true,
+      enumerable: true,
+      value: activeCookieStore,
+      writable: false,
+    });
+    const parseCookieChanges = JSON.parse.bind(JSON);
+    const dispatchCookieChange = EventTarget.prototype.dispatchEvent;
+    let cookieChangeCursor = 0;
+    try {
+      const initial = nativeCookieStoreChanges(__omoikane_document_id, cookieStoreCreationURL, null);
+      if (initial !== null) cookieChangeCursor = parseCookieChanges(String(initial)).cursor;
+    } catch (_) {}
+    __omoikane_cookie_change_reset = () => {
+      const initial = nativeCookieStoreChanges(__omoikane_document_id, cookieStoreCreationURL, null);
+      if (initial !== null) cookieChangeCursor = parseCookieChanges(String(initial)).cursor;
+    };
+    __omoikane_cookie_change_dispatch = () => {
+      if (serviceWorkerCookieChangeDispatcher !== null) {
+        serviceWorkerCookieChangeDispatcher();
+        return;
+      }
+      const encoded = nativeCookieStoreChanges(__omoikane_document_id, cookieStoreCreationURL, cookieChangeCursor);
+      if (encoded === null) return;
+      const changes = parseCookieChanges(String(encoded));
+      cookieChangeCursor = changes.cursor;
+      for (const event of changes.events) {
+        safeApply(dispatchCookieChange, activeCookieStore, [new CookieChangeEvent("change", event)]);
+      }
+    };
+  }
 
   function dataCloneError(message = "The value could not be cloned.") {
     return new DOMException(message, "DataCloneError");
@@ -24191,6 +25631,16 @@
 
   globalThis.__omoikane_encode_worker_message = encodeWorkerMessage;
   globalThis.__omoikane_decode_worker_message = decodeWorkerMessage;
+  globalThis.__omoikane_receive_worker_message = function(wire, origin, source, transferred, target = globalThis) {
+    const ports = receiveTransferredMessagePorts(transferred || []);
+    let data;
+    try { data = decodeWorkerMessage(wire, ports); }
+    catch (_) {
+      target.dispatchEvent(new MessageEvent("messageerror", {origin, source, ports}));
+      return;
+    }
+    target.dispatchEvent(new MessageEvent("message", {data, origin, source, ports}));
+  };
 
   const messagePortConstructionToken = {};
   class MessagePort extends EventTarget {
@@ -24229,6 +25679,16 @@
       if (this._closed) return;
       if (!this._started) { this._pendingMessages.push(data); return; }
       __omoikane_enqueue_posted_message(this, data);
+    }
+    _transferPendingMessages() {
+      // Serialize queued local clones in their source Realm before another
+      // runtime adopts this endpoint. Its receiver must build local objects.
+      return this._pendingMessages.map(packet => {
+        if (!packet.direct) return packet;
+        const ports = [];
+        const wire = encodeWorkerMessage(packet.data, {transfer: packet.ports}, ports);
+        return {direct: false, wire, ports};
+      });
     }
     _acceptMessage(packet) {
       if (this._closed) return;
@@ -24286,7 +25746,7 @@
       const oldPort = ports[index];
       const port = new MessagePort(messagePortConstructionToken);
       port._entangled = oldPort._entangled;
-      port._pendingMessages = oldPort._pendingMessages;
+      port._pendingMessages = oldPort._transferPendingMessages();
       if (port._entangled) port._entangled._entangled = port;
       oldPort._entangled = null;
       oldPort._pendingMessages = [];
@@ -24329,7 +25789,9 @@
     if (kind === "self") return windowForDocument(globalThis.document) || globalThis;
     if (kind === "parent") return globalThis.parent;
     if (kind === "opener") return globalThis.opener;
-    if (kind === "auxiliary") return auxiliaryWindowProxy(iframeId);
+    if (kind === "auxiliary") {
+      return nativeAuxiliaryWindowProxyForId(iframeId) || auxiliaryWindowProxy(iframeId);
+    }
     if (kind === "iframe") {
       const iframe = wrapNode(iframeId);
       return iframe ? iframe.contentWindow : null;
@@ -24351,14 +25813,49 @@
       data, origin, source, ports: receivedPorts,
     }));
   };
-  globalThis.__omoikane_cross_origin_window = function(documentId) {
-    const facade = Object.create(null);
-    facade.postMessage = function(message, targetOriginOrOptions = "/", transfer = undefined) {
+  globalThis.__omoikane_cross_origin_window = function(documentId, parentWindow, topWindow) {
+    const postMessage = function(message, targetOriginOrOptions = "/", transfer = undefined) {
       __omoikane_window_post_message("document", documentId, null,
         message, targetOriginOrOptions, transfer);
     };
-    facade.closed = false;
-    facade.window = facade.self = facade.frames = facade;
+    let facade;
+    const value = property => {
+      if (property === "window" || property === "self" || property === "frames") return facade;
+      if (property === "parent") return parentWindow === undefined ? facade : parentWindow;
+      if (property === "top") return topWindow === undefined ? facade : topWindow;
+      if (property === "closed") return false;
+      if (property === "opener") return null;
+      if (property === "postMessage") return postMessage;
+      if (isCrossOriginWindowFallbackKey(property)) return undefined;
+      return crossOriginAuxiliaryError();
+    };
+    const exposed = new Set(["window", "self", "frames", "parent", "top",
+      "closed", "opener", "postMessage"]);
+    facade = new Proxy(Object.create(null), {
+      get(_target, property) { return value(property); },
+      has(_target, property) {
+        if (exposed.has(property)) return true;
+        if (isCrossOriginWindowFallbackKey(property)) return true;
+        return crossOriginAuxiliaryError();
+      },
+      getOwnPropertyDescriptor(_target, property) {
+        if (exposed.has(property)) {
+          return { get: () => value(property), enumerable: false, configurable: true };
+        }
+        if (isCrossOriginWindowFallbackKey(property)) return crossOriginWindowFallbackDescriptor();
+        return crossOriginAuxiliaryError();
+      },
+      ownKeys() {
+        return [...exposed, "then", windowProxyToStringTag,
+          windowProxyHasInstance, windowProxyIsConcatSpreadable];
+      },
+      getPrototypeOf() { return null; },
+      set() { return crossOriginAuxiliaryError(); },
+      defineProperty() { return crossOriginAuxiliaryError(); },
+      deleteProperty() { return crossOriginAuxiliaryError(); },
+      setPrototypeOf() { return crossOriginAuxiliaryError(); },
+      preventExtensions() { return crossOriginAuxiliaryError(); },
+    });
     return facade;
   };
   globalThis.postMessage = function(message, targetOriginOrOptions = "/", transfer = undefined) {
@@ -24366,12 +25863,113 @@
       message, targetOriginOrOptions, transfer);
   };
 
+  // The auxiliary Proxy can have been created in another Window's Realm. A
+  // cross-origin read must construct every exposed function, object and error
+  // in the Realm of the script reading it.
+  const crossOriginAuxiliaryValues = new WeakMap();
+  function crossOriginAuxiliaryError() {
+    throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+  }
+  function crossOriginAuxiliaryLocation(id) {
+    const navigate = value => __omoikane_navigate_auxiliary_window(id, String(value));
+    const replace = value => navigate(value);
+    return new Proxy(Object.create(null), {
+      get(_target, property) {
+        if (property === "replace") return replace;
+        if (isCrossOriginWindowFallbackKey(property)) return undefined;
+        return crossOriginAuxiliaryError();
+      },
+      set(_target, property, value) {
+        if (property !== "href") return crossOriginAuxiliaryError();
+        navigate(value);
+        return true;
+      },
+      getOwnPropertyDescriptor(_target, property) {
+        if (isCrossOriginWindowFallbackKey(property)) return crossOriginWindowFallbackDescriptor();
+        if (property === "replace") {
+          return { value: replace, writable: false, enumerable: false, configurable: true };
+        }
+        if (property === "href") {
+          return {
+            get: crossOriginAuxiliaryError,
+            set: navigate,
+            enumerable: false,
+            configurable: true,
+          };
+        }
+        return crossOriginAuxiliaryError();
+      },
+      ownKeys() { return ["href", "replace"]; },
+      getPrototypeOf() { return null; },
+      defineProperty() { return crossOriginAuxiliaryError(); },
+      deleteProperty() { return crossOriginAuxiliaryError(); },
+      setPrototypeOf() { return crossOriginAuxiliaryError(); },
+      preventExtensions() { return crossOriginAuxiliaryError(); },
+    });
+  }
+  globalThis.__omoikane_cross_origin_auxiliary_factory = function(id, property, descriptor, proxy) {
+    if (property === "__error__") return crossOriginAuxiliaryError();
+    if (property === "__type_error__") {
+      throw new TypeError("WindowProxy cannot be made non-extensible");
+    }
+    if (isCrossOriginWindowFallbackKey(property)) {
+      return descriptor ? crossOriginWindowFallbackDescriptor() : undefined;
+    }
+    let values = crossOriginAuxiliaryValues.get(proxy);
+    if (!values) {
+      values = new Map();
+      crossOriginAuxiliaryValues.set(proxy, values);
+    }
+    if (!values.has(property)) {
+      if (property === "postMessage") {
+        values.set(property, function(message, targetOriginOrOptions = "/", transfer = undefined) {
+          __omoikane_window_post_message("popup", id, null,
+            message, targetOriginOrOptions, transfer);
+        });
+      } else if (property === "close") {
+        values.set(property, () => __omoikane_close_auxiliary_window(id));
+      } else if (property === "location") {
+        values.set(property, crossOriginAuxiliaryLocation(id));
+      }
+    }
+    let value;
+    if (property === "closed") {
+      value = __omoikane_auxiliary_window_state(id) === "closed";
+    } else if (property === "window" || property === "self" || property === "frames" ||
+               property === "parent" || property === "top") {
+      value = proxy;
+    } else if (property === "opener") {
+      value = null;
+    } else if (values.has(property)) {
+      value = values.get(property);
+    } else {
+      return crossOriginAuxiliaryError();
+    }
+    if (!descriptor) return value;
+    if (property === "location") {
+      return {
+        get: () => value,
+        set: next => { value.href = next; },
+        enumerable: false,
+        configurable: true,
+      };
+    }
+    if (property === "closed" || property === "window" || property === "self" ||
+        property === "frames" || property === "parent" || property === "top" ||
+        property === "opener") {
+      return { get: () => value, enumerable: false, configurable: true };
+    }
+    return { value, writable: false, enumerable: false, configurable: true };
+  };
+
   const auxiliaryWindowProxies = new Map();
-  function auxiliaryWindowReflection(getProxy) {
+  function auxiliaryWindowReflection(id, getProxy) {
+    const crossOriginValue = (property, descriptor = false) =>
+      nativeCrossOriginAuxiliaryValue(id, property, descriptor, getProxy());
     return {
       defineProperty(_target, property, descriptor) {
         const window = nativeWindowProxyGlobal(getProxy());
-        if (window === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        if (window === null) return crossOriginValue("__error__");
         if (descriptor.configurable === false ||
             (descriptor.configurable !== true && !safeGetOwnPropertyDescriptor(window, property))) {
           throw new TypeError("WindowProxy does not support non-configurable properties");
@@ -24380,21 +25978,18 @@
       },
       deleteProperty(_target, property) {
         const window = nativeWindowProxyGlobal(getProxy());
-        if (window === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        if (window === null) return crossOriginValue("__error__");
         return Reflect.deleteProperty(window, property);
       },
       getOwnPropertyDescriptor(_target, property) {
         const window = nativeWindowProxyGlobal(getProxy());
-        if (window === null) {
-          if (isCrossOriginWindowFallbackKey(property)) return crossOriginWindowFallbackDescriptor();
-          throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
-        }
+        if (window === null) return crossOriginValue(property, true);
         const descriptor = safeGetOwnPropertyDescriptor(window, property);
         return descriptor ? { ...descriptor, configurable: true } : undefined;
       },
       ownKeys() {
         const window = nativeWindowProxyGlobal(getProxy());
-        if (window === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        if (window === null) return crossOriginValue("__error__");
         return Reflect.ownKeys(window);
       },
       getPrototypeOf() {
@@ -24403,10 +25998,10 @@
       },
       setPrototypeOf(_target, prototype) {
         const window = nativeWindowProxyGlobal(getProxy());
-        if (window === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        if (window === null) return crossOriginValue("__error__");
         return Reflect.setPrototypeOf(window, prototype);
       },
-      preventExtensions() { throw new TypeError("WindowProxy cannot be made non-extensible"); },
+      preventExtensions() { return crossOriginValue("__type_error__"); },
     };
   }
   function auxiliaryWindowProxy(id) {
@@ -24424,15 +26019,31 @@
       assign(value) { this.href = value; },
       replace(value) { this.href = value; },
       reload() { this.href = this.href; },
+      toString() { return this.href; },
     };
+    for (const part of ["protocol", "host", "hostname", "port", "pathname", "search", "hash", "origin"]) {
+      Object.defineProperty(location, part, {
+        enumerable: true,
+        get() { return new URL(location.href)[part]; },
+        ...(part === "origin" ? {} : { set(value) {
+          location.href = locationURLWithComponent(location.href, part, value);
+        } }),
+      });
+    }
     const handler = {
-      ...auxiliaryWindowReflection(() => proxy),
+      ...auxiliaryWindowReflection(id, () => proxy),
       get(_target, property, receiver) {
         const state = access();
+        if (state !== "closed" && typeof property === "string") {
+          nativeReportAuxiliaryWindowAccess(id, property);
+        }
         if (property === "closed") return state === "closed";
-        if (property === "close") return () => __omoikane_close_auxiliary_window(id);
         const target = state === "closed" ? null : nativeWindowProxyGlobal(proxy);
         if (target === null && isCrossOriginWindowFallbackKey(property)) return undefined;
+        if (target === null) {
+          return nativeCrossOriginAuxiliaryValue(id, property, false, proxy);
+        }
+        if (property === "close") return () => __omoikane_close_auxiliary_window(id);
         if (property === windowProxyToStringTag) return "Window";
         if (property === "location") return target !== null && state === "cross" ? target.location : location;
         if (property === "window" || property === "self" || property === "frames" ||
@@ -24441,20 +26052,20 @@
           __omoikane_window_post_message("popup", id, null,
             message, targetOriginOrOptions, transfer);
         };
-        if (state === "closed") return undefined;
-        if (target === null) {
-          if (property === "opener") return null;
-          throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
-        }
         return Reflect.get(target, property, windowHandlerReceiver(target, property, receiver, proxy));
       },
       set(_target, property, value, receiver) {
         if (property === "location") {
-          location.href = value;
+          const target = nativeWindowProxyGlobal(proxy);
+          if (target === null) {
+            nativeCrossOriginAuxiliaryValue(id, "location", false, proxy).href = value;
+          } else {
+            location.href = value;
+          }
           return true;
         }
         const target = nativeWindowProxyGlobal(proxy);
-        if (target === null) throw new DOMException("Blocked access to a cross-origin window.", "SecurityError");
+        if (target === null) return nativeCrossOriginAuxiliaryValue(id, "__error__", false, proxy);
         return Reflect.set(target, property, value, windowSetReceiver(target, property, receiver, proxy));
       },
     };
@@ -24499,8 +26110,7 @@
         searchWindow = parentWindow;
       }
     }
-    const id = __omoikane_open_auxiliary_window(url, targetName);
-    return auxiliaryWindowProxy(id);
+    return __omoikane_open_auxiliary_window(url, targetName, auxiliaryWindowProxy);
   };
   if (globalThis.__omoikane_auxiliary_context_id !== undefined) {
     Object.defineProperty(globalThis, "closed", {
@@ -24594,7 +26204,7 @@
     constructor(url, options = undefined) {
       super();
       if (arguments.length < 1) throw new TypeError("SharedWorker requires a script URL");
-      const requested = String(url);
+      const requested = trustedValueForSink(url, __omoikane_document_id, 2, "SharedWorker constructor");
       let name = "";
       if (typeof options === "string") name = options;
       else if (options && options.name !== undefined) name = String(options.name);
@@ -24679,10 +26289,11 @@
   class Worker extends EventTarget {
     constructor(url, options = undefined) {
       super();
+      if (arguments.length < 1) throw new TypeError("Worker requires a script URL");
+      const requested = trustedValueForSink(url, __omoikane_document_id, 2, "Worker constructor");
       if (options && options.type !== undefined && String(options.type) !== "classic") {
         throw new TypeError("Only classic Dedicated Workers are supported");
       }
-      const requested = String(url);
       this.url = requested;
       this.onmessage = null;
       this.onerror = null;
@@ -24692,8 +26303,9 @@
     }
     postMessage(message, options = undefined) {
       if (this.__terminated) return;
-      const data = __omoikane_encode_worker_message(message, options);
-      __omoikane_worker_post_message(this.__id, data);
+      const ports = [];
+      const data = encodeWorkerMessage(message, options, ports);
+      __omoikane_worker_post_message(this.__id, data, ports);
     }
     terminate() {
       if (this.__terminated) return;
@@ -24725,6 +26337,11 @@
     // browsing-context objects before user script evaluates.
     try { delete globalThis.document; } catch (_) { globalThis.document = undefined; }
     try { delete globalThis.window; } catch (_) { globalThis.window = undefined; }
+    try { delete globalThis.SharedWorker; } catch (_) { globalThis.SharedWorker = undefined; }
+    try { delete globalThis.cookieStore; } catch (_) { globalThis.cookieStore = undefined; }
+    try { delete globalThis.CookieStore; } catch (_) { globalThis.CookieStore = undefined; }
+    try { delete globalThis.CookieChangeEvent; } catch (_) { globalThis.CookieChangeEvent = undefined; }
+    try { delete globalThis.CookieStoreManager; } catch (_) { globalThis.CookieStoreManager = undefined; }
     try { delete globalThis.length; } catch (_) {}
     try { delete globalThis.open; } catch (_) { globalThis.open = undefined; }
     try { delete globalThis.customElements; } catch (_) { globalThis.customElements = undefined; }
@@ -24775,15 +26392,29 @@
       enumerable: true,
       get() { return nativeIsSecureContext(); },
     });
+    Object.defineProperty(globalThis, "crossOriginIsolated", {
+      configurable: true,
+      enumerable: true,
+      get() { return nativeCrossOriginIsolated(); },
+    });
     Object.defineProperty(globalThis, "_listeners", {
       configurable: true,
       value: new Map(),
     });
     globalThis.self = globalThis;
     globalThis.WorkerGlobalScope = Object;
+    globalThis.DedicatedWorkerGlobalScope = Object;
     const WorkerDOMException = DOMException;
     globalThis.importScripts = function(...urls) {
-      if (!nativeImportScripts(...urls)) {
+      // Both Array.prototype.map and @@iterator are writable by worker code.
+      // The security check must cover each original argument before the
+      // private host fetch receives it.
+      const checked = [];
+      for (let index = 0; index < urls.length; index++) {
+        checked[index] = trustedValueForSink(
+          urls[index], __omoikane_document_id, 2, "WorkerGlobalScope importScripts");
+      }
+      if (!safeApply(nativeImportScripts, undefined, checked)) {
         throw new WorkerDOMException("Failed to fetch imported script", "NetworkError");
       }
     };
@@ -24833,21 +26464,206 @@
       },
     });
     globalThis.postMessage = function(message, options = undefined) {
-      const data = __omoikane_encode_worker_message(message, options);
-      __omoikane_worker_owner_post_message(workerId, data);
+      const ports = [];
+      const data = encodeWorkerMessage(message, options, ports);
+      __omoikane_worker_owner_post_message(workerId, data, ports);
     };
     globalThis.close = function() {
       __omoikane_worker_close();
     };
   };
 
+  function installServiceWorkerLifetimeEvents(registration, worker) {
+    const states = new WeakMap();
+    const events = new Map();
+    const enqueue = queueMicrotask;
+    const resolve = Promise.resolve.bind(Promise);
+    const report = __omoikane_service_worker_lifecycle_complete;
+    function complete(event) {
+      const state = states.get(event);
+      if (state.dispatching || state.pending !== 0 || state.completed) return;
+      state.completed = true;
+      state.promises.length = 0;
+      if (state.phase !== undefined) {
+        events.delete(state.phase);
+        if (state.installing) {
+          registration.installing = null;
+          registration.waiting = state.failed ? null : worker;
+          worker.__setState(state.failed ? "redundant" : "installed");
+        } else {
+          worker.__setState("activated");
+        }
+        report(state.installing, state.failed);
+      }
+    }
+    class ExtendableEvent extends Event {
+      constructor(type, init = {}) {
+        if (arguments.length === 0) throw new TypeError("ExtendableEvent requires a type");
+        super(type, init);
+        states.set(this, { trusted: false, dispatching: false, pending: 0, failed: false, completed: false, promises: [] });
+      }
+      waitUntil(promise) {
+        const state = states.get(this);
+        if (!state) throw new TypeError("Illegal ExtendableEvent receiver");
+        if (arguments.length === 0) throw new TypeError("waitUntil requires a promise");
+        if (!state.trusted || (!state.dispatching && state.pending === 0)) {
+          throw new DOMException("The event is no longer active.", "InvalidStateError");
+        }
+        state.pending++;
+        const awaited = resolve(promise);
+        state.promises.push(awaited);
+        const settle = failed => enqueue(() => {
+          state.failed ||= failed;
+          state.pending--;
+          complete(this);
+        });
+        awaited.then(() => settle(false), () => settle(true));
+      }
+      get [Symbol.toStringTag]() { return "ExtendableEvent"; }
+    }
+    globalThis.ExtendableEvent = ExtendableEvent;
+    const cookieChangeData = new WeakMap();
+    class ExtendableCookieChangeEvent extends ExtendableEvent {
+      constructor(type, init = {}) {
+        super(type, init);
+        const item = cookie => Object.freeze({
+          name: String(cookie.name),
+          ...(cookie.value === undefined ? {} : {value: String(cookie.value)}),
+        });
+        cookieChangeData.set(this, {
+          changed: Object.freeze(Array.from(init.changed ?? [], item)),
+          deleted: Object.freeze(Array.from(init.deleted ?? [], item)),
+        });
+      }
+      get changed() { return cookieChangeData.get(this)?.changed; }
+      get deleted() { return cookieChangeData.get(this)?.deleted; }
+      get [Symbol.toStringTag]() { return "ExtendableCookieChangeEvent"; }
+    }
+    globalThis.ExtendableCookieChangeEvent = ExtendableCookieChangeEvent;
+    __omoikane_service_worker_lifecycle.cookiechange = function(data) {
+      const event = new ExtendableCookieChangeEvent("cookiechange", data);
+      const state = states.get(event);
+      state.trusted = state.dispatching = true;
+      event.isTrusted = true;
+      try { globalThis.dispatchEvent(event); }
+      finally {
+        state.dispatching = false;
+        complete(event);
+      }
+    };
+    __omoikane_service_worker_lifecycle.dispatch = function(phase) {
+      if (phase === "activate") {
+        registration.waiting = null;
+        registration.active = worker;
+        worker.__setState("activating");
+      }
+      const event = new ExtendableEvent(phase);
+      const state = states.get(event);
+      state.trusted = state.dispatching = true;
+      state.phase = phase;
+      state.installing = phase === "install";
+      event.isTrusted = true;
+      events.set(phase, event);
+      globalThis.dispatchEvent(event);
+    };
+    __omoikane_service_worker_lifecycle.finish = function(phase) {
+      const event = events.get(phase);
+      if (!event) return;
+      states.get(event).dispatching = false;
+      complete(event);
+    };
+    for (const type of ["install", "activate", "cookiechange"]) {
+      let handler = null;
+      Object.defineProperty(globalThis, "on" + type, {
+        configurable: true,
+        enumerable: true,
+        get() { return handler; },
+        set(callback) {
+          if (handler) globalThis.removeEventListener(type, handler);
+          handler = typeof callback === "function" ? callback : null;
+          if (handler) globalThis.addEventListener(type, handler);
+        },
+      });
+    }
+  }
+
+  globalThis.__omoikane_install_service_worker_global = function(scope) {
+    // The common Worker bootstrap supplies importScripts, a separate Trusted
+    // Types factory, and the response CSP before the ServiceWorker script runs.
+    try { delete globalThis.DedicatedWorkerGlobalScope; } catch (_) { globalThis.DedicatedWorkerGlobalScope = undefined; }
+    globalThis.ServiceWorkerGlobalScope = Object;
+    globalThis.CookieStoreManager = CookieStoreManager;
+    const record = {scope: String(scope), scriptURL: location.href, worker: null};
+    const worker = new ServiceWorker(record, "installing", null, serviceWorkerConstructionToken);
+    record.worker = worker;
+    serviceWorkerSelfMessageTargets.set(worker, {
+      _acceptMessage(packet) {
+        const ports = receiveTransferredMessagePorts(packet.ports);
+        let data;
+        try { data = decodeWorkerMessage(packet.wire, ports); }
+        catch (_) {
+          globalThis.dispatchEvent(new MessageEvent("messageerror", {
+            data: null, origin: location.origin, source: worker, ports,
+          }));
+          return;
+        }
+        globalThis.dispatchEvent(new MessageEvent("message", {
+          data, origin: location.origin, source: worker, ports,
+        }));
+      },
+    });
+    const registration = new ServiceWorkerRegistration(
+      record,
+      null,
+      serviceWorkerContainerConstructionToken,
+    );
+    record.registration = registration;
+    globalThis.registration = registration;
+    if (serviceWorkerCookieStore !== null) {
+      // ServiceWorkers expose CookieStore without the Window-only onchange
+      // attribute or Window change event dispatch.
+      delete serviceWorkerCookieStoreClass.prototype.onchange;
+      globalThis.CookieStore = serviceWorkerCookieStoreClass;
+      Object.defineProperty(globalThis, "cookieStore", {
+        configurable: true,
+        enumerable: true,
+        value: serviceWorkerCookieStore,
+        writable: false,
+      });
+    }
+    installServiceWorkerLifetimeEvents(registration, worker);
+    let cookieChangeCursor = 0;
+    const initial = nativeCookieStoreSubscribedChanges(__omoikane_document_id, null);
+    cookieChangeCursor = JSON.parse(String(initial)).cursor;
+    serviceWorkerCookieChangeDispatcher = () => {
+      const encoded = nativeCookieStoreSubscribedChanges(__omoikane_document_id, cookieChangeCursor);
+      const changes = JSON.parse(String(encoded));
+      cookieChangeCursor = changes.cursor;
+      for (const event of changes.events) {
+        __omoikane_service_worker_lifecycle.cookiechange(event);
+      }
+    };
+    const sendToOwner = globalThis.postMessage;
+    const client = Object.freeze({
+      postMessage(message, options = undefined) {
+        sendToOwner(message, options);
+      },
+    });
+    Object.defineProperty(globalThis, "__omoikane_service_worker_client", {
+      configurable: false,
+      writable: false,
+      value: client,
+    });
+    try { delete globalThis.postMessage; } catch (_) { globalThis.postMessage = undefined; }
+    try { delete globalThis.close; } catch (_) { globalThis.close = undefined; }
+  };
+
   globalThis.__omoikane_install_shared_worker_global = function(url, sharedWorkerId) {
     // Reuse the dedicated-worker global sanitisation and then install the
     // SharedWorkerGlobalScope-specific connect/port surface.
     globalThis.__omoikane_install_worker_global(url, sharedWorkerId);
-    try { delete globalThis.Worker; } catch (_) { globalThis.Worker = undefined; }
-    try { delete globalThis.SharedWorker; } catch (_) { globalThis.SharedWorker = undefined; }
     try { delete globalThis.SharedWorkerPort; } catch (_) { globalThis.SharedWorkerPort = undefined; }
+    try { delete globalThis.DedicatedWorkerGlobalScope; } catch (_) { globalThis.DedicatedWorkerGlobalScope = undefined; }
     globalThis.SharedWorkerGlobalScope = Object;
     const ports = new Map();
     globalThis.__omoikane_get_shared_worker_port = function(connectionId) {
@@ -24875,7 +26691,7 @@
     });
     globalThis.__omoikane_dispatch_shared_worker_connect = function(connectionId) {
       const port = globalThis.__omoikane_get_shared_worker_port(connectionId);
-      globalThis.dispatchEvent(new MessageEvent("connect", { ports: [port] }));
+      globalThis.dispatchEvent(new MessageEvent("connect", { source: port, ports: [port] }));
     };
     // SharedWorkerGlobalScope communicates through the ports in connect
     // events; a global postMessage call is therefore intentionally inert.
@@ -24895,6 +26711,7 @@
   // deterministic CSS.paintWorklet seam rather than invoking a renderer.
   // -------------------------------------------------------------------------
   const workletConstructionToken = {};
+  const workletErrorConstructors = { Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError };
   class WorkletGlobalScope {
     constructor() { throw new TypeError("Illegal constructor"); }
     get [Symbol.toStringTag]() { return "WorkletGlobalScope"; }
@@ -24925,13 +26742,14 @@
       if (options !== undefined && (options === null || typeof options !== "object")) {
         return Promise.reject(new TypeError("Worklet.addModule options must be an object"));
       }
-      if (options && options.credentials !== undefined &&
-          !["omit", "same-origin", "include"].includes(String(options.credentials))) {
+      const credentialsValue = options ? options.credentials : undefined;
+      const credentials = credentialsValue === undefined ? "same-origin" : String(credentialsValue);
+      if (!["omit", "same-origin", "include"].includes(credentials)) {
         return Promise.reject(new TypeError("Unsupported Worklet credentials mode"));
       }
       let status;
       try {
-        status = JSON.parse(nativeWorkletAddModule(this.__id, String(url)));
+        status = JSON.parse(nativeWorkletAddModule(this.__id, String(url), credentials));
       } catch (error) {
         return Promise.reject(error);
       }
@@ -24939,6 +26757,10 @@
         if (!status || status.ok !== true) {
           const name = status && status.name ? String(status.name) : "OperationError";
           const message = status && status.message ? String(status.message) : "Worklet module failed";
+          if (status && status.javascript === true) {
+            const ErrorConstructor = workletErrorConstructors[name] || workletErrorConstructors.Error;
+            throw new ErrorConstructor(message);
+          }
           throw new DOMException(message, name);
         }
         return undefined;
@@ -24991,6 +26813,7 @@
     try { delete globalThis.Worker; } catch (_) { globalThis.Worker = undefined; }
     try { delete globalThis.SharedWorker; } catch (_) { globalThis.SharedWorker = undefined; }
     try { delete globalThis.SharedWorkerGlobalScope; } catch (_) {}
+    try { delete globalThis.DedicatedWorkerGlobalScope; } catch (_) {}
     try { delete globalThis.Worklet; } catch (_) { globalThis.Worklet = undefined; }
     try { delete globalThis.WorkletGlobalScope; } catch (_) {}
     try { delete globalThis.CSS; } catch (_) { globalThis.CSS = undefined; }
@@ -25598,7 +27421,10 @@
     if (!(object instanceof Blob)) {
       throw new TypeError("createObjectURL requires a Blob");
     }
-    const origin = (globalThis.location && globalThis.location.origin) || "null";
+    // about:blank and srcdoc can inherit an origin that differs from their
+    // URL's `null` origin. Use the Document's security origin instead.
+    const documentOrigin = __omoikane_storage_origin(__omoikane_document_id);
+    const origin = documentOrigin === null ? "null" : new URL(documentOrigin).origin;
     const url = "blob:" + origin + "/" + crypto.randomUUID();
     objectUrls.set(url, object);
     __omoikane_register_object_url(url, object.__bytes, object.type);
@@ -25645,6 +27471,7 @@
   class WebSocket extends EventTarget {
     constructor(url, protocols = []) {
       super();
+      const cspSource = nativeCaptureCspSource();
       this.url = String(url);
       const list = protocols === undefined ? [] : (Array.isArray(protocols) ? protocols.map(String) : [String(protocols)]);
       if (new Set(list).size !== list.length) throw new DOMException("Duplicate subprotocol", "SyntaxError");
@@ -25656,7 +27483,7 @@
       this.binaryType = "blob";
       this.onopen = this.onmessage = this.onerror = this.onclose = null;
       try {
-        const result = JSON.parse(__omoikane_websocket_connect(this.url, JSON.stringify(list)));
+        const result = JSON.parse(nativeWebSocketConnect(this.url, JSON.stringify(list), cspSource));
         this.__id = result.id;
         this.protocol = result.protocol;
         __omoikane_queue_networking_task(() => {
@@ -25734,23 +27561,35 @@
   WebSocket.CLOSING = WebSocket.prototype.CLOSING = 2;
   WebSocket.CLOSED = WebSocket.prototype.CLOSED = 3;
 
+  const eventSourceCspSources = new WeakMap();
   class EventSource extends EventTarget {
     constructor(url, init = {}) {
       super();
-      this.url = String(url);
+      const cspSource = nativeCaptureCspSource();
+      if (typeof url === "symbol") throw new IntrinsicTypeError("Cannot convert a Symbol to a string");
+      const input = String(url);
+      const base = typeof document === "undefined" ? nativeDocumentBaseURL(__omoikane_document_id) : document.baseURI;
+      try {
+        this.url = new URL(input, base || globalThis.location.href).href;
+      } catch (_) {
+        throw new DOMException("Invalid EventSource URL", "SyntaxError");
+      }
       this.withCredentials = !!(init && init.withCredentials);
       this.readyState = EventSource.CONNECTING;
       this.onopen = this.onmessage = this.onerror = null;
       this.__closed = false;
       this.__lastEventId = "";
       this.__retry = 3000;
+      safeWeakMapSet(eventSourceCspSources, this, cspSource);
       this.__connect();
     }
     close() { this.__closed = true; this.readyState = EventSource.CLOSED; }
     __connect() {
       if (this.__closed) return;
       try {
-        const text = __omoikane_event_source_fetch(this.url, this.__lastEventId, this.withCredentials);
+        const cspSource = safeWeakMapGet(eventSourceCspSources, this) ?? "null";
+        safeWeakMapDelete(eventSourceCspSources, this);
+        const text = nativeEventSourceFetch(this.url, this.__lastEventId, this.withCredentials, cspSource);
         __omoikane_queue_networking_task(() => {
           if (this.__closed) return;
           this.readyState = EventSource.OPEN;
@@ -26222,6 +28061,7 @@
   }
 
   globalThis.fetch = function(input, init = {}) {
+    const cspSource = nativeCaptureCspSource();
     const source = input instanceof Request ? input : null;
     const request = new Request(input, init);
     if (source && init.body === undefined && !bodyIsEmpty(source.__body)) disturbBody(source);
@@ -26247,7 +28087,7 @@
     }
     return Promise.resolve().then(() => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
-      return __omoikane_fetch(
+      return nativeFetch(
         request.url,
         request.method,
         JSON.stringify([...request.headers]),
@@ -26255,6 +28095,8 @@
         request.mode,
         request.credentials,
         request.redirect,
+        undefined,
+        cspSource,
       );
     }).then(raw => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
@@ -27547,6 +29389,7 @@
   globalThis.IntersectionObserver = IntersectionObserver;
   globalThis.IntersectionObserverEntry = IntersectionObserverEntry;
   const inputDispatchers = {
+    focus: (kind, ...args) => safeApply(focusDocumentCommands[kind], undefined, args),
     mouse: globalThis.__omoikane_dispatch_mouse_input,
     wheel: globalThis.__omoikane_dispatch_wheel_input,
     touch: globalThis.__omoikane_dispatch_touch_input,
@@ -27565,7 +29408,9 @@
   validationReady = true;
   formStateDocument = globalThis.document;
   nativeRegisterIframeNavigation(internalNodeId(globalThis.document), (frameId, documentId, kind, value, extra, committedURL, eventState) => {
-    if (kind === "auxiliary-window") return auxiliaryWindowProxy(frameId);
+    if (kind === "auxiliary-window") {
+      return nativeAuxiliaryWindowProxyForId(frameId) || auxiliaryWindowProxy(frameId);
+    }
     const frame = wrapNode(frameId);
     if (kind === "window") return safeApply(iframeContentWindowGetter, frame, []);
     if (kind === "prepare") return frame.__prepareResourceNavigation();
@@ -27610,6 +29455,15 @@
       return false;
     });
   };
+  globalThis.__omoikane_install_security_reporting = factory => {
+    Object.assign(platformEventInterfaces, factory({ queueTask: __omoikane_queue_networking_task }));
+  };
+  globalThis.__omoikane_generate_test_report = (message, reportURL) => {
+    platformEventInterfaces.queueTestReport(message, reportURL);
+  };
+  __omoikane_queue_reporting_api_report = report => {
+    platformEventInterfaces.queueReport(report);
+  };
   globalThis.__omoikane_install_touch_events = factory => {
     Object.assign(platformEventInterfaces, factory({ UIEvent, isTouch: platformEventInterfaces.isTouch }));
   };
@@ -27636,12 +29490,13 @@
       windowTarget: globalThis,
       reflectWindowTypes: types => { for (const type of types) WINDOW_REFLECTED_HANDLERS.add(type); },
       resolveTarget(receiver, type) {
-        if (receiver === globalThis) return receiver;
+        if (receiver === globalThis || receiver === topWindow) return globalThis;
         const id = getWrapperNodeId(wrapperNodeIds, receiver);
         if (id === undefined) throw new IntrinsicTypeError("Illegal invocation");
         const tag = internalNodeLocalName(receiver);
         if ((tag === "body" || tag === "frameset") && WINDOW_REFLECTED_HANDLERS.has(type)) {
-          return receiver.ownerDocument?.defaultView;
+          const window = receiver.ownerDocument?.defaultView;
+          return window === topWindow ? globalThis : window;
         }
         return receiver;
       },

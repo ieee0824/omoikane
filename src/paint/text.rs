@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use crate::css::style::PropagatedTextDecoration;
@@ -28,6 +28,7 @@ mod shadow;
 pub(super) use shadow::text_shadow_paint_bounds;
 
 const MAX_RENDER_GLYPH_CACHE_ENTRIES: usize = 16_384;
+const MAX_RENDER_GLYPH_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct RenderGlyphCacheKey {
@@ -46,6 +47,8 @@ enum RenderGlyphIdentity {
 struct RenderGlyphCache {
     active: bool,
     glyphs: HashMap<RenderGlyphCacheKey, Arc<GlyphRaster>>,
+    insertion_order: VecDeque<RenderGlyphCacheKey>,
+    bitmap_bytes: usize,
     #[cfg(test)]
     hits: usize,
     #[cfg(test)]
@@ -61,22 +64,42 @@ struct RenderGlyphCacheGuard;
 impl Drop for RenderGlyphCacheGuard {
     fn drop(&mut self) {
         RENDER_GLYPH_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            cache.active = false;
-            cache.glyphs.clear();
+            cache.borrow_mut().active = false;
         });
     }
 }
 
-/// Shares rasterized glyphs between text fragments in one paint operation.
-/// Monotonic font identities remain distinct when the system cache evicts a face.
+impl RenderGlyphCache {
+    fn insert(&mut self, key: RenderGlyphCacheKey, glyph: Arc<GlyphRaster>) {
+        let bytes = glyph.bitmap.len();
+        if bytes > MAX_RENDER_GLYPH_CACHE_BYTES || self.glyphs.contains_key(&key) {
+            return;
+        }
+        while self.glyphs.len() >= MAX_RENDER_GLYPH_CACHE_ENTRIES
+            || self.bitmap_bytes > MAX_RENDER_GLYPH_CACHE_BYTES - bytes
+        {
+            let Some(oldest) = self.insertion_order.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = self.glyphs.remove(&oldest) {
+                self.bitmap_bytes -= evicted.bitmap.len();
+            }
+        }
+        self.bitmap_bytes += bytes;
+        self.insertion_order.push_back(key);
+        self.glyphs.insert(key, glyph);
+    }
+}
+
+/// Shares rasterized glyphs across paint operations on this thread. Font cache
+/// identities keep replaced faces distinct; entry and bitmap limits bound the
+/// retained memory. Nested paints share the active cache.
 pub(crate) fn with_render_glyph_cache<T>(paint: impl FnOnce() -> T) -> T {
     let owns_cache = RENDER_GLYPH_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if cache.active {
             return false;
         }
-        cache.glyphs.clear();
         cache.active = true;
         #[cfg(test)]
         {
@@ -124,9 +147,7 @@ fn rasterize_cached(font: &Font, ch: char, size_px: f32) -> Result<Arc<GlyphRast
             {
                 cache.misses += 1;
             }
-            if cache.glyphs.len() < MAX_RENDER_GLYPH_CACHE_ENTRIES {
-                cache.glyphs.insert(key, glyph.clone());
-            }
+            cache.insert(key, glyph.clone());
         }
     });
     Ok(glyph)
@@ -162,9 +183,7 @@ fn rasterize_glyph_cached(
             {
                 cache.misses += 1;
             }
-            if cache.glyphs.len() < MAX_RENDER_GLYPH_CACHE_ENTRIES {
-                cache.glyphs.insert(key, glyph.clone());
-            }
+            cache.insert(key, glyph.clone());
         }
     });
     Ok(glyph)
@@ -176,6 +195,41 @@ pub(crate) fn render_glyph_cache_stats() -> (usize, usize) {
         let cache = cache.borrow();
         (cache.hits, cache.misses)
     })
+}
+
+#[cfg(test)]
+mod render_glyph_cache_tests {
+    use super::*;
+
+    #[test]
+    fn bitmap_budget_evicts_old_entries_and_rejects_oversized_glyphs() {
+        let key = |glyph_id| RenderGlyphCacheKey {
+            font_identity: 1,
+            glyph: RenderGlyphIdentity::GlyphId(glyph_id),
+            size_bits: 16.0f32.to_bits(),
+        };
+        let raster = |bytes| {
+            Arc::new(GlyphRaster {
+                width: 1,
+                height: 1,
+                bitmap: vec![0; bytes],
+                advance_x: 0.0,
+                advance_y: 0.0,
+                offset_x: 0.0,
+                offset_y: 0.0,
+            })
+        };
+        let mut cache = RenderGlyphCache::default();
+        cache.insert(key(1), raster(9 * 1024 * 1024));
+        cache.insert(key(2), raster(9 * 1024 * 1024));
+        assert!(!cache.glyphs.contains_key(&key(1)));
+        assert!(cache.glyphs.contains_key(&key(2)));
+        assert_eq!(cache.bitmap_bytes, 9 * 1024 * 1024);
+
+        cache.insert(key(3), raster(MAX_RENDER_GLYPH_CACHE_BYTES + 1));
+        assert!(!cache.glyphs.contains_key(&key(3)));
+        assert_eq!(cache.bitmap_bytes, 9 * 1024 * 1024);
+    }
 }
 
 /// Paint text using the provided fonts and an optional web font registry.

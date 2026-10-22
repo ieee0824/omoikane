@@ -93,6 +93,7 @@ pub enum PlatformTouchPhase {
 #[derive(Debug, Default)]
 pub struct PlatformInput {
     cursor: (f64, f64),
+    cursor_initialized: bool,
     modifiers: InputModifiers,
     buttons: u8,
     composition_text: Option<String>,
@@ -118,9 +119,17 @@ impl PlatformInput {
         // Locked movement arrives as device deltas. Processing absolute
         // notifications as well would duplicate motion and undo frozen coords.
         if session.is_pointer_locked() {
+            self.cursor_initialized = false;
+            return Ok(());
+        }
+        // The macOS Winit backend sends CursorMoved before every wheel event,
+        // even when the pointer has not moved. Avoid a redundant DOM mousemove
+        // and its synchronous hit test for those synthetic notifications.
+        if self.cursor_initialized && self.cursor == (x, y) {
             return Ok(());
         }
         self.cursor = (x, y);
+        self.cursor_initialized = true;
         session.dispatch(
             "Input.dispatchMouseEvent",
             json!({
@@ -170,6 +179,7 @@ impl PlatformInput {
 
     /// Starts a new movement sequence when the pointer re-enters the surface.
     pub fn cursor_left(&mut self, session: &mut CdpSession) {
+        self.cursor_initialized = false;
         session.pointer_left_surface();
     }
 
@@ -395,6 +405,27 @@ mod tests {
             ),
             json!("field:yes")
         );
+    }
+
+    #[test]
+    fn unchanged_cursor_position_does_not_dispatch_another_mousemove() {
+        let mut session = CdpSession::new().unwrap();
+        navigate(
+            &mut session,
+            "<script>globalThis.moves=0; document.addEventListener('mousemove',()=>moves++)</script>",
+        );
+        let mut input = PlatformInput::new();
+
+        input.cursor_moved(&mut session, 0.0, 0.0).unwrap();
+        input.cursor_moved(&mut session, 0.0, 0.0).unwrap();
+        assert_eq!(evaluate(&mut session, "moves"), json!(1));
+
+        input.cursor_moved(&mut session, 1.0, 0.0).unwrap();
+        assert_eq!(evaluate(&mut session, "moves"), json!(2));
+
+        input.cursor_left(&mut session);
+        input.cursor_moved(&mut session, 1.0, 0.0).unwrap();
+        assert_eq!(evaluate(&mut session, "moves"), json!(3));
     }
 
     #[test]

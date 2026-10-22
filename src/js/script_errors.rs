@@ -54,9 +54,15 @@ pub(super) fn evaluate_worker_initial_script(
     context: &mut Context,
     source: &str,
     url: &str,
+    csp_requested_url: &str,
 ) -> JsResult<WorkerScriptOutcome> {
     let input = Source::from_reader(source.as_bytes(), Some(Path::new(url)));
-    let script = match Script::parse(input, None, context) {
+    let script = match Script::parse_with_host_defined(
+        input,
+        None,
+        classic_script_metadata(false, Some(csp_requested_url.to_owned())),
+        context,
+    ) {
         Ok(script) => script,
         Err(error) => {
             if error
@@ -91,13 +97,23 @@ struct ExceptionReport {
 #[derive(Debug, Trace, Finalize, boa_engine::JsData)]
 pub(super) struct ClassicScriptMetadata {
     pub(super) muted_errors: bool,
+    /// Initial request URL used by CSP reports, kept separate from the
+    /// effective filename used by ErrorEvent and module resolution.
+    #[unsafe_ignore_trace]
+    pub(super) csp_requested_url: Option<String>,
 }
 
 /// Builds the single provenance snapshot used by active and unwound scripts.
-pub(super) fn classic_script_metadata(muted_errors: bool) -> boa_engine::HostDefined {
+pub(super) fn classic_script_metadata(
+    muted_errors: bool,
+    csp_requested_url: Option<String>,
+) -> boa_engine::HostDefined {
     let mut metadata = boa_engine::HostDefined::default();
     metadata.insert(boa_engine::error::ScriptErrorMetadata::new(
-        ClassicScriptMetadata { muted_errors },
+        ClassicScriptMetadata {
+            muted_errors,
+            csp_requested_url,
+        },
     ));
     metadata
 }
@@ -131,19 +147,25 @@ pub(super) fn fetch_classic_source(
     base: Option<&crate::http::Url>,
     origin: &CorsOrigin,
     crossorigin: Option<&str>,
+    cookie_context: Option<&crate::http::CookieRequestContext>,
+    embedder_policy: crate::http::corp::EmbedderPolicyValue,
+    report_only_embedder_policy: crate::http::corp::EmbedderPolicyValue,
     client: &mut Client,
+    violations: &mut Vec<crate::http::cors::CorpViolation>,
 ) -> Option<(String, String, usize, bool)> {
     let resource = resolve_resource_ref(src, base)?;
     let ResolvedResource::Url(url) = resource else {
-        return fetch_script_resource_with_client(src, base, client)
-            .map(|(url, source, redirects)| (url, source, redirects, false));
+        return fetch_script_resource_with_client_in_context(src, base, cookie_context, client)
+            .map(|(url, source, redirects, _)| (url, source, redirects, false));
     };
     let url = url.parse::<crate::http::Url>().ok()?;
     let mut request = HttpRequest::new(Method::Get, url.clone());
     if requires_public_fetch(&url, base) {
         request.require_public_ip();
     }
-    if let Some(site) = base {
+    if let Some(cookie_context) = cookie_context {
+        cookie_context.apply(&mut request);
+    } else if let Some(site) = base {
         request.set_cookie_context(site.clone(), false);
     }
     let mode = if crossorigin.is_some() {
@@ -156,7 +178,7 @@ pub(super) fn fetch_classic_source(
         Some(_) => CredentialsMode::SameOrigin,
         None => CredentialsMode::Include,
     };
-    let fetched = crate::http::cors::fetch(
+    let fetched = crate::http::cors::fetch_with_embedder_policy_reporting(
         client,
         request,
         origin,
@@ -164,6 +186,10 @@ pub(super) fn fetch_classic_source(
         credentials,
         RedirectMode::Follow,
         &mut PreflightCache::default(),
+        embedder_policy,
+        report_only_embedder_policy,
+        violations,
+        None,
     )
     .ok()?;
     let muted = fetched.response_type == ResponseType::Opaque;
@@ -887,7 +913,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         runtime.eval("globalThis.reports=[];addEventListener('unhandledrejection',e=>{reports.push('reject');e.preventDefault()});addEventListener('rejectionhandled',()=>reports.push('handle')); ").unwrap();
         runtime.with_active_host(|context| {
-            let metadata = classic_script_metadata(true);
+            let metadata = classic_script_metadata(true, None);
             let script = Script::parse_with_host_defined(
                 Source::from_bytes("globalThis.mutedReject=()=>Promise.reject(42);globalThis.mutedHandle=p=>p.catch(()=>{});"),
                 None, metadata, context)?;

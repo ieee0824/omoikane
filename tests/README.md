@@ -52,6 +52,42 @@ cargo test --test wpt_smoke -- --nocapture
 
 Set `WPT_ROOT` to store the checkout elsewhere. Add cases to `tests/wpt/manifest.json` and add their paths to the sparse-checkout list in `scripts/fetch-wpt.sh`. Expectations may be `PASS`, `FAIL`, or `TIMEOUT`; both regressions and unexpected passes fail the runner so expectation changes stay explicit. Set `WPT_REPORT=path/to/report.json` to write the pinned revision, case outcomes, script errors, and individual subtest results as JSON. Set `WPT_JUNIT=path/to/junit.xml` to emit a JUnit XML testsuite for CI test-report consumers; expectation mismatches are represented as failures and subtest details are XML-escaped in `system-out`.
 
+Cases marked `"server": "wptserve"` in the manifest use the pinned upstream Python
+HTTP/HTTPS server. `scripts/fetch-wpt.sh` includes its vendored dependencies and
+public test certificates; no pip installation or system trust change is needed.
+The fixture connects only configured host/port pairs to loopback, preserves their
+HTTP(S) origins, and verifies TLS with the pinned CA and requested server name.
+Original `.sub.*` templates, Python endpoints, `.headers` and `pipe=header(...)`
+are handled by wptserve; the smoke runner shares its existing result collector,
+testdriver adapter and SharedArrayBuffer discovery hook across both backends.
+Server metadata and logs are retained under `.artifacts/wptserve/` in the worktree.
+
+Set `WPT_UPSTREAM=1` to use this backend for every selected case. It provides HTTP
+and HTTPS, not WebSocket/WebTransport servers.
+
+The default upstream primary origin is HTTPS. Cases marked
+`"server": "wptserve-http"` explicitly use upstream HTTP on `web-platform.test`,
+including when `WPT_UPSTREAM=1` is set. This preserves a non-loopback, insecure
+origin while routing network connections to the local fixture server. Use
+`WPT_MANIFEST=tests/wpt/storage-access-insecure.json` to run the original Storage
+Access insecure-context cases on that origin.
+
+Cookie Store `.any.serviceworker.html` cases use the pinned upstream Service
+Worker wrappers and execute in the worker global. All 25 variants run in the
+default manifest, with exact subtest expectations for four tracked failures.
+See [Cookie Store Service Worker WPT](../docs/wpt/cookie-store-serviceworker.md)
+for results, remaining scope, and a manifest that retains PASS expectations for
+every original case.
+
+Run its TLS, origin-scope and shared-state checks explicitly with a fetched checkout:
+
+```sh
+WPT_ROOT=target/wpt WPT_REQUIRED=1 cargo test --locked --test wpt_smoke upstream_transport::tests::
+```
+
+Without the server checkout those fixture checks report that they were skipped;
+`WPT_REQUIRED=1` makes missing fixtures an error.
+
 Set `WPT_RESULTS_DIR=path/to/results` to additionally store revision-scoped reports as
 `<revision>/report.json` plus one JSON file per area (`css.json`, `dom.json`,
 `shadow-dom.json`, and so on). If that directory already contains an older revision,

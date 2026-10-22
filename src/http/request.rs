@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use super::referrer::{ReferrerPolicy, navigation_referrer_with_policy};
 use super::url::Url;
 
 /// Returns the default `User-Agent` header sent by Omoikane HTTP requests.
@@ -78,7 +79,114 @@ pub struct HttpRequest {
     body: Option<Vec<u8>>,
     require_public_ip: bool,
     site_for_cookies: Option<Url>,
+    cookie_top_level_site: Option<super::SchemefulSite>,
     top_level_navigation: bool,
+    referrer_source: Option<(String, ReferrerPolicy)>,
+    storage_access_eligible: bool,
+    cross_site_ancestry: bool,
+}
+
+/// Owned cookie policy captured from the context that initiated a resource load.
+///
+/// Resource loaders may outlive a DOM borrow or run on another thread. Keeping
+/// the site, activated origin, and ancestor flag together prevents a loader
+/// from accidentally treating an embedded request as a top-level navigation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CookieRequestContext {
+    site_for_cookies: Option<Url>,
+    granted_origin: Option<Url>,
+    top_level_site: Option<super::SchemefulSite>,
+    cross_site_ancestry: bool,
+}
+
+impl CookieRequestContext {
+    /// Stores the initiating site, the permitted origin, and ancestry for later requests.
+    pub(crate) fn new(
+        site_for_cookies: Option<Url>,
+        granted_origin: Option<Url>,
+        cross_site_ancestry: bool,
+    ) -> Self {
+        let top_level_site = site_for_cookies
+            .as_ref()
+            .map(super::SchemefulSite::from_url);
+        Self {
+            top_level_site,
+            site_for_cookies,
+            granted_origin,
+            cross_site_ancestry,
+        }
+    }
+
+    /// Overrides the real top-level site independently of cross-site cookie ancestry.
+    pub(crate) fn with_top_level_site(mut self, site: Option<super::SchemefulSite>) -> Self {
+        self.top_level_site = site;
+        self
+    }
+
+    /// Returns the inherited SameSite context, separately from the partition key.
+    pub(crate) fn cookie_site(&self) -> Option<&Url> {
+        self.site_for_cookies.as_ref()
+    }
+
+    pub(crate) fn top_level_site(&self) -> Option<super::SchemefulSite> {
+        self.top_level_site.clone()
+    }
+
+    /// Keeps the container's cookie site and ancestry, copying only an eligible
+    /// navigating Document's activated origin. No source means no activation.
+    pub(crate) fn for_navigation(mut self, source: Option<&Self>) -> Self {
+        self.granted_origin = source.and_then(|source| source.granted_origin.clone());
+        self
+    }
+
+    /// Keeps the creator's site and ancestry for a Worker while dropping its
+    /// Document-only Storage Access grant. An unknown creator site fails closed.
+    pub(crate) fn for_worker_internal(mut self) -> Self {
+        self.granted_origin = None;
+        self.cross_site_ancestry |= self.site_for_cookies.is_none();
+        self
+    }
+
+    /// Returns whether any ancestor of the owning Document is cross-site.
+    pub(crate) fn has_cross_site_ancestry(&self) -> bool {
+        self.cross_site_ancestry
+    }
+
+    /// Restricts an existing shared Worker after a cross-site owner connects.
+    pub(crate) fn with_cross_site_ancestry(mut self) -> Self {
+        self.granted_origin = None;
+        self.cross_site_ancestry = true;
+        self
+    }
+
+    /// Applies the initiating context's policy to one concrete request URL.
+    pub(crate) fn apply(&self, request: &mut HttpRequest) {
+        let eligible = self.granted_origin.as_ref().is_some_and(|origin| {
+            origin.scheme() == request.url().scheme()
+                && origin.host() == request.url().host()
+                && origin.port() == request.url().port()
+        });
+        request.set_cookie_context(
+            self.site_for_cookies
+                .clone()
+                .unwrap_or_else(|| request.url().clone()),
+            false,
+        );
+        request.cookie_top_level_site = self.top_level_site.clone();
+        request.set_storage_access_eligible(eligible);
+        request.set_cross_site_ancestry(self.cross_site_ancestry);
+    }
+
+    /// Applies a WebSocket handshake's cookie policy. The WebSocket service
+    /// may use a different port from the initiating Document on the same host.
+    pub(crate) fn apply_websocket(&self, request: &mut HttpRequest) {
+        self.apply(request);
+        if self.granted_origin.as_ref().is_some_and(|origin| {
+            origin.scheme() == request.url().scheme() && origin.host() == request.url().host()
+        }) {
+            request.set_storage_access_eligible(true);
+        }
+    }
 }
 
 impl HttpRequest {
@@ -95,7 +203,11 @@ impl HttpRequest {
             body: None,
             require_public_ip: false,
             site_for_cookies: None,
+            cookie_top_level_site: None,
             top_level_navigation: true,
+            referrer_source: None,
+            storage_access_eligible: false,
+            cross_site_ancestry: false,
         };
         req.headers.push(("Host".to_string(), host));
         req.headers
@@ -151,6 +263,7 @@ impl HttpRequest {
 
     /// Sets the initiating site and whether this request navigates the top-level context.
     pub fn set_cookie_context(&mut self, site_for_cookies: Url, top_level_navigation: bool) {
+        self.cookie_top_level_site = Some(super::SchemefulSite::from_url(&site_for_cookies));
         self.site_for_cookies = Some(site_for_cookies);
         self.top_level_navigation = top_level_navigation;
     }
@@ -160,9 +273,45 @@ impl HttpRequest {
         self.site_for_cookies.as_ref()
     }
 
+    /// Preserves the partition namespace when constructing a redirect request.
+    pub(crate) fn copy_cookie_partition_from(&mut self, source: &Self) {
+        self.cookie_top_level_site = source.cookie_top_level_site.clone();
+    }
+
+    pub(crate) fn cookie_access_context(&self, unpartitioned: bool) -> super::CookieAccessContext {
+        super::CookieAccessContext {
+            top_level_site: if self.top_level_navigation {
+                Some(super::SchemefulSite::from_url(&self.url))
+            } else {
+                self.cookie_top_level_site.clone()
+            },
+            unpartitioned,
+        }
+    }
+
     /// Returns whether this request navigates the top-level browsing context.
     pub fn is_top_level_navigation(&self) -> bool {
         self.top_level_navigation
+    }
+
+    /// Marks a same-origin request from a Document that activated Storage Access.
+    pub(crate) fn set_storage_access_eligible(&mut self, eligible: bool) {
+        self.storage_access_eligible = eligible;
+    }
+
+    /// Returns whether this request may use its Document's Storage Access grant.
+    pub(crate) fn storage_access_eligible(&self) -> bool {
+        self.storage_access_eligible
+    }
+
+    /// Marks an embedded request whose Document has a cross-site ancestor.
+    pub(crate) fn set_cross_site_ancestry(&mut self, cross_site: bool) {
+        self.cross_site_ancestry = cross_site;
+    }
+
+    /// Reports whether the initiating Document has a cross-site ancestor.
+    pub(crate) fn has_cross_site_ancestry(&self) -> bool {
+        self.cross_site_ancestry
     }
 
     /// Returns the first header value matching `name`, ignoring ASCII case.
@@ -213,6 +362,22 @@ impl HttpRequest {
     pub fn remove_header(&mut self, name: &str) {
         self.headers
             .retain(|(header_name, _)| !header_name.eq_ignore_ascii_case(name));
+    }
+
+    /// Captures the navigation initiator for redirect-time policy updates.
+    pub(crate) fn set_referrer_source(&mut self, source: String, policy: ReferrerPolicy) {
+        let value = navigation_referrer_with_policy(&source, &self.url.to_string(), policy);
+        self.referrer_source = Some((source, policy));
+        self.remove_header("Referer");
+        if !value.is_empty() {
+            self.set_header("Referer", value);
+        }
+    }
+
+    pub(crate) fn referrer_source(&self) -> Option<(&str, ReferrerPolicy)> {
+        self.referrer_source
+            .as_ref()
+            .map(|(source, policy)| (source.as_str(), *policy))
     }
 
     /// Sets the request body and automatically sets the `Content-Length` header.
@@ -342,6 +507,12 @@ pub(crate) fn copy_header_on_redirect(name: &str, preserve_body: bool, same_orig
         .any(|internal| name.eq_ignore_ascii_case(internal))
     {
         return false;
+    }
+    if name.eq_ignore_ascii_case("referer") {
+        // The generic HTTP client does not know the original source policy.
+        // Preserve the value within the same origin; avoid forwarding a full
+        // URL to another origin without recomputing it for that destination.
+        return same_origin;
     }
     if !same_origin
         && ["authorization", "proxy-authorization"]

@@ -10,6 +10,15 @@ if [[ ! -d "$destination/.git" ]]; then
   mkdir -p "$(dirname "$destination")"
   git clone --depth 1 --filter=blob:none --no-checkout "$repo" "$destination"
 fi
+# Execute original sub/py fixtures over verified TLS for the HTTPS runner.
+collect_pattern "/tools/localpaths.py" "/tools/wptserve/" "/tools/third_party/" "/tools/certs/"
+collect_pattern "/tools/serve/" "/tools/manifest/" "/tools/gitignore/"
+collect_pattern "/tools/metadata/"
+collect_pattern "/service-workers/service-worker/resources/test-helpers.sub.js"
+collect_pattern "/common/security-features/" "/trusted-types/navigate-to-javascript-url-006.sub.html"
+collect_pattern "/content-security-policy/generic/"
+collect_pattern "/content-security-policy/gen/top.meta/script-src-self/worklet-paint*.https.html*" "/content-security-policy/gen/top.meta/worker-src-none/worklet-paint*.https.html*"
+collect_pattern "/content-security-policy/gen/top.http-rp/script-src-self/worklet-paint*.https.html*" "/content-security-policy/gen/top.http-rp/worker-src-none/worklet-paint*.https.html*"
 collect_pattern "/resources/" "/html/resources/common.js" "/shadow-dom/resources/event-path-test-helpers.js" "/shadow-dom/Element-interface-attachShadow.html" "/shadow-dom/Element-interface-shadowRoot-attribute.html" "/shadow-dom/HTMLSlotElement-interface.html" "/shadow-dom/Slottable-mixin.html" "/shadow-dom/Extensions-to-Event-Interface.html" "/shadow-dom/event-inside-shadow-tree.html" "/shadow-dom/event-inside-slotted-node.html" "/custom-elements/registries/upgrade.html" "/custom-elements/connected-callbacks-template.html" "/dom/nodes/Element-childElement-null.html" "/dom/nodes/Element-childElementCount-nochild.html" "/dom/nodes/Node-isConnected.html" "/dom/nodes/Element-childElementCount.html" "/dom/nodes/Element-childElementCount-dynamic-add.html" "/dom/nodes/Element-childElementCount-dynamic-remove.html" "/dom/nodes/CharacterData-remove.html" "/dom/nodes/ChildNode-remove.js" "/dom/nodes/Element-remove.html" "/dom/nodes/DocumentType-remove.html" "/dom/nodes/Text-splitText.html" "/dom/nodes/CharacterData-data.html" "/dom/nodes/CharacterData-appendData.html" "/dom/nodes/CharacterData-substringData.html" "/dom/nodes/CharacterData-insertData.html" "/dom/nodes/CharacterData-deleteData.html" "/dom/nodes/CharacterData-replaceData.html" "/dom/nodes/CharacterData-surrogates.html" "/dom/nodes/Node-nodeValue.html" "/dom/nodes/Node-normalize.html" "/dom/nodes/Node-textContent.html" "/dom/nodes/MutationObserver-sanity.html" "/dom/nodes/MutationObserver-callback-arguments.html" "/dom/nodes/MutationObserver-takeRecords.html" "/dom/nodes/MutationObserver-disconnect.html" "/dom/nodes/mutationobservers.js" "/dom/nodes/MutationObserver-attributes.html" "/dom/nodes/MutationObserver-characterData.html"
 collect_pattern "/css/css-shadow/shadow-cascade-order-001.html"
 collect_pattern \
@@ -23,6 +32,110 @@ collect_pattern \
   "/css/css-color/parsing/color-valid-hwb.html" \
   "/css/css-color/parsing/color-valid-lab.html"
 collect_pattern "/css/css-logical/"
+collect_pattern "/reporting/" "/content-security-policy/securitypolicyviolation/constructor-required-fields.html"
+collect_pattern "/cookies/resources/"
+collect_pattern \
+  "/permissions-policy/policy-extends-to-sandbox.html" \
+  "/permissions-policy/navigate-to-blob.sub.html" \
+  "/permissions-policy/experimental-features/focus-without-user-activation-disabled.html" \
+  "/permissions-policy/experimental-features/focus-without-user-activation-enabled.sub.html" \
+  "/permissions-policy/experimental-features/resources/common.js" \
+  "/permissions-policy/experimental-features/resources/focus-without-user-activation-iframe-tentative.html" \
+  "/permissions-policy/resources/navigate-to-blob.html" \
+  "/permissions-policy/resources/sandbox-self.html" \
+  "/permissions-policy/resources/sandbox-self.html.headers" \
+  "/permissions-policy/resources/nested-sandbox.html" \
+  "/html/semantics/embedded-content/the-iframe-element/iframe-allow.html"
+collect_pattern \
+  "/trusted-types/support/" \
+  "/trusted-types/DedicatedWorker-eval.html" \
+  "/trusted-types/SharedWorker-eval.html" \
+  "/trusted-types/DedicatedWorker-importScripts.html" \
+  "/trusted-types/SharedWorker-importScripts.html" \
+  "/trusted-types/DedicatedWorker-block-eval-function-constructor.html" \
+  "/trusted-types/SharedWorker-block-eval-function-constructor.html" \
+  "/trusted-types/trusted-types-reporting-for-DedicatedWorker-eval.html" \
+  "/trusted-types/trusted-types-reporting-for-SharedWorker-eval.html" \
+  "/trusted-types/should-trusted-type-policy-creation-be-blocked-by-csp-004-worker.html" \
+  "/trusted-types/navigate-to-javascript-url-001.html" \
+  "/trusted-types/navigate-to-javascript-url-002.html" \
+  "/trusted-types/navigate-to-javascript-url-003.html" \
+  "/trusted-types/navigate-to-javascript-url-004.html" \
+  "/trusted-types/navigate-to-javascript-url-005.html" \
+  "/trusted-types/navigate-to-javascript-url-008.html" \
+  "/trusted-types/navigate-to-javascript-url-008.html.headers" \
+  "/trusted-types/navigate-to-javascript-url-csp-headers.html" \
+  "/trusted-types/Window-TrustedTypes.html" \
+  "/trusted-types/TrustedTypePolicyFactory-createPolicy-unenforced.html" \
+  "/trusted-types/TrustedTypePolicyFactory-isXXX.html" \
+  "/trusted-types/TrustedTypePolicyFactory-createPolicy-cspTests.html" \
+  "/trusted-types/trusted-types-reporting-for-Element-innerHTML.html" \
+  "/trusted-types/trusted-types-reporting-for-DOMParser-parseFromString.html" \
+  "/trusted-types/Window-block-eval-function-constructor.html" \
+  "/trusted-types/eval-with-permissive-csp.html" \
+  "/trusted-types/eval-csp-tt-default-policy.html" \
+  "/trusted-types/eval-csp-tt-default-policy-mutate.html" \
+  "/trusted-types/block-string-assignment-to-Window-setTimeout-setInterval.html" \
+  "/trusted-types/block-string-assignment-to-Element-insertAdjacentHTML.html" \
+  "/trusted-types/trusted-types-reporting-for-Window-eval.html" \
+  "/trusted-types/trusted-types-reporting-for-Window-function-constructor.html" \
+  "/trusted-types/trusted-types-reporting-for-Window-DedicatedWorker-constructor.html" \
+  "/trusted-types/TrustedTypePolicyFactory-getPropertyType.tentative.html" \
+  "/trusted-types/TrustedTypePolicyFactory-getAttributeType.html" \
+  "/trusted-types/Window-setTimeout-setInterval.html" \
+  "/trusted-types/block-string-assignment-to-Document-write.html" \
+  "/trusted-types/block-string-assignment-to-Element-outerHTML.html" \
+  "/trusted-types/block-string-assignment-to-Element-setAttribute.html" \
+  "/trusted-types/block-string-assignment-to-Element-setAttributeNS.html" \
+  "/trusted-types/block-string-assignment-to-HTMLIFrameElement-srcdoc.html" \
+  "/trusted-types/block-string-assignment-to-Range-createContextualFragment.html" \
+  "/trusted-types/trusted-types-reporting-for-HTMLScriptElement.html" \
+  "/trusted-types/trusted-types-reporting-for-HTMLScriptElement-children-change.html" \
+  "/trusted-types/block-string-assignment-to-Document-parseHTMLUnsafe.html" \
+  "/trusted-types/block-string-assignment-to-Element-setHTMLUnsafe.html" \
+  "/trusted-types/block-string-assignment-to-ShadowRoot-setHTMLUnsafe.html" \
+  "/trusted-types/ServiceWorkerContainer-register.https.html" \
+  "/trusted-types/ServiceWorker-eval.https.html" \
+  "/trusted-types/ServiceWorker-importScripts.https.html" \
+  "/trusted-types/TrustedType-AttributeNodes.html" \
+  "/trusted-types/block-string-assignment-to-attribute-via-attribute-node.html" \
+  "/trusted-types/block-string-assignment-to-ShadowRoot-innerHTML.html" \
+  "/trusted-types/trusted-types-reporting-for-ShadowRoot-innerHTML.html" \
+  "/trusted-types/Element-setAttribute-setAttributeNS-sinks.tentative.html"
+collect_pattern \
+  "/content-security-policy/script-src/worker-importscripts.sub.html" \
+  "/content-security-policy/script-src/support/worker-with-script-src-none-importscripts.js" \
+  "/content-security-policy/script-src/support/worker-with-script-src-none-importscripts.js.sub.headers" \
+  "/content-security-policy/worker-src/dedicated-worker-src-script-fallback.sub.html" \
+  "/content-security-policy/worker-src/shared-worker-src-script-fallback.sub.html" \
+  "/content-security-policy/support/testharness-helper.js" \
+  "/content-security-policy/support/dedicated-worker-helper.js" \
+  "/content-security-policy/support/shared-worker-helper.js" \
+  "/content-security-policy/support/ping.js" \
+  "/content-security-policy/support/post-message.js"
+collect_pattern \
+  "/content-security-policy/script-src/script-src-strict_dynamic_discard_source_expressions.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_discard_source_expressions.html.headers" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_parser_inserted.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_parser_inserted.html.headers" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_parser_inserted_correct_nonce.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_parser_inserted_correct_nonce.html.headers" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_non_parser_inserted.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_non_parser_inserted.html.headers" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_non_parser_inserted_module.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_non_parser_inserted_module.html.headers" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_parser_inserted_module.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_parser_inserted_module.html.headers" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_double_policy_report_only.html" \
+  "/content-security-policy/script-src/script-src-strict_dynamic_double_policy_report_only.html.headers" \
+  "/content-security-policy/script-src/simpleSourcedScript.js" \
+  "/content-security-policy/script-src/simpleSourcedModule.js"
+collect_pattern \
+  "/content-security-policy/unsafe-hashes/javascript_src_allowed-href.html" \
+  "/content-security-policy/unsafe-hashes/javascript_src_denied_missing_unsafe_hashes-href.html" \
+  "/content-security-policy/unsafe-hashes/javascript_src_denied_wrong_hash-href.html" \
+  "/content-security-policy/unsafe-hashes/javascript_src_allowed-href_blank-script-src-elem.html" \
+  "/content-security-policy/unsafe-hashes/support/helper.js"
 collect_pattern \
   "/dom/events/AddEventListenerOptions-once.any.js" \
   "/dom/events/AddEventListenerOptions-passive.any.js" \
@@ -77,6 +190,8 @@ collect_pattern \
   "/css/selectors/focus-within-focus-move.html" \
   "/css/selectors/focus-within-removal.html"
 collect_pattern "/css/css-conditional/js/CSS-supports-L3.html"
+collect_pattern "/css/css-conditional/js/CSS-supports-L4.html"
+collect_pattern "/css/css-conditional/js/CSS-supports-selector-detecting-invalid-in-logical-combinations.html"
 collect_pattern "/css/css-conditional/js/supports-conditionText.html"
 collect_pattern "/css/css-nesting/"
 collect_pattern "/css/css-cascade/scope-cssom.html"
@@ -186,10 +301,18 @@ collect_pattern \
   "/css/css-transitions/events-002.html"
 collect_pattern "/custom-elements/form-associated/" "/html/semantics/forms/form-submission-0/resources/targetted-form.js"
 collect_pattern "/common/blank.html" "/FileAPI/file/resources/echo-content-escaped.py"
+collect_pattern \
+  "/html/cross-origin-embedder-policy/meta-http-equiv.https.html" \
+  "/html/cross-origin-embedder-policy/non-initial-about-blank.https.html" \
+  "/html/cross-origin-embedder-policy/non-initial-about-blank.https.html.headers" \
+  "/html/cross-origin-embedder-policy/require-corp-about-blank.https.html" \
+  "/html/cross-origin-embedder-policy/require-corp-about-blank.https.html.headers"
 collect_pattern "/domxpath/"
 collect_pattern "/visual-viewport/"
 collect_pattern "/page-visibility/"
 collect_pattern "/web-locks/"
+collect_pattern "/cookiestore/"
+collect_pattern "/storage-access-api/"
 collect_pattern "/css/css-multicol/parsing/" "/css/support/shorthand-testcommon.js"
 collect_pattern \
   "/css/css-overscroll-behavior/parsing/overscroll-behavior-valid.html" \
@@ -253,6 +376,8 @@ collect_pattern \
   "/css/css-page/page-name-and-break-print-ref.html"
 collect_pattern "/interfaces/" "/html/dom/" "/html/semantics/forms/form-submission-0/SubmitEvent.window.js" "/html/semantics/forms/form-submission-0/FormDataEvent.window.js" "/touch-events/" "/dom/events/Body-FrameSet-Event-Handlers.html" "/dom/events/event-global-set-before-handleEvent-lookup.window.js" "/dom/events/window-event-restored-after-throwing-onerror.html" "/dom/events/event-handler-attribute-replace-preserves-passive.html" "/dom/events/Event-dispatch-handlers-changed.html" "/common/utils.js"
 collect_pattern "/common/subset-tests-by-key.js" "/common/get-host-info.sub.js"
+collect_pattern "/common/redirect.py"
+collect_pattern "/common/dispatcher/" "/html/cross-origin-opener-policy/"
 current_revision="$(git_wpt rev-parse HEAD 2>/dev/null || true)"
 collect_pattern \
   "/css/css-flexbox/parsing/order-valid.html" \
