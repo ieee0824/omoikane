@@ -129,8 +129,25 @@ impl NativeJob {
         } else {
             (self.f)(context)
         };
-        context.runtime_limits().check_deadline()?;
+        if let Err(timeout) = context.runtime_limits().check_deadline() {
+            return preserve_vm_timeout(result, timeout);
+        }
         result
+    }
+}
+
+/// Keeps frames already captured by the VM while rejecting other late results.
+fn preserve_vm_timeout(result: JsResult<JsValue>, timeout: crate::JsError) -> JsResult<JsValue> {
+    match result {
+        Err(error)
+            if error.as_native().is_some_and(|native| {
+                native.is_runtime_limit()
+                    && native.message() == crate::vm::WALL_CLOCK_TIMEOUT_MESSAGE
+            }) =>
+        {
+            Err(error)
+        }
+        _ => Err(timeout),
     }
 }
 
@@ -550,7 +567,10 @@ impl NativeAsyncJob {
             };
             if let Err(error) = context.check_deadline(limits) {
                 future.take();
-                return std::task::Poll::Ready(Err(error));
+                return std::task::Poll::Ready(match result {
+                    std::task::Poll::Ready(result) => preserve_vm_timeout(result, error),
+                    std::task::Poll::Pending => Err(error),
+                });
             }
             if result.is_ready() {
                 future.take();

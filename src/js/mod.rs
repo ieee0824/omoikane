@@ -84,6 +84,7 @@ mod cache_storage;
 mod child_document;
 #[cfg(test)]
 mod child_document_tests;
+mod console_trace;
 mod cssom_normalization;
 mod dom_removal_trace;
 mod frame_diagnostics;
@@ -586,7 +587,12 @@ where
         // wall-clock bound instead of waiting for the next wake-up.
         if Instant::now() >= self.deadline {
             self.future.take();
-            return Poll::Ready(Err(wall_clock_timeout_error()));
+            // The VM may already have attached the interrupted JavaScript
+            // frames. Keep that timeout instead of replacing its diagnostics.
+            return match result {
+                Poll::Ready(Err(error)) if is_wall_clock_timeout(&error) => Poll::Ready(Err(error)),
+                _ => Poll::Ready(Err(wall_clock_timeout_error())),
+            };
         }
 
         if result.is_ready() {
@@ -23122,8 +23128,10 @@ fn console_log_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
         parts.push(arg.to_string(context)?.to_std_string_escaped());
     }
 
+    let message = parts.join(" ");
     with_host_state(|state| {
-        state.borrow_mut().console_logs.push(parts.join(" "));
+        console_trace::record(context, &message);
+        state.borrow_mut().console_logs.push(message);
         Ok(JsValue::undefined())
     })
 }
@@ -28128,6 +28136,9 @@ fn take_discarded_node_ids_native(
         ))
     })
 }
+
+#[cfg(test)]
+mod timed_future_tests;
 
 #[cfg(test)]
 mod tests;
