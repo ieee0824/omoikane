@@ -7116,7 +7116,8 @@ impl HostState {
         attribute_name: &str,
         has_non_scalar_dom_string: bool,
     ) {
-        self.form_validation.invalidate();
+        // Ordinary data attributes have no native constraint-validity semantics.
+        // Author reactions invalidate through their actual form-state writes.
         if let Some(document) = document_root_for_node(node) {
             if !document.is_html_document() {
                 self.invalidate_document_style_cache_keeping_validation(

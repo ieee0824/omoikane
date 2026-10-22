@@ -401,4 +401,61 @@ mod tests {
         runtime.eval("input.removeAttribute('required'); if(!input.matches(':valid')) throw Error('valid expected');").unwrap();
         assert_eq!(scans(&runtime), 2, "a validity attribute change rescans");
     }
+    #[test]
+    fn ordinary_data_attribute_changes_keep_constraint_validation_snapshot_fresh() {
+        let document = crate::html::TreeBuilder::parse("<form><input required></form>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.eval("globalThis.input=document.querySelector('input'); if(!input.matches(':invalid')) throw Error('invalid expected');").unwrap();
+        let initial = runtime.host_state.borrow().form_validation.completed_scans;
+        runtime.eval("for(let i=0;i<100;i++){input.dataset.probe=String(i); if(!input.matches(':invalid')) throw Error('must stay invalid')} input.setAttribute('data-other','yes');input.removeAttribute('data-other');if(!input.matches(':invalid')) throw Error('must stay invalid')").unwrap();
+        assert_eq!(
+            runtime.host_state.borrow().form_validation.completed_scans,
+            initial
+        );
+        runtime.eval("input.removeAttribute('required');if(!input.matches(':valid'))throw Error('must become valid')").unwrap();
+        assert_eq!(
+            runtime.host_state.borrow().form_validation.completed_scans,
+            initial + 1
+        );
+    }
+
+    #[test]
+    fn css_observed_data_attribute_restyles_without_changing_constraint_validity() {
+        let document = crate::html::TreeBuilder::parse(
+        "<style>input{width:20px;height:10px;padding:0;border:0}input[data-probe]{width:40px}</style><input required>",
+    )
+    .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        assert!(runtime.eval("globalThis.input=document.querySelector('input');input.matches(':invalid') && input.getBoundingClientRect().width===20").unwrap().to_boolean());
+        let initial = runtime.host_state.borrow().form_validation.completed_scans;
+        assert!(runtime.eval("input.dataset.probe='yes';input.matches(':invalid') && input.getBoundingClientRect().width===40").unwrap().to_boolean());
+        assert_eq!(
+            runtime.host_state.borrow().form_validation.completed_scans,
+            initial
+        );
+    }
+
+    #[test]
+    fn data_attribute_author_callback_can_change_custom_constraint_validity() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.eval("customElements.define('validity-probe',class extends HTMLElement{static formAssociated=true;static get observedAttributes(){return ['data-valid']}constructor(){super();this._internals=this.attachInternals()}attributeChangedCallback(){this._internals.setValidity(this.dataset.valid==='no'?{customError:true}:{},this.dataset.valid==='no'?'invalid':'')}});globalThis.probe=document.createElement('validity-probe');document.body.appendChild(probe)").unwrap();
+        assert!(
+            runtime
+                .eval("probe.matches(':valid')")
+                .unwrap()
+                .to_boolean()
+        );
+        assert!(
+            runtime
+                .eval("probe.dataset.valid='no';probe.matches(':invalid')")
+                .unwrap()
+                .to_boolean()
+        );
+        assert!(
+            runtime
+                .eval("probe.dataset.valid='yes';probe.matches(':valid')")
+                .unwrap()
+                .to_boolean()
+        );
+    }
 }
