@@ -1800,7 +1800,7 @@ mod tests {
     }
 
     #[test]
-    fn task_mutation_uses_a_fresh_gate_for_the_same_frame_capture() {
+    fn task_mutation_publishes_new_pixels_without_revoking_the_committed_gate() {
         let (mut page, mut first) = native_scroll_page();
         let old = first.native_scroll.take().unwrap();
         let old_epoch = old.handle.publication_gate().policy_epoch;
@@ -1816,7 +1816,8 @@ mod tests {
         commit_pending_publication(&publication);
         assert!(next.frame.is_some());
         assert!(next.retained_scene.is_some());
-        assert!(publication.policy_epoch > old_epoch);
+        assert_eq!(publication.policy_epoch, old_epoch);
+        assert!(publication.paint_revision > old.paint_revision);
         assert!(publication.handle.publication_gate().eligible);
     }
 
@@ -2032,7 +2033,9 @@ mod tests {
             "wrap.style.height='32px';\
              globalThis.__omoikane_native_scroll_axes_have_no_range=()=>true",
         );
-        assert!(!old.handle.publication_gate().eligible);
+        // The old committed pixels remain scrollable until replacement. The
+        // new layout must still reject a nested overflowing target below.
+        assert!(old.handle.publication_gate().eligible);
         assert!(
             page.session
                 .native_scroll_target_at(8.0, 8.0)
