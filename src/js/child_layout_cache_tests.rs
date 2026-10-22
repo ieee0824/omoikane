@@ -254,3 +254,45 @@ fn child_snapshot_attribution_connects_candidate_raster_style_and_pixels() {
     assert_eq!(data["child_details"][0]["shadow_masks"]["hits"], 0);
     assert_eq!(data["child_shadow_masks"]["eligible"], 1);
 }
+#[test]
+fn child_layout_cache_keeps_pixels_and_geometry_after_unobserved_parent_data_change() {
+    let mut runtime = runtime();
+    let before = runtime.paint_current_document().unwrap();
+    let builds = runtime.host_state.borrow().child_layout_builds;
+    assert!(
+        runtime
+            .eval("document.querySelector('[data-probe=yes]') === null")
+            .unwrap()
+            .to_boolean()
+    );
+    assert!(runtime.eval("f.dataset.probe='yes'; a.getBoundingClientRect().width===20 && document.querySelector('[data-probe=yes]')===f").unwrap().to_boolean());
+    let after = runtime.paint_current_document().unwrap();
+    assert_eq!(before.pixels(), after.pixels());
+    assert_eq!(runtime.host_state.borrow().child_layout_builds, builds);
+}
+
+#[test]
+fn child_animation_keeps_advancing_after_unobserved_parent_data_change() {
+    let mut runtime = runtime();
+    runtime.enable_live_css_animations();
+    runtime.eval("d.querySelector('style').textContent+='@keyframes grow{from{width:20px}to{width:40px}}#a{animation:grow 1s linear forwards}'").unwrap();
+    runtime.paint_current_document().unwrap();
+    runtime.run_animation_frame(500).unwrap();
+    assert_eq!(
+        runtime
+            .eval("a.getBoundingClientRect().width")
+            .unwrap()
+            .as_number(),
+        Some(30.0)
+    );
+    runtime.eval("f.dataset.probe='yes'").unwrap();
+    // Frame input is a delta: advance from 500ms to 750ms.
+    runtime.run_animation_frame(250).unwrap();
+    assert_eq!(
+        runtime
+            .eval("a.getBoundingClientRect().width")
+            .unwrap()
+            .as_number(),
+        Some(35.0)
+    );
+}

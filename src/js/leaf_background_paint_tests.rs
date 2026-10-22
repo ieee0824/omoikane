@@ -107,26 +107,26 @@ fn leaf_data_loaded_with_a_selector_change_falls_back() {
 fn leaf_other_unobserved_data_attributes_keep_clean_geometry() {
     let mut runtime = leaf_runtime(&leaf_fixture("", ""));
     let before = runtime.paint_current_document().unwrap();
-    let generation = runtime.render_generations().layout;
+    let generations = runtime.render_generations();
     runtime
         .eval("document.getElementById('target').dataset.other='true'")
         .unwrap();
     let after = runtime.paint_current_document().unwrap();
     assert_eq!(after.pixels(), before.pixels());
-    assert_eq!(runtime.render_generations().layout, generation);
+    assert_eq!(runtime.render_generations(), generations);
 }
 
 #[test]
 fn leaf_data_loaded_without_css_dependency_keeps_clean_geometry() {
     let mut runtime = leaf_runtime(&leaf_fixture("", ""));
     let before = runtime.paint_current_document().unwrap();
-    let generation = runtime.render_generations().layout;
+    let generations = runtime.render_generations();
     runtime
         .eval("document.getElementById('target').dataset.loaded='true'")
         .unwrap();
     let after = runtime.paint_current_document().unwrap();
     assert_eq!(after.pixels(), before.pixels());
-    assert_eq!(runtime.render_generations().layout, generation);
+    assert_eq!(runtime.render_generations(), generations);
 }
 
 #[test]
@@ -541,5 +541,22 @@ fn leaf_background_with_unrelated_running_transition_keeps_clock_events() {
         "#clock{width:10px;height:10px;background:red;opacity:1;transition:opacity 1s linear}",
         "document.getElementById('clock').style.opacity='0';getComputedStyle(document.getElementById('clock')).opacity",
         true,
+    );
+}
+#[test]
+fn unobserved_data_attribute_author_reactions_still_update_geometry_and_pixels() {
+    let html = "<style>probe-box{display:block;width:80px;height:40px;background:red}</style><probe-box id='target'></probe-box>";
+    let mut runtime = leaf_runtime(html);
+    runtime.eval("globalThis.reactions=0;customElements.define('probe-box',class extends HTMLElement{static get observedAttributes(){return ['data-probe']}attributeChangedCallback(){reactions++;this.style.width='120px'}})").unwrap();
+    let before = runtime.paint_current_document().unwrap();
+    assert!(runtime.eval("const target=document.getElementById('target');target.dataset.probe='yes';reactions===1 && target.getBoundingClientRect().width===120 && document.querySelector('[data-probe=yes]')===target").unwrap().to_boolean());
+    let after = runtime.paint_current_document().unwrap();
+    let mut reference = leaf_runtime(
+        "<style>probe-box{display:block;width:80px;height:40px;background:red}</style><probe-box id='target' style='width:120px' data-probe='yes'></probe-box>",
+    );
+    assert_ne!(before.pixels(), after.pixels());
+    assert_eq!(
+        after.pixels(),
+        reference.paint_current_document().unwrap().pixels()
     );
 }

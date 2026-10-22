@@ -7158,13 +7158,17 @@ impl HostState {
                     node.identity(),
                     outcome,
                 );
-                let preserve_main_layout = outcome == "local_data_attribute_inert"
-                    || self.finish_leaf_paint(
-                        node,
-                        leaf_candidate,
-                        leaf_paint::Mutation::DataLoaded,
-                        outcome,
-                    );
+                // Selectors were invalidated above, but no style or paint
+                // input observes this attribute. Keep adjusted geometry too.
+                if outcome == "local_data_attribute_inert" {
+                    return;
+                }
+                let preserve_main_layout = self.finish_leaf_paint(
+                    node,
+                    leaf_candidate,
+                    leaf_paint::Mutation::DataLoaded,
+                    outcome,
+                );
                 self.invalidate_document_style_outputs(&document, preserve_main_layout);
             }
         }
