@@ -95,21 +95,10 @@ pub(super) fn flush(node_id: usize, context: &mut Context) -> JsResult<()> {
             .to_std_string_escaped();
         let values: Vec<(usize, Option<bool>)> = serde_json::from_str(&json)
             .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
-        // The validation callback and JSON conversion above may run author
-        // code. Revoke only after they finish, before :valid/:invalid state is
-        // written into any live node, and outside a HostState borrow.
-        let validity_changes = {
-            let state = host.borrow();
-            values.iter().any(|(id, value)| {
-                state
-                    .get_node(*id)
-                    .is_some_and(|node| node.css_validity() != *value)
-            })
-        };
-        if validity_changes {
-            let native_scroll = host.borrow().native_scroll.clone();
-            native_scroll.revoke_policy();
-        }
+        // Derived selector state is render work: keep committed root pixels
+        // available until their replacement is published. Author code above
+        // still revokes through the dedicated listener, navigation and scroll
+        // boundaries if it changes the input contract.
         let mut state = host.borrow_mut();
         #[cfg(test)]
         {
@@ -202,6 +191,129 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
 mod tests {
     use super::*;
 
+    fn scene_runtime() -> JsRuntime {
+        let document = crate::html::TreeBuilder::parse(
+            "<style>body{height:1000px}input:valid{width:40px}\
+             input:invalid{width:20px}</style><form><input required value=filled></form>\
+             <iframe></iframe>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.set_viewport(200.0, 100.0);
+        runtime
+            .eval("globalThis.control=document.querySelector('input');getComputedStyle(control).width")
+            .unwrap();
+        runtime
+    }
+
+    #[test]
+    fn validation_scene_survives_validity_style_changes() {
+        use native_scroll::{Offset, ScrollDecision};
+        let mut runtime = scene_runtime();
+        let handle =
+            super::super::native_scroll_clock_tests::install_clock_test_scene(&mut runtime);
+        let gate = handle.publication_gate();
+        let generations = runtime.render_generations();
+        for (message, width, valid) in [("invalid", "20px", false), ("", "40px", true)] {
+            let result = runtime
+                .eval(&format!(
+                    "control.setCustomValidity('{}');getComputedStyle(control).width",
+                    message
+                ))
+                .unwrap();
+            assert_eq!(result.as_string().unwrap().to_std_string_escaped(), width);
+            assert_eq!(
+                runtime
+                    .document()
+                    .query_selector("input")
+                    .unwrap()
+                    .css_validity(),
+                Some(valid)
+            );
+            assert_eq!(handle.publication_gate(), gate);
+        }
+        assert_ne!(runtime.render_generations(), generations);
+        let accepted = match handle.scroll(Offset { x: 0.0, y: 10.0 }) {
+            ScrollDecision::Accepted(accepted) => accepted,
+            other => panic!("validity styling retired committed pixels: {other:?}"),
+        };
+        assert!(handle.validate_for_presentation(accepted));
+        assert_eq!(runtime.eval("scrollY").unwrap().as_number(), Some(10.0));
+    }
+
+    #[test]
+    fn validation_scene_survives_child_validity_changes() {
+        use native_scroll::{Offset, ScrollDecision};
+        let mut runtime = scene_runtime();
+        runtime
+            .eval(
+                "globalThis.childWindow=document.querySelector('iframe').contentWindow;\
+             globalThis.childControl=childWindow.document.createElement('input');\
+             childControl.required=true;childControl.value='filled';\
+             childWindow.document.body.appendChild(childControl);\
+             childControl.matches(':valid')",
+            )
+            .unwrap();
+        let handle =
+            super::super::native_scroll_clock_tests::install_clock_test_scene(&mut runtime);
+        let gate = handle.publication_gate();
+        assert_eq!(
+            runtime
+                .eval("childControl.setCustomValidity('invalid');childControl.matches(':invalid')")
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+        assert_eq!(handle.publication_gate(), gate);
+        assert!(matches!(
+            handle.scroll(Offset { x: 0.0, y: 10.0 }),
+            ScrollDecision::Accepted(_)
+        ));
+        assert_eq!(runtime.eval("scrollY").unwrap().as_number(), Some(10.0));
+    }
+
+    #[test]
+    fn validation_scene_still_rejects_author_input_contract_changes() {
+        use native_scroll::{Offset, ScrollDecision};
+        for operation in [
+            "window.addEventListener('wheel',()=>{}, {passive:false})",
+            "window.scrollTo(0,30)",
+        ] {
+            let mut runtime = scene_runtime();
+            let handle =
+                super::super::native_scroll_clock_tests::install_clock_test_scene(&mut runtime);
+            let gate = handle.publication_gate();
+            let callback = runtime
+                .eval(&format!(
+                    "(function(){{{};return JSON.stringify([[control.__id,false]])}})",
+                    operation
+                ))
+                .unwrap();
+            {
+                let mut state = runtime.host_state.borrow_mut();
+                let id = state.document.identity();
+                state.form_validation.callbacks.insert(id, callback);
+                state.form_validation.invalidate();
+            }
+            runtime.eval("control.matches(':invalid')").unwrap();
+            assert!(
+                handle.publication_gate().policy_epoch > gate.policy_epoch,
+                "{operation}"
+            );
+            assert!(
+                !handle.authorize_policy(gate.key, gate.policy_epoch),
+                "{operation}"
+            );
+            assert!(
+                matches!(
+                    handle.scroll(Offset { x: 0.0, y: 10.0 }),
+                    ScrollDecision::Fallback(_)
+                ),
+                "{operation}"
+            );
+        }
+    }
+
     #[test]
     fn computed_style_without_validity_changes_preserves_native_policy_epoch() {
         let document = crate::html::TreeBuilder::parse("<div>content</div>").document();
@@ -219,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn validity_rescans_revoke_only_when_live_selector_state_changes() {
+    fn validity_rescans_update_selectors_without_retiring_committed_policy() {
         let document = crate::html::TreeBuilder::parse("<form><input required></form>").document();
         let input = document.query_selector("input").unwrap();
         let mut runtime = JsRuntime::with_document(document).unwrap();
@@ -229,7 +341,7 @@ mod tests {
             .eval("globalThis.control=document.querySelector('input');control.matches(':invalid')")
             .unwrap();
         assert_eq!(input.css_validity(), Some(false));
-        assert!(handle.publication_gate().policy_epoch > before);
+        assert_eq!(handle.publication_gate().policy_epoch, before);
 
         runtime.host_state.borrow_mut().form_validation.invalidate();
         let unchanged = handle.publication_gate().policy_epoch;
@@ -245,8 +357,11 @@ mod tests {
         assert!(handle.authorize_policy(before_change.key, before_change.policy_epoch));
         runtime.eval("control.matches(':valid')").unwrap();
         assert_eq!(input.css_validity(), Some(true));
-        assert!(handle.publication_gate().policy_epoch > before_change.policy_epoch);
-        assert!(!handle.authorize_policy(before_change.key, before_change.policy_epoch));
+        assert_eq!(
+            handle.publication_gate().policy_epoch,
+            before_change.policy_epoch
+        );
+        assert!(handle.authorize_policy(before_change.key, before_change.policy_epoch));
         assert_eq!(
             runtime.host_state.borrow().form_validation.completed_scans,
             3

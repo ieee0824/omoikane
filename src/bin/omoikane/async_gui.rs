@@ -31,6 +31,25 @@ struct NativeComposedFrame {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CanonicalWheelReason {
+    UndrainedIngress,
+    MissingPublication,
+    DocumentMismatch,
+    PublicationChanged,
+}
+
+impl CanonicalWheelReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::UndrainedIngress => "undrained_ingress",
+            Self::MissingPublication => "missing_publication",
+            Self::DocumentMismatch => "document_mismatch",
+            Self::PublicationChanged => "publication_changed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NativePresentationInstall {
     Installed,
     Superseded,
@@ -614,7 +633,10 @@ impl AsyncBrowserApp {
     }
 
     fn apply_update(&mut self, update: PageUpdate) {
-        let retire_native_scroll = update.error.is_some() || update.pointer_lock.is_some();
+        // A failed page task does not itself change the committed input
+        // contract. Every update below still revalidates live owner authority;
+        // dedicated mutation boundaries revoke unsafe scenes independently.
+        let retire_native_scroll = update.pointer_lock.is_some();
         if let Some(error) = update.error {
             eprintln!("page worker operation failed: {error}");
             report_gui_failure(self.reporter.as_deref(), GuiFailure::Frame, &error);
@@ -1467,6 +1489,7 @@ impl AsyncBrowserApp {
                         "event":"receipt", "gui_sequence":wheel.gui_sequence,
                         "nonzero":!wheel.is_phase_barrier(), "document":wheel.document,
                         "delta":[wheel.delta.0,wheel.delta.1],
+                        "phase":format!("{:?}",wheel.phase), "pixel_delta":wheel.pixel_delta,
                     }));
                 }
                 if wheel.is_phase_barrier() {
@@ -1475,13 +1498,14 @@ impl AsyncBrowserApp {
                     self.queue_native_scroll_recovery();
                     return;
                 }
-                if self.try_native_scroll(&wheel) {
-                    return;
-                }
+                let canonical_reason = match self.try_native_scroll(&wheel) {
+                    Ok(()) => return,
+                    Err(reason) => reason,
+                };
                 if self.trace_input {
                     omoikane::diagnostics::input_probe(json!({
                         "event":"decision", "gui_sequence":wheel.gui_sequence,
-                        "nonzero":true, "decision":"canonical", "reason":"no_publication",
+                        "nonzero":true, "decision":"canonical", "reason":canonical_reason.label(),
                     }));
                 }
                 self.worker.send(Command::NativeWheel(wheel));
@@ -1689,15 +1713,15 @@ impl AsyncBrowserApp {
         }
     }
 
-    fn try_native_scroll(&mut self, wheel: &NativeWheel) -> bool {
+    fn try_native_scroll(&mut self, wheel: &NativeWheel) -> Result<(), CanonicalWheelReason> {
         if !self.worker.native_ingress_is_drained() {
-            return false;
+            return Err(CanonicalWheelReason::UndrainedIngress);
         }
         let Some(publication) = self.native_scroll.clone() else {
-            return false;
+            return Err(CanonicalWheelReason::MissingPublication);
         };
         if wheel.document != publication.document {
-            return false;
+            return Err(CanonicalWheelReason::DocumentMismatch);
         }
         let now = Instant::now();
         self.expire_native_scroll_transaction(now);
@@ -1733,7 +1757,7 @@ impl AsyncBrowserApp {
                 self.native_scroll_transaction = None;
                 self.native_scroll_requires_fresh_scene = true;
                 self.native_scroll_recovery.request();
-                return false;
+                return Err(CanonicalWheelReason::PublicationChanged);
             };
             decision
         } else {
@@ -1823,7 +1847,7 @@ impl AsyncBrowserApp {
                 self.request_native_scroll_recovery();
             }
         }
-        true
+        Ok(())
     }
 
     fn trace_native_scroll_precheck(

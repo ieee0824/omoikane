@@ -2075,15 +2075,14 @@ mod render_invalidation_source_contract {
             "pub(super) fn flush",
             "pub(super) fn register",
         );
+        // Derived validity changes preserve the committed scene; author callbacks
+        // still use their dedicated listener/navigation/scroll boundaries.
+        assert!(!validation.contains("native_scroll.revoke_policy();"));
+        assert_before(validation, "serde_json::from_str", "node.set_css_validity");
         assert_before(
             validation,
-            "serde_json::from_str",
-            "native_scroll.revoke_policy();",
-        );
-        assert_before(
-            validation,
-            "native_scroll.revoke_policy();",
             "node.set_css_validity",
+            "state.invalidate_document_style_cache(document)",
         );
 
         let parser = section(

@@ -82,7 +82,9 @@ fn transition_cssom_reads_at_the_same_clock_keep_native_authority() {
     assert_same_clock_keeps_epoch(&mut runtime);
 }
 
-fn install_clock_test_scene(runtime: &mut JsRuntime) -> native_scroll::NativeScrollHandle {
+pub(super) fn install_clock_test_scene(
+    runtime: &mut JsRuntime,
+) -> native_scroll::NativeScrollHandle {
     use native_scroll::*;
     let _ = runtime.hit_test(1.0, 1.0);
     let (offset, extent) = runtime.host_state.borrow_mut().native_scroll_geometry();

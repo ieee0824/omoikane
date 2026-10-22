@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Close the native window while the page worker executes a long script."""
+"""Exercise native close, queued input and scrolling during page-worker work."""
 import argparse
 import contextlib
 import http.server
@@ -8,6 +8,8 @@ from pathlib import Path
 from urllib.parse import quote
 import threading
 import time
+
+from PIL import ImageGrab
 
 from gui_x11 import GuiSession, trace_records
 
@@ -187,12 +189,133 @@ def verify_wheel_queue(binary, artifacts):
                 'title': title}, indent=2) + '\n')
 
 
+def runtime_error_html(blocking):
+    script = 'const blocking=' + json.dumps(blocking) + ';' + r"""
+    let total=0, runs=0;
+    function update(){document.title='Wheel:'+total+':'+scrollY}
+    addEventListener('wheel',event=>{total+=event.deltaY;update()}, {passive:true});
+    addEventListener('scroll', update);
+    function work(){
+        runs++;
+        document.body.style.setProperty('--worker-busy-'+runs, '1');
+        if(blocking && runs===1){
+            addEventListener('wheel',event=>event.preventDefault(),{passive:false});
+        }
+        const payload='x'.repeat(100000), until=performance.now()+20000;
+        while(performance.now()<until){JSON.stringify([payload,payload,payload])}
+    }
+    setTimeout(()=>Promise.resolve().then(work),2000);
+    setTimeout(()=>Promise.resolve().then(work),2200);
+    document.title='Ready';
+    """
+    rows = '<div class="row"></div>' * 100
+    return ('<style>html,body{margin:0}.row{height:80px;background:#e04040}'
+            '.row:nth-child(3n+2){background:#40c080}'
+            '.row:nth-child(3n){background:#4060e0}</style>'
+            '<body>' + rows + '<script>' + script + '</script>')
+
+
+def runtime_error_state(text):
+    """Accept complete busy markers, ending them at the next owner turn result."""
+    complete, separator, _ = text.rpartition('\n')
+    lines = complete.splitlines() if separator else []
+    second_busy, completed, errors = False, False, 0
+    for line in lines:
+        if line.startswith('OMOIKANE_ATTRIBUTE_SET '):
+            try:
+                row = json.loads(line.split(' ', 1)[1])
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict) or row.get('name') != 'style':
+                continue
+            declarations = row.get('declarations')
+            changed = declarations.get('changed_properties') if isinstance(declarations, dict) else []
+            if isinstance(changed, list) and '--worker-busy-2' in changed:
+                second_busy, completed = True, False
+        elif second_busy and line.startswith('OMOIKANE_FRAME_EVENT_LOOP '):
+            completed = True
+        elif line.startswith('page worker operation failed:') and 'RuntimeLimit' in line:
+            errors += 1
+    return {
+        'errors': errors, 'second_busy': second_busy,
+        'busy_in_progress': second_busy and not completed,
+    }
+
+
+def verify_scroll_after_runtime_error(binary, artifacts, blocking):
+    environment = {'OMOIKANE_TRACE_PAINT': '1', 'OMOIKANE_TRACE_INPUT': '1',
+                   'OMOIKANE_TRACE_NATIVE_POLICY': '1', 'OMOIKANE_TRACE_ATTRIBUTE_SET': '1'}
+    with GuiSession(artifacts, environment) as gui:
+        app = gui.launch(binary, ['data:text/html,' + quote(runtime_error_html(blocking))])
+        window = gui.window(app)
+        gui.command('xdotool', 'windowactivate', '--sync', window)
+        gui.command('xdotool', 'windowsize', window, '640', '440')
+        gui.command('xdotool', 'mousemove', '--window', window, '500', '240')
+        log = gui.out / 'browser.log'
+        probes = lambda: trace_records(log, 'NATIVE_SCROLL_PROBE')
+        gui.wait_for('initial native authority',
+                     lambda: any(row.get('event') == 'publication' and row.get('eligible')
+                                 for row in probes()), bool)
+        gui.wait_for('page error reported', lambda: runtime_error_state(log.read_text()),
+                     lambda state: state['errors'] >= 1, seconds=15)
+        gui.wait_for('second busy callback', lambda: runtime_error_state(log.read_text()),
+                     lambda state: state['second_busy'] and state['busy_in_progress'], seconds=10)
+        gui.command('xdotool', 'click', '--repeat', '2', '--delay', '40', '5')
+
+        def presents():
+            return [row for row in probes() if row.get('event') == 'present'
+                    and row.get('success')]
+
+        if blocking:
+            time.sleep(.4)
+            assert not presents(), 'blocking wheel listener permitted native default'
+            expected_scroll, expected_color = 0, (224, 64, 64)
+        else:
+            rows = gui.wait_for('native surfaces after page error', presents,
+                                lambda rows: len({row['gui_sequence'] for row in rows}) == 4,
+                                seconds=2)
+            assert {tuple(row['visual_offset']) for row in rows} >= {
+                (0.0, 40.0), (0.0, 80.0), (0.0, 120.0), (0.0, 160.0)}
+            expected_scroll, expected_color = 160, (64, 96, 224)
+        assert runtime_error_state(log.read_text())['busy_in_progress'], 'owner finished before native check'
+        geometry = dict(line.split('=', 1) for line in gui.command(
+            'xdotool', 'getwindowgeometry', '--shell', window).splitlines())
+        image = ImageGrab.grab(xdisplay=gui.env['DISPLAY']).convert('RGB')
+        color = image.getpixel((int(geometry['X']) + 500, int(geometry['Y']) + 60))
+        assert color == expected_color, (color, expected_color)
+        gui.screenshot('after-error-scroll')
+        gui.wait_for('owner delivers all wheel defaults exactly once',
+                     lambda: gui.command('xdotool', 'getwindowname', window),
+                     lambda title: title == f'Wheel:160:{expected_scroll}', seconds=15)
+        if blocking:
+            assert not presents(), 'blocking owner later accepted a native default'
+        final_image = ImageGrab.grab(xdisplay=gui.env['DISPLAY']).convert('RGB')
+        assert final_image.getpixel((int(geometry['X']) + 500,
+                                     int(geometry['Y']) + 60)) == expected_color
+        assert app.poll() is None
+        receipts = {row['gui_sequence']: row['mono_ns'] for row in probes()
+                    if row.get('event') == 'receipt' and row.get('nonzero')}
+        first_presents = {}
+        for row in presents():
+            first_presents.setdefault(row['gui_sequence'], row)
+        latencies = [(row['mono_ns'] - receipts[sequence]) / 1_000_000
+                     for sequence, row in first_presents.items()]
+        (gui.out / 'runtime-error-scroll-summary.json').write_text(json.dumps({
+            'blocking': blocking, 'native_presented_inputs': len(first_presents),
+            'max_receipt_to_present_ms': max(latencies, default=None),
+            'scroll_y': expected_scroll, 'color': color,
+            'runtime_errors': runtime_error_state(log.read_text())['errors']}, indent=2) + '\n')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', required=True)
     parser.add_argument('--artifacts', type=Path, required=True)
+    parser.add_argument('--scenario', choices=('all', 'runtime-error-scroll'), default='all')
     args = parser.parse_args()
-    verify(args.binary, args.artifacts / 'busy')
-    verify_hidden_timer(args.binary, args.artifacts / 'hidden')
-
-    verify_wheel_queue(args.binary, args.artifacts / 'wheel-queue')
+    if args.scenario == 'all':
+        verify(args.binary, args.artifacts / 'busy')
+        verify_hidden_timer(args.binary, args.artifacts / 'hidden')
+        verify_wheel_queue(args.binary, args.artifacts / 'wheel-queue')
+    verify_scroll_after_runtime_error(args.binary, args.artifacts / 'timeout-scroll-passive', False)
+    verify_scroll_after_runtime_error(args.binary, args.artifacts / 'timeout-scroll-blocking', True)
