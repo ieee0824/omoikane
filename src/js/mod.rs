@@ -28150,6 +28150,9 @@ fn take_discarded_node_ids_native(
 mod tree_style_cache_tests;
 
 #[cfg(test)]
+mod lexical_this_tests;
+
+#[cfg(test)]
 mod timed_future_tests;
 
 #[cfg(test)]
