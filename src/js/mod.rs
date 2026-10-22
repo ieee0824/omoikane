@@ -85,6 +85,7 @@ mod child_document;
 #[cfg(test)]
 mod child_document_tests;
 mod cssom_normalization;
+mod dom_removal_trace;
 mod frame_diagnostics;
 mod layout_structure;
 mod main_shadow_mask_cache;
@@ -21597,6 +21598,9 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         // navigation for iframe/object resource elements.
         let source_document = document_root_for_node(&child);
         let target_document = document_root_for_node(&parent);
+        if source_document.is_some() && source_document != target_document {
+            dom_removal_trace::trace("appendChild_move", &child, false, context);
+        }
         parent.append_child(child.clone());
         {
             let mut state = state.borrow_mut();
@@ -25420,6 +25424,7 @@ fn set_text_content_native(
         if is_character_data {
             node.set_data_owned(data);
         } else {
+            dom_removal_trace::trace("textContent", &node, true, context);
             // Remove all children
             let removed_children = node.child_nodes();
             for child in &removed_children {
@@ -25502,6 +25507,7 @@ fn set_inner_html_native(
             .get_node(id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
         let target = node.template_content().unwrap_or_else(|| node.clone());
+        dom_removal_trace::trace("innerHTML", &target, true, context);
         let removed_children = target.child_nodes();
         for child in &removed_children {
             let _ = target.remove_child(&child);
@@ -26128,6 +26134,7 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         // detached child has no document root, so the affected document could no
         // longer be found from it. The parent keeps its place in the tree.
         let parent_document = document_root_for_node(&parent);
+        dom_removal_trace::trace("removeChild", &child, false, context);
         parent
             .remove_child(&child)
             .map_err(|e| JsError::from(JsNativeError::error().with_message(e.to_string())))?;
@@ -26199,6 +26206,18 @@ fn insert_before_native_impl(
         // matters.
         let source_document = document_root_for_node(&new_node);
         let target_document = document_root_for_node(&parent);
+        if source_document.is_some() && source_document != target_document {
+            dom_removal_trace::trace(
+                if preserve_state {
+                    "moveBefore_move"
+                } else {
+                    "insertBefore_move"
+                },
+                &new_node,
+                false,
+                context,
+            );
+        }
         match ref_node {
             Some(ref_node) => {
                 parent
@@ -27370,6 +27389,7 @@ fn document_reset_native(
         {
             return Ok(JsValue::from(false));
         }
+        dom_removal_trace::trace("document_reset", &node, true, context);
         let removed_children = node.child_nodes();
         let removed_any = !removed_children.is_empty();
         {
