@@ -1570,6 +1570,28 @@ fn overscan_overlapping_samples_partition_pixels_at_sample_origins() {
 }
 
 #[test]
+fn overscan_ignores_overlapping_layers_outside_every_sample() {
+    let mut html = String::from(
+        "<style>*{margin:0;padding:0}body{height:12000px}.off{position:absolute;top:10000px;\
+         width:100px;height:100px;background:red}</style>",
+    );
+    for _ in 0..160 {
+        html.push_str("<div class=off></div>");
+    }
+    let frame = expect_overscan(overscan_fixture(
+        &html,
+        VerticalOverscanPlan::new(0, 0, 3, 0).unwrap(),
+        |_| {},
+    ));
+    for y in [0, 32, 64] {
+        assert_same_canvas(
+            &frame.compose_integer((0, y)).unwrap(),
+            &ordinary_fixture(&html, (0.0, y as f32), |_| {}),
+        );
+    }
+}
+
+#[test]
 fn overscan_sticky_accepts_a_fractional_bound_beyond_complete_coverage() {
     let html = "<style>*{margin:0;padding:0}html{background:white}\
         body{height:80.5px}#pin{position:sticky;top:0;width:16px;height:16px;background:red}\

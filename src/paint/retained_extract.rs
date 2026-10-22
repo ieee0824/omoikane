@@ -1612,43 +1612,115 @@ fn retained_layer_composite_taps(
         .ok_or(RetainedPaintError::Capacity)?;
     let mut taps = 0usize;
     for run in &layers.runs {
-        let plane_count = run
-            .layers
-            .len()
-            .checked_add(usize::from(run.base_first))
-            .ok_or(RetainedPaintError::Capacity)?;
-        if !matches!(run.identity, RetainedPaintRunIdentity::Document(_)) || plane_count < 2 {
+        if !matches!(run.identity, RetainedPaintRunIdentity::Document(_)) {
             continue;
         }
-        taps = taps
-            .checked_add(
-                viewport_pixels
-                    .checked_mul(4)
-                    .ok_or(RetainedPaintError::Capacity)?,
-            )
-            .ok_or(RetainedPaintError::Capacity)?;
-        taps = taps
-            .checked_add(
-                viewport_pixels
-                    .checked_mul(4)
-                    .and_then(|value| value.checked_mul(run.layers.len()))
-                    .ok_or(RetainedPaintError::Capacity)?,
-            )
-            .ok_or(RetainedPaintError::Capacity)?;
+        let mut visible_layers = 0usize;
         for layer in run.layers.iter() {
+            let mut layer_pixels = 0usize;
             for &origin in document_origins {
                 let coverage = layer_coverage_rect(origin, dimensions)?;
                 let pixels = layer
                     .sample_rect
                     .intersection(coverage)
                     .map_or(0, |rect| rect.bytes().unwrap_or(usize::MAX) / 4);
-                taps = taps
-                    .checked_add(pixels.checked_mul(4).ok_or(RetainedPaintError::Capacity)?)
+                layer_pixels = layer_pixels
+                    .checked_add(pixels)
                     .ok_or(RetainedPaintError::Capacity)?;
             }
+            if layer_pixels == 0 {
+                continue;
+            }
+            visible_layers = visible_layers
+                .checked_add(1)
+                .ok_or(RetainedPaintError::Capacity)?;
+            taps = taps
+                .checked_add(
+                    layer_pixels
+                        .checked_mul(4)
+                        .ok_or(RetainedPaintError::Capacity)?,
+                )
+                .ok_or(RetainedPaintError::Capacity)?;
         }
+        let plane_count = visible_layers
+            .checked_add(usize::from(run.base_first))
+            .ok_or(RetainedPaintError::Capacity)?;
+        if plane_count < 2 {
+            continue;
+        }
+        taps = taps
+            .checked_add(
+                viewport_pixels
+                    .checked_mul(4)
+                    .and_then(|value| value.checked_mul(plane_count))
+                    .ok_or(RetainedPaintError::Capacity)?,
+            )
+            .ok_or(RetainedPaintError::Capacity)?;
     }
     Ok(taps)
+}
+
+#[cfg(test)]
+mod retained_layer_composite_tap_tests {
+    use super::*;
+    use crate::paint::retained_layers::{RetainedPrimitiveKind, RetainedPrimitiveToken};
+
+    fn layer(ordinal: u32, sample_rect: PixelRect) -> PlannedLayer {
+        let token = RetainedPrimitiveToken {
+            ordinal,
+            kind: RetainedPrimitiveKind::FillRect,
+        };
+        PlannedLayer {
+            identity: RetainedLayerIdentity {
+                first: token,
+                last: token,
+                operation_count: 1,
+            },
+            sample_rect,
+            animation_count: 0,
+        }
+    }
+
+    #[test]
+    fn ignores_layers_outside_every_overscan_sample() {
+        let layers = RetainedLayerPlan {
+            runs: vec![RetainedRunLayerPlan {
+                identity: RetainedPaintRunIdentity::Document(0),
+                base_first: true,
+                primitives: Arc::from([]),
+                layers: vec![
+                    layer(
+                        0,
+                        PixelRect {
+                            left: 0,
+                            top: 1_000,
+                            right: 100,
+                            bottom: 1_100,
+                        },
+                    ),
+                    layer(
+                        1,
+                        PixelRect {
+                            left: 0,
+                            top: 0,
+                            right: 10,
+                            bottom: 10,
+                        },
+                    ),
+                ]
+                .into(),
+            }],
+        };
+        let dimensions = SurfaceDimensions {
+            width: 100,
+            height: 100,
+            bytes: 40_000,
+        };
+        assert_eq!(
+            retained_layer_composite_taps(&layers, dimensions, &[(0, 0), (0, 100)]),
+            Ok(80_400)
+        );
+    }
 }
 
 impl SurfaceDimensions {
@@ -3649,6 +3721,8 @@ impl OverscanBuilder {
             return Err(RetainedPaintError::OverscanRunMismatch);
         }
         for run in &mut self.runs {
+            run.document_layers
+                .retain(|layer| layer.samples.iter().any(|sample| sample.tile.is_some()));
             if run.space == RetainedPaintSpace::Document {
                 run.tiles.sort_by_key(|tile| tile.origin.1);
                 run.sample_coverages.sort_by_key(|coverage| coverage.top);
