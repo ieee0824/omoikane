@@ -86,6 +86,7 @@ mod child_document;
 mod child_document_tests;
 mod cssom_normalization;
 mod frame_diagnostics;
+mod layout_structure;
 mod main_shadow_mask_cache;
 #[cfg(test)]
 mod main_shadow_mask_cache_tests;
@@ -8114,6 +8115,7 @@ impl HostState {
             self.queue_scroll_target(node_id);
         }
         self.resnap_after_layout(resnap_targets);
+        self.trace_layout_structure();
     }
 
     fn content_visibility_ancestor_ids(node: &NodeHandle) -> HashSet<usize> {
