@@ -104,7 +104,8 @@ fn next(node: &NodeHandle, root: &NodeHandle) -> Option<NodeHandle> {
     None
 }
 
-fn source_label(source: &str) -> String {
+/// Removes credentials, query strings, fragments and local paths from a diagnostic source.
+pub(super) fn source_label(source: &str) -> String {
     match url::Url::parse(source) {
         Ok(mut url) if matches!(url.scheme(), "http" | "https") => {
             let _ = url.set_username("");
