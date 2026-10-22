@@ -2037,7 +2037,10 @@ fn rejected_native_completion_does_not_pop_after_its_placeholder_was_consumed() 
         .vm
         .native_call_continuations
         .push(NativeCallBoundary {
-            target: NativeCallBoundaryTarget::NativePlaceholder(placeholder.clone()),
+            target: NativeCallBoundaryTarget::NativePlaceholder {
+                target: placeholder.clone(),
+                frame_depth: context.vm.frames.len(),
+            },
             continuation: NativeCallContinuation::from_copy_closure_with_captures(
                 |result, (), _| result,
                 (),
