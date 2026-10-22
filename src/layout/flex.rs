@@ -12,6 +12,11 @@ use super::{
 
 mod anonymous;
 
+#[cfg(test)]
+thread_local! {
+    static LAYOUT_VISITS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 #[derive(Debug, Clone)]
 struct FlexItemSpec {
     node: NodeHandle,
@@ -55,6 +60,8 @@ pub(super) fn layout_flex_container(
     containing_height: f32,
     used_height: Option<super::UsedHeight>,
 ) -> Option<LayoutBox> {
+    #[cfg(test)]
+    LAYOUT_VISITS.with(|visits| visits.set(visits.get().map(|count| count + 1)));
     let direction = flex_direction(&style);
     let wrap = flex_wrap(&style);
     let justify = justify_content(&style);
@@ -547,7 +554,9 @@ fn resolve_line_cross_size(
                 child.dimensions.padding,
                 child.dimensions.border,
             );
-            if used_height.is_some() && child.dimensions.content.height == height {
+            if child.dimensions.content.height == height
+                && (used_height.is_some() || unchanged_stretch_is_invariant(child, resolver))
+            {
                 continue;
             }
             if let Some(reflowed) = layout_item(
@@ -566,6 +575,48 @@ fn resolve_line_cross_size(
     }
 
     line_cross_size
+}
+
+/// Proves a narrow height-independent subtree: unwrapped rows with auto or
+/// absolute heights ending in explicitly sized leaves. Making an unchanged
+/// height definite cannot change these descendants. Other formatting contexts
+/// and percentage heights still require the normal stretch pass.
+fn unchanged_stretch_is_invariant(layout: &LayoutBox, resolver: &mut StyleResolver) -> bool {
+    if layout.pseudo.is_some() {
+        return false;
+    }
+    let style = resolver.computed_style(&layout.node);
+    if style.get("position").is_some_and(
+        |value| !matches!(value, ComputedValue::Keyword(keyword) if keyword == "static"),
+    ) {
+        return false;
+    }
+    let absolute_height = matches!(style.get("height"), Some(ComputedValue::Px(_)));
+    let auto_height = style
+        .get("height")
+        .is_none_or(|value| matches!(value, ComputedValue::Keyword(keyword) if keyword == "auto"));
+    if (!absolute_height && !auto_height)
+        || !["min-height", "max-height"].iter().all(|name| {
+            style.get(name).is_none_or(|value| {
+                matches!(value, ComputedValue::Px(_) | ComputedValue::Number(_))
+                    || matches!(value, ComputedValue::Keyword(keyword) if keyword == "auto" || keyword == "none")
+            })
+        })
+    {
+        return false;
+    }
+    if layout.children.is_empty() {
+        return absolute_height;
+    }
+    matches!(
+        style.display(),
+        Some(ComputedDisplay::Flex | ComputedDisplay::InlineFlex)
+    ) && flex_direction(&style) == FlexDirection::Row
+        && flex_wrap(&style) == FlexWrap::NoWrap
+        && layout
+            .children
+            .iter()
+            .all(|child| unchanged_stretch_is_invariant(child, resolver))
 }
 
 /// Positions a flex line's items along the main axis, applying
@@ -1073,4 +1124,78 @@ fn layout_item(
         used_height,
         item.percentage_basis,
     )
+}
+
+#[cfg(test)]
+mod layout_cost_tests {
+    use super::*;
+    use crate::css::{Origin, parse_stylesheet};
+
+    #[test]
+    fn nested_auto_height_rows_have_bounded_layout_work() {
+        const DEPTH: usize = 8;
+        let root = NodeHandle::element("div");
+        let mut parent = root.clone();
+        for _ in 1..DEPTH {
+            let child = NodeHandle::element("div");
+            parent.append_child(child.clone());
+            parent = child;
+        }
+        let leaf = NodeHandle::element("span");
+        parent.append_child(leaf);
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("div { display:flex; width:100px } span { width:20px; height:20px }")
+                .unwrap(),
+        );
+        LAYOUT_VISITS.with(|visits| visits.set(Some(0)));
+        let layout = super::super::layout_tree(
+            &root,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        let visits = LAYOUT_VISITS.with(|visits| visits.replace(None).unwrap());
+        eprintln!("{DEPTH} nested rows: {visits} flex layouts");
+        assert_eq!(layout.dimensions.content.height, 20.0);
+        assert!(
+            visits <= DEPTH * 3,
+            "{DEPTH} nested rows required {visits} layouts"
+        );
+    }
+
+    #[test]
+    fn percentage_descendants_still_resolve_after_auto_row_stretch() {
+        let root = NodeHandle::element("div");
+        let nested = NodeHandle::element("div");
+        let percentage = NodeHandle::element("span");
+        nested.append_child(percentage);
+        root.append_child(nested);
+        root.append_child(NodeHandle::element("i"));
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+            "div { display:flex; width:100px } span { width:20px; height:50% } i { width:20px; height:80px }",
+        ).unwrap());
+        let layout = super::super::layout_tree(
+            &root,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        let nested = &layout.children[0];
+        assert_eq!(nested.dimensions.content.height, 80.0);
+        assert_eq!(nested.children[0].dimensions.content.height, 40.0);
+        assert!(!unchanged_stretch_is_invariant(nested, &mut resolver));
+    }
 }
