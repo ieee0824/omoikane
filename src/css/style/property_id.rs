@@ -572,6 +572,24 @@ impl PropertyMap {
         }
     }
 
+    /// Copies one implemented property without resolving its name again.
+    pub(crate) fn insert_from_by_id(&mut self, id: PropertyId, source: &Self) {
+        if let Some(value) = source.get(&id) {
+            self.insert(id, value.clone());
+            if let Some(system_name) = source.system_color_name(id.as_str()) {
+                Arc::make_mut(&mut self.system_colors)
+                    .insert(id.as_str().into(), system_name.to_ascii_lowercase().into());
+            }
+        }
+    }
+
+    /// Iterates custom properties without visiting implemented longhands.
+    pub(crate) fn custom_properties(&self) -> impl Iterator<Item = (&str, &ComputedValue)> {
+        self.other
+            .iter()
+            .filter_map(|(name, value)| name.starts_with("--").then_some((name.as_ref(), value)))
+    }
+
     /// Resolves a reference to another property while retaining source identity.
     pub(crate) fn copy_property(&mut self, from: &str, to: &str) {
         let system_name = self.system_color_name(from).map(str::to_owned);

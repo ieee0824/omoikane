@@ -4,6 +4,8 @@ mod animation;
 mod class_invalidation;
 #[cfg(test)]
 mod container_dependency_tests;
+#[cfg(test)]
+mod inherited_lookup_tests;
 pub(crate) use animation::StyleClockEffects;
 mod counter_readers;
 mod font_palette;
@@ -12878,14 +12880,14 @@ fn apply_inheritance(properties: &mut PropertyMap, parent_style: Option<&Compute
         return;
     };
 
-    for &inherited_name in INHERITED_PROPERTIES {
-        if !properties.contains_key(inherited_name) && parent_style.get(inherited_name).is_some() {
-            properties.insert_from(inherited_name, &parent_style.properties);
+    for &id in INHERITED_PROPERTY_IDS {
+        if !properties.contains_key(&id) {
+            properties.insert_from_by_id(id, &parent_style.properties);
         }
     }
 
     // CSS custom properties inherit by default.
-    for (name, value) in &parent_style.properties {
+    for (name, value) in parent_style.properties.custom_properties() {
         if name.starts_with("--") && !properties.contains_key(name) {
             properties.insert(name, value.clone());
         }
@@ -12894,44 +12896,44 @@ fn apply_inheritance(properties: &mut PropertyMap, parent_style: Option<&Compute
 
 // Inherited CSS properties supported by this engine. Keeping this as shared
 // metadata lets both natural inheritance and `all: unset` use the same rule.
-const INHERITED_PROPERTIES: &[&str] = &[
-    "forced-color-adjust",
-    "border-collapse",
-    "border-spacing",
-    "color",
-    "cursor",
-    "direction",
-    "font-family",
-    "font-size",
-    "font-palette",
-    "font-style",
-    "font-stretch",
-    "font-variation-settings",
-    "font-weight",
-    "letter-spacing",
-    "line-height",
-    "list-style-image",
-    "list-style-position",
-    "list-style-type",
-    "overflow-wrap",
-    "orphans",
-    "pointer-events",
-    "text-align",
-    "text-indent",
-    "text-shadow",
-    "text-transform",
-    "visibility",
-    "white-space",
-    "writing-mode",
-    "text-underline-position",
-    "text-underline-offset",
-    "word-break",
-    "word-spacing",
-    "widows",
+const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
+    PropertyId::ForcedColorAdjust,
+    PropertyId::BorderCollapse,
+    PropertyId::BorderSpacing,
+    PropertyId::Color,
+    PropertyId::Cursor,
+    PropertyId::Direction,
+    PropertyId::FontFamily,
+    PropertyId::FontSize,
+    PropertyId::FontPalette,
+    PropertyId::FontStyle,
+    PropertyId::FontStretch,
+    PropertyId::FontVariationSettings,
+    PropertyId::FontWeight,
+    PropertyId::LetterSpacing,
+    PropertyId::LineHeight,
+    PropertyId::ListStyleImage,
+    PropertyId::ListStylePosition,
+    PropertyId::ListStyleType,
+    PropertyId::OverflowWrap,
+    PropertyId::Orphans,
+    PropertyId::PointerEvents,
+    PropertyId::TextAlign,
+    PropertyId::TextIndent,
+    PropertyId::TextShadow,
+    PropertyId::TextTransform,
+    PropertyId::Visibility,
+    PropertyId::WhiteSpace,
+    PropertyId::WritingMode,
+    PropertyId::TextUnderlinePosition,
+    PropertyId::TextUnderlineOffset,
+    PropertyId::WordBreak,
+    PropertyId::WordSpacing,
+    PropertyId::Widows,
 ];
 
 fn is_inherited_property(name: &str) -> bool {
-    name.starts_with("--") || INHERITED_PROPERTIES.contains(&name)
+    name.starts_with("--") || INHERITED_PROPERTY_IDS.iter().any(|id| id.as_str() == name)
 }
 
 fn inherited_font_size(parent_style: Option<&ComputedStyle>, current: &PropertyMap) -> f32 {
