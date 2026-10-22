@@ -1,6 +1,7 @@
 //! CSS cascade and computed style resolution.
 
 mod animation;
+mod class_invalidation;
 pub(crate) use animation::StyleClockEffects;
 mod counter_readers;
 mod font_palette;
@@ -822,6 +823,8 @@ pub struct StyleResolver {
     /// therefore means "not classified for the current stylesheet set", rather
     /// than "no selector observes the attribute".
     data_attribute_selector_dependencies: HashMap<String, AttributeSelectorDependency>,
+    /// Bounded per-class selector reach, cleared when stylesheets change.
+    class_selector_dependencies: HashMap<String, class_invalidation::ClassReach>,
     /// Whether declarations in the current stylesheet set read a given
     /// `data-*` attribute through `attr()`. This is separate from selector
     /// reach because an unobserved attribute can still affect computed values.
@@ -3071,6 +3074,7 @@ impl StyleResolver {
         stylesheet: &Stylesheet,
     ) -> usize {
         self.data_attribute_selector_dependencies.clear();
+        self.class_selector_dependencies.clear();
         self.data_attribute_value_dependencies.clear();
         self.style_attribute_selector_dependency = self
             .style_attribute_selector_dependency

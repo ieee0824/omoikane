@@ -106,6 +106,9 @@ mod canvas_blit;
 mod canvas_blit_tests;
 #[cfg(test)]
 mod child_layout_cache_tests;
+mod class_style;
+#[cfg(test)]
+mod class_style_invalidation_tests;
 mod compression_stream;
 #[cfg(test)]
 mod compression_stream_tests;
@@ -22771,12 +22774,18 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         .to_string(context)?;
     let is_name_attribute = name.eq_ignore_ascii_case("name");
     let is_style_attribute = name.eq_ignore_ascii_case("style");
+    let is_class_attribute = name.eq_ignore_ascii_case("class");
     let is_meta_referrer_attribute = is_name_attribute || name.eq_ignore_ascii_case("content");
     with_node_render_mutation(&[node_id], |state| {
         let node = state
             .borrow()
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let previous_class = is_class_attribute
+            .then(|| node.get_attribute("class"))
+            .flatten();
+        let previous_class_non_scalar =
+            is_class_attribute && node.attribute_has_non_scalar_value("class");
         let previous_inline_style = is_style_attribute
             .then(|| node.get_attribute("style"))
             .flatten();
@@ -22833,6 +22842,12 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
             );
         } else if matches!(node.tag_name().as_deref(), Some("style" | "link" | "base")) {
             state.borrow_mut().mark_style_dirty_for_node(&node);
+        } else if is_class_attribute {
+            state.borrow_mut().invalidate_class_for_node(
+                &node,
+                previous_class.as_deref(),
+                previous_class_non_scalar,
+            );
         } else if let Some(attribute_name) = local_data_attribute.as_deref() {
             let has_non_scalar_dom_string = previous_data_attribute_is_non_scalar
                 || node.attribute_has_non_scalar_value(attribute_name);
