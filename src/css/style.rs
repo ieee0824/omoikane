@@ -2,6 +2,8 @@
 
 mod animation;
 mod class_invalidation;
+#[cfg(test)]
+mod container_dependency_tests;
 pub(crate) use animation::StyleClockEffects;
 mod counter_readers;
 mod font_palette;
@@ -14,6 +16,7 @@ mod page;
 mod property_id;
 mod sibling_functions;
 mod specified_math;
+mod style_cache;
 pub(crate) mod text_shadow;
 mod typed_math;
 mod will_change;
@@ -811,8 +814,8 @@ pub struct StyleResolver {
     next_stylesheet_id: usize,
     layer_orders: HashMap<LayerContextKey, CascadeLayerOrder>,
     rule_indexes: Vec<StylesheetRuleIndex>,
-    cache: HashMap<usize, Arc<ComputedStyle>>,
-    pseudo_cache: HashMap<(usize, PseudoElement), Arc<ComputedStyle>>,
+    cache: style_cache::StyleCache<usize>,
+    pseudo_cache: style_cache::StyleCache<(usize, PseudoElement)>,
     counter_values: HashMap<(usize, Option<PseudoElement>), HashMap<String, Vec<i32>>>,
     selector_match_cache: SelectorMatchCache,
     /// Furthest reach of a registered selector that observes the raw `style` attribute.
@@ -862,6 +865,10 @@ pub struct StyleResolver {
     container_query_cache: HashMap<String, Option<super::ContainerQuery>>,
     /// Query-container geometry and metadata from the previous layout pass.
     container_contexts: HashMap<usize, ContainerContext>,
+    /// Dependency queries reuse a result until either computed-style cache changes.
+    container_context_memo: style_cache::ContainerContextMemo,
+    #[cfg(test)]
+    container_context_scans: std::cell::Cell<usize>,
     /// Winning `@keyframes` rules, grouped by their tree scope and name.
     keyframes: HashMap<Option<usize>, HashMap<String, KeyframesDefinition>>,
     /// Monotonic order assigned to parsed `@keyframes` definitions.
@@ -2428,19 +2435,30 @@ impl StyleResolver {
 
     /// Whether size queries or size-container units need a geometry snapshot.
     pub(crate) fn needs_container_contexts(&self) -> bool {
-        self.cache
-            .values()
-            .chain(self.pseudo_cache.values())
-            .any(|style| {
-                style
-                    .component_values
+        self.container_context_memo
+            .get_or_compute(&self.cache, &self.pseudo_cache, || {
+                #[cfg(test)]
+                self.container_context_scans
+                    .set(self.container_context_scans.get() + 1);
+                self.cache
                     .values()
-                    .any(color_uses_container_units)
+                    .chain(self.pseudo_cache.values())
+                    .any(|style| {
+                        style
+                            .component_values
+                            .values()
+                            .any(color_uses_container_units)
+                    })
+                    || self
+                        .stylesheets
+                        .iter()
+                        .any(|input| contains_at_rule_named(&input.stylesheet.rules, "container"))
             })
-            || self
-                .stylesheets
-                .iter()
-                .any(|input| contains_at_rule_named(&input.stylesheet.rules, "container"))
+    }
+
+    #[cfg(test)]
+    fn container_context_scan_count(&self) -> usize {
+        self.container_context_scans.get()
     }
 
     /// Returns the number of distinct `@media` prelude strings currently held
