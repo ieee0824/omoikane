@@ -4472,6 +4472,78 @@ pub(crate) fn edge_sizes_with_basis(
 }
 
 fn edge_sizes_using_basis(style: &ComputedStyle, prefix: &str, basis: Option<f32>) -> EdgeSizes {
+    let ids = match prefix {
+        "margin" => [
+            PropertyId::MarginTop,
+            PropertyId::MarginRight,
+            PropertyId::MarginBottom,
+            PropertyId::MarginLeft,
+        ],
+        "padding" => [
+            PropertyId::PaddingTop,
+            PropertyId::PaddingRight,
+            PropertyId::PaddingBottom,
+            PropertyId::PaddingLeft,
+        ],
+        "border" => [
+            PropertyId::BorderTopWidth,
+            PropertyId::BorderRightWidth,
+            PropertyId::BorderBottomWidth,
+            PropertyId::BorderLeftWidth,
+        ],
+        _ => return generic_edge_sizes_using_basis(style, prefix, basis),
+    };
+    let length = |value: Option<&ComputedValue>| {
+        edge_length_value(value, basis).map(|value| {
+            if prefix == "padding" {
+                value.max(0.0)
+            } else {
+                value
+            }
+        })
+    };
+    let shorthand_name = if prefix == "border" {
+        "border-width"
+    } else {
+        prefix
+    };
+    let shorthand = length(style.get(shorthand_name)).unwrap_or(0.0);
+    let aliases = ["border-top", "border-right", "border-bottom", "border-left"];
+    let sides = std::array::from_fn::<_, 4, _>(|index| {
+        length(style.get_by_id(ids[index]))
+            .or_else(|| {
+                if prefix == "border" {
+                    length(style.get(aliases[index]))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(shorthand)
+    });
+    EdgeSizes {
+        top: sides[0],
+        right: sides[1],
+        bottom: sides[2],
+        left: sides[3],
+    }
+}
+
+/// Resolves one already-looked-up value with the existing definite-basis policy.
+fn edge_length_value(value: Option<&ComputedValue>, basis: Option<f32>) -> Option<f32> {
+    let value = value?;
+    match value {
+        ComputedValue::Px(value) => Some(*value),
+        ComputedValue::Number(value) if *value == 0.0 => Some(0.0),
+        _ => basis.and_then(|basis| value.resolve_length_percentage(basis)),
+    }
+}
+
+/// Retains the string-keyed path for other edge families and legacy names.
+fn generic_edge_sizes_using_basis(
+    style: &ComputedStyle,
+    prefix: &str,
+    basis: Option<f32>,
+) -> EdgeSizes {
     let length = |property: &str| {
         explicit_length(style, property)
             .or_else(|| {
@@ -5940,3 +6012,6 @@ mod inline_box_tests;
 
 mod image_animation;
 pub(crate) use image_animation::{image_animation_time_ms, with_image_animation_timeline};
+
+#[cfg(test)]
+mod edge_lookup_tests;
