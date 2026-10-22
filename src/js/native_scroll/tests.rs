@@ -1640,7 +1640,7 @@ mod runtime_hook_contract {
     }
 
     #[test]
-    fn detached_dom_moves_involving_live_targets_still_revoke() {
+    fn live_dom_mutations_keep_the_committed_scene_scrollable() {
         for operation in [
             "document.body.appendChild(detached)",
             "detached.appendChild(live)",
@@ -1656,17 +1656,16 @@ mod runtime_hook_contract {
             let before = handle.publication_gate();
             runtime.eval(operation).unwrap();
             let after = handle.publication_gate();
-            assert!(after.policy_epoch > before.policy_epoch, "{operation}");
-            assert!(!after.eligible, "{operation}");
+            assert_eq!(after, before, "{operation}");
             assert!(matches!(
                 handle.scroll(Offset { x: 0.0, y: 10.0 }),
-                ScrollDecision::Fallback(_)
+                ScrollDecision::Accepted(_)
             ));
         }
     }
 
     #[test]
-    fn detached_dom_policy_keeps_connected_shadow_mutations_hard() {
+    fn connected_shadow_mutations_keep_the_committed_scene_scrollable() {
         let (mut runtime, handle, _) = ready_runtime_with_setup(
             "const host=document.createElement('div');document.body.appendChild(host);             globalThis.shadow=host.attachShadow({mode:'open'});             shadow.innerHTML='<div>live</div>';",
         );
@@ -1674,8 +1673,7 @@ mod runtime_hook_contract {
         runtime
             .eval("shadow.firstElementChild.setAttribute('class','changed')")
             .unwrap();
-        assert!(handle.publication_gate().policy_epoch > before.policy_epoch);
-        assert!(!handle.publication_gate().eligible);
+        assert_eq!(handle.publication_gate(), before);
     }
 
     #[test]
@@ -1793,7 +1791,7 @@ mod runtime_hook_contract {
     }
 
     #[test]
-    fn live_dom_mutation_revokes_without_consuming_an_accepted_notification() {
+    fn live_dom_mutation_keeps_an_accepted_presentation_and_notification() {
         let (mut runtime, handle, key) = ready_runtime();
         let accepted = accept_vertical(&handle, 10.0);
         let before = handle.publication_gate();
@@ -1804,10 +1802,11 @@ mod runtime_hook_contract {
 
         let after = handle.publication_gate();
         assert_eq!(after.key, key);
-        assert!(after.policy_epoch > before.policy_epoch);
+        assert_eq!(after.policy_epoch, before.policy_epoch);
+        assert!(after.eligible);
         assert_eq!(handle.owner_sequences(key), Ok((0, 0)));
         assert_eq!(handle.notification_backlog(key), Ok(1));
-        assert!(!handle.validate_for_presentation(accepted));
+        assert!(handle.validate_for_presentation(accepted));
     }
 }
 
@@ -1841,18 +1840,16 @@ mod render_invalidation_source_contract {
     }
 
     #[test]
-    fn owned_helper_revokes_after_conversion_and_before_native_mutation() {
+    fn owned_helper_records_active_mutations_without_revoking_scroll() {
         let helper = section(
             HOST,
-            "fn with_render_mutation",
-            "fn cross_origin_access_error",
+            "fn with_node_render_mutation",
+            "fn with_canvas_render_mutation",
         );
-        assert_before(
-            helper,
-            "(state.native_scroll.clone(), affects)",
-            "native_scroll.revoke_policy();",
-        );
-        assert_before(helper, "native_scroll.revoke_policy();", "f(state)");
+        assert!(helper.contains("(state.native_scroll.clone(), affects)"));
+        assert!(helper.contains("trace_render_mutation("));
+        assert!(!helper.contains("native_scroll.revoke_policy();"));
+        assert_before(helper, "trace_render_mutation(", "f(state)");
 
         let attribute = section(
             HOST,
@@ -2024,7 +2021,7 @@ mod render_invalidation_source_contract {
     }
 
     #[test]
-    fn external_render_owners_revoke_before_their_first_visible_write() {
+    fn external_render_owners_apply_their_declared_scene_boundaries() {
         let media = section(
             MEDIA_ENVIRONMENT,
             "pub fn set_media_environment",
@@ -2123,17 +2120,9 @@ mod render_invalidation_source_contract {
             "pub(super) fn poll_image_resource_loads",
             "let waiting =",
         );
-        assert_before(image, "effects.changed", "native_scroll.revoke_policy();");
-        assert_before(
-            image,
-            ".filter(|document| state.document_is_active(document.identity()))",
-            "native_scroll.revoke_policy();",
-        );
-        assert_before(
-            image,
-            "native_scroll.revoke_policy();",
-            "state.invalidate_paint_cache()",
-        );
+        assert!(image.contains("effects.changed"));
+        assert!(image.contains("state.invalidate_paint_cache()"));
+        assert!(!image.contains("native_scroll.revoke_policy();"));
     }
 
     #[test]

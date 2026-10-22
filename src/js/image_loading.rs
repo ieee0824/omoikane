@@ -165,16 +165,13 @@ impl JsRuntime {
                     state
                         .get_node(document_id)
                         .filter(|document| state.document_is_active(document.identity()))
-                        .map(|document| (state.native_scroll.clone(), document))
+                        .map(|document| document)
                 })
             }
             .flatten();
-            if let Some((native_scroll, document)) = render_change {
-                // Decode completion can change only pixels, so it does not
-                // necessarily pass through a style/layout invalidator. Revoke
-                // after confirming the live owner and before either cache is
-                // made stale, without holding HostState across the lock.
-                native_scroll.revoke_policy();
+            if let Some(document) = render_change {
+                // Keep the last committed scene scrollable while the decoded
+                // pixels and any intrinsic-size layout reach the next scene.
                 let mut state = self.host_state.borrow_mut();
                 if effects.requires_layout {
                     state.mark_document_layout_dirty(&document, "image_resource_completed");

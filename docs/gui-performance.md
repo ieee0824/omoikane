@@ -34,6 +34,11 @@ GUIへ渡すsceneのraster scaleは現在1で、ウィンドウのdevice scale�
 明示的な有効化である。環境変数を指定しない通常起動でも有効になる。
 ページのホスト名ではなく、描画・入力状態によって利用可否を判定する。
 未対応の効果や配置、入力の状態変更では通常の入力経路へ戻る。
+通常のDOM・style・layout更新、画像完了、子frame更新、visited色更新中は、次のsceneが
+公開されるまで直前にcommitしたroot sceneをスクロール表示に使う。ページ処理が長くても
+入力表示を止めないためである。
+ページ遷移、viewport変更、programmatic scroll、blocking wheel listenerなど、
+scroll targetまたは入力契約が変わる操作では直前のsceneを失効させる。
 
 `OMOIKANE_TRACE_INPUT=1`との併用で出る`OMOIKANE_NATIVE_SCROLL_PROBE`は、入力の受信、
 `accepted`/`fallback`/`canonical`の判定、画像の表示、ページ側への配信を記録する。
@@ -138,6 +143,12 @@ property数、geometry・transform・color・background・filter・opacity・oth
 microtask checkpoint、`cookie_ms`はCookie変更の配信を示す。`turn_ms`はこれらを
 含む区間全体で、`turn_success`は後続処理のエラーも反映する。未到達の区間は`null`。
 これらはフレーム時間の内数なので、フレーム時間へ加算しない。
+
+同じ設定では、50ms以上のmicrotask checkpointを`OMOIKANE_JOB_DRAIN`にも記録する。
+`engine_jobs_ms`はBoaのjob queue、`written_scripts_ms`は`document.write`後続処理、
+`reports_ms`はreport配送の時間である。`promise`は実行したPromise job数、
+`promise_elapsed_ms`はその合計、`max_promise_ms`は最長の1件を示す。
+個別jobの計時はこの診断を有効にしたruntimeだけで行い、通常実行には加えない。
 
 authorの`setTimeout`/`setInterval`由来なら、`timer_id`と登録時の
 `timer_source`（`file`・`line`・`column`）も出る。HTTP(S) URLはcredential・query・

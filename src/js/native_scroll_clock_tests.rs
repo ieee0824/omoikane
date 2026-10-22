@@ -149,11 +149,14 @@ fn render_clock_keeps_committed_scene_while_new_animation_values_are_sampled() {
 }
 
 #[test]
-fn hard_mutations_after_render_clock_still_revoke_committed_scene() {
-    for mutation in [
-        "window.addEventListener('wheel',()=>{}, {passive:false})",
-        "box.style.height='80px'",
-        "window.scrollTo(0, 30)",
+fn render_mutations_keep_the_scene_but_input_contract_changes_revoke_it() {
+    for (mutation, revokes) in [
+        (
+            "window.addEventListener('wheel',()=>{}, {passive:false})",
+            true,
+        ),
+        ("box.style.height='80px'", false),
+        ("window.scrollTo(0, 30)", true),
     ] {
         let mut runtime = runtime_with_animation("animation:pulse 1s linear infinite");
         let handle = install_clock_test_scene(&mut runtime);
@@ -163,11 +166,16 @@ fn hard_mutations_after_render_clock_still_revoke_committed_scene() {
         assert_eq!(handle.publication_gate(), gate);
         runtime.eval(mutation).unwrap();
         let after = handle.publication_gate();
-        assert!(
-            after.policy_epoch > gate.policy_epoch,
-            "hard mutation: {mutation}"
-        );
-        assert!(!after.eligible, "hard mutation: {mutation}");
-        assert!(!handle.authorize_policy(gate.key, gate.policy_epoch));
+        if revokes {
+            assert!(
+                after.policy_epoch > gate.policy_epoch,
+                "mutation: {mutation}"
+            );
+            assert!(!after.eligible, "mutation: {mutation}");
+            assert!(!handle.authorize_policy(gate.key, gate.policy_epoch));
+        } else {
+            assert_eq!(after, gate, "mutation: {mutation}");
+            assert!(handle.authorize_policy(gate.key, gate.policy_epoch));
+        }
     }
 }

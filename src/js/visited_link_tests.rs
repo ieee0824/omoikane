@@ -242,7 +242,7 @@ fn native_visited_runtime(storage: &StorageManager) -> JsRuntime {
 }
 
 #[test]
-fn another_runtime_visit_revokes_an_authorized_scene_and_its_inflight_token() {
+fn another_runtime_visit_keeps_an_authorized_scene_and_its_inflight_token() {
     let storage = StorageManager::new();
     let mut first = native_visited_runtime(&storage);
     let second = native_visited_runtime(&storage);
@@ -273,10 +273,10 @@ fn another_runtime_visit_revokes_an_authorized_scene_and_its_inflight_token() {
             )
             .unwrap(),
         );
-    assert_ne!(handle.publication_gate().policy_epoch, initial.policy_epoch);
-    assert!(!handle.publication_gate().eligible);
-    assert!(!handle.validate_for_presentation(token));
-    assert!(!handle.authorize_policy(key, initial.policy_epoch));
+    assert_eq!(handle.publication_gate().policy_epoch, initial.policy_epoch);
+    assert!(handle.publication_gate().eligible);
+    assert!(handle.validate_for_presentation(token));
+    assert!(handle.authorize_policy(key, initial.policy_epoch));
     assert_eq!(handle.owner_sequences(key), Ok((0, 0)));
     assert_eq!(handle.notification_backlog(key), Ok(1));
 }
@@ -346,7 +346,7 @@ fn a_fresh_visited_capture_can_reauthorize_the_same_owner() {
         .unwrap(),
     );
     let before = handle.publication_gate();
-    assert!(!before.eligible);
+    assert!(before.eligible);
     assert!(
         !runtime
             .host_state

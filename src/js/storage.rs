@@ -302,9 +302,9 @@ impl StorageManager {
         Self::default()
     }
 
-    /// Registers native-only revocation for this shared store. Registration is
-    /// completed before a HostState can publish a scene. Dead owners are pruned;
-    /// repeated registration of a cloned handle must not multiply revocations.
+    /// Registers a native-scroll owner for this shared store. Registration is
+    /// completed before a HostState can publish a scene. Dead owners are pruned,
+    /// and repeated registration of a cloned handle remains idempotent.
     pub(crate) fn register_native_scroll(&self, observer: NativeScrollInvalidator) {
         let mut state = self.0.lock().expect("storage manager mutex poisoned");
         state
@@ -326,12 +326,12 @@ impl StorageManager {
         if state.visited_links.contains(&key) {
             return;
         }
-        // Close every old scene BEFORE the new visited paint state is visible.
-        // Keep this lock until insertion: a capture that observes the new native
-        // epoch must wait here before it can read the corresponding visit data.
+        // A newly visited link changes only future paint output. Keep an
+        // already committed scene scrollable until a newer capture replaces
+        // it, and prune owners that have gone away.
         state
             .visited_invalidators
-            .retain(|observer| observer.revoke_if_live().is_some());
+            .retain(NativeScrollInvalidator::is_live);
         state.visited_links.insert(key);
         state.visited_generation = state.visited_generation.saturating_add(1);
     }
@@ -1325,7 +1325,7 @@ mod tests {
     }
 
     #[test]
-    fn new_visit_revokes_all_live_native_observers_once_but_duplicates_do_nothing() {
+    fn new_visit_keeps_live_native_scenes_and_duplicates_do_nothing() {
         let manager = StorageManager::new();
         let first = super::super::native_scroll::NativeScrollHandle::default();
         let second = super::super::native_scroll::NativeScrollHandle::default();
@@ -1336,12 +1336,12 @@ mod tests {
         let before = first.publication_gate().policy_epoch;
         let key = observer_visit("https://example.test/next");
         manager.record_visited_link(key.clone());
-        assert_eq!(first.publication_gate().policy_epoch, before + 1);
-        assert_eq!(second.publication_gate().policy_epoch, before + 1);
+        assert_eq!(first.publication_gate().policy_epoch, before);
+        assert_eq!(second.publication_gate().policy_epoch, before);
         assert_eq!(manager.visited_generation(), 1);
         manager.record_visited_link(key);
-        assert_eq!(first.publication_gate().policy_epoch, before + 1);
-        assert_eq!(second.publication_gate().policy_epoch, before + 1);
+        assert_eq!(first.publication_gate().policy_epoch, before);
+        assert_eq!(second.publication_gate().policy_epoch, before);
         assert_eq!(manager.visited_generation(), 1);
     }
 
@@ -1363,7 +1363,7 @@ mod tests {
     }
 
     #[test]
-    fn visit_during_capture_invalidates_the_old_gate_and_fresh_capture_can_reauthorize() {
+    fn visit_during_capture_keeps_the_committed_gate_authorized() {
         use super::super::native_scroll::{
             Bounds, FallbackTicket, NativeScrollHandle, Offset, PublicationGate,
             PublicationSequence, Scene, ScrollDecision,
@@ -1402,18 +1402,19 @@ mod tests {
             .join()
             .unwrap();
         let after = handle.publication_gate();
-        assert_ne!(captured.policy_epoch, after.policy_epoch);
-        assert!(!after.eligible);
-        assert!(!handle.authorize_policy(captured.key, captured.policy_epoch));
-        // A stale pixel snapshot may install, but cannot authorize input.
+        assert_eq!(captured.policy_epoch, after.policy_epoch);
+        assert!(after.eligible);
+        assert!(handle.authorize_policy(captured.key, captured.policy_epoch));
+        // A capture that began before the visit may still install; it is
+        // replaced by a later paint without interrupting root scrolling.
         assert!(handle.install_scene(scene(captured, 2)));
-        assert!(!handle.publication_gate().eligible);
+        assert!(handle.publication_gate().eligible);
         let fresh_before = handle.publication_gate();
         assert!(manager.has_visited_link(&observer_visit("https://example.test/next")));
         let fresh_after = handle.publication_gate();
         assert_eq!(fresh_before.policy_epoch, fresh_after.policy_epoch);
         assert!(handle.authorize_policy(fresh_after.key, fresh_after.policy_epoch));
-        assert!(!handle.publication_gate().eligible);
+        assert!(handle.publication_gate().eligible);
         assert!(handle.install_scene(scene(fresh_after, 3)));
         assert!(handle.publication_gate().eligible);
         assert!(matches!(
@@ -1423,7 +1424,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_capture_gates_cannot_pair_a_stable_epoch_with_old_visited_data() {
+    fn concurrent_visits_do_not_revoke_native_scroll_gates() {
         use super::super::native_scroll::NativeScrollHandle;
         let manager = StorageManager::new();
         let handle = NativeScrollHandle::default();
@@ -1441,19 +1442,14 @@ mod tests {
             }
         });
         start.wait();
+        let before = handle.publication_gate();
         for _ in 0..256 {
-            // Native locks never extend across a storage call. This is the
-            // same before/read/after order required of a real scene capture.
-            let before = handle.publication_gate();
-            let generation = manager.visited_generation();
-            let after = handle.publication_gate();
-            if before.policy_epoch == after.policy_epoch {
-                assert_eq!(generation, before.policy_epoch);
-            }
+            let _ = manager.visited_generation();
+            assert_eq!(handle.publication_gate(), before);
             std::thread::yield_now();
         }
         writer.join().unwrap();
         assert_eq!(manager.visited_generation(), 64);
-        assert_eq!(handle.publication_gate().policy_epoch, 64);
+        assert_eq!(handle.publication_gate(), before);
     }
 }

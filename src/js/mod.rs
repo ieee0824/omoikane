@@ -18,7 +18,7 @@ use boa_engine::Module;
 use boa_engine::builtins::promise::{OperationType, PromiseState};
 use boa_engine::builtins::typed_array::TypedArrayKind;
 use boa_engine::context::HostHooks;
-use boa_engine::job::AsyncContext;
+use boa_engine::job::{AsyncContext, Job, JobExecutor, SimpleJobExecutor};
 use boa_engine::module::{ModuleLoader, Referrer};
 use boa_engine::native_function::{NativeCallContinuation, NativeCallSuspension, NativeFunction};
 use boa_engine::object::{
@@ -4365,10 +4365,9 @@ impl HostState {
         // This keeps an exhausted monotonic-id space fail-closed without a
         // half-created context and keeps the previous Rc alive while the
         // replacement tree is allocated, preventing immediate pointer reuse.
-        // Replacing a child Document changes nested layout and pixels while the
-        // embedding element stays in the same main-document tree. Close any
-        // retained native-scroll authority before the replacement is visible.
-        self.native_scroll.revoke_policy();
+        // Replacing a child document keeps the root scroll owner unchanged.
+        // Continue presenting the committed scene until the replacement is
+        // included in a newer publication.
         self.retire_iframe_document(prepared.iframe_id);
         if let Some(context_id) = prepared.new_context_id {
             self.iframe_context_ids
@@ -4628,9 +4627,8 @@ impl HostState {
             })
             .map(|script| script.identity())
             .collect();
-        // A javascript: replacement swaps the nested render source in place.
-        // Revoke before retiring the old tree or installing the new one.
-        self.native_scroll.revoke_policy();
+        // A javascript: replacement swaps a nested render source in place; the
+        // committed root scene remains usable until its successor is ready.
         self.retire_iframe_document(iframe_id);
         self.register_tree(&document);
         self.document_urls.insert(document_id, old_url.clone());
@@ -6907,7 +6905,6 @@ impl HostState {
     /// identity. When it is the main document, the cached layout tree is also
     /// dropped, because layout is only maintained for the main document.
     fn mark_document_style_dirty(&mut self, document: &NodeHandle) {
-        self.native_scroll.revoke_policy();
         self.form_validation.invalidate();
         task_diagnostics::record_document_dirty();
         let document_id = document.identity();
@@ -6927,7 +6924,6 @@ impl HostState {
     /// Drops geometry derived from a document resource while retaining its
     /// parsed cascade and computed-style caches.
     fn mark_document_layout_dirty(&mut self, document: &NodeHandle, reason: &'static str) {
-        self.native_scroll.revoke_policy();
         let document_id = document.identity();
         if document_id == self.document.identity() {
             self.capture_scroll_offsets_before_layout();
@@ -6956,7 +6952,6 @@ impl HostState {
         document: &NodeHandle,
         kind: NonInlineFullStyleInvalidation,
     ) {
-        self.native_scroll.revoke_policy();
         let document_id = document.identity();
         if let Some(entry) = self.document_styles.get_mut(&document_id) {
             entry.needs_full_sample = true;
@@ -7376,7 +7371,6 @@ impl HostState {
         let Some(document) = document_root_for_node(node) else {
             return;
         };
-        self.native_scroll.revoke_policy();
         if document.identity() == self.document.identity() {
             self.capture_scroll_offsets_before_layout();
             self.invalidate_layout_root("node_layout_invalidated");
@@ -8852,11 +8846,101 @@ pub struct JsRuntime {
     // freed host allocation during teardown.
     _host_roots_provider: RootProvider,
     context: Context,
+    job_executor: Option<Rc<CountingJobExecutor>>,
     host_state: Rc<RefCell<HostState>>,
     module_loader: Rc<HttpModuleLoader>,
     sandbox: SandboxConfig,
     task_pump_limit: usize,
     retained_scroll: retained_scroll::RetainedScrollCapture,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct JobDrainStats {
+    promise: usize,
+    asynchronous: usize,
+    timeout: usize,
+    generic: usize,
+    promise_elapsed: std::time::Duration,
+    max_promise_elapsed: std::time::Duration,
+}
+
+impl JobDrainStats {
+    fn total(self) -> usize {
+        self.promise
+            .saturating_add(self.asynchronous)
+            .saturating_add(self.timeout)
+            .saturating_add(self.generic)
+    }
+}
+
+struct CountingJobExecutor {
+    inner: Rc<SimpleJobExecutor>,
+    pending: RefCell<JobDrainStats>,
+}
+
+impl Default for CountingJobExecutor {
+    fn default() -> Self {
+        let inner = Rc::new(SimpleJobExecutor::new());
+        inner.set_diagnostics_enabled(true);
+        Self {
+            inner,
+            pending: RefCell::new(JobDrainStats::default()),
+        }
+    }
+}
+
+impl CountingJobExecutor {
+    fn take_stats(&self) -> JobDrainStats {
+        let mut stats = std::mem::take(&mut *self.pending.borrow_mut());
+        let promise = self.inner.take_promise_job_diagnostics();
+        stats.promise_elapsed = promise.elapsed;
+        stats.max_promise_elapsed = promise.max_elapsed;
+        stats
+    }
+}
+
+impl JobExecutor for CountingJobExecutor {
+    fn enqueue_job(self: Rc<Self>, job: Job, context: &mut Context) {
+        let mut pending = self.pending.borrow_mut();
+        match &job {
+            Job::PromiseJob(_) => pending.promise = pending.promise.saturating_add(1),
+            Job::AsyncJob(_) => pending.asynchronous = pending.asynchronous.saturating_add(1),
+            Job::TimeoutJob(_) => pending.timeout = pending.timeout.saturating_add(1),
+            Job::GenericJob(_) => pending.generic = pending.generic.saturating_add(1),
+            _ => pending.generic = pending.generic.saturating_add(1),
+        }
+        drop(pending);
+        Rc::clone(&self.inner).enqueue_job(job, context);
+    }
+
+    fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
+        Rc::clone(&self.inner).run_jobs(context)
+    }
+}
+
+#[cfg(test)]
+mod job_drain_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn counts_promise_jobs_queued_during_a_drain() {
+        let executor = Rc::new(CountingJobExecutor::default());
+        let mut context = Context::builder()
+            .job_executor(Rc::clone(&executor))
+            .build()
+            .expect("context should build");
+        context
+            .eval(Source::from_bytes(
+                "Promise.resolve().then(() => Promise.resolve()).then(() => 1)",
+            ))
+            .expect("promise chain should evaluate");
+
+        context.run_jobs().expect("promise jobs should drain");
+
+        let stats = executor.take_stats();
+        assert!(stats.promise >= 2, "observed {stats:?}");
+        assert_eq!(stats.total(), stats.promise);
+    }
 }
 
 /// Operation on the browser-owned page search session.
@@ -9038,10 +9122,15 @@ impl JsRuntime {
             ..HttpModuleLoader::default()
         });
         host_state.borrow_mut().module_loader = Some(Rc::downgrade(&module_loader));
-        let context = Context::builder()
+        let job_executor = std::env::var_os("OMOIKANE_TRACE_TASKS")
+            .map(|_| Rc::new(CountingJobExecutor::default()));
+        let mut context_builder = Context::builder()
             .module_loader(module_loader.clone())
-            .host_hooks(Rc::new(BrowserHostHooks))
-            .build()?;
+            .host_hooks(Rc::new(BrowserHostHooks));
+        if let Some(job_executor) = &job_executor {
+            context_builder = context_builder.job_executor(Rc::clone(job_executor));
+        }
+        let context = context_builder.build()?;
         context
             .realm()
             .host_defined_mut()
@@ -9059,6 +9148,7 @@ impl JsRuntime {
         let mut runtime = Self {
             _host_roots_provider: host_roots_provider,
             context,
+            job_executor,
             host_state,
             module_loader,
             sandbox,
@@ -11169,16 +11259,51 @@ impl JsRuntime {
 
     /// Runs pending promise jobs.
     pub fn run_jobs(&mut self) -> JsResult<()> {
+        let started = std::time::Instant::now();
+        let phase_started = std::time::Instant::now();
         let result = self.with_active_host(|context| context.run_jobs());
+        let engine_jobs_elapsed = phase_started.elapsed();
+        let phase_started = std::time::Instant::now();
         if result.is_ok() {
             self.with_active_host(script_errors::flush)?;
         }
+        let errors_elapsed = phase_started.elapsed();
+        let phase_started = std::time::Instant::now();
         if result.is_ok() && self.host_state.borrow().document_write_depth == 0 {
             self.run_written_scripts(false)?;
         }
+        let written_scripts_elapsed = phase_started.elapsed();
+        let phase_started = std::time::Instant::now();
         self.sync_module_csp_violations();
         let isolation_result = self.flush_pending_isolation_reports();
+        let reports_elapsed = phase_started.elapsed();
+        let phase_started = std::time::Instant::now();
         self.flush_pointer_lock_notifications()?;
+        let pointer_lock_elapsed = phase_started.elapsed();
+        let elapsed = started.elapsed();
+        if let Some(jobs) = self
+            .job_executor
+            .as_ref()
+            .map(|executor| executor.take_stats())
+            .filter(|_| elapsed >= std::time::Duration::from_millis(50))
+        {
+            eprintln!(
+                "OMOIKANE_JOB_DRAIN {{\"elapsed_ms\":{:.3},\"engine_jobs_ms\":{:.3},\"errors_ms\":{:.3},\"written_scripts_ms\":{:.3},\"reports_ms\":{:.3},\"pointer_lock_ms\":{:.3},\"total\":{},\"promise\":{},\"promise_elapsed_ms\":{:.3},\"max_promise_ms\":{:.3},\"async\":{},\"timeout\":{},\"generic\":{}}}",
+                elapsed.as_secs_f64() * 1000.0,
+                engine_jobs_elapsed.as_secs_f64() * 1000.0,
+                errors_elapsed.as_secs_f64() * 1000.0,
+                written_scripts_elapsed.as_secs_f64() * 1000.0,
+                reports_elapsed.as_secs_f64() * 1000.0,
+                pointer_lock_elapsed.as_secs_f64() * 1000.0,
+                jobs.total(),
+                jobs.promise,
+                jobs.promise_elapsed.as_secs_f64() * 1000.0,
+                jobs.max_promise_elapsed.as_secs_f64() * 1000.0,
+                jobs.asynchronous,
+                jobs.timeout,
+                jobs.generic,
+            );
+        }
         result.and(isolation_result)
     }
 
@@ -17880,19 +18005,22 @@ fn with_host_state<T>(f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>) ->
     })
 }
 
-/// Runs one render-affecting native mutation after closing retained native
-/// scroll eligibility. Callers must finish all author-reentrant argument
-/// conversion before entering this helper. The HostState borrow and protocol
-/// mutex are both released before `f` can touch DOM or render state.
+/// Runs one render-affecting native mutation while keeping the last committed
+/// scene available for native scrolling. Callers must finish all
+/// author-reentrant argument conversion before entering this helper. The
+/// HostState borrow and protocol mutex are both released before `f` can touch
+/// DOM or render state.
 #[track_caller]
 fn with_render_mutation<T>(f: impl FnOnce(&Rc<RefCell<HostState>>) -> JsResult<T>) -> JsResult<T> {
     with_node_render_mutation(&[], f)
 }
 
-/// Closes native eligibility before changing any active target. Callers pass
-/// both the destination and moved source for tree operations. An empty target
-/// set is conservative and always revokes. Resolve IDs under a short owner
-/// borrow; release it and the protocol lock before invoking the mutation.
+/// Records whether a mutation affects the active document without revoking the
+/// committed root scroll target. Callers pass both the destination and moved
+/// source for tree operations. Navigation, viewport replacement, programmatic
+/// scrolling, and blocking wheel listeners revoke through their dedicated
+/// boundaries. Resolve IDs under a short owner borrow; release it and the
+/// protocol lock before invoking the mutation.
 #[track_caller]
 fn with_node_render_mutation<T>(
     node_ids: &[usize],
@@ -17911,9 +18039,6 @@ fn with_node_render_mutation<T>(
             (state.native_scroll.clone(), affects)
         };
         trace_render_mutation(caller, &native_scroll, affects_active_document);
-        if affects_active_document {
-            native_scroll.revoke_policy();
-        }
         f(state)
     })
 }

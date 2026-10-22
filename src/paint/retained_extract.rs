@@ -1946,7 +1946,7 @@ impl StickyPlan {
             if entry.space == StickySpace::Document {
                 expected.y += -(scroll.1 as f32);
             }
-            if !seen.insert(id) || layout.dimensions.content != expected {
+            if !seen.insert(id) || !sticky_rect_matches(layout.dimensions.content, expected) {
                 return false;
             }
         }
@@ -1955,6 +1955,18 @@ impl StickyPlan {
             .iter()
             .all(|child| self.verify_node(child, scroll, seen))
     }
+}
+
+/// Accepts only sub-pixel drift caused by reassociating the same sticky
+/// translation and document scroll. The layout path subtracts scroll before
+/// adding the sticky offset, while the retained proof stores the translated
+/// origin and subtracts scroll when it verifies a sample.
+fn sticky_rect_matches(actual: Rect, expected: Rect) -> bool {
+    const COORDINATE_EPSILON: f32 = 1.0 / 256.0;
+    (actual.x - expected.x).abs() <= COORDINATE_EPSILON
+        && (actual.y - expected.y).abs() <= COORDINATE_EPSILON
+        && actual.width == expected.width
+        && actual.height == expected.height
 }
 
 fn scan_sticky_proofs(
@@ -2188,6 +2200,43 @@ mod viewport_sticky_constant_tests {
                 "scroll={scroll}"
             );
         }
+    }
+
+    #[test]
+    fn adjusted_verification_accepts_only_fractional_reassociation_drift() {
+        let raw_y = 699.493_16_f32;
+        let offset = 228.9_f32 - raw_y;
+        let scroll = 85.0_f32;
+        let actual_y = (raw_y - scroll) + offset;
+        let expected_y = (raw_y + offset) - scroll;
+        assert!(sticky_rect_matches(
+            Rect {
+                x: 785.0,
+                y: actual_y,
+                width: 350.0,
+                height: 1321.4069,
+            },
+            Rect {
+                x: 785.0,
+                y: expected_y,
+                width: 350.0,
+                height: 1321.4069,
+            },
+        ));
+        assert!(!sticky_rect_matches(
+            Rect {
+                x: 785.0,
+                y: expected_y + 0.01,
+                width: 350.0,
+                height: 1321.4069,
+            },
+            Rect {
+                x: 785.0,
+                y: expected_y,
+                width: 350.0,
+                height: 1321.4069,
+            },
+        ));
     }
 }
 
