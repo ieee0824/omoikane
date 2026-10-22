@@ -10,6 +10,8 @@
 # CI report destination for the WPT smoke and JS benchmark jobs, also written
 # when those are run locally.
 /.artifacts/
+# External WPT fixture checkout used by CI; keep it out of Cargo source scans.
+/.cache/wpt/
 
 # OS
 .DS_Store
