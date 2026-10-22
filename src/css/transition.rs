@@ -114,6 +114,7 @@ pub(crate) fn transition_cache_scope(property: &str) -> TransitionCacheScope {
             | PropertyId::Opacity
             | PropertyId::Filter
             | PropertyId::BackdropFilter
+            | PropertyId::Transform
     ) {
         TransitionCacheScope::Subtree
     } else {
@@ -1868,6 +1869,7 @@ mod tests {
                 "opacity",
                 "outline-color",
                 "text-decoration-color",
+                "transform",
             ],
             "adding another localized property requires a dependency audit and this contract update",
         );
@@ -1892,7 +1894,6 @@ mod tests {
             "border-block-color",
             "border-inline-color",
             "width",
-            "transform",
             "text-shadow",
             "box-shadow",
             "--accent-color",

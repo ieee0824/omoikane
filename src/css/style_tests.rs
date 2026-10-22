@@ -13633,3 +13633,84 @@ fn inline_display_value_changes_keep_nonlocal_selectors_and_mixed_changes_guarde
         );
     }
 }
+
+#[test]
+fn transform_transition_sampling_preserves_unrelated_style_caches() {
+    fn resolved(style: &ComputedStyle) -> Option<ComputedValue> {
+        let mut style = style.clone();
+        style.set_resolved_transform(validation_transform_reference_box());
+        style.get("transform").cloned()
+    }
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    let unrelated = NodeHandle::element("aside");
+    target.set_attribute("id", "moving");
+    child.set_attribute("style", "transform:inherit");
+    target.set_attribute(
+        "style",
+        "transform:translateX(0px);transition:transform 1s linear",
+    );
+    document.append_child(target.clone());
+    target.append_child(child.clone());
+    document.append_child(unrelated.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("#moving::before{content:'';transform:inherit}aside::before{content:''}")
+            .unwrap(),
+    );
+    resolver.computed_style_shared(&child);
+    target.set_attribute(
+        "style",
+        "transform:translateX(20px);transition:transform 1s linear",
+    );
+    resolver.invalidate_style_cache_for_test();
+    let target_before = resolver.computed_style_shared(&target);
+    let child_before = resolver.computed_style_shared(&child);
+    let pseudo_before = resolver
+        .computed_pseudo_style_shared(&target, PseudoElement::Before)
+        .unwrap();
+    let unrelated_before = resolver.computed_style_shared(&unrelated);
+    let unrelated_pseudo_before = resolver
+        .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+        .unwrap();
+    for (time_ms, translation) in [(500.0, 10), (1000.0, 20)] {
+        let effects = resolver.advance_style_clocks_with_node_lookup(
+            time_ms,
+            false,
+            transition_node_lookup(std::slice::from_ref(&target)),
+        );
+        assert!(effects.transition_changed);
+        assert!(effects.transition_requires_layout);
+        assert_eq!(
+            effects.transition_cache_before_animation.outcome,
+            TransitionCacheOutcome::Subtree
+        );
+        let expected = NodeHandle::element("div");
+        expected.set_attribute("style", &format!("transform:translateX({translation}px)"));
+        let expected = resolved(&StyleResolver::new().computed_style(&expected));
+        let sampled_target = resolver.computed_style_shared(&target);
+        let sampled_child = resolver.computed_style_shared(&child);
+        let sampled_pseudo = resolver
+            .computed_pseudo_style_shared(&target, PseudoElement::Before)
+            .unwrap();
+        for sample in [&sampled_target, &sampled_child, &sampled_pseudo] {
+            assert_eq!(resolved(sample), expected, "sample at {time_ms}ms");
+        }
+        assert!(!Arc::ptr_eq(&target_before, &sampled_target));
+        assert!(!Arc::ptr_eq(&child_before, &sampled_child));
+        assert!(!Arc::ptr_eq(&pseudo_before, &sampled_pseudo));
+        assert!(Arc::ptr_eq(
+            &unrelated_before,
+            &resolver.computed_style_shared(&unrelated)
+        ));
+        assert!(Arc::ptr_eq(
+            &unrelated_pseudo_before,
+            &resolver
+                .computed_pseudo_style_shared(&unrelated, PseudoElement::Before)
+                .unwrap()
+        ));
+    }
+    assert!(!resolver.has_running_transitions());
+}
