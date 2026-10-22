@@ -4,6 +4,7 @@ use super::page_worker::{
     AsyncEvent, NativeScrollAccepted, NativeScrollFallback, NativeScrollPublication, NativeWheel,
     PageCommand as Command, PagePaintTrace, PageUpdate, PageWorker,
 };
+use super::toolbar_font::ToolbarFont;
 use super::toolbar_paint::url_field;
 use super::url_bar::{UrlBarKey, UrlBarOutcome, navigation_target};
 use super::*;
@@ -502,7 +503,7 @@ pub(super) struct AsyncBrowserApp {
     media_preferences: omoikane::platform_media::PlatformMediaPreferences,
     pointer_devices: omoikane::platform_media::PointerDeviceTracker<DeviceId>,
     monitor: Option<omoikane::platform_media::MediaPreferenceMonitor>,
-    toolbar_font: OnceCell<Option<Font>>,
+    toolbar_font: ToolbarFont,
 }
 
 impl AsyncBrowserApp {
@@ -513,6 +514,7 @@ impl AsyncBrowserApp {
         startup_trace: Option<Instant>,
     ) -> std::io::Result<Self> {
         let media_preferences = omoikane::platform_media::capture_media_preferences();
+        let toolbar_font = ToolbarFont::start(wake.clone());
         Ok(Self {
             worker: PageWorker::start(wake, reporter.clone())?,
             window: None,
@@ -566,7 +568,7 @@ impl AsyncBrowserApp {
             ),
             media_preferences,
             monitor: None,
-            toolbar_font: OnceCell::new(),
+            toolbar_font,
         })
     }
 
@@ -1005,7 +1007,7 @@ impl AsyncBrowserApp {
             toolbar,
             layout.scale(),
             &self.url_bar,
-            self.toolbar_font.get_or_init(load_toolbar_font).as_ref(),
+            self.toolbar_font.get(),
         );
         // The shared owner can revoke or replace this token while the native
         // buffer is being built. Validate at the actual presentation boundary,
@@ -2062,6 +2064,14 @@ impl ApplicationHandler<AsyncEvent> for AsyncBrowserApp {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AsyncEvent) {
         match event {
             AsyncEvent::PageUpdate => self.apply_updates(),
+            AsyncEvent::ToolbarFontReady => {
+                if self.toolbar_font.poll() {
+                    self.trace_startup("toolbar_font_ready");
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+            }
             AsyncEvent::CookieChanged => {
                 self.cookie_dirty = true;
                 self.next_frame = Instant::now();

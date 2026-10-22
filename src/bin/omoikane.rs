@@ -63,6 +63,8 @@ mod pointer_lock_host;
 #[cfg(test)]
 #[path = "omoikane/render_pump.rs"]
 mod render_pump;
+#[path = "omoikane/toolbar_font.rs"]
+mod toolbar_font;
 #[path = "omoikane/toolbar_paint.rs"]
 mod toolbar_paint;
 #[path = "omoikane/url_bar.rs"]

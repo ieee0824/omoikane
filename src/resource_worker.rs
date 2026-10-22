@@ -242,6 +242,33 @@ impl ResourceQueue {
         kind: ResourceKind,
         work: impl FnOnce(CancellationToken) -> T + Send + 'static,
     ) -> io::Result<ResourceTask<T>> {
+        self.submit_inner(scope, priority, kind, None, work)
+    }
+
+    /// Queues owned work and wakes the owner after its outcome is committed.
+    ///
+    /// Completion, cancellation and a caught work panic all notify the owner.
+    /// A failed submission does not notify. Panics in the waker are isolated
+    /// from the worker, just like work panics.
+    pub fn submit_with_waker<T: Send + 'static>(
+        &self,
+        scope: &ResourceScope,
+        priority: ResourcePriority,
+        kind: ResourceKind,
+        waker: std::task::Waker,
+        work: impl FnOnce(CancellationToken) -> T + Send + 'static,
+    ) -> io::Result<ResourceTask<T>> {
+        self.submit_inner(scope, priority, kind, Some(waker), work)
+    }
+
+    fn submit_inner<T: Send + 'static>(
+        &self,
+        scope: &ResourceScope,
+        priority: ResourcePriority,
+        kind: ResourceKind,
+        waker: Option<std::task::Waker>,
+        work: impl FnOnce(CancellationToken) -> T + Send + 'static,
+    ) -> io::Result<ResourceTask<T>> {
         let mut state = self.pool.shared.state.lock().unwrap();
         if state.stopped {
             return Err(io::Error::other("resource queue is stopped"));
@@ -280,6 +307,9 @@ impl ResourceQueue {
                     }
                 };
                 let _ = sender.send(outcome);
+                if let Some(waker) = waker {
+                    let _ = catch_unwind(AssertUnwindSafe(|| waker.wake()));
+                }
             }),
         });
         drop(state);

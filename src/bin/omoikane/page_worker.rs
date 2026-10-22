@@ -52,9 +52,10 @@ fn gui_resource_worker_count() -> NonZeroUsize {
     configured_resource_worker_count(std::env::var("OMOIKANE_RESOURCE_WORKERS").ok().as_deref())
 }
 
-/// Native-loop notification from the page owner or cookie jar.
+/// Native-loop notification from page, resource, or cookie owners.
 pub(super) enum AsyncEvent {
     PageUpdate,
+    ToolbarFontReady,
     CookieChanged,
 }
 
