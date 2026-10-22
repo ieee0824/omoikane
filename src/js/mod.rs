@@ -117,6 +117,8 @@ mod computed_pseudo_tests;
 #[cfg(test)]
 mod computed_style_layout_tests;
 #[cfg(test)]
+mod computed_style_snapshot_tests;
+#[cfg(test)]
 mod computed_text_shadow_tests;
 mod cookie_store;
 mod cross_origin_isolation;
@@ -19860,7 +19862,7 @@ fn computed_style_native(
     }
     let json = style
         .as_ref()
-        .map_or_else(|| "{}".to_string(), serialize_computed_style);
+        .map_or_else(|| "{}".to_string(), |style| serialize_computed_style(style));
     Ok(js_string!(json.as_str()).into())
 }
 
@@ -19875,14 +19877,15 @@ fn cssom_property_uses_used_size(name: &str) -> bool {
         || name.starts_with("padding-")
 }
 
-/// Resolves an owned CSSOM snapshot before constructing any JavaScript objects.
+/// Resolves an immutable CSSOM snapshot before constructing JavaScript objects.
+/// Read-only results share the cascade; resolved-value edits copy on write.
 /// Layout runs when `needs_used_size` asks for resolved sizes or a transform matrix.
 fn resolve_native_computed_style(
     args: &[JsValue],
     needs_used_size: bool,
     needs_logical_aliases: bool,
     context: &mut Context,
-) -> JsResult<Option<ComputedStyle>> {
+) -> JsResult<Option<Arc<ComputedStyle>>> {
     let node_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, node_id)?;
     let pseudo = match args.get(1) {
@@ -19937,11 +19940,11 @@ fn resolve_native_computed_style(
         });
         let flex_or_grid_item = pseudo.is_none() && auto_min_size
             && node.parent_node().is_some_and(|parent| {
-                matches!(resolver.computed_style(&parent).get("display"),
+                matches!(resolver.computed_style_shared(&parent).get("display"),
                     Some(ComputedValue::Keyword(display))
                         if matches!(display.as_str(), "flex" | "inline-flex" | "grid" | "inline-grid"))
             });
-        style.populate_logical_cssom(flex_or_grid_item);
+        Arc::make_mut(&mut style).populate_logical_cssom(flex_or_grid_item);
         Ok(Some(style))
     })
 }
@@ -19966,12 +19969,12 @@ fn resolve_cssom_style(
     node: &NodeHandle,
     pseudo: Option<PseudoElement>,
     needs_used_size: bool,
-) -> Option<ComputedStyle> {
+) -> Option<Arc<ComputedStyle>> {
     let compute = |state: &mut HostState| {
         let resolver = document_style_resolver(state, document)?;
         match pseudo {
-            Some(pseudo) => resolver.computed_pseudo_style(node, pseudo),
-            None => Some(resolver.computed_style(node)),
+            Some(pseudo) => resolver.computed_pseudo_style_shared(node, pseudo),
+            None => Some(resolver.computed_style_shared(node)),
         }
     };
     if needs_used_size {
@@ -19983,6 +19986,7 @@ fn resolve_cssom_style(
                 Some(ComputedValue::Px(value)) => *value,
                 _ => 16.0,
             };
+            let style = Arc::make_mut(&mut style);
             style.set_resolved_transform(crate::css::TransformReferenceBox {
                 x: 0.0,
                 y: 0.0,
@@ -20000,10 +20004,10 @@ fn resolve_cssom_style(
                 root_font_size,
             });
             if !used_size.non_replaced_inline {
-                apply_cssom_used_size(&mut style, used_size);
+                apply_cssom_used_size(style, used_size);
             }
         } else if pseudo.is_some() || style.is_display_none() {
-            style.set_unrendered_transform();
+            Arc::make_mut(&mut style).set_unrendered_transform();
         }
         return Some(style);
     }
