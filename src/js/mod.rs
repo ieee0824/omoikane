@@ -96,6 +96,7 @@ mod media_environment;
 pub mod native_scroll;
 mod navigation_transport;
 mod retained_scroll;
+mod tree_style_invalidation;
 use child_document::{FetchedChildResource, LoadedChildDocument, NavigationRedirect};
 use cross_origin_isolation::{
     Disposition, GroupSwitchDecision, IsolationPolicy, OpenerPolicy, OpenerPolicyValue,
@@ -21609,6 +21610,7 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         // navigation for iframe/object resource elements.
         let source_document = document_root_for_node(&child);
         let target_document = document_root_for_node(&parent);
+        let rebuild_stylesheets = tree_style_invalidation::requires_rebuild(&parent, &child);
         if source_document.is_some() && source_document != target_document {
             dom_removal_trace::trace("appendChild_move", &child, false, context);
         }
@@ -21620,10 +21622,10 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             }
             state.register_tree(&child);
             if let Some(document) = &source_document {
-                state.mark_document_style_dirty(document);
+                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets);
             }
             if let Some(document) = &target_document {
-                state.mark_document_style_dirty(document);
+                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets);
             }
             if source_document.is_some() {
                 state.destroy_iframe_contexts_in_subtree(&child);
@@ -25427,11 +25429,7 @@ fn set_text_content_native(
                 | crate::dom::NodeType::Comment
                 | crate::dom::NodeType::ProcessingInstruction
         );
-        let rebuild_stylesheets = !is_character_data
-            || node
-                .parent_node()
-                .and_then(|parent| parent.tag_name())
-                .is_some_and(|tag| tag.eq_ignore_ascii_case("style"));
+        let rebuild_stylesheets = tree_style_invalidation::text_replacement_requires_rebuild(&node);
         frame_diagnostics::record_scroll_mutation("set_text_content", id, None);
         // For text/comment leaf nodes, update data directly
         if is_character_data {
@@ -25548,7 +25546,16 @@ fn set_inner_html_native(
         }
         // The node stays attached to its document; invalidate that document's
         // resolver so a `<style>` inside the new markup is picked up.
-        state.borrow_mut().mark_style_dirty_for_node(&node);
+        let rebuild_stylesheets = tree_style_invalidation::replacement_requires_rebuild(
+            &target,
+            &removed_children,
+            &inserted_children,
+        );
+        if rebuild_stylesheets {
+            state.borrow_mut().mark_style_dirty_for_node(&node);
+        } else {
+            state.borrow_mut().invalidate_style_cache_for_node(&node);
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -26147,6 +26154,7 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         // detached child has no document root, so the affected document could no
         // longer be found from it. The parent keeps its place in the tree.
         let parent_document = document_root_for_node(&parent);
+        let rebuild_stylesheets = tree_style_invalidation::requires_rebuild(&parent, &child);
         dom_removal_trace::trace("removeChild", &child, false, context);
         parent
             .remove_child(&child)
@@ -26156,7 +26164,7 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             state.cancel_smooth_scrolls_in_subtree(&child);
             state.destroy_iframe_contexts_in_subtree(&child);
             if let Some(document) = &parent_document {
-                state.mark_document_style_dirty(document);
+                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets);
             }
         }
         Ok(JsValue::undefined())
@@ -26219,6 +26227,7 @@ fn insert_before_native_impl(
         // matters.
         let source_document = document_root_for_node(&new_node);
         let target_document = document_root_for_node(&parent);
+        let rebuild_stylesheets = tree_style_invalidation::requires_rebuild(&parent, &new_node);
         if source_document.is_some() && source_document != target_document {
             dom_removal_trace::trace(
                 if preserve_state {
@@ -26247,10 +26256,10 @@ fn insert_before_native_impl(
                 trusted_types::invalidate_approvals_for_detached_element(&mut state, &new_node);
             }
             if let Some(document) = &source_document {
-                state.mark_document_style_dirty(document);
+                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets);
             }
             if let Some(document) = &target_document {
-                state.mark_document_style_dirty(document);
+                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets);
             }
             if !preserve_state && source_document.is_some() {
                 state.destroy_iframe_contexts_in_subtree(&new_node);
@@ -28136,6 +28145,9 @@ fn take_discarded_node_ids_native(
         ))
     })
 }
+
+#[cfg(test)]
+mod tree_style_cache_tests;
 
 #[cfg(test)]
 mod timed_future_tests;
