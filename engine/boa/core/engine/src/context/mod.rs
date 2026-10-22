@@ -342,9 +342,10 @@ impl Context {
                 self.vm
                     .native_call_continuations
                     .push(crate::vm::NativeCallBoundary {
-                        target: crate::vm::NativeCallBoundaryTarget::NativePlaceholder(
-                            suspension.placeholder(),
-                        ),
+                        target: crate::vm::NativeCallBoundaryTarget::NativePlaceholder {
+                            target: suspension.placeholder(),
+                            frame_depth: self.vm.frames.len(),
+                        },
                         continuation,
                     });
                 return Ok(JsValue::undefined());
