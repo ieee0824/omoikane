@@ -578,7 +578,7 @@ fn resolve_line_cross_size(
 }
 
 /// Proves a narrow height-independent subtree: unwrapped rows with auto or
-/// absolute heights ending in explicitly sized leaves. Making an unchanged
+/// absolute heights ending in explicitly sized or plain text leaves. Making an unchanged
 /// height definite cannot change these descendants. Other formatting contexts
 /// and percentage heights still require the normal stretch pass.
 fn unchanged_stretch_is_invariant(layout: &LayoutBox, resolver: &mut StyleResolver) -> bool {
@@ -606,7 +606,8 @@ fn unchanged_stretch_is_invariant(layout: &LayoutBox, resolver: &mut StyleResolv
         return false;
     }
     if layout.children.is_empty() {
-        return absolute_height;
+        return absolute_height
+            || (auto_height && unchanged_text_leaf_is_invariant(layout, &style));
     }
     matches!(
         style.display(),
@@ -617,6 +618,28 @@ fn unchanged_stretch_is_invariant(layout: &LayoutBox, resolver: &mut StyleResolv
             .children
             .iter()
             .all(|child| unchanged_stretch_is_invariant(child, resolver))
+}
+
+/// Text wrapping depends on the unchanged inline width, not on whether the
+/// same horizontal block height has become definite. Exclude atomic/replaced
+/// content, generated fragments, vertical flow and aspect-ratio sizing.
+fn unchanged_text_leaf_is_invariant(layout: &LayoutBox, style: &ComputedStyle) -> bool {
+    !super::has_replaced_layout_semantics(&layout.node)
+        && !super::has_preferred_aspect_ratio(style)
+        && style.get("writing-mode").is_none_or(
+            |value| matches!(value, ComputedValue::Keyword(keyword) if keyword == "horizontal-tb"),
+        )
+        && layout
+            .node
+            .layout_child_nodes()
+            .iter()
+            .all(|node| node.node_type() == NodeType::Text)
+        && layout.lines.iter().all(|line| {
+            line.fragments.iter().all(|fragment| {
+                matches!(&fragment.content, super::InlineFragmentContent::Text(_))
+                    && fragment.style.pseudo.is_none()
+            })
+        })
 }
 
 /// Positions a flex line's items along the main axis, applying
@@ -1168,6 +1191,96 @@ mod layout_cost_tests {
             visits <= DEPTH * 3,
             "{DEPTH} nested rows required {visits} layouts"
         );
+    }
+
+    #[test]
+    fn nested_text_rows_have_bounded_layout_work() {
+        const DEPTH: usize = 8;
+        let root = NodeHandle::element("div");
+        let mut parent = root.clone();
+        for _ in 1..DEPTH {
+            let child = NodeHandle::element("div");
+            parent.append_child(child.clone());
+            parent = child;
+        }
+        let label = NodeHandle::element("span");
+        label.append_child(NodeHandle::text("label"));
+        parent.append_child(label);
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { display:flex; width:100px } span { font-size:10px; line-height:20px }",
+            )
+            .unwrap(),
+        );
+        LAYOUT_VISITS.with(|visits| visits.set(Some(0)));
+        let layout = super::super::layout_tree(
+            &root,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        let visits = LAYOUT_VISITS.with(|visits| visits.replace(None).unwrap());
+        eprintln!("{DEPTH} nested text rows: {visits} flex layouts");
+        assert_eq!(layout.dimensions.content.height, 20.0);
+        assert!(
+            visits <= DEPTH * 3,
+            "{DEPTH} nested text rows required {visits} layouts"
+        );
+    }
+
+    #[test]
+    fn wrapped_text_keeps_its_lines_when_a_row_height_becomes_definite() {
+        for stretch_height in [None, Some(160.0)] {
+            let root = NodeHandle::element("div");
+            let row = NodeHandle::element("div");
+            let label = NodeHandle::element("span");
+            label.append_child(NodeHandle::text(
+                "alpha beta gamma delta epsilon zeta eta theta",
+            ));
+            row.append_child(label);
+            root.append_child(row);
+            if let Some(height) = stretch_height {
+                let spacer = NodeHandle::element("i");
+                spacer.set_attribute("style", &format!("width:0px;height:{height}px"));
+                root.append_child(spacer);
+            }
+            let mut resolver = StyleResolver::new();
+            resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+                "div { display:flex; width:100px } span { font:10px monospace; line-height:20px }",
+            ).unwrap());
+            let layout = super::super::layout_tree(
+                &root,
+                &mut resolver,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 200.0,
+                },
+            )
+            .unwrap();
+            let label = &layout.children[0].children[0];
+            assert!(label.lines.len() > 1, "text must wrap at 100px");
+            assert_eq!(
+                label.dimensions.content.height,
+                layout.dimensions.content.height
+            );
+            if let Some(height) = stretch_height {
+                assert_eq!(label.dimensions.content.height, height);
+            } else {
+                assert_eq!(
+                    label.dimensions.content.height,
+                    label.lines.len() as f32 * 20.0
+                );
+            }
+        }
     }
 
     #[test]
