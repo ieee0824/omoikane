@@ -22295,7 +22295,8 @@ fn sample_css_transition_styles_native(
                 .and_then(|entry| entry.resolver.as_mut())
             {
                 for element in elements {
-                    resolver.computed_style(&element);
+                    // Sampling needs resolver side effects, not an owned style snapshot.
+                    resolver.computed_style_shared(&element);
                 }
                 if full_sample {
                     resolver.finish_transition_sample(&active_node_ids);
