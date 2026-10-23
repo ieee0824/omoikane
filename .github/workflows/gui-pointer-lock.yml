@@ -47,6 +47,8 @@ jobs:
           cargo build --locked --features gui --bin omoikane
           cargo test --locked --features gui --bin omoikane
       - name: Verify first-script media settings on a scaled display
+        env:
+          OMOIKANE_TRACE_STARTUP: "1"
         run: /usr/bin/python3 scripts/test-gui-media-environment.py --binary target/debug/omoikane --artifacts .artifacts/gui-media-environment
       - name: Verify harness failure cleanup and scaled native hit testing
         run: |
