@@ -125,13 +125,24 @@ impl JsRuntime {
                 }));
         // Completed downloads still need an opportunity to resume their promise.
         let modules = !self.module_loader.pending.borrow().is_empty();
-        let workers = state.workers.values().any(|worker| {
-            let worker = worker.borrow();
-            !worker.terminated
-                && (!worker.outgoing.is_empty()
-                    || worker.startup_error.is_some()
-                    || worker.runtime.next_rendering_with_visited(visited) != NextRendering::Idle)
-        });
+        // Worker clocks advance by the same elapsed delta as their owner.
+        // Preserve their relative deadlines instead of polling future timers
+        // every frame; queued owner notifications still need an opportunity.
+        let workers = state
+            .workers
+            .values()
+            .fold(NextRendering::Idle, |demand, worker| {
+                let worker = worker.borrow();
+                if worker.terminated {
+                    return demand;
+                }
+                let next = if !worker.outgoing.is_empty() || worker.startup_error.is_some() {
+                    NextRendering::EveryFrame
+                } else {
+                    worker.runtime.next_rendering_with_visited(visited)
+                };
+                merge_next_rendering(demand, next)
+            });
         let images = !state.pending_image_events.is_empty()
             || state
                 .image_resources
@@ -139,7 +150,7 @@ impl JsRuntime {
                 .any(|images| images.borrow().has_pending_images());
         if visual_work
             || modules
-            || workers
+            || workers == NextRendering::EveryFrame
             || images
             || state.font_loading.has_pending()
             || state.script_loads.has_pending()
@@ -160,8 +171,8 @@ impl JsRuntime {
         {
             // Worker globals can retain bootstrap-private CookieStore callbacks
             // after removing the page-facing API. They do not deliver change
-            // events, and scheduling them for cookie expiry would keep their
-            // owner Window in EveryFrame mode for the cookie's lifetime.
+            // events, so their private callbacks must not schedule the owner
+            // Window for cookie expiration.
             None
         } else {
             let cookie_store = state.cookie_store.lock().unwrap();
@@ -173,7 +184,7 @@ impl JsRuntime {
                 cookie_store.next_expiry_delay_at(SystemTime::now())
             }
         };
-        match (timer_delay, cookie_delay) {
+        let own = match (timer_delay, cookie_delay) {
             (Some(page_delay), Some(wall_delay)) => NextRendering::AfterBoth {
                 page_delay,
                 wall_delay,
@@ -181,7 +192,8 @@ impl JsRuntime {
             (Some(delay), None) => NextRendering::After(delay),
             (None, Some(delay)) => NextRendering::AfterWall(delay),
             (None, None) => NextRendering::Idle,
-        }
+        };
+        merge_next_rendering(own, workers)
     }
 }
 

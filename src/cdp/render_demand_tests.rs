@@ -191,15 +191,21 @@ fn smooth_scrolling_requests_frames_until_reaching_the_target() {
 }
 
 #[test]
-fn worker_timer_work_is_polled_until_completion() {
+fn worker_timer_waits_until_its_deadline() {
     let mut session = page("<body></body>");
     eval(
         &mut session,
         "window.done=false;window.worker=new Worker('data:text/javascript,'+encodeURIComponent('setTimeout(()=>postMessage(42),100)'));worker.onmessage=()=>done=true",
     );
-    assert_eq!(session.render_demand(None).next, NextRendering::EveryFrame);
+    assert_eq!(
+        session.render_demand(None).next,
+        NextRendering::After(Duration::from_millis(100))
+    );
     session.drive_event_loop(99).unwrap();
-    assert_eq!(session.render_demand(None).next, NextRendering::EveryFrame);
+    assert_eq!(
+        session.render_demand(None).next,
+        NextRendering::After(Duration::from_millis(1))
+    );
     session.drive_event_loop(1).unwrap();
     let result = session
         .dispatch("Runtime.evaluate", json!({"expression":"done"}))
@@ -574,5 +580,76 @@ fn uppercase_none_keyword_removes_live_keyframes() {
     assert_eq!(
         session.render_demand(Some(&presented)).next,
         NextRendering::Idle
+    );
+}
+
+#[test]
+fn worker_deadline_merges_with_page_timer_and_disappears_on_termination() {
+    let mut session = page("<body></body>");
+    eval(
+        &mut session,
+        "globalThis.pageFired=false;globalThis.workerFired=false;globalThis.worker=new Worker('data:text/javascript,'+encodeURIComponent('setTimeout(()=>postMessage(42),100)'));worker.onmessage=()=>workerFired=true;setTimeout(()=>pageFired=true,40)",
+    );
+    assert_eq!(
+        session.render_demand(None).next,
+        NextRendering::After(Duration::from_millis(40))
+    );
+    session.drive_event_loop(40).unwrap();
+    let result = session
+        .dispatch(
+            "Runtime.evaluate",
+            json!({"expression":"pageFired && !workerFired"}),
+        )
+        .unwrap();
+    assert_eq!(result["result"]["value"], json!(true));
+    assert_eq!(
+        session.render_demand(None).next,
+        NextRendering::After(Duration::from_millis(60))
+    );
+    eval(&mut session, "worker.terminate()");
+    assert_eq!(session.render_demand(None).next, NextRendering::Idle);
+    session.drive_event_loop(100).unwrap();
+    let result = session
+        .dispatch("Runtime.evaluate", json!({"expression":"workerFired"}))
+        .unwrap();
+    assert_eq!(result["result"]["value"], json!(false));
+}
+
+#[test]
+fn worker_message_wakes_a_worker_waiting_for_a_future_timer() {
+    let mut session = page("<body></body>");
+    eval(
+        &mut session,
+        "globalThis.reply='';globalThis.worker=new Worker('data:text/javascript,'+encodeURIComponent('setTimeout(()=>{},60000);onmessage=e=>postMessage(e.data)'));worker.onmessage=e=>reply=e.data",
+    );
+    assert_eq!(
+        session.render_demand(None).next,
+        NextRendering::After(Duration::from_secs(60))
+    );
+    // CDP Runtime.evaluate drains host tasks before returning. Queue the
+    // message without that checkpoint to observe the scheduler's wake demand.
+    session.runtime.eval("worker.postMessage('awake')").unwrap();
+    assert_eq!(
+        session
+            .runtime
+            .eval("reply")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        ""
+    );
+    assert_eq!(
+        session.render_demand(None).next,
+        NextRendering::After(Duration::ZERO)
+    );
+    session.drive_event_loop(0).unwrap();
+    let result = session
+        .dispatch("Runtime.evaluate", json!({"expression":"reply"}))
+        .unwrap();
+    assert_eq!(result["result"]["value"], json!("awake"));
+    assert_eq!(
+        session.render_demand(None).next,
+        NextRendering::After(Duration::from_secs(60))
     );
 }
