@@ -1732,7 +1732,19 @@ pub struct FontFamilyKey(u32);
 #[derive(Default)]
 struct FontFamilyIntern {
     keys: HashMap<String, u32>,
-    families: Vec<Arc<[String]>>,
+    families: Vec<Arc<[FontFamilyMember]>>,
+}
+
+struct FontFamilyMember {
+    name: String,
+    key: OnceLock<FontFamilyKey>,
+}
+
+impl FontFamilyMember {
+    fn key(&self) -> FontFamilyKey {
+        // The intern mutex is not held here. Unvisited fallback names need no ID.
+        *self.key.get_or_init(|| FontFamilyKey::new(&self.name))
+    }
 }
 
 static FONT_FAMILY_KEY_INTERN: OnceLock<Mutex<FontFamilyIntern>> = OnceLock::new();
@@ -1747,14 +1759,21 @@ impl FontFamilyKey {
             return Self(*key);
         }
         let next = intern.families.len() as u32;
-        intern
-            .families
-            .push(system::parse_family_list(&folded).into());
+        intern.families.push(
+            system::parse_family_list(&folded)
+                .into_iter()
+                .map(|name| FontFamilyMember {
+                    name,
+                    key: OnceLock::new(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        );
         intern.keys.insert(folded, next);
         Self(next)
     }
 
-    fn families(self) -> Arc<[String]> {
+    fn families(self) -> Arc<[FontFamilyMember]> {
         let intern = FONT_FAMILY_KEY_INTERN.get().expect("interned family");
         let intern = intern.lock().unwrap_or_else(PoisonError::into_inner);
         Arc::clone(&intern.families[self.0 as usize])
@@ -2157,9 +2176,8 @@ impl WebFontRegistry {
         family: FontFamilyKey,
         target: FontVariantKey,
     ) -> Vec<WebFontCandidate<'_>> {
-        for name in family.families().iter() {
-            let selected =
-                self.select_candidates_scoped_by_key(scope_root, FontFamilyKey::new(name), target);
+        for member in family.families().iter() {
+            let selected = self.select_candidates_scoped_by_key(scope_root, member.key(), target);
             if !selected.is_empty() {
                 return selected;
             }

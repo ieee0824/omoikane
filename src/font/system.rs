@@ -377,13 +377,13 @@ fn select_text_font_impl<'a>(
     // their existing authority. Installed defaults carry their system identity.
     let use_system = fallbacks.iter().any(|font| font.system_face.is_some());
     if let Some(family) = family {
-        for name in family.families().iter() {
+        for member in family.families().iter() {
             if let Some(font) = web_fonts.and_then(|registry| {
-                registry.select_best_scoped_variant(scope_root, FontFamilyKey::new(name), variant)
+                registry.select_best_scoped_variant(scope_root, member.key(), variant)
             }) {
                 return Some(SelectedFont::Web(font));
             }
-            if use_system && let Ok(font) = system_font_database().load(name, variant) {
+            if use_system && let Ok(font) = system_font_database().load(&member.name, variant) {
                 return Some(SelectedFont::System(font));
             }
         }

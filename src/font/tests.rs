@@ -1442,3 +1442,100 @@ fn underline_position_uses_signed_font_metric_and_scales_with_size() {
         assert!((font.underline_thickness(size).unwrap() - 150.0 * size / 2048.0).abs() < 0.0001);
     }
 }
+
+#[test]
+fn family_list_keys_preserve_quoted_names_unicode_order_and_duplicates() {
+    let list = FontFamilyKey::new(r#"  "A,B", ГАРНИТУРА, sans-serif, "A,B" "#).families();
+    let actual: Vec<_> = list
+        .iter()
+        .map(|member| (member.name.clone(), member.key()))
+        .collect();
+    let expected = ["a,b", "гарнитура", "sans-serif", "a,b"]
+        .map(|name| (name.to_owned(), FontFamilyKey::new(name)));
+    assert_eq!(actual, expected);
+    // A single-name list can refer to its own intern key without recursive init.
+    let single = FontFamilyKey::new("SelfFamily");
+    assert_eq!(
+        single
+            .families()
+            .iter()
+            .map(|member| (member.name.clone(), member.key()))
+            .collect::<Vec<_>>(),
+        [("selffamily".to_owned(), single)]
+    );
+    assert!(FontFamilyKey::new(" , ").families().iter().next().is_none());
+}
+
+#[test]
+fn family_list_selection_observes_fonts_added_after_initial_lookup() {
+    let preferred = load_selection_fixture();
+    let fallback = load_selection_fixture();
+    let family = FontFamilyKey::new("PreferredLateFamily, ExistingFallback");
+    let mut registry = WebFontRegistry::new();
+    registry.push_shared(
+        "ExistingFallback",
+        FontWeight(400),
+        FontStyle::Normal,
+        Arc::clone(&fallback),
+    );
+    let selected =
+        registry.select_candidates_for_family_list(None, family, FontVariantKey::normal());
+    assert_eq!(selected.len(), 1);
+    assert!(std::ptr::eq(selected[0].font, fallback.as_ref()));
+    registry.push_shared(
+        "PreferredLateFamily",
+        FontWeight(400),
+        FontStyle::Normal,
+        Arc::clone(&preferred),
+    );
+    let selected =
+        registry.select_candidates_for_family_list(None, family, FontVariantKey::normal());
+    assert_eq!(selected.len(), 1);
+    assert!(std::ptr::eq(selected[0].font, preferred.as_ref()));
+}
+
+#[test]
+fn family_list_member_initialization_is_safe_across_threads() {
+    let family = FontFamilyKey::new("ConcurrentMemberA, ConcurrentMemberB");
+    let expected = ["concurrentmembera", "concurrentmemberb"]
+        .map(|name| (name.to_owned(), FontFamilyKey::new(name)));
+    let workers: Vec<_> = (0..4)
+        .map(|_| {
+            let expected = expected.clone();
+            std::thread::spawn(move || {
+                for _ in 0..100 {
+                    let actual: Vec<_> = family
+                        .families()
+                        .iter()
+                        .map(|member| (member.name.clone(), member.key()))
+                        .collect();
+                    assert_eq!(actual, expected);
+                }
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn font_family_selection_does_not_initialize_unused_fallback_members() {
+    let family = FontFamilyKey::new("LazyPreferred, LazyUnvisitedFallback");
+    let members = family.families();
+    assert!(members.iter().all(|member| member.key.get().is_none()));
+    let font = load_selection_fixture();
+    let mut registry = WebFontRegistry::new();
+    registry.push_shared(
+        "LazyPreferred",
+        FontWeight(400),
+        FontStyle::Normal,
+        Arc::clone(&font),
+    );
+    let selected =
+        registry.select_candidates_for_family_list(None, family, FontVariantKey::normal());
+    assert_eq!(selected.len(), 1);
+    assert!(std::ptr::eq(selected[0].font, font.as_ref()));
+    assert!(members[0].key.get().is_some());
+    assert!(members[1].key.get().is_none());
+}
