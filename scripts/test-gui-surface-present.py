@@ -103,6 +103,8 @@ def run(binary, artifacts, expect_idle):
         gui.command('xdotool', 'windowactivate', '--sync', window)
         gui.wait_for('fixture painted', lambda: records(gui, 'PAINT'), bool)
         gui.wait_for('surface trace supported', lambda: records(gui, 'SURFACE_PRESENT'), bool)
+        gui.wait_for('toolbar font ready', lambda: records(gui, 'STARTUP'),
+                     lambda rows: any(row['phase'] == 'toolbar_font_ready' for row in rows))
         report, original = unchanged_input(gui, window, expect_idle)
         chrome_and_resize(gui, window, original)
         report.update({'status': 'PASS', 'build': records(gui, 'BUILD'),

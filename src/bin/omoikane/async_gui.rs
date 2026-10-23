@@ -634,7 +634,25 @@ impl AsyncBrowserApp {
         }
     }
 
+    fn update_changes_visible_content(&self, update: &PageUpdate) -> bool {
+        update.frame.is_some()
+            || self.native_frame.is_some()
+            || update.fullscreen.is_some()
+            || update.pointer_lock.is_some()
+            || self.document != update.document_generation
+            || (!self.url_bar.is_editing() && self.url_bar.page_url() != update.url)
+    }
+
+    fn redraw_visible_content(&self, changed: bool) {
+        if changed || self.native_frame.is_some() {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     fn apply_update(&mut self, update: PageUpdate) {
+        let redraw_required = self.update_changes_visible_content(&update);
         // A failed page task does not itself change the committed input
         // contract. Every update below still revalidates live owner authority;
         // dedicated mutation boundaries revoke unsafe scenes independently.
@@ -788,9 +806,7 @@ impl AsyncBrowserApp {
             self.apply_pointer_lock(transition);
         }
         self.update_title();
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
+        self.redraw_visible_content(redraw_required);
         let now = Instant::now();
         self.next_frame = if update.deferred_task_turn {
             // A wheel paint can leave scroll events and timers unprocessed even
@@ -1391,6 +1407,7 @@ impl AsyncBrowserApp {
     }
 
     fn input(&mut self, event: WindowEvent) {
+        let redraw_required = self.url_bar.is_editing() || self.native_frame.is_some();
         self.trace_input_event(&event);
         match event {
             WindowEvent::CursorMoved {
@@ -1476,9 +1493,7 @@ impl AsyncBrowserApp {
         }
         self.next_frame = Instant::now();
         self.queue_frame(true);
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
+        self.redraw_visible_content(redraw_required || self.url_bar.is_editing());
     }
 
     fn native_wheel(
