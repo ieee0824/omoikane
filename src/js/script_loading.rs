@@ -17,6 +17,13 @@ pub(super) struct Response {
     violations: Vec<crate::http::cors::CorpViolation>,
 }
 
+impl Response {
+    /// Applies worker-produced policy reports only on the document owner.
+    pub(super) fn apply_violations(&mut self, state: &mut HostState, document: usize) {
+        state.queue_coep_corp_violations(document, "script", std::mem::take(&mut self.violations));
+    }
+}
+
 pub(super) struct Prepared {
     pub script: DynamicScriptInfo,
     pub dispatch_document: usize,
@@ -138,12 +145,17 @@ impl HostState {
         }
     }
 
-    /// Called only after owner-thread sandbox and request CSP checks.
-    pub(super) fn queue_dynamic_script(&mut self, prepared: Prepared) -> std::io::Result<()> {
-        let (node, reference, kind, base, document) = &prepared.script;
-        let node_id = node.identity();
-        let document = *document;
-        let crossorigin = if *kind == ScriptKind::Module {
+    /// Submits an owned script request to the common resource workers after the
+    /// owner has checked sandbox and request CSP. DOM handles stay on the owner.
+    pub(super) fn queue_script_source_for_node(
+        &self,
+        node: &NodeHandle,
+        reference: &str,
+        kind: ScriptKind,
+        base: Option<crate::http::Url>,
+        document: usize,
+    ) -> std::io::Result<(ResourceScope, ResourceTask<Response>)> {
+        let crossorigin = if kind == ScriptKind::Module {
             Some(node.get_attribute("crossorigin").unwrap_or_default())
         } else {
             node.get_attribute("crossorigin")
@@ -151,11 +163,10 @@ impl HostState {
         let policy = self.isolation_policy_for_document(document).embedder;
         let mut client = self.http_client.fork_for_worker();
         client.set_shared_cookie_store(Arc::clone(&self.cookie_store));
-        let nonce = node.get_attribute("nonce");
         let request = Request {
-            nonce: nonce.clone(),
-            reference: reference.clone(),
-            base: base.clone(),
+            nonce: node.get_attribute("nonce"),
+            reference: reference.to_owned(),
+            base,
             crossorigin,
             origin: script_errors::document_fetch_origin(self, document),
             cookies: self.document_cookie_request_context(document),
@@ -170,6 +181,17 @@ impl HostState {
             ResourceKind::Script,
             move |_| request.run(),
         )?;
+        Ok((scope, task))
+    }
+
+    /// Called only after owner-thread sandbox and request CSP checks.
+    pub(super) fn queue_dynamic_script(&mut self, prepared: Prepared) -> std::io::Result<()> {
+        let (node, reference, kind, base, document) = &prepared.script;
+        let node_id = node.identity();
+        let document = *document;
+        let nonce = node.get_attribute("nonce");
+        let (scope, task) =
+            self.queue_script_source_for_node(node, reference, *kind, base.clone(), document)?;
         if !node.script_is_async() {
             self.script_loads
                 .ordered

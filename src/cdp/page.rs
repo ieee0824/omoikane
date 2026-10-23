@@ -2,12 +2,14 @@
 //! document install and commit steps shared by page tasks.
 
 use super::*;
+use crate::js::{DocumentScriptStartup, DocumentScriptWait};
 
 #[derive(Debug)]
 pub(super) struct PendingDocumentStartup {
     base_url: Option<crate::http::Url>,
     started: std::time::Instant,
     first_frame_due: bool,
+    scripts: Option<DocumentScriptStartup>,
 }
 
 fn finish_document_startup(
@@ -16,6 +18,14 @@ fn finish_document_startup(
     started: std::time::Instant,
 ) -> Result<(), CdpSessionError> {
     let errors = runtime.execute_document_scripts(base_url);
+    finish_document_startup_events(runtime, errors, started)
+}
+
+fn finish_document_startup_events(
+    runtime: &mut JsRuntime,
+    errors: Vec<String>,
+    started: std::time::Instant,
+) -> Result<(), CdpSessionError> {
     trace_startup_page("document_scripts_finished", started);
     if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
         for error in errors {
@@ -53,8 +63,9 @@ fn is_fragment_only_navigation(current: &str, target: &str) -> bool {
 
 impl CdpSession {
     /// Lets a native host paint parsed HTML before running initial page scripts.
-    /// The first event-loop opportunity exposes the parsed document; the next
-    /// executes startup in normal parser/defer order and delivers load events.
+    /// The first opportunity exposes parsed HTML. Later opportunities preserve
+    /// parser/defer execution order while polling external script responses,
+    /// and deliver load events when startup completes.
     /// Embedders must keep driving opportunities while render demand is active.
     pub fn set_deferred_document_startup(&mut self, enabled: bool) {
         self.defer_document_startup = enabled;
@@ -71,25 +82,43 @@ impl CdpSession {
         &mut self,
         elapsed_ms: u64,
     ) -> Result<bool, JsonRpcError> {
-        let Some(pending) = self.pending_document_startup.as_mut() else {
+        self.advance_deferred_document_startup_with_wait(elapsed_ms, DocumentScriptWait::Poll)
+    }
+
+    pub(super) fn advance_deferred_document_startup_with_wait(
+        &mut self,
+        elapsed_ms: u64,
+        wait: DocumentScriptWait,
+    ) -> Result<bool, JsonRpcError> {
+        let Some(mut pending) = self.pending_document_startup.take() else {
             return Ok(false);
         };
         self.runtime.advance_clock_without_tasks(elapsed_ms);
         if pending.first_frame_due {
             pending.first_frame_due = false;
             trace_startup_page("parsed_document_frame", pending.started);
+            self.pending_document_startup = Some(pending);
             return Ok(true);
         }
-        let pending = self.pending_document_startup.take().unwrap();
-        finish_document_startup(
-            &mut self.runtime,
-            pending.base_url.as_ref(),
-            pending.started,
-        )
-        .map_err(|error| JsonRpcError {
-            code: -32000,
-            message: error.to_string(),
-        })?;
+        let startup = pending
+            .scripts
+            .get_or_insert_with(|| self.runtime.begin_document_scripts(pending.base_url.take()));
+        if self.runtime.poll_document_scripts(startup, wait) {
+            finish_document_startup_events(
+                &mut self.runtime,
+                startup.take_errors(),
+                pending.started,
+            )
+            .map_err(|error| JsonRpcError {
+                code: -32000,
+                message: error.to_string(),
+            })?;
+        } else {
+            self.pending_document_startup = Some(pending);
+            // A parser resource wait leaves the owner available for resource
+            // completions and task checkpoints, before its next host opportunity.
+            self.runtime.run_until_idle().map_err(js_error)?;
+        }
         Ok(true)
     }
 
@@ -824,6 +853,7 @@ impl CdpSession {
                 base_url,
                 started: install_started,
                 first_frame_due: true,
+                scripts: None,
             })
         } else {
             finish_document_startup(&mut runtime, base_url.as_ref(), install_started)?;

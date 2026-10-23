@@ -233,6 +233,7 @@ mod window_named_tests;
 use module_fetch::{ModuleFetch, ModuleFetchPool, ModuleIsolation};
 
 pub(crate) mod csp;
+mod document_script_startup;
 mod event_loop;
 mod html_parsing;
 mod html_sanitizer;
@@ -240,6 +241,7 @@ mod html_serialization;
 mod image_loading;
 mod resource_loading;
 mod script_loading;
+pub(crate) use document_script_startup::{DocumentScriptStartup, DocumentScriptWait};
 mod security_reporting;
 mod storage;
 mod storage_access;
@@ -14674,128 +14676,10 @@ impl JsRuntime {
     ///
     /// Errors in individual scripts are logged but do not stop execution of remaining scripts.
     pub fn execute_document_scripts(&mut self, base_url: Option<&crate::http::Url>) -> Vec<String> {
-        // Record the base URL so relative resource references discovered later
-        // (e.g. an `<iframe src="empty.html">` whose contentDocument is accessed
-        // during the timer loop) can be resolved.
-        if let Some(base) = base_url {
-            self.host_state.borrow_mut().set_main_base_url(base.clone());
-        }
-        if self
-            .eval("__omoikane_install_window_named_properties()")
-            .is_err()
-        {
-            self.record_document_script_failure("DOCUMENT_SCRIPT_INITIALIZATION_FAILED");
-        }
-        if self.eval("document.__readyState = 'loading'").is_err() {
-            self.record_document_script_failure("DOCUMENT_SCRIPT_INITIALIZATION_FAILED");
-        }
-
-        let document = self.document();
-        let scripts = collect_script_elements(&document);
-        // This runtime starts from an already parsed tree. Reconstruct the
-        // parser's policy snapshots so a later meta CSP cannot block earlier
-        // scripts or their synchronous work.
-        let full_parser_policy = self.host_state.borrow().csp_policy_for_document(&document);
-        let parser_policies = scripts
-            .iter()
-            .map(|script| full_parser_policy.for_parser_script(&document, script))
-            .collect::<Vec<_>>();
-        let mut errors = Vec::new();
-        let mut deferred = Vec::new();
-        let log_scripts = std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some();
-
-        for (script_index, script) in scripts.iter().enumerate() {
-            if let Some(policy) = self
-                .host_state
-                .borrow_mut()
-                .document_csp
-                .get_mut(&document.identity())
-            {
-                policy.use_parser_policies_from(&parser_policies[script_index]);
-            }
-            let Some((
-                is_module,
-                is_defer,
-                has_src,
-                source_code,
-                script_label,
-                muted_errors,
-                csp_requested_url,
-            )) = self.fetch_or_inline_document_script_source(
-                script,
-                script_index,
-                base_url,
-                log_scripts,
-                &mut errors,
-            )
-            else {
-                continue;
-            };
-            if source_code.trim().is_empty() {
-                continue;
-            }
-
-            let module_url =
-                is_module.then(|| module_script_url(&script_label, base_url, !has_src));
-
-            if log_scripts {
-                eprintln!(
-                    "[omoikane][script] queued {script_label} ({} chars, defer={is_defer})",
-                    source_code.chars().count()
-                );
-            }
-
-            if is_defer {
-                // Keep the <script> node alongside its source so the deferred
-                // execution loop below can point `document.write`'s insertion
-                // reference at this script (exactly like the inline path), rather
-                // than letting a deferred write() fall back to appending at
-                // <body>.
-                deferred.push((
-                    source_code,
-                    script.clone(),
-                    script_label,
-                    module_url,
-                    muted_errors,
-                    csp_requested_url,
-                ));
-                continue;
-            }
-            self.run_document_script_now(
-                script,
-                &source_code,
-                &script_label,
-                csp_requested_url.as_deref(),
-                muted_errors,
-                log_scripts,
-                &mut errors,
-            );
-        }
-
-        if let Some(policy) = self
-            .host_state
-            .borrow_mut()
-            .document_csp
-            .get_mut(&document.identity())
-        {
-            policy.use_parser_policies_from(&full_parser_policy);
-        }
-
-        // Execute deferred scripts. Each runs with its own insertion point set
-        // to its <script> element, so a `document.write` from a deferred script
-        // lands as that script's following siblings — the same treatment the
-        // inline path applies above.
-        self.run_deferred_document_scripts(deferred, log_scripts, &mut errors);
-
-        self.sync_module_csp_violations();
-
-        // Fire DOMContentLoaded
-        if let Err(err) = self.fire_dom_content_loaded() {
-            self.record_document_script_failure("DOCUMENT_SCRIPT_INITIALIZATION_FAILED");
-            errors.push(format!("{err}"));
-        }
-
-        errors
+        let mut startup = self.begin_document_scripts(base_url.cloned());
+        let finished = self.poll_document_scripts(&mut startup, DocumentScriptWait::Block);
+        debug_assert!(finished, "blocking script startup must complete");
+        startup.take_errors()
     }
     /// Returns the pre-redirect external URL or the inline script's document URL.
     fn csp_requested_url_for_script(
@@ -14816,155 +14700,6 @@ impl JsRuntime {
             },
             |reference| Some(resource_reference_timing_name(reference, base_url)),
         )
-    }
-
-    /// Classifies one `<script>` element, enforces its CSP policy, and
-    /// resolves its source: fetched for an external script, or its text
-    /// content for an inline one. Returns `None` (after recording any CSP
-    /// violation or fetch failure) when the script must not run at all.
-    fn fetch_or_inline_document_script_source(
-        &mut self,
-        script: &NodeHandle,
-        script_index: usize,
-        base_url: Option<&crate::http::Url>,
-        log_scripts: bool,
-        errors: &mut Vec<String>,
-    ) -> Option<(bool, bool, bool, String, String, bool, Option<String>)> {
-        let attrs = script.attributes().unwrap_or_default();
-        let is_module = attrs
-            .get("type")
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("module"));
-
-        // Skip the types Omoikane does not execute at all. Modules are not
-        // among them — they run below through `eval_module_timed` — so this
-        // only filters values like `application/json` or an import map.
-        // Shares the type gate with `is_inline_classic_script` and with the
-        // dynamic-insertion path in `run_timer_payload`, so a script executes
-        // identically however it reached the tree.
-        if !is_module && !is_executable_classic_script_type(attrs.get("type").map(|s| s.as_str())) {
-            if log_scripts {
-                eprintln!(
-                    "[omoikane][script] skipped type={:?} src={:?}",
-                    attrs.get("type"),
-                    attrs.get("src")
-                );
-            }
-            return None;
-        }
-
-        let src = attrs.get("src").cloned();
-        let has_src = src.is_some();
-        let csp_requested_url = self.csp_requested_url_for_script(script, src.as_deref(), base_url);
-        let request = csp::ScriptRequest {
-            nonce: attrs.get("nonce").map(String::as_str),
-            parser_inserted: true,
-        };
-        // HTML spec: defer only applies to external (src) scripts.
-        let is_defer = is_module || (attrs.contains_key("defer") && src.is_some());
-
-        if let Some(src_url) = src.as_deref() {
-            if !self
-                .host_state
-                .borrow_mut()
-                .csp_allows_script_for_node(script, src_url, request)
-            {
-                return None;
-            }
-        } else {
-            let source = collect_text_content(script);
-            if !self
-                .host_state
-                .borrow_mut()
-                .csp_allows_inline_script_for_node(script, &source)
-            {
-                return None;
-            }
-        }
-
-        let (source_code, script_label, muted_errors) = if let Some(src_url) = src {
-            // External script: fetch
-            let fetch_start = std::time::Instant::now();
-            let fetched = {
-                let mut state = self.host_state.borrow_mut();
-                let owner = document_root_for_node(script)
-                    .map(|doc| doc.identity())
-                    .unwrap_or_else(|| state.document.identity());
-                if is_module {
-                    state.fetch_classic_source_for_document(
-                        owner,
-                        &src_url,
-                        base_url,
-                        Some(attrs.get("crossorigin").map_or("", String::as_str)),
-                    )
-                } else {
-                    state.fetch_classic_source_for_document(
-                        owner,
-                        &src_url,
-                        base_url,
-                        attrs.get("crossorigin").map(String::as_str),
-                    )
-                }
-            };
-            match fetched {
-                Some((effective_url, code, redirect_count, muted)) => {
-                    if !self
-                        .host_state
-                        .borrow_mut()
-                        .csp_allows_response_for_script_node(
-                            script,
-                            &effective_url,
-                            redirect_count,
-                            &resource_reference_timing_name(&src_url, base_url),
-                            request,
-                        )
-                    {
-                        return None;
-                    }
-                    let redirected =
-                        resource_reference_was_redirected(&src_url, &effective_url, base_url);
-                    let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
-                    let _ = self.eval(&format!(
-                            "__omoikane_record_resource_timing({}, 'script', 200, false, {redirected}, {elapsed_ms})",
-                            serde_json::to_string(&effective_url)
-                                .unwrap_or_else(|_| "\"\"".to_string()),
-                        ));
-                    if log_scripts {
-                        eprintln!(
-                            "[omoikane][script] fetched {src_url} elapsed_ms={:.3}",
-                            elapsed_ms,
-                        );
-                    }
-                    (code, effective_url, muted)
-                }
-                None => {
-                    let timing_name = resource_reference_timing_name(&src_url, base_url);
-                    let elapsed_ms = fetch_start.elapsed().as_secs_f64() * 1_000.0;
-                    let _ = self.eval(&format!(
-                            "__omoikane_record_resource_timing({}, 'script', 0, true, false, {elapsed_ms})",
-                            serde_json::to_string(&timing_name)
-                                .unwrap_or_else(|_| "\"\"".to_string()),
-                        ));
-                    errors.push(format!("failed to fetch script: {src_url}"));
-                    return None;
-                }
-            }
-        } else {
-            // Inline script: collect text content
-            (
-                collect_text_content(script),
-                format!("inline-script-{}", script_index + 1),
-                false,
-            )
-        };
-        Some((
-            is_module,
-            is_defer,
-            has_src,
-            source_code,
-            script_label,
-            muted_errors,
-            csp_requested_url,
-        ))
     }
 
     /// Runs one non-deferred document script immediately: wires up

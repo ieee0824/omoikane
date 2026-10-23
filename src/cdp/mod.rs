@@ -722,7 +722,10 @@ impl CdpSession {
         let mut timings = SessionSettleTimings::default();
         for _ in 0..MAX_NAVIGATION_PASSES {
             while self.pending_document_startup.is_some() {
-                self.advance_deferred_document_startup(0)?;
+                self.advance_deferred_document_startup_with_wait(
+                    0,
+                    crate::js::DocumentScriptWait::Block,
+                )?;
             }
             let previous_generation = self.document_generation;
             let timers_start = Instant::now();
@@ -929,7 +932,13 @@ fn js_error(error: boa_engine::JsError) -> JsonRpcError {
 mod tests;
 
 #[cfg(test)]
+mod startup_tests;
+
+#[cfg(test)]
 mod frameset_tests;
 
 #[cfg(test)]
 mod render_demand_tests;
+
+#[cfg(test)]
+mod startup_parallel_tests;
