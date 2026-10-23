@@ -14,6 +14,7 @@ use shadow_mask_cache::{
     ShadowMaskKey, ShadowMaskShapeKey,
 };
 
+use crate::css::style::PropertyId;
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::layout::{LayoutBox, Rect};
 
@@ -239,8 +240,15 @@ pub(crate) fn paint_borders(
 }
 
 pub(crate) fn has_solid_border_side(style: &ComputedStyle, side: &str) -> bool {
+    let value = match side {
+        "top" => style.get_by_id(PropertyId::BorderTopStyle),
+        "right" => style.get_by_id(PropertyId::BorderRightStyle),
+        "bottom" => style.get_by_id(PropertyId::BorderBottomStyle),
+        "left" => style.get_by_id(PropertyId::BorderLeftStyle),
+        _ => style.get(&format!("border-{side}-style")),
+    };
     if matches!(
-        style.get(&format!("border-{side}-style")),
+        value,
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("solid")
     ) {
         return true;
@@ -253,8 +261,14 @@ pub(crate) fn has_solid_border_side(style: &ComputedStyle, side: &str) -> bool {
 }
 
 pub(crate) fn border_color_side(style: &ComputedStyle, side: &str) -> Option<Color> {
-    resolve_color_value(style.get(&format!("border-{side}-color")), style)
-        .or_else(|| border_color(style))
+    let value = match side {
+        "top" => style.get_by_id(PropertyId::BorderTopColor),
+        "right" => style.get_by_id(PropertyId::BorderRightColor),
+        "bottom" => style.get_by_id(PropertyId::BorderBottomColor),
+        "left" => style.get_by_id(PropertyId::BorderLeftColor),
+        _ => style.get(&format!("border-{side}-color")),
+    };
+    resolve_color_value(value, style).or_else(|| border_color(style))
 }
 
 #[derive(Clone, Copy)]

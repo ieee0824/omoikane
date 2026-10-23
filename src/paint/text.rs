@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use crate::css::style::PropagatedTextDecoration;
+use crate::css::style::{PropagatedTextDecoration, PropertyId};
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::dom::Node;
 use crate::font::{
@@ -2637,13 +2637,13 @@ pub(crate) fn inline_fragment_content_rect(
 }
 
 pub(crate) fn text_color(style: &ComputedStyle) -> Option<Color> {
-    super::color_property(style.get("color"))
+    super::color_property(style.get_by_id(PropertyId::Color))
 }
 
 /// Returns `true` when `text-align: center` is set on `style`.
 fn is_text_align_center(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("text-align"),
+        style.get_by_id(PropertyId::TextAlign),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center")
     )
 }

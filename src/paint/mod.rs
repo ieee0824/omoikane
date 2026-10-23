@@ -2917,7 +2917,7 @@ fn has_invertible_box_transform(
         return true;
     }
     let bounds = layout.dimensions.border_box();
-    let font_size = match style.get("font-size") {
+    let font_size = match style.get_by_id(PropertyId::FontSize) {
         Some(ComputedValue::Px(value)) => *value,
         _ => 16.0,
     };
@@ -3753,7 +3753,11 @@ fn hit_test_box(
 }
 
 fn accepts_pointer_events(style: &ComputedStyle) -> bool {
-    accepts_pointer_events_value(style.get("pointer-events").cloned())
+    accepts_pointer_events_value(
+        style
+            .get_by_id(crate::css::style::PropertyId::PointerEvents)
+            .cloned(),
+    )
 }
 
 fn accepts_pointer_events_value(value: Option<ComputedValue>) -> bool {
@@ -3901,7 +3905,7 @@ fn translate_layout_for_scroll(
 
 fn is_sticky_for_paint(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("position"),
+        style.get_by_id(PropertyId::Position),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("sticky")
     )
 }
@@ -3989,7 +3993,7 @@ fn sticky_axis_translation(
 
 fn is_absolute_for_paint(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("position"),
+        style.get_by_id(PropertyId::Position),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("absolute")
     )
 }
@@ -4001,7 +4005,7 @@ fn establishes_containing_block_for_paint(style: &ComputedStyle) -> bool {
 /// Whether a box uses the fixed-position containing block's scroll chain.
 fn is_fixed_for_paint(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("position"),
+        style.get_by_id(PropertyId::Position),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed")
     )
 }
@@ -4473,7 +4477,7 @@ fn subtree_paint_bounds_internal(
     if let Some(outline_bounds) = outline::solid_outline_bounds(&style, border_box_rect(layout)) {
         bounds = union_rect(bounds, outline_bounds);
     }
-    let shadow_value = match style.get("box-shadow") {
+    let shadow_value = match style.get_by_id(PropertyId::BoxShadow) {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
             Some(value.as_str())
         }
@@ -4589,14 +4593,14 @@ enum MaskComposite {
 }
 
 fn mask_mode_for_layer(style: &ComputedStyle, index: usize) -> MaskMode {
-    match computed_style_layer_text(style.get("mask-mode"), index).as_deref() {
+    match computed_style_layer_text(style.get_by_id(PropertyId::MaskMode), index).as_deref() {
         Some(value) if value.eq_ignore_ascii_case("luminance") => MaskMode::Luminance,
         _ => MaskMode::Alpha,
     }
 }
 
 fn mask_composite_for_layer(style: &ComputedStyle, index: usize) -> MaskComposite {
-    match computed_style_layer_text(style.get("mask-composite"), index).as_deref() {
+    match computed_style_layer_text(style.get_by_id(PropertyId::MaskComposite), index).as_deref() {
         Some(value) if value.eq_ignore_ascii_case("subtract") => MaskComposite::Subtract,
         Some(value) if value.eq_ignore_ascii_case("intersect") => MaskComposite::Intersect,
         Some(value) if value.eq_ignore_ascii_case("exclude") => MaskComposite::Exclude,
@@ -4899,7 +4903,7 @@ fn paint_replaced_image_box(
     offset: PaintOffset,
 ) {
     let is_positioned = matches!(
-        style.get("position"),
+        style.get_by_id(PropertyId::Position),
         Some(ComputedValue::Keyword(position))
             if position.eq_ignore_ascii_case("absolute")
                 || position.eq_ignore_ascii_case("fixed")
@@ -5272,11 +5276,11 @@ fn paint_column_rules(
     let Some(multicol) = &layout.multicol else {
         return;
     };
-    let width = match style.get("column-rule-width") {
+    let width = match style.get_by_id(PropertyId::ColumnRuleWidth) {
         Some(ComputedValue::Px(value)) if *value > 0.0 => *value,
         _ => return,
     };
-    let rule_style = match style.get("column-rule-style") {
+    let rule_style = match style.get_by_id(PropertyId::ColumnRuleStyle) {
         Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
             value.to_ascii_lowercase()
         }
@@ -5285,7 +5289,8 @@ fn paint_column_rules(
     if matches!(rule_style.as_str(), "none" | "hidden") {
         return;
     }
-    let Some(color) = resolve_color_value(style.get("column-rule-color"), style) else {
+    let Some(color) = resolve_color_value(style.get_by_id(PropertyId::ColumnRuleColor), style)
+    else {
         return;
     };
 
@@ -5433,14 +5438,14 @@ fn collect_phase_descendants<'a>(
 
 fn is_float_for_paint(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("float"),
+        style.get_by_id(PropertyId::Float),
         Some(ComputedValue::Keyword(keyword))
             if keyword.eq_ignore_ascii_case("left") || keyword.eq_ignore_ascii_case("right")
     )
 }
 
 fn is_flex_or_grid_container(style: &ComputedStyle) -> bool {
-    matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if matches!(value.to_ascii_lowercase().as_str(), "flex" | "inline-flex" | "grid" | "inline-grid"))
+    matches!(style.get_by_id(PropertyId::Display), Some(ComputedValue::Keyword(value)) if matches!(value.to_ascii_lowercase().as_str(), "flex" | "inline-flex" | "grid" | "inline-grid"))
 }
 
 fn is_positioned_child_for_paint(
@@ -5448,7 +5453,7 @@ fn is_positioned_child_for_paint(
     style: &ComputedStyle,
     item_container: bool,
 ) -> bool {
-    let explicit_z_index = match style.get("z-index") {
+    let explicit_z_index = match style.get_by_id(PropertyId::ZIndex) {
         Some(ComputedValue::Number(_)) => true,
         Some(ComputedValue::Keyword(value)) => value.parse::<i32>().is_ok(),
         _ => false,
@@ -5459,7 +5464,7 @@ fn is_positioned_child_for_paint(
 
 fn is_positioned_for_paint(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("position"),
+        style.get_by_id(PropertyId::Position),
         Some(ComputedValue::Keyword(keyword))
             if keyword.eq_ignore_ascii_case("absolute")
                 || keyword.eq_ignore_ascii_case("fixed")
@@ -5594,7 +5599,7 @@ fn padding_box_rect(layout: &LayoutBox) -> Rect {
 }
 
 fn background_color(style: &ComputedStyle) -> Option<Color> {
-    color_property(style.get("background-color"))
+    color_property(style.get_by_id(PropertyId::BackgroundColor))
 }
 
 fn background_clip_geometry(
@@ -5761,7 +5766,7 @@ enum PreparedBackgroundImage {
 }
 
 fn prepare_background_image(style: &ComputedStyle) -> Option<PreparedBackgroundImage> {
-    let value = match style.get("background-image") {
+    let value = match style.get_by_id(PropertyId::BackgroundImage) {
         Some(ComputedValue::Keyword(value))
         | Some(ComputedValue::String(value))
         | Some(ComputedValue::Color(value)) => value,
@@ -5774,7 +5779,7 @@ fn prepare_background_image(style: &ComputedStyle) -> Option<PreparedBackgroundI
 }
 
 fn background_image(style: &ComputedStyle) -> Option<Image> {
-    match style.get("background-image") {
+    match style.get_by_id(PropertyId::BackgroundImage) {
         Some(ComputedValue::Keyword(keyword)) => image::parse_background_image_value(keyword),
         Some(ComputedValue::String(value)) => image::parse_background_image_value(value),
         _ => None,
@@ -5839,7 +5844,7 @@ fn mask_style_for_layer(style: &ComputedStyle, index: usize) -> ComputedStyle {
 }
 
 fn mask_layers(style: &ComputedStyle) -> Vec<MaskLayer> {
-    let values = match style.get("mask-image") {
+    let values = match style.get_by_id(PropertyId::MaskImage) {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
             crate::css::split_top_level_commas(value)
         }
@@ -5870,7 +5875,7 @@ fn mask_layers(style: &ComputedStyle) -> Vec<MaskLayer> {
 }
 
 fn background_repeat(style: &ComputedStyle) -> (bool, bool) {
-    let value = match style.get("background-repeat") {
+    let value = match style.get_by_id(PropertyId::BackgroundRepeat) {
         Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
         _ => return (true, true),
     };
@@ -5887,7 +5892,7 @@ fn background_repeat(style: &ComputedStyle) -> (bool, bool) {
 }
 
 fn mask_repeat(style: &ComputedStyle) -> (bool, bool) {
-    let value = match style.get("mask-repeat") {
+    let value = match style.get_by_id(PropertyId::MaskRepeat) {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
             value.to_ascii_lowercase()
         }
@@ -5914,7 +5919,7 @@ enum BackgroundAttachment {
 }
 
 fn background_attachment(style: &ComputedStyle) -> BackgroundAttachment {
-    match style.get("background-attachment") {
+    match style.get_by_id(PropertyId::BackgroundAttachment) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed") => {
             BackgroundAttachment::Fixed
         }
@@ -6014,7 +6019,7 @@ fn mask_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32) -> (
 
 fn border_color(style: &ComputedStyle) -> Option<Color> {
     resolve_color_value(style.get("border-color"), style)
-        .or_else(|| color_property(style.get("color")))
+        .or_else(|| color_property(style.get_by_id(PropertyId::Color)))
 }
 
 fn color_property(value: Option<&ComputedValue>) -> Option<Color> {
@@ -6032,10 +6037,10 @@ pub(crate) fn resolve_color_value(
 ) -> Option<Color> {
     match value {
         Some(ComputedValue::Color(c)) if c.eq_ignore_ascii_case("currentcolor") => {
-            color_property(style.get("color"))
+            color_property(style.get_by_id(PropertyId::Color))
         }
         Some(ComputedValue::Keyword(k)) if k.eq_ignore_ascii_case("currentcolor") => {
-            color_property(style.get("color"))
+            color_property(style.get_by_id(PropertyId::Color))
         }
         _ => color_property(value),
     }
@@ -6224,7 +6229,7 @@ fn parse_shape_radii(value: &str, rect: Rect) -> Option<(f32, f32, f32, f32)> {
 /// Unsupported or malformed values return `None`, preserving the CSS fallback
 /// behavior of painting without a clip.
 fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathShape> {
-    let value = match style.get("clip-path") {
+    let value = match style.get_by_id(PropertyId::ClipPath) {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value.trim(),
         _ => return None,
     };
@@ -6584,7 +6589,7 @@ fn valid_clip_path_polygon_body(body: &str) -> bool {
 /// Returns `None` for unsupported clip shapes, `Some(None)` for an empty inset,
 /// and `Some(Some(rect))` for a non-empty inset clip.
 fn clip_path_inset_rect(style: &ComputedStyle, border_box: Rect) -> Option<Option<Rect>> {
-    let value = match style.get("clip-path") {
+    let value = match style.get_by_id(PropertyId::ClipPath) {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value.trim(),
         _ => return None,
     };
@@ -6694,7 +6699,7 @@ fn has_border_radius(style: &ComputedStyle) -> bool {
 /// `opacity` プロパティの値を返す（0.0〜1.0）。未指定の場合は `None`。
 /// `with_force_opacity` が有効な場合、0.0 の値は 1.0 に上書きされる。
 fn element_opacity(style: &ComputedStyle) -> Option<f32> {
-    let value = match style.get("opacity") {
+    let value = match style.get_by_id(PropertyId::Opacity) {
         Some(ComputedValue::Number(v)) => Some(v.clamp(0.0, 1.0)),
         Some(ComputedValue::Px(v)) => Some(v.clamp(0.0, 1.0)),
         Some(ComputedValue::Keyword(k)) if k == "1" || k == "1.0" => Some(1.0),
@@ -7927,7 +7932,7 @@ fn paint_prepared_background_image(
 
     // CSS gradients share the same background tiling, positioning and clipping path.
     if let PreparedBackgroundImage::Gradient(gradient) = background {
-        let has_explicit_size = match style.get("background-size") {
+        let has_explicit_size = match style.get_by_id(PropertyId::BackgroundSize) {
             None => false,
             Some(ComputedValue::Keyword(kw)) => !kw.eq_ignore_ascii_case("auto"),
             _ => true,

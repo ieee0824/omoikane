@@ -785,9 +785,10 @@ impl FragmentStyle {
     /// to lowercase to avoid per-paint allocation.
     pub fn from_computed(style: &ComputedStyle) -> Self {
         use crate::css::ComputedValue;
+        use crate::css::style::PropertyId;
 
-        let extract_str = |key: &str| -> Option<String> {
-            match style.get(key) {
+        let extract_str = |key: PropertyId| -> Option<String> {
+            match style.get_by_id(key) {
                 Some(ComputedValue::Keyword(s)) => Some(s.clone()),
                 Some(ComputedValue::Color(s)) => Some(s.clone()),
                 Some(ComputedValue::String(s)) => Some(s.clone()),
@@ -795,12 +796,13 @@ impl FragmentStyle {
             }
         };
 
-        let normalize_lower =
-            |key: &str| -> Option<String> { extract_str(key).map(|s| s.to_ascii_lowercase()) };
+        let normalize_lower = |key: PropertyId| -> Option<String> {
+            extract_str(key).map(|s| s.to_ascii_lowercase())
+        };
 
         // Extract the first font-family name from the CSS value.
         // The value may be quoted (e.g. `"My Font"`) or unquoted (e.g. `sans-serif`).
-        let font_family = extract_str("font-family").map(|s| {
+        let font_family = extract_str(PropertyId::FontFamily).map(|s| {
             // Take the first comma-separated entry and strip quotes
             let first = s.split(',').next().unwrap_or(&s).trim().to_string();
             first.trim_matches('"').trim_matches('\'').to_string()
@@ -809,22 +811,22 @@ impl FragmentStyle {
         Self {
             pseudo: None,
             visibility: visibility(style),
-            color: extract_str("color"),
-            text_transform: normalize_lower("text-transform"),
-            text_decoration_line: normalize_lower("text-decoration-line"),
-            text_decoration_color: extract_str("text-decoration-color"),
+            color: extract_str(PropertyId::Color),
+            text_transform: normalize_lower(PropertyId::TextTransform),
+            text_decoration_line: normalize_lower(PropertyId::TextDecorationLine),
+            text_decoration_color: extract_str(PropertyId::TextDecorationColor),
             text_decorations: Arc::clone(style.text_decorations()),
-            font_weight: normalize_lower("font-weight"),
-            font_style: normalize_lower("font-style"),
-            font_stretch: match style.get("font-stretch") {
+            font_weight: normalize_lower(PropertyId::FontWeight),
+            font_style: normalize_lower(PropertyId::FontStyle),
+            font_stretch: match style.get_by_id(PropertyId::FontStretch) {
                 Some(ComputedValue::Percentage(value)) => Some(format!("{value}%")),
-                _ => normalize_lower("font-stretch"),
+                _ => normalize_lower(PropertyId::FontStretch),
             },
             font_family,
             font_scope_root: style.font_family_scope_root(),
-            writing_mode: normalize_lower("writing-mode"),
-            direction: normalize_lower("direction"),
-            unicode_bidi: normalize_lower("unicode-bidi"),
+            writing_mode: normalize_lower(PropertyId::WritingMode),
+            direction: normalize_lower(PropertyId::Direction),
+            unicode_bidi: normalize_lower(PropertyId::UnicodeBidi),
             resolved_bidi_level: None,
         }
     }
