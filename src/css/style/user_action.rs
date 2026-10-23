@@ -123,11 +123,11 @@ impl Observers {
                     SimpleSelector::Is(selectors)
                     | SimpleSelector::Where(selectors)
                     | SimpleSelector::Not(selectors) => {
-                        let arguments_start = self.subjects.len();
+                        // Boolean lists test the same candidate. Inner sibling
+                        // and relational dependencies keep their own guards.
                         for selector in selectors {
                             self.selector(selector, state, nested);
                         }
-                        self.mark_new_nonlocal(arguments_start);
                     }
                     SimpleSelector::Has(selectors) => {
                         let arguments_start = self.subjects.len();

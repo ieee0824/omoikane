@@ -160,8 +160,12 @@ fn subtree_hover_recomputes_descendants_and_preserves_unrelated_styles() {
 }
 
 #[test]
-fn relational_hover_keeps_full_invalidation() {
-    for selector in ["a:hover + aside", "main:has(a:hover)", ":is(a:hover)"] {
+fn relational_hover_distinguishes_local_and_nonlocal_dependencies() {
+    for (selector, full) in [
+        ("a:hover + aside", true),
+        ("main:has(a:hover)", true),
+        (":is(a:hover)", false),
+    ] {
         let document = NodeHandle::document();
         let root = NodeHandle::element("main");
         let anchor = NodeHandle::element("a");
@@ -178,7 +182,7 @@ fn relational_hover_keeps_full_invalidation() {
                 .changed()
         );
         let after = resolver.computed_style_shared(&other);
-        assert!(!Arc::ptr_eq(&before, &after), "{selector}");
+        assert_eq!(Arc::ptr_eq(&before, &after), !full, "{selector}");
     }
 }
 
@@ -469,6 +473,135 @@ fn static_functional_predicates_keep_outer_hover_subtree_local() {
                     "{selector}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn boolean_functional_hover_keeps_local_caches_and_matches_cold_cascade() {
+    for selector in [
+        ":is(a:hover)",
+        ":where(a:hover)",
+        ":not(a:hover)",
+        ":is(main a:hover)",
+        ":is(a:hover span)",
+        ":not(a:hover span)",
+        ":is(:where(a:hover))",
+        ":not(:not(a:hover))",
+        "main :where(a:hover) span",
+        "a:is(:hover,:active)",
+    ] {
+        let document = NodeHandle::document();
+        let root = NodeHandle::element("main");
+        let anchor = NodeHandle::element("a");
+        let child = NodeHandle::element("span");
+        let aside = NodeHandle::element("aside");
+        document.append_child(root.clone());
+        root.append_child(anchor.clone());
+        anchor.append_child(child.clone());
+        root.append_child(aside.clone());
+        let nodes = [root, anchor.clone(), child, aside.clone()];
+        let css = format!(
+            "*{{width:3px;color:blue}}{selector}{{width:17px;color:red}}a::before{{content:'marker'}}"
+        );
+        let mut cached = resolver(&css);
+        let original = nodes
+            .iter()
+            .map(|node| cached.computed_style_shared(node))
+            .collect::<Vec<_>>();
+        for node in &nodes {
+            cached.computed_pseudo_style_shared(node, PseudoElement::Before);
+        }
+        for enabled in [true, false] {
+            let unrelated = cached.computed_style_shared(&aside);
+            anchor.set_user_action_state("hover", enabled);
+            let outcome = cached.invalidate_user_action_styles(&[(anchor.clone(), "hover")]);
+            let mut cold = resolver(&css);
+            let mut changed = false;
+            for (node, original) in nodes.iter().zip(&original) {
+                let actual = cached.computed_style_shared(node);
+                assert_eq!(
+                    actual,
+                    cold.computed_style_shared(node),
+                    "{selector}, hover={enabled}"
+                );
+                changed |= actual != *original;
+                assert_eq!(
+                    cached.computed_pseudo_style_shared(node, PseudoElement::Before),
+                    cold.computed_pseudo_style_shared(node, PseudoElement::Before),
+                    "pseudo {selector}, hover={enabled}"
+                );
+            }
+            assert_eq!(
+                changed, enabled,
+                "{selector}: fixture must visibly change then restore"
+            );
+            assert_eq!(
+                cached
+                    .computed_pseudo_style_shared(&anchor, PseudoElement::Before)
+                    .unwrap()
+                    .get("content"),
+                Some(&ComputedValue::String("marker".into()))
+            );
+            assert_eq!(outcome, UserActionStyleInvalidation::Local, "{selector}");
+            assert!(
+                Arc::ptr_eq(&unrelated, &cached.computed_style_shared(&aside)),
+                "{selector}"
+            );
+        }
+    }
+}
+
+#[test]
+fn functional_sibling_and_has_arguments_keep_full_invalidation_and_cold_results() {
+    for selector in [
+        ":is(a:hover + aside)",
+        ":where(a:hover ~ aside)",
+        ":not(a:hover + aside)",
+        ":is(main:has(a:hover))",
+        "main:not(:has(a:hover))",
+    ] {
+        let document = NodeHandle::document();
+        let root = NodeHandle::element("main");
+        let anchor = NodeHandle::element("a");
+        let aside = NodeHandle::element("aside");
+        document.append_child(root.clone());
+        root.append_child(anchor.clone());
+        root.append_child(aside.clone());
+        let nodes = [root, anchor.clone(), aside.clone()];
+        let css = format!("*{{width:3px}}{selector}{{width:17px;color:red}}");
+        let mut cached = resolver(&css);
+        let original = nodes
+            .iter()
+            .map(|node| cached.computed_style_shared(node))
+            .collect::<Vec<_>>();
+        for enabled in [true, false] {
+            let before_aside = cached.computed_style_shared(&aside);
+            anchor.set_user_action_state("hover", enabled);
+            assert_eq!(
+                cached.invalidate_user_action_styles(&[(anchor.clone(), "hover")]),
+                UserActionStyleInvalidation::Full("fallback_nonlocal_selector"),
+                "{selector}"
+            );
+            assert!(
+                !Arc::ptr_eq(&before_aside, &cached.computed_style_shared(&aside)),
+                "{selector}"
+            );
+            let mut cold = resolver(&css);
+            let mut changed = false;
+            for (node, original) in nodes.iter().zip(&original) {
+                let actual = cached.computed_style_shared(node);
+                assert_eq!(
+                    actual,
+                    cold.computed_style_shared(node),
+                    "{selector}, hover={enabled}"
+                );
+                changed |= actual != *original;
+            }
+            assert_eq!(
+                changed, enabled,
+                "{selector}: fixture must visibly change then restore"
+            );
         }
     }
 }
