@@ -11,6 +11,37 @@ use crate::css::{
 
 const MAX_CHILD_RASTER_DETAILS: usize = 32;
 
+/// Includes short frames when diagnosing steady event-loop overhead. This
+/// opt-in does not enable task/job tracing or change the rendering cadence.
+fn trace_all_frame_phases() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_FRAME_PHASES").is_some())
+}
+
+pub(super) fn trace_animation_frame_phases(
+    enabled: bool,
+    background_ms: f64,
+    tasks_ms: f64,
+    callbacks_ms: f64,
+    finish_ms: f64,
+) {
+    let total_ms = background_ms + tasks_ms + callbacks_ms + finish_ms;
+    if trace_all_frame_phases() || enabled && total_ms >= 50.0 {
+        eprintln!(
+            "{}",
+            crate::diagnostics::json_record(
+                "OMOIKANE_FRAME_PHASE",
+                &serde_json::json!({
+                    "background_ms": background_ms,
+                    "tasks_ms": tasks_ms,
+                    "callbacks_ms": callbacks_ms,
+                    "finish_ms": finish_ms,
+                })
+            )
+        );
+    }
+}
+
 fn raf_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_RAF").is_some())

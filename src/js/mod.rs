@@ -54,30 +54,6 @@ use crate::http::cors::{
 use crate::http::{Client, HttpRequest, Method, default_user_agent};
 use crate::layout::{InlineFragmentContent, LayoutBox, Rect, edge_sizes};
 
-fn trace_animation_frame_phases(
-    enabled: bool,
-    background_ms: f64,
-    tasks_ms: f64,
-    callbacks_ms: f64,
-    finish_ms: f64,
-) {
-    let total_ms = background_ms + tasks_ms + callbacks_ms + finish_ms;
-    if enabled && total_ms >= 50.0 {
-        eprintln!(
-            "{}",
-            crate::diagnostics::json_record(
-                "OMOIKANE_FRAME_PHASE",
-                &serde_json::json!({
-                    "background_ms": background_ms,
-                    "tasks_ms": tasks_ms,
-                    "callbacks_ms": callbacks_ms,
-                    "finish_ms": finish_ms,
-                })
-            )
-        );
-    }
-}
-
 mod async_realm;
 mod broadcast_channel;
 mod cache_storage;
@@ -12501,7 +12477,13 @@ impl JsRuntime {
         detail.record_scroll_events(stage_started);
 
         if self.host_state.borrow().page_hidden {
-            trace_animation_frame_phases(trace_frame, background_ms, tasks_ms, 0.0, 0.0);
+            frame_diagnostics::trace_animation_frame_phases(
+                trace_frame,
+                background_ms,
+                tasks_ms,
+                0.0,
+                0.0,
+            );
             detail.finish(phase_started.elapsed().as_secs_f64() * 1000.0);
             // Keep callbacks queued until the page has a rendering opportunity.
             return Ok(0);
@@ -12619,7 +12601,7 @@ impl JsRuntime {
         if self.task_pump_limit == usize::MAX {
             self.run_until_idle()?;
         }
-        trace_animation_frame_phases(
+        frame_diagnostics::trace_animation_frame_phases(
             trace_frame,
             background_ms,
             tasks_ms,
