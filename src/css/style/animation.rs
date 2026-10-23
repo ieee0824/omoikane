@@ -584,6 +584,36 @@ impl StyleResolver {
                 .any(|state| state.running(timeline.now_ms))
         })
     }
+    /// Paint-only clocks in disjoint branches cannot change this action's styles.
+    /// Sampling still invalidates animated targets; the owner still rebuilds geometry.
+    pub(super) fn animations_allow_user_action_subtree_invalidation(
+        &self,
+        invalidated: &HashSet<usize>,
+        roots: &[NodeHandle],
+    ) -> bool {
+        let Some(timeline) = &self.animation_timeline else {
+            return true;
+        };
+        let timeline = timeline.borrow();
+        timeline.elements.iter().all(|((identity, _), state)| {
+            if !state.running(timeline.now_ms) {
+                return true;
+            }
+            if state.spec.requires_layout || invalidated.contains(identity) {
+                return false;
+            }
+            !roots.iter().any(|root| {
+                let mut ancestor = root.parent_node();
+                while let Some(node) = ancestor {
+                    if node.identity() == *identity {
+                        return true;
+                    }
+                    ancestor = node.parent_node();
+                }
+                false
+            })
+        })
+    }
     pub(crate) fn animation_node_ids(&self) -> Vec<usize> {
         self.animation_timeline
             .as_ref()

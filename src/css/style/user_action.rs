@@ -219,9 +219,10 @@ impl StyleResolver {
     /// invalidated by the owner; uncertain selectors retain full invalidation.
     /// The locality proof assumes inheritance only from the flat-tree parent,
     /// ancestor-only selector traversal, and global clearing on shared resolver
-    /// context changes. Shadow/slot, relational selectors and time-dependent
-    /// styles fall back. New cross-element style dependencies must extend these
-    /// guards before retaining caches (for example future anchor positioning).
+    /// context changes. Shadow/slot, relational selectors, transitions and
+    /// animations that can affect the changed branch or geometry fall back.
+    /// New cross-element style dependencies must extend these guards before
+    /// retaining caches (for example future anchor positioning).
     pub(crate) fn invalidate_user_action_styles(
         &mut self,
         changes: &[(NodeHandle, &'static str)],
@@ -240,8 +241,6 @@ impl StyleResolver {
             .collect::<Vec<_>>();
         let fallback = if self.has_running_transitions() {
             Some("fallback_active_transition")
-        } else if self.has_running_animations() {
-            Some("fallback_active_animation")
         } else if roots.iter().any(|node| {
             node.parent_node()
                 .is_some_and(|parent| parent.node_type() == NodeType::Document)
@@ -254,10 +253,14 @@ impl StyleResolver {
             self.invalidate_style_cache();
             return Full(reason);
         }
-        let Some(identities) = invalidation_subtrees(roots) else {
+        let Some(identities) = invalidation_subtrees(roots.iter().cloned()) else {
             self.invalidate_style_cache();
             return Full("fallback_shadow_or_slot");
         };
+        if !self.animations_allow_user_action_subtree_invalidation(&identities, &roots) {
+            self.invalidate_style_cache();
+            return Full("fallback_active_animation");
+        }
         self.cache
             .retain(|identity, _| !identities.contains(identity));
         self.pseudo_cache

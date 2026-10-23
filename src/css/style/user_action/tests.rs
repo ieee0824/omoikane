@@ -397,27 +397,114 @@ fn hover_uses_full_invalidation_during_an_unrelated_transition() {
 }
 
 #[test]
-fn delayed_animation_keeps_full_user_action_invalidation() {
-    let document = NodeHandle::document();
-    let root = NodeHandle::element("main");
-    let animated = NodeHandle::element("div");
-    let anchor = NodeHandle::element("a");
-    animated.set_attribute("id", "animated");
-    document.append_child(root.clone());
-    root.append_child(animated.clone());
-    root.append_child(anchor.clone());
-    let mut cached = resolver(
-        "@keyframes fade{from{opacity:0}to{opacity:1}}\
-        #animated{animation:fade 1s linear 5s}a:hover{color:green}",
-    );
-    cached.set_animation_time_ms(0.0);
-    cached.computed_style_shared(&animated);
-    assert!(cached.has_running_animations());
-    anchor.set_user_action_state("hover", true);
-    assert_eq!(
-        cached.invalidate_user_action_styles(&[(anchor, "hover")]),
-        UserActionStyleInvalidation::Full("fallback_active_animation")
-    );
+fn disjoint_paint_animation_keeps_local_hover_and_continues_sampling() {
+    for (delay, times) in [
+        (0, [0.0, 250.0, 500.0, 750.0, 1250.0]),
+        (5, [0.0, 4500.0, 5250.0, 5500.0, 6250.0]),
+    ] {
+        let document = NodeHandle::document();
+        let root = NodeHandle::element("main");
+        let anchor = NodeHandle::element("a");
+        let animated = NodeHandle::element("div");
+        let unrelated = NodeHandle::element("aside");
+        animated.set_attribute("id", "animated");
+        document.append_child(root.clone());
+        for node in [&anchor, &animated, &unrelated] {
+            root.append_child(node.clone());
+        }
+        let css = format!(
+            "@keyframes fade{{from{{opacity:0.1}}to{{opacity:0.9}}}}            #animated{{animation:fade 1s linear {delay}s}}            #animated::before{{content:'x';animation:fade 1s linear {delay}s}}            a{{color:blue}}a:hover{{color:green}}aside{{width:15px}}"
+        );
+        let mut cached = resolver(&css);
+        let mut full = resolver(&css);
+        for resolver in [&mut cached, &mut full] {
+            resolver.set_animation_time_ms(0.0);
+            for node in [&anchor, &animated, &unrelated] {
+                resolver.computed_style_shared(node);
+                resolver.computed_pseudo_style_shared(node, PseudoElement::Before);
+            }
+        }
+        let mut opacities = Vec::new();
+        for (index, time) in times.into_iter().enumerate() {
+            cached.set_animation_time_ms(time);
+            full.set_animation_time_ms(time);
+            let retained = cached.computed_style_shared(&unrelated);
+            anchor.set_user_action_state("hover", index % 2 == 0);
+            assert_eq!(
+                cached.invalidate_user_action_styles(&[(anchor.clone(), "hover")]),
+                UserActionStyleInvalidation::Local,
+                "delay={delay} time={time}"
+            );
+            full.invalidate_style_cache();
+            for node in [&anchor, &animated, &unrelated] {
+                assert_eq!(
+                    cached.computed_style_shared(node),
+                    full.computed_style_shared(node)
+                );
+                assert_eq!(
+                    cached.computed_pseudo_style_shared(node, PseudoElement::Before),
+                    full.computed_pseudo_style_shared(node, PseudoElement::Before)
+                );
+            }
+            assert!(Arc::ptr_eq(
+                &retained,
+                &cached.computed_style_shared(&unrelated)
+            ));
+            opacities.push(
+                cached
+                    .computed_style_shared(&animated)
+                    .get("opacity")
+                    .cloned(),
+            );
+        }
+        assert!(
+            opacities.windows(2).any(|pair| pair[0] != pair[1]),
+            "animation must advance"
+        );
+    }
+}
+
+#[test]
+fn animated_branch_dependencies_keep_full_user_action_invalidation() {
+    for (placement, property, from, to) in [
+        ("unrelated", "width", "10px", "30px"),
+        ("ancestor", "opacity", "0.1", "0.9"),
+        ("descendant", "opacity", "0.1", "0.9"),
+        ("self", "opacity", "0.1", "0.9"),
+    ] {
+        let document = NodeHandle::document();
+        let root = NodeHandle::element("main");
+        let anchor = NodeHandle::element("a");
+        let other = NodeHandle::element("div");
+        document.append_child(root.clone());
+        root.append_child(anchor.clone());
+        let animated = match placement {
+            "ancestor" => root.clone(),
+            "self" => anchor.clone(),
+            "descendant" => {
+                anchor.append_child(other.clone());
+                other.clone()
+            }
+            _ => {
+                root.append_child(other.clone());
+                other.clone()
+            }
+        };
+        animated.set_attribute("id", "animated");
+        let css = format!(
+            "@keyframes run{{from{{{property}:{from}}}to{{{property}:{to}}}}}            #animated{{animation:run 1s linear}}a:hover{{color:green}}"
+        );
+        let mut cached = resolver(&css);
+        cached.set_animation_time_ms(0.0);
+        cached.computed_style_shared(&animated);
+        assert!(cached.has_running_animations());
+        anchor.set_user_action_state("hover", true);
+        assert_eq!(
+            cached.invalidate_user_action_styles(&[(anchor, "hover")]),
+            UserActionStyleInvalidation::Full("fallback_active_animation"),
+            "{placement}"
+        );
+    }
 }
 
 #[test]
