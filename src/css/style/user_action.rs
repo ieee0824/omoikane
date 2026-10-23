@@ -18,6 +18,7 @@ struct Observers {
 struct Observer {
     selector: Selector,
     nonlocal: bool,
+    parent_subtree: bool,
     // A subject whose match can change is strictly below the state node.
     subject_is_descendant: bool,
 }
@@ -109,6 +110,7 @@ impl Observers {
                 }],
             },
             nonlocal: false,
+            parent_subtree: false,
             subject_is_descendant: false,
         });
     }
@@ -167,7 +169,7 @@ impl Observers {
                         observer.subject_is_descendant = true;
                     }
                     Some(Combinator::AdjacentSibling | Combinator::GeneralSibling) => {
-                        observer.nonlocal |= !observer.subject_is_descendant;
+                        observer.parent_subtree |= !observer.subject_is_descendant;
                     }
                     None => observer.nonlocal = true,
                 }
@@ -214,6 +216,30 @@ impl UserActionDependencies {
         self.states.clear();
     }
 
+    fn invalidation_root(
+        &mut self,
+        stylesheets: &[StylesheetInput],
+        node: &NodeHandle,
+        state: &str,
+    ) -> Option<NodeHandle> {
+        if !self.affects(stylesheets, node, state) {
+            return None;
+        }
+        let needs_parent = state_name(state)
+            .and_then(|name| self.states.get(name))
+            .is_some_and(|observers| {
+                observers.subjects.iter().any(|observer| {
+                    observer.parent_subtree
+                        && super::super::matcher::matches_selector(node, &observer.selector)
+                })
+            });
+        Some(if needs_parent {
+            sibling_invalidation_parent(node).unwrap_or_else(|| node.clone())
+        } else {
+            node.clone()
+        })
+    }
+
     fn affects(&mut self, stylesheets: &[StylesheetInput], node: &NodeHandle, state: &str) -> bool {
         let Some(state) = state_name(state) else {
             return true;
@@ -233,9 +259,22 @@ impl UserActionDependencies {
     }
 }
 
+// Sibling steps from a changed node stay below its element parent. Keep the
+// document-root and shadow-root boundaries on the conservative full path.
+fn sibling_invalidation_parent(node: &NodeHandle) -> Option<NodeHandle> {
+    let parent = node.parent_node()?;
+    (parent.node_type() == NodeType::Element
+        && parent
+            .parent_node()
+            .is_some_and(|ancestor| ancestor.node_type() == NodeType::Element))
+    .then_some(parent)
+}
+
 impl StyleResolver {
     /// Invalidates only changed state subtrees when selector dependencies prove
-    /// that siblings and ancestors cannot observe the change. Geometry is still
+    /// that affected subjects stay inside them. Sibling dependencies expand the
+    /// invalidation to the element parent's subtree; ancestors remain guarded.
+    /// Geometry is still
     /// invalidated by the owner; uncertain selectors retain full invalidation.
     /// The locality proof assumes inheritance only from the flat-tree parent,
     /// ancestor-only selector traversal, and global clearing on shared resolver
@@ -255,8 +294,7 @@ impl StyleResolver {
             .iter()
             .filter_map(|(node, state)| {
                 self.user_action_dependencies
-                    .affects(&self.stylesheets, node, state)
-                    .then(|| node.clone())
+                    .invalidation_root(&self.stylesheets, node, state)
             })
             .collect::<Vec<_>>();
         let fallback = if self.has_running_transitions() {
@@ -299,7 +337,8 @@ impl StyleResolver {
                 return Some("fallback_uncertain_selector");
             }
             if observers.subjects.iter().any(|observer| {
-                observer.nonlocal
+                (observer.nonlocal
+                    || (observer.parent_subtree && sibling_invalidation_parent(node).is_none()))
                     && super::super::matcher::matches_selector(node, &observer.selector)
             }) {
                 return Some("fallback_nonlocal_selector");

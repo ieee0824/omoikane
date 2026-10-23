@@ -49,6 +49,10 @@ fn sibling_selectors_keep_geometry_and_pseudo_pixels_equal_to_full_invalidation(
         ":is(a:hover > span) + em",
         ":not(a:hover > span) + em",
         "a:hover + aside",
+        "a:hover ~ aside",
+        ":is(a:hover + aside)",
+        "main :where(a:hover ~ aside)",
+        ":not(a:hover) + aside",
         ":is(a:hover, a:hover > span) + aside",
     ] {
         let mut actual = session(selector);

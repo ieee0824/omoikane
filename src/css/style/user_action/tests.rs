@@ -825,3 +825,89 @@ fn nested_siblings_cannot_become_local_after_later_descendant_steps() {
         }
     }
 }
+
+#[test]
+fn sibling_state_changes_keep_other_parent_subtrees_cached() {
+    for (selector, state) in [
+        ("a:hover + aside", "hover"),
+        ("a:hover ~ aside", "hover"),
+        (":is(a:hover + aside) > span", "hover"),
+        (":is(a:hover, a:hover > span) + aside", "hover"),
+        (":not(a:hover) + aside", "hover"),
+        (":where(a:hover ~ aside) > span", "hover"),
+        ("a:hover + aside ~ footer", "hover"),
+        ("a:active + aside", "active"),
+        ("a:focus + aside", "focus"),
+        ("a:focus-visible + aside", "focus-visible"),
+        ("a:focus-within ~ aside", "focus-within"),
+    ] {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let body = NodeHandle::element("body");
+        let branch = NodeHandle::element("section");
+        let anchor = NodeHandle::element("a");
+        let sibling = NodeHandle::element("aside");
+        let child = NodeHandle::element("span");
+        let tail = NodeHandle::element("footer");
+        let unrelated = NodeHandle::element("div");
+        document.append_child(html.clone());
+        html.append_child(body.clone());
+        body.append_child(branch.clone());
+        body.append_child(unrelated.clone());
+        branch.append_child(anchor.clone());
+        branch.append_child(sibling.clone());
+        branch.append_child(tail.clone());
+        sibling.append_child(child.clone());
+        let nodes = [
+            html,
+            body,
+            branch,
+            anchor.clone(),
+            sibling,
+            child,
+            tail,
+            unrelated.clone(),
+        ];
+        let css = format!(
+            "*{{width:3px}}{selector}{{width:17px;color:red}}span::before{{content:'marker';color:inherit}}"
+        );
+        let mut cached = resolver(&css);
+        let original = nodes
+            .iter()
+            .map(|node| cached.computed_style_shared(node))
+            .collect::<Vec<_>>();
+        for enabled in [true, false, true, false] {
+            let before_unrelated = cached.computed_style_shared(&unrelated);
+            anchor.set_user_action_state(state, enabled);
+            assert_eq!(
+                cached.invalidate_user_action_styles(&[(anchor.clone(), state)]),
+                UserActionStyleInvalidation::Local,
+                "{selector}"
+            );
+            let mut cold = resolver(&css);
+            let mut changed = false;
+            for (node, original) in nodes.iter().zip(&original) {
+                let actual = cached.computed_style_shared(node);
+                assert_eq!(
+                    actual,
+                    cold.computed_style_shared(node),
+                    "{selector}, hover={enabled}"
+                );
+                changed |= actual != *original;
+                assert_eq!(
+                    cached.computed_pseudo_style_shared(node, PseudoElement::Before),
+                    cold.computed_pseudo_style_shared(node, PseudoElement::Before),
+                    "pseudo {selector}, hover={enabled}"
+                );
+            }
+            assert_eq!(
+                changed, enabled,
+                "fixture must change then restore: {selector}"
+            );
+            assert!(
+                Arc::ptr_eq(&before_unrelated, &cached.computed_style_shared(&unrelated)),
+                "unrelated parent subtree must retain its cached style: {selector}"
+            );
+        }
+    }
+}
