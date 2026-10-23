@@ -1,4 +1,4 @@
-//! Opt-in diagnostics for exact ordinary style/class attribute assignments.
+//! Opt-in diagnostics for ordinary attribute assignments without attribute values.
 use super::*;
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
@@ -156,7 +156,33 @@ fn parsed_difference(node: &NodeHandle, name: &str, value: &JsString) -> Option<
     Some(style_difference(&old, &new))
 }
 
-/// Emits equality and changed declaration names, never property values.
+/// Returns bounded categories and scalar lengths without names or values.
+fn generic_assignment_record(node: &NodeHandle, name: &str, value: &JsString) -> serde_json::Value {
+    let attribute = match name.to_ascii_lowercase().as_str() {
+        "width" => "width",
+        "height" => "height",
+        "title" => "title",
+        "role" => "role",
+        "alt" => "alt",
+        name if name.starts_with("aria-") => "aria",
+        name if name.starts_with("data-") => "data",
+        _ => "other",
+    };
+    let target = match node.tag_name().as_deref() {
+        Some("iframe" | "object") => "frame",
+        Some("img") => "image",
+        Some("meta" | "link" | "style" | "base") => "metadata",
+        _ => "other",
+    };
+    let (old_length, same_value) = previous_value(node, name, value);
+    serde_json::json!({
+        "node": node.identity(), "attribute_kind": attribute, "target_kind": target,
+        "connected_document": document_root_for_node(node).is_some(),
+        "old_length": old_length, "new_length": value.len(), "same_value": same_value,
+    })
+}
+
+/// Emits equality and bounded attribute diagnostics without property values.
 pub(super) fn trace(
     node: &NodeHandle,
     name: &str,
@@ -168,6 +194,13 @@ pub(super) fn trace(
         return;
     }
     if !name.eq_ignore_ascii_case("style") && !name.eq_ignore_ascii_case("class") {
+        eprintln!(
+            "{}",
+            crate::diagnostics::json_record(
+                "OMOIKANE_GENERIC_ATTRIBUTE_SET",
+                &generic_assignment_record(node, name, value)
+            )
+        );
         return;
     }
     let (old_length, same_value) = previous_value(node, name, value);
@@ -193,6 +226,43 @@ pub(super) fn trace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generic_assignment_diagnostics_are_bounded_and_do_not_expose_values_or_names() {
+        let node = NodeHandle::element("iframe");
+        node.set_attribute("private-token", "secret-value");
+        let record =
+            generic_assignment_record(&node, "private-token", &JsString::from("secret-value"));
+        assert_eq!(record["attribute_kind"], "other");
+        assert_eq!(record["target_kind"], "frame");
+        assert_eq!(record["connected_document"], false);
+        assert_eq!(record["same_value"], true);
+        assert_eq!(record["old_length"], 12);
+        assert_eq!(record["new_length"], 12);
+        let serialized = record.to_string();
+        assert!(!serialized.contains("secret-value"));
+        assert!(!serialized.contains("private-token"));
+        assert_eq!(
+            node.get_attribute("private-token").as_deref(),
+            Some("secret-value")
+        );
+        let document = NodeHandle::document();
+        document.append_child(node.clone());
+        assert_eq!(
+            generic_assignment_record(&node, "width", &JsString::from("1"))["connected_document"],
+            true
+        );
+        for (name, expected) in [
+            ("WIDTH", "width"),
+            ("aria-label", "aria"),
+            ("data-secret", "data"),
+        ] {
+            assert_eq!(
+                generic_assignment_record(&node, name, &JsString::from("x"))["attribute_kind"],
+                expected
+            );
+        }
+    }
 
     #[test]
     fn declaration_diagnostics_separate_order_value_and_priority_changes() {
