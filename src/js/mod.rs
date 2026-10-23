@@ -160,6 +160,8 @@ mod worker_loading;
 mod worker_reporting_tests;
 pub use form_state::{FormStateRestoreMode, FormStateSnapshot};
 #[cfg(test)]
+mod hit_test_order_tests;
+#[cfg(test)]
 mod layout_metrics_tests;
 mod module_fetch;
 #[cfg(test)]
@@ -2056,6 +2058,7 @@ struct AdjustedLayoutCache {
     style_generation: u64,
     paint_generation: u64,
     root: Rc<LayoutBox>,
+    hit_test: crate::paint::HitTestTree,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8141,12 +8144,15 @@ impl HostState {
                 )
             );
         }
+        let root = Rc::new(root);
+        let hit_test = crate::paint::HitTestTree::new(root.clone());
         self.adjusted_layout_cache = Some(AdjustedLayoutCache {
             layout_generation: current.0,
             scroll_generation: current.1,
             style_generation: current.2,
             paint_generation: current.3,
-            root: Rc::new(root),
+            root,
+            hit_test,
         });
         #[cfg(test)]
         {
@@ -9813,15 +9819,15 @@ impl JsRuntime {
         let viewport = state.viewport;
         let document_id = state.document.identity();
         let state = &mut *state;
-        let layout = &state.adjusted_layout_cache.as_ref()?.root;
+        let cache = state.adjusted_layout_cache.as_mut()?;
         let target = {
             let resolver = state
                 .document_styles
                 .get_mut(&document_id)
                 .and_then(|entry| entry.resolver.as_mut())?;
-            crate::paint::hit_test_layout(layout, resolver, viewport, x, y)
+            cache.hit_test.query(resolver, viewport, x, y, false).pop()
         }?;
-        let layout = layout.clone();
+        let layout = cache.root.clone();
         let target = nested_rendering::hit_child(state, &layout, target, x, y, 0);
         Some(state.retarget_content_visibility_hit(target))
     }
@@ -19950,11 +19956,7 @@ fn hit_test_document_point(
     let document_id = document.identity();
     if document_id == state.document.identity() {
         state.ensure_adjusted_layout();
-        let Some(layout) = state
-            .adjusted_layout_cache
-            .as_ref()
-            .map(|cache| &cache.root)
-        else {
+        let Some(cache) = state.adjusted_layout_cache.as_mut() else {
             return Vec::new();
         };
         let Some(resolver) = state
@@ -19964,13 +19966,7 @@ fn hit_test_document_point(
         else {
             return Vec::new();
         };
-        return if all {
-            crate::paint::hit_test_layout_all(layout, resolver, viewport, x, y)
-        } else {
-            crate::paint::hit_test_layout(layout, resolver, viewport, x, y)
-                .into_iter()
-                .collect()
-        };
+        return cache.hit_test.query(resolver, viewport, x, y, all);
     }
 
     let Some(mut layout) = build_child_document_layout(state, document, viewport) else {

@@ -8,6 +8,9 @@ pub(crate) mod color;
 pub(crate) mod color4;
 pub(crate) mod form_control;
 mod gradient_tiles;
+mod hit_test_order;
+use hit_test_order::HitTestPhaseCache;
+pub(crate) use hit_test_order::HitTestTree;
 pub(crate) mod image;
 mod image_blit;
 mod image_scale;
@@ -3175,6 +3178,7 @@ pub(crate) fn hit_test_layout(
         y,
         &mut hits,
         true,
+        &mut HitTestPhaseCache::default(),
     );
     let HitCollector::First(hit) = hits else {
         unreachable!();
@@ -3206,6 +3210,7 @@ pub(crate) fn hit_test_layout_all(
         y,
         &mut hits,
         true,
+        &mut HitTestPhaseCache::default(),
     );
     let HitCollector::All { hits, .. } = hits else {
         unreachable!();
@@ -3472,6 +3477,7 @@ fn hit_test_child_path(
     mut point: (f32, f32),
     hits: &mut HitCollector,
     include_descendants: bool,
+    phase_cache: &mut HitTestPhaseCache,
 ) -> bool {
     let (&last, ancestors) = path.split_last().expect("nonempty child path");
     for &index in ancestors {
@@ -3495,6 +3501,7 @@ fn hit_test_child_path(
         point.1,
         hits,
         include_descendants,
+        phase_cache,
     )
 }
 
@@ -3509,6 +3516,7 @@ fn hit_test_child_groups(
     x: f32,
     y: f32,
     hits: &mut HitCollector,
+    phase_cache: &mut HitTestPhaseCache,
 ) -> bool {
     for (group, include_descendants) in groups {
         for path in group.iter().rev() {
@@ -3522,6 +3530,7 @@ fn hit_test_child_groups(
                 (x, y),
                 hits,
                 include_descendants,
+                phase_cache,
             ) {
                 return true;
             }
@@ -3679,6 +3688,7 @@ fn hit_test_box(
     y: f32,
     hits: &mut HitCollector,
     include_descendants: bool,
+    phase_cache: &mut HitTestPhaseCache,
 ) -> bool {
     let Some(HitTestGeometry {
         transform,
@@ -3700,7 +3710,7 @@ fn hit_test_box(
         return false;
     };
 
-    let phases = partition_children_for_hit_test(layout, resolver, include_descendants);
+    let phases = phase_cache.phases(layout, resolver, include_descendants);
 
     if hit_test_child_groups(
         layout,
@@ -3716,6 +3726,7 @@ fn hit_test_box(
         query_point.0,
         query_point.1,
         hits,
+        phase_cache,
     ) {
         return true;
     }
@@ -3739,6 +3750,7 @@ fn hit_test_box(
         query_point.0,
         query_point.1,
         hits,
+        phase_cache,
     ) {
         return true;
     }
