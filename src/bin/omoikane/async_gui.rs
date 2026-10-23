@@ -18,6 +18,21 @@ use winit::event::TouchPhase;
 
 const NATIVE_WHEEL_TRANSACTION_IDLE: Duration = Duration::from_millis(200);
 
+/// Returns whether a cursor notification needs delivery and records its CSS position.
+/// Repeated unlocked positions are already no-ops in `PlatformInput`; filter them
+/// before they create a canonical ingress barrier ahead of a macOS wheel event.
+pub(super) fn update_page_cursor(
+    previous: &mut Option<(f64, f64)>,
+    point: (f64, f64),
+    locked: bool,
+) -> bool {
+    if !locked && *previous == Some(point) {
+        return false;
+    }
+    *previous = (!locked).then_some(point);
+    true
+}
+
 struct FindBar {
     query: String,
     result: FindInPageResult,
@@ -507,6 +522,7 @@ pub(super) struct AsyncBrowserApp {
     modifiers: InputModifiers,
     cursor: (f64, f64),
     cursor_in_page: bool,
+    last_page_cursor: Option<(f64, f64)>,
     page_buttons: Vec<PlatformMouseButton>,
     page_touches: HashSet<u64>,
     native_fullscreen: bool,
@@ -570,6 +586,7 @@ impl AsyncBrowserApp {
             modifiers: InputModifiers::default(),
             cursor: (0.0, 0.0),
             cursor_in_page: false,
+            last_page_cursor: None,
             page_buttons: Vec::new(),
             page_touches: HashSet::new(),
             native_fullscreen: false,
@@ -707,6 +724,7 @@ impl AsyncBrowserApp {
         self.url_bar.set_page_url(update.url);
         self.page_title = update.title;
         if self.document != update.document_generation {
+            self.last_page_cursor = None;
             self.revoke_native_scroll_before_page_work();
             self.retained_scene = None;
             self.document = update.document_generation;
@@ -993,6 +1011,7 @@ impl AsyncBrowserApp {
     }
 
     fn unlock_pointer(&mut self) {
+        self.last_page_cursor = None;
         if let Some(window) = &self.window {
             let _ = pointer_lock_host::set_grab(window, false);
             window.set_cursor_visible(true);
@@ -1008,6 +1027,7 @@ impl AsyncBrowserApp {
     }
 
     fn apply_pointer_lock(&mut self, transition: PointerLockTransition) {
+        self.last_page_cursor = None;
         match transition {
             PointerLockTransition::Release => self.unlock_pointer(),
             PointerLockTransition::Acquire {
@@ -1265,17 +1285,15 @@ impl AsyncBrowserApp {
     }
 
     fn cursor_moved(&mut self, x: f64, y: f64) {
-        let unchanged = self.cursor == (x, y) && self.cursor_in_page;
         self.cursor = (x, y);
         let inside = self.pointer_targets_page();
         if inside {
             let (x, y) = self.layout().page_point(x, y);
-            if unchanged {
-                self.worker.send(Command::Cursor(x, y));
-            } else {
+            if update_page_cursor(&mut self.last_page_cursor, (x, y), self.pointer_locked) {
                 self.send_observable_page_command(Command::Cursor(x, y));
             }
         } else if self.cursor_in_page {
+            self.last_page_cursor = None;
             self.send_observable_page_command(Command::CursorLeft);
         }
         self.cursor_in_page = inside;
@@ -1486,6 +1504,7 @@ impl AsyncBrowserApp {
                 self.cursor_moved(position.x, position.y);
             }
             WindowEvent::CursorLeft { .. } => {
+                self.last_page_cursor = None;
                 self.cursor_in_page = false;
                 self.send_observable_page_command(Command::CursorLeft);
             }

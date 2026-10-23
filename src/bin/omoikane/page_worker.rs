@@ -1677,6 +1677,98 @@ mod tests {
         );
     }
 
+    fn cursor_queue() -> (PageWorker, Receiver<QueuedCommand>) {
+        let (sender, commands) = mpsc::channel();
+        let (_, updates) = mpsc::channel();
+        (
+            PageWorker {
+                sender,
+                canonical_ingress: CanonicalIngress::default(),
+                trace_input: false,
+                input_sequence: Cell::new(0),
+                updates,
+            },
+            commands,
+        )
+    }
+
+    fn dispatch_cursor_for_test(
+        worker: &PageWorker,
+        previous: &mut Option<(f64, f64)>,
+        point: (f64, f64),
+        locked: bool,
+    ) {
+        if super::super::async_gui::update_page_cursor(previous, point, locked) {
+            worker.send(PageCommand::Cursor(point.0, point.1));
+        }
+    }
+
+    fn acknowledge_cursor_for_test(worker: &PageWorker, commands: &Receiver<QueuedCommand>) {
+        let queued = commands.try_recv().expect("cursor must reach the owner");
+        assert!(matches!(queued.command, PageCommand::Cursor(..)));
+        worker.canonical_ingress.completed.store(
+            queued
+                .canonical_ingress
+                .expect("real cursor remains a barrier")
+                .0,
+            Ordering::Release,
+        );
+    }
+
+    #[test]
+    fn stationary_cursor_does_not_block_native_ingress_while_owner_is_busy() {
+        let (worker, commands) = cursor_queue();
+        let mut previous = None;
+        dispatch_cursor_for_test(&worker, &mut previous, (500.0, 200.0), false);
+        assert!(
+            !worker.native_ingress_is_drained(),
+            "first move cannot be skipped"
+        );
+        acknowledge_cursor_for_test(&worker, &commands);
+        // The owner is now busy in a frame callback: no queued command is consumed.
+        for _ in 0..10 {
+            dispatch_cursor_for_test(&worker, &mut previous, (500.0, 200.0), false);
+        }
+        assert!(
+            worker.native_ingress_is_drained(),
+            "duplicate moves must not block the following wheel"
+        );
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        dispatch_cursor_for_test(&worker, &mut previous, (500.25, 200.0), false);
+        assert!(
+            !worker.native_ingress_is_drained(),
+            "a real pending move must still block native scroll"
+        );
+        dispatch_cursor_for_test(&worker, &mut previous, (500.25, 200.0), false);
+        acknowledge_cursor_for_test(&worker, &commands);
+        assert!(worker.native_ingress_is_drained());
+    }
+
+    #[test]
+    fn cursor_ingress_preserves_reentry_lock_and_css_position_changes() {
+        let (worker, commands) = cursor_queue();
+        let mut previous = None;
+        // Origin, scale-adjusted coordinates, reentry, lock, then unlocked restore.
+        for (point, locked, reset) in [
+            ((0.0, 0.0), false, false),
+            ((250.0, 100.0), false, false),
+            ((250.0, 100.0), false, true),
+            ((250.0, 100.0), true, false),
+            ((250.0, 100.0), false, false),
+        ] {
+            if reset {
+                previous = None;
+            }
+            dispatch_cursor_for_test(&worker, &mut previous, point, locked);
+            assert!(!worker.native_ingress_is_drained());
+            acknowledge_cursor_for_test(&worker, &commands);
+            assert!(worker.native_ingress_is_drained());
+        }
+    }
+
     #[test]
     fn canonical_ingress_counts_untraced_controls_and_fails_closed_on_exhaustion() {
         let ingress = CanonicalIngress::default();
