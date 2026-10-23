@@ -1,6 +1,6 @@
 //! Deterministic system-font discovery and face selection from OpenType metadata.
 
-use super::{Font, FontError, FontFamilyKey, FontStyle, FontVariantKey};
+use super::{Font, FontError, FontFamilyKey, FontFamilyMember, FontStyle, FontVariantKey};
 use rustybuzz::ttf_parser::{self, name_id};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -35,6 +35,8 @@ impl SystemFontFace {
     }
 }
 
+const SELECTION_CACHE_CAPACITY: usize = 256;
+
 /// An immutable index of font metadata with a bounded cache of loaded faces.
 ///
 /// Discovery visits each directory once and indexes all collection faces. Files
@@ -45,6 +47,7 @@ pub struct SystemFontDatabase {
     families: HashMap<String, Vec<usize>>,
     unreadable: Vec<PathBuf>,
     loaded: Mutex<HashMap<usize, Arc<Font>>>,
+    selections: Mutex<HashMap<(FontFamilyKey, FontVariantKey), Option<usize>>>,
 }
 
 impl SystemFontDatabase {
@@ -144,6 +147,7 @@ impl SystemFontDatabase {
             families,
             unreadable,
             loaded: Mutex::new(HashMap::new()),
+            selections: Mutex::new(HashMap::new()),
         }
     }
 
@@ -191,6 +195,42 @@ impl SystemFontDatabase {
             })
     }
 
+    // Metadata is immutable for this database. Cache misses as well as indices,
+    // but never cache file-loading errors or Web font selection outcomes.
+    fn select_member_index(
+        &self,
+        member: &FontFamilyMember,
+        variant: FontVariantKey,
+    ) -> Option<usize> {
+        let key = (member.key(), variant);
+        {
+            let selections = self
+                .selections
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(index) = selections.get(&key) {
+                return *index;
+            }
+        }
+        let index = self.select_index(&member.name, variant);
+        let mut selections = self
+            .selections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if selections.len() >= SELECTION_CACHE_CAPACITY
+            && let Some(old) = selections.keys().next().copied()
+        {
+            selections.remove(&old);
+        }
+        selections.insert(key, index);
+        index
+    }
+
+    fn load_member(&self, member: &FontFamilyMember, variant: FontVariantKey) -> Option<Arc<Font>> {
+        self.load_index(self.select_member_index(member, variant)?)
+            .ok()
+    }
+
     /// Selects a face for one family (or a generic family), weight and style.
     ///
     /// Family names match metadata, not filename substrings. Missing weights
@@ -205,6 +245,10 @@ impl SystemFontDatabase {
         let index = self
             .select_index(family, variant)
             .ok_or_else(|| FontError::Other(format!("System font '{family}' not found")))?;
+        self.load_index(index)
+    }
+
+    fn load_index(&self, index: usize) -> Result<Arc<Font>, FontError> {
         {
             let loaded = self.loaded.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(font) = loaded.get(&index) {
@@ -383,7 +427,7 @@ fn select_text_font_impl<'a>(
             }) {
                 return Some(SelectedFont::Web(font));
             }
-            if use_system && let Ok(font) = system_font_database().load(&member.name, variant) {
+            if use_system && let Some(font) = system_font_database().load_member(member, variant) {
                 return Some(SelectedFont::System(font));
             }
         }
@@ -458,3 +502,7 @@ pub(crate) fn load_default_text_fonts_shared() -> Vec<Arc<Font>> {
     }
     fonts
 }
+
+#[cfg(test)]
+#[path = "system_query_tests.rs"]
+mod query_tests;
