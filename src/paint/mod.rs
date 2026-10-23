@@ -22,7 +22,7 @@ pub(crate) use retained_extract::{
     RetainedOverscanTile, RetainedPaintError, RetainedPaintFrame, RetainedPaintOutcome,
     RetainedPaintRun, RetainedPaintRunIdentity, RetainedPaintSpace, VerticalOverscanPlan,
     diagnose_cross_space_clip, paint_layout_with_retained_fallback,
-    paint_layout_with_vertical_overscan,
+    paint_layout_with_vertical_overscan, paint_layout_with_vertical_overscan_current,
 };
 pub(crate) mod stylesheet;
 pub(crate) mod text;
@@ -1553,6 +1553,17 @@ pub(crate) fn paint_layout_with_document_snapshots_cached(
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    static ORDINARY_DOCUMENT_RASTERS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Test-only count of ordinary snapshot-aware raster traversals on this thread.
+#[cfg(test)]
+pub(crate) fn ordinary_document_raster_count() -> usize {
+    ORDINARY_DOCUMENT_RASTERS.with(Cell::get)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_layout_with_document_snapshots_internal(
     layout: &LayoutBox,
@@ -1565,6 +1576,8 @@ fn paint_layout_with_document_snapshots_internal(
     collect_diagnostics: bool,
     external_shadow_masks: Option<&border::FrameShadowMaskCache>,
 ) -> (Canvas, PaintRasterSummary) {
+    #[cfg(test)]
+    ORDINARY_DOCUMENT_RASTERS.with(|count| count.set(count.get() + 1));
     resolver.begin_visited_paint(visited_link_ids);
     let local_shadow_masks = external_shadow_masks
         .is_none()

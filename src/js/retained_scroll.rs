@@ -103,6 +103,42 @@ impl RetainedScrollCapture {
         })
     }
 
+    /// Reuses exact capture pixels for display, or paints the current adjusted
+    /// layout when the capture does not provide matching canonical pixels.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn paint_current(
+        &mut self,
+        request: Option<CaptureRequest>,
+        diagnostics_enabled: bool,
+        layout: &LayoutBox,
+        resolver: &mut StyleResolver,
+        viewport: Rect,
+        web_fonts: &crate::font::WebFontRegistry,
+        visited: &[usize],
+        snapshots: &HashMap<usize, crate::paint::Image>,
+        shadows: &crate::paint::border::FrameShadowMaskCache,
+    ) -> (crate::paint::Canvas, crate::paint::PaintRasterSummary) {
+        if let Some(canvas) =
+            self.capture(request, resolver, web_fonts, visited, snapshots, shadows)
+        {
+            // These counters describe the ordinary raster pass, which reuse skips.
+            return (canvas, crate::paint::PaintRasterSummary::default());
+        }
+        nested_rendering::paint_layout_with_snapshot_attribution(
+            diagnostics_enabled,
+            layout,
+            resolver,
+            viewport,
+            web_fonts,
+            visited.iter().copied(),
+            snapshots,
+            Some(shadows),
+        )
+    }
+
+    /// Returns an ordinary display image from the exact current capture raster
+    /// when its integer scroll matches the requested display. Fractional scroll
+    /// and nonmatching samples still require the ordinary painter.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn capture(
         &mut self,
@@ -112,13 +148,13 @@ impl RetainedScrollCapture {
         visited: &[usize],
         snapshots: &HashMap<usize, crate::paint::Image>,
         shadows: &crate::paint::border::FrameShadowMaskCache,
-    ) {
+    ) -> Option<crate::paint::Canvas> {
         let Some(request) = request else {
-            self.trace_result(None);
-            return;
+            self.trace_result(None, false);
+            return None;
         };
         let started = self.trace.then(Instant::now);
-        match crate::paint::paint_layout_with_vertical_overscan(
+        let painted = crate::paint::paint_layout_with_vertical_overscan_current(
             &request.layout,
             resolver,
             request.viewport,
@@ -128,7 +164,10 @@ impl RetainedScrollCapture {
             visited,
             snapshots,
             shadows,
-        ) {
+            Some(request.logical_scroll),
+        );
+        let mut current_canvas = painted.canonical;
+        match painted.outcome {
             RetainedOverscanOutcome::Extracted(frame) => {
                 self.last = Some(CapturedScrollScene {
                     frame,
@@ -139,19 +178,33 @@ impl RetainedScrollCapture {
                     viewport: request.viewport,
                 });
             }
-            RetainedOverscanOutcome::Fallback { reason, .. }
-            | RetainedOverscanOutcome::Rejected { reason } => {
-                self.reason = Some(reason);
-                if self.trace && reason == RetainedPaintError::CrossSpaceClip {
-                    self.clip_diagnostic =
-                        crate::paint::diagnose_cross_space_clip(&request.layout, resolver);
+            RetainedOverscanOutcome::Fallback { canvas, reason, .. } => {
+                if painted.fallback_is_current {
+                    current_canvas = Some(canvas);
                 }
+                self.record_failure(reason, &request.layout, resolver);
+            }
+            RetainedOverscanOutcome::Rejected { reason } => {
+                self.record_failure(reason, &request.layout, resolver);
             }
         }
-        self.trace_result(started);
+        self.trace_result(started, current_canvas.is_some());
+        current_canvas
     }
 
-    fn trace_result(&self, started: Option<Instant>) {
+    fn record_failure(
+        &mut self,
+        reason: RetainedPaintError,
+        layout: &LayoutBox,
+        resolver: &mut StyleResolver,
+    ) {
+        self.reason = Some(reason);
+        if self.trace && reason == RetainedPaintError::CrossSpaceClip {
+            self.clip_diagnostic = crate::paint::diagnose_cross_space_clip(layout, resolver);
+        }
+    }
+
+    fn trace_result(&self, started: Option<Instant>, canonical_available: bool) {
         if !self.trace {
             return;
         }
@@ -161,6 +214,7 @@ impl RetainedScrollCapture {
                 "OMOIKANE_RETAINED_CAPTURE",
                 &serde_json::json!({
                     "extracted": self.last.is_some(),
+                    "canonical_available": canonical_available,
                     "reason": self.reason.map(|reason| format!("{reason:?}")),
                     "capture_ms": started.map(|at| at.elapsed().as_secs_f64() * 1000.0),
                     "coverage": self.last.as_ref().map(|scene| scene.frame.coverage()),

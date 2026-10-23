@@ -4088,3 +4088,21 @@ fn flat_planning_reuse_keeps_overscan_capacity_fallback() {
         _ => panic!("32 fixed roots must keep the bounded ordinary fallback"),
     }
 }
+
+#[test]
+fn canonical_reuse_requires_a_losslessly_representable_pixel_grid() {
+    use super::retained_extract::canonical_raster_scroll;
+    assert_eq!(canonical_raster_scroll(None), None);
+    assert_eq!(canonical_raster_scroll(Some((0.0, 32.0))), Some((0, 32)));
+    assert_eq!(canonical_raster_scroll(Some((-1.0, 0.0))), Some((-1, 0)));
+    for scroll in [
+        (0.5, 0.0),
+        (0.0, 47.5),
+        (f64::NAN, 0.0),
+        (0.0, f64::INFINITY),
+        (16_777_216.0, 0.0),
+        (0.0, f64::from(i32::MAX)),
+    ] {
+        assert_eq!(canonical_raster_scroll(Some(scroll)), None, "{scroll:?}");
+    }
+}

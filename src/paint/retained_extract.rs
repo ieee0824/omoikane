@@ -1431,6 +1431,24 @@ pub(crate) enum RetainedOverscanOutcome {
     },
 }
 
+/// One bounded capture plus a canonical image from its exact current sample.
+/// No pixels from other scroll samples are used for the canonical image.
+pub(crate) struct RetainedOverscanPaintResult {
+    pub(crate) outcome: RetainedOverscanOutcome,
+    pub(crate) canonical: Option<Canvas>,
+    pub(crate) fallback_is_current: bool,
+}
+
+impl From<RetainedOverscanOutcome> for RetainedOverscanPaintResult {
+    fn from(outcome: RetainedOverscanOutcome) -> Self {
+        Self {
+            outcome,
+            canonical: None,
+            fallback_is_current: false,
+        }
+    }
+}
+
 /// Either a fully owned retained frame or the ordinary painter fallback.
 pub(crate) enum RetainedPaintOutcome {
     Extracted(RetainedPaintFrame),
@@ -3928,10 +3946,51 @@ pub(crate) fn paint_layout_with_vertical_overscan(
     nested_documents: &HashMap<usize, Image>,
     shadow_masks: &border::FrameShadowMaskCache,
 ) -> RetainedOverscanOutcome {
+    paint_layout_with_vertical_overscan_current(
+        raw_layout,
+        resolver,
+        viewport,
+        plan,
+        fonts,
+        web_fonts,
+        visited_link_ids,
+        nested_documents,
+        shadow_masks,
+        None,
+    )
+    .outcome
+}
+
+/// Returns a losslessly representable pixel-grid offset for canonical reuse.
+/// Fractional/nonfinite/large offsets require the ordinary display painter.
+pub(super) fn canonical_raster_scroll(scroll: Option<(f64, f64)>) -> Option<(i32, i32)> {
+    let (x, y) = scroll?;
+    [x, y]
+        .into_iter()
+        .all(|value| value.is_finite() && value.fract() == 0.0 && value.abs() < 16_777_216.0)
+        .then_some((x as i32, y as i32))
+}
+
+/// Requests canonical pixels only when the capture's current raster exactly
+/// matches `display_scroll`; fallback origin is recorded independently.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_layout_with_vertical_overscan_current(
+    raw_layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    plan: VerticalOverscanPlan,
+    fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+    visited_link_ids: &[usize],
+    nested_documents: &HashMap<usize, Image>,
+    shadow_masks: &border::FrameShadowMaskCache,
+    display_scroll: Option<(f64, f64)>,
+) -> RetainedOverscanPaintResult {
+    let canonical_scroll = canonical_raster_scroll(display_scroll);
     let _gradient_tiles = super::gradient_tiles::freeze_gradient_tiles();
     let dimensions = match SurfaceDimensions::for_viewport(viewport) {
         Ok(dimensions) => dimensions,
-        Err(reason) => return RetainedOverscanOutcome::Rejected { reason },
+        Err(reason) => return RetainedOverscanOutcome::Rejected { reason }.into(),
     };
     let view = OverscanPaintView {
         raw_layout,
@@ -3944,12 +4003,20 @@ pub(crate) fn paint_layout_with_vertical_overscan(
     };
     let validated_plan = match plan.resolve(viewport, dimensions, 1, None, None) {
         Ok(plan) => plan,
-        Err(reason) => return RetainedOverscanOutcome::Rejected { reason },
+        Err(reason) => return RetainedOverscanOutcome::Rejected { reason }.into(),
     };
     let (plan, preflight) =
         match preflight_vertical_overscan(view, resolver, dimensions, plan, validated_plan) {
             Ok(result) => result,
-            Err((plan, reason)) => return view.fallback(resolver, &plan, reason, 0),
+            Err((plan, reason)) => {
+                let fallback_is_current =
+                    canonical_scroll == Some((plan.document_x, plan.sample_y[plan.current_index]));
+                return RetainedOverscanPaintResult {
+                    outcome: view.fallback(resolver, &plan, reason, 0),
+                    canonical: None,
+                    fallback_is_current,
+                };
+            }
         };
     let plan = match plan.resolve(
         viewport,
@@ -3959,9 +4026,11 @@ pub(crate) fn paint_layout_with_vertical_overscan(
         Some(preflight.document_layers.as_ref()),
     ) {
         Ok(plan) => plan,
-        Err(reason) => return RetainedOverscanOutcome::Rejected { reason },
+        Err(reason) => return RetainedOverscanOutcome::Rejected { reason }.into(),
     };
-    capture_vertical_overscan(
+    let fallback_is_current =
+        canonical_scroll == Some((plan.document_x, plan.sample_y[plan.current_index]));
+    let (outcome, canonical) = capture_vertical_overscan(
         view,
         resolver,
         plan,
@@ -3969,7 +4038,13 @@ pub(crate) fn paint_layout_with_vertical_overscan(
         preflight.filters,
         preflight.document_layers,
         preflight.current_frame,
-    )
+        fallback_is_current,
+    );
+    RetainedOverscanPaintResult {
+        outcome,
+        canonical,
+        fallback_is_current,
+    }
 }
 
 fn preflight_vertical_overscan(
@@ -4012,7 +4087,8 @@ fn capture_vertical_overscan(
     filters: FilterSourcePlan,
     document_layers: Arc<RetainedLayerPlan>,
     current_frame: Option<(ExtractionPlan, RetainedPaintFrame)>,
-) -> RetainedOverscanOutcome {
+    want_canonical: bool,
+) -> (RetainedOverscanOutcome, Option<Canvas>) {
     let current_y = plan.sample_y[plan.current_index];
     let current = match current_frame {
         Some((mut current_plan, frame)) => {
@@ -4021,7 +4097,7 @@ fn capture_vertical_overscan(
             // complete overscan plan resolves, matching normal sample order.
             if let Err(reason) = current_plan.install_document_layers(Arc::clone(&document_layers))
             {
-                return view.fallback(resolver, &plan, reason, 0);
+                return (view.fallback(resolver, &plan, reason, 0), None);
             }
             RetainedPaintOutcome::Extracted(frame)
         }
@@ -4040,16 +4116,42 @@ fn capture_vertical_overscan(
             reason,
             discarded_runs,
         } => {
-            return RetainedOverscanOutcome::Fallback {
-                canvas,
-                reason,
-                discarded_tiles: discarded_runs,
-            };
+            return (
+                RetainedOverscanOutcome::Fallback {
+                    canvas,
+                    reason,
+                    discarded_tiles: discarded_runs,
+                },
+                None,
+            );
         }
         RetainedPaintOutcome::Rejected { reason } => {
-            return RetainedOverscanOutcome::Rejected { reason };
+            return (RetainedOverscanOutcome::Rejected { reason }, None);
         }
     };
+    let canonical = want_canonical.then(|| frame.compose());
+    let outcome = collect_vertical_overscan_samples(
+        view,
+        resolver,
+        plan,
+        sticky,
+        filters,
+        document_layers,
+        frame,
+    );
+    (outcome, canonical)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_vertical_overscan_samples(
+    view: OverscanPaintView<'_>,
+    resolver: &mut StyleResolver,
+    plan: ResolvedVerticalOverscanPlan,
+    sticky: StickyPlan,
+    filters: FilterSourcePlan,
+    document_layers: Arc<RetainedLayerPlan>,
+    frame: RetainedPaintFrame,
+) -> RetainedOverscanOutcome {
     let current_runs = frame.runs.len();
     let mut builder = match OverscanBuilder::from_current(frame, plan.clone()) {
         Ok(builder) => builder,

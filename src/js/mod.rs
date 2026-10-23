@@ -9792,25 +9792,17 @@ impl JsRuntime {
         let ((canvas, raster_summary), image_reports) = image_environment.run(false, || {
             crate::layout::with_image_base_url(base, || {
                 crate::layout::with_image_animation_time(animation_time, || {
-                    let painted = nested_rendering::paint_layout_with_snapshot_attribution(
+                    self.retained_scroll.paint_current(
+                        retained_request,
                         diagnostics_enabled,
                         &layout,
                         resolver,
                         viewport,
                         &entry.web_fonts,
-                        visited_link_ids.iter().copied(),
-                        &snapshots,
-                        Some(shadow_masks),
-                    );
-                    self.retained_scroll.capture(
-                        retained_request,
-                        resolver,
-                        &entry.web_fonts,
                         &visited_link_ids,
                         &snapshots,
                         shadow_masks,
-                    );
-                    painted
+                    )
                 })
             })
         });
