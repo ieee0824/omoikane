@@ -18,6 +18,8 @@ struct Observers {
 struct Observer {
     selector: Selector,
     nonlocal: bool,
+    // A subject whose match can change is strictly below the state node.
+    subject_is_descendant: bool,
 }
 
 /// Bounded owner-visible result of a user-action cache invalidation.
@@ -107,12 +109,13 @@ impl Observers {
                 }],
             },
             nonlocal: false,
+            subject_is_descendant: false,
         });
     }
 
     fn selector(&mut self, selector: &Selector, state: &str, nested: bool) {
-        let previous_subjects = self.subjects.len();
-        for part in &selector.parts {
+        for (index, part) in selector.parts.iter().enumerate() {
+            let previous_subjects = self.subjects.len();
             if part.simples.iter().any(|simple| {
                 matches!(simple, SimpleSelector::PseudoClass(name) if name.eq_ignore_ascii_case(state))
             }) {
@@ -144,14 +147,31 @@ impl Observers {
                     _ => {}
                 }
             }
+            self.extend_subjects(previous_subjects, &selector.parts[index + 1..]);
         }
-        if selector.parts.iter().any(|part| {
-            matches!(
-                part.combinator,
-                Some(Combinator::AdjacentSibling | Combinator::GeneralSibling)
-            )
-        }) {
-            self.mark_new_nonlocal(previous_subjects);
+    }
+
+    fn extend_subjects(&mut self, start: usize, suffix: &[SelectorPart]) {
+        let Some(observers) = self.subjects.get_mut(start..) else {
+            return;
+        };
+        for observer in observers {
+            // Only a sibling step at the changed node's level can leave its
+            // subtree. Once descended, later sibling steps remain inside it.
+            // Nested boolean selectors retain the relationship already proven for
+            // their candidate. A nonlocal inner dependency cannot be repaired
+            // by a later descendant step.
+            for part in suffix {
+                match part.combinator {
+                    Some(Combinator::Child | Combinator::Descendant) => {
+                        observer.subject_is_descendant = true;
+                    }
+                    Some(Combinator::AdjacentSibling | Combinator::GeneralSibling) => {
+                        observer.nonlocal |= !observer.subject_is_descendant;
+                    }
+                    None => observer.nonlocal = true,
+                }
+            }
         }
     }
 

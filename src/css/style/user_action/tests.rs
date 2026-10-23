@@ -692,3 +692,136 @@ fn functional_sibling_and_has_arguments_keep_full_invalidation_and_cold_results(
         }
     }
 }
+
+#[test]
+fn contained_sibling_hover_keeps_local_caches_and_matches_cold_cascade() {
+    for selector in [
+        "div + a:hover",
+        "div + :is(a:hover)",
+        ":where(div + a:hover)",
+        "a:hover > span + em",
+        "a:hover span ~ em",
+        ":is(a:hover > span) + em",
+        ":not(a:hover > span) + em",
+        ":where(:is(a:hover > span)) + em",
+        "div + a:hover > span + em",
+    ] {
+        let document = NodeHandle::document();
+        let root = NodeHandle::element("main");
+        let anchor = NodeHandle::element("a");
+        let child = NodeHandle::element("span");
+        let aside = NodeHandle::element("aside");
+        let prefix = NodeHandle::element("div");
+        let sibling = NodeHandle::element("em");
+        document.append_child(root.clone());
+        root.append_child(prefix.clone());
+        root.append_child(anchor.clone());
+        anchor.append_child(child.clone());
+        anchor.append_child(sibling.clone());
+        root.append_child(aside.clone());
+        let nodes = [root, prefix, anchor.clone(), child, sibling, aside.clone()];
+        let css = format!(
+            "*{{width:3px;color:blue}}{selector}{{width:17px;color:red}}*::before{{content:'marker'}}"
+        );
+        let mut cached = resolver(&css);
+        let original = nodes
+            .iter()
+            .map(|node| cached.computed_style_shared(node))
+            .collect::<Vec<_>>();
+        for node in &nodes {
+            cached.computed_pseudo_style_shared(node, PseudoElement::Before);
+        }
+        for enabled in [true, false] {
+            let unrelated = cached.computed_style_shared(&aside);
+            anchor.set_user_action_state("hover", enabled);
+            let outcome = cached.invalidate_user_action_styles(&[(anchor.clone(), "hover")]);
+            let mut cold = resolver(&css);
+            let mut changed = false;
+            for (node, original) in nodes.iter().zip(&original) {
+                let actual = cached.computed_style_shared(node);
+                assert_eq!(
+                    actual,
+                    cold.computed_style_shared(node),
+                    "{selector}, hover={enabled}"
+                );
+                changed |= actual != *original;
+                assert_eq!(
+                    cached.computed_pseudo_style_shared(node, PseudoElement::Before),
+                    cold.computed_pseudo_style_shared(node, PseudoElement::Before),
+                    "pseudo {selector}, hover={enabled}"
+                );
+            }
+            assert_eq!(
+                changed, enabled,
+                "{selector}: fixture must visibly change then restore"
+            );
+            assert_eq!(
+                cached
+                    .computed_pseudo_style_shared(&anchor, PseudoElement::Before)
+                    .unwrap()
+                    .get("content"),
+                Some(&ComputedValue::String("marker".into()))
+            );
+            assert_eq!(outcome, UserActionStyleInvalidation::Local, "{selector}");
+            assert!(
+                Arc::ptr_eq(&unrelated, &cached.computed_style_shared(&aside)),
+                "{selector}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_siblings_cannot_become_local_after_later_descendant_steps() {
+    for selector in [
+        ":is(a:hover + aside) > span",
+        ":is(a:hover, a:hover > span) + aside",
+        ":not(a:hover) + aside",
+        ":where(a:hover ~ aside) > span",
+    ] {
+        let document = NodeHandle::document();
+        let root = NodeHandle::element("main");
+        let anchor = NodeHandle::element("a");
+        let aside = NodeHandle::element("aside");
+        let child = NodeHandle::element("span");
+        document.append_child(root.clone());
+        root.append_child(anchor.clone());
+        root.append_child(aside.clone());
+        aside.append_child(child.clone());
+        let nodes = [root, anchor.clone(), aside.clone(), child];
+        let css = format!("*{{width:3px}}{selector}{{width:17px;color:red}}");
+        let mut cached = resolver(&css);
+        let original = nodes
+            .iter()
+            .map(|node| cached.computed_style_shared(node))
+            .collect::<Vec<_>>();
+        for enabled in [true, false] {
+            let before_aside = cached.computed_style_shared(&aside);
+            anchor.set_user_action_state("hover", enabled);
+            assert_eq!(
+                cached.invalidate_user_action_styles(&[(anchor.clone(), "hover")]),
+                UserActionStyleInvalidation::Full("fallback_nonlocal_selector"),
+                "{selector}"
+            );
+            assert!(
+                !Arc::ptr_eq(&before_aside, &cached.computed_style_shared(&aside)),
+                "{selector}"
+            );
+            let mut cold = resolver(&css);
+            let mut changed = false;
+            for (node, original) in nodes.iter().zip(&original) {
+                let actual = cached.computed_style_shared(node);
+                assert_eq!(
+                    actual,
+                    cold.computed_style_shared(node),
+                    "{selector}, hover={enabled}"
+                );
+                changed |= actual != *original;
+            }
+            assert_eq!(
+                changed, enabled,
+                "{selector}: fixture must visibly change then restore"
+            );
+        }
+    }
+}
