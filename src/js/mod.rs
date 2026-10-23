@@ -7018,6 +7018,7 @@ impl HostState {
     /// Invalidates the scroll-adjusted paint geometry while retaining the
     /// layout tree when the invalidation does not require reflow.
     fn invalidate_paint_cache(&mut self) {
+        self.invalidate_child_media_query_inputs();
         self.invalidate_layout_metrics_cache();
         self.paint_generation = self.paint_generation.saturating_add(1);
         self.adjusted_layout_cache = None;
@@ -7025,6 +7026,7 @@ impl HostState {
 
     /// Drops cached layout and records its cause in opt-in paint traces.
     fn invalidate_layout_root(&mut self, reason: &'static str) {
+        self.invalidate_child_media_query_inputs();
         static TRACE_PAINT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if self.layout_root.is_some()
             && *TRACE_PAINT.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_PAINT").is_some())
@@ -7661,6 +7663,7 @@ impl HostState {
     }
 
     fn queue_window_resize(&mut self, document_id: usize) {
+        self.pending_media_query_report = true;
         Self::queue_document_once(&mut self.pending_window_resize_documents, document_id);
     }
 
@@ -7711,6 +7714,7 @@ impl HostState {
                     self.queue_window_resize(document_id);
                     self.queue_visual_viewport_resize(document_id);
                 }
+                None => self.pending_media_query_report = true,
                 _ => {}
             }
         }
@@ -15721,10 +15725,13 @@ fn ensure_iframe_realm(
     let viewport = host_state
         .borrow_mut()
         .visual_viewport_for_document(&document);
-    host_state
-        .borrow_mut()
-        .observed_iframe_viewports
-        .insert(document_id, (viewport.width, viewport.height));
+    {
+        let mut state = host_state.borrow_mut();
+        state
+            .observed_iframe_viewports
+            .insert(document_id, (viewport.width, viewport.height));
+        state.pending_media_query_report = true;
+    }
     form_state::restore_pending_document(host_state, document_id, context)?;
     Ok(realm)
 }
@@ -20331,11 +20338,13 @@ fn visual_viewport_state_native(
         let viewport = state.visual_viewport_for_document(&document);
         if document_id != state.document.identity() {
             let next = (viewport.width, viewport.height);
-            if let Some(previous) = state.observed_iframe_viewports.insert(document_id, next)
-                && previous != next
-            {
-                state.queue_window_resize(document_id);
-                state.queue_visual_viewport_resize(document_id);
+            match state.observed_iframe_viewports.insert(document_id, next) {
+                Some(previous) if previous != next => {
+                    state.queue_window_resize(document_id);
+                    state.queue_visual_viewport_resize(document_id);
+                }
+                None => state.pending_media_query_report = true,
+                _ => {}
             }
         }
         let scroll = state.window_scroll_for_document(document_id);

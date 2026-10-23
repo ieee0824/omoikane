@@ -27031,6 +27031,20 @@ export const __omoikane_service_worker_lifecycle = {};
   };
 
   const mediaQueryListRefs = [];
+  let mediaQueryReportingDepth = 0;
+  let mediaQueryPruneAt = 64;
+  // Reporting need not run on unchanged frames. Bound dead WeakRef metadata
+  // during creation too, without compacting a report's in-flight iteration.
+  function pruneMediaQueryReferences() {
+    if (mediaQueryReportingDepth || mediaQueryListRefs.length < mediaQueryPruneAt) return;
+    let kept = 0;
+    for (let index = 0; index < mediaQueryListRefs.length; index++) {
+      const entry = mediaQueryListRefs[index];
+      if (weakRefDeref(entry)) mediaQueryListRefs[kept++] = entry;
+    }
+    mediaQueryListRefs.length = kept;
+    mediaQueryPruneAt = kept > 32 ? kept * 2 : 64;
+  }
   const mediaQueryListConstructionToken = {};
   const mediaQueryListMedia = new WeakMap();
 
@@ -27108,22 +27122,29 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   globalThis.matchMedia = function(query) {
+    pruneMediaQueryReferences();
     const list = new MediaQueryList(query, mediaQueryListConstructionToken);
-    mediaQueryListRefs.push(typeof WeakRef === "function" ? new WeakRef(list) : list);
+    mediaQueryListRefs.push(new IntrinsicWeakRef(list));
     return list;
   };
   globalThis.__omoikane_media_query_viewport_changed = function() {
-    // Do not process lists created by a callback until the next report cycle.
-    let limit = mediaQueryListRefs.length;
-    for (let index = 0; index < limit; index++) {
-      const entry = mediaQueryListRefs[index];
-      const list = typeof WeakRef === "function" ? entry.deref() : entry;
-      if (list) list.__reevaluate();
-      else {
-        mediaQueryListRefs.splice(index, 1);
-        index--;
-        limit--;
+    mediaQueryReportingDepth++;
+    try {
+      // Do not process lists created by a callback until the next report cycle.
+      let limit = mediaQueryListRefs.length;
+      for (let index = 0; index < limit; index++) {
+        const entry = mediaQueryListRefs[index];
+        const list = weakRefDeref(entry);
+        if (list) list.__reevaluate();
+        else {
+          mediaQueryListRefs.splice(index, 1);
+          index--;
+          limit--;
+        }
       }
+    } finally {
+      mediaQueryReportingDepth--;
+      mediaQueryPruneAt = mediaQueryListRefs.length > 32 ? mediaQueryListRefs.length * 2 : 64;
     }
   };
   globalThis.MediaQueryList = MediaQueryList;

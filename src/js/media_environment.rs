@@ -77,18 +77,30 @@ impl JsRuntime {
     }
 
     pub(super) fn report_media_query_changes(&mut self) -> JsResult<()> {
-        self.host_state.borrow_mut().pending_media_query_report = false;
+        if !std::mem::take(&mut self.host_state.borrow_mut().pending_media_query_report) {
+            return Ok(());
+        }
         for document_id in self.media_document_ids() {
-            self.eval_in_document_realm(
+            if let Err(error) = self.eval_in_document_realm(
                 document_id,
                 "globalThis.__omoikane_media_query_viewport_changed();",
-            )?;
+            ) {
+                self.host_state.borrow_mut().pending_media_query_report = true;
+                return Err(error);
+            }
         }
         Ok(())
     }
 }
 
 impl HostState {
+    /// A dirty scene can change descendant iframe viewports. Keep a rendering
+    /// opportunity even when the mutation occurs after this frame's reports.
+    /// This is conservative for paint-only changes; unchanged scenes stay idle.
+    pub(super) fn invalidate_child_media_query_inputs(&mut self) {
+        self.pending_media_query_report |= !self.iframe_documents.is_empty();
+    }
+
     /// Resolves one display snapshot for every document in this presentation.
     /// The host's virtual display uses the top-level viewport when no native
     /// screen size is provided, independently of iframe viewport dimensions.
@@ -236,5 +248,76 @@ mod tests {
         assert_eq!(runtime.next_rendering(), NextRendering::EveryFrame);
         runtime.run_animation_frame(16).unwrap();
         assert_eq!(runtime.next_rendering(), NextRendering::Idle);
+    }
+    #[test]
+    fn iframe_resize_after_raf_keeps_a_reporting_opportunity() {
+        use crate::cdp::NextRendering;
+        let document = crate::html::TreeBuilder::parse(
+            "<body><div id=container style='width:200px'><iframe id=child style='width:100%;border:0'></iframe></div></body>",
+        ).document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.set_viewport(800.0, 600.0);
+        runtime.eval(r#"
+          globalThis.mediaChanges=[];
+          globalThis.child=document.getElementById('child').contentWindow;
+          child.eval("globalThis.query=matchMedia('(max-width:200px)');query.onchange=e=>parent.mediaChanges.push(e.matches)");
+        "#).unwrap();
+        for _ in 0..3 {
+            runtime.run_animation_frame(16).unwrap();
+        }
+        assert_eq!(runtime.next_rendering(), NextRendering::Idle);
+        runtime.eval("requestAnimationFrame(()=>document.getElementById('container').style.width='400px')").unwrap();
+        runtime.run_animation_frame(16).unwrap();
+        runtime.paint_current_document().unwrap();
+        assert_eq!(runtime.next_rendering(), NextRendering::EveryFrame);
+        for _ in 0..3 {
+            runtime.run_animation_frame(16).unwrap();
+        }
+        assert!(
+            runtime
+                .eval("JSON.stringify(mediaChanges)==='[false]' && !child.query.matches")
+                .unwrap()
+                .to_boolean()
+        );
+        assert_eq!(runtime.next_rendering(), NextRendering::Idle);
+    }
+
+    #[test]
+    fn media_lists_created_during_reporting_do_not_compact_the_active_iteration() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .eval(
+                r#"
+          globalThis.mediaOrder=[];
+          globalThis.createdChanges=0;
+          globalThis.first=matchMedia('(prefers-reduced-motion: reduce)');
+          first.onchange=()=>{
+            mediaOrder.push('first');
+            for(let i=0;i<1;i++){
+              matchMedia('(prefers-reduced-motion: reduce)').onchange=()=>createdChanges++;
+            }
+          };
+          for(let i=0;i<126;i++)matchMedia('all');
+          globalThis.last=matchMedia('(prefers-reduced-motion: reduce)');
+          last.onchange=()=>mediaOrder.push('last');
+        "#,
+            )
+            .unwrap();
+        runtime.context.clear_kept_objects();
+        boa_gc::force_collect();
+        let baseline = runtime.media_environment();
+        let mut reduced = baseline.clone();
+        reduced.set_feature("prefers-reduced-motion", "reduce");
+        runtime.set_media_environment(reduced).unwrap();
+        runtime.run_animation_frame(16).unwrap();
+        assert!(
+            runtime
+                .eval("JSON.stringify(mediaOrder)==='[\"first\",\"last\"]' && createdChanges===0")
+                .unwrap()
+                .to_boolean()
+        );
+        runtime.set_media_environment(baseline).unwrap();
+        runtime.run_animation_frame(16).unwrap();
+        assert!(runtime.eval("JSON.stringify(mediaOrder)==='[\"first\",\"last\",\"first\",\"last\"]' && createdChanges===1").unwrap().to_boolean());
     }
 }

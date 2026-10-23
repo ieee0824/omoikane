@@ -1224,3 +1224,105 @@ fn media_query_event_identity_does_not_depend_on_page_reflect_apply() {
         Some(true)
     );
 }
+
+#[test]
+fn unchanged_frames_skip_media_reporting_but_viewport_changes_notify_once() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_viewport(800.0, 600.0);
+    runtime
+        .eval(
+            r#"
+      globalThis.changes=[];
+      globalThis.list=matchMedia('(max-width:600px)');
+      list.onchange=e=>changes.push(e.matches);
+    "#,
+        )
+        .unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    runtime
+        .eval(
+            r#"
+      globalThis.mediaReports=0;
+      const reportMedia=globalThis.__omoikane_media_query_viewport_changed;
+      globalThis.__omoikane_media_query_viewport_changed=function(){
+        mediaReports++;return reportMedia();
+      };
+    "#,
+        )
+        .unwrap();
+    for _ in 0..20 {
+        runtime.run_animation_frame(16).unwrap();
+    }
+    assert_eq!(runtime.eval("mediaReports").unwrap().as_number(), Some(0.0));
+    runtime.set_viewport(500.0, 600.0);
+    assert!(
+        runtime
+            .eval("list.matches && changes.length===0")
+            .unwrap()
+            .to_boolean()
+    );
+    runtime.run_animation_frame(16).unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    assert!(
+        runtime
+            .eval("mediaReports===1 && JSON.stringify(changes)==='[true]'")
+            .unwrap()
+            .to_boolean()
+    );
+}
+
+#[test]
+fn iframe_media_change_survives_visual_viewport_read_before_reporting() {
+    let mut runtime = JsRuntime::with_document(
+        TreeBuilder::parse(
+            "<body><iframe id=child width=200 height=100 style='border:0'></iframe></body>",
+        )
+        .document(),
+    )
+    .unwrap();
+    runtime.eval(r#"
+      globalThis.frame=document.getElementById('child');
+      globalThis.child=frame.contentWindow;
+      child.eval("globalThis.events=[];globalThis.query=matchMedia('(max-width:200px)');query.onchange=e=>events.push(e.matches)");
+    "#).unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    runtime
+        .eval("frame.width='400';void child.visualViewport.width")
+        .unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    assert!(
+        runtime
+            .eval("JSON.stringify(child.events)==='[false]' && !child.query.matches")
+            .unwrap()
+            .to_boolean()
+    );
+}
+
+#[test]
+fn media_query_reference_maintenance_uses_intrinsic_weak_refs() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"
+      globalThis.weakRefCalls=0;
+      WeakRef.prototype.deref=function(){weakRefCalls++;throw new Error('page deref');};
+      globalThis.WeakRef=function(){weakRefCalls++;throw new Error('page constructor');};
+      for(let i=0;i<130;i++)matchMedia('all');
+      globalThis.mediaChanges=0;
+      globalThis.query=matchMedia('(prefers-reduced-motion: reduce)');
+      query.onchange=()=>mediaChanges++;
+    "#,
+        )
+        .unwrap();
+    let mut environment = runtime.media_environment();
+    environment.set_feature("prefers-reduced-motion", "reduce");
+    runtime.set_media_environment(environment).unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    assert!(
+        runtime
+            .eval("mediaChanges===1 && weakRefCalls===0 && query.matches")
+            .unwrap()
+            .to_boolean()
+    );
+}
