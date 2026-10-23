@@ -6,6 +6,7 @@ mod class_invalidation;
 mod container_dependency_tests;
 #[cfg(test)]
 mod inherited_lookup_tests;
+mod user_action;
 pub(crate) use animation::StyleClockEffects;
 mod counter_readers;
 mod font_palette;
@@ -830,6 +831,8 @@ pub struct StyleResolver {
     data_attribute_selector_dependencies: HashMap<String, AttributeSelectorDependency>,
     /// Bounded per-class selector reach, cleared when stylesheets change.
     class_selector_dependencies: HashMap<String, class_invalidation::ClassReach>,
+    /// Bounded subjects that can observe changed hover/active/focus flags.
+    user_action_dependencies: user_action::UserActionDependencies,
     /// Whether declarations in the current stylesheet set read a given
     /// `data-*` attribute through `attr()`. This is separate from selector
     /// reach because an unobserved attribute can still affect computed values.
@@ -3095,6 +3098,7 @@ impl StyleResolver {
     ) -> usize {
         self.data_attribute_selector_dependencies.clear();
         self.class_selector_dependencies.clear();
+        self.user_action_dependencies.clear();
         self.data_attribute_value_dependencies.clear();
         self.style_attribute_selector_dependency = self
             .style_attribute_selector_dependency
