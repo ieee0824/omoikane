@@ -3119,7 +3119,11 @@ impl RetainedPaintCollector {
             }
             return Ok(None);
         }
-        let recorded = canvas.take_retained_layers()?;
+        let recorded = if matches!(self.layer_mode, RetainedLayerMode::Plan { .. }) {
+            canvas.take_retained_layers_for_plan()?
+        } else {
+            canvas.take_retained_layers()?
+        };
         if guard.is_some() != recorded.is_some()
             || guard.is_some_and(|guard| guard.load(std::sync::atomic::Ordering::Relaxed))
         {
@@ -3144,7 +3148,9 @@ impl RetainedPaintCollector {
                     return Ok(None);
                 };
                 if layers.len() < 2 {
-                    return Ok(Some(Vec::new()));
+                    // Keep this flat run's ordinary pixels. Planning capacity
+                    // includes all run surfaces, the Canvas and recorder scratch.
+                    return Ok(None);
                 }
                 if runs.iter().any(|run| run.identity == identity) {
                     return Err(RetainedPaintError::TraversalMismatch);
@@ -3386,11 +3392,10 @@ impl RetainedPaintCollector {
                 discarded_runs: self.runs.len(),
             });
         };
-        // Document(0) is painted without a layer recorder. When no fixed or
-        // filter root splits the traversal, its full canvas is already the
-        // exact current sample. Other planning runs contain metadata rather
-        // than captured layer pixels and must still be painted in capture mode.
-        let current_frame = (self.plan.expected_runs == 1).then(|| RetainedPaintFrame {
+        // Runs without sparse layer plans retain their ordinary pixels, even
+        // when fixed roots split traversal. Sparse runs only have planning
+        // metadata and still require a capture traversal.
+        let current_frame = runs.is_empty().then(|| RetainedPaintFrame {
             width: self.plan.width,
             height: self.plan.height,
             runs: self.runs,

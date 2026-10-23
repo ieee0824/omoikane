@@ -272,7 +272,7 @@ fn vertical_overscan_matches_real_painter_between_samples() {
         <div id=c class=band></div><div id=pin></div><div id=late></div>";
     let plan = VerticalOverscanPlan::new(0, 0, 3, 1).unwrap();
     let frame = expect_overscan(overscan_fixture(html, plan, |_| {}));
-    assert_eq!(super::retained_extract::retained_raster_count() - before, 4);
+    assert_eq!(super::retained_extract::retained_raster_count() - before, 3);
     assert_eq!(frame.coverage(), ((0, 0), (0, 64)));
     assert_eq!(frame.current_scroll(), (0, 32));
     assert_eq!(
@@ -3989,4 +3989,102 @@ fn live_gradient_cache_does_not_override_real_retained_capacity_rejection() {
         2,
         "capacity rejection must evict the live tile and release its freeze guard"
     );
+}
+
+#[test]
+fn flat_planning_moves_real_scratch_pixels_and_preserves_guard_checks() {
+    let rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 4.0,
+    };
+    let mut expected = Canvas::new(4, 4);
+    expected.fill_rect(rect, Color::rgba(255, 0, 0, 127));
+    let mut canvas = Canvas::new(4, 4);
+    let guard = canvas.install_layer_planner((0, 0)).unwrap();
+    canvas.fill_rect(rect, Color::rgba(255, 0, 0, 127));
+    assert!(
+        canvas.pixels.iter().all(|byte| *byte == 0),
+        "planning pixels live in scratch"
+    );
+    let (_, layers) = canvas.take_retained_layers_for_plan().unwrap().unwrap();
+    assert_eq!(layers.len(), 1);
+    assert_same_canvas(&canvas, &expected);
+    assert!(!guard.load(std::sync::atomic::Ordering::Relaxed));
+
+    let mut invalid = Canvas::new(4, 4);
+    let guard = invalid.install_layer_planner((0, 0)).unwrap();
+    invalid.fill_rect(rect, Color::rgba(255, 0, 0, 127));
+    let _ = invalid.pixels();
+    assert!(guard.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(matches!(
+        invalid.take_retained_layers_for_plan(),
+        Err(RetainedPaintError::TraversalMismatch)
+    ));
+}
+
+#[test]
+fn overlapping_planning_groups_still_require_sparse_capture() {
+    let rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 4.0,
+    };
+    let mut canvas = Canvas::new(4, 4);
+    canvas.install_layer_planner((0, 0)).unwrap();
+    canvas.fill_rect(rect, Color::rgba(255, 0, 0, 127));
+    canvas.fill_rect(rect, Color::rgba(0, 0, 255, 127));
+    let (_, layers) = canvas.take_retained_layers_for_plan().unwrap().unwrap();
+    assert_eq!(layers.len(), 2);
+    assert!(layers.iter().all(|layer| layer.image.is_none()));
+    assert!(canvas.pixels().iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn flat_planning_preserves_image_playback_regions() {
+    let frame = |red| ImageFrame {
+        image: Image::new(1, 1, vec![red, 0, 0, 127]).unwrap(),
+        delay_ms: 100,
+        disposal: GifDisposal::Keep,
+    };
+    let animation = Arc::new(ImageAnimation {
+        frames: vec![frame(255), frame(128)],
+        delays_ms: vec![100, 100],
+        duration_ms: 200,
+        plays: None,
+    });
+    let image = animation.playback_image(77, "test:flat-plan", 0, 0);
+    let mut expected = Canvas::new(4, 4);
+    expected.draw_image(&image, 1.0, 1.0);
+    let mut planned = Canvas::new(4, 4);
+    planned.install_layer_planner((0, 0)).unwrap();
+    planned.draw_image(&image, 1.0, 1.0);
+    let (_, layers) = planned.take_retained_layers_for_plan().unwrap().unwrap();
+    assert_eq!(layers.len(), 1);
+    assert_eq!(layers[0].animation_count, 1);
+    assert_same_canvas(&planned, &expected);
+    assert_eq!(planned.animation_regions, expected.animation_regions);
+    assert_eq!(planned.image_playbacks().len(), 1);
+    assert_eq!(planned.image_playbacks()[0].document, 77);
+}
+
+#[test]
+fn flat_planning_reuse_keeps_overscan_capacity_fallback() {
+    let mut html = String::from(
+        "<style>*{margin:0;padding:0}body{height:128px}\
+         .fixed{position:fixed;width:1px;height:1px;background:red}</style>",
+    );
+    for _ in 0..32 {
+        html.push_str("<div class=fixed></div>");
+    }
+    let plan = VerticalOverscanPlan::new(0, 0, 3, 1).unwrap();
+    match overscan_fixture(&html, plan, |_| {}) {
+        RetainedOverscanOutcome::Fallback { canvas, reason, .. } => {
+            assert_eq!(reason, RetainedPaintError::Capacity);
+            assert_same_canvas(&canvas, &ordinary_fixture(&html, (0.0, 32.0), |_| {}));
+        }
+        _ => panic!("32 fixed roots must keep the bounded ordinary fallback"),
+    }
 }

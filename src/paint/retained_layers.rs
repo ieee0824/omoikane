@@ -912,12 +912,30 @@ impl Canvas {
         Ok(true)
     }
 
+    /// Finishes planning while transferring a single unsealed group's pixels
+    /// back to the public canvas. Multiple groups still require capture mode.
+    pub(super) fn take_retained_layers_for_plan(
+        &mut self,
+    ) -> Result<Option<(Vec<PlannedPrimitive>, Vec<RetainedDocumentLayer>)>, RetainedPaintError>
+    {
+        self.take_retained_layers_with_options(false, true)
+    }
+
     pub(super) fn take_retained_layers_with_base(
         &mut self,
         preserve_base: bool,
     ) -> Result<Option<(Vec<PlannedPrimitive>, Vec<RetainedDocumentLayer>)>, RetainedPaintError>
     {
-        let Some(recorder) = self.retained_layers.take() else {
+        self.take_retained_layers_with_options(preserve_base, false)
+    }
+
+    fn take_retained_layers_with_options(
+        &mut self,
+        preserve_base: bool,
+        reuse_flat_planning_pixels: bool,
+    ) -> Result<Option<(Vec<PlannedPrimitive>, Vec<RetainedDocumentLayer>)>, RetainedPaintError>
+    {
+        let Some(mut recorder) = self.retained_layers.take() else {
             return Ok(None);
         };
         if (!preserve_base && self.pixels.iter().any(|byte| *byte != 0))
@@ -933,6 +951,22 @@ impl Canvas {
                 )
             });
             return Err(RetainedPaintError::TraversalMismatch);
+        }
+        if reuse_flat_planning_pixels
+            && matches!(recorder.mode, RecorderMode::Plan)
+            && recorder.layers.is_empty()
+        {
+            // No earlier group has sealed, so scratch holds the entire run.
+            // Give the recorder the already-empty public surface before finish
+            // seals metadata and checks guards. Only playback metadata is copied;
+            // its peak is covered by recorder_metadata_peak_bytes.
+            let mut animations = Vec::new();
+            animations
+                .try_reserve_exact(recorder.scratch_animation_regions.len())
+                .map_err(|_| RetainedPaintError::Capacity)?;
+            animations.extend_from_slice(&recorder.scratch_animation_regions);
+            std::mem::swap(&mut self.pixels, &mut recorder.scratch_pixels);
+            self.animation_regions = animations;
         }
         recorder.finish(self.width, self.height).map(Some)
     }
