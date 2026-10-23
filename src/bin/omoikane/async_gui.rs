@@ -24,6 +24,13 @@ struct FindBar {
     document: u64,
 }
 
+/// Canonical pixels retain their Document identity independently of native
+/// scroll authority. A rejected first scene must not restore another page.
+struct CanonicalFrame {
+    document: u64,
+    frame: BrowserFrame,
+}
+
 struct NativeComposedFrame {
     gui_sequence: u64,
     frame: BrowserFrame,
@@ -402,10 +409,18 @@ fn resolve_staged_visual_bundle<C, R, T>(
     retained_scene: &mut Option<R>,
     paint_trace: &mut Option<T>,
     previous: Option<(Option<C>, Option<R>, Option<T>)>,
+    first_document_frame: bool,
 ) -> bool {
     match disposition {
         PublicationReconciliation::Current => true,
         PublicationReconciliation::StaleUpdate | PublicationReconciliation::StaleAcceptance => {
+            if first_document_frame {
+                // Ordinary pixels remain usable even though their scene can
+                // no longer grant native acceptance. Do not restore the old
+                // Document, or trust this rejected retained association.
+                *retained_scene = None;
+                return false;
+            }
             if let Some((frame, retained, trace)) = previous {
                 *canonical_frame = frame;
                 *retained_scene = retained;
@@ -457,7 +472,7 @@ pub(super) struct AsyncBrowserApp {
     window: Option<Arc<Window>>,
     context: Option<Context<Arc<Window>>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
-    frame: Option<BrowserFrame>,
+    frame: Option<CanonicalFrame>,
     native_frame: Option<NativeComposedFrame>,
     retained_scene: Option<RetainedScrollScene>,
     native_scroll: Option<NativeScrollPublication>,
@@ -634,6 +649,7 @@ impl AsyncBrowserApp {
         }
     }
 
+    // A metadata-only update can still retire a displayed native composition.
     fn update_changes_visible_content(&self, update: &PageUpdate) -> bool {
         update.frame.is_some()
             || self.native_frame.is_some()
@@ -643,6 +659,8 @@ impl AsyncBrowserApp {
             || (!self.url_bar.is_editing() && self.url_bar.page_url() != update.url)
     }
 
+    // Exposure/resize/font notifications request their own OS redraws. Inputs
+    // still reach the owner FIFO and request frames even when pixels stay put.
     fn redraw_visible_content(&self, changed: bool) {
         if changed || self.native_frame.is_some() {
             if let Some(window) = &self.window {
@@ -651,7 +669,20 @@ impl AsyncBrowserApp {
         }
     }
 
+    fn needs_first_document_frame(&self, update: &PageUpdate) -> bool {
+        update.frame.is_some()
+            && update
+                .native_scroll
+                .as_ref()
+                .is_none_or(|publication| publication.document == update.document_generation)
+            && self
+                .frame
+                .as_ref()
+                .is_none_or(|canonical| canonical.document != update.document_generation)
+    }
+
     fn apply_update(&mut self, update: PageUpdate) {
+        let first_document_frame = self.needs_first_document_frame(&update);
         let redraw_required = self.update_changes_visible_content(&update);
         // A failed page task does not itself change the committed input
         // contract. Every update below still revalidates live owner authority;
@@ -717,6 +748,10 @@ impl AsyncBrowserApp {
         }
         let native_scroll = update.native_scroll.filter(|_| ingress_drained);
         let pending_visual_bundle = update.frame.map(|frame| {
+            let frame = CanonicalFrame {
+                document: update.document_generation,
+                frame,
+            };
             let retained_scene = update
                 .retained_scene
                 .filter(|scene| viewport_matches && scene.document_generation() == self.document);
@@ -747,7 +782,9 @@ impl AsyncBrowserApp {
                 &mut self.retained_scene,
                 &mut self.pending_paint_trace,
                 previous_visual_bundle,
+                first_document_frame,
             );
+            self.trace_visual_commit(&publication, publication_disposition, first_document_frame);
             if visual_bundle_is_current {
                 publication_disposition =
                     self.recompose_native_frame_after_scene_commit(&publication);
@@ -833,6 +870,25 @@ impl AsyncBrowserApp {
             self.queue_frame(true);
         }
         self.queue_native_scroll_recovery();
+    }
+
+    fn trace_visual_commit(
+        &self,
+        publication: &NativeScrollPublication,
+        disposition: PublicationReconciliation,
+        first_document_frame: bool,
+    ) {
+        if self.trace_input {
+            omoikane::diagnostics::input_probe(json!({
+                "event": "visual_commit", "document": self.document,
+                "publication_document": publication.document,
+                "publication_sequence": publication.publication_sequence,
+                "disposition": format!("{disposition:?}"),
+                "first_document_frame": first_document_frame,
+                "canonical_document": self.frame.as_ref().map(|canonical| canonical.document),
+                "retained_document": self.retained_scene.as_ref().map(|scene| scene.document_generation()),
+            }));
+        }
     }
 
     fn native_scroll_authority_is_current(&self) -> bool {
@@ -1008,7 +1064,7 @@ impl AsyncBrowserApp {
             .native_frame
             .as_ref()
             .map(|native| &native.frame)
-            .or(self.frame.as_ref());
+            .or(self.frame.as_ref().map(|canonical| &canonical.frame));
         if let Some(frame) = visible_frame.filter(|_| page.height > 0) {
             blit_scaled(
                 frame.pixels(),
@@ -1036,7 +1092,8 @@ impl AsyncBrowserApp {
         if !native_valid {
             self.native_frame = None;
             target[rows.clone()].fill(0x00ff_ffff);
-            if let Some(frame) = self.frame.as_ref().filter(|_| page.height > 0) {
+            if let Some(canonical) = self.frame.as_ref().filter(|_| page.height > 0) {
+                let frame = &canonical.frame;
                 blit_scaled(
                     frame.pixels(),
                     (frame.width(), frame.height()),
@@ -3123,6 +3180,73 @@ mod native_scroll_gui_contract_tests {
         ));
     }
 
+    fn first_document_frame_race_keeps_canonical_pixels(acceptance_race: bool) {
+        let (handle, key) = ready_native_scroll_handle();
+        let pending = test_publication(&handle, key, 2, test_scene(&handle, key, 2, 0));
+        let mut pixels = Some((key.document - 1, 1_u8));
+        let mut retained = Some(11_u8);
+        let mut trace = Some(21_u8);
+        let previous = Some(stage_visual_bundle(
+            &mut pixels,
+            &mut retained,
+            &mut trace,
+            ((key.document, 2), Some(12), Some(22)),
+        ));
+        if acceptance_race {
+            handle.close_acceptance();
+        } else {
+            handle.revoke_policy();
+        }
+        let gate = handle.publication_gate();
+        let mut native_pixels = None::<u8>;
+        let mut requires_fresh_scene = false;
+        let mut recovery = NativeScrollRecovery::default();
+        let disposition = commit_native_scroll_publication(
+            &pending,
+            true,
+            &mut native_pixels,
+            &mut requires_fresh_scene,
+            &mut recovery,
+        );
+        assert_eq!(disposition, PublicationReconciliation::StaleUpdate);
+        assert!(!resolve_staged_visual_bundle(
+            disposition,
+            &mut pixels,
+            &mut retained,
+            &mut trace,
+            previous,
+            true,
+        ));
+        assert_eq!(
+            pixels,
+            Some((key.document, 2)),
+            "a new Document must replace the previous page"
+        );
+        assert_eq!(
+            retained, None,
+            "a rejected scene must not grant composition authority"
+        );
+        assert_eq!(trace, Some(22));
+        assert_eq!(native_pixels, None);
+        assert_eq!(handle.publication_gate(), gate);
+        assert!(!handle.publication_is_current(
+            key,
+            pending.policy_epoch,
+            pending.acceptance_epoch,
+            PublicationSequence::new(2),
+        ));
+    }
+
+    #[test]
+    fn first_document_frame_survives_policy_race_without_granting_scene_authority() {
+        first_document_frame_race_keeps_canonical_pixels(false);
+    }
+
+    #[test]
+    fn first_document_frame_survives_acceptance_race_without_granting_scene_authority() {
+        first_document_frame_race_keeps_canonical_pixels(true);
+    }
+
     #[test]
     fn pending_commit_replays_an_accepted_default_without_advancing_early() {
         use omoikane::js::native_scroll::{Offset, ScrollDecision};
@@ -3175,6 +3299,7 @@ mod native_scroll_gui_contract_tests {
             &mut retained_pixels,
             &mut paint_trace,
             previous_visual_bundle,
+            false,
         ));
         assert_eq!(canonical_pixels, Some(2));
         assert_eq!(retained_pixels, Some(12));
@@ -3241,6 +3366,7 @@ mod native_scroll_gui_contract_tests {
             &mut retained_pixels,
             &mut paint_trace,
             previous_visual_bundle,
+            false,
         ));
         assert_eq!(canonical_pixels, Some(1));
         assert_eq!(retained_pixels, Some(11));
@@ -3470,6 +3596,7 @@ mod native_scroll_gui_contract_tests {
             &mut retained_pixels,
             &mut paint_trace,
             previous_visual_bundle,
+            false,
         ));
         assert_eq!(canonical_pixels, Some(2));
         assert_eq!(retained_pixels, None);
