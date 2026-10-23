@@ -964,7 +964,8 @@ impl AsyncBrowserApp {
     }
 
     fn present(&mut self) {
-        let started = self.pending_paint_trace.as_ref().map(|_| Instant::now());
+        let started = (self.trace_paint_started.is_some() || self.pending_paint_trace.is_some())
+            .then(Instant::now);
         let layout = self.layout();
         let page = layout.page();
         let toolbar = layout.toolbar();
@@ -1033,6 +1034,27 @@ impl AsyncBrowserApp {
             eprintln!("surface present failed: {error}");
             return;
         }
+        self.trace_surface_present(started, native_valid, layout);
+    }
+
+    /// Records every completed GUI transfer, including transfers without a new
+    /// page raster. Existing PAINT records remain limited to new page frames.
+    fn trace_surface_present(
+        &mut self,
+        started: Option<Instant>,
+        native_valid: bool,
+        layout: ChromeLayout,
+    ) {
+        let surface_trace = self.trace_paint_started.and_then(|origin| {
+            started.map(|started| {
+                (
+                    origin.elapsed().as_millis(),
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    self.pending_paint_trace.is_some(),
+                    self.native_frame.is_some(),
+                )
+            })
+        });
         if self.trace_input {
             if let Some(native) = self.native_frame.as_ref() {
                 let input = native.accepted.input();
@@ -1066,6 +1088,21 @@ impl AsyncBrowserApp {
         if self.frame.is_some() && !self.initial_navigation_pending && self.first_page_redraw {
             self.trace_startup("first_page_redraw_attempted");
             self.first_page_redraw = false;
+        }
+        if let Some((elapsed_ms, present_ms, page_paint, native_composition)) = surface_trace {
+            eprintln!(
+                "{}",
+                omoikane::diagnostics::json_record(
+                    "OMOIKANE_SURFACE_PRESENT",
+                    &json!({
+                        "elapsed_ms": elapsed_ms, "present_ms": present_ms,
+                        "page_paint": page_paint, "native_composition": native_composition,
+                        "page_paint_sequence": self.paint_sequence,
+                        "scale": layout.scale().factor(),
+                        "surface_size": [layout.page().width, layout.toolbar().height + layout.page().height],
+                    })
+                )
+            );
         }
     }
 
