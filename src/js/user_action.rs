@@ -166,14 +166,40 @@ impl ActionChanges {
     fn invalidate(self, state: &mut HostState, kind: &str) {
         let affected_documents = self.documents.len();
         let mut invalidated_documents = 0;
+        let mut local_documents = 0;
+        let mut full_documents = 0;
+        let mut cache_outcomes = std::collections::BTreeMap::<&'static str, usize>::new();
         for changes in self.documents.into_values() {
-            let needs_style = state
+            let outcome = state
                 .document_styles
                 .get_mut(&changes.document.identity())
                 .and_then(|entry| entry.resolver.as_mut())
-                .is_none_or(|resolver| resolver.invalidate_user_action_selectors(&changes.flags));
-            if needs_style {
-                state.invalidate_document_style_cache(&changes.document);
+                .map_or(
+                    crate::css::style::UserActionStyleInvalidation::Full("deferred_resolver"),
+                    |resolver| resolver.invalidate_user_action_styles(&changes.flags),
+                );
+            if outcome.changed() {
+                *cache_outcomes.entry(outcome.label()).or_default() += 1;
+                if outcome.is_full() {
+                    full_documents += 1;
+                    task_diagnostics::record_other_full();
+                } else {
+                    local_documents += 1;
+                    task_diagnostics::record_local_user_action_invalidation();
+                }
+                for (node, _) in &changes.flags {
+                    frame_diagnostics::record_style_cache_invalidation(
+                        changes.document.identity(),
+                        node.identity(),
+                        outcome.label(),
+                    );
+                }
+                state.form_validation.invalidate();
+                if let Some(entry) = state.document_styles.get_mut(&changes.document.identity()) {
+                    entry.needs_full_sample = true;
+                    entry.child_layout = None;
+                }
+                state.invalidate_document_style_outputs(&changes.document, false);
                 invalidated_documents += 1;
             }
         }
@@ -186,7 +212,9 @@ impl ActionChanges {
                 crate::diagnostics::json_record(
                     "OMOIKANE_USER_ACTION",
                     &serde_json::json!({"kind": kind, "affected_documents": affected_documents,
-                    "invalidated_documents": invalidated_documents})
+                    "invalidated_documents": invalidated_documents,
+                    "local_documents": local_documents, "full_documents": full_documents,
+                    "cache_outcomes": cache_outcomes})
                 )
             );
         }

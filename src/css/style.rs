@@ -8,6 +8,7 @@ mod container_dependency_tests;
 mod inherited_lookup_tests;
 mod user_action;
 pub(crate) use animation::StyleClockEffects;
+pub(crate) use user_action::UserActionStyleInvalidation;
 mod counter_readers;
 mod font_palette;
 mod forced_colors;

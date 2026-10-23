@@ -23,6 +23,7 @@ struct TaskStyleInvalidationCounts {
     local: u32,
     local_raw_style_subject: u32,
     local_data_attribute: u32,
+    local_user_action: u32,
     deferred_resolver: u32,
     fallback_raw_style_selector: u32,
     fallback_active_transition: u32,
@@ -68,6 +69,7 @@ impl TaskStyleInvalidationCounts {
             "local": self.local,
             "local_raw_style_subject": self.local_raw_style_subject,
             "local_data_attribute": self.local_data_attribute,
+            "local_user_action": self.local_user_action,
             "deferred_resolver": self.deferred_resolver,
             "fallback_raw_style_selector": self.fallback_raw_style_selector,
             "fallback_active_transition": self.fallback_active_transition,
@@ -151,6 +153,19 @@ fn record_inline_style_invalidation_active(outcome: &str) {
 pub(super) fn record_inline_style_invalidation(outcome: &'static str) {
     if tracing_enabled() {
         record_inline_style_invalidation_active(outcome);
+    }
+}
+
+fn record_local_user_action_invalidation_active() {
+    update_active_style_invalidations(|counts| {
+        TaskStyleInvalidationCounts::increment(&mut counts.local_user_action);
+    });
+}
+
+/// Records one locally-evicted hover, active or focus state change.
+pub(super) fn record_local_user_action_invalidation() {
+    if tracing_enabled() {
+        record_local_user_action_invalidation_active();
     }
 }
 
@@ -609,6 +624,7 @@ mod turn_timing_tests {
             record_inline_style_invalidation_active(outcome);
         }
         record_local_data_attribute_invalidation_active();
+        record_local_user_action_invalidation_active();
         record_ordinary_node_mutation_full_active();
         record_ordinary_node_mutation_full_active();
         record_document_dirty_active();
@@ -622,6 +638,7 @@ mod turn_timing_tests {
                 "local": 1,
                 "local_raw_style_subject": 1,
                 "local_data_attribute": 1,
+                "local_user_action": 1,
                 "deferred_resolver": 1,
                 "fallback_raw_style_selector": 1,
                 "fallback_active_transition": 1,

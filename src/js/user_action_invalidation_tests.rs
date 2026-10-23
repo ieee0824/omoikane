@@ -74,3 +74,53 @@ fn hovering_without_observing_rules_keeps_geometry_and_live_matches() {
     assert_eq!(after.style, before.style);
     assert_eq!(after.layout, before.layout);
 }
+
+fn cached_element_style(runtime: &mut JsRuntime, id: &str) -> Arc<ComputedStyle> {
+    let identity = runtime
+        .eval(&format!(
+            "document.getElementById({}).__id",
+            serde_json::to_string(id).unwrap()
+        ))
+        .unwrap()
+        .as_number()
+        .unwrap() as usize;
+    let mut state = runtime.host_state.borrow_mut();
+    let document = state.document.clone();
+    let node = state.get_node(identity).unwrap();
+    state.ensure_style_resolver(&document);
+    document_style_resolver(&mut state, &document)
+        .unwrap()
+        .computed_style_shared(&node)
+}
+
+#[test]
+fn observed_hover_updates_geometry_and_inheritance_without_discarding_unrelated_styles() {
+    let mut runtime = runtime(
+        "a{color:blue}a:hover{width:64px;color:red}\
+        button:hover + label{color:green}",
+    );
+    check(
+        &mut runtime,
+        "document.getElementById('link').getBoundingClientRect().width===32",
+    );
+    let before = cached_element_style(&mut runtime, "other");
+    check(
+        &mut runtime,
+        "(() => { const left=document.getElementById('left');\
+        __omoikane_dispatch_mouse_input(left.__id,'mousemove',{},false);\
+        return document.getElementById('link').getBoundingClientRect().width===64\
+        && getComputedStyle(left).color==='rgb(255, 0, 0)'; })()",
+    );
+    let after = cached_element_style(&mut runtime, "other");
+    assert!(
+        Arc::ptr_eq(&before, &after),
+        "the unrelated style survives the real hover/reflow path"
+    );
+    check(
+        &mut runtime,
+        "(() => {const other=document.getElementById('other');\
+        __omoikane_dispatch_mouse_input(other.__id,'mousemove',{},false);\
+        return document.getElementById('link').getBoundingClientRect().width===32\
+        && getComputedStyle(document.getElementById('left')).color==='rgb(0, 0, 255)'; })()",
+    );
+}

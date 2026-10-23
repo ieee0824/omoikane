@@ -11,7 +11,37 @@ pub(super) struct UserActionDependencies {
 #[derive(Debug, Default)]
 struct Observers {
     uncertain: bool,
-    subjects: Vec<Selector>,
+    subjects: Vec<Observer>,
+}
+
+#[derive(Debug)]
+struct Observer {
+    selector: Selector,
+    nonlocal: bool,
+}
+
+/// Bounded owner-visible result of a user-action cache invalidation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UserActionStyleInvalidation {
+    Unchanged,
+    Local,
+    Full(&'static str),
+}
+
+impl UserActionStyleInvalidation {
+    pub(crate) fn changed(self) -> bool {
+        self != Self::Unchanged
+    }
+    pub(crate) fn is_full(self) -> bool {
+        matches!(self, Self::Full(_))
+    }
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Unchanged => "unchanged",
+            Self::Local => "local_user_action",
+            Self::Full(reason) => reason,
+        }
+    }
 }
 
 fn state_name(state: &str) -> Option<&'static str> {
@@ -69,15 +99,19 @@ impl Observers {
             })
             .cloned()
             .collect();
-        self.subjects.push(Selector {
-            parts: vec![SelectorPart {
-                combinator: None,
-                simples,
-            }],
+        self.subjects.push(Observer {
+            selector: Selector {
+                parts: vec![SelectorPart {
+                    combinator: None,
+                    simples,
+                }],
+            },
+            nonlocal: false,
         });
     }
 
     fn selector(&mut self, selector: &Selector, state: &str, nested: bool) {
+        let previous_subjects = self.subjects.len();
         for part in &selector.parts {
             if part.simples.iter().any(|simple| {
                 matches!(simple, SimpleSelector::PseudoClass(name) if name.eq_ignore_ascii_case(state))
@@ -105,6 +139,26 @@ impl Observers {
                     }
                     _ => {}
                 }
+            }
+        }
+        if self.subjects.len() > previous_subjects
+            && selector.parts.iter().any(|part| {
+                matches!(
+                    part.combinator,
+                    Some(Combinator::AdjacentSibling | Combinator::GeneralSibling)
+                ) || part.simples.iter().any(|simple| {
+                    matches!(
+                        simple,
+                        SimpleSelector::Is(_)
+                            | SimpleSelector::Where(_)
+                            | SimpleSelector::Not(_)
+                            | SimpleSelector::Has(_)
+                    )
+                })
+            })
+        {
+            for observer in &mut self.subjects[previous_subjects..] {
+                observer.nonlocal = true;
             }
         }
     }
@@ -154,11 +208,82 @@ impl UserActionDependencies {
             || observers
                 .subjects
                 .iter()
-                .any(|selector| super::super::matcher::matches_selector(node, selector))
+                .any(|observer| super::super::matcher::matches_selector(node, &observer.selector))
     }
 }
 
 impl StyleResolver {
+    /// Invalidates only changed state subtrees when selector dependencies prove
+    /// that siblings and ancestors cannot observe the change. Geometry is still
+    /// invalidated by the owner; uncertain selectors retain full invalidation.
+    /// The locality proof assumes inheritance only from the flat-tree parent,
+    /// ancestor-only selector traversal, and global clearing on shared resolver
+    /// context changes. Shadow/slot, relational selectors and time-dependent
+    /// styles fall back. New cross-element style dependencies must extend these
+    /// guards before retaining caches (for example future anchor positioning).
+    pub(crate) fn invalidate_user_action_styles(
+        &mut self,
+        changes: &[(NodeHandle, &'static str)],
+    ) -> UserActionStyleInvalidation {
+        use UserActionStyleInvalidation::{Full, Local, Unchanged};
+        if !self.invalidate_user_action_selectors(changes) {
+            return Unchanged;
+        }
+        let roots = changes
+            .iter()
+            .filter_map(|(node, state)| {
+                self.user_action_dependencies
+                    .affects(&self.stylesheets, node, state)
+                    .then(|| node.clone())
+            })
+            .collect::<Vec<_>>();
+        let fallback = if self.has_running_transitions() {
+            Some("fallback_active_transition")
+        } else if self.has_running_animations() {
+            Some("fallback_active_animation")
+        } else if roots.iter().any(|node| {
+            node.parent_node()
+                .is_some_and(|parent| parent.node_type() == NodeType::Document)
+        }) {
+            Some("fallback_document_root")
+        } else {
+            self.user_action_fallback(changes)
+        };
+        if let Some(reason) = fallback {
+            self.invalidate_style_cache();
+            return Full(reason);
+        }
+        let Some(identities) = invalidation_subtrees(roots) else {
+            self.invalidate_style_cache();
+            return Full("fallback_shadow_or_slot");
+        };
+        self.cache
+            .retain(|identity, _| !identities.contains(identity));
+        self.pseudo_cache
+            .retain(|key, _| !identities.contains(&key.0));
+        Local
+    }
+
+    fn user_action_fallback(&self, changes: &[(NodeHandle, &'static str)]) -> Option<&'static str> {
+        for (node, state) in changes {
+            let Some(observers) =
+                state_name(state).and_then(|name| self.user_action_dependencies.states.get(name))
+            else {
+                return Some("fallback_uncertain_selector");
+            };
+            if observers.uncertain {
+                return Some("fallback_uncertain_selector");
+            }
+            if observers.subjects.iter().any(|observer| {
+                observer.nonlocal
+                    && super::super::matcher::matches_selector(node, &observer.selector)
+            }) {
+                return Some("fallback_nonlocal_selector");
+            }
+        }
+        None
+    }
+
     /// Drops dynamic selector matches and reports whether any changed flag can
     /// affect a registered rule. False preserves computed styles and geometry;
     /// unknown selector contexts conservatively return true. Node handles are
