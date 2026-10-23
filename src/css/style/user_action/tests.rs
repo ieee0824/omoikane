@@ -415,3 +415,60 @@ fn delayed_animation_keeps_full_user_action_invalidation() {
         UserActionStyleInvalidation::Full("fallback_active_animation")
     );
 }
+
+#[test]
+fn static_functional_predicates_keep_outer_hover_subtree_local() {
+    for selector in [
+        "a:not(.disabled):hover",
+        "a:is(.enabled):hover",
+        "a:where(.enabled):hover",
+        "a:has(span):hover",
+        "a:has(+ aside):hover",
+    ] {
+        let document = NodeHandle::document();
+        let root = NodeHandle::element("main");
+        let anchor = NodeHandle::element("a");
+        anchor.set_attribute("class", "enabled");
+        let child = NodeHandle::element("span");
+        let aside = NodeHandle::element("aside");
+        document.append_child(root.clone());
+        root.append_child(anchor.clone());
+        anchor.append_child(child.clone());
+        root.append_child(aside.clone());
+        let css = format!("a{{color:blue}}{selector}{{color:red;width:17px}}");
+        let nodes = [root, anchor.clone(), child, aside.clone()];
+        let mut cached = resolver(&css);
+        for node in &nodes {
+            cached.computed_style_shared(node);
+        }
+        for enabled in [true, false] {
+            let before_aside = cached.computed_style_shared(&aside);
+            anchor.set_user_action_state("hover", enabled);
+            assert_eq!(
+                cached.invalidate_user_action_styles(&[(anchor.clone(), "hover")]),
+                UserActionStyleInvalidation::Local,
+                "{selector}"
+            );
+            assert!(Arc::ptr_eq(
+                &before_aside,
+                &cached.computed_style_shared(&aside)
+            ));
+            let mut cold = resolver(&css);
+            for node in &nodes {
+                assert_eq!(
+                    cached.computed_style_shared(node),
+                    cold.computed_style_shared(node),
+                    "{selector}, hover={enabled}, tag={:?}",
+                    node.tag_name()
+                );
+            }
+            if enabled {
+                assert_eq!(
+                    cached.computed_style_shared(&anchor).get("width"),
+                    Some(&ComputedValue::Px(17.0)),
+                    "{selector}"
+                );
+            }
+        }
+    }
+}

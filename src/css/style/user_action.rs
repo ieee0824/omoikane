@@ -123,14 +123,18 @@ impl Observers {
                     SimpleSelector::Is(selectors)
                     | SimpleSelector::Where(selectors)
                     | SimpleSelector::Not(selectors) => {
+                        let arguments_start = self.subjects.len();
                         for selector in selectors {
                             self.selector(selector, state, nested);
                         }
+                        self.mark_new_nonlocal(arguments_start);
                     }
                     SimpleSelector::Has(selectors) => {
+                        let arguments_start = self.subjects.len();
                         for relative in selectors {
                             self.selector(&relative.selector, state, nested);
                         }
+                        self.mark_new_nonlocal(arguments_start);
                     }
                     SimpleSelector::PseudoClass(name) | SimpleSelector::PseudoElement(name)
                         if name.contains('(') && tokens_observe_state(name, state) =>
@@ -141,23 +145,20 @@ impl Observers {
                 }
             }
         }
-        if self.subjects.len() > previous_subjects
-            && selector.parts.iter().any(|part| {
-                matches!(
-                    part.combinator,
-                    Some(Combinator::AdjacentSibling | Combinator::GeneralSibling)
-                ) || part.simples.iter().any(|simple| {
-                    matches!(
-                        simple,
-                        SimpleSelector::Is(_)
-                            | SimpleSelector::Where(_)
-                            | SimpleSelector::Not(_)
-                            | SimpleSelector::Has(_)
-                    )
-                })
-            })
-        {
-            for observer in &mut self.subjects[previous_subjects..] {
+        if selector.parts.iter().any(|part| {
+            matches!(
+                part.combinator,
+                Some(Combinator::AdjacentSibling | Combinator::GeneralSibling)
+            )
+        }) {
+            self.mark_new_nonlocal(previous_subjects);
+        }
+    }
+
+    fn mark_new_nonlocal(&mut self, start: usize) {
+        // An uncertain nested selector may have cleared the observer list.
+        if let Some(observers) = self.subjects.get_mut(start..) {
+            for observer in observers {
                 observer.nonlocal = true;
             }
         }
