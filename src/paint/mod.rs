@@ -9,6 +9,7 @@ pub(crate) mod color4;
 pub(crate) mod form_control;
 mod gradient_tiles;
 pub(crate) mod image;
+mod image_blit;
 mod image_scale;
 pub(crate) use gradient_tiles::gradient_tile_cache_scope;
 mod outline;
@@ -1196,6 +1197,23 @@ impl Canvas {
         }
         self.record_animation_regions_from_scaled_image(image, destination, area);
         let image = image.sampled_image(crate::layout::image_animation_time_ms());
+        if self.try_draw_unscaled_image(image, destination, opacity, x0..x1, y0..y1) {
+            return;
+        }
+        self.draw_scaled_image_pixels(image, destination, opacity, x0..x1, y0..y1);
+    }
+
+    /// Paints sampled image pixels after normalization and animation registration.
+    fn draw_scaled_image_pixels(
+        &mut self,
+        image: &Image,
+        destination: Rect,
+        opacity: f32,
+        x_range: std::ops::Range<i32>,
+        y_range: std::ops::Range<i32>,
+    ) {
+        let (x0, x1) = (x_range.start, x_range.end);
+        let (y0, y1) = (y_range.start, y_range.end);
         let shrink_x = destination.width < image.width as f32;
         let shrink_y = destination.height < image.height as f32;
         let source_per_dest_x = image.width as f32 / destination.width;
