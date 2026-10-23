@@ -1,6 +1,61 @@
 use super::*;
 
 #[test]
+fn window_named_refresh_preserves_non_scalar_names_and_duplicate_order() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"(() => {
+        const name = '\ud800named';
+        const first = document.createElement('div');
+        const second = document.createElement('form');
+        first.id = name;
+        second.setAttribute('name', name);
+        document.body.appendChild(first);
+        document.body.appendChild(second);
+        const both = window[name];
+        if (both.length !== 2 || both[0] !== first || both[1] !== second) return false;
+        const keys = Object.keys(window);
+        if (!keys.some(key => key === name && key.charCodeAt(0) === 0xd800)) return false;
+        first.remove();
+        if (window[name] !== second || both.length !== 1) return false;
+        second.setAttribute('name', 'renamedAfterSnapshot');
+        return !(name in window) && window.renamedAfterSnapshot === second;
+    })()"#,
+        )
+        .unwrap();
+    assert_eq!(value.as_boolean(), Some(true));
+}
+
+#[test]
+fn window_named_refresh_keeps_shadow_and_template_names_out_of_document() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"(() => {
+        const host = document.createElement('div');
+        document.body.appendChild(host);
+        const shadow = host.attachShadow({mode:'open'});
+        shadow.innerHTML = '<span id="shadowOnlyName"></span>';
+        const template = document.createElement('template');
+        template.innerHTML = '<span id="templateOnlyName"></span>';
+        document.body.appendChild(template);
+        const trigger = document.createElement('div');
+        trigger.id = 'visibleSnapshotName';
+        document.body.appendChild(trigger);
+        if ('shadowOnlyName' in window || 'templateOnlyName' in window) return false;
+        if (window.visibleSnapshotName !== trigger) return false;
+        document.body.appendChild(template.content);
+        return window.templateOnlyName === document.getElementById('templateOnlyName') &&
+            !('shadowOnlyName' in window) &&
+            !('__omoikane_window_named_snapshot' in window);
+    })()"#,
+        )
+        .unwrap();
+    assert_eq!(value.as_boolean(), Some(true));
+}
+
+#[test]
 fn window_named_properties_follow_connected_dom_mutations() {
     let mut runtime = JsRuntime::new().unwrap();
     let result = runtime

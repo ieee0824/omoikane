@@ -317,6 +317,8 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeSetAttributeNS = globalThis.__omoikane_set_attribute_ns;
   const nativeRemoveAttributeNS = globalThis.__omoikane_remove_attribute_ns;
   const nativeIframeContentDocument = globalThis.__omoikane_iframe_content_document;
+  const nativeWindowNamedSnapshot = globalThis.__omoikane_window_named_snapshot;
+  delete globalThis.__omoikane_window_named_snapshot;
   const nativeIframeGlobal = globalThis.__omoikane_iframe_global;
   const nativeExistingIframeDocument = globalThis.__omoikane_existing_iframe_document;
   delete globalThis.__omoikane_existing_iframe_document;
@@ -17574,33 +17576,28 @@ export const __omoikane_service_worker_lifecycle = {};
     const names = new Set();
     const firstFrameNames = new Map();
     let frameIndex = 0;
-    const visit = node => {
-      for (const child of windowNameChildren(node)) {
-        if (internalNodeType(child) !== 1) continue;
-        const tag = internalNodeLocalName(child) || "";
-        if (tag === "iframe" || tag === "frame") {
-          const index = `${frameIndex++}`;
-          if (!Object.prototype.hasOwnProperty.call(globalThis, index)) {
-            Object.defineProperty(globalThis, index, {
-              configurable: true,
-              enumerable: true,
-              get() { return child.contentWindow; },
-            });
-          }
+    const documentId = internalNodeId(globalThis.document);
+    const candidates = documentId === undefined ? [] : nativeWindowNamedSnapshot(documentId);
+    for (const [nodeId, isFrame, id, name] of candidates) {
+      if (isFrame) {
+        const child = wrapNode(nodeId);
+        const index = `${frameIndex++}`;
+        if (!Object.prototype.hasOwnProperty.call(globalThis, index)) {
+          Object.defineProperty(globalThis, index, {
+            configurable: true,
+            enumerable: true,
+            get() { return child.contentWindow; },
+          });
         }
-        const id = windowNameAttribute(child, "id");
-        if (id) names.add(id);
-        const name = windowNameAttribute(child, "name");
-        if (name && (tag === "embed" || tag === "form" || tag === "img" || tag === "object")) {
-          names.add(name);
-        }
-        if (name && (tag === "iframe" || tag === "frame") && !firstFrameNames.has(name)) {
-          firstFrameNames.set(name, nativeIframeContentDocument(internalNodeId(child)) !== null);
-        }
-        visit(child);
       }
-    };
-    visit(globalThis.document);
+      if (id) names.add(id);
+      if (name && !isFrame) {
+        names.add(name);
+      }
+      if (name && isFrame && !firstFrameNames.has(name)) {
+        firstFrameNames.set(name, nativeIframeContentDocument(nodeId) !== null);
+      }
+    }
     for (const [name, sameOrigin] of firstFrameNames) {
       if (sameOrigin) names.add(name);
     }

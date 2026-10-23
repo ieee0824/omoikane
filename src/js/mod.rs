@@ -154,6 +154,7 @@ mod nested_rendering;
 pub(crate) mod render_demand;
 mod script_errors;
 mod window_event;
+mod window_names;
 mod worker_imports;
 mod worker_loading;
 #[cfg(test)]
@@ -16388,6 +16389,11 @@ fn register_host_bindings(
             js_string!("__omoikane_subtree_has_window_name"),
             1,
             NativeFunction::from_copy_closure(subtree_has_window_name_native),
+        ),
+        (
+            js_string!("__omoikane_window_named_snapshot"),
+            1,
+            NativeFunction::from_copy_closure(window_names::snapshot_native),
         ),
         (
             js_string!("__omoikane_node_index"),
