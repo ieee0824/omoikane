@@ -1036,6 +1036,24 @@ export const __omoikane_service_worker_lifecycle = {};
     "display", "cursor", "visibility", "pointer-events", "transform", "opacity",
     "background-image", "background-clip", "background-color", "color",
   ]);
+  // A repeated assignment may keep its place only when no later declaration
+  // can change the property's cascade precedence. Unknown vendor aliases keep
+  // the conservative path; shorthand and logical conflicts must still append.
+  function repeatedInlineAssignmentKeepsPosition(name, declarations, index) {
+    if (!hasSetValue(independentInlineStyleProperties, name)) return false;
+    if (declarations.some((d, i) => i !== index && d.name === name)) return false;
+    for (let i = index + 1; i < declarations.length; i++) {
+      const other = declarations[i].name;
+      if (other === "all" || (other.startsWith("-") && !other.startsWith("--"))) return false;
+      if ((name === "width" || name === "height") &&
+          (other === "inline-size" || other === "block-size")) return false;
+      if ((name === "top" || name === "right" || name === "bottom" || name === "left") &&
+          (other === "inset" || other.startsWith("inset-inline") ||
+           other.startsWith("inset-block"))) return false;
+      if (name.startsWith("background-") && other === "background") return false;
+    }
+    return true;
+  }
   const logicalBoxStyleProperties = new Set([
     "margin-block", "margin-inline", "padding-block", "padding-inline",
     "margin-block-start", "margin-block-end", "margin-inline-start", "margin-inline-end",
@@ -4171,6 +4189,9 @@ export const __omoikane_service_worker_lifecycle = {};
           return;
         }
         const existing = decls.findIndex(d => d.name === kebab);
+        if (existing >= 0 && decls[existing].value === value &&
+            decls[existing].priority === (priority || "") &&
+            repeatedInlineAssignmentKeepsPosition(kebab, decls, existing)) return;
         if (existing >= 0 && decls.every((d, i) =>
             hasSetValue(independentInlineStyleProperties, d.name) &&
             (i === existing || d.name !== kebab))) {

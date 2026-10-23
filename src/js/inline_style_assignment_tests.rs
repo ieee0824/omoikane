@@ -156,3 +156,97 @@ fn inline_display_none_focus_fixup_refreshes_external_selector_and_paint() {
         .unwrap();
     assert_eq!((shown.r, shown.g, shown.b), (255, 0, 0));
 }
+
+#[test]
+fn repeated_inline_assignment_with_unrelated_declarations_preserves_layout() {
+    for extra in [
+        "font-size:16px;overflow:hidden",
+        "margin:0;padding:0",
+        "background:red;box-sizing:border-box",
+    ] {
+        let mut runtime = runtime();
+        runtime.eval(&format!(
+            "globalThis.t=document.getElementById('t');t.style.cssText='position:absolute;width:10px;height:10px;top:0px;left:0px;{extra}';t.getBoundingClientRect();globalThis.before=t.getAttribute('style');globalThis.observer=new MutationObserver(()=>{{}});observer.observe(t,{{attributes:true}});"
+        )).unwrap();
+        let generation = runtime.host_state.borrow().style_generation;
+        let records = runtime.eval("for(let i=0;i<20;i++){t.style.position='absolute';t.style.width='10px';t.getBoundingClientRect()}observer.takeRecords().length").unwrap();
+        assert_eq!(records.as_number(), Some(0.0), "{extra}");
+        assert!(
+            runtime
+                .eval("t.getAttribute('style')===before")
+                .unwrap()
+                .to_boolean(),
+            "{extra}"
+        );
+        assert_eq!(
+            runtime.host_state.borrow().style_generation,
+            generation,
+            "{extra}"
+        );
+    }
+}
+
+#[test]
+fn repeated_inline_assignment_preserves_later_conflicting_declaration_precedence() {
+    for (property, value, later) in [
+        ("width", "10px", "inline-size:20px"),
+        ("height", "10px", "block-size:20px"),
+        ("left", "1px", "inset:2px"),
+        ("left", "1px", "inset-inline-start:2px"),
+        ("top", "1px", "inset-block-start:2px"),
+        ("background-color", "red", "background:blue"),
+        (
+            "background-image",
+            "none",
+            "background:linear-gradient(red,blue)",
+        ),
+        ("color", "red", "all:initial"),
+    ] {
+        let mut runtime = runtime();
+        let setup = format!("{property}:{value};{later};overflow:hidden");
+        let script = format!(
+            r#"(()=>{{
+              const t=document.getElementById('t');
+              t.style.cssText={setup};
+              const property={property}, value={value}, later={later};
+              if(!t.style.getPropertyValue(later))throw new Error('fixture declaration rejected');
+              const reference=document.createElement('div');
+              reference.style.cssText={setup}+';'+property+':'+value;
+              document.body.appendChild(reference);
+              const observer=new MutationObserver(()=>{{}});
+              observer.observe(t,{{attributes:true}});
+              t.style.setProperty(property,value);
+              const names=Array.from({{length:t.style.length}},(_,i)=>t.style.item(i));
+              return observer.takeRecords().length===1 &&
+                names.indexOf(property)>names.indexOf(later) &&
+                t.style.getPropertyValue(property)===value &&
+                getComputedStyle(t).getPropertyValue(property)===
+                  getComputedStyle(reference).getPropertyValue(property);
+            }})()"#,
+            setup = serde_json::to_string(&setup).unwrap(),
+            property = serde_json::to_string(property).unwrap(),
+            value = serde_json::to_string(value).unwrap(),
+            later = serde_json::to_string(later.split(':').next().unwrap()).unwrap(),
+        );
+        assert!(runtime.eval(&script).unwrap().to_boolean(), "{setup}");
+    }
+}
+
+#[test]
+fn mixed_inline_changed_values_and_priorities_remain_observable() {
+    let mut runtime = runtime();
+    assert!(runtime.eval(r#"(()=>{
+      const t=document.getElementById('t');
+      t.style.cssText='width:10px;overflow:hidden';
+      const observer=new MutationObserver(()=>{});
+      observer.observe(t,{attributes:true});
+      t.style.width='20px';
+      if(observer.takeRecords().length!==1 || t.getBoundingClientRect().width!==20)return false;
+      t.style.setProperty('width','20px','important');
+      if(observer.takeRecords().length!==1 || t.style.getPropertyPriority('width')!=='important')return false;
+      t.style.setProperty('width','20px','important');
+      if(observer.takeRecords().length!==0)return false;
+      t.style.setProperty('width','20px','');
+      return observer.takeRecords().length===1 && t.style.getPropertyPriority('width')==='';
+    })()"#).unwrap().to_boolean());
+}
