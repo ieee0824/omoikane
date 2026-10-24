@@ -54,9 +54,13 @@ jobs:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
-          key: browser-${{ matrix.platform.target }}-${{ matrix.mode }}
+          # Both modes build the same dependencies; baseline-jit adds a
+          # feature on top. One entry per target keeps the repository under
+          # its 10 GB cache limit (#1451). Save only after a successful run on
+          # main so a failed build cannot freeze an incomplete shared entry.
+          shared-key: browser-v2-${{ matrix.platform.target }}
+          save-if: ${{ matrix.mode == 'baseline-jit' && github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
-          cache-on-failure: true
       - name: Install system fonts
         if: runner.os == 'Linux'
         run: |

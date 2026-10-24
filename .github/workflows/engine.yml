@@ -57,6 +57,7 @@ jobs:
         shell: bash
     env:
       CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
       CARGO_TERM_COLOR: never
       ENGINE_FEATURES: annex-b,intl_bundled,experimental,embedded_lz4,boa_engine/baseline-jit
     steps:
@@ -65,12 +66,9 @@ jobs:
         with:
           toolchain: 1.98.1
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: engine/boa -> target
-          key: engine-workspace-v1-${{ matrix.target }}
-          cache-workspace-crates: true
-          cache-on-failure: true
+      # No Rust cache: this Boa-only job is short and off the critical path,
+      # and its entries would evict the long jobs' caches from the 10 GB
+      # repository limit (#1451).
       - uses: taiki-e/install-action@nextest
       - name: Record source, host, features and dependency inputs
         env:

@@ -55,11 +55,11 @@ jobs:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
-          # Keep the repository crate artifacts as well as dependencies so a
-          # PR rerun can reuse an unchanged Omoikane build. Bump this key
-          # when the cache policy changes to avoid restoring dependency-only
-          # entries produced by the old configuration.
-          key: workspace-v1
+          # The repository cache limit is 10 GB (#1451). `test` and
+          # `wpt-smoke` build default features on the same image, so they
+          # share one entry; only `test` on main writes it and PRs restore it.
+          shared-key: workspace-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
       - name: Install system fonts
         run: |
@@ -158,11 +158,14 @@ jobs:
         run: cp .artifacts/js-benchmark/gate4/inputs/Cargo.lock Cargo.lock
       - uses: Swatinem/rust-cache@v2
         with:
-          # Unit partitions compile the same binary; only one writes that cache.
-          shared-key: gate4-parallel-v1-${{ startsWith(matrix.shard, 'unit-') && 'unit' || matrix.shard }}
-          save-if: ${{ !startsWith(matrix.shard, 'unit-') || matrix.shard == 'unit-0' }}
+          # Every partition builds with the same features and dependencies.
+          # The integration partition builds all of them (tests, examples,
+          # bins and docs), so only it writes the shared entry, on main and
+          # after a successful run (#1451). Omoikane itself is rebuilt for
+          # each revision in every partition either way.
+          shared-key: gate4-parallel-v2
+          save-if: ${{ matrix.shard == 'integration' && github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
-          cache-on-failure: true
       - uses: actions/cache@v4
         if: matrix.shard == 'compatibility' || matrix.shard == 'integration'
         with:
@@ -229,7 +232,8 @@ jobs:
   wpt-smoke:
     needs: changes
     if: needs.changes.outputs.run_full == 'true'
-    runs-on: ubuntu-latest
+    # Same image as `test`, whose cache entry this job restores.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -237,7 +241,9 @@ jobs:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
-          key: workspace-v1
+          # Restore-only: `test` writes the shared entry (#1451).
+          shared-key: workspace-v2
+          save-if: false
           cache-workspace-crates: true
       - uses: actions/cache@v4
         with:

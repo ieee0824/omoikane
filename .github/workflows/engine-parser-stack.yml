@@ -43,6 +43,7 @@ jobs:
           - {arch: aarch64, runner: ubuntu-24.04-arm, profile: dev}
           - {arch: aarch64, runner: ubuntu-24.04-arm, profile: release}
     env:
+      CARGO_INCREMENTAL: '0'
       NO_COLOR: "1"
       RUSTUP_TOOLCHAIN: "1.98.0"
     steps:
@@ -52,10 +53,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: engine/boa -> target
-          key: engine-parser-stack-${{ matrix.arch }}-${{ matrix.profile }}
+      # No Rust cache: this Boa-only job is short and off the critical path,
+      # and its entries would evict the long jobs' caches from the 10 GB
+      # repository limit (#1451).
       - name: Record environment and pinned Test262 revision
         id: suite
         shell: bash
