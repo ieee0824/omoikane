@@ -2839,7 +2839,10 @@ fn navigation_response_diagnostics_remove_url_secrets_and_limit_headers() {
     assert_eq!(diagnostic["loader_id"], "loader-secret-test");
     assert_eq!(diagnostic["commit"], "reload");
     for secret in ["password", "token", "secret=value", "Bearer private"] {
-        assert!(!serialized.contains(secret), "leaked {secret}");
+        assert!(
+            !serialized.contains(secret),
+            "response diagnostic redaction failed"
+        );
     }
     assert_eq!(
         super::page::diagnostic_navigation_url("data:text/html,private"),
@@ -2860,7 +2863,10 @@ fn navigation_response_diagnostics_remove_url_secrets_and_limit_headers() {
     assert_eq!(history["effective_url"], "data");
     assert_eq!(history["outcome"], "preserved");
     for secret in ["password", "token", "private", "fragment"] {
-        assert!(!serialized.contains(secret), "leaked {secret}");
+        assert!(
+            !serialized.contains(secret),
+            "navigation history redaction failed"
+        );
     }
 }
 
