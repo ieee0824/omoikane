@@ -53,6 +53,29 @@ fn matches_environment(query: &str, environment: &omoikane::css::MediaEnvironmen
 }
 
 #[test]
+fn dynamic_range_boolean_queries_match_both_standard_and_high_capabilities() {
+    let mut environment = omoikane::css::MediaEnvironment::default();
+    for feature in ["dynamic-range", "video-dynamic-range"] {
+        for capability in ["standard", "high"] {
+            assert!(environment.set_feature(feature, capability));
+            assert!(matches_environment(&format!("({feature})"), &environment));
+            assert!(!matches_environment(
+                &format!("not ({feature})"),
+                &environment
+            ));
+            assert!(matches_environment(
+                &format!("({feature}: standard)"),
+                &environment
+            ));
+            assert_eq!(
+                matches_environment(&format!("({feature}: high)"), &environment),
+                capability == "high"
+            );
+        }
+    }
+}
+
+#[test]
 fn explicit_media_snapshots_configure_preferences_and_all_pointer_devices() {
     let mut environment = omoikane::css::MediaEnvironment::default();
     let previous = environment.clone();

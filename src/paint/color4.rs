@@ -148,7 +148,17 @@ impl CssColor {
                         format!(
                             "{}{}",
                             css_number(value * 100.0),
-                            if computed { "%" } else { "" }
+                            if computed
+                                || !self
+                                    .expressions
+                                    .iter()
+                                    .flatten()
+                                    .any(|text| math::has_relative_units(text))
+                            {
+                                "%"
+                            } else {
+                                ""
+                            }
                         )
                     } else {
                         css_number(value)
@@ -183,6 +193,14 @@ fn canonical_math(text: &str) -> Option<String> {
 }
 
 fn css_number(value: f64) -> String {
+    if value.is_infinite() {
+        return if value.is_sign_positive() {
+            "calc(infinity)"
+        } else {
+            "calc(-infinity)"
+        }
+        .into();
+    }
     if value == 0.0 {
         return "0".into();
     }
@@ -252,11 +270,19 @@ fn component(
         (Space::Oklab | Space::Oklch, _) => 0.4,
         _ => 1.0,
     };
-    let value = number(text, scale, context)?;
+    let value = if matches!(space, Space::Lch | Space::Oklch)
+        && index == 1
+        && text.contains('(')
+        && math::evaluate(text, scale, false, context) == Some(f64::INFINITY)
+    {
+        Some(f64::INFINITY)
+    } else {
+        number(text, scale, context)?
+    };
     Some(value.map(|v| match (space, index) {
         (Space::Lab | Space::Lch | Space::Oklab | Space::Oklch, 0) => v.clamp(0.0, scale),
         (Space::Lch | Space::Oklch, 1) => v.max(0.0),
-        (Space::Hwb, _) => v.clamp(0.0, 100.0) / 100.0,
+        (Space::Hwb, _) => v.max(0.0) / 100.0,
         _ => v,
     }))
 }
@@ -515,12 +541,49 @@ mod context_tests {
             Color::rgb(77, 128, 77)
         );
         let color = CssColor::parse("hwb(120 80% none)").unwrap();
-        assert_eq!(color.serialize(), "hwb(120 80 none)");
+        assert_eq!(color.serialize(), "hwb(120 80% none)");
         assert_eq!(color.serialize_computed(), "hwb(120 80% none)");
         assert_eq!(
             CssColor::parse("hwb(0 0 0 / .5)").unwrap().to_color().a,
             128
         );
+    }
+
+    #[test]
+    fn hwb_normalizes_unbounded_white_and_black_before_quantizing() {
+        for (input, gray) in [
+            ("hwb(0 200% 100%)", 170),
+            ("hwb(0 100% 200%)", 85),
+            ("hwb(0 150% 50%)", 191),
+            ("hwb(0 50% 150%)", 64),
+            ("hwb(0 180% 120%)", 153),
+        ] {
+            assert_eq!(
+                CssColor::parse(input).unwrap().to_color(),
+                Color::rgb(gray, gray, gray),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn infinite_chroma_serializes_as_math_and_converts_to_finite_rgb() {
+        for (input, expected) in [
+            ("lch(50 calc(infinity) 0)", "lch(50 calc(infinity) 0)"),
+            ("oklch(.5 calc(infinity) 0)", "oklch(0.5 calc(infinity) 0)"),
+            ("lch(50 calc(-infinity) 0)", "lch(50 0 0)"),
+        ] {
+            let color = CssColor::parse(input).unwrap();
+            assert_eq!(color.serialize_computed(), expected);
+            let rgb = convert::to_srgb(
+                color.space,
+                color.channels.map(|value| value.unwrap_or(0.0)),
+            );
+            assert!(
+                rgb.into_iter()
+                    .all(|channel| channel.is_finite() && (0.0..=1.0).contains(&channel))
+            );
+        }
     }
 }
 

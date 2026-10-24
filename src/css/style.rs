@@ -1197,29 +1197,36 @@ fn parse_registered_initial_value(input: &str) -> Option<Value> {
 }
 
 fn parse_registered_property_syntax(input: &str) -> Option<RegisteredPropertySyntax> {
-    let input = input.trim();
-    if input == "*" {
+    use super::CssToken;
+    if input.trim() == "*" {
         return Some(RegisteredPropertySyntax::Universal);
     }
-    if input.is_empty() || input.contains('*') {
-        return None;
-    }
+    let tokens = super::tokenizer::tokenize(input).ok()?;
     let mut alternatives = Vec::new();
-    for raw in input.split('|') {
-        let raw = raw.trim();
-        if raw.is_empty() || raw.split_whitespace().count() != 1 {
-            return None;
-        }
-        let (core, multiplier) = match raw.as_bytes().last() {
-            Some(b'+') => (&raw[..raw.len() - 1], RegisteredSyntaxMultiplier::SpaceList),
-            Some(b'#') => (&raw[..raw.len() - 1], RegisteredSyntaxMultiplier::CommaList),
+    for part in tokens.split(|token| matches!(token, CssToken::Delim('|'))) {
+        let start = part
+            .iter()
+            .position(|token| !matches!(token, CssToken::Whitespace))?;
+        let end = part
+            .iter()
+            .rposition(|token| !matches!(token, CssToken::Whitespace))?;
+        let raw = &part[start..=end];
+        let (core, multiplier) = match raw.last() {
+            Some(CssToken::Delim('+')) => {
+                (&raw[..raw.len() - 1], RegisteredSyntaxMultiplier::SpaceList)
+            }
+            Some(CssToken::Hash(value)) if value.is_empty() => {
+                (&raw[..raw.len() - 1], RegisteredSyntaxMultiplier::CommaList)
+            }
             _ => (raw, RegisteredSyntaxMultiplier::Single),
         };
-        if core.is_empty() || core.ends_with(['+', '#']) {
-            return None;
-        }
-        let kind = if core.starts_with('<') && core.ends_with('>') {
-            match &core[1..core.len() - 1] {
+        let kind = if let [
+            CssToken::Delim('<'),
+            CssToken::Ident(name),
+            CssToken::Delim('>'),
+        ] = core
+        {
+            match name.as_str() {
                 "length" => RegisteredSyntaxKind::Length,
                 "length-percentage" => RegisteredSyntaxKind::LengthPercentage,
                 "number" => RegisteredSyntaxKind::Number,
@@ -1239,15 +1246,63 @@ fn parse_registered_property_syntax(input: &str) -> Option<RegisteredPropertySyn
                 "custom-ident" => RegisteredSyntaxKind::CustomIdent,
                 _ => return None,
             }
-        } else {
-            if !valid_registered_literal(core) {
+        } else if let [CssToken::Ident(name)] = core {
+            if name.is_empty()
+                || is_css_wide_keyword(&name.to_ascii_lowercase())
+                || name.eq_ignore_ascii_case("default")
+            {
                 return None;
             }
-            RegisteredSyntaxKind::Literal(core.to_string())
+            RegisteredSyntaxKind::Literal(name.clone())
+        } else {
+            return None;
         };
         alternatives.push(RegisteredSyntaxComponent { kind, multiplier });
     }
     (!alternatives.is_empty()).then_some(RegisteredPropertySyntax::Alternatives(alternatives))
+}
+
+fn serialize_registered_identifier(value: &str) -> String {
+    let mut result = String::new();
+    for (index, character) in value.chars().enumerate() {
+        if character == '\0' {
+            result.push('\u{fffd}');
+        } else if character.is_ascii_control()
+            || (character.is_ascii_digit()
+                && (index == 0 || (index == 1 && value.starts_with('-'))))
+        {
+            result.push_str(&format!("\\{:x} ", character as u32));
+        } else if character.is_ascii_alphanumeric()
+            || character == '_'
+            || character == '-'
+            || !character.is_ascii()
+        {
+            if value == "-" {
+                result.push('\\');
+            }
+            result.push(character);
+        } else {
+            result.push('\\');
+            result.push(character);
+        }
+    }
+    result
+}
+
+impl RegisteredCustomProperty {
+    /// Serializes the initial descriptor, retaining escapes on literal identifiers.
+    pub(crate) fn initial_value_css_text(&self) -> Option<String> {
+        self.initial_value.as_ref().map(|value| {
+            if let Value::Keyword(keyword) = value
+                && let RegisteredPropertySyntax::Alternatives(parts) = &self.syntax
+                && parts.iter().any(|part| matches!(&part.kind, RegisteredSyntaxKind::Literal(name) if name == keyword))
+            {
+                serialize_registered_identifier(keyword)
+            } else {
+                super::serialize_specified_value(value)
+            }
+        })
+    }
 }
 
 fn valid_registered_literal(value: &str) -> bool {
@@ -1282,7 +1337,7 @@ fn syntax_text(syntax: RegisteredPropertySyntax) -> String {
                     RegisteredSyntaxKind::Image => "<image>".to_string(),
                     RegisteredSyntaxKind::Url => "<url>".to_string(),
                     RegisteredSyntaxKind::CustomIdent => "<custom-ident>".to_string(),
-                    RegisteredSyntaxKind::Literal(value) => value,
+                    RegisteredSyntaxKind::Literal(value) => serialize_registered_identifier(&value),
                 };
                 match part.multiplier {
                     RegisteredSyntaxMultiplier::Single => core,

@@ -3,6 +3,86 @@ use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
 
 #[test]
+fn property_rule_cssom_preserves_escaped_literal_identifiers() {
+    let mut runtime = JsRuntime::new().unwrap();
+    assert_eq!(runtime.eval(r#"(() => {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(String.raw`@property --literal {
+            syntax: "I\\ dent|none"; inherits: false; initial-value: I\ dent;
+        }
+        @property --pipe {
+            syntax: "a\\|b|none"; inherits: false; initial-value: a\|b;
+        }`);
+        const literal = sheet.cssRules[0];
+        const pipe = sheet.cssRules[1];
+        if (!literal || !pipe || literal.syntax !== String.raw`I\ dent|none` ||
+            literal.initialValue !== String.raw`I\ dent` ||
+            literal.cssText !== String.raw`@property --literal { syntax: "I\\ dent|none"; inherits: false; initial-value: I\ dent; }` ||
+            pipe.initialValue !== String.raw`a\|b`) return false;
+        CSS.registerProperty({name: '--escaped-api', syntax: String.raw`a\+`,
+            inherits: false, initialValue: String.raw`a\+`});
+        try {
+            CSS.registerProperty({name: '--reserved-api', syntax: String.raw`IN\49TIAL`,
+                inherits: false, initialValue: 'initial'});
+            return false;
+        } catch (error) { return error.name === 'SyntaxError'; }
+    })()"#).unwrap().as_boolean(), Some(true));
+}
+
+#[test]
+fn retained_computed_overscroll_shorthand_coalesces_and_tracks_axis_changes() {
+    let mut runtime = JsRuntime::new().unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+        const element = document.body.appendChild(document.createElement('div'));
+        const style = getComputedStyle(element);
+        if (!('overscroll-behavior' in style) || style.overscrollBehavior !== 'auto') return false;
+        element.style.overscrollBehaviorX = 'contain';
+        if (style.overscrollBehavior !== 'contain auto') return false;
+        element.style.overscrollBehaviorY = 'contain';
+        if (style.getPropertyValue('overscroll-behavior') !== 'contain') return false;
+        element.style.cssText = 'overscroll-behavior: none auto';
+        return style.overscrollBehavior === 'none auto' &&
+            style.overscrollBehaviorX === 'none' && style.overscrollBehaviorY === 'auto';
+    })()"#
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
+fn toggle_source_retargets_for_each_listener_and_after_shadow_dispatch() {
+    let mut runtime = JsRuntime::new().unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+        const host = document.body.appendChild(document.createElement('div'));
+        const root = host.attachShadow({mode: 'closed'});
+        const source = document.createElement('button');
+        const target = document.createElement('div');
+        root.append(source, target);
+        const event = new ToggleEvent('toggle', {source, bubbles: true, composed: true});
+        const observed = [];
+        root.addEventListener('toggle', e => observed.push(e.source === source));
+        host.addEventListener('toggle', e => observed.push(e.source === host));
+        if (event.source !== host) return false;
+        target.dispatchEvent(event);
+        return observed.length === 2 && observed.every(Boolean) &&
+            event.source === host && new ToggleEvent('toggle').source === null;
+    })()"#
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
 fn property_support_agrees_with_css_supports_and_cascade() {
     let mut runtime = JsRuntime::with_document(TreeBuilder::parse(
         "<style>#probe { rotate:10deg; font-feature-settings: \"liga\" 0; scrollbar-color:red blue; }</style><div id=probe></div>"

@@ -22183,10 +22183,7 @@ fn css_property_rule_native(
     let Some(registration) = registration else {
         return Ok(JsValue::null());
     };
-    let initial_value = registration
-        .initial_value
-        .as_ref()
-        .map(crate::css::serialize_specified_value);
+    let initial_value = registration.initial_value_css_text();
     let encoded = serde_json::json!({
         "name": registration.name,
         "syntax": registration.syntax_text,

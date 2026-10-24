@@ -153,10 +153,6 @@ impl MediaEnvironment {
             .find(|(feature, _, _)| *feature == name)?;
         let actual = self.features.get(name)?;
         if value.is_empty() {
-            if matches!(name, "dynamic-range" | "video-dynamic-range") {
-                // Match the fixed WPT contract and reference-browser behavior.
-                return Some(false);
-            }
             if name == "scan" && !self.scan_available {
                 return Some(false);
             }

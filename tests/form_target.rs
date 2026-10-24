@@ -17,6 +17,41 @@ use http_fixture::{
 
 use omoikane::{html::TreeBuilder, js::JsRuntime};
 
+#[test]
+fn native_submission_preserves_shadow_boundaries_and_retains_its_submitter() {
+    let mut runtime = JsRuntime::new().unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+        const host = document.body.appendChild(document.createElement('div'));
+        const root = host.attachShadow({mode: 'closed'});
+        const form = document.createElement('form');
+        const button = document.createElement('button');
+        form.id = 'shadow-form';
+        button.setAttribute('form', form.id);
+        root.append(form, button);
+        let submitted, outside = 0;
+        form.addEventListener('submit', event => {
+            event.preventDefault();
+            submitted = event;
+        });
+        host.addEventListener('submit', event => {
+            if (event.target === host && event.submitter === button) outside++;
+        });
+        button.click();
+        return submitted && submitted.composed && submitted.submitter === button &&
+            submitted.currentTarget === null && outside === 0 &&
+            submitted.relatedTarget === undefined &&
+            new SubmitEvent('submit', {submitter: button}).composed === false;
+    })()"#
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
 #[derive(Debug)]
 struct Request {
     line: String,

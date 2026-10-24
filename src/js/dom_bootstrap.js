@@ -1168,6 +1168,7 @@ export const __omoikane_service_worker_lifecycle = {};
 
   function computedLogicalShorthand(map, kebab) {
     if (!logicalBoxStyleProperties.has(kebab) &&
+        kebab !== "overscroll-behavior" &&
         kebab !== "inset" && kebab !== "inset-inline" && kebab !== "inset-block" &&
         kebab !== "border-inline" && kebab !== "border-block" &&
         !kebab.startsWith("border-inline-") && !kebab.startsWith("border-block-")) {
@@ -2369,6 +2370,10 @@ export const __omoikane_service_worker_lifecycle = {};
   const registerEventInstance = WeakSet.prototype.add;
   const hasEventInstance = WeakSet.prototype.has;
   const isEventInstance = event => safeApply(hasEventInstance, eventInstances, [event]);
+  // UA submitter data survives dispatch independently of the related-target
+  // slot used to limit its event path at shadow boundaries.
+  const submissionRelatedTargets = browsingInput.submissionRelatedTargets ||
+    (browsingInput.submissionRelatedTargets = new WeakMap());
 
   class Event {
     constructor(type, init = {}) {
@@ -2476,7 +2481,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     get oldState() { return this.__oldState; }
     get newState() { return this.__newState; }
-    get source() { return this.__source; }
+    get source() { return retargetNode(this.__source, this.currentTarget); }
     get [Symbol.toStringTag]() { return "ToggleEvent"; }
   }
 
@@ -2773,9 +2778,17 @@ export const __omoikane_service_worker_lifecycle = {};
     return path;
   }
 
+  function setEventPathRelatedTarget(event, value) {
+    if (safeWeakMapGet(submissionRelatedTargets, event) === undefined) {
+      event.relatedTarget = value;
+    } else {
+      safeWeakMapSet(submissionRelatedTargets, event, value);
+    }
+  }
+
   function invokeEventPathEntry(entry, event, capture, phase) {
     event.target = entry.target;
-    event.relatedTarget = entry.relatedTarget;
+    setEventPathRelatedTarget(event, entry.relatedTarget);
     if (entry.relatedTarget !== null && entry.relatedTarget === entry.target) {
       return event.__stopped;
     }
@@ -2795,7 +2808,9 @@ export const __omoikane_service_worker_lifecycle = {};
     event.__dispatching = true;
     event.__stopped = false;
     event.__stoppedImmediate = false;
-    event.__originalRelatedTarget = event.relatedTarget ?? null;
+    const submissionRelatedTarget = safeWeakMapGet(submissionRelatedTargets, event);
+    event.__originalRelatedTarget = submissionRelatedTarget === undefined
+      ? event.relatedTarget ?? null : submissionRelatedTarget;
     const path = buildEventPath(target, event);
     event.__path = path;
     if (activationInfo) activationInfo.target = clickActivationTarget(path, event);
@@ -2835,7 +2850,7 @@ export const __omoikane_service_worker_lifecycle = {};
         (finalEntry.relatedTarget instanceof Node &&
           nodeRoot(finalEntry.relatedTarget) instanceof ShadowRoot);
       event.target = clearTargets ? null : finalEntry.target;
-      event.relatedTarget = clearTargets ? null : finalEntry.relatedTarget;
+      setEventPathRelatedTarget(event, clearTargets ? null : finalEntry.relatedTarget);
       event.__path = [];
     }
     return !event.defaultPrevented;
@@ -13453,7 +13468,8 @@ export const __omoikane_service_worker_lifecycle = {};
       if (!this.noValidate && !(submitter && submitter.formNoValidate) && !this.__validate(true)) {
         return;
       }
-      const event = new platformEventInterfaces.SubmitEvent("submit", { bubbles: true, cancelable: true, submitter: submitter || null });
+      const event = new platformEventInterfaces.SubmitEvent("submit", { bubbles: true, cancelable: true, composed: true, submitter: submitter || null });
+      safeWeakMapSet(submissionRelatedTargets, event, submitter || null);
       if (this.dispatchEvent(event)) this.__navigate(submitter || null);
     }
     submit() { this.__navigate(null); }

@@ -12,6 +12,29 @@ fn evaluate_boolean(source: &str) -> bool {
 }
 
 #[test]
+fn id_selects_only_the_first_duplicate_in_current_document_order() {
+    assert!(evaluate_boolean(
+        r#"(() => {
+            const doc = new DOMParser().parseFromString(
+                '<root><a id="same"/><b id="same"/><c id="other"/></root>',
+                'application/xml'
+            );
+            const select = () => doc.evaluate('id("other same same")', doc, null,
+                XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+            const first = doc.documentElement.firstChild;
+            const second = first.nextSibling;
+            const before = select();
+            if (before.snapshotLength !== 2 || before.snapshotItem(0) !== first ||
+                before.snapshotItem(1).localName !== 'c') return false;
+            doc.documentElement.insertBefore(second, first);
+            const after = select();
+            return after.snapshotLength === 2 && after.snapshotItem(0) === second &&
+                after.snapshotItem(1).localName === 'c';
+        })()"#,
+    ));
+}
+
+#[test]
 fn evaluates_xpath_operators_functions_axes_and_predicates() {
     assert!(evaluate_boolean(
         r#"(() => {
