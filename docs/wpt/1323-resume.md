@@ -9,6 +9,7 @@
 - #1323 は未完了。[上流WPT PR](https://redirect.github.com/web-platform-tests/wpt/pull/63537) は2026-10-20 16:16:35 UTCにマージ済み。正式なマージコミットは `dff7cf45938f6e16427f5607bac82a803534484b`。
 - [`tests/wpt/revision.txt`](../../tests/wpt/revision.txt) を正式な上流コミット `dff7cf45938f6e16427f5607bac82a803534484b` へ更新し、[`tests/wpt/manifest.json`](../../tests/wpt/manifest.json) から #1323 の既知失敗登録を削除した。
 - main `18fde88e7cc42b05f2842a351872104b5c28f9d6` を統合し、pin更新で検出したCSSOM・色・イベント・XPath・メディアクエリの不一致を修正した。
+- 固定IDLからイベントハンドラー一覧を再生成し、`installresult` と `openerchange` を反映した。生成物の一致検査と、全属性の公開・dispatchを含むイベント関連27テストも成功した。下記の全体結果には一覧更新を含む。
 - 新しく検査される `column-span: auto` は未対応で、CSSOM・配置の実装を [Issue #1450](https://github.com/ieee0824/omoikane/issues/1450) で追跡する。この1 subtest名だけを期限付き既知失敗として登録し、既存のnone/allや別の失敗は引き続き回帰として検出する。
 - `CI=1 WPT_REQUIRED=1 cargo test --locked -- --include-ignored` は5,569成功・失敗0・無視0で終了した。正式WPT全565ケースは555成功・既知失敗10・回帰0・unexpected pass 0。PIは全23 subtest成功、script error 0。
 - 色の単体テスト11件、関連する統合テスト92件、`cargo build --locked`、未コミット差分の書式・空白検査も成功した。コミット後の書式検査、CI、PRのready化・マージは残る。
