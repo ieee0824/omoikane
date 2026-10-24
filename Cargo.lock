@@ -2417,6 +2417,7 @@ dependencies = [
  "sha1",
  "sha2",
  "softbuffer",
+ "sys-locale",
  "unicode-bidi",
  "unicode-segmentation",
  "unicode-vo",

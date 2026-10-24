@@ -199,6 +199,26 @@ fn creates_runtime_and_evaluates_scripts() {
 }
 
 #[test]
+fn navigator_uses_host_language_preferences() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let preferences = crate::language::preferences();
+    let value = runtime
+        .eval("JSON.stringify([navigator.language, ...navigator.languages])")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    let expected = serde_json::to_string(
+        &std::iter::once(preferences.primary())
+            .chain(preferences.languages().iter().map(String::as_str))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+
+    assert_eq!(value, expected);
+}
+
+#[test]
 fn accessibility_node_identities_require_in_range_integers() {
     let maximum = 9_007_199_254_740_991.0_f64.min(usize::MAX as f64);
     assert_eq!(JsRuntime::accessibility_node_identity(42.0), Some(42));

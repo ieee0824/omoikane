@@ -64,6 +64,7 @@ mod console_trace;
 mod cssom_normalization;
 mod dom_removal_trace;
 mod frame_diagnostics;
+mod language;
 mod layout_structure;
 mod main_shadow_mask_cache;
 #[cfg(test)]
@@ -16322,6 +16323,7 @@ fn register_host_bindings(
         js_string!(state.navigator_user_agent.as_str()),
         boa_engine::property::Attribute::all(),
     )?;
+    language::register(context, &mut bindings)?;
     register_private_callable(
         context,
         &mut bindings,
