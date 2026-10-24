@@ -14,7 +14,23 @@ pub(super) fn paint_layout_with_snapshot_attribution(
     visited_link_ids: impl IntoIterator<Item = usize>,
     nested_documents: &HashMap<usize, crate::paint::Image>,
     shadow_masks: Option<&crate::paint::border::FrameShadowMaskCache>,
+    effect_sources: Option<(&crate::paint::EffectSourceCache, u64, &HashSet<usize>)>,
 ) -> (crate::paint::Canvas, crate::paint::PaintRasterSummary) {
+    if let Some((cache, generation, opacity_nodes)) = effect_sources {
+        return crate::paint::paint_layout_with_child_effect_cache(
+            layout,
+            resolver,
+            viewport,
+            crate::paint::text::load_text_fonts(),
+            Some(web_fonts),
+            visited_link_ids,
+            nested_documents,
+            diagnostics_enabled,
+            cache,
+            generation,
+            opacity_nodes,
+        );
+    }
     if let Some(shadow_masks) = shadow_masks {
         return crate::paint::paint_layout_with_document_snapshots_cached(
             layout,
@@ -125,8 +141,38 @@ fn child_snapshot(
     crate::paint::apply_scroll_offsets(&mut layout, resolver, viewport, scroll);
     let preparation_style_profile = preparation_style_profile.finish();
     let children = collect_snapshots(state, &layout, depth + 1, attribution)?;
-    let entry = state
+    let opacity_nodes = state
         .document_styles
+        .get(&id)
+        .and_then(|entry| entry.resolver.as_ref())
+        .map(crate::css::StyleResolver::opacity_only_animation_node_ids)
+        .unwrap_or_default();
+    opacity_target_diagnostics::record(
+        state,
+        &layout,
+        viewport,
+        id,
+        &opacity_nodes,
+        diagnostics_enabled,
+    );
+    let opacity_nodes = if state
+        .document_styles
+        .get(&id)
+        .and_then(|entry| entry.resolver.as_ref())
+        .is_some_and(crate::css::StyleResolver::has_opacity_only_animation_pseudos)
+    {
+        HashSet::new()
+    } else {
+        opacity_nodes
+    };
+    let source_generation = state.paint_source_generation;
+    let HostState {
+        document_styles,
+        child_effect_sources,
+        ..
+    } = state;
+    let effect_sources = child_effect_sources.cache_for(id);
+    let entry = document_styles
         .get_mut(&id)
         .ok_or(crate::paint::PaintError::InvalidImageBuffer)?;
     let resolver = entry
@@ -148,6 +194,7 @@ fn child_snapshot(
                     visited,
                     &children,
                     None,
+                    Some((effect_sources, source_generation, &opacity_nodes)),
                 )
             })
         })

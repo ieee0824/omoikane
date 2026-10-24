@@ -1,4 +1,61 @@
 use super::*;
+
+#[test]
+fn user_action_outcome_distinguishes_paint_only_from_geometry_declarations() {
+    for (declarations, expected) in [
+        (
+            "opacity:.5;background-position-x:2px;background-position-y:3px",
+            UserActionStyleInvalidation::LocalPaintOnly,
+        ),
+        ("filter:blur(1px)", UserActionStyleInvalidation::Local),
+        (
+            "backdrop-filter:blur(1px)",
+            UserActionStyleInvalidation::Local,
+        ),
+        ("width:20px", UserActionStyleInvalidation::Local),
+        ("--size:20px", UserActionStyleInvalidation::Local),
+        ("color:red", UserActionStyleInvalidation::Local),
+        ("content:'x'", UserActionStyleInvalidation::Local),
+        (
+            "transform:translateX(2px)",
+            UserActionStyleInvalidation::Local,
+        ),
+    ] {
+        let document = NodeHandle::document();
+        let root = NodeHandle::element("main");
+        let anchor = NodeHandle::element("a");
+        document.append_child(root.clone());
+        root.append_child(anchor.clone());
+        let mut cached = resolver(&format!("a:hover{{{declarations}}}"));
+        cached.computed_style_shared(&anchor);
+        anchor.set_user_action_state("hover", true);
+        assert_eq!(
+            cached.invalidate_user_action_styles(&[(anchor.clone(), "hover")]),
+            expected,
+            "{declarations}"
+        );
+    }
+}
+
+#[test]
+fn nested_rule_under_user_action_is_conservatively_layout_affecting() {
+    let document = NodeHandle::document();
+    let root = NodeHandle::element("main");
+    let host = NodeHandle::element("div");
+    host.set_attribute("id", "host");
+    let child = NodeHandle::element("div");
+    child.set_attribute("id", "child");
+    document.append_child(root.clone());
+    root.append_child(host.clone());
+    host.append_child(child);
+    let mut cached = resolver("#host:hover { & > #child { width:100px } }");
+    cached.computed_style_shared(&host);
+    host.set_user_action_state("hover", true);
+    assert_eq!(
+        cached.invalidate_user_action_styles(&[(host, "hover")]),
+        UserActionStyleInvalidation::Full("fallback_uncertain_selector")
+    );
+}
 use crate::css::parse_stylesheet;
 
 fn resolver(css: &str) -> StyleResolver {
@@ -125,7 +182,7 @@ fn observer_limit_falls_back_to_full_reach_instead_of_truncating_it() {
         .unwrap()
         .remove(0);
     for _ in 0..=MAX_OBSERVERS {
-        observers.selector(&selector, "hover", false);
+        observers.selector(&selector, "hover", false, true);
     }
     assert!(observers.uncertain);
     assert!(observers.subjects.is_empty());

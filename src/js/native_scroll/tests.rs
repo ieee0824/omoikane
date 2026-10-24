@@ -2120,7 +2120,8 @@ mod render_invalidation_source_contract {
             "let waiting =",
         );
         assert!(image.contains("effects.changed"));
-        assert!(image.contains("state.invalidate_paint_cache()"));
+        assert!(image.contains("state.invalidate_document_paint_source(document.identity())"));
+        assert!(!image.contains("state.invalidate_paint_cache()"));
         assert!(!image.contains("native_scroll.revoke_policy();"));
     }
 

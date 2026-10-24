@@ -19,12 +19,29 @@ thread_local! {
 
 /// Replaces one canvas element's RGBA backing store.
 pub fn commit(owner: &NodeHandle, width: u32, height: u32, pixels: Vec<u8>) -> bool {
+    commit_with_change(owner, width, height, pixels).is_some()
+}
+
+/// Commits validated pixels and reports whether dimensions or pixel bytes changed.
+/// An identical submission succeeds without replacing the existing image.
+pub(crate) fn commit_with_change(
+    owner: &NodeHandle,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+) -> Option<bool> {
     let Ok(image) = Image::new(width, height, pixels) else {
-        return false;
+        return None;
     };
     BACKING_STORES.with(|stores| {
         let mut stores = stores.borrow_mut();
         stores.retain(|_, store| store.owner.is_alive());
+        if stores
+            .get(&owner.identity())
+            .is_some_and(|store| store.image.retained_pixels_exact(&image))
+        {
+            return Some(false);
+        }
         stores.insert(
             owner.identity(),
             BackingStore {
@@ -32,8 +49,8 @@ pub fn commit(owner: &NodeHandle, width: u32, height: u32, pixels: Vec<u8>) -> b
                 image,
             },
         );
-    });
-    true
+        Some(true)
+    })
 }
 
 /// Returns a snapshot of a canvas element's current pixels.
@@ -76,6 +93,27 @@ pub fn png_data_url_from_rgba(width: u32, height: u32, pixels: Vec<u8>) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identical_canvas_submission_succeeds_without_changing_backing() {
+        let node = NodeHandle::element("canvas");
+        assert_eq!(
+            commit_with_change(&node, 1, 1, vec![1, 2, 3, 255]),
+            Some(true)
+        );
+        assert_eq!(
+            commit_with_change(&node, 1, 1, vec![1, 2, 3, 255]),
+            Some(false)
+        );
+        assert!(commit(&node, 1, 1, vec![1, 2, 3, 255]));
+        assert_eq!(
+            commit_with_change(&node, 1, 1, vec![2, 2, 3, 255]),
+            Some(true)
+        );
+        assert_eq!(commit_with_change(&node, 2, 1, vec![2; 8]), Some(true));
+        assert_eq!(commit_with_change(&node, 2, 1, vec![2; 7]), None);
+        assert_eq!(backing_dimensions(node.identity()), Some((2, 1)));
+    }
 
     #[test]
     fn released_canvas_nodes_drop_their_backing_store() {

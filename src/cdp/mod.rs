@@ -622,7 +622,7 @@ impl CdpSession {
     /// Raster coordinates are CSS pixels, independently of the native device scale.
     pub fn take_retained_scroll_scene(&mut self) -> Option<crate::frame::RetainedScrollScene> {
         let captured = self.runtime.take_retained_scroll_capture()?;
-        crate::frame::RetainedScrollScene::new(
+        crate::frame::RetainedScrollScene::new_shared(
             captured.frame,
             1.0,
             self.document_generation(),

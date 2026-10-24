@@ -176,6 +176,95 @@ fn child_layout_cache_survives_paint_only_animation() {
     assert_eq!(runtime.host_state.borrow().child_layout_builds, builds);
 }
 
+fn child_opacity_runtime() -> JsRuntime {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.eval(r#"document.body.style.margin='0';document.body.innerHTML='<iframe id=f style="border:0;width:40px;height:40px"></iframe>';globalThis.f=document.getElementById('f');f.srcdoc='<style>body{margin:0}@keyframes fade{from{opacity:.2}to{opacity:.8}}#a{width:30px;height:30px;background:red;animation:fade 1s linear infinite}</style><div id=a></div>';globalThis.d=f.contentDocument;globalThis.a=d.getElementById('a');"#).unwrap();
+    runtime.enable_live_css_animations();
+    runtime
+}
+
+fn child_document_id(runtime: &JsRuntime) -> usize {
+    runtime
+        .host_state
+        .borrow()
+        .iframe_documents
+        .values()
+        .next()
+        .unwrap()
+        .document
+        .identity()
+}
+
+#[test]
+fn child_opacity_cache_matches_full_paint_and_invalidates_mutations_and_navigation() {
+    let mut cached = child_opacity_runtime();
+    let mut reference = child_opacity_runtime();
+    let cached_document = child_document_id(&cached);
+    let reference_document = child_document_id(&reference);
+
+    for delta in [0, 250, 250] {
+        if delta != 0 {
+            cached.run_animation_frame(delta).unwrap();
+            reference.run_animation_frame(delta).unwrap();
+        }
+        reference
+            .host_state
+            .borrow_mut()
+            .child_effect_sources
+            .remove(reference_document);
+        let expected = reference.paint_current_document().unwrap();
+        let actual = cached.paint_current_document().unwrap();
+        assert_eq!(actual.pixels(), expected.pixels());
+    }
+    assert_eq!(
+        cached
+            .host_state
+            .borrow()
+            .child_effect_sources
+            .source_rasters(cached_document),
+        Some(1),
+        "multiple opacity samples must reuse one pre-opacity source"
+    );
+    let before_mutation = cached.paint_current_document().unwrap().pixels().to_vec();
+
+    for runtime in [&mut cached, &mut reference] {
+        runtime
+            .eval("a.textContent='changed';a.style.background='blue'")
+            .unwrap();
+    }
+    reference
+        .host_state
+        .borrow_mut()
+        .child_effect_sources
+        .remove(reference_document);
+    let expected = reference.paint_current_document().unwrap();
+    let actual = cached.paint_current_document().unwrap();
+    assert_eq!(actual.pixels(), expected.pixels());
+    assert_ne!(actual.pixels(), before_mutation);
+    assert_eq!(actual.pixel(5, 5), expected.pixel(5, 5));
+    assert_eq!(
+        cached
+            .host_state
+            .borrow()
+            .child_effect_sources
+            .source_rasters(cached_document),
+        Some(2),
+        "DOM/style mutation must raster a new source generation"
+    );
+
+    cached
+        .eval("f.srcdoc='<body style=margin:0><p>replacement</p>';void f.contentDocument")
+        .unwrap();
+    assert!(
+        !cached
+            .host_state
+            .borrow()
+            .child_effect_sources
+            .contains(cached_document),
+        "retired child document cache must be removed"
+    );
+}
+
 fn canvas_runtime() -> JsRuntime {
     let mut runtime = runtime();
     runtime.eval("document.body.style.margin='0';f.style.border='0';d.body.innerHTML='<canvas width=20 height=20></canvas>';globalThis.ctx=d.querySelector('canvas').getContext('2d');ctx.fillStyle='red';ctx.fillRect(0,0,20,20)").unwrap();

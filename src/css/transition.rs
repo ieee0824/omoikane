@@ -145,6 +145,37 @@ pub(crate) fn animated_property_requires_layout(property: &str) -> bool {
     )
 }
 
+/// Returns whether a running transition must rebuild layout geometry.
+///
+/// Color transitions can retain geometry because transition sampling already
+/// invalidates the owner's full style subtree, including inherited `color` and
+/// descendant `currentColor` users. Keyframe animations use
+/// [`animated_property_requires_layout`] directly because their target-only
+/// cache invalidation does not yet provide that inheritance guarantee.
+fn transition_property_requires_layout(property: &str) -> bool {
+    if !animated_property_requires_layout(property) {
+        return false;
+    }
+    !matches!(
+        PropertyId::parse(property),
+        Some(
+            PropertyId::Color
+                | PropertyId::BorderBlockEndColor
+                | PropertyId::BorderBlockStartColor
+                | PropertyId::BorderBottomColor
+                | PropertyId::BorderInlineEndColor
+                | PropertyId::BorderInlineStartColor
+                | PropertyId::BorderLeftColor
+                | PropertyId::BorderRightColor
+                | PropertyId::BorderTopColor
+                | PropertyId::ColumnRuleColor
+                | PropertyId::OutlineColor
+                | PropertyId::TextDecorationColor
+                | PropertyId::BackgroundColor
+        )
+    )
+}
+
 impl TransitionPropertyCounts {
     fn add(&mut self, property: &str) {
         self.properties += 1;
@@ -386,7 +417,7 @@ impl TransitionTimeline {
             state
                 .running
                 .keys()
-                .any(|property| animated_property_requires_layout(property))
+                .any(|property| transition_property_requires_layout(property))
         })
     }
 

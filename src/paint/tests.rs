@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -7624,6 +7625,122 @@ fn opacity_reduces_element_alpha() {
         center.map_or(false, |c| c.a > 0 && c.a < 255),
         "opacity: 0.5 should produce semi-transparent pixel at center, got {:?}",
         center
+    );
+}
+
+#[test]
+fn child_opacity_effect_cache_reuses_source_and_invalidates_by_generation() {
+    fn paint(
+        opacity: f32,
+        color: &str,
+        generation: u64,
+        cache: &EffectSourceCache,
+        document: &NodeHandle,
+        node: &NodeHandle,
+    ) -> (Canvas, Canvas) {
+        let css = format!(
+            "body{{margin:0}}div{{width:20px;height:20px;background:{color};opacity:{opacity}}}"
+        );
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 24.0,
+            height: 24.0,
+        };
+        let layout = layout_tree(document, &mut resolver, viewport).unwrap();
+        let ordinary = paint_layout(&layout, &mut resolver, viewport);
+        let nodes = HashSet::from([node.identity()]);
+        let cached = paint_layout_with_child_effect_cache(
+            &layout,
+            &mut resolver,
+            viewport,
+            text::load_text_fonts(),
+            None,
+            [],
+            &HashMap::new(),
+            false,
+            cache,
+            generation,
+            &nodes,
+        )
+        .0;
+        (cached, ordinary)
+    }
+
+    let cache = EffectSourceCache::default();
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let node = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(node.clone());
+    let (first, first_ordinary) = paint(0.25, "red", 7, &cache, &document, &node);
+    let (second, second_ordinary) = paint(0.75, "red", 7, &cache, &document, &node);
+    assert_eq!(cache.source_rasters(), 1);
+    assert_eq!(first.pixels(), first_ordinary.pixels());
+    assert_eq!(second.pixels(), second_ordinary.pixels());
+    assert_eq!(first.pixel(5, 5).unwrap().a, 64);
+    assert_eq!(second.pixel(5, 5).unwrap().a, 191);
+
+    let (mutated, mutated_ordinary) = paint(0.75, "blue", 8, &cache, &document, &node);
+    assert_eq!(cache.source_rasters(), 2);
+    assert_eq!(mutated.pixels(), mutated_ordinary.pixels());
+    assert_eq!(mutated.pixel(5, 5), Some(Color::rgba(0, 0, 255, 191)));
+}
+
+#[test]
+fn child_opacity_effect_cache_rejects_nested_animated_alpha() {
+    fn paint(opacities: (f32, f32), cache: &EffectSourceCache) -> (Canvas, Canvas) {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let outer = NodeHandle::element("section");
+        let inner = NodeHandle::element("div");
+        document.append_child(body.clone());
+        body.append_child(outer.clone());
+        outer.append_child(inner.clone());
+        let css = format!(
+            "body{{margin:0}}section{{width:20px;height:20px;opacity:{}}}\
+             div{{width:20px;height:20px;background:red;opacity:{}}}",
+            opacities.0, opacities.1
+        );
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 24.0,
+            height: 24.0,
+        };
+        let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+        let ordinary = paint_layout(&layout, &mut resolver, viewport);
+        let nodes = HashSet::from([outer.identity(), inner.identity()]);
+        let cached = paint_layout_with_child_effect_cache(
+            &layout,
+            &mut resolver,
+            viewport,
+            text::load_text_fonts(),
+            None,
+            [],
+            &HashMap::new(),
+            false,
+            cache,
+            11,
+            &nodes,
+        )
+        .0;
+        (cached, ordinary)
+    }
+
+    let cache = EffectSourceCache::default();
+    for opacities in [(0.25, 0.5), (0.75, 0.8)] {
+        let (cached, ordinary) = paint(opacities, &cache);
+        assert_eq!(cached.pixels(), ordinary.pixels());
+    }
+    assert_eq!(
+        cache.source_rasters(),
+        0,
+        "an animated descendant must prevent retaining its parent's old alpha"
     );
 }
 

@@ -176,7 +176,7 @@ impl JsRuntime {
                 if effects.requires_layout {
                     state.mark_document_layout_dirty(&document, "image_resource_completed");
                 } else {
-                    state.invalidate_paint_cache();
+                    state.invalidate_document_paint_source(document.identity());
                 }
             }
         }

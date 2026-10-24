@@ -286,6 +286,10 @@ impl FilterSourcePlan {
             shadow_masks: Some(view.shadow_masks),
             retained_collector: None,
             retained_destination: PaintDestination::Temporary,
+            effect_sources: None,
+            effect_source_generation: 0,
+            effect_source_nodes: None,
+            effect_source_summary: None,
         };
         let mut ancestor_trace =
             FilterAncestorTrace::new(std::env::var_os("OMOIKANE_TRACE_RETAINED_FILTER").is_some());

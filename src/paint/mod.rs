@@ -3,7 +3,9 @@
 pub(crate) mod animation;
 pub(crate) mod border;
 mod caret;
+mod effect_source_cache;
 pub(crate) use caret::{TextCaretPoint, hit_test_caret_layout};
+pub(crate) use effect_source_cache::{EffectSourceCache, EffectSourceCacheSummary};
 pub(crate) mod color;
 pub(crate) mod color4;
 pub(crate) mod form_control;
@@ -230,6 +232,21 @@ impl PartialEq for Image {
     }
 }
 impl Eq for Image {}
+
+impl Image {
+    pub(crate) fn retained_pixels_exact(&self, other: &Self) -> bool {
+        self == other
+    }
+
+    /// Includes playback regions and rejects direct animated sources whose
+    /// future sampled pixels cannot yet be compared by a stable cache key.
+    pub(crate) fn retained_source_exact(&self, other: &Self) -> bool {
+        self.animated_pixels.is_none()
+            && other.animated_pixels.is_none()
+            && self == other
+            && self.animation_regions == other.animation_regions
+    }
+}
 
 /// GIF disposal operation applied after a frame's display interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1463,7 +1480,11 @@ pub fn paint_layout_with_web_fonts(
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PaintRasterSummary {
     pub(crate) nested_snapshot_draw_calls: usize,
+    pub(crate) nested_snapshot_owner_ids: [usize; 16],
+    pub(crate) nested_snapshot_owner_count: usize,
+    pub(crate) nested_snapshot_owner_overflow: usize,
     pub(crate) shadow_masks: border::ShadowMaskCacheSummary,
+    pub(crate) effect_sources: EffectSourceCacheSummary,
 }
 
 impl PaintRasterSummary {
@@ -1471,9 +1492,84 @@ impl PaintRasterSummary {
         self.nested_snapshot_draw_calls = self
             .nested_snapshot_draw_calls
             .saturating_add(other.nested_snapshot_draw_calls);
+        for owner in other.nested_snapshot_owner_ids[..other.nested_snapshot_owner_count.min(16)]
+            .iter()
+            .copied()
+        {
+            self.record_nested_snapshot_owner(owner);
+        }
+        self.nested_snapshot_owner_overflow = self
+            .nested_snapshot_owner_overflow
+            .saturating_add(other.nested_snapshot_owner_overflow);
         self.shadow_masks = self.shadow_masks.merged(other.shadow_masks);
+        self.effect_sources = self.effect_sources.merged(other.effect_sources);
         self
     }
+
+    fn record_nested_snapshot_owner(&mut self, owner: usize) {
+        let retained = &self.nested_snapshot_owner_ids[..self.nested_snapshot_owner_count.min(16)];
+        if retained.contains(&owner) {
+            return;
+        }
+        if self.nested_snapshot_owner_count < self.nested_snapshot_owner_ids.len() {
+            self.nested_snapshot_owner_ids[self.nested_snapshot_owner_count] = owner;
+            self.nested_snapshot_owner_count += 1;
+        } else {
+            self.nested_snapshot_owner_overflow =
+                self.nested_snapshot_owner_overflow.saturating_add(1);
+        }
+    }
+}
+
+thread_local! {
+    static NESTED_SNAPSHOT_DRAW_SCOPE: RefCell<Option<PaintRasterSummary>> = RefCell::new(None);
+}
+
+/// Bounded attribution for nested snapshots drawn by one main raster,
+/// including retained-layer planning and every full-viewport overscan sample.
+pub(crate) struct NestedSnapshotDrawScope {
+    active: bool,
+}
+
+impl NestedSnapshotDrawScope {
+    pub(crate) fn begin(enabled: bool) -> Self {
+        if enabled {
+            NESTED_SNAPSHOT_DRAW_SCOPE.with(|scope| {
+                debug_assert!(scope.borrow().is_none());
+                *scope.borrow_mut() = Some(PaintRasterSummary::default());
+            });
+        }
+        Self { active: enabled }
+    }
+
+    pub(crate) fn finish(mut self) -> PaintRasterSummary {
+        if !self.active {
+            return PaintRasterSummary::default();
+        }
+        self.active = false;
+        NESTED_SNAPSHOT_DRAW_SCOPE.with(|scope| scope.borrow_mut().take().unwrap_or_default())
+    }
+}
+
+impl Drop for NestedSnapshotDrawScope {
+    fn drop(&mut self) {
+        if self.active {
+            NESTED_SNAPSHOT_DRAW_SCOPE.with(|scope| {
+                scope.borrow_mut().take();
+            });
+        }
+    }
+}
+
+fn record_nested_snapshot_draw(owner: usize) {
+    NESTED_SNAPSHOT_DRAW_SCOPE.with(|scope| {
+        let mut scope = scope.borrow_mut();
+        let Some(summary) = scope.as_mut() else {
+            return;
+        };
+        summary.nested_snapshot_draw_calls = summary.nested_snapshot_draw_calls.saturating_add(1);
+        summary.record_nested_snapshot_owner(owner);
+    });
 }
 
 /// Paints with a private visited-link color snapshot, restored before return.
@@ -1519,6 +1615,7 @@ pub(crate) fn paint_layout_with_document_snapshots(
         nested_documents,
         false,
         None,
+        None,
     )
     .0
 }
@@ -1544,6 +1641,7 @@ pub(crate) fn paint_layout_with_document_snapshots_counted(
         visited_link_ids,
         nested_documents,
         true,
+        None,
         None,
     )
 }
@@ -1571,6 +1669,36 @@ pub(crate) fn paint_layout_with_document_snapshots_cached(
         nested_documents,
         collect_diagnostics,
         Some(shadow_masks),
+        None,
+    )
+}
+
+/// Paints a child document while retaining only proven opacity effect sources.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_layout_with_child_effect_cache(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    fonts: Vec<Arc<Font>>,
+    web_fonts: Option<&WebFontRegistry>,
+    visited_link_ids: impl IntoIterator<Item = usize>,
+    nested_documents: &HashMap<usize, Image>,
+    collect_diagnostics: bool,
+    cache: &EffectSourceCache,
+    generation: u64,
+    opacity_nodes: &HashSet<usize>,
+) -> (Canvas, PaintRasterSummary) {
+    paint_layout_with_document_snapshots_internal(
+        layout,
+        resolver,
+        viewport,
+        fonts,
+        web_fonts,
+        visited_link_ids,
+        nested_documents,
+        collect_diagnostics,
+        None,
+        Some((cache, generation, opacity_nodes)),
     )
 }
 
@@ -1596,6 +1724,7 @@ fn paint_layout_with_document_snapshots_internal(
     nested_documents: &HashMap<usize, Image>,
     collect_diagnostics: bool,
     external_shadow_masks: Option<&border::FrameShadowMaskCache>,
+    effect_sources: Option<(&EffectSourceCache, u64, &HashSet<usize>)>,
 ) -> (Canvas, PaintRasterSummary) {
     #[cfg(test)]
     ORDINARY_DOCUMENT_RASTERS.with(|count| count.set(count.get() + 1));
@@ -1609,6 +1738,7 @@ fn paint_layout_with_document_snapshots_internal(
     let shadow_measurement: border::RasterMeasurementToken =
         shadow_masks.begin_raster_measurement(collect_diagnostics);
     let snapshot_draw_calls = Cell::new(0);
+    let effect_source_summary = RefCell::new(EffectSourceCacheSummary::default());
     let mut canvas = Canvas::new(
         viewport.width.ceil().max(1.0) as u32,
         viewport.height.ceil().max(1.0) as u32,
@@ -1632,6 +1762,10 @@ fn paint_layout_with_document_snapshots_internal(
                 shadow_masks: Some(shadow_masks),
                 retained_collector: None,
                 retained_destination: retained_extract::PaintDestination::RootDocument,
+                effect_sources: effect_sources.map(|value| value.0),
+                effect_source_generation: effect_sources.map_or(0, |value| value.1),
+                effect_source_nodes: effect_sources.map(|value| value.2),
+                effect_source_summary: collect_diagnostics.then_some(&effect_source_summary),
             },
             PaintBoxOptions {
                 inherited_clip: None,
@@ -1651,6 +1785,8 @@ fn paint_layout_with_document_snapshots_internal(
             shadow_masks: shadow_masks
                 .finish_raster_measurement(shadow_measurement)
                 .unwrap_or_default(),
+            effect_sources: effect_source_summary.into_inner(),
+            ..PaintRasterSummary::default()
         },
     )
 }
@@ -2505,6 +2641,10 @@ struct PaintContext<'a> {
     shadow_masks: Option<&'a border::FrameShadowMaskCache>,
     retained_collector: Option<&'a RefCell<retained_extract::RetainedPaintCollector>>,
     retained_destination: retained_extract::PaintDestination,
+    effect_sources: Option<&'a EffectSourceCache>,
+    effect_source_generation: u64,
+    effect_source_nodes: Option<&'a HashSet<usize>>,
+    effect_source_summary: Option<&'a RefCell<EffectSourceCacheSummary>>,
 }
 
 /// Per-box traversal state in the destination surface's coordinate system.
@@ -2742,6 +2882,10 @@ fn paint_box(
             shadow_masks: Some(shadow_masks),
             retained_collector: None,
             retained_destination: retained_extract::PaintDestination::RootDocument,
+            effect_sources: None,
+            effect_source_generation: 0,
+            effect_source_nodes: None,
+            effect_source_summary: None,
         },
         PaintBoxOptions {
             inherited_clip,
@@ -4285,30 +4429,79 @@ fn paint_effect_group(
         width: viewport.width,
         height: viewport.height,
     };
-    let mut offscreen = Canvas::new(buf_w, buf_h);
-    paint_box_internal_to(
-        &mut offscreen,
+    let cache_key = effect_source_cache_key(
         layout,
-        resolver,
-        PaintContext {
-            viewport: offset_viewport,
-            retained_destination: retained_extract::PaintDestination::Temporary,
-            ..context
-        },
+        context,
+        options,
         style,
-        PaintBoxGeometry {
-            border_box: offset_border_box,
-            padding_box: offset_padding_box,
-        },
-        PaintBoxOptions {
-            inherited_clip: offset_inherited_clip,
-            include_phase_descendants,
-            paint_decorations,
-            offset: surface_offset,
-            retained_paint_owner: options.retained_paint_owner,
-            retained_atomic_inline: options.retained_atomic_inline,
-        },
+        inherited_clip,
+        clip_shape,
+        filters,
+        masks,
+        include_phase_descendants,
+        paint_decorations,
+        offset,
+        buf_x,
+        buf_y,
+        buf_w,
+        buf_h,
     );
+    let cached_source = cache_key.and_then(|key| context.effect_sources?.get(key));
+    if cached_source.is_some() {
+        record_effect_source_summary(context, |summary| {
+            summary.hits = summary.hits.saturating_add(1);
+        });
+    }
+    let mut offscreen = cached_source.unwrap_or_else(|| {
+        let mut source = Canvas::new(buf_w, buf_h);
+        paint_box_internal_to(
+            &mut source,
+            layout,
+            resolver,
+            PaintContext {
+                viewport: offset_viewport,
+                retained_destination: retained_extract::PaintDestination::Temporary,
+                // Nested effect groups must not recursively use the same
+                // source cache entry while it is being produced.
+                effect_sources: None,
+                effect_source_nodes: None,
+                ..context
+            },
+            style,
+            PaintBoxGeometry {
+                border_box: offset_border_box,
+                padding_box: offset_padding_box,
+            },
+            PaintBoxOptions {
+                inherited_clip: offset_inherited_clip,
+                include_phase_descendants,
+                paint_decorations,
+                offset: surface_offset,
+                retained_paint_owner: options.retained_paint_owner,
+                retained_atomic_inline: options.retained_atomic_inline,
+            },
+        );
+        if let (Some(key), Some(cache)) = (cache_key, context.effect_sources) {
+            match cache.insert(key, source.clone()) {
+                effect_source_cache::InsertOutcome::Stored => {
+                    record_effect_source_summary(context, |summary| {
+                        summary.source_rasters = summary.source_rasters.saturating_add(1);
+                    });
+                }
+                effect_source_cache::InsertOutcome::AnimatedImage => {
+                    record_effect_source_summary(context, |summary| {
+                        summary.animated_image = summary.animated_image.saturating_add(1);
+                    });
+                }
+                effect_source_cache::InsertOutcome::Oversize => {
+                    record_effect_source_summary(context, |summary| {
+                        summary.oversize = summary.oversize.saturating_add(1);
+                    });
+                }
+            }
+        }
+        source
+    });
     if retained_extract::capture_filter_source(layout, context, &offscreen, (buf_x, buf_y)) {
         return;
     }
@@ -4355,6 +4548,112 @@ fn paint_effect_group(
             blend_pixel(&mut canvas.pixels[dst_idx..dst_idx + 4], color);
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn effect_source_cache_key(
+    layout: &LayoutBox,
+    context: PaintContext<'_>,
+    options: PaintBoxOptions,
+    style: &ComputedStyle,
+    inherited_clip: Option<Rect>,
+    clip_shape: &Option<ClipPathShape>,
+    filters: &[crate::css::FilterFunction],
+    masks: &[MaskLayer],
+    include_phase_descendants: bool,
+    paint_decorations: bool,
+    offset: PaintOffset,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Option<effect_source_cache::EffectSourceKey> {
+    let node = layout.node.identity();
+    context.effect_sources?;
+    let nodes = context.effect_source_nodes?;
+    macro_rules! reject {
+        ($field:ident) => {{
+            record_effect_source_summary(context, |summary| {
+                summary.$field = summary.$field.saturating_add(1);
+            });
+            return None;
+        }};
+    }
+    if !nodes.contains(&node) {
+        reject!(node_not_eligible);
+    }
+    if subtree_has_other_opacity_target(layout, nodes, node) {
+        reject!(descendant_animation);
+    }
+    if !filters.is_empty() || !masks.is_empty() || clip_shape.is_some() {
+        reject!(other_effect);
+    }
+    if !layout.transform.is_identity() || has_transform_style(style) {
+        reject!(transform);
+    }
+    if context
+        .nested_documents
+        .is_some_and(|documents| !documents.is_empty())
+    {
+        reject!(nested_snapshot);
+    }
+    if !matches!(
+        context.retained_destination,
+        retained_extract::PaintDestination::RootDocument
+    ) {
+        reject!(non_root_destination);
+    }
+    Some(effect_source_cache::EffectSourceKey {
+        node,
+        generation: context.effect_source_generation,
+        x,
+        y,
+        width,
+        height,
+        inherited_clip: inherited_clip.map(rect_bits),
+        include_phase_descendants,
+        paint_decorations,
+        offset: [offset.x.to_bits(), offset.y.to_bits()],
+        retained_paint_owner: options.retained_paint_owner,
+        retained_atomic_inline: options.retained_atomic_inline.map(|invocation| {
+            [
+                invocation.owner_node_id,
+                invocation.atomic_node_id,
+                invocation.line_index,
+                invocation.fragment_index,
+            ]
+        }),
+    })
+}
+
+fn rect_bits(rect: Rect) -> [u32; 4] {
+    [
+        rect.x.to_bits(),
+        rect.y.to_bits(),
+        rect.width.to_bits(),
+        rect.height.to_bits(),
+    ]
+}
+
+fn record_effect_source_summary(
+    context: PaintContext<'_>,
+    record: impl FnOnce(&mut EffectSourceCacheSummary),
+) {
+    if let Some(summary) = context.effect_source_summary {
+        record(&mut summary.borrow_mut());
+    }
+}
+
+fn subtree_has_other_opacity_target(
+    layout: &LayoutBox,
+    targets: &HashSet<usize>,
+    owner: usize,
+) -> bool {
+    layout.children.iter().any(|child| {
+        let child_id = child.node.identity();
+        (child_id != owner && targets.contains(&child_id))
+            || subtree_has_other_opacity_target(child, targets, owner)
+    })
 }
 
 fn composite_affine(
@@ -5055,6 +5354,7 @@ fn paint_nested_document_snapshot(
             None => Some(destination),
         };
         if let Some(image_clip) = image_clip {
+            record_nested_snapshot_draw(layout.node.identity());
             if let Some(snapshot_draw_calls) = snapshot_draw_calls {
                 snapshot_draw_calls.set(snapshot_draw_calls.get().saturating_add(1));
             }

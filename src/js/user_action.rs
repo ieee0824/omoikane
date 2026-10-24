@@ -179,6 +179,7 @@ impl ActionChanges {
                     |resolver| resolver.invalidate_user_action_styles(&changes.flags),
                 );
             if outcome.changed() {
+                let preserve_main_layout = outcome.preserves_layout();
                 *cache_outcomes.entry(outcome.label()).or_default() += 1;
                 if outcome.is_full() {
                     full_documents += 1;
@@ -199,7 +200,7 @@ impl ActionChanges {
                     entry.needs_full_sample = true;
                     entry.child_layout = None;
                 }
-                state.invalidate_document_style_outputs(&changes.document, false);
+                state.invalidate_document_style_outputs(&changes.document, preserve_main_layout);
                 invalidated_documents += 1;
             }
         }

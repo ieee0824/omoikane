@@ -76,6 +76,7 @@ struct AnimationSpec {
     timing: String,
     requires_layout: bool,
     refreshes_visibility: bool,
+    opacity_only: bool,
 }
 
 impl AnimationSpec {
@@ -107,6 +108,7 @@ impl AnimationSpec {
             timing: keyword(PropertyId::AnimationTimingFunction, "ease"),
             requires_layout: true,
             refreshes_visibility: false,
+            opacity_only: false,
         }
     }
 
@@ -201,6 +203,7 @@ struct AnimationClockEffects {
     changed_elements: usize,
     changed_pseudos: usize,
     changed_targets: Vec<(usize, Option<PseudoElement>)>,
+    opacity_only: bool,
 }
 
 impl AnimationClockEffects {
@@ -221,6 +224,8 @@ pub(crate) struct StyleClockEffects {
     pub(crate) transition_cache_before_animation: TransitionCacheEffects,
     pub(crate) animation_changed: bool,
     pub(crate) animation_requires_layout: bool,
+    /// Every animation target changed only `opacity` in this sample.
+    pub(crate) animation_opacity_only: bool,
     /// A changed keyframe sample updates visibility without changing geometry.
     pub(crate) animation_refreshes_visibility: bool,
     pub(crate) retained_animation_elements: usize,
@@ -260,6 +265,7 @@ impl AnimationTimeline {
             self.now_ms
         };
         let mut effects = AnimationClockEffects::default();
+        effects.opacity_only = true;
         for ((node, pseudo), state) in &self.elements {
             if pseudo.is_some() {
                 effects.retained_pseudos += 1;
@@ -277,6 +283,7 @@ impl AnimationTimeline {
                 }
                 effects.requires_layout |= state.spec.requires_layout;
                 effects.refreshes_visibility |= state.spec.refreshes_visibility;
+                effects.opacity_only &= state.spec.opacity_only;
             }
         }
         self.now_ms = next;
@@ -561,6 +568,7 @@ impl StyleResolver {
             transition_cache_before_animation,
             animation_changed: animation.changed(),
             animation_requires_layout: animation.requires_layout,
+            animation_opacity_only: animation.changed() && animation.opacity_only,
             animation_refreshes_visibility: animation.refreshes_visibility,
             retained_animation_elements: animation.retained_elements,
             retained_animation_pseudos: animation.retained_pseudos,
@@ -634,6 +642,36 @@ impl StyleResolver {
             })
             .unwrap_or_default()
     }
+
+    /// Element targets whose running keyframes affect only opacity.
+    pub(crate) fn opacity_only_animation_node_ids(&self) -> HashSet<usize> {
+        self.animation_timeline
+            .as_ref()
+            .map(|timeline| {
+                timeline
+                    .borrow()
+                    .elements
+                    .iter()
+                    .filter_map(|((node, pseudo), state)| {
+                        (pseudo.is_none() && state.spec.opacity_only).then_some(*node)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether an opacity-only keyframe targets a pseudo-element. The child
+    /// effect cache has no pseudo identity in its key, so such documents fail
+    /// closed until that identity is represented explicitly.
+    pub(crate) fn has_opacity_only_animation_pseudos(&self) -> bool {
+        self.animation_timeline.as_ref().is_some_and(|timeline| {
+            timeline
+                .borrow()
+                .elements
+                .iter()
+                .any(|((_, pseudo), state)| pseudo.is_some() && state.spec.opacity_only)
+        })
+    }
     pub(crate) fn retain_animation_nodes(&mut self, nodes: &HashSet<usize>) {
         if let Some(timeline) = &mut self.animation_timeline {
             timeline
@@ -678,6 +716,13 @@ impl StyleResolver {
             step.declarations
                 .iter()
                 .any(|declaration| declaration.name == "visibility")
+        });
+        spec.opacity_only = steps.iter().all(|step| {
+            !step.declarations.is_empty()
+                && step
+                    .declarations
+                    .iter()
+                    .all(|declaration| declaration.name == "opacity")
         });
         spec.requires_layout = steps.iter().any(|step| {
             step.declarations.iter().any(|declaration| {

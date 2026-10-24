@@ -60,7 +60,7 @@ fn assert_queries_match_states(timeline: &TransitionTimeline) {
         state
             .running
             .keys()
-            .any(|property| animated_property_requires_layout(property))
+            .any(|property| transition_property_requires_layout(property))
     });
     assert_eq!(timeline.running_transitions_require_layout(), layout);
     let expected_scopes: std::collections::BTreeMap<_, _> = timeline
@@ -91,6 +91,26 @@ fn assert_queries_match_states(timeline: &TransitionTimeline) {
                 .values()
                 .all(|scope| *scope == TransitionCacheScope::Subtree)
     );
+}
+
+#[test]
+fn color_transitions_retain_layout_but_geometry_transitions_do_not() {
+    for property in [
+        "color",
+        "background-color",
+        "border-top-color",
+        "outline-color",
+        "text-decoration-color",
+    ] {
+        assert!(!transition_property_requires_layout(property), "{property}");
+        assert!(
+            animated_property_requires_layout(property),
+            "keyframes remain conservative until their cache invalidation covers descendants: {property}",
+        );
+    }
+    for property in ["width", "border-top-width", "padding-left"] {
+        assert!(transition_property_requires_layout(property), "{property}");
+    }
 }
 
 #[test]

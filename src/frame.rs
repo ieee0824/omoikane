@@ -221,7 +221,7 @@ impl std::error::Error for RetainedScrollComposeError {}
 /// The numeric tags are snapshot checks; live DOM/script revocation remains a
 /// separate native-owner signal and must be connected before async acceptance.
 pub struct RetainedScrollScene {
-    inner: RetainedOverscanFrame,
+    inner: std::sync::Arc<RetainedOverscanFrame>,
     raster_scale: f64,
     document_generation: u64,
     paint_revision: u64,
@@ -233,6 +233,25 @@ impl RetainedScrollScene {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         inner: RetainedOverscanFrame,
+        raster_scale: f64,
+        document_generation: u64,
+        paint_revision: u64,
+        logical_scroll: (f64, f64),
+        extent: (f64, f64),
+    ) -> Result<Self, RetainedScrollComposeError> {
+        Self::new_shared(
+            std::sync::Arc::new(inner),
+            raster_scale,
+            document_generation,
+            paint_revision,
+            logical_scroll,
+            extent,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_shared(
+        inner: std::sync::Arc<RetainedOverscanFrame>,
         raster_scale: f64,
         document_generation: u64,
         paint_revision: u64,

@@ -10740,6 +10740,20 @@ fn style_clock_effects_distinguish_transition_layout_and_paint_changes() {
     for (property, start, end, expected, requires_layout) in [
         ("width", "10px", "30px", ComputedValue::Px(20.0), true),
         ("opacity", "0", "1", ComputedValue::Number(0.5), false),
+        (
+            "color",
+            "red",
+            "blue",
+            ComputedValue::Color("rgb(128, 0, 128)".into()),
+            false,
+        ),
+        (
+            "background-color",
+            "red",
+            "blue",
+            ComputedValue::Color("rgb(128, 0, 128)".into()),
+            false,
+        ),
     ] {
         let element = NodeHandle::element("div");
         let mut resolver = StyleResolver::new();
@@ -10858,7 +10872,7 @@ fn localized_nested_color_transitions_replace_the_union_and_retain_unrelated_sty
     expected_lookups.sort_unstable();
     assert_eq!(looked_up, expected_lookups);
     assert!(effects.transition_changed);
-    assert!(effects.transition_requires_layout);
+    assert!(!effects.transition_requires_layout);
     assert_eq!(
         effects.transition_cache_before_animation,
         TransitionCacheEffects {
@@ -10920,6 +10934,7 @@ fn localized_nested_color_transitions_replace_the_union_and_retain_unrelated_sty
         transition_node_lookup(&[parent.clone(), child.clone()]),
     );
     assert!(effects.transition_changed);
+    assert!(!effects.transition_requires_layout);
     assert_eq!(
         effects.transition_cache_before_animation,
         TransitionCacheEffects {
@@ -11040,6 +11055,7 @@ fn localized_noninherited_color_transitions_refresh_explicit_inherit_descendants
         transition_node_lookup(std::slice::from_ref(&target)),
     );
     assert!(effects.transition_changed);
+    assert!(!effects.transition_requires_layout);
     assert_eq!(
         effects.transition_cache_before_animation,
         TransitionCacheEffects {
@@ -11088,6 +11104,7 @@ fn localized_noninherited_color_transitions_refresh_explicit_inherit_descendants
         false,
         transition_node_lookup(std::slice::from_ref(&target)),
     );
+    assert!(!final_effects.transition_requires_layout);
     assert_eq!(
         final_effects.transition_cache_before_animation,
         TransitionCacheEffects {

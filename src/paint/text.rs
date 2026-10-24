@@ -265,6 +265,10 @@ pub(crate) fn paint_text_with_registry(
             shadow_masks: None,
             retained_collector: None,
             retained_destination: super::retained_extract::PaintDestination::RootDocument,
+            effect_sources: None,
+            effect_source_generation: 0,
+            effect_source_nodes: None,
+            effect_source_summary: None,
         },
         offset,
     );
@@ -429,8 +433,10 @@ pub(super) fn paint_text_with_context(
 /// text decorations, for caching per-origin decoration state on a line.
 type DecorationOrigin = (usize, Option<crate::css::PseudoElement>);
 
-/// Samples canvas backing stores at paint time, independently of cached geometry.
-/// Other replaced fragments keep their layout-time image and animation metadata.
+/// Samples paint-dependent replaced content independently of cached geometry.
+/// Canvas uses its current backing store, while inline SVG is re-rasterized when
+/// its live `currentColor` input differs. Other replaced fragments keep their
+/// layout-time image and animation metadata.
 fn paint_current_inline_image(
     canvas: &mut Canvas,
     fragment: &crate::layout::InlineFragment,
@@ -446,12 +452,31 @@ fn paint_current_inline_image(
         .has_tag_name("canvas")
         .then(|| crate::canvas::image(fragment.node.identity()))
         .flatten();
+    let is_svg = fragment.node.has_tag_name("svg");
     let paint = fragment_box_paint_style(fragment, resolver);
+    let paint_style = paint.as_deref().unwrap_or(style);
+    // Inline SVG is rasterized during layout, but its `currentColor` input is
+    // paint-only. Re-rasterize when the live paint color differs so color
+    // transitions can retain geometry without retaining stale SVG pixels.
+    let current_svg = is_svg
+        .then(|| {
+            let layout_color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
+            let paint_color = text_color(paint_style).unwrap_or(Color::rgb(0, 0, 0));
+            (layout_color != paint_color)
+                .then(|| {
+                    crate::svg::render_svg_to_image_with_current_color(&fragment.node, paint_color)
+                })
+                .flatten()
+        })
+        .flatten();
     paint_inline_image_fragment(
         canvas,
         rect,
-        current_canvas.as_ref().unwrap_or(image),
-        paint.as_deref().unwrap_or(style),
+        current_canvas
+            .as_ref()
+            .or_else(|| current_svg.as_ref())
+            .unwrap_or(image),
+        paint_style,
         clip,
         viewport,
     );
@@ -967,9 +992,8 @@ pub(super) fn fragment_box_paint_style(
     fragment: &crate::layout::InlineFragment,
     resolver: &mut crate::css::StyleResolver,
 ) -> Option<Arc<ComputedStyle>> {
-    if !resolver.has_visited_paint() {
-        return None;
-    }
+    // Inline fragment geometry may outlive paint-only transitions, so source
+    // color and decorations from the live style rather than its layout copy.
     match fragment.style.pseudo {
         Some(pseudo) => resolver.paint_pseudo_style(&fragment.node, pseudo),
         None => Some(resolver.paint_style(&fragment.node)),
@@ -981,6 +1005,19 @@ fn fragment_paint_color(
     resolver: &mut crate::css::StyleResolver,
     fallback: Color,
 ) -> Color {
+    // Layout-generated text such as the text-overflow marker has no DOM text
+    // source of its own. Its node is only a placement anchor and can belong to
+    // the first styled child (for example a blue span), while the synthetic
+    // marker deliberately carries the containing block's style. Do not replace
+    // that anonymous style with the anchor's live style; use the live containing
+    // block fallback so color transitions still repaint it. Pseudo generated
+    // content has an explicit pseudo owner and remains live-sampled.
+    if fragment.text_source.is_empty()
+        && fragment.style.pseudo.is_none()
+        && matches!(fragment.content, InlineFragmentContent::Text(_))
+    {
+        return fallback;
+    }
     if let Some(color) = fragment_box_paint_style(fragment, resolver)
         .as_deref()
         .and_then(text_color)
@@ -997,10 +1034,6 @@ fn decoration_paint_color(
     fallback: Color,
 ) -> Color {
     let ordinary = parse_color(&decoration.color).unwrap_or(fallback);
-    if !resolver.has_visited_paint() {
-        return ordinary;
-    }
-
     let mut ancestor = Some(fragment.node.clone());
     while let Some(node) = ancestor {
         if node.identity() == decoration.origin.0 {

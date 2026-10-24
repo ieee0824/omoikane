@@ -85,6 +85,7 @@ mod attribute_assignment;
 mod canvas_blit;
 #[cfg(test)]
 mod canvas_blit_tests;
+mod child_effect_source_cache;
 #[cfg(test)]
 mod child_layout_cache_tests;
 mod class_style;
@@ -152,6 +153,7 @@ mod fullscreen_tests;
 mod iframe_navigation;
 mod input_bridge;
 mod nested_rendering;
+mod opacity_target_diagnostics;
 pub(crate) mod render_demand;
 mod script_errors;
 mod window_event;
@@ -2065,6 +2067,58 @@ struct AdjustedLayoutCache {
     hit_test: crate::paint::HitTestTree,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DocumentPaintRevision {
+    source: u64,
+    compositor: u64,
+}
+
+/// Records bounded, opt-in evidence for the call site that advanced a
+/// document-owned paint revision. The caller path is deliberately limited to
+/// repository sources so diagnostics cannot expose host filesystem paths.
+#[track_caller]
+fn trace_paint_revision_invalidation(
+    document_id: usize,
+    kind: &'static str,
+    revision: DocumentPaintRevision,
+) {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    static EVENTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    const EVENT_LIMIT: usize = 4096;
+
+    if !*ENABLED.get_or_init(|| std::env::var_os("OMOIKANE_TRACE_RETAINED_REUSE").is_some())
+        || EVENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= EVENT_LIMIT
+    {
+        return;
+    }
+    let caller = std::panic::Location::caller();
+    let file = caller.file();
+    let source_file = file
+        .strip_prefix("src/")
+        .map(|relative| format!("src/{relative}"))
+        .or_else(|| {
+            file.rsplit_once("/src/")
+                .map(|(_, relative)| format!("src/{relative}"))
+        })
+        .unwrap_or_else(|| "<outside-src>".to_owned());
+    eprintln!(
+        "{}",
+        crate::diagnostics::json_record(
+            "OMOIKANE_PAINT_REVISION_INVALIDATE",
+            &serde_json::json!({
+                "document_id": document_id,
+                "kind": kind,
+                "new_revision": {
+                    "source": revision.source,
+                    "compositor": revision.compositor,
+                },
+                "caller_file": source_file,
+                "caller_line": caller.line(),
+            }),
+        )
+    );
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SmoothScrollTarget {
     Document(usize),
@@ -2315,6 +2369,8 @@ struct HostState {
     document_styles: HashMap<usize, DocumentStyleEntry>,
     /// Bounded paint data partitioned to the host-selected main Document.
     main_shadow_masks: main_shadow_mask_cache::MainDocumentShadowMaskOwner,
+    /// Pre-opacity rasters are isolated by live child Document identity.
+    child_effect_sources: child_effect_source_cache::Owner,
     /// Last inline-style CSP check per live element, so a resolver rebuild
     /// does not repeat reports for unchanged attribute text and policy.
     observed_style_attributes: HashMap<usize, InlineStyleCspSnapshot>,
@@ -2337,6 +2393,11 @@ struct HostState {
     style_generation: u64,
     layout_generation: u64,
     paint_generation: u64,
+    /// Paint-input generation excluding proven opacity-only animation samples.
+    paint_source_generation: u64,
+    /// Per-document paint inputs. Unscoped invalidations conservatively advance
+    /// the main document so retained main pixels are never reused on ambiguity.
+    document_paint_revisions: HashMap<usize, DocumentPaintRevision>,
     scroll_generation: u64,
     /// Snap geometry is rebuilt at most once per scroll container and layout
     /// generation. User scrolls only scan that container's candidate areas.
@@ -3264,6 +3325,7 @@ impl HostState {
             main_shadow_masks: main_shadow_mask_cache::MainDocumentShadowMaskOwner::new(
                 document.identity(),
             ),
+            child_effect_sources: Default::default(),
             observed_style_attributes: HashMap::new(),
             registered_custom_properties: HashMap::new(),
             font_loading: Default::default(),
@@ -3278,6 +3340,8 @@ impl HostState {
             style_generation: 0,
             layout_generation: 0,
             paint_generation: 0,
+            paint_source_generation: 0,
+            document_paint_revisions: HashMap::new(),
             scroll_generation: 0,
             scroll_snap_cache: HashMap::new(),
             scroll_snap_selection: HashMap::new(),
@@ -6187,6 +6251,8 @@ impl HostState {
         }
         self.event_loop.cancel_tasks_for_document(document_id);
         self.document_styles.remove(&document_id);
+        self.document_paint_revisions.remove(&document_id);
+        self.child_effect_sources.remove(document_id);
         self.registered_custom_properties.remove(&document_id);
         self.font_loading.remove_document(document_id);
         self.script_loads.remove_document(document_id);
@@ -6326,6 +6392,8 @@ impl HostState {
         }
         self.event_loop.cancel_tasks_for_document(document_id);
         self.document_styles.remove(&document_id);
+        self.document_paint_revisions.remove(&document_id);
+        self.child_effect_sources.remove(document_id);
         self.registered_custom_properties.remove(&document_id);
         self.font_loading.remove_document(document_id);
         self.script_loads.remove_document(document_id);
@@ -6931,9 +6999,9 @@ impl HostState {
             self.style_generation = self.style_generation.saturating_add(1);
             self.capture_scroll_offsets_before_layout();
             self.invalidate_layout_root("document_style_dirty");
-            self.invalidate_paint_cache();
+            self.invalidate_document_paint_source(document_id);
         } else {
-            self.invalidate_paint_cache();
+            self.invalidate_document_paint_source(document_id);
         }
     }
 
@@ -6947,7 +7015,7 @@ impl HostState {
         } else if let Some(entry) = self.document_styles.get_mut(&document_id) {
             entry.child_layout = None;
         }
-        self.invalidate_paint_cache();
+        self.invalidate_document_paint_source(document_id);
     }
 
     /// Invalidates values derived from the DOM without rebuilding the parsed
@@ -7002,9 +7070,9 @@ impl HostState {
                 self.capture_scroll_offsets_before_layout();
                 self.invalidate_layout_root("style_cache_invalidated");
             }
-            self.invalidate_paint_cache();
+            self.invalidate_document_paint_source(document_id);
         } else {
-            self.invalidate_paint_cache();
+            self.invalidate_document_paint_source(document_id);
         }
         if !preserve_main_layout {
             frame_diagnostics::record_scroll_invalidation(document_id);
@@ -7013,11 +7081,53 @@ impl HostState {
 
     /// Invalidates the scroll-adjusted paint geometry while retaining the
     /// layout tree when the invalidation does not require reflow.
+    #[track_caller]
     fn invalidate_paint_cache(&mut self) {
+        self.invalidate_document_paint_source(self.document.identity());
+    }
+
+    #[track_caller]
+    fn invalidate_document_paint_source(&mut self, document_id: usize) {
+        let revision = self
+            .document_paint_revisions
+            .entry(document_id)
+            .or_default();
+        revision.source = revision.source.saturating_add(1);
+        revision.compositor = revision.compositor.saturating_add(1);
+        trace_paint_revision_invalidation(document_id, "source", *revision);
+        self.paint_source_generation = self.paint_source_generation.saturating_add(1);
+        self.invalidate_compositor_paint_cache_global();
+    }
+
+    /// Invalidates final pixels while preserving pre-opacity source rasters.
+    #[track_caller]
+    fn invalidate_compositor_paint_cache(&mut self) {
+        self.invalidate_document_compositor_paint(self.document.identity());
+    }
+
+    #[track_caller]
+    fn invalidate_document_compositor_paint(&mut self, document_id: usize) {
+        let revision = self
+            .document_paint_revisions
+            .entry(document_id)
+            .or_default();
+        revision.compositor = revision.compositor.saturating_add(1);
+        trace_paint_revision_invalidation(document_id, "compositor", *revision);
+        self.invalidate_compositor_paint_cache_global();
+    }
+
+    fn invalidate_compositor_paint_cache_global(&mut self) {
         self.invalidate_child_media_query_inputs();
         self.invalidate_layout_metrics_cache();
         self.paint_generation = self.paint_generation.saturating_add(1);
         self.adjusted_layout_cache = None;
+    }
+
+    fn document_paint_revision(&self, document_id: usize) -> DocumentPaintRevision {
+        self.document_paint_revisions
+            .get(&document_id)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Drops cached layout and records its cause in opt-in paint traces.
@@ -7250,7 +7360,7 @@ impl HostState {
         } else if let Some(entry) = self.document_styles.get_mut(&document.identity()) {
             entry.child_layout = None;
         }
-        self.invalidate_paint_cache();
+        self.invalidate_document_paint_source(document.identity());
     }
 
     /// Marks the document that `node` currently lives in as stale.
@@ -7459,7 +7569,14 @@ impl HostState {
                         entry.child_layout = None;
                     }
                 }
-                self.invalidate_paint_cache();
+                if !clock_effects.transition_changed
+                    && clock_effects.animation_opacity_only
+                    && !clock_effects.animation_refreshes_visibility
+                {
+                    self.invalidate_document_compositor_paint(document_id);
+                } else {
+                    self.invalidate_document_paint_source(document_id);
+                }
             }
             return;
         }
@@ -7864,7 +7981,7 @@ impl HostState {
         }
         self.native_scroll.revoke_policy();
         self.iframe_window_scrolls.insert(document_id, next);
-        self.invalidate_paint_cache();
+        self.invalidate_document_paint_source(document_id);
         self.queue_scroll_target(document_id);
         true
     }
@@ -8233,11 +8350,19 @@ impl HostState {
         }
         self.window_scroll = next;
         self.scroll_generation = self.scroll_generation.saturating_add(1);
-        if !self.content_visibility_auto_nodes.is_empty() {
+        let changes_main_source = !self.content_visibility_auto_nodes.is_empty();
+        if changes_main_source {
             self.capture_scroll_offsets_before_layout();
             self.invalidate_layout_root("scroll_content_visibility_auto");
         }
-        self.invalidate_paint_cache();
+        if changes_main_source {
+            self.invalidate_paint_cache();
+        } else {
+            // Retained document/fixed runs encode pure root scrolling. Keep the
+            // main raster revision stable while still requesting fresh output.
+            self.paint_source_generation = self.paint_source_generation.saturating_add(1);
+            self.invalidate_compositor_paint_cache_global();
+        }
         let document_id = self.document.identity();
         self.queue_scroll_target(document_id);
         true
@@ -9767,7 +9892,7 @@ impl JsRuntime {
         let start = Instant::now();
         state.ensure_adjusted_layout();
         let layout_time = start.elapsed();
-        let retained_request = self.retained_scroll.prepare(&mut state);
+        let mut retained_request = self.retained_scroll.prepare(&mut state);
         let document_id = state.document.identity();
         let mut paint_attribution = frame_diagnostics::PaintAttributionScope::begin(document_id);
         let visited_link_ids = state.visited_link_ids_for_paint(&state.document);
@@ -9790,6 +9915,8 @@ impl JsRuntime {
             nested_rendering::collect_snapshots(state, &layout, 0, &mut paint_attribution);
         paint_attribution.record_snapshot_collection(snapshot_started);
         let snapshots = snapshots?;
+        self.retained_scroll
+            .refresh_after_snapshots(&mut retained_request, state);
         let HostState {
             document_styles,
             main_shadow_masks,
@@ -24493,12 +24620,15 @@ fn canvas_commit_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         let Some(node) = state.get_node(id) else {
             return Ok(JsValue::from(false));
         };
-        let committed = crate::canvas::commit(&node, width, height, pixels);
-        if committed && state.node_is_in_active_document(&node) {
+        let change = crate::canvas::commit_with_change(&node, width, height, pixels);
+        if change == Some(true) && state.node_is_in_active_document(&node) {
             // Pixel changes need a new frame, not a new layout tree.
-            state.invalidate_paint_cache();
+            let document_id = document_root_for_node(&node)
+                .map(|document| document.identity())
+                .unwrap_or_else(|| state.document.identity());
+            state.invalidate_document_paint_source(document_id);
         }
-        Ok(JsValue::from(committed))
+        Ok(JsValue::from(change.is_some()))
     })
 }
 

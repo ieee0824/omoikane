@@ -3,6 +3,16 @@ use super::*;
 
 const MAX_OBSERVERS: usize = 4096;
 
+// Keep this narrower than animation sampling. Changing filter/backdrop-filter
+// from `none` establishes a containing block for fixed descendants, while
+// opacity and background position are consumed without changing geometry.
+fn user_action_property_requires_layout(property: &str) -> bool {
+    !matches!(
+        property,
+        "opacity" | "background-position-x" | "background-position-y"
+    )
+}
+
 #[derive(Debug, Default)]
 pub(super) struct UserActionDependencies {
     states: HashMap<&'static str, Observers>,
@@ -17,6 +27,7 @@ struct Observers {
 #[derive(Debug)]
 struct Observer {
     selector: Selector,
+    requires_layout: bool,
     nonlocal: bool,
     parent_subtree: bool,
     // A subject whose match can change is strictly below the state node.
@@ -28,6 +39,7 @@ struct Observer {
 pub(crate) enum UserActionStyleInvalidation {
     Unchanged,
     Local,
+    LocalPaintOnly,
     Full(&'static str),
 }
 
@@ -38,10 +50,14 @@ impl UserActionStyleInvalidation {
     pub(crate) fn is_full(self) -> bool {
         matches!(self, Self::Full(_))
     }
+    pub(crate) fn preserves_layout(self) -> bool {
+        matches!(self, Self::LocalPaintOnly)
+    }
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Unchanged => "unchanged",
             Self::Local => "local_user_action",
+            Self::LocalPaintOnly => "local_user_action_paint_only",
             Self::Full(reason) => reason,
         }
     }
@@ -77,7 +93,7 @@ impl Observers {
         self.subjects.clear();
     }
 
-    fn subject(&mut self, part: &SelectorPart, nested: bool) {
+    fn subject(&mut self, part: &SelectorPart, nested: bool, requires_layout: bool) {
         if self.uncertain {
             return;
         }
@@ -109,19 +125,20 @@ impl Observers {
                     simples,
                 }],
             },
+            requires_layout,
             nonlocal: false,
             parent_subtree: false,
             subject_is_descendant: false,
         });
     }
 
-    fn selector(&mut self, selector: &Selector, state: &str, nested: bool) {
+    fn selector(&mut self, selector: &Selector, state: &str, nested: bool, requires_layout: bool) {
         for (index, part) in selector.parts.iter().enumerate() {
             let previous_subjects = self.subjects.len();
             if part.simples.iter().any(|simple| {
                 matches!(simple, SimpleSelector::PseudoClass(name) if name.eq_ignore_ascii_case(state))
             }) {
-                self.subject(part, nested);
+                self.subject(part, nested, requires_layout);
             }
             for simple in &part.simples {
                 match simple {
@@ -131,13 +148,13 @@ impl Observers {
                         // Boolean lists test the same candidate. Inner sibling
                         // and relational dependencies keep their own guards.
                         for selector in selectors {
-                            self.selector(selector, state, nested);
+                            self.selector(selector, state, nested, requires_layout);
                         }
                     }
                     SimpleSelector::Has(selectors) => {
                         let arguments_start = self.subjects.len();
                         for relative in selectors {
-                            self.selector(&relative.selector, state, nested);
+                            self.selector(&relative.selector, state, nested, requires_layout);
                         }
                         self.mark_new_nonlocal(arguments_start);
                     }
@@ -190,8 +207,12 @@ impl Observers {
         for rule in rules {
             match rule {
                 Rule::Style(rule) => {
+                    let requires_layout = !rule.rules.is_empty()
+                        || rule.declarations.iter().any(|declaration| {
+                            user_action_property_requires_layout(&declaration.name)
+                        });
                     for selector in &rule.selectors {
-                        self.selector(selector, state, nested);
+                        self.selector(selector, state, nested, requires_layout);
                     }
                     self.rules(&rule.rules, state, true);
                 }
@@ -240,6 +261,18 @@ impl UserActionDependencies {
         })
     }
 
+    fn matching_rules_require_layout(&self, node: &NodeHandle, state: &str) -> bool {
+        state_name(state)
+            .and_then(|name| self.states.get(name))
+            .is_none_or(|observers| {
+                observers.uncertain
+                    || observers.subjects.iter().any(|observer| {
+                        observer.requires_layout
+                            && super::super::matcher::matches_selector(node, &observer.selector)
+                    })
+            })
+    }
+
     fn affects(&mut self, stylesheets: &[StylesheetInput], node: &NodeHandle, state: &str) -> bool {
         let Some(state) = state_name(state) else {
             return true;
@@ -286,7 +319,7 @@ impl StyleResolver {
         &mut self,
         changes: &[(NodeHandle, &'static str)],
     ) -> UserActionStyleInvalidation {
-        use UserActionStyleInvalidation::{Full, Local, Unchanged};
+        use UserActionStyleInvalidation::{Full, Local, LocalPaintOnly, Unchanged};
         if !self.invalidate_user_action_selectors(changes) {
             return Unchanged;
         }
@@ -297,6 +330,10 @@ impl StyleResolver {
                     .invalidation_root(&self.stylesheets, node, state)
             })
             .collect::<Vec<_>>();
+        let requires_layout = changes.iter().any(|(node, state)| {
+            self.user_action_dependencies
+                .matching_rules_require_layout(node, state)
+        });
         let fallback = if self.has_running_transitions() {
             Some("fallback_active_transition")
         } else if roots.iter().any(|node| {
@@ -323,7 +360,11 @@ impl StyleResolver {
             .retain(|identity, _| !identities.contains(identity));
         self.pseudo_cache
             .retain(|key, _| !identities.contains(&key.0));
-        Local
+        if requires_layout {
+            Local
+        } else {
+            LocalPaintOnly
+        }
     }
 
     fn user_action_fallback(&self, changes: &[(NodeHandle, &'static str)]) -> Option<&'static str> {

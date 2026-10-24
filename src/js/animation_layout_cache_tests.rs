@@ -339,7 +339,7 @@ fn full_transition_runtime_skips_node_map_but_advances_and_clears_cached_styles(
 }
 
 #[test]
-fn inherited_color_transition_rebuilds_each_sample_and_paints_final_dependants() {
+fn inherited_color_transition_repaints_dependants_without_rebuilding_geometry() {
     let html = r#"
         <style>
           html,body { margin:0; background:white }
@@ -416,6 +416,9 @@ fn inherited_color_transition_rebuilds_each_sample_and_paints_final_dependants()
              source.style.color='rgb(0, 0, 255)';getComputedStyle(source).color",
         )
         .unwrap();
+    // Establish the geometry invalidated by the declaration change before
+    // measuring whether subsequent transition samples cause additional reflow.
+    runtime.paint_current_document().unwrap();
     let before_layout = runtime.render_generations().layout;
 
     runtime.run_animation_frame(500).unwrap();
@@ -427,7 +430,7 @@ fn inherited_color_transition_rebuilds_each_sample_and_paints_final_dependants()
         (128, 0, 128, 255),
     );
     let middle_layout = runtime.render_generations().layout;
-    assert!(middle_layout > before_layout);
+    assert_eq!(middle_layout, before_layout);
     assert_eq!(geometry(&mut runtime), initial_geometry);
 
     runtime.run_animation_frame(500).unwrap();
@@ -439,7 +442,7 @@ fn inherited_color_transition_rebuilds_each_sample_and_paints_final_dependants()
         (0, 0, 255, 255),
     );
     let final_layout = runtime.render_generations().layout;
-    assert!(final_layout > middle_layout);
+    assert_eq!(final_layout, middle_layout);
     assert_eq!(geometry(&mut runtime), initial_geometry);
     assert_eq!(
         runtime.eval("transitionEnds.length").unwrap().as_number(),
@@ -468,4 +471,93 @@ fn inherited_color_transition_rebuilds_each_sample_and_paints_final_dependants()
         runtime.eval("transitionEnds.length").unwrap().as_number(),
         Some(1.0),
     );
+}
+
+#[test]
+fn color_transition_repaints_text_overflow_marker_without_relayout() {
+    let html = r#"
+        <style>
+          html,body { margin:0; background:white }
+          #box {
+            width:90px; height:30px; overflow:hidden; white-space:nowrap;
+            text-overflow:ellipsis; font:20px/30px sans-serif;
+            color:rgb(255, 0, 0); transition:color 1s linear;
+          }
+          #box span { color:rgb(0, 0, 255) }
+        </style>
+        <div id=box><span>AB AB AB AB AB AB AB</span></div>
+    "#;
+    let mut runtime =
+        JsRuntime::with_document(crate::html::TreeBuilder::parse(html).document()).unwrap();
+    runtime.set_viewport(120.0, 40.0);
+    runtime.enable_live_css_animations();
+
+    let initial = runtime.paint_current_document().unwrap();
+    let marker_pixel = (0..30)
+        .find_map(|y| {
+            (45..90).rev().find_map(|x| {
+                let pixel = initial.pixel(x, y)?;
+                (pixel.r > pixel.g.saturating_add(80) && pixel.r > pixel.b.saturating_add(80))
+                    .then_some((x, y))
+            })
+        })
+        .expect("the overflow marker must use the containing block's red color");
+
+    runtime
+        .eval("const box=document.getElementById('box');box.style.color='rgb(0, 255, 0)';getComputedStyle(box).color")
+        .unwrap();
+    runtime.paint_current_document().unwrap();
+    let before_layout = runtime.render_generations().layout;
+
+    runtime.run_animation_frame(500).unwrap();
+    let middle = runtime.paint_current_document().unwrap();
+    let pixel = middle.pixel(marker_pixel.0, marker_pixel.1).unwrap();
+    assert!(pixel.r > pixel.b.saturating_add(40));
+    assert!(pixel.g > pixel.b.saturating_add(40));
+    assert!(pixel.r.abs_diff(pixel.g) <= 2);
+    assert_eq!(runtime.render_generations().layout, before_layout);
+
+    runtime.run_animation_frame(500).unwrap();
+    let final_canvas = runtime.paint_current_document().unwrap();
+    let pixel = final_canvas.pixel(marker_pixel.0, marker_pixel.1).unwrap();
+    assert!(pixel.g > pixel.r.saturating_add(80));
+    assert!(pixel.g > pixel.b.saturating_add(80));
+    assert_eq!(runtime.render_generations().layout, before_layout);
+}
+
+#[test]
+fn background_color_transition_repaints_without_rebuilding_geometry() {
+    let html = "<style>body{margin:0;background:white}#item{width:40px;height:40px;background-color:red;transition:background-color 1s linear}</style><div id='item'></div>";
+    let mut runtime =
+        JsRuntime::with_document(crate::html::TreeBuilder::parse(html).document()).unwrap();
+    runtime.enable_live_css_animations();
+    runtime.paint_current_document().unwrap();
+    runtime
+        .eval(
+            "const item=document.getElementById('item');\
+             item.style.backgroundColor='blue';getComputedStyle(item).backgroundColor",
+        )
+        .unwrap();
+    // The declaration change may invalidate geometry once. Measure only the
+    // subsequent transition samples after the new style has been laid out.
+    runtime.paint_current_document().unwrap();
+    let layout = runtime.render_generations().layout;
+
+    runtime.run_animation_frame(500).unwrap();
+    let middle = runtime
+        .paint_current_document()
+        .unwrap()
+        .pixel(20, 20)
+        .unwrap();
+    assert_eq!((middle.r, middle.g, middle.b, middle.a), (128, 0, 128, 255));
+    assert_eq!(runtime.render_generations().layout, layout);
+
+    runtime.run_animation_frame(500).unwrap();
+    let after = runtime
+        .paint_current_document()
+        .unwrap()
+        .pixel(20, 20)
+        .unwrap();
+    assert_eq!((after.r, after.g, after.b, after.a), (0, 0, 255, 255));
+    assert_eq!(runtime.render_generations().layout, layout);
 }

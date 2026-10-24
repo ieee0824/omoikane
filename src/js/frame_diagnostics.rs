@@ -391,7 +391,7 @@ impl Drop for PaintAttributionScope {
 }
 
 fn child_raster_data(detail: &ChildRasterDetail) -> serde_json::Value {
-    serde_json::json!({
+    let mut data = serde_json::json!({
         "document_id": detail.document_id,
         "raster_ms": detail.raster_ms,
         "style_scope_ms": detail.style.scope_ms,
@@ -400,6 +400,36 @@ fn child_raster_data(detail: &ChildRasterDetail) -> serde_json::Value {
         "style_outer_compute_ms": detail.style.outer_compute_ms,
         "nested_snapshot_draw_calls": detail.raster.nested_snapshot_draw_calls,
         "shadow_masks": shadow_mask_data(detail.raster.shadow_masks, false),
+    });
+    if detail.raster.effect_sources != Default::default() {
+        data.as_object_mut()
+            .expect("child raster data is an object")
+            .insert(
+                "effect_sources".to_owned(),
+                effect_source_data(detail.raster.effect_sources),
+            );
+    }
+    data
+}
+
+fn nested_snapshot_owner_ids(summary: crate::paint::PaintRasterSummary) -> Vec<usize> {
+    summary.nested_snapshot_owner_ids[..summary.nested_snapshot_owner_count.min(16)].to_vec()
+}
+
+fn effect_source_data(summary: crate::paint::EffectSourceCacheSummary) -> serde_json::Value {
+    serde_json::json!({
+        "hits": summary.hits,
+        "source_rasters": summary.source_rasters,
+        "fallback_node_not_eligible": summary.node_not_eligible,
+        "fallback_descendant_animation": summary.descendant_animation,
+        "fallback_inherited_clip": summary.inherited_clip,
+        "fallback_noncanonical_phase": summary.noncanonical_phase,
+        "fallback_transform": summary.transform,
+        "fallback_other_effect": summary.other_effect,
+        "fallback_nested_snapshot": summary.nested_snapshot,
+        "fallback_non_root_destination": summary.non_root_destination,
+        "fallback_animated_image": summary.animated_image,
+        "fallback_oversize": summary.oversize,
     })
 }
 
@@ -446,7 +476,7 @@ fn paint_attribution_data(sample: &PaintAttributionSample, completed: bool) -> s
         .child_raster
         .nested_snapshot_draw_calls
         .saturating_add(sample.main_raster.nested_snapshot_draw_calls);
-    serde_json::json!({
+    let mut data = serde_json::json!({
         "document_id": sample.document_id,
         "completed": completed,
         "style_counts_ordinary_only": true,
@@ -470,8 +500,19 @@ fn paint_attribution_data(sample: &PaintAttributionSample, completed: bool) -> s
         "main_style_cache_misses": sample.main_style.cache_misses,
         "main_style_outer_compute_ms": sample.main_style.outer_compute_ms,
         "main_snapshot_draw_calls": sample.main_raster.nested_snapshot_draw_calls,
+        "main_snapshot_owner_ids": nested_snapshot_owner_ids(sample.main_raster),
+        "main_snapshot_owner_overflow": sample.main_raster.nested_snapshot_owner_overflow,
         "main_shadow_masks": shadow_mask_data(sample.main_raster.shadow_masks, false),
-    })
+    });
+    if sample.child_raster.effect_sources != Default::default() {
+        data.as_object_mut()
+            .expect("paint attribution data is an object")
+            .insert(
+                "child_effect_sources".to_owned(),
+                effect_source_data(sample.child_raster.effect_sources),
+            );
+    }
+    data
 }
 
 fn emit_paint_attribution(sample: &PaintAttributionSample, completed: bool) {
@@ -900,6 +941,8 @@ mod tests {
                 retained_entries: 1,
                 retained_rgba_bytes: 8,
             },
+            effect_sources: Default::default(),
+            ..crate::paint::PaintRasterSummary::default()
         }
     }
 
@@ -1059,6 +1102,7 @@ mod tests {
             },
             animation_changed: true,
             animation_requires_layout: true,
+            animation_opacity_only: false,
             animation_refreshes_visibility: false,
             retained_animation_elements: 2,
             retained_animation_pseudos: 3,
@@ -1259,6 +1303,8 @@ mod tests {
                 "main_style_cache_misses": 3,
                 "main_style_outer_compute_ms": 1.5,
                 "main_snapshot_draw_calls": 2,
+                "main_snapshot_owner_ids": [],
+                "main_snapshot_owner_overflow": 0,
                 "main_shadow_masks": {
                     "eligible": 3,
                     "generated": 4,

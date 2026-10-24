@@ -4306,6 +4306,10 @@ fn paint_retained_canvas(
                 shadow_masks: Some(shadow_masks),
                 retained_collector: Some(collector),
                 retained_destination: PaintDestination::RootDocument,
+                effect_sources: None,
+                effect_source_generation: 0,
+                effect_source_nodes: None,
+                effect_source_summary: None,
             },
             PaintBoxOptions {
                 inherited_clip: None,
@@ -4453,6 +4457,7 @@ fn paint_layout_with_retained_fallback_impl(
                         snapshots,
                         false,
                         external_shadow_masks,
+                        None,
                     )
                     .0
                 }
