@@ -37,6 +37,7 @@ mod intrinsic;
 mod margins;
 mod multicol;
 mod paged;
+mod profile;
 mod shapes;
 mod table;
 
@@ -1459,6 +1460,8 @@ pub(crate) fn layout_tree_with_content_visibility(
     containing_block: Rect,
     input: ContentVisibilityLayoutInput,
 ) -> (Option<LayoutBox>, ContentVisibilityLayoutReport) {
+    let _phase_pass = profile::Pass::begin();
+    let _tree_phase = profile::Scope::begin(profile::Phase::Tree);
     let report = Rc::new(RefCell::new(ContentVisibilityLayoutReport::default()));
     let scope = ContentVisibilityLayoutScope::new(ContentVisibilityLayoutSession {
         input,
@@ -2379,6 +2382,7 @@ fn layout_element(
     subgrid: Option<grid::SubgridContext>,
     used_height: Option<UsedHeight>,
 ) -> Option<LayoutBox> {
+    let _phase = profile::Scope::begin(profile::Phase::Element);
     layout_element_with_cell(
         node,
         resolver,

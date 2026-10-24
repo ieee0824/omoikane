@@ -293,6 +293,7 @@ fn layout_inline_nodes_impl(
         ));
     }
     for node in nodes {
+        let _phase = super::profile::Scope::begin(super::profile::Phase::InlineCollect);
         collect_inline_segments(node, resolver, &mut segments, context, &mut atomic_boxes);
     }
     if include_after && let Some(owner) = generated_owner {
@@ -405,6 +406,7 @@ pub(super) fn layout_vertical_inline_nodes(
         ));
     }
     for node in nodes {
+        let _phase = super::profile::Scope::begin(super::profile::Phase::InlineCollect);
         collect_inline_segments(node, resolver, &mut segments, context, &mut atomic_boxes);
     }
     if include_after && let Some(owner) = generated_owner {
@@ -2597,6 +2599,7 @@ pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
             metrics.font_size.to_bits(),
         );
         let actual = context.metrics_cache.get(&key).copied().or_else(|| {
+            let font_phase = super::profile::Scope::begin(super::profile::Phase::FontSelect);
             let selected = select_text_font(
                 "layout",
                 metrics.font_family,
@@ -2605,6 +2608,7 @@ pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
                 context.web_fonts.as_deref(),
                 &context.system_fonts,
             );
+            drop(font_phase);
             let actual = selected
                 .as_ref()
                 .map(AsRef::as_ref)
@@ -3796,6 +3800,7 @@ fn bidi_controls(style: &FragmentStyle) -> (&'static str, &'static str) {
 // ── Text measurement ────────────────────────────────────────────────────────
 
 pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
+    let _measure_phase = super::profile::Scope::begin(super::profile::Phase::TextMeasure);
     LAYOUT_FONTS.with(|cell| {
         let mut fonts_ref = cell.borrow_mut();
         if fonts_ref.is_none() {
@@ -3826,6 +3831,7 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                     })
                 })
                 .unwrap_or_default();
+            let font_phase = super::profile::Scope::begin(super::profile::Phase::FontSelect);
             let selected = select_text_font(
                 "layout",
                 metrics.font_family,
@@ -3834,6 +3840,7 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                 context.web_fonts.as_deref(),
                 &context.system_fonts,
             );
+            drop(font_phase);
             let primary = selected.as_ref().map(AsRef::as_ref);
             if primary.is_some() || !context.system_fonts.is_empty() {
                 let base = measure_text_width_with_fallback(

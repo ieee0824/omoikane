@@ -62,6 +62,7 @@ pub(super) fn measure(
         })
         .flatten();
     if let Some(width) = cached {
+        super::profile::record_intrinsic_hit();
         #[cfg(test)]
         TEST_STATE.with(|state| state.borrow_mut().2 += 1);
         return width;
@@ -69,6 +70,7 @@ pub(super) fn measure(
     #[cfg(test)]
     TEST_STATE.with(|state| state.borrow_mut().1 += 1);
     // No TLS borrow crosses recursive measurement or style/resource resolution.
+    let _phase = super::profile::Scope::begin(super::profile::Phase::IntrinsicRaw);
     let width = compute();
     if !disabled {
         PASS.with(|slot| {

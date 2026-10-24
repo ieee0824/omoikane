@@ -61,6 +61,7 @@ pub(super) fn layout_flex_container(
     containing_height: f32,
     used_height: Option<super::UsedHeight>,
 ) -> Option<LayoutBox> {
+    let _layout_phase = super::profile::Scope::begin(super::profile::Phase::FlexLayout);
     #[cfg(test)]
     LAYOUT_VISITS.with(|visits| visits.set(visits.get().map(|count| count + 1)));
     let direction = flex_direction(&style);
@@ -79,6 +80,7 @@ pub(super) fn layout_flex_container(
         .and_then(super::UsedHeight::percentage_basis)
         .or(specified_height);
 
+    let collect_phase = super::profile::Scope::begin(super::profile::Phase::FlexCollect);
     let (items, positioned_children, available_main_size) = collect_flex_items(
         node,
         resolver,
@@ -94,6 +96,7 @@ pub(super) fn layout_flex_container(
         border,
         main_gap,
     );
+    drop(collect_phase);
 
     let lines = build_flex_lines(&items, available_main_size, wrap, main_gap);
     let mut children = Vec::new();
