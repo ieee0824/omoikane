@@ -37,6 +37,11 @@ fn inactive_transition_baselines_do_not_get_scanned_by_activity_queries() {
     );
 }
 
+#[test]
+fn visibility_transitions_remain_layout_refreshing() {
+    assert!(animated_property_requires_layout("visibility"));
+}
+
 fn assert_queries_match_states(timeline: &TransitionTimeline) {
     let expected: BTreeSet<_> = timeline
         .elements

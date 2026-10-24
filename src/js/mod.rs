@@ -2348,6 +2348,8 @@ struct HostState {
     /// while retaining the top-level document's style and layout generations.
     layout_metrics_generation: u64,
     adjusted_layout_cache: Option<AdjustedLayoutCache>,
+    /// A paint-only keyframe changed snapshotted `visibility` values.
+    refresh_adjusted_visibility: bool,
     #[cfg(test)]
     adjusted_layout_builds: u64,
     #[cfg(test)]
@@ -3281,6 +3283,7 @@ impl HostState {
             scroll_snap_selection: HashMap::new(),
             layout_metrics_generation: 0,
             adjusted_layout_cache: None,
+            refresh_adjusted_visibility: false,
             #[cfg(test)]
             adjusted_layout_builds: 0,
             #[cfg(test)]
@@ -7443,9 +7446,15 @@ impl HostState {
                     if clock_effects.requires_layout() {
                         self.capture_scroll_offsets_before_layout();
                         self.invalidate_layout_root("animated_style_requires_layout");
+                    } else if clock_effects.animation_refreshes_visibility {
+                        self.refresh_adjusted_visibility = true;
                     }
-                } else if clock_effects.requires_layout() {
-                    // Paint-only child animations keep their unscrolled geometry.
+                } else if clock_effects.requires_layout()
+                    || clock_effects.animation_refreshes_visibility
+                {
+                    // Child visibility snapshots are retained in their cached
+                    // layout tree; keep the main document reusable while
+                    // conservatively refreshing that child scene.
                     if let Some(entry) = self.document_styles.get_mut(&document_id) {
                         entry.child_layout = None;
                     }
@@ -8149,6 +8158,10 @@ impl HostState {
             self.adjusted_layout_cache = None;
             return;
         };
+        if self.refresh_adjusted_visibility {
+            crate::paint::refresh_paint_only_visibility(&mut root, resolver);
+            self.refresh_adjusted_visibility = false;
+        }
         crate::paint::apply_scroll_offsets(&mut root, resolver, self.viewport, self.window_scroll);
         if trace {
             let translated_layout = started.elapsed();

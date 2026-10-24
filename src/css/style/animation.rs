@@ -75,6 +75,7 @@ struct AnimationSpec {
     fill: AnimationFill,
     timing: String,
     requires_layout: bool,
+    refreshes_visibility: bool,
 }
 
 impl AnimationSpec {
@@ -105,6 +106,7 @@ impl AnimationSpec {
             fill: AnimationFill::from_keyword(&keyword(PropertyId::AnimationFillMode, "none")),
             timing: keyword(PropertyId::AnimationTimingFunction, "ease"),
             requires_layout: true,
+            refreshes_visibility: false,
         }
     }
 
@@ -193,6 +195,7 @@ pub(crate) struct AnimationTimeline {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct AnimationClockEffects {
     requires_layout: bool,
+    refreshes_visibility: bool,
     retained_elements: usize,
     retained_pseudos: usize,
     changed_elements: usize,
@@ -218,6 +221,8 @@ pub(crate) struct StyleClockEffects {
     pub(crate) transition_cache_before_animation: TransitionCacheEffects,
     pub(crate) animation_changed: bool,
     pub(crate) animation_requires_layout: bool,
+    /// A changed keyframe sample updates visibility without changing geometry.
+    pub(crate) animation_refreshes_visibility: bool,
     pub(crate) retained_animation_elements: usize,
     pub(crate) retained_animation_pseudos: usize,
     pub(crate) changed_animation_elements: usize,
@@ -271,6 +276,7 @@ impl AnimationTimeline {
                     effects.changed_elements += 1;
                 }
                 effects.requires_layout |= state.spec.requires_layout;
+                effects.refreshes_visibility |= state.spec.refreshes_visibility;
             }
         }
         self.now_ms = next;
@@ -555,6 +561,7 @@ impl StyleResolver {
             transition_cache_before_animation,
             animation_changed: animation.changed(),
             animation_requires_layout: animation.requires_layout,
+            animation_refreshes_visibility: animation.refreshes_visibility,
             retained_animation_elements: animation.retained_elements,
             retained_animation_pseudos: animation.retained_pseudos,
             changed_animation_elements: animation.changed_elements,
@@ -667,9 +674,17 @@ impl StyleResolver {
         let mut spec = AnimationSpec::from_properties(&name, scope, properties);
         // Paint-only properties do not change containing blocks or geometry.
         // Unknown/custom properties retain conservative reflow.
+        spec.refreshes_visibility = steps.iter().any(|step| {
+            step.declarations
+                .iter()
+                .any(|declaration| declaration.name == "visibility")
+        });
         spec.requires_layout = steps.iter().any(|step| {
             step.declarations.iter().any(|declaration| {
-                super::super::transition::animated_property_requires_layout(&declaration.name)
+                declaration.name != "visibility"
+                    && super::super::transition::animated_property_requires_layout(
+                        &declaration.name,
+                    )
             })
         });
         let paused = matches!(

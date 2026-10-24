@@ -37,6 +37,90 @@ fn opacity_keyframes_repaint_without_rebuilding_geometry() {
 }
 
 #[test]
+fn visibility_keyframes_repaint_and_retarget_hits_without_rebuilding_geometry() {
+    let html = "<style>body{margin:0;background:white}@keyframes reveal{0%,49%{visibility:hidden}50%,100%{visibility:visible}}#item{width:40px;height:40px;background:red;animation:reveal 1s step-end forwards}</style><div id='item'></div>";
+    let mut runtime =
+        JsRuntime::with_document(crate::html::TreeBuilder::parse(html).document()).unwrap();
+    runtime.enable_live_css_animations();
+    let before = runtime
+        .paint_current_document()
+        .unwrap()
+        .pixel(20, 20)
+        .unwrap();
+    assert_eq!(
+        (before.r, before.g, before.b, before.a),
+        (255, 255, 255, 255)
+    );
+    assert_eq!(
+        runtime
+            .eval("document.elementFromPoint(20,20)?.id || ''")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        ""
+    );
+    assert_ne!(
+        runtime.hit_test(20.0, 20.0).unwrap().get_attribute("id"),
+        Some("item".to_string())
+    );
+    let layout = runtime.render_generations().layout;
+
+    runtime.run_animation_frame(750).unwrap();
+    let after = runtime
+        .paint_current_document()
+        .unwrap()
+        .pixel(20, 20)
+        .unwrap();
+    assert_eq!((after.r, after.g, after.b, after.a), (255, 0, 0, 255));
+    assert_eq!(
+        runtime
+            .eval("document.elementFromPoint(20,20).id")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "item"
+    );
+    assert_eq!(
+        runtime.hit_test(20.0, 20.0).unwrap().get_attribute("id"),
+        Some("item".to_string())
+    );
+    assert_eq!(runtime.render_generations().layout, layout);
+}
+
+#[test]
+fn inline_visibility_keyframes_refresh_fragment_hit_testing_without_reflow() {
+    let html = "<style>body{margin:0}@keyframes reveal{0%,49%{visibility:hidden}50%,100%{visibility:visible}}#item{font:20px/24px monospace;animation:reveal 1s step-end forwards}</style><span id='item'>XXXX</span>";
+    let mut runtime =
+        JsRuntime::with_document(crate::html::TreeBuilder::parse(html).document()).unwrap();
+    runtime.enable_live_css_animations();
+    runtime.paint_current_document().unwrap();
+    assert_eq!(
+        runtime
+            .eval("document.elementFromPoint(5,10)?.id || ''")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        ""
+    );
+    let layout = runtime.render_generations().layout;
+
+    runtime.run_animation_frame(750).unwrap();
+    assert_eq!(
+        runtime
+            .eval("document.elementFromPoint(5,10).id")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "item"
+    );
+    assert_eq!(runtime.render_generations().layout, layout);
+}
+
+#[test]
 fn width_keyframes_update_geometry_and_the_painted_edge() {
     let html = "<style>body{margin:0;background:white}@keyframes grow{from{width:10px}to{width:30px}}#item{height:40px;background:red;animation:grow 1s linear forwards}</style><div id='item'></div>";
     let mut runtime =

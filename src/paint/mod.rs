@@ -3157,6 +3157,60 @@ pub(crate) fn apply_scroll_offsets(
     );
 }
 
+fn visibility_from_style(style: &ComputedStyle) -> Visibility {
+    match style.get_by_id(PropertyId::Visibility) {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("hidden") => {
+            Visibility::Hidden
+        }
+        _ => Visibility::Visible,
+    }
+}
+
+fn live_fragment_visibility(fragment: &InlineFragment, resolver: &mut StyleResolver) -> Visibility {
+    let style = if let Some(pseudo) = fragment.style.pseudo {
+        resolver.computed_pseudo_style_shared(&fragment.node, pseudo)
+    } else if fragment.node.node_type() == NodeType::Text {
+        fragment
+            .node
+            .parent_node()
+            .map(|parent| resolver.computed_style_shared(&parent))
+    } else {
+        Some(resolver.computed_style_shared(&fragment.node))
+    };
+    style
+        .as_deref()
+        .map(visibility_from_style)
+        .unwrap_or_default()
+}
+
+/// Refreshes paint-only visibility state without rebuilding unchanged geometry.
+///
+/// `visibility:hidden` keeps boxes in layout. Live keyframe animations can
+/// therefore update the paint/hit-test clone while the committed CSSOM geometry
+/// remains reusable.
+pub(crate) fn refresh_paint_only_visibility(layout: &mut LayoutBox, resolver: &mut StyleResolver) {
+    let style = layout
+        .pseudo
+        .and_then(|pseudo| resolver.computed_pseudo_style_shared(&layout.node, pseudo))
+        .unwrap_or_else(|| resolver.computed_style_shared(&layout.node));
+    layout.visibility = visibility_from_style(&style);
+    for line in &mut layout.lines {
+        for fragment in &mut line.fragments {
+            let visibility = live_fragment_visibility(fragment, resolver);
+            fragment.style.visibility = visibility;
+        }
+        if let Some(overflow) = &mut line.text_overflow {
+            for fragment in &mut overflow.fragments {
+                let visibility = live_fragment_visibility(fragment, resolver);
+                fragment.style.visibility = visibility;
+            }
+        }
+    }
+    for child in &mut layout.children {
+        refresh_paint_only_visibility(child, resolver);
+    }
+}
+
 /// Returns the topmost event target at viewport coordinates using the cached
 /// layout tree's paint order. Callers should apply current Window/element scroll
 /// offsets to a cloned tree before invoking this function.
