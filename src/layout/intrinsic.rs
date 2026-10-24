@@ -125,6 +125,67 @@ mod tests {
     }
 
     #[test]
+    fn non_wrapping_text_reuses_max_content_measurement_within_each_pass() {
+        for (white_space, shares_measurement) in [
+            ("normal", false),
+            ("pre-wrap", false),
+            ("pre-line", false),
+            ("nowrap", true),
+            ("pre", true),
+        ] {
+            let parent = NodeHandle::element("span");
+            let text = NodeHandle::text("wide   text\nwith spacing");
+            parent.append_child(text.clone());
+            let mut resolver = StyleResolver::new();
+            resolver.add_stylesheet(
+                Origin::Author,
+                parse_stylesheet(&format!(
+                    "span{{white-space:{white_space};font-size:21px;letter-spacing:2px}}"
+                ))
+                .unwrap(),
+            );
+
+            for maximum_first in [false, true] {
+                let ((minimum, maximum), raw, hits) = probe(false, || {
+                    with_pass(|| {
+                        if maximum_first {
+                            let maximum = intrinsic_width(&text, &mut resolver);
+                            let minimum = minimum_content_width(&text, &mut resolver);
+                            (minimum, maximum)
+                        } else {
+                            let minimum = minimum_content_width(&text, &mut resolver);
+                            let maximum = intrinsic_width(&text, &mut resolver);
+                            (minimum, maximum)
+                        }
+                    })
+                });
+                if shares_measurement {
+                    assert_eq!(minimum, maximum, "white-space:{white_space}");
+                    assert_eq!(raw, 1, "white-space:{white_space}");
+                    assert_eq!(hits, 1, "white-space:{white_space}");
+                } else {
+                    assert_eq!(raw, 2, "white-space:{white_space}");
+                }
+            }
+
+            if shares_measurement {
+                let before = with_pass(|| intrinsic_width(&text, &mut resolver));
+                text.set_data("substantially wider replacement text");
+                let ((minimum, maximum), raw, hits) = probe(false, || {
+                    with_pass(|| {
+                        let minimum = minimum_content_width(&text, &mut resolver);
+                        let maximum = intrinsic_width(&text, &mut resolver);
+                        (minimum, maximum)
+                    })
+                });
+                assert!(maximum > before, "white-space:{white_space}");
+                assert_eq!(minimum, maximum, "white-space:{white_space}");
+                assert_eq!((raw, hits), (1, 1), "white-space:{white_space}");
+            }
+        }
+    }
+
+    #[test]
     fn recursive_measurements_bound_raw_subtree_work() {
         for depth in [8, 16, 32] {
             let (_, nodes, mut resolver) = fixture(depth);

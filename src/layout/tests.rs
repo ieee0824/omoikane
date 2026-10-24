@@ -9344,6 +9344,28 @@ fn cjk_small_kana_stays_with_previous() {
     assert_eq!(pieces[2], "語");
 }
 
+#[test]
+fn borrowed_cjk_split_matches_owned_unicode_space_and_kinsoku_pieces() {
+    for text in [
+        "",
+        " ",
+        "  ",
+        "hello world",
+        "日本。語",
+        "日「本」語",
+        "Hello日本っ語World",
+        "한국어 ｶﾀｶﾅ",
+        "ＡＢＣ　日本語",
+        "e\u{301}日…語",
+    ] {
+        let owned = super::split_words_preserving_spaces_cjk(text);
+        let mut borrowed = Vec::new();
+        super::inline::for_each_word_preserving_spaces_cjk(text, |piece| borrowed.push(piece));
+        assert_eq!(borrowed, owned, "split mismatch for {text:?}");
+        assert_eq!(borrowed.concat(), text, "pieces must cover input exactly");
+    }
+}
+
 // ===== letter-spacing tests =====
 
 #[test]
@@ -11468,6 +11490,34 @@ fn resolve_style_for_test(css: &str, tag: &str) -> ComputedStyle {
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
     resolver.computed_style(&elem)
+}
+
+#[test]
+fn resolved_length_preserves_length_percentage_and_dimension_rules() {
+    let px = resolve_style_for_test("div { width: 12px; }", "div");
+    assert_eq!(resolved_length(&px, "width", 0.0), Some(12.0));
+
+    let zero = resolve_style_for_test("div { width: 0; }", "div");
+    assert_eq!(resolved_length(&zero, "width", 0.0), Some(0.0));
+
+    let percentage = resolve_style_for_test("div { width: 25%; }", "div");
+    assert_eq!(resolved_length(&percentage, "width", 200.0), Some(50.0));
+    assert_eq!(resolved_length(&percentage, "width", 0.0), None);
+
+    let math = resolve_style_for_test("div { width: calc(25% + 10px); }", "div");
+    assert_eq!(resolved_length(&math, "width", 200.0), Some(60.0));
+    assert_eq!(resolved_length(&math, "width", 0.0), None);
+
+    let negative_dimension =
+        resolve_style_for_test("div { width: calc(-12px); left: -12px; }", "div");
+    assert_eq!(
+        resolved_length(&negative_dimension, "width", 100.0),
+        Some(0.0)
+    );
+    assert_eq!(
+        resolved_length(&negative_dimension, "left", 100.0),
+        Some(-12.0)
+    );
 }
 
 #[test]

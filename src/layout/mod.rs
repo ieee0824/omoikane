@@ -4601,31 +4601,16 @@ fn explicit_length(style: &ComputedStyle, property: &str) -> Option<f32> {
     }
 }
 
-fn percentage_length(style: &ComputedStyle, property: &str) -> Option<f32> {
-    match style.get(property) {
-        Some(ComputedValue::Percentage(value)) => Some(*value),
-        _ => None,
-    }
-}
-
 fn resolved_length(style: &ComputedStyle, property: &str, basis: f32) -> Option<f32> {
-    let resolved = explicit_length(style, property)
-        .or_else(|| {
-            percentage_length(style, property).and_then(|percent| {
-                if basis > 0.0 {
-                    Some(basis * (percent / 100.0))
-                } else {
-                    None
-                }
-            })
-        })
-        .or_else(|| {
-            // Resolve typed length-percentage math only when the caller has a
-            // concrete percentage basis.
-            (basis > 0.0)
-                .then(|| style.get(property)?.resolve_length_percentage(basis))
-                .flatten()
-        });
+    // Project the borrowed property into an owned used scalar while the lookup
+    // is live. The old explicit/percentage/math chain searched the same style
+    // map up to three times for one property.
+    let resolved = match style.get(property) {
+        Some(ComputedValue::Px(value)) => Some(*value),
+        Some(ComputedValue::Number(value)) if *value == 0.0 => Some(0.0),
+        Some(value) if basis > 0.0 => value.resolve_length_percentage(basis),
+        _ => None,
+    };
     if matches!(
         property,
         "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height"
@@ -4861,6 +4846,18 @@ fn minimum_content_width_inner(
     resolver: &mut StyleResolver,
     ignore_own_width: bool,
 ) -> f32 {
+    // With no wrapping opportunity a text node's min-content contribution is
+    // exactly its max-content contribution. Reuse that pass entry instead of
+    // normalizing and shaping the same text once for each intrinsic kind.
+    if node.node_type() == NodeType::Text {
+        let parent_style = node
+            .parent_node()
+            .map(|parent| resolver.computed_style(&parent))
+            .unwrap_or_default();
+        if !white_space(&parent_style).allows_wrapping() {
+            return intrinsic_width_inner(node, resolver, ignore_own_width);
+        }
+    }
     intrinsic::measure(
         node.identity(),
         intrinsic::Kind::Minimum,
@@ -4884,16 +4881,17 @@ fn minimum_content_width_inner_uncached(
                     .unwrap_or_default();
                 let metrics = font_metrics(&parent_style);
                 // Find the width of the longest unbreakable unit (word or CJK character).
-                use crate::layout::inline::split_words_preserving_spaces_cjk;
+                use crate::layout::inline::for_each_word_preserving_spaces_cjk;
                 let white_space_mode = white_space(&parent_style);
                 let normalized = normalize_text(&text, white_space_mode);
                 if !white_space_mode.allows_wrapping() {
                     return measure_text_width(&normalized, metrics);
                 }
-                split_words_preserving_spaces_cjk(&normalized)
-                    .into_iter()
-                    .map(|word| measure_text_width(&word, metrics))
-                    .fold(0.0f32, f32::max)
+                let mut minimum = 0.0f32;
+                for_each_word_preserving_spaces_cjk(&normalized, |word| {
+                    minimum = minimum.max(measure_text_width(word, metrics));
+                });
+                minimum
             })
             .unwrap_or(0.0),
         NodeType::Element => {

@@ -3470,20 +3470,31 @@ fn is_line_end_prohibited(ch: char) -> bool {
 /// This allows line breaks between CJK characters while respecting kinsoku rules.
 pub(crate) fn split_words_preserving_spaces_cjk(text: &str) -> Vec<String> {
     let mut pieces = Vec::new();
-    let mut current = String::new();
+    for_each_word_preserving_spaces_cjk(text, |piece| pieces.push(piece.to_string()));
+    pieces
+}
 
-    for ch in text.chars() {
+/// Visits the same CJK-aware pieces as [`split_words_preserving_spaces_cjk`]
+/// without allocating owned strings.
+pub(super) fn for_each_word_preserving_spaces_cjk<'a>(
+    text: &'a str,
+    mut visit: impl FnMut(&'a str),
+) {
+    let mut piece_start = 0;
+    let mut previous = None;
+
+    for (offset, ch) in text.char_indices() {
         let is_space = ch == ' ';
         let is_cjk = is_cjk_char(ch);
 
         // Check if we should break before this character
-        let should_break = if current.is_empty() {
+        let should_break = if previous.is_none() {
             false
         } else if is_space {
             // Break before space if previous was not space
-            !current.ends_with(' ')
+            previous != Some(' ')
         } else if is_cjk {
-            let prev_char = current.chars().last().unwrap();
+            let prev_char = previous.expect("non-first character has a predecessor");
             let prev_is_cjk = is_cjk_char(prev_char);
             let prev_is_space = prev_char == ' ';
 
@@ -3501,7 +3512,7 @@ pub(crate) fn split_words_preserving_spaces_cjk(text: &str) -> Vec<String> {
             }
         } else {
             // Non-CJK, non-space character
-            let prev_char = current.chars().last().unwrap();
+            let prev_char = previous.expect("non-first character has a predecessor");
             let prev_is_space = prev_char == ' ';
             let prev_is_cjk = is_cjk_char(prev_char);
 
@@ -3515,18 +3526,16 @@ pub(crate) fn split_words_preserving_spaces_cjk(text: &str) -> Vec<String> {
             }
         };
 
-        if should_break && !current.is_empty() {
-            pieces.push(std::mem::take(&mut current));
+        if should_break {
+            visit(&text[piece_start..offset]);
+            piece_start = offset;
         }
-
-        current.push(ch);
+        previous = Some(ch);
     }
 
-    if !current.is_empty() {
-        pieces.push(current);
+    if previous.is_some() {
+        visit(&text[piece_start..]);
     }
-
-    pieces
 }
 
 // ── Line building ───────────────────────────────────────────────────────────
