@@ -344,16 +344,7 @@
     { "path": "dom/nodes/MutationObserver-takeRecords.html" },
     { "path": "dom/nodes/MutationObserver-disconnect.html" },
     { "path": "dom/nodes/MutationObserver-attributes.html" },
-    {
-      "path": "dom/nodes/MutationObserver-characterData.html",
-      "known_failure": {
-        "status": "FAIL",
-        "reason": "The 2014 fixture expects <?processing data?> to be a bogus comment with data ?processing data?. Current HTML processing-instruction tokenization produces a ProcessingInstruction with data data. Keep the original fixture and assertions; only this named subtest is a tracked specification mismatch.",
-        "issue": "#1323",
-        "expires": "2026-11-08",
-        "failed_subtests": ["characterData ProcessingInstruction: data mutations"]
-      }
-    },
+    { "path": "dom/nodes/MutationObserver-characterData.html" },
     { "path": "html/semantics/popovers/toggleevent-interface.html" },
     { "path": "html/semantics/popovers/togglePopover.html" },
     { "path": "fullscreen/api/document-fullscreen-enabled.html" },
@@ -445,7 +436,18 @@
     { "path": "css/css-multicol/parsing/column-fill-valid.html" },
     { "path": "css/css-multicol/parsing/column-fill-invalid.html" },
     { "path": "css/css-multicol/parsing/column-fill-computed.html" },
-    { "path": "css/css-multicol/parsing/column-span-valid.html" },
+    {
+      "path": "css/css-multicol/parsing/column-span-valid.html",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "The updated official fixture adds column-span: auto. The engine implements none/all but not the Level 2 auto spanning layout. Track CSSOM and layout together in #1450; only the newly added auto subtest may fail.",
+        "issue": "https://github.com/ieee0824/omoikane/issues/1450",
+        "expires": "2026-11-24",
+        "failed_subtests": [
+          "e.style['column-span'] = \"auto\" should set the property value"
+        ]
+      }
+    },
     { "path": "css/css-multicol/parsing/column-span-invalid.html" },
     { "path": "css/css-multicol/parsing/column-span-computed.html" },
     { "path": "css/css-multicol/parsing/column-rule-width-valid.html" },

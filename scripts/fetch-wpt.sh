@@ -281,6 +281,7 @@ collect_pattern \
   "/css/css-color/parsing/color-invalid-hsl.html"
 collect_pattern \
   "/css/support/parsing-testcommon.js" \
+  "/css/support/color-testcommon.js" \
   "/css/support/computed-testcommon.js" \
   "/css/css-text-decor/text-decoration-thickness-valid.html" \
   "/css/css-text-decor/text-decoration-thickness-invalid.html" \

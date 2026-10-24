@@ -51,6 +51,9 @@ fn signed_pow(v: f64, exponent: f64) -> f64 {
 }
 
 pub(super) fn to_srgb(space: Space, values: Triple) -> Triple {
+    // Preserve unbounded computed channels for CSSOM, then limit them to the
+    // engine's representable range when converting to a raster color.
+    let values = values.map(|value| value.clamp(-(f32::MAX as f64), f32::MAX as f64));
     if space == Space::Srgb {
         return gamut_map(values);
     }

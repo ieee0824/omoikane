@@ -506,7 +506,7 @@
       const value = evaluate(args[0], context);
       const strings = isNodeSet(value) ? value.map(stringValue) : [asString(value)];
       const ids = new Set(strings.flatMap(text => text.trim().split(/[\x20\x09\x0d\x0a]+/)).filter(Boolean));
-      return descendants(rootOf(context.node), true).filter(node => node.nodeType === 1 && ids.has(node.getAttribute("id")));
+      return descendants(rootOf(context.node), true).filter(node => node.nodeType === 1 && ids.delete(node.getAttribute("id")));
     }
     if (name === "lang") {
       const language = asciiLower(asString(evaluate(args[0], context)));
