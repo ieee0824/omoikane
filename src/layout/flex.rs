@@ -7,8 +7,8 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use super::{
     AlignItems, BoxDimensions, EdgeSizes, FlexDirection, FlexWrap, JustifyContent, LayoutBox, Rect,
     edge_sizes, explicit_length, intrinsic_width, is_out_of_flow_positioned,
-    layout_positioned_child, overflow, resolved_length, sort_children_by_z_index,
-    translate_layout_box_to_outer, visibility, z_index,
+    layout_positioned_child, overflow, sort_children_by_z_index, translate_layout_box_to_outer,
+    visibility, z_index,
 };
 
 mod anonymous;
@@ -71,7 +71,7 @@ pub(super) fn layout_flex_container(
     let main_gap = flex_main_axis_gap(&style, direction);
     let line_gap = flex_cross_axis_gap(&style, direction);
 
-    let specified_height = resolved_length(&style, "height", containing_height)
+    let specified_height = resolved_dimension_by_id(&style, PropertyId::Height, containing_height)
         .map(|height| super::border_box_adjust_height(&style, height, &padding, &border))
         .map(|height| {
             super::clamp_content_height(&style, height, containing_height, padding, border)
@@ -298,9 +298,11 @@ fn collect_flex_items(
             .or_else(|| resolved_main_size(&child_style, direction, main_basis))
             .unwrap_or_else(|| auto_flex_base_main_size(&child, resolver, direction));
         let min_main_size = match direction {
-            FlexDirection::Row => explicit_length(&child_style, "min-width")
+            FlexDirection::Row => explicit_length_by_id(&child_style, PropertyId::MinWidth)
                 .unwrap_or_else(|| super::minimum_content_width(&child, resolver)),
-            FlexDirection::Column => explicit_length(&child_style, "min-height").unwrap_or(0.0),
+            FlexDirection::Column => {
+                explicit_length_by_id(&child_style, PropertyId::MinHeight).unwrap_or(0.0)
+            }
         };
         let (main_start_auto, main_end_auto) = main_axis_auto_margins(&child_style, direction);
         items.push(FlexItemSpec {
@@ -376,7 +378,7 @@ fn resolve_line_main_sizes<'a>(
         let column_width = item.explicit_cross_size.unwrap_or_else(|| {
             if direction == FlexDirection::Column
                 && item.align_self.unwrap_or(align) != AlignItems::Stretch
-                && resolved_length(&child_style, "width", width).is_none()
+                && resolved_dimension_by_id(&child_style, PropertyId::Width, width).is_none()
             {
                 (intrinsic_width(&item.node, resolver)
                     + edge_sizes(&child_style, "margin").horizontal())
@@ -467,7 +469,7 @@ fn grow_column_line_items(
         // Even an unchanged auto height needs a second layout when
         // flex layout has made its percentage basis definite.
         if height != child.dimensions.content.height
-            || (definite && explicit_length(&child_style, "height").is_none())
+            || (definite && explicit_length_by_id(&child_style, PropertyId::Height).is_none())
         {
             if let Some(reflowed) = layout_item(
                 item,
@@ -778,16 +780,40 @@ fn main_axis_auto_margins(style: &ComputedStyle, direction: FlexDirection) -> (b
     }
 }
 
+fn explicit_length_by_id(style: &ComputedStyle, property: PropertyId) -> Option<f32> {
+    match style.get_by_id(property) {
+        Some(ComputedValue::Px(value)) => Some(*value),
+        Some(ComputedValue::Number(value)) if *value == 0.0 => Some(0.0),
+        _ => None,
+    }
+}
+
+fn resolved_dimension_by_id(
+    style: &ComputedStyle,
+    property: PropertyId,
+    basis: f32,
+) -> Option<f32> {
+    debug_assert!(matches!(property, PropertyId::Width | PropertyId::Height));
+    match style.get_by_id(property) {
+        Some(ComputedValue::Px(value)) => Some(*value),
+        Some(ComputedValue::Number(value)) if *value == 0.0 => Some(0.0),
+        Some(value) if basis > 0.0 => value.resolve_length_percentage(basis),
+        _ => None,
+    }
+    .map(|value| value.max(0.0))
+}
+
 fn flex_gap(style: &ComputedStyle) -> Option<f32> {
+    // `gap` is a serialized shorthand rather than a PropertyId longhand.
     explicit_length(style, "gap")
 }
 
 fn flex_main_axis_gap(style: &ComputedStyle, direction: FlexDirection) -> f32 {
     match direction {
-        FlexDirection::Row => explicit_length(style, "column-gap")
+        FlexDirection::Row => explicit_length_by_id(style, PropertyId::ColumnGap)
             .or_else(|| flex_gap(style))
             .unwrap_or(0.0),
-        FlexDirection::Column => explicit_length(style, "row-gap")
+        FlexDirection::Column => explicit_length_by_id(style, PropertyId::RowGap)
             .or_else(|| flex_gap(style))
             .unwrap_or(0.0),
     }
@@ -795,10 +821,10 @@ fn flex_main_axis_gap(style: &ComputedStyle, direction: FlexDirection) -> f32 {
 
 fn flex_cross_axis_gap(style: &ComputedStyle, direction: FlexDirection) -> f32 {
     match direction {
-        FlexDirection::Row => explicit_length(style, "row-gap")
+        FlexDirection::Row => explicit_length_by_id(style, PropertyId::RowGap)
             .or_else(|| flex_gap(style))
             .unwrap_or(0.0),
-        FlexDirection::Column => explicit_length(style, "column-gap")
+        FlexDirection::Column => explicit_length_by_id(style, PropertyId::ColumnGap)
             .or_else(|| flex_gap(style))
             .unwrap_or(0.0),
     }
@@ -857,8 +883,8 @@ fn align_self(style: &ComputedStyle) -> Option<AlignItems> {
 
 fn explicit_main_size(style: &ComputedStyle, direction: FlexDirection) -> Option<f32> {
     match direction {
-        FlexDirection::Row => explicit_length(style, "width"),
-        FlexDirection::Column => explicit_length(style, "height"),
+        FlexDirection::Row => explicit_length_by_id(style, PropertyId::Width),
+        FlexDirection::Column => explicit_length_by_id(style, PropertyId::Height),
     }
 }
 
@@ -866,20 +892,21 @@ fn explicit_main_size(style: &ComputedStyle, direction: FlexDirection) -> Option
 /// container's main axis size as basis.
 fn resolved_main_size(style: &ComputedStyle, direction: FlexDirection, basis: f32) -> Option<f32> {
     match direction {
-        FlexDirection::Row => resolved_length(style, "width", basis),
-        FlexDirection::Column => resolved_length(style, "height", basis),
+        FlexDirection::Row => resolved_dimension_by_id(style, PropertyId::Width, basis),
+        FlexDirection::Column => resolved_dimension_by_id(style, PropertyId::Height, basis),
     }
 }
 
 fn explicit_cross_size(style: &ComputedStyle, direction: FlexDirection) -> Option<f32> {
     match direction {
-        FlexDirection::Row => explicit_length(style, "height"),
-        FlexDirection::Column => explicit_length(style, "width"),
+        FlexDirection::Row => explicit_length_by_id(style, PropertyId::Height),
+        FlexDirection::Column => explicit_length_by_id(style, PropertyId::Width),
     }
 }
 
 fn flex_basis(style: &ComputedStyle, direction: FlexDirection) -> Option<f32> {
-    explicit_length(style, "flex-basis").or_else(|| explicit_main_size(style, direction))
+    explicit_length_by_id(style, PropertyId::FlexBasis)
+        .or_else(|| explicit_main_size(style, direction))
 }
 
 /// Stretch applies only to an auto cross size without auto cross margins.
@@ -1160,6 +1187,37 @@ fn layout_item(
 mod layout_cost_tests {
     use super::*;
     use crate::css::{Origin, parse_stylesheet};
+
+    #[test]
+    fn typed_flex_length_lookup_preserves_used_value_rules() {
+        let node = NodeHandle::element("div");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { width:calc(25% + 10px); height:0; min-width:12px; flex-basis:7px }",
+            )
+            .unwrap(),
+        );
+        let style = resolver.computed_style(&node);
+        assert_eq!(
+            resolved_dimension_by_id(&style, PropertyId::Width, 200.0),
+            Some(60.0)
+        );
+        assert_eq!(
+            resolved_dimension_by_id(&style, PropertyId::Width, 0.0),
+            None
+        );
+        assert_eq!(explicit_length_by_id(&style, PropertyId::Height), Some(0.0));
+        assert_eq!(
+            explicit_length_by_id(&style, PropertyId::MinWidth),
+            Some(12.0)
+        );
+        assert_eq!(
+            explicit_length_by_id(&style, PropertyId::FlexBasis),
+            Some(7.0)
+        );
+    }
 
     #[test]
     fn nested_auto_height_rows_have_bounded_layout_work() {

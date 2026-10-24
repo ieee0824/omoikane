@@ -1572,7 +1572,7 @@ fn populate_layout_transforms(
 ) {
     let style = layout_box_style(layout, resolver);
     let perspective_box = layout.dimensions.border_box();
-    let font_size = match style.get("font-size") {
+    let font_size = match style.get_by_id(PropertyId::FontSize) {
         Some(ComputedValue::Px(value)) => *value,
         _ => 16.0,
     };
@@ -1613,7 +1613,7 @@ fn populate_layout_transforms(
         populate_layout_transforms(child, resolver, root_font_size, perspective_matrix);
     }
     layout.needs_scroll_translation = matches!(
-        style.get("position"),
+        style.get_by_id(PropertyId::Position),
         Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("sticky")
     ) || layout
         .children
@@ -5709,7 +5709,7 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
             if float_side(&style) != FloatSide::None || is_out_of_flow_positioned(&style) {
                 return false;
             }
-            if let Some(ComputedValue::Keyword(keyword)) = style.get("display") {
+            if let Some(ComputedValue::Keyword(keyword)) = style.get_by_id(PropertyId::Display) {
                 return keyword.eq_ignore_ascii_case("inline")
                     || keyword.eq_ignore_ascii_case("inline-block");
             }
@@ -5755,7 +5755,7 @@ fn is_non_rendered_html_element(node: &NodeHandle) -> bool {
 }
 
 fn visibility(style: &ComputedStyle) -> Visibility {
-    match style.get("visibility") {
+    match style.get_by_id(PropertyId::Visibility) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("hidden") => {
             Visibility::Hidden
         }
@@ -5765,7 +5765,7 @@ fn visibility(style: &ComputedStyle) -> Visibility {
 
 fn text_overflow_is_ellipsis(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("text-overflow"),
+        style.get_by_id(PropertyId::TextOverflow),
         Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("ellipsis")
     )
 }
@@ -5778,8 +5778,8 @@ fn overflow(style: &ComputedStyle) -> Overflow {
         Scroll,
     }
 
-    fn axis(style: &ComputedStyle, property: &str) -> Axis {
-        match style.get(property) {
+    fn axis(style: &ComputedStyle, property: PropertyId) -> Axis {
+        match style.get_by_id(property) {
             Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("clip") => {
                 Axis::Clip
             }
@@ -5790,8 +5790,8 @@ fn overflow(style: &ComputedStyle) -> Overflow {
         }
     }
 
-    let mut x = axis(style, "overflow-x");
-    let mut y = axis(style, "overflow-y");
+    let mut x = axis(style, PropertyId::OverflowX);
+    let mut y = axis(style, PropertyId::OverflowY);
     // CSS Overflow computes visible to auto and clip to hidden when the other
     // axis is neither visible nor clip. Thus any scrollable axis makes both
     // axes part of the scroll container; clip/visible is the special pair that
@@ -5838,7 +5838,7 @@ fn build_list_marker(
 ) -> Option<ListMarker> {
     // Only `display: list-item` generates a marker.
     let display_is_list_item = matches!(
-        style.get("display"),
+        style.get_by_id(PropertyId::Display),
         Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("list-item")
     );
     if !display_is_list_item {
@@ -5846,7 +5846,7 @@ fn build_list_marker(
     }
 
     // Determine list-style-type.
-    let list_style_type = match style.get("list-style-type") {
+    let list_style_type = match style.get_by_id(PropertyId::ListStyleType) {
         Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase(),
         _ => "disc".to_string(),
     };
@@ -5855,13 +5855,13 @@ fn build_list_marker(
         return None;
     }
 
-    let font_size = match style.get("font-size") {
+    let font_size = match style.get_by_id(PropertyId::FontSize) {
         Some(ComputedValue::Px(px)) => *px,
         _ => 16.0,
     };
 
     let outside = !matches!(
-        style.get("list-style-position"),
+        style.get_by_id(PropertyId::ListStylePosition),
         Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("inside")
     );
 
