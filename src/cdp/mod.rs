@@ -558,21 +558,11 @@ impl CdpSession {
     /// A GUI redraw must not run unrelated timers or promise jobs just to update
     /// the window title.
     pub fn document_title_without_tasks(&mut self) -> Result<String, JsonRpcError> {
-        let document = self.runtime.document();
-        let Some(head) = document.query_selector("head") else {
-            return Ok(String::new());
-        };
-        let Some(title) = head
-            .child_nodes()
-            .into_iter()
-            .find(|node| node.tag_name().as_deref() == Some("title"))
-        else {
-            return Ok(String::new());
-        };
-        Ok(crate::dom::collect_descendant_text(
-            &title,
-            crate::dom::TextTraversal::Containers,
-        ))
+        let value = self.runtime.eval("document.title").map_err(js_error)?;
+        Ok(value
+            .as_string()
+            .map(|title| title.to_std_string_escaped())
+            .unwrap_or_default())
     }
 
     fn omoikane_find_in_page(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
