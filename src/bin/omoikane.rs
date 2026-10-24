@@ -8,8 +8,10 @@ use std::time::{Duration, Instant};
 
 use chrome_layout::ChromeLayout;
 use device_scale::{DeviceScale, blit_scaled};
+#[cfg(test)]
 use input_routing::{InputTarget, PagePointer};
 use omoikane::cdp::CdpSession;
+#[cfg(test)]
 use omoikane::dom::NodeHandle;
 use omoikane::error_reporting::{
     ErrorCategory, ErrorCode, ErrorReporter, ErrorSeverity, ExecutionSurface, RawEvent,
@@ -18,10 +20,13 @@ use omoikane::error_reporting::{
 use omoikane::font::{Font, load_system_font};
 #[cfg(test)]
 use omoikane::frame::render_browser_frame;
+#[cfg(test)]
 use omoikane::frame::{BrowserFrameCache, PlatformFramePlan, PlatformFrameScheduler};
 use omoikane::js::{FindInPageResult, FullscreenTransition, PointerLockTransition};
+#[cfg(test)]
+use omoikane::platform_input::PlatformInput;
 use omoikane::platform_input::{
-    InputModifiers, PlatformImeEvent, PlatformInput, PlatformKeyEvent, PlatformMouseButton,
+    InputModifiers, PlatformImeEvent, PlatformKeyEvent, PlatformMouseButton,
 };
 use serde_json::json;
 use softbuffer::{Context, Surface};
@@ -36,18 +41,30 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Fullscreen as WindowFullscreen, Window, WindowId};
 
+#[path = "omoikane/build_info.rs"]
+mod build_info;
+
+#[path = "omoikane/async_gui.rs"]
+mod async_gui;
 #[path = "omoikane/chrome_layout.rs"]
 mod chrome_layout;
 #[path = "omoikane/device_scale.rs"]
 mod device_scale;
+#[cfg(test)]
 #[path = "omoikane/input_routing.rs"]
 mod input_routing;
+#[cfg(test)]
 #[path = "omoikane/media_environment.rs"]
 mod media_environment;
+#[path = "omoikane/page_worker.rs"]
+mod page_worker;
 #[path = "omoikane/pointer_lock_host.rs"]
 mod pointer_lock_host;
+#[cfg(test)]
 #[path = "omoikane/render_pump.rs"]
 mod render_pump;
+#[path = "omoikane/toolbar_font.rs"]
+mod toolbar_font;
 #[path = "omoikane/toolbar_paint.rs"]
 mod toolbar_paint;
 #[path = "omoikane/url_bar.rs"]
@@ -58,6 +75,7 @@ mod url_bar;
 mod keyboard_tests;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const POINTER_TASK_QUIET_PERIOD: Duration = Duration::from_millis(300);
 const DEFAULT_WINDOW_TITLE: &str = "Omoikane";
 
 #[derive(Clone, Copy)]
@@ -147,16 +165,19 @@ fn configured_error_reporter() -> Result<Option<Arc<ErrorReporter>>, Box<dyn Err
     )?)))
 }
 
+#[cfg(test)]
 struct FindUi {
     query: String,
     result: FindInPageResult,
     document: NodeHandle,
 }
 
+#[cfg(test)]
 struct BrowserApp {
     session: CdpSession,
     cookie_changes: Option<omoikane::http::CookieChangeSubscription>,
     initial_url: Option<String>,
+    initial_navigation_due_at: Option<Instant>,
     initial_navigation_error: Option<omoikane::cdp::JsonRpcError>,
     error_reporter: Option<Arc<ErrorReporter>>,
     window: Option<Arc<Window>>,
@@ -165,6 +186,7 @@ struct BrowserApp {
     frame_scheduler: PlatformFrameScheduler,
     /// Earliest frame allowed inside an input batch, independent of wakeups.
     wheel_frame_deadline: Instant,
+    last_pointer_input_at: Option<Instant>,
     frame_cache: BrowserFrameCache,
     clock_document: u64,
     last_chrome: Option<render_pump::PresentedChrome>,
@@ -185,6 +207,7 @@ struct BrowserApp {
     /// Window logical position to restore the cursor to after Pointer Lock.
     pointer_restore: (f64, f64),
     trace_input: bool,
+    startup_trace: Option<Instant>,
     input_trace_sequence: u64,
     url_bar: UrlBar,
     /// Last cursor position in physical window pixels.
@@ -198,10 +221,27 @@ struct BrowserApp {
     toolbar_font: OnceCell<Option<Font>>,
 }
 
+#[cfg(test)]
 impl BrowserApp {
+    fn trace_startup(&self, phase: &str) {
+        if let Some(started) = self.startup_trace {
+            eprintln!(
+                "{}",
+                omoikane::diagnostics::json_record(
+                    "OMOIKANE_STARTUP",
+                    &json!({
+                        "phase": phase,
+                        "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+                    })
+                )
+            );
+        }
+    }
+
     fn new(url: &str) -> Result<Self, Box<dyn Error>> {
         let mut session =
             CdpSession::new().map_err(|error| std::io::Error::other(error.to_string()))?;
+        session.set_task_pump_limit(std::num::NonZeroUsize::new(1));
         session.set_pointer_lock_deferred(true);
         let media_preferences = omoikane::platform_media::capture_media_preferences();
         let mut environment = session.host_media_environment();
@@ -214,6 +254,7 @@ impl BrowserApp {
             session,
             cookie_changes: None,
             initial_url: Some(url.into()),
+            initial_navigation_due_at: None,
             initial_navigation_error: None,
             error_reporter: None,
             window: None,
@@ -221,6 +262,7 @@ impl BrowserApp {
             surface: None,
             frame_scheduler: PlatformFrameScheduler::new(started_at, FRAME_INTERVAL),
             wheel_frame_deadline: started_at,
+            last_pointer_input_at: None,
             frame_cache: BrowserFrameCache::default(),
             clock_document,
             last_chrome: None,
@@ -243,6 +285,7 @@ impl BrowserApp {
             native_pointer_lock_raw_buttons: false,
             pointer_restore: (0.0, 0.0),
             trace_input: std::env::var_os("OMOIKANE_TRACE_INPUT").is_some(),
+            startup_trace: None,
             input_trace_sequence: 0,
             url_bar: UrlBar::new(url),
             cursor_position: (0.0, 0.0),
@@ -454,7 +497,10 @@ impl BrowserApp {
         };
         self.input_trace_sequence += 1;
         record["sequence"] = json!(self.input_trace_sequence);
-        eprintln!("OMOIKANE_INPUT {record}");
+        eprintln!(
+            "{}",
+            omoikane::diagnostics::json_record("OMOIKANE_INPUT", &record)
+        );
     }
 
     fn dispatch_key_input(
@@ -588,13 +634,16 @@ impl BrowserApp {
         let result = self.input.wheel(&mut self.session, delta_x, delta_y);
         if let Some(started) = started {
             eprintln!(
-                "OMOIKANE_WHEEL {}",
-                json!({
-                    "dispatch_ms": started.elapsed().as_secs_f64() * 1000.0,
-                    "delta_x": delta_x,
-                    "delta_y": delta_y,
-                    "success": result.is_ok(),
-                })
+                "{}",
+                omoikane::diagnostics::json_record(
+                    "OMOIKANE_WHEEL",
+                    &json!({
+                        "dispatch_ms": started.elapsed().as_secs_f64() * 1000.0,
+                        "delta_x": delta_x,
+                        "delta_y": delta_y,
+                        "success": result.is_ok(),
+                    })
+                )
             );
         }
         result
@@ -772,15 +821,12 @@ fn platform_mouse_button(button: MouseButton) -> Option<PlatformMouseButton> {
 }
 
 fn document_window_title(session: &mut CdpSession) -> Result<String, omoikane::cdp::JsonRpcError> {
-    let result = session.dispatch(
-        "Runtime.evaluate",
-        json!({ "expression": "document.title", "returnByValue": true }),
-    )?;
-    Ok(result["result"]["value"]
-        .as_str()
-        .filter(|title| !title.is_empty())
-        .unwrap_or(DEFAULT_WINDOW_TITLE)
-        .to_string())
+    let title = session.document_title_without_tasks()?;
+    Ok(if title.is_empty() {
+        DEFAULT_WINDOW_TITLE.to_string()
+    } else {
+        title
+    })
 }
 
 fn changed_window_title(current: &mut String, next: String) -> Option<String> {
@@ -791,6 +837,7 @@ fn changed_window_title(current: &mut String, next: String) -> Option<String> {
     Some(next)
 }
 
+#[cfg(test)]
 fn find_window_title(page_title: String, find_ui: Option<&FindUi>) -> String {
     match find_ui {
         Some(ui) => format!(
@@ -842,6 +889,7 @@ fn wheel_delta_css_pixels(delta: MouseScrollDelta, scale_factor: f64) -> (f64, f
     }
 }
 
+#[cfg(test)]
 impl ApplicationHandler for BrowserApp {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, (): ()) {
         if self
@@ -870,6 +918,7 @@ impl ApplicationHandler for BrowserApp {
                 return;
             }
         };
+        self.trace_startup("window_created");
         window.set_ime_allowed(true);
         let context = match Context::new(window.clone()) {
             Ok(context) => context,
@@ -884,6 +933,7 @@ impl ApplicationHandler for BrowserApp {
                 return;
             }
         };
+        self.trace_startup("display_context_ready");
         let surface = match Surface::new(&context, window.clone()) {
             Ok(surface) => surface,
             Err(error) => {
@@ -897,6 +947,7 @@ impl ApplicationHandler for BrowserApp {
                 return;
             }
         };
+        self.trace_startup("surface_ready");
         self.frame_scheduler
             .request_rendering_opportunity(Instant::now());
         self.window = Some(window);
@@ -904,14 +955,10 @@ impl ApplicationHandler for BrowserApp {
         self.sync_media_environment();
         self.context = Some(context);
         self.surface = Some(surface);
+        self.session.set_deferred_document_startup(true);
+        self.session.set_nonblocking_image_loading(true);
         let (width, height) = self.chrome_layout().page_viewport();
         self.session.set_viewport(width, height);
-        if let Err(error) = self.start_initial_navigation() {
-            report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Input, &error);
-            eprintln!("initial navigation failed: {error}");
-            self.initial_navigation_error = Some(error);
-            event_loop.exit();
-        }
     }
 
     fn window_event(
@@ -927,15 +974,28 @@ impl ApplicationHandler for BrowserApp {
         {
             return;
         }
+        // macOS emits zero-delta wheel notifications during a gesture. They
+        // cannot scroll, but dispatching them can synchronously run expensive
+        // page listeners and hit testing before the first real wheel delta.
+        if let WindowEvent::MouseWheel { delta, .. } = &event {
+            let (dx, dy) = wheel_delta_css_pixels(delta.clone(), self.device_scale().factor());
+            if dx == 0.0 && dy == 0.0 {
+                return;
+            }
+        }
         self.update_media_environment_for_event(&event);
         if !matches!(event, WindowEvent::RedrawRequested) {
             // X11 and macOS can consume a wheel backlog before delivering a
             // queued redraw. Present at most once per frame interval while
             // processing input so the page visibly moves during the burst.
             if matches!(event, WindowEvent::MouseWheel { .. }) {
-                self.render_before_wheel(Instant::now());
+                let now = Instant::now();
+                self.render_before_wheel(now);
+                self.last_pointer_input_at = Some(now);
+            } else if matches!(event, WindowEvent::CursorMoved { .. }) {
+                self.last_pointer_input_at = Some(Instant::now());
             }
-            self.sync_page_time_before_input(Instant::now());
+            self.defer_page_time_before_input(Instant::now());
         }
         match event {
             WindowEvent::CloseRequested => {
@@ -974,8 +1034,20 @@ impl ApplicationHandler for BrowserApp {
                 // Without a queued application redraw, this is an OS exposure event.
                 let os_exposure = !self.frame_scheduler.redraw_pending();
                 let elapsed_ms = self.begin_page_frame(Instant::now());
-                if let Err(error) = self.draw(elapsed_ms, os_exposure) {
+                let result = if self.pointer_input_is_recent(Instant::now()) {
+                    self.draw_without_page_tasks(elapsed_ms, os_exposure)
+                } else {
+                    self.draw(elapsed_ms, os_exposure)
+                };
+                if let Err(error) = result {
                     eprintln!("frame failed: {error}");
+                }
+                if self.initial_url.is_some() && self.initial_navigation_due_at.is_none() {
+                    self.trace_startup("first_window_redraw_attempted");
+                    self.initial_navigation_due_at = Some(Instant::now() + FRAME_INTERVAL);
+                } else if self.initial_url.is_none() && self.initial_navigation_due_at.is_none() {
+                    self.trace_startup("first_page_redraw_attempted");
+                    self.startup_trace = None;
                 }
             }
             event => {
@@ -997,7 +1069,7 @@ impl ApplicationHandler for BrowserApp {
         if !self.native_pointer_lock {
             return;
         }
-        self.sync_page_time_before_input(Instant::now());
+        self.defer_page_time_before_input(Instant::now());
         let result = match event {
             DeviceEvent::MouseMotion { delta } => {
                 self.input
@@ -1058,10 +1130,43 @@ impl ApplicationHandler for BrowserApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        let pointer_resume_at = self
+            .last_pointer_input_at
+            .map(|last| last + POINTER_TASK_QUIET_PERIOD);
+        if pointer_resume_at.is_some_and(|deadline| now >= deadline) {
+            self.last_pointer_input_at = None;
+            self.frame_scheduler.request_rendering_opportunity(now);
+        }
+        if self
+            .initial_navigation_due_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.initial_navigation_due_at = None;
+            self.trace_startup("navigation_started");
+            if let Err(error) = self.start_initial_navigation() {
+                report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Input, &error);
+                eprintln!("initial navigation failed: {error}");
+                self.initial_navigation_error = Some(error);
+                event_loop.exit();
+                return;
+            }
+            self.trace_startup("navigation_finished");
+            self.frame_scheduler
+                .request_rendering_opportunity(Instant::now());
+        }
         self.sync_fullscreen();
         self.sync_pointer_lock();
         if let Some(window) = &self.window {
             let now = Instant::now();
+            let wake_at = self
+                .initial_navigation_due_at
+                .into_iter()
+                .chain(
+                    self.last_pointer_input_at
+                        .map(|last| last + POINTER_TASK_QUIET_PERIOD),
+                )
+                .min();
             match self
                 .frame_scheduler
                 .plan(now, self.frame_cache.demand(&self.session))
@@ -1071,8 +1176,12 @@ impl ApplicationHandler for BrowserApp {
                     window.request_redraw();
                     event_loop.set_control_flow(ControlFlow::Wait);
                 }
-                PlatformFramePlan::Wait => event_loop.set_control_flow(ControlFlow::Wait),
+                PlatformFramePlan::Wait => match wake_at {
+                    Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
+                    None => event_loop.set_control_flow(ControlFlow::Wait),
+                },
                 PlatformFramePlan::WaitUntil(deadline) => {
+                    let deadline = wake_at.map_or(deadline, |wake| std::cmp::min(wake, deadline));
                     event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
                 }
             }
@@ -1256,6 +1365,28 @@ mod tests {
     }
 
     #[test]
+    fn reading_window_title_does_not_run_due_page_timer() {
+        let mut session = CdpSession::new().unwrap();
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": "data:text/html,<title>Before</title>" }),
+            )
+            .unwrap();
+        session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({ "expression": "setTimeout(() => document.title = 'After', 1000)" }),
+            )
+            .unwrap();
+        session.advance_clock_without_tasks(1000);
+
+        assert_eq!(document_window_title(&mut session).unwrap(), "Before");
+        render_browser_frame(&mut session, 100, 100, 0).unwrap();
+        assert_eq!(document_window_title(&mut session).unwrap(), "After");
+    }
+
+    #[test]
     fn find_shortcut_edits_query_navigates_and_releases_page_keys() {
         let mut app = BrowserApp::new("data:text/html,<p>needle needle</p>").unwrap();
         app.start_initial_navigation().unwrap();
@@ -1299,8 +1430,10 @@ mod tests {
     }
 }
 
+#[cfg(test)]
 struct CookieStoreWake(winit::event_loop::EventLoopProxy<()>);
 
+#[cfg(test)]
 impl std::task::Wake for CookieStoreWake {
     fn wake(self: Arc<Self>) {
         self.wake_by_ref();
@@ -1311,7 +1444,12 @@ impl std::task::Wake for CookieStoreWake {
     }
 }
 
+#[cfg(test)]
 fn main() -> Result<(), Box<dyn Error>> {
+    let startup_trace = std::env::var_os("OMOIKANE_TRACE_STARTUP").map(|_| Instant::now());
+    if startup_trace.is_some() {
+        build_info::trace();
+    }
     let url = std::env::args().nth(1).unwrap_or_else(|| {
         "data:text/html,<title>Omoikane</title><style>body{font:32px sans-serif;padding:2rem}</style><h1>Omoikane</h1><p>Pass a URL as the first argument.</p>".to_string()
     });
@@ -1320,7 +1458,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         install_panic_reporter(reporter, ExecutionSurface::Gui);
     }
     let event_loop = EventLoop::new()?;
+    if let Some(started) = startup_trace {
+        eprintln!(
+            "{}",
+            omoikane::diagnostics::json_record(
+                "OMOIKANE_STARTUP",
+                &json!({
+                    "phase": "event_loop_ready",
+                    "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+                })
+            )
+        );
+    }
     let mut app = BrowserApp::new(&url)?;
+    app.startup_trace = startup_trace;
+    app.trace_startup("app_ready");
     app.cookie_changes = Some(app.session.subscribe_cookie_changes(std::task::Waker::from(
         Arc::new(CookieStoreWake(event_loop.create_proxy())),
     )));
@@ -1330,6 +1482,39 @@ fn main() -> Result<(), Box<dyn Error>> {
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.initial_navigation_error.take() {
         return Err(error.into());
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn main() -> Result<(), Box<dyn Error>> {
+    let startup_trace = std::env::var_os("OMOIKANE_TRACE_STARTUP").map(|_| Instant::now());
+    if startup_trace.is_some() {
+        build_info::trace();
+    }
+    let url = std::env::args().nth(1).unwrap_or_else(|| {
+        "data:text/html,<title>Omoikane</title><style>body{font:32px sans-serif;padding:2rem}</style><h1>Omoikane</h1><p>Pass a URL as the first argument.</p>".into()
+    });
+    let reporter = configured_error_reporter()?;
+    if let Some(reporter) = reporter.as_ref() {
+        install_panic_reporter(reporter, ExecutionSurface::Gui);
+    }
+    let event_loop = EventLoop::<page_worker::AsyncEvent>::with_user_event().build()?;
+    if let Some(started) = startup_trace {
+        eprintln!(
+            "{}",
+            omoikane::diagnostics::json_record(
+                "OMOIKANE_STARTUP",
+                &json!({"phase":"event_loop_ready","elapsed_ms":started.elapsed().as_secs_f64()*1000.0})
+            )
+        );
+    }
+    let mut app =
+        async_gui::AsyncBrowserApp::new(url, event_loop.create_proxy(), reporter, startup_trace)?;
+    app.trace_startup("app_ready");
+    event_loop.run_app(&mut app)?;
+    if let Some(error) = app.initial_error.take() {
+        return Err(std::io::Error::other(error).into());
     }
     Ok(())
 }

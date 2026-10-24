@@ -1,15 +1,26 @@
 //! CSS cascade and computed style resolution.
 
 mod animation;
+mod class_invalidation;
+#[cfg(test)]
+mod container_dependency_tests;
+#[cfg(test)]
+mod inherited_lookup_tests;
+mod user_action;
+pub(crate) use animation::StyleClockEffects;
+pub(crate) use user_action::UserActionStyleInvalidation;
+mod counter_readers;
 mod font_palette;
 mod forced_colors;
 mod generic_transform;
 pub(crate) mod grid_properties;
 pub(crate) mod individual_transform;
+mod leaf_paint;
 mod page;
 mod property_id;
 mod sibling_functions;
 mod specified_math;
+mod style_cache;
 pub(crate) mod text_shadow;
 mod typed_math;
 mod will_change;
@@ -30,6 +41,7 @@ use super::matcher::{
     SelectorMatchCache, matches_selector_boundary_cached, matches_selector_with_pseudo_cached,
     matches_selector_with_scope_cached,
 };
+use super::transition::TransitionCacheScope;
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
     CssRelativeFontMetrics, Font, FontFamilyKey, FontStretch, FontVariantKey, FontWeight,
@@ -442,6 +454,21 @@ impl ComputedStyle {
         self.properties.get(name)
     }
 
+    /// Returns a computed longhand by its canonical property identity.
+    pub(crate) fn get_by_id(&self, id: PropertyId) -> Option<&ComputedValue> {
+        self.properties.get(&id)
+    }
+
+    /// Returns the number of computed properties without copying their values.
+    pub(crate) fn property_count(&self) -> usize {
+        self.properties.len()
+    }
+
+    /// Borrows computed property names in ascending order.
+    pub(crate) fn property_names(&self) -> impl Iterator<Item = &str> {
+        self.properties.keys()
+    }
+
     /// Returns a snapshot of all computed properties, keyed by name.
     ///
     /// The map is built on each call; use [`Self::get`] to read a single
@@ -529,46 +556,53 @@ impl ComputedStyle {
             .insert(PropertyId::Transform, ComputedValue::Keyword("none".into()));
     }
 
+    const LOGICAL_CSSOM_ALIASES: &[&str] = &[
+        "inline-size",
+        "block-size",
+        "min-inline-size",
+        "min-block-size",
+        "max-inline-size",
+        "max-block-size",
+        "inset-inline-start",
+        "inset-inline-end",
+        "inset-block-start",
+        "inset-block-end",
+        "margin-inline-start",
+        "margin-inline-end",
+        "margin-block-start",
+        "margin-block-end",
+        "padding-inline-start",
+        "padding-inline-end",
+        "padding-block-start",
+        "padding-block-end",
+        "border-inline-start-width",
+        "border-inline-end-width",
+        "border-block-start-width",
+        "border-block-end-width",
+        "border-inline-start-style",
+        "border-inline-end-style",
+        "border-block-start-style",
+        "border-block-end-style",
+        "border-inline-start-color",
+        "border-inline-end-color",
+        "border-block-start-color",
+        "border-block-end-color",
+        "border-start-start-radius",
+        "border-start-end-radius",
+        "border-end-start-radius",
+        "border-end-end-radius",
+    ];
+
+    /// Reports whether projecting this CSSOM longhand needs a logical alias.
+    pub(crate) fn has_logical_cssom_alias(name: &str) -> bool {
+        Self::LOGICAL_CSSOM_ALIASES.contains(&name)
+    }
+
     /// Exposes logical aliases of the final physical values to computed CSSOM.
     /// This runs after layout has resolved used width and height.
     pub(crate) fn populate_logical_cssom(&mut self, flex_or_grid_item: bool) {
         let flow = logical_flow_from_properties(&self.properties);
-        for name in [
-            "inline-size",
-            "block-size",
-            "min-inline-size",
-            "min-block-size",
-            "max-inline-size",
-            "max-block-size",
-            "inset-inline-start",
-            "inset-inline-end",
-            "inset-block-start",
-            "inset-block-end",
-            "margin-inline-start",
-            "margin-inline-end",
-            "margin-block-start",
-            "margin-block-end",
-            "padding-inline-start",
-            "padding-inline-end",
-            "padding-block-start",
-            "padding-block-end",
-            "border-inline-start-width",
-            "border-inline-end-width",
-            "border-block-start-width",
-            "border-block-end-width",
-            "border-inline-start-style",
-            "border-inline-end-style",
-            "border-block-start-style",
-            "border-block-end-style",
-            "border-inline-start-color",
-            "border-inline-end-color",
-            "border-block-start-color",
-            "border-block-end-color",
-            "border-start-start-radius",
-            "border-start-end-radius",
-            "border-end-start-radius",
-            "border-end-end-radius",
-        ] {
+        for &name in Self::LOGICAL_CSSOM_ALIASES {
             let Some(physical) = flow.physical_name(name) else {
                 continue;
             };
@@ -718,6 +752,73 @@ impl std::fmt::Debug for CssFontResources {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum StyleAttributeSelectorDependency {
+    #[default]
+    None,
+    SubjectOnly,
+    NonLocal,
+}
+
+type AttributeSelectorDependency = StyleAttributeSelectorDependency;
+
+/// Bounded result of transition cache processing before animation sampling.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TransitionCacheOutcome {
+    /// The transition clock did not invalidate computed-style caches.
+    #[default]
+    None,
+    /// Running transition light-DOM subtrees were invalidated.
+    Subtree,
+    /// All ordinary and pseudo computed styles were invalidated.
+    Full,
+}
+
+impl TransitionCacheOutcome {
+    /// Returns the bounded label written to style-clock diagnostics.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Subtree => "subtree",
+            Self::Full => "full",
+        }
+    }
+}
+
+/// Cache entry counts from transition processing before animation invalidation.
+/// A `None` outcome reports zeroes rather than the current cache sizes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TransitionCacheEffects {
+    /// Scope selected for transition cache invalidation.
+    pub(crate) outcome: TransitionCacheOutcome,
+    /// Ordinary entries removed by transition processing.
+    pub(crate) ordinary_evicted: usize,
+    /// Ordinary entries retained by transition processing.
+    pub(crate) ordinary_retained: usize,
+    /// Pseudo entries removed by transition processing.
+    pub(crate) pseudo_evicted: usize,
+    /// Pseudo entries retained by transition processing.
+    pub(crate) pseudo_retained: usize,
+}
+
+impl TransitionCacheEffects {
+    fn from_lengths(
+        outcome: TransitionCacheOutcome,
+        ordinary_before: usize,
+        ordinary_after: usize,
+        pseudo_before: usize,
+        pseudo_after: usize,
+    ) -> Self {
+        Self {
+            outcome,
+            ordinary_evicted: ordinary_before.saturating_sub(ordinary_after),
+            ordinary_retained: ordinary_after,
+            pseudo_evicted: pseudo_before.saturating_sub(pseudo_after),
+            pseudo_retained: pseudo_after,
+        }
+    }
+}
+
 /// Computes styles and caches results per node.
 #[derive(Debug, Default)]
 pub struct StyleResolver {
@@ -727,10 +828,26 @@ pub struct StyleResolver {
     next_stylesheet_id: usize,
     layer_orders: HashMap<LayerContextKey, CascadeLayerOrder>,
     rule_indexes: Vec<StylesheetRuleIndex>,
-    cache: HashMap<usize, Arc<ComputedStyle>>,
-    pseudo_cache: HashMap<(usize, PseudoElement), Arc<ComputedStyle>>,
+    cache: style_cache::StyleCache<usize>,
+    pseudo_cache: style_cache::StyleCache<(usize, PseudoElement)>,
     counter_values: HashMap<(usize, Option<PseudoElement>), HashMap<String, Vec<i32>>>,
     selector_match_cache: SelectorMatchCache,
+    /// Furthest reach of a registered selector that observes the raw `style` attribute.
+    style_attribute_selector_dependency: StyleAttributeSelectorDependency,
+    /// Lazily classified selector reach for ordinary HTML `data-*` attributes.
+    ///
+    /// The cache is dropped whenever a stylesheet is registered. A missing entry
+    /// therefore means "not classified for the current stylesheet set", rather
+    /// than "no selector observes the attribute".
+    data_attribute_selector_dependencies: HashMap<String, AttributeSelectorDependency>,
+    /// Bounded per-class selector reach, cleared when stylesheets change.
+    class_selector_dependencies: HashMap<String, class_invalidation::ClassReach>,
+    /// Bounded subjects that can observe changed hover/active/focus flags.
+    user_action_dependencies: user_action::UserActionDependencies,
+    /// Whether declarations in the current stylesheet set read a given
+    /// `data-*` attribute through `attr()`. This is separate from selector
+    /// reach because an unobserved attribute can still affect computed values.
+    data_attribute_value_dependencies: HashMap<String, bool>,
     visited_paint_state: Option<VisitedPaintState>,
     /// Root element's computed font-size in px (for `rem` unit resolution).
     root_font_size: f32,
@@ -764,6 +881,10 @@ pub struct StyleResolver {
     container_query_cache: HashMap<String, Option<super::ContainerQuery>>,
     /// Query-container geometry and metadata from the previous layout pass.
     container_contexts: HashMap<usize, ContainerContext>,
+    /// Dependency queries reuse a result until either computed-style cache changes.
+    container_context_memo: style_cache::ContainerContextMemo,
+    #[cfg(test)]
+    container_context_scans: std::cell::Cell<usize>,
     /// Winning `@keyframes` rules, grouped by their tree scope and name.
     keyframes: HashMap<Option<usize>, HashMap<String, KeyframesDefinition>>,
     /// Monotonic order assigned to parsed `@keyframes` definitions.
@@ -1671,6 +1792,539 @@ struct UnsupportedCssConfig {
     top_n: Option<usize>,
 }
 
+fn selector_observes_style_attribute(selector: &Selector) -> bool {
+    selector.parts.iter().any(|part| {
+        part.simples.iter().any(|simple| match simple {
+            SimpleSelector::Attribute { name, .. } => name.eq_ignore_ascii_case("style"),
+            SimpleSelector::Is(selectors)
+            | SimpleSelector::Where(selectors)
+            | SimpleSelector::Not(selectors) => {
+                selectors.iter().any(selector_observes_style_attribute)
+            }
+            SimpleSelector::Has(selectors) => selectors
+                .iter()
+                .any(|relative| selector_observes_style_attribute(&relative.selector)),
+            SimpleSelector::PseudoClass(name) | SimpleSelector::PseudoElement(name) => {
+                functional_selector_observes_style_attribute(name)
+            }
+            _ => false,
+        })
+    })
+}
+
+fn functional_selector_observes_style_attribute(value: &str) -> bool {
+    let Some((_, rest)) = value.split_once('(') else {
+        return false;
+    };
+    let Some(argument) = rest.strip_suffix(')') else {
+        return false;
+    };
+    selector_text_observes_style_attribute(argument)
+        || selector_tokens_observe_style_attribute(argument)
+}
+
+fn selector_text_observes_style_attribute(input: &str) -> bool {
+    super::parse_selector_list(input)
+        .is_ok_and(|selectors| selectors.iter().any(selector_observes_style_attribute))
+}
+
+fn selector_tokens_observe_style_attribute(input: &str) -> bool {
+    let Ok(tokens) = super::tokenize(input) else {
+        return false;
+    };
+    tokens.iter().enumerate().any(|(index, token)| {
+        (*token == CssToken::BracketOpen)
+            .then(|| attribute_selector_local_name(&tokens[index + 1..]))
+            .flatten()
+            .is_some_and(|name| name.eq_ignore_ascii_case("style"))
+    })
+}
+
+fn attribute_selector_local_name(tokens: &[CssToken]) -> Option<&str> {
+    let mut significant = tokens
+        .iter()
+        .filter(|token| **token != CssToken::Whitespace);
+    match significant.next()? {
+        CssToken::Ident(name) => match (significant.next(), significant.next()) {
+            (Some(CssToken::Delim('|')), Some(CssToken::Ident(local_name))) => Some(local_name),
+            _ => Some(name),
+        },
+        CssToken::Delim('|') => match significant.next() {
+            Some(CssToken::Ident(name)) => Some(name),
+            _ => None,
+        },
+        CssToken::Delim('*') => match (significant.next(), significant.next()) {
+            (Some(CssToken::Delim('|')), Some(CssToken::Ident(name))) => Some(name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn selector_style_attribute_dependency(selector: &Selector) -> StyleAttributeSelectorDependency {
+    let Some(subject_index) = selector.parts.len().checked_sub(1) else {
+        return StyleAttributeSelectorDependency::None;
+    };
+    let mut dependency = StyleAttributeSelectorDependency::None;
+    for (part_index, part) in selector.parts.iter().enumerate() {
+        for simple in &part.simples {
+            dependency = dependency.max(simple_style_attribute_dependency(
+                simple,
+                part_index == subject_index,
+            ));
+        }
+    }
+    if dependency == StyleAttributeSelectorDependency::SubjectOnly
+        && (selector_contains_has(selector) || selector_contains_shadow_pseudo(selector))
+    {
+        StyleAttributeSelectorDependency::NonLocal
+    } else {
+        dependency
+    }
+}
+
+fn selector_contains_has(selector: &Selector) -> bool {
+    selector.parts.iter().any(|part| {
+        part.simples.iter().any(|simple| match simple {
+            SimpleSelector::Has(_) => true,
+            SimpleSelector::Is(selectors)
+            | SimpleSelector::Where(selectors)
+            | SimpleSelector::Not(selectors) => selectors.iter().any(selector_contains_has),
+            _ => false,
+        })
+    })
+}
+
+fn selector_contains_shadow_pseudo(selector: &Selector) -> bool {
+    if selector_uses_shadow_pseudo(selector) {
+        return true;
+    }
+    selector.parts.iter().any(|part| {
+        part.simples.iter().any(|simple| match simple {
+            SimpleSelector::Is(selectors)
+            | SimpleSelector::Where(selectors)
+            | SimpleSelector::Not(selectors) => {
+                selectors.iter().any(selector_contains_shadow_pseudo)
+            }
+            SimpleSelector::Has(selectors) => selectors
+                .iter()
+                .any(|relative| selector_contains_shadow_pseudo(&relative.selector)),
+            _ => false,
+        })
+    })
+}
+
+fn simple_style_attribute_dependency(
+    simple: &SimpleSelector,
+    in_subject: bool,
+) -> StyleAttributeSelectorDependency {
+    match simple {
+        SimpleSelector::Attribute { name, .. } if name.eq_ignore_ascii_case("style") => {
+            if in_subject {
+                StyleAttributeSelectorDependency::SubjectOnly
+            } else {
+                StyleAttributeSelectorDependency::NonLocal
+            }
+        }
+        SimpleSelector::Is(selectors)
+        | SimpleSelector::Where(selectors)
+        | SimpleSelector::Not(selectors) => selectors.iter().fold(
+            StyleAttributeSelectorDependency::None,
+            |dependency, selector| {
+                let nested = selector_style_attribute_dependency(selector);
+                let nested = match nested {
+                    StyleAttributeSelectorDependency::None => nested,
+                    StyleAttributeSelectorDependency::SubjectOnly
+                        if in_subject && selector.parts.len() == 1 =>
+                    {
+                        nested
+                    }
+                    _ => StyleAttributeSelectorDependency::NonLocal,
+                };
+                dependency.max(nested)
+            },
+        ),
+        SimpleSelector::Has(selectors) => {
+            if selectors
+                .iter()
+                .any(|relative| selector_observes_style_attribute(&relative.selector))
+            {
+                StyleAttributeSelectorDependency::NonLocal
+            } else {
+                StyleAttributeSelectorDependency::None
+            }
+        }
+        SimpleSelector::PseudoClass(name) | SimpleSelector::PseudoElement(name)
+            if functional_selector_observes_style_attribute(name) =>
+        {
+            StyleAttributeSelectorDependency::NonLocal
+        }
+        _ => StyleAttributeSelectorDependency::None,
+    }
+}
+
+fn rules_style_attribute_dependency(rules: &[Rule]) -> StyleAttributeSelectorDependency {
+    rules.iter().fold(
+        StyleAttributeSelectorDependency::None,
+        |dependency, rule| {
+            let rule_dependency = match rule {
+                Rule::Style(rule) => rule
+                    .selectors
+                    .iter()
+                    .map(selector_style_attribute_dependency)
+                    .chain(std::iter::once(rules_style_attribute_dependency(
+                        &rule.rules,
+                    )))
+                    .max()
+                    .unwrap_or_default(),
+                Rule::At(rule) => {
+                    let scope_observes = rule.name.eq_ignore_ascii_case("scope")
+                        && (super::parse_scope_prelude(&rule.prelude).is_some_and(|scope| {
+                            scope
+                                .start
+                                .iter()
+                                .chain(scope.end.iter())
+                                .flatten()
+                                .any(selector_observes_style_attribute)
+                        }) || selector_tokens_observe_style_attribute(&rule.prelude));
+                    let scope_dependency = if scope_observes {
+                        StyleAttributeSelectorDependency::NonLocal
+                    } else {
+                        StyleAttributeSelectorDependency::None
+                    };
+                    scope_dependency.max(
+                        rule.block
+                            .as_deref()
+                            .map(rules_style_attribute_dependency)
+                            .unwrap_or_default(),
+                    )
+                }
+                Rule::FontFace(_) => StyleAttributeSelectorDependency::None,
+            };
+            dependency.max(rule_dependency)
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttributeTokenObservation {
+    Absent,
+    Named,
+    Unknown,
+}
+
+/// Looks for one attribute name in raw selector text retained by functional
+/// pseudos and `@scope`. Unknown bracket syntax is deliberately not treated as
+/// absence: a future parser extension could make it observable.
+fn selector_tokens_observe_attribute(
+    input: &str,
+    attribute_name: &str,
+) -> AttributeTokenObservation {
+    let Ok(tokens) = super::tokenize(input) else {
+        return AttributeTokenObservation::Unknown;
+    };
+    let mut observation = AttributeTokenObservation::Absent;
+    for (index, token) in tokens.iter().enumerate() {
+        if *token != CssToken::BracketOpen {
+            continue;
+        }
+        let Some(close_offset) = tokens[index + 1..]
+            .iter()
+            .position(|token| *token == CssToken::BracketClose)
+        else {
+            return AttributeTokenObservation::Unknown;
+        };
+        let contents = &tokens[index + 1..index + 1 + close_offset];
+        match attribute_selector_local_name(contents) {
+            Some(name) if name.eq_ignore_ascii_case(attribute_name) => {
+                return AttributeTokenObservation::Named;
+            }
+            Some(_) => {}
+            None => observation = AttributeTokenObservation::Unknown,
+        }
+    }
+    observation
+}
+
+fn functional_selector_observes_data_attribute(value: &str, attribute_name: &str) -> bool {
+    let Some((_, rest)) = value.split_once('(') else {
+        return false;
+    };
+    let Some(argument) = rest.strip_suffix(')') else {
+        return true;
+    };
+    selector_tokens_observe_attribute(argument, attribute_name) != AttributeTokenObservation::Absent
+}
+
+fn selector_observes_data_attribute(selector: &Selector, attribute_name: &str) -> bool {
+    selector.parts.iter().any(|part| {
+        part.simples.iter().any(|simple| match simple {
+            SimpleSelector::Attribute { name, .. } => name.eq_ignore_ascii_case(attribute_name),
+            SimpleSelector::Is(selectors)
+            | SimpleSelector::Where(selectors)
+            | SimpleSelector::Not(selectors) => selectors
+                .iter()
+                .any(|selector| selector_observes_data_attribute(selector, attribute_name)),
+            SimpleSelector::Has(selectors) => selectors.iter().any(|relative| {
+                selector_observes_data_attribute(&relative.selector, attribute_name)
+            }),
+            SimpleSelector::PseudoClass(name) | SimpleSelector::PseudoElement(name) => {
+                functional_selector_observes_data_attribute(name, attribute_name)
+            }
+            _ => false,
+        })
+    })
+}
+
+fn selector_data_attribute_dependency(
+    selector: &Selector,
+    attribute_name: &str,
+) -> AttributeSelectorDependency {
+    let Some(subject_index) = selector.parts.len().checked_sub(1) else {
+        return AttributeSelectorDependency::None;
+    };
+    let mut dependency = AttributeSelectorDependency::None;
+    for (part_index, part) in selector.parts.iter().enumerate() {
+        for simple in &part.simples {
+            dependency = dependency.max(simple_data_attribute_dependency(
+                simple,
+                attribute_name,
+                part_index == subject_index,
+            ));
+        }
+    }
+    if dependency == AttributeSelectorDependency::SubjectOnly
+        && (selector_contains_has(selector) || selector_contains_shadow_pseudo(selector))
+    {
+        AttributeSelectorDependency::NonLocal
+    } else {
+        dependency
+    }
+}
+
+fn simple_data_attribute_dependency(
+    simple: &SimpleSelector,
+    attribute_name: &str,
+    in_subject: bool,
+) -> AttributeSelectorDependency {
+    match simple {
+        SimpleSelector::Attribute { name, .. } if name.eq_ignore_ascii_case(attribute_name) => {
+            if in_subject {
+                AttributeSelectorDependency::SubjectOnly
+            } else {
+                AttributeSelectorDependency::NonLocal
+            }
+        }
+        SimpleSelector::Is(selectors)
+        | SimpleSelector::Where(selectors)
+        | SimpleSelector::Not(selectors) => {
+            selectors
+                .iter()
+                .fold(AttributeSelectorDependency::None, |dependency, selector| {
+                    let nested = selector_data_attribute_dependency(selector, attribute_name);
+                    let nested = match nested {
+                        AttributeSelectorDependency::None => nested,
+                        AttributeSelectorDependency::SubjectOnly
+                            if in_subject && selector.parts.len() == 1 =>
+                        {
+                            nested
+                        }
+                        _ => AttributeSelectorDependency::NonLocal,
+                    };
+                    dependency.max(nested)
+                })
+        }
+        SimpleSelector::Has(selectors) => {
+            if selectors.iter().any(|relative| {
+                selector_observes_data_attribute(&relative.selector, attribute_name)
+            }) {
+                AttributeSelectorDependency::NonLocal
+            } else {
+                AttributeSelectorDependency::None
+            }
+        }
+        SimpleSelector::PseudoClass(name) | SimpleSelector::PseudoElement(name)
+            if functional_selector_observes_data_attribute(name, attribute_name) =>
+        {
+            AttributeSelectorDependency::NonLocal
+        }
+        _ => AttributeSelectorDependency::None,
+    }
+}
+
+fn rules_data_attribute_dependency(
+    rules: &[Rule],
+    attribute_name: &str,
+    inside_nested_style: bool,
+) -> AttributeSelectorDependency {
+    rules
+        .iter()
+        .fold(AttributeSelectorDependency::None, |dependency, rule| {
+            let rule_dependency = match rule {
+                Rule::Style(rule) => {
+                    let selector_dependency = rule
+                        .selectors
+                        .iter()
+                        .map(|selector| {
+                            selector_data_attribute_dependency(selector, attribute_name)
+                        })
+                        .max()
+                        .unwrap_or_default();
+                    let nested_dependency =
+                        rules_data_attribute_dependency(&rule.rules, attribute_name, true);
+                    let dependency = selector_dependency.max(nested_dependency);
+                    if inside_nested_style && dependency != AttributeSelectorDependency::None {
+                        AttributeSelectorDependency::NonLocal
+                    } else if selector_dependency != AttributeSelectorDependency::None
+                        && !rule.rules.is_empty()
+                    {
+                        // A nested selector can project an outer subject's
+                        // attribute dependency onto a sibling or ancestor.
+                        AttributeSelectorDependency::NonLocal
+                    } else {
+                        dependency
+                    }
+                }
+                Rule::At(rule) => {
+                    let scope_observes = rule.name.eq_ignore_ascii_case("scope")
+                        && (super::parse_scope_prelude(&rule.prelude).is_some_and(|scope| {
+                            scope
+                                .start
+                                .iter()
+                                .chain(scope.end.iter())
+                                .flatten()
+                                .any(|selector| {
+                                    selector_observes_data_attribute(selector, attribute_name)
+                                })
+                        }) || selector_tokens_observe_attribute(&rule.prelude, attribute_name)
+                            != AttributeTokenObservation::Absent);
+                    let scope_dependency = if scope_observes {
+                        AttributeSelectorDependency::NonLocal
+                    } else {
+                        AttributeSelectorDependency::None
+                    };
+                    scope_dependency.max(
+                        rule.block
+                            .as_deref()
+                            .map(|rules| {
+                                rules_data_attribute_dependency(
+                                    rules,
+                                    attribute_name,
+                                    inside_nested_style,
+                                )
+                            })
+                            .unwrap_or_default(),
+                    )
+                }
+                Rule::FontFace(_) => AttributeSelectorDependency::None,
+            };
+            dependency.max(rule_dependency)
+        })
+}
+
+fn value_reads_data_attribute(value: &Value, attribute_name: &str) -> bool {
+    match value {
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("attr") => {
+            let Some(first) = arguments.first() else {
+                return true;
+            };
+            match first {
+                Value::Keyword(name) | Value::String(name) => {
+                    name.trim().eq_ignore_ascii_case(attribute_name)
+                }
+                _ => true,
+            }
+        }
+        Value::Function { arguments, .. }
+        | Value::List(arguments)
+        | Value::CommaList(arguments) => arguments
+            .iter()
+            .any(|value| value_reads_data_attribute(value, attribute_name)),
+        _ => false,
+    }
+}
+
+fn declarations_read_data_attribute(declarations: &[Declaration], attribute_name: &str) -> bool {
+    declarations
+        .iter()
+        .any(|declaration| value_reads_data_attribute(&declaration.value, attribute_name))
+}
+
+fn rules_read_data_attribute(rules: &[Rule], attribute_name: &str) -> bool {
+    rules.iter().any(|rule| match rule {
+        Rule::Style(rule) => {
+            declarations_read_data_attribute(&rule.declarations, attribute_name)
+                || rules_read_data_attribute(&rule.rules, attribute_name)
+        }
+        Rule::At(rule) => {
+            declarations_read_data_attribute(&rule.declarations, attribute_name)
+                || rule
+                    .block
+                    .as_deref()
+                    .is_some_and(|rules| rules_read_data_attribute(rules, attribute_name))
+        }
+        Rule::FontFace(_) => false,
+    })
+}
+
+fn parsed_inline_style(source: Option<&str>) -> Vec<Declaration> {
+    source.map(super::parse_style_attribute).unwrap_or_default()
+}
+
+fn is_local_inline_property(name: &str) -> bool {
+    matches!(
+        canonical_property_name(name),
+        "background-image" | "bottom" | "top" | "right" | "left" | "transform" | "display"
+    )
+}
+
+fn is_flow_relative_inset(name: &str) -> bool {
+    name.starts_with("inset-block-") || name.starts_with("inset-inline-")
+}
+
+fn inline_style_change_is_subtree_local(previous: Option<&str>, current: Option<&str>) -> bool {
+    let previous = parsed_inline_style(previous);
+    let current = parsed_inline_style(current);
+    if previous
+        .iter()
+        .chain(&current)
+        .any(|declaration| is_flow_relative_inset(&declaration.name))
+    {
+        return false;
+    }
+    previous
+        .iter()
+        .filter(|declaration| !is_local_inline_property(&declaration.name))
+        .eq(current
+            .iter()
+            .filter(|declaration| !is_local_inline_property(&declaration.name)))
+}
+
+fn inline_invalidation_subtree(node: &NodeHandle) -> Option<HashSet<usize>> {
+    invalidation_subtrees([node.clone()])
+}
+
+fn invalidation_subtrees(roots: impl IntoIterator<Item = NodeHandle>) -> Option<HashSet<usize>> {
+    let mut pending = roots.into_iter().collect::<Vec<_>>();
+    if pending
+        .iter()
+        .any(|node| node.containing_shadow_root().is_some())
+    {
+        return None;
+    }
+    let mut identities = HashSet::new();
+    while let Some(current) = pending.pop() {
+        if !identities.insert(current.identity()) {
+            continue;
+        }
+        if current.shadow_root().is_some() || current.assigned_slot().is_some() {
+            return None;
+        }
+        pending.extend(current.child_nodes());
+    }
+    Some(identities)
+}
+
 impl StyleResolver {
     pub(crate) fn replace_counter_values(
         &mut self,
@@ -1797,19 +2451,30 @@ impl StyleResolver {
 
     /// Whether size queries or size-container units need a geometry snapshot.
     pub(crate) fn needs_container_contexts(&self) -> bool {
-        self.cache
-            .values()
-            .chain(self.pseudo_cache.values())
-            .any(|style| {
-                style
-                    .component_values
+        self.container_context_memo
+            .get_or_compute(&self.cache, &self.pseudo_cache, || {
+                #[cfg(test)]
+                self.container_context_scans
+                    .set(self.container_context_scans.get() + 1);
+                self.cache
                     .values()
-                    .any(color_uses_container_units)
+                    .chain(self.pseudo_cache.values())
+                    .any(|style| {
+                        style
+                            .component_values
+                            .values()
+                            .any(color_uses_container_units)
+                    })
+                    || self
+                        .stylesheets
+                        .iter()
+                        .any(|input| contains_at_rule_named(&input.stylesheet.rules, "container"))
             })
-            || self
-                .stylesheets
-                .iter()
-                .any(|input| contains_at_rule_named(&input.stylesheet.rules, "container"))
+    }
+
+    #[cfg(test)]
+    fn container_context_scan_count(&self) -> usize {
+        self.container_context_scans.get()
     }
 
     /// Returns the number of distinct `@media` prelude strings currently held
@@ -1853,13 +2518,109 @@ impl StyleResolver {
 
     /// Advances the CSS transition sampling clock without moving it backwards.
     pub(crate) fn set_transition_time_ms(&mut self, time_ms: f64) -> bool {
-        if self.transition_timeline.set_time_ms(time_ms) {
+        self.sample_transition_time_ms(time_ms).0
+    }
+
+    fn sample_transition_time_ms(&mut self, time_ms: f64) -> (bool, TransitionCacheEffects) {
+        let ordinary_before = self.cache.len();
+        let pseudo_before = self.pseudo_cache.len();
+        if !self.transition_timeline.set_time_ms(time_ms) {
+            return (false, TransitionCacheEffects::default());
+        }
+        self.cache.clear();
+        self.pseudo_cache.clear();
+        (
+            true,
+            TransitionCacheEffects::from_lengths(
+                TransitionCacheOutcome::Full,
+                ordinary_before,
+                self.cache.len(),
+                pseudo_before,
+                self.pseudo_cache.len(),
+            ),
+        )
+    }
+
+    /// Advances the transition clock and discards only caches that can observe
+    /// a sampled value. The lookup must return nodes from the resolver's
+    /// document; a missing node conservatively falls back to a full clear.
+    fn sample_transition_time_ms_with_node_lookup<F>(
+        &mut self,
+        time_ms: f64,
+        lookup: F,
+    ) -> (bool, TransitionCacheEffects)
+    where
+        F: FnMut(usize) -> Option<NodeHandle>,
+    {
+        if !self.transition_timeline.sample_will_advance(time_ms) {
+            let _ = self.transition_timeline.set_time_ms(time_ms);
+            return (false, TransitionCacheEffects::default());
+        }
+        // Capture running nodes before moving the clock. Sampling the final
+        // frame removes a completed transition only after its style is read.
+        let scopes = self.transition_timeline.running_cache_scopes();
+        let ordinary_before = self.cache.len();
+        let pseudo_before = self.pseudo_cache.len();
+        if !self.transition_timeline.set_time_ms(time_ms) {
+            return (false, TransitionCacheEffects::default());
+        }
+        let outcome = self.invalidate_transition_cache_scopes(scopes, lookup);
+        (
+            true,
+            TransitionCacheEffects::from_lengths(
+                outcome,
+                ordinary_before,
+                self.cache.len(),
+                pseudo_before,
+                self.pseudo_cache.len(),
+            ),
+        )
+    }
+
+    fn invalidate_transition_cache_scopes<F>(
+        &mut self,
+        scopes: Vec<(usize, TransitionCacheScope)>,
+        mut lookup: F,
+    ) -> TransitionCacheOutcome
+    where
+        F: FnMut(usize) -> Option<NodeHandle>,
+    {
+        if scopes
+            .iter()
+            .any(|(_, scope)| *scope == TransitionCacheScope::Full)
+        {
             self.cache.clear();
             self.pseudo_cache.clear();
-            true
-        } else {
-            false
+            return TransitionCacheOutcome::Full;
         }
+
+        let mut root_ids = HashSet::new();
+        let mut roots = Vec::new();
+        for (node_id, scope) in scopes {
+            let Some(node) = lookup(node_id).filter(|node| node.identity() == node_id) else {
+                self.cache.clear();
+                self.pseudo_cache.clear();
+                return TransitionCacheOutcome::Full;
+            };
+            match scope {
+                TransitionCacheScope::Subtree => {
+                    if root_ids.insert(node_id) {
+                        roots.push(node);
+                    }
+                }
+                TransitionCacheScope::Full => unreachable!("handled before node lookup"),
+            }
+        }
+        let Some(identities) = invalidation_subtrees(roots) else {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return TransitionCacheOutcome::Full;
+        };
+        self.cache
+            .retain(|identity, _| !identities.contains(identity));
+        self.pseudo_cache
+            .retain(|key, _| !identities.contains(&key.0));
+        TransitionCacheOutcome::Subtree
     }
 
     /// Moves transition state into a replacement resolver after stylesheet
@@ -1891,6 +2652,12 @@ impl StyleResolver {
         self.transition_timeline.running_node_ids()
     }
 
+    /// Whether the next transition sample can use localized eviction and needs
+    /// document node handles. A false result does not permit skipping sampling.
+    pub(crate) fn transition_sample_needs_node_lookup(&self, time_ms: f64) -> bool {
+        self.transition_timeline.sample_needs_node_lookup(time_ms)
+    }
+
     pub(crate) fn has_running_transitions(&self) -> bool {
         self.transition_timeline.has_running_transitions()
     }
@@ -1900,9 +2667,57 @@ impl StyleResolver {
             .running_transitions_require_layout()
     }
 
+    /// Returns bounded transition-property counts for opt-in diagnostics.
+    pub(crate) fn running_transition_property_counts(&self) -> super::TransitionPropertyCounts {
+        self.transition_timeline.running_property_counts()
+    }
+
     pub(crate) fn cancel_detached_transitions(&mut self, active_node_ids: &HashSet<usize>) {
         self.transition_timeline
             .cancel_detached_transitions(active_node_ids);
+    }
+
+    fn data_attribute_selector_dependency(
+        &mut self,
+        attribute_name: &str,
+    ) -> AttributeSelectorDependency {
+        let attribute_name = attribute_name.to_ascii_lowercase();
+        if let Some(dependency) = self
+            .data_attribute_selector_dependencies
+            .get(&attribute_name)
+        {
+            return *dependency;
+        }
+        let dependency = self
+            .stylesheets
+            .iter()
+            .map(|input| {
+                rules_data_attribute_dependency(&input.stylesheet.rules, &attribute_name, false)
+            })
+            .max()
+            .unwrap_or_default();
+        self.data_attribute_selector_dependencies
+            .insert(attribute_name, dependency);
+        dependency
+    }
+
+    fn data_attribute_value_dependency(&mut self, node: &NodeHandle, attribute_name: &str) -> bool {
+        let attribute_name = attribute_name.to_ascii_lowercase();
+        let stylesheet_dependency =
+            if let Some(dependency) = self.data_attribute_value_dependencies.get(&attribute_name) {
+                *dependency
+            } else {
+                let dependency = self.stylesheets.iter().any(|input| {
+                    rules_read_data_attribute(&input.stylesheet.rules, &attribute_name)
+                });
+                self.data_attribute_value_dependencies
+                    .insert(attribute_name.clone(), dependency);
+                dependency
+            };
+        stylesheet_dependency
+            || parsed_inline_style(node.get_attribute("style").as_deref())
+                .iter()
+                .any(|declaration| value_reads_data_attribute(&declaration.value, &attribute_name))
     }
 
     /// Drops values derived from the current DOM while retaining parsed
@@ -1911,6 +2726,126 @@ impl StyleResolver {
         self.cache.clear();
         self.pseudo_cache.clear();
         self.selector_match_cache = SelectorMatchCache::default();
+    }
+
+    /// Invalidates computed styles after one element's inline `style` mutation.
+    ///
+    /// Returns a bounded diagnostic outcome. A `"local*"` outcome means cached
+    /// styles outside the element's light-DOM subtree were retained; every
+    /// `"fallback_*"` outcome means all computed and pseudo styles were cleared.
+    /// Selectors are always invalidated.
+    pub(crate) fn invalidate_inline_style_subtree(
+        &mut self,
+        node: &NodeHandle,
+        previous: Option<&str>,
+        current: Option<&str>,
+        has_non_scalar_dom_string: bool,
+        csp_block_state_changed: bool,
+    ) -> &'static str {
+        self.selector_match_cache = SelectorMatchCache::default();
+        let is_document_element = node.node_type() == NodeType::Element
+            && node
+                .parent_node()
+                .is_some_and(|parent| parent.node_type() == NodeType::Document);
+        let fallback = if self.style_attribute_selector_dependency
+            == StyleAttributeSelectorDependency::NonLocal
+        {
+            Some("fallback_raw_style_selector")
+        } else if self.has_running_transitions() {
+            Some("fallback_active_transition")
+        } else if self.has_running_animations() {
+            Some("fallback_active_animation")
+        } else if is_document_element {
+            Some("fallback_document_root")
+        } else if has_non_scalar_dom_string {
+            Some("fallback_non_scalar_dom_string")
+        } else if csp_block_state_changed {
+            Some("fallback_csp_block_state_change")
+        } else if !inline_style_change_is_subtree_local(previous, current) {
+            Some("fallback_unsupported_declaration_change")
+        } else {
+            None
+        };
+        if let Some(reason) = fallback {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return reason;
+        }
+        let Some(identities) = inline_invalidation_subtree(node) else {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return "fallback_shadow_or_slot";
+        };
+        self.cache
+            .retain(|identity, _| !identities.contains(identity));
+        self.pseudo_cache
+            .retain(|key, _| !identities.contains(&key.0));
+        if self.style_attribute_selector_dependency == StyleAttributeSelectorDependency::SubjectOnly
+        {
+            "local_raw_style_subject"
+        } else {
+            "local"
+        }
+    }
+
+    /// Invalidates computed styles after one ordinary HTML `data-*` mutation.
+    ///
+    /// Selectors are always invalidated. Computed styles are retained only when
+    /// neither selectors nor `attr()` declarations observe the attribute.
+    pub(crate) fn invalidate_data_attribute_subtree(
+        &mut self,
+        node: &NodeHandle,
+        attribute_name: &str,
+        has_non_scalar_dom_string: bool,
+    ) -> &'static str {
+        self.selector_match_cache = SelectorMatchCache::default();
+        let dependency = self.data_attribute_selector_dependency(attribute_name);
+        let value_dependency = self.data_attribute_value_dependency(node, attribute_name);
+        let is_document_element = node.node_type() == NodeType::Element
+            && node
+                .parent_node()
+                .is_some_and(|parent| parent.node_type() == NodeType::Document);
+        let fallback = if dependency == AttributeSelectorDependency::NonLocal {
+            Some("fallback_data_attribute_selector")
+        } else if is_document_element {
+            Some("fallback_document_root")
+        } else if has_non_scalar_dom_string {
+            Some("fallback_non_scalar_dom_string")
+        } else {
+            None
+        };
+        if let Some(reason) = fallback {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return reason;
+        }
+        let Some(identities) = inline_invalidation_subtree(node) else {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return "fallback_shadow_or_slot";
+        };
+        if dependency == AttributeSelectorDependency::None && !value_dependency {
+            return "local_data_attribute_inert";
+        }
+        if self.has_running_transitions() {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return "fallback_active_transition";
+        }
+        if self.has_running_animations() {
+            self.cache.clear();
+            self.pseudo_cache.clear();
+            return "fallback_active_animation";
+        }
+        self.cache
+            .retain(|identity, _| !identities.contains(identity));
+        self.pseudo_cache
+            .retain(|key, _| !identities.contains(&key.0));
+        if dependency == AttributeSelectorDependency::SubjectOnly {
+            "local_data_attribute_subject"
+        } else {
+            "local_data_attribute_none"
+        }
     }
 
     /// Installs the CSP-filtered set of inline style attributes for the next
@@ -1926,12 +2861,12 @@ impl StyleResolver {
     /// Updates one CSP-filtered inline-style entry after a `style` attribute
     /// mutation. The caller invalidates the owning document's computed-style
     /// cache separately, so this operation does not rescan or clear unrelated
-    /// resolver state.
-    pub(crate) fn set_blocked_inline_style_node(&mut self, node_id: usize, blocked: bool) {
+    /// resolver state. Returns whether the blocked state changed.
+    pub(crate) fn set_blocked_inline_style_node(&mut self, node_id: usize, blocked: bool) -> bool {
         if blocked {
-            self.blocked_inline_style_nodes.insert(node_id);
+            self.blocked_inline_style_nodes.insert(node_id)
         } else {
-            self.blocked_inline_style_nodes.remove(&node_id);
+            self.blocked_inline_style_nodes.remove(&node_id)
         }
     }
 
@@ -2172,6 +3107,13 @@ impl StyleResolver {
         scope_root: Option<usize>,
         stylesheet: &Stylesheet,
     ) -> usize {
+        self.data_attribute_selector_dependencies.clear();
+        self.class_selector_dependencies.clear();
+        self.user_action_dependencies.clear();
+        self.data_attribute_value_dependencies.clear();
+        self.style_attribute_selector_dependency = self
+            .style_attribute_selector_dependency
+            .max(rules_style_attribute_dependency(&stylesheet.rules));
         let stylesheet_id = self.next_stylesheet_id;
         self.next_stylesheet_id += 1;
         self.layer_orders
@@ -2505,16 +3447,26 @@ impl StyleResolver {
         &self.active_font_faces
     }
 
+    /// Reads whether an existing ordinary-style cache entry has `display: none`.
+    ///
+    /// Returns `None` without resolving style when `node` has no cached entry.
+    pub(crate) fn cached_display_none(&self, node: &NodeHandle) -> Option<bool> {
+        self.cache
+            .get(&node.identity())
+            .map(|style| style.is_display_none())
+    }
+
     /// Resolves computed style for `node`, using the cache when possible.
     pub fn computed_style(&mut self, node: &NodeHandle) -> ComputedStyle {
         self.computed_style_shared(node).as_ref().clone()
     }
 
-    /// Shares an immutable cached style with paint readers. Invalidation
+    /// Shares an immutable cached style with layout and paint readers. Invalidation
     /// replaces the cache entry without changing any retained snapshot.
-    fn computed_style_shared(&mut self, node: &NodeHandle) -> Arc<ComputedStyle> {
+    pub(crate) fn computed_style_shared(&mut self, node: &NodeHandle) -> Arc<ComputedStyle> {
         let key = node.identity();
         if let Some(style) = self.cache.get(&key) {
+            super::style_profile::record_cache_hit();
             return style.clone();
         }
 
@@ -2523,13 +3475,16 @@ impl StyleResolver {
             if parent.node_type() == NodeType::DocumentFragment {
                 parent
                     .shadow_host()
-                    .map(|host| self.computed_style(&host))
+                    .map(|host| self.computed_style_shared(&host))
                     .unwrap_or_default()
             } else {
-                self.computed_style(&parent)
+                self.computed_style_shared(&parent)
             }
         });
-        let style = self.compute_style(node, inherited.as_ref());
+        let style = {
+            let _sample = super::style_profile::StyleComputationSample::begin();
+            self.compute_style(node, inherited.as_deref())
+        };
 
         // Auto-update root_font_size from the root element's computed font-size so that
         // `rem` units in descendant elements resolve correctly even without an explicit
@@ -2667,7 +3622,8 @@ impl StyleResolver {
             .map(|style| style.as_ref().clone())
     }
 
-    fn computed_pseudo_style_shared(
+    /// Shares an immutable cached pseudo style without cloning its property maps.
+    pub(crate) fn computed_pseudo_style_shared(
         &mut self,
         node: &NodeHandle,
         pseudo: PseudoElement,
@@ -2679,10 +3635,12 @@ impl StyleResolver {
 
         let parent_style = match pseudo {
             PseudoElement::BeforeMarker => {
-                self.computed_pseudo_style(node, PseudoElement::Before)?
+                self.computed_pseudo_style_shared(node, PseudoElement::Before)?
             }
-            PseudoElement::AfterMarker => self.computed_pseudo_style(node, PseudoElement::After)?,
-            _ => self.computed_style(node),
+            PseudoElement::AfterMarker => {
+                self.computed_pseudo_style_shared(node, PseudoElement::After)?
+            }
+            _ => self.computed_style_shared(node),
         };
         // Inherit from the immediate originating pseudo, while numeric tree
         // counting still receives the ultimate originating DOM element.
@@ -8605,7 +9563,7 @@ fn truncate_log_value(value: &str, max_len: usize) -> String {
 }
 
 pub(super) fn is_supported_property(name: &str) -> bool {
-    SUPPORTED_PROPERTIES.contains(&name)
+    PropertyId::parse(name).is_some() || is_shorthand_or_legacy_alias(name)
 }
 
 /// Returns every implemented longhand affected by the CSS `all` shorthand.
@@ -11509,115 +12467,181 @@ impl InitialValue {
 /// This intentionally excludes the handful of properties whose initial value
 /// depends on another property's resolved value or on the number of layers
 /// in a shorthand — those stay as explicit code in `apply_initial_values`.
-const INITIAL_VALUES: &[(&str, InitialValue)] = &[
-    ("translate", InitialValue::Keyword("none")),
-    ("rotate", InitialValue::Keyword("none")),
-    ("scale", InitialValue::Keyword("none")),
-    ("order", InitialValue::Number(0.0)),
-    ("flex-grow", InitialValue::Number(0.0)),
-    ("flex-shrink", InitialValue::Number(1.0)),
-    ("grid-auto-flow", InitialValue::Keyword("row")),
-    ("grid-auto-columns", InitialValue::Keyword("auto")),
-    ("grid-auto-rows", InitialValue::Keyword("auto")),
-    ("counter-reset", InitialValue::Keyword("none")),
-    ("counter-increment", InitialValue::Keyword("none")),
-    ("shape-outside", InitialValue::Keyword("none")),
-    ("shape-margin", InitialValue::Px(0.0)),
-    ("background-clip", InitialValue::Keyword("border-box")),
-    ("background-color", InitialValue::Color("transparent")),
-    ("background-origin", InitialValue::Keyword("padding-box")),
-    ("color", InitialValue::Color("black")),
-    ("font-size", InitialValue::Px(16.0)),
-    ("font-palette", InitialValue::Keyword("normal")),
-    ("direction", InitialValue::Keyword("ltr")),
-    ("writing-mode", InitialValue::Keyword("horizontal-tb")),
-    ("unicode-bidi", InitialValue::Keyword("normal")),
-    ("text-transform", InitialValue::Keyword("none")),
-    ("white-space", InitialValue::Keyword("normal")),
-    ("text-overflow", InitialValue::Keyword("clip")),
-    ("text-shadow", InitialValue::Keyword("none")),
-    ("text-decoration-line", InitialValue::Keyword("none")),
-    ("text-decoration-style", InitialValue::Keyword("solid")),
+const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
+    (PropertyId::Translate, InitialValue::Keyword("none")),
+    (PropertyId::Rotate, InitialValue::Keyword("none")),
+    (PropertyId::Scale, InitialValue::Keyword("none")),
+    (PropertyId::Order, InitialValue::Number(0.0)),
+    (PropertyId::FlexGrow, InitialValue::Number(0.0)),
+    (PropertyId::FlexShrink, InitialValue::Number(1.0)),
+    (PropertyId::GridAutoFlow, InitialValue::Keyword("row")),
+    (PropertyId::GridAutoColumns, InitialValue::Keyword("auto")),
+    (PropertyId::GridAutoRows, InitialValue::Keyword("auto")),
+    (PropertyId::CounterReset, InitialValue::Keyword("none")),
+    (PropertyId::CounterIncrement, InitialValue::Keyword("none")),
+    (PropertyId::ShapeOutside, InitialValue::Keyword("none")),
+    (PropertyId::ShapeMargin, InitialValue::Px(0.0)),
+    (
+        PropertyId::BackgroundClip,
+        InitialValue::Keyword("border-box"),
+    ),
+    (
+        PropertyId::BackgroundColor,
+        InitialValue::Color("transparent"),
+    ),
+    (
+        PropertyId::BackgroundOrigin,
+        InitialValue::Keyword("padding-box"),
+    ),
+    (PropertyId::Color, InitialValue::Color("black")),
+    (PropertyId::FontSize, InitialValue::Px(16.0)),
+    (PropertyId::FontPalette, InitialValue::Keyword("normal")),
+    (PropertyId::Direction, InitialValue::Keyword("ltr")),
+    (
+        PropertyId::WritingMode,
+        InitialValue::Keyword("horizontal-tb"),
+    ),
+    (PropertyId::UnicodeBidi, InitialValue::Keyword("normal")),
+    (PropertyId::TextTransform, InitialValue::Keyword("none")),
+    (PropertyId::WhiteSpace, InitialValue::Keyword("normal")),
+    (PropertyId::TextOverflow, InitialValue::Keyword("clip")),
+    (PropertyId::TextShadow, InitialValue::Keyword("none")),
+    (
+        PropertyId::TextDecorationLine,
+        InitialValue::Keyword("none"),
+    ),
+    (
+        PropertyId::TextDecorationStyle,
+        InitialValue::Keyword("solid"),
+    ),
     // `text-decoration-color`'s initial value is `currentcolor`.
-    ("text-decoration-color", InitialValue::CurrentColor),
-    ("text-decoration-thickness", InitialValue::Keyword("auto")),
-    ("text-underline-position", InitialValue::Keyword("auto")),
-    ("text-underline-offset", InitialValue::Keyword("auto")),
+    (PropertyId::TextDecorationColor, InitialValue::CurrentColor),
+    (
+        PropertyId::TextDecorationThickness,
+        InitialValue::Keyword("auto"),
+    ),
+    (
+        PropertyId::TextUnderlinePosition,
+        InitialValue::Keyword("auto"),
+    ),
+    (
+        PropertyId::TextUnderlineOffset,
+        InitialValue::Keyword("auto"),
+    ),
     // `cursor` initial value is `auto` (CSS UI). Ensuring it is always
     // present lets a dropped/absent `cursor` declaration serialize as `auto`
     // in getComputedStyle (Acid3 test 47).
-    ("forced-color-adjust", InitialValue::Keyword("auto")),
-    ("will-change", InitialValue::Keyword("auto")),
-    ("cursor", InitialValue::Keyword("auto")),
-    ("pointer-events", InitialValue::Keyword("auto")),
-    ("scroll-behavior", InitialValue::Keyword("auto")),
-    ("table-layout", InitialValue::Keyword("auto")),
-    ("overscroll-behavior-block", InitialValue::Keyword("auto")),
-    ("overscroll-behavior-inline", InitialValue::Keyword("auto")),
-    ("overscroll-behavior-x", InitialValue::Keyword("auto")),
-    ("overscroll-behavior-y", InitialValue::Keyword("auto")),
-    ("scroll-snap-type", InitialValue::Keyword("none")),
-    ("scroll-snap-align", InitialValue::Keyword("none")),
-    ("position", InitialValue::Keyword("static")),
-    ("contain", InitialValue::Keyword("none")),
-    ("content-visibility", InitialValue::Keyword("visible")),
-    ("contain-intrinsic-width", InitialValue::Keyword("none")),
-    ("contain-intrinsic-height", InitialValue::Keyword("none")),
+    (PropertyId::ForcedColorAdjust, InitialValue::Keyword("auto")),
+    (PropertyId::WillChange, InitialValue::Keyword("auto")),
+    (PropertyId::Cursor, InitialValue::Keyword("auto")),
+    (PropertyId::PointerEvents, InitialValue::Keyword("auto")),
+    (PropertyId::ScrollBehavior, InitialValue::Keyword("auto")),
+    (PropertyId::TableLayout, InitialValue::Keyword("auto")),
     (
-        "contain-intrinsic-inline-size",
+        PropertyId::OverscrollBehaviorBlock,
+        InitialValue::Keyword("auto"),
+    ),
+    (
+        PropertyId::OverscrollBehaviorInline,
+        InitialValue::Keyword("auto"),
+    ),
+    (
+        PropertyId::OverscrollBehaviorX,
+        InitialValue::Keyword("auto"),
+    ),
+    (
+        PropertyId::OverscrollBehaviorY,
+        InitialValue::Keyword("auto"),
+    ),
+    (PropertyId::ScrollSnapType, InitialValue::Keyword("none")),
+    (PropertyId::ScrollSnapAlign, InitialValue::Keyword("none")),
+    (PropertyId::Position, InitialValue::Keyword("static")),
+    (PropertyId::Contain, InitialValue::Keyword("none")),
+    (
+        PropertyId::ContentVisibility,
+        InitialValue::Keyword("visible"),
+    ),
+    (
+        PropertyId::ContainIntrinsicWidth,
         InitialValue::Keyword("none"),
     ),
     (
-        "contain-intrinsic-block-size",
+        PropertyId::ContainIntrinsicHeight,
         InitialValue::Keyword("none"),
     ),
-    ("container-name", InitialValue::Keyword("none")),
-    ("container-type", InitialValue::Keyword("normal")),
-    ("column-count", InitialValue::Keyword("auto")),
-    ("column-width", InitialValue::Keyword("auto")),
-    ("column-gap", InitialValue::Keyword("normal")),
-    ("column-fill", InitialValue::Keyword("balance")),
-    ("column-span", InitialValue::Keyword("none")),
-    ("box-decoration-break", InitialValue::Keyword("slice")),
-    ("column-rule-style", InitialValue::Keyword("none")),
-    ("column-rule-width", InitialValue::Px(3.0)),
+    (
+        PropertyId::ContainIntrinsicInlineSize,
+        InitialValue::Keyword("none"),
+    ),
+    (
+        PropertyId::ContainIntrinsicBlockSize,
+        InitialValue::Keyword("none"),
+    ),
+    (PropertyId::ContainerName, InitialValue::Keyword("none")),
+    (PropertyId::ContainerType, InitialValue::Keyword("normal")),
+    (PropertyId::ColumnCount, InitialValue::Keyword("auto")),
+    (PropertyId::ColumnWidth, InitialValue::Keyword("auto")),
+    (PropertyId::ColumnGap, InitialValue::Keyword("normal")),
+    (PropertyId::ColumnFill, InitialValue::Keyword("balance")),
+    (PropertyId::ColumnSpan, InitialValue::Keyword("none")),
+    (
+        PropertyId::BoxDecorationBreak,
+        InitialValue::Keyword("slice"),
+    ),
+    (PropertyId::ColumnRuleStyle, InitialValue::Keyword("none")),
+    (PropertyId::ColumnRuleWidth, InitialValue::Px(3.0)),
     // `column-rule-color`'s initial value is `currentcolor`.
-    ("column-rule-color", InitialValue::CurrentColor),
-    ("outline-style", InitialValue::Keyword("none")),
-    ("outline-width", InitialValue::Px(3.0)),
-    ("outline-offset", InitialValue::Px(0.0)),
-    ("outline-color", InitialValue::Keyword("auto")),
-    ("break-before", InitialValue::Keyword("auto")),
-    ("break-after", InitialValue::Keyword("auto")),
-    ("break-inside", InitialValue::Keyword("auto")),
-    ("page", InitialValue::Keyword("auto")),
-    ("orphans", InitialValue::Number(2.0)),
-    ("widows", InitialValue::Number(2.0)),
+    (PropertyId::ColumnRuleColor, InitialValue::CurrentColor),
+    (PropertyId::OutlineStyle, InitialValue::Keyword("none")),
+    (PropertyId::OutlineWidth, InitialValue::Px(3.0)),
+    (PropertyId::OutlineOffset, InitialValue::Px(0.0)),
+    (PropertyId::OutlineColor, InitialValue::Keyword("auto")),
+    (PropertyId::BreakBefore, InitialValue::Keyword("auto")),
+    (PropertyId::BreakAfter, InitialValue::Keyword("auto")),
+    (PropertyId::BreakInside, InitialValue::Keyword("auto")),
+    (PropertyId::Page, InitialValue::Keyword("auto")),
+    (PropertyId::Orphans, InitialValue::Number(2.0)),
+    (PropertyId::Widows, InitialValue::Number(2.0)),
     // CSS Sizing: `aspect-ratio` is `auto`, meaning "use the intrinsic ratio".
-    ("aspect-ratio", InitialValue::Keyword("auto")),
+    (PropertyId::AspectRatio, InitialValue::Keyword("auto")),
     // CSS Images: `object-fit` is `fill` and `object-position` is `50% 50%`.
     // Keeping them present lets getComputedStyle serialize the initial value
     // even when nothing declares them.
-    ("object-fit", InitialValue::Keyword("fill")),
-    ("object-position", InitialValue::Position(50.0, 50.0)),
+    (PropertyId::ObjectFit, InitialValue::Keyword("fill")),
+    (
+        PropertyId::ObjectPosition,
+        InitialValue::Position(50.0, 50.0),
+    ),
     // CSS Masking initial values. `none` is an identity mask in the paint
     // implementation; match-source resolves gradients/images through their
     // alpha channel and keeps SVG/image defaults deterministic.
-    ("mask-image", InitialValue::Keyword("none")),
-    ("mask-mode", InitialValue::Keyword("match-source")),
-    ("mask-composite", InitialValue::Keyword("add")),
-    ("transform", InitialValue::Keyword("none")),
-    ("transform-origin", InitialValue::Keyword("50% 50%")),
-    ("perspective", InitialValue::Keyword("none")),
-    ("perspective-origin", InitialValue::Keyword("50% 50%")),
-    ("transform-style", InitialValue::Keyword("flat")),
-    ("backface-visibility", InitialValue::Keyword("visible")),
-    ("mix-blend-mode", InitialValue::Keyword("normal")),
-    ("isolation", InitialValue::Keyword("auto")),
-    ("transition-property", InitialValue::Keyword("all")),
-    ("transition-duration", InitialValue::Keyword("0s")),
-    ("transition-timing-function", InitialValue::Keyword("ease")),
-    ("transition-delay", InitialValue::Keyword("0s")),
+    (PropertyId::MaskImage, InitialValue::Keyword("none")),
+    (PropertyId::MaskMode, InitialValue::Keyword("match-source")),
+    (PropertyId::MaskComposite, InitialValue::Keyword("add")),
+    (PropertyId::Transform, InitialValue::Keyword("none")),
+    (
+        PropertyId::TransformOrigin,
+        InitialValue::Keyword("50% 50%"),
+    ),
+    (PropertyId::Perspective, InitialValue::Keyword("none")),
+    (
+        PropertyId::PerspectiveOrigin,
+        InitialValue::Keyword("50% 50%"),
+    ),
+    (PropertyId::TransformStyle, InitialValue::Keyword("flat")),
+    (
+        PropertyId::BackfaceVisibility,
+        InitialValue::Keyword("visible"),
+    ),
+    (PropertyId::MixBlendMode, InitialValue::Keyword("normal")),
+    (PropertyId::Isolation, InitialValue::Keyword("auto")),
+    (PropertyId::TransitionProperty, InitialValue::Keyword("all")),
+    (PropertyId::TransitionDuration, InitialValue::Keyword("0s")),
+    (
+        PropertyId::TransitionTimingFunction,
+        InitialValue::Keyword("ease"),
+    ),
+    (PropertyId::TransitionDelay, InitialValue::Keyword("0s")),
 ];
 
 fn apply_initial_values(properties: &mut PropertyMap) {
@@ -11625,37 +12649,51 @@ fn apply_initial_values(properties: &mut PropertyMap) {
         if matches!(initial, InitialValue::CurrentColor) {
             continue;
         }
-        if !properties.contains_key(*name) {
-            properties
-                .entry((*name).to_string())
-                .or_insert_with(|| initial.resolve());
+        if !properties.contains_key(name) {
+            properties.entry(*name).or_insert_with(|| initial.resolve());
         }
     }
     // `currentcolor`-valued initial values are resolved once `color` (set by
     // the author or defaulted above) is known.
     for (name, initial) in INITIAL_VALUES {
         if matches!(initial, InitialValue::CurrentColor) {
-            if !properties.contains_key(*name) {
-                properties.copy_property("color", name);
+            if !properties.contains_key(name) {
+                properties.copy_property("color", name.as_str());
             }
         }
     }
-    for side in [
-        "top",
-        "right",
-        "bottom",
-        "left",
-        "inline-start",
-        "inline-end",
-        "block-start",
-        "block-end",
+    for (padding, margin) in [
+        (PropertyId::ScrollPaddingTop, PropertyId::ScrollMarginTop),
+        (
+            PropertyId::ScrollPaddingRight,
+            PropertyId::ScrollMarginRight,
+        ),
+        (
+            PropertyId::ScrollPaddingBottom,
+            PropertyId::ScrollMarginBottom,
+        ),
+        (PropertyId::ScrollPaddingLeft, PropertyId::ScrollMarginLeft),
+        (
+            PropertyId::ScrollPaddingInlineStart,
+            PropertyId::ScrollMarginInlineStart,
+        ),
+        (
+            PropertyId::ScrollPaddingInlineEnd,
+            PropertyId::ScrollMarginInlineEnd,
+        ),
+        (
+            PropertyId::ScrollPaddingBlockStart,
+            PropertyId::ScrollMarginBlockStart,
+        ),
+        (
+            PropertyId::ScrollPaddingBlockEnd,
+            PropertyId::ScrollMarginBlockEnd,
+        ),
     ] {
         properties
-            .entry(format!("scroll-padding-{side}"))
+            .entry(padding)
             .or_insert_with(|| ComputedValue::Keyword("auto".to_string()));
-        properties
-            .entry(format!("scroll-margin-{side}"))
-            .or_insert(ComputedValue::Px(0.0));
+        properties.entry(margin).or_insert(ComputedValue::Px(0.0));
     }
     let intrinsic_width = properties
         .get(&PropertyId::ContainIntrinsicWidth)
@@ -11857,14 +12895,14 @@ fn apply_inheritance(properties: &mut PropertyMap, parent_style: Option<&Compute
         return;
     };
 
-    for &inherited_name in INHERITED_PROPERTIES {
-        if !properties.contains_key(inherited_name) && parent_style.get(inherited_name).is_some() {
-            properties.insert_from(inherited_name, &parent_style.properties);
+    for &id in INHERITED_PROPERTY_IDS {
+        if !properties.contains_key(&id) {
+            properties.insert_from_by_id(id, &parent_style.properties);
         }
     }
 
     // CSS custom properties inherit by default.
-    for (name, value) in &parent_style.properties {
+    for (name, value) in parent_style.properties.custom_properties() {
         if name.starts_with("--") && !properties.contains_key(name) {
             properties.insert(name, value.clone());
         }
@@ -11873,44 +12911,44 @@ fn apply_inheritance(properties: &mut PropertyMap, parent_style: Option<&Compute
 
 // Inherited CSS properties supported by this engine. Keeping this as shared
 // metadata lets both natural inheritance and `all: unset` use the same rule.
-const INHERITED_PROPERTIES: &[&str] = &[
-    "forced-color-adjust",
-    "border-collapse",
-    "border-spacing",
-    "color",
-    "cursor",
-    "direction",
-    "font-family",
-    "font-size",
-    "font-palette",
-    "font-style",
-    "font-stretch",
-    "font-variation-settings",
-    "font-weight",
-    "letter-spacing",
-    "line-height",
-    "list-style-image",
-    "list-style-position",
-    "list-style-type",
-    "overflow-wrap",
-    "orphans",
-    "pointer-events",
-    "text-align",
-    "text-indent",
-    "text-shadow",
-    "text-transform",
-    "visibility",
-    "white-space",
-    "writing-mode",
-    "text-underline-position",
-    "text-underline-offset",
-    "word-break",
-    "word-spacing",
-    "widows",
+const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
+    PropertyId::ForcedColorAdjust,
+    PropertyId::BorderCollapse,
+    PropertyId::BorderSpacing,
+    PropertyId::Color,
+    PropertyId::Cursor,
+    PropertyId::Direction,
+    PropertyId::FontFamily,
+    PropertyId::FontSize,
+    PropertyId::FontPalette,
+    PropertyId::FontStyle,
+    PropertyId::FontStretch,
+    PropertyId::FontVariationSettings,
+    PropertyId::FontWeight,
+    PropertyId::LetterSpacing,
+    PropertyId::LineHeight,
+    PropertyId::ListStyleImage,
+    PropertyId::ListStylePosition,
+    PropertyId::ListStyleType,
+    PropertyId::OverflowWrap,
+    PropertyId::Orphans,
+    PropertyId::PointerEvents,
+    PropertyId::TextAlign,
+    PropertyId::TextIndent,
+    PropertyId::TextShadow,
+    PropertyId::TextTransform,
+    PropertyId::Visibility,
+    PropertyId::WhiteSpace,
+    PropertyId::WritingMode,
+    PropertyId::TextUnderlinePosition,
+    PropertyId::TextUnderlineOffset,
+    PropertyId::WordBreak,
+    PropertyId::WordSpacing,
+    PropertyId::Widows,
 ];
 
 fn is_inherited_property(name: &str) -> bool {
-    name.starts_with("--") || INHERITED_PROPERTIES.contains(&name)
+    name.starts_with("--") || INHERITED_PROPERTY_IDS.iter().any(|id| id.as_str() == name)
 }
 
 fn inherited_font_size(parent_style: Option<&ComputedStyle>, current: &PropertyMap) -> f32 {

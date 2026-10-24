@@ -90,7 +90,7 @@ pub enum ResponseType {
 
 /// Successful CORS preflight results, keyed by the request properties that
 /// the preflight approved and valid until the response's `max-age` expires.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PreflightCache {
     entries: HashMap<PreflightCacheKey, Instant>,
 }
@@ -112,6 +112,20 @@ struct PreflightCacheKey {
 }
 
 impl PreflightCache {
+    /// Merges completed worker snapshots without discarding newer approvals.
+    /// Expiration is evaluated at the caller's explicit monotonic timestamp.
+    pub(crate) fn merge(&mut self, other: Self, now: Instant) {
+        self.entries.retain(|_, expires| *expires > now);
+        for (key, expires) in other.entries {
+            if expires > now {
+                self.entries
+                    .entry(key)
+                    .and_modify(|current| *current = (*current).max(expires))
+                    .or_insert(expires);
+            }
+        }
+    }
+
     /// Drops entries that expired at `now` and reports whether `key` remains.
     fn contains_fresh(&mut self, key: &PreflightCacheKey, now: Instant) -> bool {
         self.entries.retain(|_, expires| *expires > now);
@@ -1130,5 +1144,32 @@ mod tests {
         assert!(!cache.contains_fresh(&credentialed_key, now));
         assert!(!cache.contains_fresh(&key, now + Duration::from_secs(5)));
         assert!(cache.entries.is_empty());
+    }
+    #[test]
+    fn worker_cache_snapshots_merge_without_losing_or_shortening_approvals() {
+        let key = |host: &str| PreflightCacheKey {
+            request_origin: Origin::from_url(&"https://source.test/".parse().unwrap()),
+            target_origin: Origin::from_url(&format!("https://{host}/").parse().unwrap()),
+            method: "PUT".into(),
+            unsafe_header_names: vec!["x-probe".into()],
+            credentialed: false,
+        };
+        let now = Instant::now();
+        let a = key("a.test");
+        let b = key("b.test");
+        let c = key("c.test");
+        let mut owner = PreflightCache::default();
+        owner.insert(a.clone(), now + Duration::from_secs(60));
+        owner.insert(key("expired-owner.test"), now);
+        let mut worker = owner.clone();
+        owner.insert(a.clone(), now + Duration::from_secs(180));
+        owner.insert(b.clone(), now + Duration::from_secs(120));
+        worker.insert(c.clone(), now + Duration::from_secs(90));
+        worker.insert(key("expired-worker.test"), now);
+        owner.merge(worker, now + Duration::from_secs(1));
+        assert_eq!(owner.entries.len(), 3);
+        assert_eq!(owner.entries[&a], now + Duration::from_secs(180));
+        assert!(owner.contains_fresh(&b, now + Duration::from_secs(1)));
+        assert!(owner.contains_fresh(&c, now + Duration::from_secs(1)));
     }
 }

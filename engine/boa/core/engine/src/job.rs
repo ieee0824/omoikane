@@ -45,6 +45,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::mem;
 use std::rc::Rc;
+use std::time::{Duration as StdDuration, Instant as StdInstant};
 use std::{
     cell::{Ref, RefCell, RefMut},
     collections::VecDeque,
@@ -128,8 +129,25 @@ impl NativeJob {
         } else {
             (self.f)(context)
         };
-        context.runtime_limits().check_deadline()?;
+        if let Err(timeout) = context.runtime_limits().check_deadline() {
+            return preserve_vm_timeout(result, timeout);
+        }
         result
+    }
+}
+
+/// Keeps frames already captured by the VM while rejecting other late results.
+fn preserve_vm_timeout(result: JsResult<JsValue>, timeout: crate::JsError) -> JsResult<JsValue> {
+    match result {
+        Err(error)
+            if error.as_native().is_some_and(|native| {
+                native.is_runtime_limit()
+                    && native.message() == crate::vm::WALL_CLOCK_TIMEOUT_MESSAGE
+            }) =>
+        {
+            Err(error)
+        }
+        _ => Err(timeout),
     }
 }
 
@@ -549,7 +567,10 @@ impl NativeAsyncJob {
             };
             if let Err(error) = context.check_deadline(limits) {
                 future.take();
-                return std::task::Poll::Ready(Err(error));
+                return std::task::Poll::Ready(match result {
+                    std::task::Poll::Ready(result) => preserve_vm_timeout(result, error),
+                    std::task::Poll::Pending => Err(error),
+                });
             }
             if result.is_ready() {
                 future.take();
@@ -845,6 +866,19 @@ pub struct SimpleJobExecutor {
     async_jobs: RefCell<VecDeque<NativeAsyncJob>>,
     timeout_jobs: RefCell<BTreeMap<JsInstant, TimeoutJob>>,
     generic_jobs: RefCell<VecDeque<GenericJob>>,
+    diagnostics_enabled: Cell<bool>,
+    promise_job_diagnostics: RefCell<PromiseJobDiagnostics>,
+}
+
+/// Aggregate timing for promise jobs executed by [`SimpleJobExecutor`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PromiseJobDiagnostics {
+    /// Number of promise jobs observed since the last reset.
+    pub count: usize,
+    /// Sum of the observed promise job durations.
+    pub elapsed: StdDuration,
+    /// Longest observed promise job duration.
+    pub max_elapsed: StdDuration,
 }
 
 impl SimpleJobExecutor {
@@ -867,6 +901,16 @@ impl SimpleJobExecutor {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Enables per-promise-job timing. Disabled by default to avoid runtime overhead.
+    pub fn set_diagnostics_enabled(&self, enabled: bool) {
+        self.diagnostics_enabled.set(enabled);
+    }
+
+    /// Takes the promise-job timing accumulated since the previous call.
+    pub fn take_promise_job_diagnostics(&self) -> PromiseJobDiagnostics {
+        mem::take(&mut *self.promise_job_diagnostics.borrow_mut())
     }
 }
 
@@ -947,9 +991,17 @@ impl JobExecutor for SimpleJobExecutor {
 
                 let jobs = mem::take(&mut *self.promise_jobs.borrow_mut());
                 for job in jobs {
+                    let started = self.diagnostics_enabled.get().then(StdInstant::now);
                     if let Err(err) = job.call_async(context).await {
                         self.clear();
                         return Err(err);
+                    }
+                    if let Some(started) = started {
+                        let elapsed = started.elapsed();
+                        let mut diagnostics = self.promise_job_diagnostics.borrow_mut();
+                        diagnostics.count = diagnostics.count.saturating_add(1);
+                        diagnostics.elapsed = diagnostics.elapsed.saturating_add(elapsed);
+                        diagnostics.max_elapsed = diagnostics.max_elapsed.max(elapsed);
                     }
                 }
 

@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use crate::css::style::PropagatedTextDecoration;
+use crate::css::style::{PropagatedTextDecoration, PropertyId};
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::dom::Node;
 use crate::font::{
@@ -260,7 +260,15 @@ pub(crate) fn paint_text_with_registry(
             text_fonts: fonts,
             web_fonts,
             nested_documents: None,
+            nested_snapshot_draw_calls: None,
             propagated_background_node: None,
+            shadow_masks: None,
+            retained_collector: None,
+            retained_destination: super::retained_extract::PaintDestination::RootDocument,
+            effect_sources: None,
+            effect_source_generation: 0,
+            effect_source_nodes: None,
+            effect_source_summary: None,
         },
         offset,
     );
@@ -282,13 +290,8 @@ pub(super) fn paint_text_with_context(
     // Fallback color from the containing block's style (used when fragment
     // style has no explicit color).
     let fallback_color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
-    for line in &layout.lines {
-        let fragments = line
-            .text_overflow
-            .as_ref()
-            .map_or(line.fragments.as_slice(), |overflow| {
-                overflow.fragments.as_slice()
-            });
+    for (line_index, line) in layout.lines.iter().enumerate() {
+        let fragments = super::selected_line_fragments(line);
         shadow::paint_line_shadows(
             canvas,
             line,
@@ -303,7 +306,7 @@ pub(super) fn paint_text_with_context(
         // line; descendants cannot substitute their own font or underline data.
         let mut decorations = HashMap::new();
         let mut decoration_colors = HashMap::new();
-        for fragment in fragments {
+        for (fragment_index, fragment) in fragments.iter().enumerate() {
             if fragment.style.visibility == crate::layout::Visibility::Hidden {
                 continue;
             }
@@ -340,11 +343,12 @@ pub(super) fn paint_text_with_context(
                     );
                 }
                 InlineFragmentContent::AtomicInline(_) => {
-                    if let Some(child) = layout
-                        .children
-                        .iter()
-                        .find(|child| child.node == fragment.node)
-                    {
+                    if let Some((child, invocation)) = super::atomic_inline_invocation(
+                        layout,
+                        line_index,
+                        fragment_index,
+                        fragment,
+                    ) {
                         super::paint_box_internal(
                             canvas,
                             child,
@@ -355,6 +359,8 @@ pub(super) fn paint_text_with_context(
                                 include_phase_descendants: true,
                                 paint_decorations: true,
                                 offset,
+                                retained_paint_owner: Some(layout.node.identity()),
+                                retained_atomic_inline: Some(invocation),
                             },
                         );
                     }
@@ -362,12 +368,13 @@ pub(super) fn paint_text_with_context(
                 InlineFragmentContent::InlineSpacing(_)
                 | InlineFragmentContent::InlineEdge(_, _) => {}
                 InlineFragmentContent::Image(image, style) => {
-                    let paint = fragment_box_paint_style(fragment, resolver);
-                    paint_inline_image_fragment(
+                    paint_current_inline_image(
                         canvas,
+                        fragment,
                         fragment_rect,
                         image,
-                        paint.as_deref().unwrap_or(style),
+                        style,
+                        resolver,
                         clip,
                         _viewport,
                     );
@@ -397,6 +404,7 @@ pub(super) fn paint_text_with_context(
                         fonts,
                         web_fonts,
                         clip,
+                        _viewport,
                     );
                 }
                 InlineFragmentContent::IconFormControl(style, image, width, height) => {
@@ -424,6 +432,55 @@ pub(super) fn paint_text_with_context(
 /// A text fragment's originating box, keyed the same way as its captured
 /// text decorations, for caching per-origin decoration state on a line.
 type DecorationOrigin = (usize, Option<crate::css::PseudoElement>);
+
+/// Samples paint-dependent replaced content independently of cached geometry.
+/// Canvas uses its current backing store, while inline SVG is re-rasterized when
+/// its live `currentColor` input differs. Other replaced fragments keep their
+/// layout-time image and animation metadata.
+fn paint_current_inline_image(
+    canvas: &mut Canvas,
+    fragment: &crate::layout::InlineFragment,
+    rect: Rect,
+    image: &Image,
+    style: &ComputedStyle,
+    resolver: &mut crate::css::StyleResolver,
+    clip: Option<Rect>,
+    viewport: Rect,
+) {
+    let current_canvas = fragment
+        .node
+        .has_tag_name("canvas")
+        .then(|| crate::canvas::image(fragment.node.identity()))
+        .flatten();
+    let is_svg = fragment.node.has_tag_name("svg");
+    let paint = fragment_box_paint_style(fragment, resolver);
+    let paint_style = paint.as_deref().unwrap_or(style);
+    // Inline SVG is rasterized during layout, but its `currentColor` input is
+    // paint-only. Re-rasterize when the live paint color differs so color
+    // transitions can retain geometry without retaining stale SVG pixels.
+    let current_svg = is_svg
+        .then(|| {
+            let layout_color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
+            let paint_color = text_color(paint_style).unwrap_or(Color::rgb(0, 0, 0));
+            (layout_color != paint_color)
+                .then(|| {
+                    crate::svg::render_svg_to_image_with_current_color(&fragment.node, paint_color)
+                })
+                .flatten()
+        })
+        .flatten();
+    paint_inline_image_fragment(
+        canvas,
+        rect,
+        current_canvas
+            .as_ref()
+            .or_else(|| current_svg.as_ref())
+            .unwrap_or(image),
+        paint_style,
+        clip,
+        viewport,
+    );
+}
 
 /// Selects the resolved installed or web font for one text fragment and
 /// paints its glyphs, falling back to placeholder rectangles when no font is
@@ -646,9 +703,18 @@ fn paint_form_control_fragment(
     fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
     clip: Option<Rect>,
+    viewport: Rect,
 ) {
     let paint = fragment_box_paint_style(fragment, resolver);
     let style = paint.as_deref().unwrap_or(style);
+    // Before its first draw a canvas has the same geometry as a media
+    // placeholder. Its first pixels must also appear without rebuilding it.
+    if fragment.node.has_tag_name("canvas")
+        && let Some(image) = crate::canvas::image(fragment.node.identity())
+    {
+        paint_inline_image_fragment(canvas, fragment_rect, &image, style, clip, viewport);
+        return;
+    }
     paint_form_control_background(canvas, layout, fragment, fragment_rect, style, clip);
     let shadows = shadow::style_shadows(style);
     if !shadows.is_empty() {
@@ -922,13 +988,12 @@ fn fragment_text_color(style: &FragmentStyle) -> Option<Color> {
     style.color.as_deref().and_then(parse_color)
 }
 
-fn fragment_box_paint_style(
+pub(super) fn fragment_box_paint_style(
     fragment: &crate::layout::InlineFragment,
     resolver: &mut crate::css::StyleResolver,
 ) -> Option<Arc<ComputedStyle>> {
-    if !resolver.has_visited_paint() {
-        return None;
-    }
+    // Inline fragment geometry may outlive paint-only transitions, so source
+    // color and decorations from the live style rather than its layout copy.
     match fragment.style.pseudo {
         Some(pseudo) => resolver.paint_pseudo_style(&fragment.node, pseudo),
         None => Some(resolver.paint_style(&fragment.node)),
@@ -940,6 +1005,19 @@ fn fragment_paint_color(
     resolver: &mut crate::css::StyleResolver,
     fallback: Color,
 ) -> Color {
+    // Layout-generated text such as the text-overflow marker has no DOM text
+    // source of its own. Its node is only a placement anchor and can belong to
+    // the first styled child (for example a blue span), while the synthetic
+    // marker deliberately carries the containing block's style. Do not replace
+    // that anonymous style with the anchor's live style; use the live containing
+    // block fallback so color transitions still repaint it. Pseudo generated
+    // content has an explicit pseudo owner and remains live-sampled.
+    if fragment.text_source.is_empty()
+        && fragment.style.pseudo.is_none()
+        && matches!(fragment.content, InlineFragmentContent::Text(_))
+    {
+        return fallback;
+    }
     if let Some(color) = fragment_box_paint_style(fragment, resolver)
         .as_deref()
         .and_then(text_color)
@@ -956,10 +1034,6 @@ fn decoration_paint_color(
     fallback: Color,
 ) -> Color {
     let ordinary = parse_color(&decoration.color).unwrap_or(fallback);
-    if !resolver.has_visited_paint() {
-        return ordinary;
-    }
-
     let mut ancestor = Some(fragment.node.clone());
     while let Some(node) = ancestor {
         if node.identity() == decoration.origin.0 {
@@ -2596,13 +2670,13 @@ pub(crate) fn inline_fragment_content_rect(
 }
 
 pub(crate) fn text_color(style: &ComputedStyle) -> Option<Color> {
-    super::color_property(style.get("color"))
+    super::color_property(style.get_by_id(PropertyId::Color))
 }
 
 /// Returns `true` when `text-align: center` is set on `style`.
 fn is_text_align_center(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("text-align"),
+        style.get_by_id(PropertyId::TextAlign),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center")
     )
 }

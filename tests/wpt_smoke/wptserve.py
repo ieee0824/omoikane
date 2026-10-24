@@ -15,8 +15,9 @@ def configuration(root, config):
         browser_host="web-platform.test", server_host="127.0.0.1",
         doc_root=str(root), subdomains={"www", "www1", "www2"},
         alternate_hosts={"alt": "not-web-platform.test"},
-        ports={"http": ["auto", "auto"], "https": ["auto", "auto"],
-               "ws": [0], "wss": ["auto"]},
+        # Let each listener bind port zero atomically. ConfigBuilder's "auto"
+        # probes and releases a port before the server can claim it.
+        ports={"http": [0, 0], "https": [0, 0], "ws": [0], "wss": [0]},
         ssl={"type": "pregenerated", "encrypt_after_connect": False,
              "pregenerated": {
                  "host_key_path": str(certificates / "web-platform.test.key"),
@@ -90,15 +91,16 @@ def main():
         servers = []
         websocket_server = None
         try:
+            bound_ports = {"http": [], "https": [], "wss": []}
             websocket_server = websocket_cookie.start(
-                settings.ports["wss"][0],
+                0,
                 settings.ssl_config["cert_path"],
                 settings.ssl_config["key_path"],
             )
             for scheme in ("http", "https"):
-                for port in settings.ports[scheme]:
+                for _ in settings.ports[scheme]:
                     instance = server.WebTestHttpd(
-                        host="127.0.0.1", port=port, doc_root=str(root),
+                        host="127.0.0.1", port=0, doc_root=str(root),
                         handler_cls=ClosingHttpHandler,
                         routes=(adapter_routes(handlers)
                                 + generated_worker_routes() + routes.routes),
@@ -107,8 +109,17 @@ def main():
                         key_file=settings.ssl_config["key_path"],
                         certificate=settings.ssl_config["cert_path"],
                     )
-                    instance.start()
                     servers.append(instance)
+                    bound_ports[scheme].append(instance.port)
+            bound_ports["wss"] = [websocket_server.server_address[1]]
+            # Configure template URLs only after every socket is held, and
+            # before any HTTP request handler starts. Config remains immutable.
+            settings = config.Config(dict(settings) | {
+                "ports": dict(settings.ports) | bound_ports,
+            })
+            server.Server.config = settings
+            for instance in servers:
+                instance.start()
             description = {
                 "base_url": f"https://web-platform.test:{settings.ports['https'][0]}",
                 "http_ports": settings.ports["http"],
@@ -127,6 +138,8 @@ def main():
                     break
         finally:
             for instance in reversed(servers):
+                if not instance.started:
+                    instance.httpd.server_close()
                 instance.stop()
             if websocket_server is not None:
                 websocket_server.shutdown()

@@ -5,11 +5,14 @@
 //! the shorthand into its four longhands. Timeline sampling lives above the
 //! CSS parser and consumes the normalized longhand values produced here.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+
+#[cfg(test)]
+mod activity_tests;
 
 use crate::paint::color::{Color, parse_color};
 
-use super::style::PropertyMap;
+use super::style::{PropertyId, PropertyMap};
 use super::{
     ComputedValue, Declaration, LengthPercentageMath, Value, is_css_wide_keyword,
     split_top_level_whitespace_strict as split_top_level_whitespace,
@@ -32,7 +35,11 @@ struct TransitionDescriptor {
 pub(crate) struct TransitionTimeline {
     now_ms: f64,
     elements: HashMap<usize, ElementTransitionState>,
+    /// IDs with running transitions; inactive base snapshots stay in `elements`.
+    running_nodes: HashSet<usize>,
     events: Vec<TransitionEventRecord>,
+    #[cfg(test)]
+    activity_scan_visits: std::cell::Cell<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +48,216 @@ pub(crate) struct TransitionEventRecord {
     pub event_type: &'static str,
     pub property_name: String,
     pub elapsed_time: f64,
+}
+
+/// Bounded diagnostic counts for currently running transition properties.
+///
+/// The summary intentionally omits property names, values, selectors, and DOM
+/// handles. Its categories are diagnostic labels and do not relax the existing
+/// layout invalidation policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TransitionPropertyCounts {
+    pub(crate) nodes: usize,
+    pub(crate) properties: usize,
+    pub(crate) geometry: usize,
+    pub(crate) transform: usize,
+    pub(crate) color: usize,
+    pub(crate) background: usize,
+    pub(crate) filter: usize,
+    pub(crate) opacity: usize,
+    pub(crate) other: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransitionPropertyCategory {
+    Geometry,
+    Transform,
+    Color,
+    Background,
+    Filter,
+    Opacity,
+    Other,
+}
+
+/// The smallest computed-style cache region that can safely be discarded for
+/// one running transition node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TransitionCacheScope {
+    /// Invalidate the transition owner and its light-DOM descendants.
+    Subtree,
+    /// Invalidate every ordinary and pseudo computed style.
+    Full,
+}
+
+/// Classifies a transitioned property by the computed-style cache region that
+/// can observe a newly sampled value.
+pub(crate) fn transition_cache_scope(property: &str) -> TransitionCacheScope {
+    let Some(property_id) = PropertyId::parse(property) else {
+        return TransitionCacheScope::Full;
+    };
+    if matches!(
+        property_id,
+        PropertyId::Color
+            | PropertyId::BorderBlockEndColor
+            | PropertyId::BorderBlockStartColor
+            | PropertyId::BorderBottomColor
+            | PropertyId::BorderInlineEndColor
+            | PropertyId::BorderInlineStartColor
+            | PropertyId::BorderLeftColor
+            | PropertyId::BorderRightColor
+            | PropertyId::BorderTopColor
+            | PropertyId::ColumnRuleColor
+            | PropertyId::OutlineColor
+            | PropertyId::TextDecorationColor
+            | PropertyId::BackgroundAttachment
+            | PropertyId::BackgroundClip
+            | PropertyId::BackgroundColor
+            | PropertyId::BackgroundImage
+            | PropertyId::BackgroundOrigin
+            | PropertyId::BackgroundPositionX
+            | PropertyId::BackgroundPositionY
+            | PropertyId::BackgroundRepeat
+            | PropertyId::BackgroundSize
+            | PropertyId::Opacity
+            | PropertyId::Filter
+            | PropertyId::BackdropFilter
+            | PropertyId::Transform
+    ) {
+        TransitionCacheScope::Subtree
+    } else {
+        TransitionCacheScope::Full
+    }
+}
+
+/// Returns whether a sampled property can change layout geometry.
+///
+/// These properties are consumed only while painting. Keeping this shared
+/// between transitions and keyframe animations prevents the two clocks from
+/// assigning different invalidation costs to the same visual change.
+pub(crate) fn animated_property_requires_layout(property: &str) -> bool {
+    !matches!(
+        property,
+        "opacity"
+            | "filter"
+            | "backdrop-filter"
+            | "background-position-x"
+            | "background-position-y"
+    )
+}
+
+/// Returns whether a running transition must rebuild layout geometry.
+///
+/// Color transitions can retain geometry because transition sampling already
+/// invalidates the owner's full style subtree, including inherited `color` and
+/// descendant `currentColor` users. Keyframe animations use
+/// [`animated_property_requires_layout`] directly because their target-only
+/// cache invalidation does not yet provide that inheritance guarantee.
+fn transition_property_requires_layout(property: &str) -> bool {
+    if !animated_property_requires_layout(property) {
+        return false;
+    }
+    !matches!(
+        PropertyId::parse(property),
+        Some(
+            PropertyId::Color
+                | PropertyId::BorderBlockEndColor
+                | PropertyId::BorderBlockStartColor
+                | PropertyId::BorderBottomColor
+                | PropertyId::BorderInlineEndColor
+                | PropertyId::BorderInlineStartColor
+                | PropertyId::BorderLeftColor
+                | PropertyId::BorderRightColor
+                | PropertyId::BorderTopColor
+                | PropertyId::ColumnRuleColor
+                | PropertyId::OutlineColor
+                | PropertyId::TextDecorationColor
+                | PropertyId::BackgroundColor
+        )
+    )
+}
+
+impl TransitionPropertyCounts {
+    fn add(&mut self, property: &str) {
+        self.properties += 1;
+        match transition_property_category(property) {
+            TransitionPropertyCategory::Geometry => self.geometry += 1,
+            TransitionPropertyCategory::Transform => self.transform += 1,
+            TransitionPropertyCategory::Color => self.color += 1,
+            TransitionPropertyCategory::Background => self.background += 1,
+            TransitionPropertyCategory::Filter => self.filter += 1,
+            TransitionPropertyCategory::Opacity => self.opacity += 1,
+            TransitionPropertyCategory::Other => self.other += 1,
+        }
+    }
+
+    #[cfg(test)]
+    fn categorized_properties(self) -> usize {
+        self.geometry
+            + self.transform
+            + self.color
+            + self.background
+            + self.filter
+            + self.opacity
+            + self.other
+    }
+}
+
+fn transition_property_category(property: &str) -> TransitionPropertyCategory {
+    if property.starts_with("--") {
+        return TransitionPropertyCategory::Other;
+    }
+    if property == "opacity" {
+        TransitionPropertyCategory::Opacity
+    } else if matches!(property, "filter" | "backdrop-filter") {
+        TransitionPropertyCategory::Filter
+    } else if matches!(property, "transform" | "translate" | "rotate" | "scale") {
+        TransitionPropertyCategory::Transform
+    } else if property.starts_with("background-") {
+        TransitionPropertyCategory::Background
+    } else if property == "color" || property.ends_with("-color") {
+        TransitionPropertyCategory::Color
+    } else if transition_property_is_geometry(property) {
+        TransitionPropertyCategory::Geometry
+    } else {
+        TransitionPropertyCategory::Other
+    }
+}
+
+fn transition_property_is_geometry(property: &str) -> bool {
+    matches!(
+        property,
+        "width"
+            | "height"
+            | "min-width"
+            | "max-width"
+            | "min-height"
+            | "max-height"
+            | "top"
+            | "right"
+            | "bottom"
+            | "left"
+            | "inset"
+            | "inset-inline"
+            | "inset-inline-start"
+            | "inset-inline-end"
+            | "inset-block"
+            | "inset-block-start"
+            | "inset-block-end"
+            | "flex-basis"
+            | "flex-grow"
+            | "flex-shrink"
+            | "row-gap"
+            | "column-gap"
+            | "gap"
+            | "font-size"
+            | "font-weight"
+            | "line-height"
+            | "letter-spacing"
+            | "word-spacing"
+            | "text-indent"
+    ) || property.starts_with("margin-")
+        || property.starts_with("padding-")
+        || (property.starts_with("border-") && property.ends_with("-width"))
 }
 
 #[derive(Debug, Default)]
@@ -85,183 +302,67 @@ struct TransitionParameters {
 }
 
 impl TransitionTimeline {
+    fn sample_time_advances(&self, time_ms: f64) -> bool {
+        time_ms.is_finite() && time_ms.max(0.0) > self.now_ms
+    }
+
+    /// Whether this finite monotonic sample advances at least one transition.
+    pub(crate) fn sample_will_advance(&self, time_ms: f64) -> bool {
+        self.sample_time_advances(time_ms) && !self.running_nodes.is_empty()
+    }
+
+    /// Whether this advancing sample can localize every running transition and
+    /// therefore needs document node lookup.
+    ///
+    /// A false result can mean either that the clock will not advance or that
+    /// one running property requires full cache invalidation. Callers must
+    /// still sample the clock.
+    pub(crate) fn sample_needs_node_lookup(&self, time_ms: f64) -> bool {
+        if !self.sample_time_advances(time_ms) {
+            return false;
+        }
+        let mut has_running = false;
+        for (_, state) in self.running_states() {
+            for property in state.running.keys() {
+                has_running = true;
+                if transition_cache_scope(property) == TransitionCacheScope::Full {
+                    return false;
+                }
+            }
+        }
+        has_running
+    }
+
     pub(crate) fn set_time_ms(&mut self, time_ms: f64) -> bool {
         if time_ms.is_finite() {
             let next = self.now_ms.max(time_ms.max(0.0));
             if next > self.now_ms {
                 self.now_ms = next;
-                return self
-                    .elements
-                    .values()
-                    .any(|state| !state.running.is_empty());
+                return !self.running_nodes.is_empty();
             }
         }
         false
     }
 
     pub(crate) fn sample(&mut self, node_id: usize, properties: &mut PropertyMap) {
-        let now_ms = self.now_ms;
         let state = self.elements.entry(node_id).or_default();
-        if !state.initialized {
-            state.base_values = properties.clone();
-            state.initialized = true;
-            return;
-        }
+        sample_element_transitions(node_id, self.now_ms, state, properties, &mut self.events);
+        let running = !state.running.is_empty();
+        self.update_running_node(node_id, running);
+    }
 
-        let configuration = TransitionConfiguration::from_properties(properties);
-        let no_longer_matching: Vec<String> = state
-            .running
-            .keys()
-            .filter(|property| configuration.matching_parameters(property).is_none())
-            .cloned()
-            .collect();
-        for property in no_longer_matching {
-            if let Some(running) = state.running.remove(&property) {
-                self.events.push(running.event_record(
-                    node_id,
-                    "transitioncancel",
-                    property,
-                    now_ms,
-                ));
-            }
-        }
-
-        let mut changed_properties = BTreeSet::new();
-        changed_properties.extend(state.base_values.keys().map(str::to_owned));
-        changed_properties.extend(properties.keys().map(str::to_owned));
-        changed_properties.retain(|property| {
-            effective_value(property, state.base_values.get(property))
-                != effective_value(property, properties.get(property))
-        });
-
-        for property in changed_properties {
-            let old_value = effective_value(&property, state.base_values.get(&property));
-            let new_value = effective_value(&property, properties.get(&property));
-            let Some(end_value) = new_value else {
-                state.running.remove(&property);
-                continue;
-            };
-            if state
-                .running
-                .get(&property)
-                .is_some_and(|running| running.end_value == end_value)
-            {
-                continue;
-            }
-            let interrupted = state.running.get(&property).cloned();
-            let start_value = interrupted
-                .as_ref()
-                .and_then(|running| {
-                    running.sample(
-                        &property,
-                        now_ms,
-                        &sampled_current_color(properties, &state.running, now_ms),
-                    )
-                })
-                .or(old_value);
-            let Some(start_value) = start_value else {
-                state.running.remove(&property);
-                continue;
-            };
-            if start_value == end_value {
-                if let Some(running) = state.running.remove(&property) {
-                    self.events.push(running.event_record(
-                        node_id,
-                        "transitioncancel",
-                        property.clone(),
-                        now_ms,
-                    ));
-                }
-                continue;
-            }
-            let Some(parameters) = configuration.matching_parameters(&property) else {
-                if let Some(running) = state.running.remove(&property) {
-                    self.events.push(running.event_record(
-                        node_id,
-                        "transitioncancel",
-                        property.clone(),
-                        now_ms,
-                    ));
-                }
-                continue;
-            };
-            if parameters.duration_ms + parameters.delay_ms <= 0.0
-                || interpolate_property_with_color(
-                    &property,
-                    &start_value,
-                    &end_value,
-                    0.5,
-                    &sampled_current_color(properties, &state.running, now_ms),
-                )
-                .is_none()
-            {
-                if let Some(running) = state.running.remove(&property) {
-                    self.events.push(running.event_record(
-                        node_id,
-                        "transitioncancel",
-                        property.clone(),
-                        now_ms,
-                    ));
-                }
-                continue;
-            }
-            if let Some(running) = interrupted.as_ref() {
-                self.events.push(running.event_record(
-                    node_id,
-                    "transitioncancel",
-                    property.clone(),
-                    now_ms,
-                ));
-            }
-            let (reversing_adjusted_start_value, reversing_shortening_factor) = interrupted
-                .as_ref()
-                .filter(|running| running.reversing_adjusted_start_value == end_value)
-                .map(|running| {
-                    let factor = (running.timing.sample(running.input_progress(now_ms))
-                        * running.reversing_shortening_factor
-                        + 1.0
-                        - running.reversing_shortening_factor)
-                        .abs()
-                        .clamp(0.0, 1.0);
-                    (running.end_value.clone(), factor)
-                })
-                .unwrap_or_else(|| (start_value.clone(), 1.0));
-            let delay_ms = if parameters.delay_ms < 0.0 {
-                parameters.delay_ms * reversing_shortening_factor
-            } else {
-                parameters.delay_ms
-            };
-            let start_ms = now_ms + delay_ms;
-            let end_ms = start_ms + parameters.duration_ms * reversing_shortening_factor;
-            let started = now_ms >= start_ms;
-            let running = RunningTransition {
-                start_value,
-                end_value,
-                reversing_adjusted_start_value,
-                reversing_shortening_factor,
-                start_ms,
-                end_ms,
-                timing: parameters.timing,
-                started,
-            };
-            self.events.push(running.event_record(
-                node_id,
-                "transitionrun",
-                property.clone(),
-                now_ms,
-            ));
-            if started {
-                self.events.push(running.event_record(
-                    node_id,
-                    "transitionstart",
-                    property.clone(),
-                    now_ms,
-                ));
-            }
-            state.running.insert(property, running);
-        }
-        state.base_values = properties.clone();
-        sample_running_transitions(node_id, now_ms, state, properties, &mut self.events);
+    #[cfg(test)]
+    fn sample_without_fast_paths(&mut self, node_id: usize, properties: &mut PropertyMap) {
+        let state = self.elements.entry(node_id).or_default();
+        sample_element_without_fast_paths(
+            node_id,
+            self.now_ms,
+            state,
+            properties,
+            &mut self.events,
+        );
+        let running = !state.running.is_empty();
+        self.update_running_node(node_id, running);
     }
 
     pub(crate) fn take_events(&mut self) -> Vec<TransitionEventRecord> {
@@ -277,6 +378,7 @@ impl TransitionTimeline {
             .collect::<Vec<_>>();
         for node_id in detached {
             if let Some(state) = self.elements.remove(&node_id) {
+                self.running_nodes.remove(&node_id);
                 self.events
                     .extend(state.running.into_iter().map(|(property, running)| {
                         running.event_record(node_id, "transitioncancel", property, self.now_ms)
@@ -286,24 +388,74 @@ impl TransitionTimeline {
     }
 
     pub(crate) fn running_node_ids(&self) -> Vec<usize> {
-        self.elements
-            .iter()
-            .filter_map(|(node_id, state)| (!state.running.is_empty()).then_some(*node_id))
+        self.running_nodes.iter().copied().collect()
+    }
+
+    /// Returns one strongest cache invalidation scope per running node.
+    ///
+    /// Callers collect this before advancing the clock so a transition that
+    /// completes at the new sample time still has its final value recomputed.
+    pub(crate) fn running_cache_scopes(&self) -> Vec<(usize, TransitionCacheScope)> {
+        self.running_states()
+            .filter_map(|(node_id, state)| {
+                state
+                    .running
+                    .keys()
+                    .map(|property| transition_cache_scope(property))
+                    .max()
+                    .map(|scope| (node_id, scope))
+            })
             .collect()
     }
 
     pub(crate) fn has_running_transitions(&self) -> bool {
-        self.elements
-            .values()
-            .any(|state| !state.running.is_empty())
+        !self.running_nodes.is_empty()
     }
 
     pub(crate) fn running_transitions_require_layout(&self) -> bool {
-        self.elements.values().any(|state| {
-            state.running.keys().any(|property| {
-                !matches!(property.as_str(), "opacity" | "filter" | "backdrop-filter")
-            })
+        self.running_states().any(|(_, state)| {
+            state
+                .running
+                .keys()
+                .any(|property| transition_property_requires_layout(property))
         })
+    }
+
+    fn update_running_node(&mut self, node_id: usize, running: bool) {
+        if running {
+            self.running_nodes.insert(node_id);
+        } else {
+            self.running_nodes.remove(&node_id);
+        }
+    }
+
+    fn running_states(&self) -> impl Iterator<Item = (usize, &ElementTransitionState)> {
+        self.running_nodes.iter().map(|node_id| {
+            #[cfg(test)]
+            self.activity_scan_visits
+                .set(self.activity_scan_visits.get() + 1);
+            (
+                *node_id,
+                self.elements
+                    .get(node_id)
+                    .expect("running transition retains its state"),
+            )
+        })
+    }
+
+    pub(crate) fn running_property_counts(&self) -> TransitionPropertyCounts {
+        let mut counts = TransitionPropertyCounts::default();
+        for state in self
+            .elements
+            .values()
+            .filter(|state| !state.running.is_empty())
+        {
+            counts.nodes += 1;
+            for property in state.running.keys() {
+                counts.add(property);
+            }
+        }
+        counts
     }
 
     pub(crate) fn cancel_detached_transitions(
@@ -320,12 +472,201 @@ impl TransitionTimeline {
             .collect::<Vec<_>>();
         for node_id in detached {
             if let Some(state) = self.elements.remove(&node_id) {
+                self.running_nodes.remove(&node_id);
                 self.events
                     .extend(state.running.into_iter().map(|(property, running)| {
                         running.event_record(node_id, "transitioncancel", property, self.now_ms)
                     }));
             }
         }
+    }
+}
+
+fn sample_element_transitions(
+    node_id: usize,
+    now_ms: f64,
+    state: &mut ElementTransitionState,
+    properties: &mut PropertyMap,
+    events: &mut Vec<TransitionEventRecord>,
+) {
+    if !state.initialized {
+        state.base_values = properties.clone();
+        state.initialized = true;
+        return;
+    }
+    // The base snapshot includes transition configuration. Equal snapshots
+    // cannot start or cancel a transition, but existing ones still advance.
+    if state.base_values == *properties {
+        sample_running_transitions(node_id, now_ms, state, properties, events);
+        return;
+    }
+    let configuration = TransitionConfiguration::from_properties(properties);
+    if state.running.is_empty()
+        && !configuration.may_start_transition(&state.base_values, properties)
+    {
+        // Keep the latest baseline even while transitions are disabled, so
+        // enabling them later starts from the immediately preceding style.
+        state.base_values = properties.clone();
+        return;
+    }
+    cancel_unmatched_transitions(node_id, now_ms, state, &configuration, events);
+    update_changed_transitions(node_id, now_ms, state, properties, &configuration, events);
+    state.base_values = properties.clone();
+    sample_running_transitions(node_id, now_ms, state, properties, events);
+}
+
+#[cfg(test)]
+fn sample_element_without_fast_paths(
+    node_id: usize,
+    now_ms: f64,
+    state: &mut ElementTransitionState,
+    properties: &mut PropertyMap,
+    events: &mut Vec<TransitionEventRecord>,
+) {
+    if !state.initialized {
+        state.base_values = properties.clone();
+        state.initialized = true;
+        return;
+    }
+    let configuration = TransitionConfiguration::from_properties(properties);
+    cancel_unmatched_transitions(node_id, now_ms, state, &configuration, events);
+    update_changed_transitions(node_id, now_ms, state, properties, &configuration, events);
+    state.base_values = properties.clone();
+    sample_running_transitions(node_id, now_ms, state, properties, events);
+}
+
+fn cancel_unmatched_transitions(
+    node_id: usize,
+    now_ms: f64,
+    state: &mut ElementTransitionState,
+    configuration: &TransitionConfiguration,
+    events: &mut Vec<TransitionEventRecord>,
+) {
+    let no_longer_matching: Vec<String> = state
+        .running
+        .keys()
+        .filter(|property| configuration.matching_parameters(property).is_none())
+        .cloned()
+        .collect();
+    for property in no_longer_matching {
+        if let Some(running) = state.running.remove(&property) {
+            events.push(running.event_record(node_id, "transitioncancel", property, now_ms));
+        }
+    }
+}
+
+fn update_changed_transitions(
+    node_id: usize,
+    now_ms: f64,
+    state: &mut ElementTransitionState,
+    properties: &PropertyMap,
+    configuration: &TransitionConfiguration,
+    events: &mut Vec<TransitionEventRecord>,
+) {
+    let mut changed_properties = BTreeSet::new();
+    changed_properties.extend(state.base_values.keys().map(str::to_owned));
+    changed_properties.extend(properties.keys().map(str::to_owned));
+    changed_properties.retain(|property| {
+        effective_value(property, state.base_values.get(property))
+            != effective_value(property, properties.get(property))
+    });
+    for property in changed_properties {
+        update_transition_for_property(
+            node_id,
+            now_ms,
+            state,
+            properties,
+            configuration,
+            events,
+            property,
+        );
+    }
+}
+
+fn update_transition_for_property(
+    node_id: usize,
+    now_ms: f64,
+    state: &mut ElementTransitionState,
+    properties: &PropertyMap,
+    configuration: &TransitionConfiguration,
+    events: &mut Vec<TransitionEventRecord>,
+    property: String,
+) {
+    let old_value = effective_value(&property, state.base_values.get(&property));
+    let new_value = effective_value(&property, properties.get(&property));
+    let Some(end_value) = new_value else {
+        state.running.remove(&property);
+        return;
+    };
+    if state
+        .running
+        .get(&property)
+        .is_some_and(|running| running.end_value == end_value)
+    {
+        return;
+    }
+    let interrupted = state.running.get(&property).cloned();
+    let start_value = interrupted
+        .as_ref()
+        .and_then(|running| {
+            running.sample(
+                &property,
+                now_ms,
+                &sampled_current_color(properties, &state.running, now_ms),
+            )
+        })
+        .or(old_value);
+    let Some(start_value) = start_value else {
+        state.running.remove(&property);
+        return;
+    };
+    if start_value == end_value {
+        cancel_transition(node_id, now_ms, state, events, &property);
+        return;
+    }
+    let Some(parameters) = configuration.matching_parameters(&property) else {
+        cancel_transition(node_id, now_ms, state, events, &property);
+        return;
+    };
+    if parameters.duration_ms + parameters.delay_ms <= 0.0
+        || interpolate_property_with_color(
+            &property,
+            &start_value,
+            &end_value,
+            0.5,
+            &sampled_current_color(properties, &state.running, now_ms),
+        )
+        .is_none()
+    {
+        cancel_transition(node_id, now_ms, state, events, &property);
+        return;
+    }
+    if let Some(running) = interrupted.as_ref() {
+        events.push(running.event_record(node_id, "transitioncancel", property.clone(), now_ms));
+    }
+    let running = RunningTransition::new(
+        start_value,
+        end_value,
+        interrupted.as_ref(),
+        parameters,
+        now_ms,
+    );
+    events.push(running.event_record(node_id, "transitionrun", property.clone(), now_ms));
+    if running.started {
+        events.push(running.event_record(node_id, "transitionstart", property.clone(), now_ms));
+    }
+    state.running.insert(property, running);
+}
+
+fn cancel_transition(
+    node_id: usize,
+    now_ms: f64,
+    state: &mut ElementTransitionState,
+    events: &mut Vec<TransitionEventRecord>,
+    property: &str,
+) {
+    if let Some(running) = state.running.remove(property) {
+        events.push(running.event_record(node_id, "transitioncancel", property.to_owned(), now_ms));
     }
 }
 
@@ -348,6 +689,9 @@ fn sample_running_transitions(
     properties: &mut PropertyMap,
     events: &mut Vec<TransitionEventRecord>,
 ) {
+    if state.running.is_empty() {
+        return;
+    }
     // Resolve currentcolor from the sampled color independently of map iteration order.
     let current_color = sampled_current_color(properties, &state.running, now_ms);
     let mut completed = Vec::new();
@@ -370,6 +714,45 @@ fn sample_running_transitions(
 }
 
 impl RunningTransition {
+    fn new(
+        start_value: ComputedValue,
+        end_value: ComputedValue,
+        interrupted: Option<&Self>,
+        parameters: TransitionParameters,
+        now_ms: f64,
+    ) -> Self {
+        let (reversing_adjusted_start_value, reversing_shortening_factor) = interrupted
+            .filter(|running| running.reversing_adjusted_start_value == end_value)
+            .map(|running| {
+                let factor = (running.timing.sample(running.input_progress(now_ms))
+                    * running.reversing_shortening_factor
+                    + 1.0
+                    - running.reversing_shortening_factor)
+                    .abs()
+                    .clamp(0.0, 1.0);
+                (running.end_value.clone(), factor)
+            })
+            .unwrap_or_else(|| (start_value.clone(), 1.0));
+        let delay_ms = if parameters.delay_ms < 0.0 {
+            parameters.delay_ms * reversing_shortening_factor
+        } else {
+            parameters.delay_ms
+        };
+        let start_ms = now_ms + delay_ms;
+        let end_ms = start_ms + parameters.duration_ms * reversing_shortening_factor;
+        let started = now_ms >= start_ms;
+        Self {
+            start_value,
+            end_value,
+            reversing_adjusted_start_value,
+            reversing_shortening_factor,
+            start_ms,
+            end_ms,
+            timing: parameters.timing,
+            started,
+        }
+    }
+
     fn input_progress(&self, now_ms: f64) -> f64 {
         if now_ms >= self.end_ms || self.end_ms < self.start_ms {
             1.0
@@ -486,6 +869,20 @@ impl TransitionConfiguration {
         }
     }
 
+    fn may_start_transition(&self, old: &PropertyMap, new: &PropertyMap) -> bool {
+        // Avoid even scanning property names for the common zero-time case.
+        if !self.properties.iter().enumerate().any(|(index, _)| {
+            self.parameters_at(index)
+                .is_some_and(|parameters| parameters.duration_ms + parameters.delay_ms > 0.0)
+        }) {
+            return false;
+        }
+        old.keys().chain(new.keys()).any(|property| {
+            self.matching_parameters(property)
+                .is_some_and(|parameters| parameters.duration_ms + parameters.delay_ms > 0.0)
+        })
+    }
+
     fn matching_parameters(&self, property: &str) -> Option<TransitionParameters> {
         let index = self
             .properties
@@ -495,6 +892,10 @@ impl TransitionConfiguration {
             .find_map(|(index, candidate)| {
                 transition_property_matches(candidate, property).then_some(index)
             })?;
+        self.parameters_at(index)
+    }
+
+    fn parameters_at(&self, index: usize) -> Option<TransitionParameters> {
         Some(TransitionParameters {
             duration_ms: *repeated(&self.durations_ms, index)?,
             delay_ms: *repeated(&self.delays_ms, index)?,
@@ -1179,6 +1580,472 @@ fn format_number(value: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn timeline_style(
+        opacity: Option<f32>,
+        property: &str,
+        duration: &str,
+        delay: &str,
+    ) -> PropertyMap {
+        let mut values = PropertyMap::new();
+        if let Some(opacity) = opacity {
+            values.insert("opacity", ComputedValue::Number(opacity));
+        }
+        values.insert("width", ComputedValue::Px(16.0));
+        for (name, value) in [
+            ("transition-property", property),
+            ("transition-duration", duration),
+            ("transition-delay", delay),
+            ("transition-timing-function", "linear"),
+        ] {
+            values.insert(name, ComputedValue::Keyword(value.into()));
+        }
+        values
+    }
+
+    fn assert_timeline_state_matches(actual: &TransitionTimeline, expected: &TransitionTimeline) {
+        assert_eq!(actual.now_ms, expected.now_ms);
+        assert_eq!(actual.elements.len(), expected.elements.len());
+        assert_eq!(actual.running_nodes, expected.running_nodes);
+        for (id, state) in &actual.elements {
+            let expected = &expected.elements[id];
+            assert_eq!(state.initialized, expected.initialized);
+            assert_eq!(state.base_values, expected.base_values);
+            assert_eq!(state.running.len(), expected.running.len());
+            for (property, running) in &state.running {
+                let expected = &expected.running[property];
+                assert_eq!(running.start_value, expected.start_value);
+                assert_eq!(running.end_value, expected.end_value);
+                assert_eq!(
+                    running.reversing_adjusted_start_value,
+                    expected.reversing_adjusted_start_value
+                );
+                assert_eq!(
+                    running.reversing_shortening_factor,
+                    expected.reversing_shortening_factor
+                );
+                assert_eq!(running.start_ms, expected.start_ms);
+                assert_eq!(running.end_ms, expected.end_ms);
+                assert_eq!(running.started, expected.started);
+                for progress in [0.0, 0.25, 0.5, 1.0] {
+                    assert_eq!(
+                        running.timing.sample(progress),
+                        expected.timing.sample(progress)
+                    );
+                }
+            }
+        }
+    }
+
+    fn compare_timeline_step(
+        actual: &mut TransitionTimeline,
+        expected: &mut TransitionTimeline,
+        now_ms: f64,
+        base: &PropertyMap,
+    ) -> (PropertyMap, Vec<TransitionEventRecord>) {
+        assert_eq!(actual.set_time_ms(now_ms), expected.set_time_ms(now_ms));
+        let mut actual_values = base.clone();
+        let mut expected_values = base.clone();
+        actual.sample(1, &mut actual_values);
+        expected.sample_without_fast_paths(1, &mut expected_values);
+        assert_eq!(actual_values, expected_values);
+        assert_timeline_state_matches(actual, expected);
+        let events = actual.take_events();
+        assert_eq!(events, expected.take_events());
+        (actual_values, events)
+    }
+
+    #[test]
+    fn static_and_disabled_transitions_keep_latest_base_when_enabled_later() {
+        let mut actual = TransitionTimeline::default();
+        let mut expected = TransitionTimeline::default();
+        for (time, opacity) in [
+            (0.0, Some(0.0)),
+            (10.0, Some(0.2)),
+            (20.0, None),
+            (30.0, Some(0.4)),
+        ] {
+            let style = timeline_style(opacity, "none", "1s", "0s");
+            assert!(
+                compare_timeline_step(&mut actual, &mut expected, time, &style)
+                    .1
+                    .is_empty()
+            );
+        }
+        let enabled = timeline_style(Some(0.4), "opacity", "1s", "0s");
+        assert!(
+            compare_timeline_step(&mut actual, &mut expected, 40.0, &enabled)
+                .1
+                .is_empty()
+        );
+        let target = timeline_style(Some(0.8), "opacity", "1s", "0s");
+        let (values, events) = compare_timeline_step(&mut actual, &mut expected, 50.0, &target);
+        assert_eq!(values.get("opacity"), Some(&ComputedValue::Number(0.4)));
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type)
+                .collect::<Vec<_>>(),
+            ["transitionrun", "transitionstart"]
+        );
+        let (values, events) = compare_timeline_step(&mut actual, &mut expected, 550.0, &target);
+        assert_eq!(values.get("opacity"), Some(&ComputedValue::Number(0.6)));
+        assert!(events.is_empty());
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 1050.0, &target);
+        assert_eq!(events[0].event_type, "transitionend");
+        assert!(
+            compare_timeline_step(&mut actual, &mut expected, 1100.0, &target)
+                .1
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn no_effective_transition_skips_diff_without_losing_fallback_baselines() {
+        for (property, duration, delay) in [
+            ("all", "0s", "0s"),
+            ("opacity", "1s", "-1s"),
+            ("opacity", "1s", "-2s"),
+            ("unmatched-property", "1s", "0s"),
+            ("opacity, opacity", "1s, 0s", "0s"),
+        ] {
+            let mut actual = TransitionTimeline::default();
+            let mut expected = TransitionTimeline::default();
+            for (time, opacity) in [(0.0, Some(0.0)), (10.0, None), (20.0, Some(0.5))] {
+                let base = timeline_style(opacity, property, duration, delay);
+                assert!(
+                    compare_timeline_step(&mut actual, &mut expected, time, &base)
+                        .1
+                        .is_empty()
+                );
+            }
+            let enabled = timeline_style(Some(1.0), "opacity", "1s", "0s");
+            let (values, events) =
+                compare_timeline_step(&mut actual, &mut expected, 30.0, &enabled);
+            assert_eq!(values.get("opacity"), Some(&ComputedValue::Number(0.5)));
+            assert_eq!(events.len(), 2);
+        }
+    }
+
+    #[test]
+    fn unchanged_base_preserves_delayed_zero_duration_start_and_end_order() {
+        let mut actual = TransitionTimeline::default();
+        let mut expected = TransitionTimeline::default();
+        let initial = timeline_style(Some(0.0), "opacity", "0s", "100ms");
+        compare_timeline_step(&mut actual, &mut expected, 0.0, &initial);
+        let target = timeline_style(Some(1.0), "opacity", "0s", "100ms");
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 10.0, &target);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type)
+                .collect::<Vec<_>>(),
+            ["transitionrun"]
+        );
+        assert!(
+            compare_timeline_step(&mut actual, &mut expected, 109.0, &target)
+                .1
+                .is_empty()
+        );
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 110.0, &target);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type)
+                .collect::<Vec<_>>(),
+            ["transitionstart", "transitionend"]
+        );
+        assert!(events.iter().all(|event| event.elapsed_time == 0.0));
+    }
+
+    #[test]
+    fn changed_properties_keep_alphabetic_start_order_and_staggered_completion() {
+        let mut actual = TransitionTimeline::default();
+        let mut expected = TransitionTimeline::default();
+        let initial = timeline_style(Some(0.0), "width, opacity", "100ms, 200ms", "0s");
+        compare_timeline_step(&mut actual, &mut expected, 0.0, &initial);
+        let mut target = initial.clone();
+        target.insert("opacity", ComputedValue::Number(1.0));
+        target.insert("width", ComputedValue::Px(32.0));
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 10.0, &target);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.property_name.as_str(), event.event_type))
+                .collect::<Vec<_>>(),
+            [
+                ("opacity", "transitionrun"),
+                ("opacity", "transitionstart"),
+                ("width", "transitionrun"),
+                ("width", "transitionstart")
+            ],
+        );
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 110.0, &target);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].property_name, "width");
+        assert_eq!(events[0].event_type, "transitionend");
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 210.0, &target);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].property_name, "opacity");
+        assert_eq!(events[0].event_type, "transitionend");
+    }
+
+    #[test]
+    fn negative_delay_reversal_and_configuration_cancellation_match_unoptimized_timeline() {
+        let mut actual = TransitionTimeline::default();
+        let mut expected = TransitionTimeline::default();
+        let initial = timeline_style(Some(0.0), "opacity", "1s", "-250ms");
+        compare_timeline_step(&mut actual, &mut expected, 0.0, &initial);
+        let target = timeline_style(Some(1.0), "opacity", "1s", "-250ms");
+        let (values, events) = compare_timeline_step(&mut actual, &mut expected, 100.0, &target);
+        assert_eq!(values.get("opacity"), Some(&ComputedValue::Number(0.25)));
+        assert!(events.iter().all(|event| event.elapsed_time == 0.25));
+        let (values, events) = compare_timeline_step(&mut actual, &mut expected, 350.0, &target);
+        assert_eq!(values.get("opacity"), Some(&ComputedValue::Number(0.5)));
+        assert!(events.is_empty());
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 350.0, &initial);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type)
+                .collect::<Vec<_>>(),
+            ["transitioncancel", "transitionrun", "transitionstart"]
+        );
+        assert_eq!(
+            actual.elements[&1].running["opacity"].reversing_shortening_factor,
+            0.5
+        );
+        let cancelled = timeline_style(Some(0.0), "none", "1s", "-250ms");
+        let (_, events) = compare_timeline_step(&mut actual, &mut expected, 400.0, &cancelled);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type)
+                .collect::<Vec<_>>(),
+            ["transitioncancel"]
+        );
+        assert!(!actual.has_running_transitions());
+        assert!(
+            compare_timeline_step(&mut actual, &mut expected, 2000.0, &cancelled)
+                .1
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn running_property_diagnostics_are_bounded_and_exhaustive() {
+        let running = RunningTransition::new(
+            ComputedValue::Number(0.0),
+            ComputedValue::Number(1.0),
+            None,
+            TransitionParameters {
+                duration_ms: 1_000.0,
+                delay_ms: 0.0,
+                timing: TimingFunction::Linear,
+            },
+            0.0,
+        );
+        let mut timeline = TransitionTimeline::default();
+        for (node_id, properties) in [
+            (
+                10,
+                ["bottom", "transform", "color", "background-color"].as_slice(),
+            ),
+            (
+                20,
+                [
+                    "filter",
+                    "backdrop-filter",
+                    "opacity",
+                    "text-shadow",
+                    "--tone",
+                ]
+                .as_slice(),
+            ),
+        ] {
+            timeline.elements.insert(
+                node_id,
+                ElementTransitionState {
+                    running: properties
+                        .iter()
+                        .map(|property| ((*property).to_string(), running.clone()))
+                        .collect(),
+                    ..ElementTransitionState::default()
+                },
+            );
+        }
+        timeline
+            .elements
+            .insert(30, ElementTransitionState::default());
+
+        for id in [10, 20] {
+            timeline.update_running_node(id, true);
+        }
+        assert_eq!(
+            timeline
+                .running_node_ids()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([10, 20])
+        );
+        let counts = timeline.running_property_counts();
+        assert_eq!(
+            counts,
+            TransitionPropertyCounts {
+                nodes: 2,
+                properties: 9,
+                geometry: 1,
+                transform: 1,
+                color: 1,
+                background: 1,
+                filter: 2,
+                opacity: 1,
+                other: 2,
+            }
+        );
+        assert_eq!(counts.categorized_properties(), counts.properties);
+    }
+
+    #[test]
+    fn transition_cache_scope_is_an_exact_audited_property_allowlist() {
+        use crate::css::style::PropertyId;
+
+        let localized = PropertyId::ALL
+            .iter()
+            .filter_map(|property| {
+                (transition_cache_scope(property.as_str()) == TransitionCacheScope::Subtree)
+                    .then_some(property.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            localized,
+            [
+                "backdrop-filter",
+                "background-attachment",
+                "background-clip",
+                "background-color",
+                "background-image",
+                "background-origin",
+                "background-position-x",
+                "background-position-y",
+                "background-repeat",
+                "background-size",
+                "border-block-end-color",
+                "border-block-start-color",
+                "border-bottom-color",
+                "border-inline-end-color",
+                "border-inline-start-color",
+                "border-left-color",
+                "border-right-color",
+                "border-top-color",
+                "color",
+                "column-rule-color",
+                "filter",
+                "opacity",
+                "outline-color",
+                "text-decoration-color",
+                "transform",
+            ],
+            "adding another localized property requires a dependency audit and this contract update",
+        );
+
+        for property in PropertyId::ALL {
+            if matches!(
+                transition_property_category(property.as_str()),
+                TransitionPropertyCategory::Color | TransitionPropertyCategory::Background
+            ) {
+                assert_eq!(
+                    transition_cache_scope(property.as_str()),
+                    TransitionCacheScope::Subtree,
+                    "every implemented color/background diagnostic property needs an audited cache scope: {}",
+                    property.as_str(),
+                );
+            }
+        }
+
+        for property in [
+            "background",
+            "border-color",
+            "border-block-color",
+            "border-inline-color",
+            "width",
+            "text-shadow",
+            "box-shadow",
+            "--accent-color",
+            "caret-color",
+            "text-emphasis-color",
+            "-webkit-text-fill-color",
+            "future-color",
+            "background-future",
+        ] {
+            assert_eq!(
+                transition_cache_scope(property),
+                TransitionCacheScope::Full,
+                "unknown, custom, shorthand, and unaudited properties must fail closed: {property}",
+            );
+        }
+    }
+
+    fn run_static_timeline_benchmark(
+        sample: fn(&mut TransitionTimeline, usize, &mut PropertyMap),
+        template: &PropertyMap,
+        changing: bool,
+    ) -> (std::time::Duration, TransitionTimeline, Vec<PropertyMap>) {
+        let mut timeline = TransitionTimeline::default();
+        let mut last = vec![PropertyMap::new(); 32];
+        for (node, values) in last.iter_mut().enumerate() {
+            *values = template.clone();
+            sample(&mut timeline, node, values);
+        }
+        let started = std::time::Instant::now();
+        for frame in 1..=16 {
+            timeline.set_time_ms(frame as f64 * 16.0);
+            for (node, values) in last.iter_mut().enumerate() {
+                *values = template.clone();
+                if changing {
+                    values.insert("width", ComputedValue::Px(16.0 + frame as f32));
+                }
+                sample(&mut timeline, node, std::hint::black_box(&mut *values));
+                std::hint::black_box(&*values);
+            }
+        }
+        (started.elapsed(), timeline, last)
+    }
+
+    #[test]
+    #[ignore = "manual comparison of static CSS transition sampling fast paths"]
+    fn static_transition_sampling_microbenchmark() {
+        for (name, property, duration, changing) in [
+            ("static-default", "all", "0s", false),
+            ("static-enabled", "opacity", "1s", false),
+            ("changing-zero-time", "all", "0s", true),
+            ("changing-unmatched", "unmatched-property", "1s", true),
+        ] {
+            let mut style = timeline_style(Some(0.5), property, duration, "0s");
+            for index in 0..64 {
+                style.insert(
+                    format!("--benchmark-{index:02}"),
+                    ComputedValue::Number(index as f32),
+                );
+            }
+            let (reference_time, mut reference, reference_values) = run_static_timeline_benchmark(
+                TransitionTimeline::sample_without_fast_paths,
+                &style,
+                changing,
+            );
+            let (optimized_time, mut optimized, optimized_values) =
+                run_static_timeline_benchmark(TransitionTimeline::sample, &style, changing);
+            assert_eq!(optimized_values, reference_values);
+            assert_eq!(optimized.take_events(), reference.take_events());
+            assert_timeline_state_matches(&optimized, &reference);
+            println!(
+                "TRANSITION_SAMPLE_BENCH case={name} nodes=32 frames=16 reference_ms={:.3} optimized_ms={:.3} reference_over_optimized={:.3}",
+                reference_time.as_secs_f64() * 1000.0,
+                optimized_time.as_secs_f64() * 1000.0,
+                reference_time.as_secs_f64() / optimized_time.as_secs_f64(),
+            );
+        }
+    }
 
     #[test]
     fn expands_shorthand_lists_and_defaults() {

@@ -33,6 +33,7 @@ use crate::js::{
     JavaScriptDialogKind, JsRuntime, NavigationRequest, OwnedPageTask, PageTaskError,
     PointerLockTransition, StorageManager, VisitSource,
 };
+use crate::resource_worker::ResourceQueue;
 
 mod render_demand;
 pub use render_demand::{NextRendering, PaintStateKey, RenderDemand};
@@ -97,6 +98,8 @@ pub enum CdpSessionError {
     Url(UrlParseError),
     /// Loading the requested document failed.
     Http(HttpParseError),
+    /// A 304 response could not be resolved because no HTTP entity cache exists.
+    MissingCachedNavigationResponse,
     /// A page startup task completed for a retired document generation.
     StalePageTaskCompletion,
     /// A page startup task was cancelled.
@@ -105,6 +108,8 @@ pub enum CdpSessionError {
     PageTaskTimedOut,
     /// The browser session no longer has an active page.
     Unavailable,
+    /// Native-scroll owner generations cannot advance without reusing an old owner.
+    NativeScrollOwnerExhausted,
 }
 
 impl std::fmt::Display for CdpSessionError {
@@ -113,12 +118,21 @@ impl std::fmt::Display for CdpSessionError {
             Self::JavaScript(error) => write!(f, "{error}"),
             Self::Url(error) => write!(f, "{error}"),
             Self::Http(error) => write!(f, "{error}"),
+            Self::MissingCachedNavigationResponse => {
+                write!(
+                    f,
+                    "navigation returned 304 without a cached response entity"
+                )
+            }
             Self::StalePageTaskCompletion => write!(f, "stale page startup task completion"),
             Self::PageTaskCancelled => write!(f, "page startup task was cancelled"),
             Self::PageTaskTimedOut => {
                 write!(f, "page startup task exceeded its wall-clock timeout")
             }
             Self::Unavailable => write!(f, "Browser session is unavailable"),
+            Self::NativeScrollOwnerExhausted => {
+                write!(f, "native scroll owner generation exhausted")
+            }
         }
     }
 }
@@ -184,6 +198,19 @@ pub(crate) struct SessionSettleTimings {
 #[derive(Debug)]
 pub struct CdpSession {
     runtime: JsRuntime,
+    /// Next owner identity reserved before a replacement runtime can run script.
+    next_native_scroll_owner_generation: Option<u64>,
+    resource_queue: Option<ResourceQueue>,
+    resource_worker_count: std::num::NonZeroUsize,
+    task_pump_limit: Option<std::num::NonZeroUsize>,
+    defer_document_startup: bool,
+    nonblocking_image_loading: bool,
+    nonblocking_font_loading: bool,
+    nonblocking_script_loading: bool,
+    nonblocking_fetch_loading: bool,
+    nonblocking_iframe_loading: bool,
+    retained_scroll_capture: bool,
+    pending_document_startup: Option<page::PendingDocumentStartup>,
     media_emulation: emulation::State,
     _storage_lifetime: TabStorageLifetime,
     storage_manager: StorageManager,
@@ -263,6 +290,7 @@ struct SessionHistoryEntry {
 /// Document metadata held by the CDP host while its new runtime is owned by a
 /// suspendable page-startup task.
 pub(crate) struct PendingDocumentCommit {
+    requested_url: String,
     url: String,
     html: String,
     generation: u64,
@@ -319,11 +347,33 @@ impl CdpSession {
             storage_session_id,
         )
         .map_err(CdpSessionError::JavaScript)?;
+        let resource_queue = ResourceQueue::default();
+        let resource_worker_count = resource_queue.worker_count();
+        runtime.set_resource_queue(resource_queue.clone());
+        let initial_scroll_key = crate::js::native_scroll::TargetKey {
+            document: 0,
+            owner_generation: 1,
+            viewport_epoch: 0,
+            scroll_node: runtime.document().identity() as u64,
+        };
+        runtime.activate_native_scroll(initial_scroll_key);
         Self::configure_runtime_playback(&mut runtime, &cookie_store);
         let mut http_client = Client::new();
         http_client.set_shared_cookie_store(Arc::clone(&cookie_store));
         let mut session = Self {
             runtime,
+            next_native_scroll_owner_generation: Some(2),
+            resource_queue: None,
+            resource_worker_count,
+            task_pump_limit: None,
+            defer_document_startup: false,
+            nonblocking_image_loading: false,
+            nonblocking_font_loading: false,
+            nonblocking_script_loading: false,
+            nonblocking_fetch_loading: false,
+            nonblocking_iframe_loading: false,
+            retained_scroll_capture: false,
+            pending_document_startup: None,
             _storage_lifetime: storage_lifetime,
             storage_manager,
             storage_session_id,
@@ -388,13 +438,26 @@ impl CdpSession {
 
     /// Carries host configuration into a replacement document runtime.
     fn configure_replacement_runtime(
-        &self,
+        &mut self,
         runtime: &mut JsRuntime,
+        document_generation: u64,
     ) -> Result<(), CdpSessionError> {
         if let Some((reporter, surface)) = self.runtime.error_reporter_destination() {
             runtime.set_error_reporter(reporter, surface);
         }
         Self::configure_runtime_playback(runtime, &self.cookie_store);
+        runtime.set_resource_queue(
+            self.resource_queue
+                .clone()
+                .unwrap_or_else(|| ResourceQueue::new(self.resource_worker_count)),
+        );
+        runtime.set_task_pump_limit(self.task_pump_limit);
+        runtime.set_nonblocking_image_loading(self.nonblocking_image_loading);
+        runtime.set_nonblocking_font_loading(self.nonblocking_font_loading);
+        runtime.set_nonblocking_script_loading(self.nonblocking_script_loading);
+        runtime.set_nonblocking_fetch_loading(self.nonblocking_fetch_loading);
+        runtime.set_nonblocking_iframe_loading(self.nonblocking_iframe_loading);
+        runtime.set_retained_scroll_capture(self.retained_scroll_capture);
         runtime.set_initial_visibility_hidden(self.host_hidden || self.lifecycle_frozen);
         let (width, height) = self.runtime.presentation_viewport();
         runtime.set_viewport(width, height);
@@ -408,11 +471,31 @@ impl CdpSession {
             .set_pointer_lock_focus(self.pointer_lock_focused)
             .map_err(CdpSessionError::JavaScript)?;
         runtime.set_fullscreen_transition_allowed(self.fullscreen_transition_allowed);
-        Self::install_runtime_helpers_on(runtime).map_err(CdpSessionError::JavaScript)
+        Self::install_runtime_helpers_on(runtime).map_err(CdpSessionError::JavaScript)?;
+        let owner_generation = self
+            .next_native_scroll_owner_generation
+            .ok_or(CdpSessionError::NativeScrollOwnerExhausted)?;
+        self.next_native_scroll_owner_generation = owner_generation.checked_add(1);
+        runtime.activate_native_scroll(crate::js::native_scroll::TargetKey {
+            document: document_generation,
+            owner_generation,
+            viewport_epoch: 0,
+            scroll_node: runtime.document().identity() as u64,
+        });
+        Ok(())
     }
 
     fn runtime_timeout(&self) -> Duration {
         self.runtime.sandbox_timeout()
+    }
+
+    /// Bounds the number of page macrotasks drained in one host call.
+    ///
+    /// The setting applies to the current document and later navigations.
+    /// `None` restores the default unlimited drain used by CDP callers.
+    pub fn set_task_pump_limit(&mut self, limit: Option<std::num::NonZeroUsize>) {
+        self.task_pump_limit = limit;
+        self.runtime.set_task_pump_limit(limit);
     }
 
     /// Dispatches a CDP domain method and returns the result payload.
@@ -480,6 +563,17 @@ impl CdpSession {
         self.runtime.document()
     }
 
+    /// Reads the current document title for native chrome without pumping page tasks.
+    /// A GUI redraw must not run unrelated timers or promise jobs just to update
+    /// the window title.
+    pub fn document_title_without_tasks(&mut self) -> Result<String, JsonRpcError> {
+        let value = self.runtime.eval("document.title").map_err(js_error)?;
+        Ok(value
+            .as_string()
+            .map(|title| title.to_std_string_escaped())
+            .unwrap_or_default())
+    }
+
     fn omoikane_find_in_page(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
         let action = match require_string(params, "action")?.as_str() {
             "start" => FindInPageAction::Start,
@@ -517,6 +611,35 @@ impl CdpSession {
         &mut self,
     ) -> Result<crate::paint::Canvas, crate::paint::PaintError> {
         self.runtime.paint_current_document()
+    }
+
+    /// Enables bounded, owned scroll-image capture alongside ordinary painting.
+    /// This does not authorize asynchronous input or change its default action.
+    pub fn set_retained_scroll_capture(&mut self, enabled: bool) {
+        self.retained_scroll_capture = enabled;
+        self.runtime.set_retained_scroll_capture(enabled);
+    }
+
+    /// Updates owner-local capture interest without changing the configuration
+    /// inherited by a replacement runtime.
+    pub fn set_retained_scroll_capture_interest(&mut self, interested: bool) {
+        self.runtime
+            .set_retained_scroll_capture_interest(interested);
+    }
+
+    /// Takes the latest capture if its document and render inputs are unchanged.
+    /// Raster coordinates are CSS pixels, independently of the native device scale.
+    pub fn take_retained_scroll_scene(&mut self) -> Option<crate::frame::RetainedScrollScene> {
+        let captured = self.runtime.take_retained_scroll_capture()?;
+        crate::frame::RetainedScrollScene::new_shared(
+            captured.frame,
+            1.0,
+            self.document_generation(),
+            self.runtime.render_generations().paint,
+            captured.logical_scroll,
+            captured.extent,
+        )
+        .ok()
     }
 
     /// Attaches the optional error reporter to this session's runtime and HTTP client.
@@ -588,10 +711,13 @@ impl CdpSession {
     /// animation frame, then any resulting Location/History request installs
     /// the next Document.
     pub fn drive_event_loop(&mut self, elapsed_ms: u64) -> Result<(), JsonRpcError> {
+        if self.advance_deferred_document_startup(elapsed_ms)? {
+            return self.commit_pending_navigation_requests();
+        }
         self.runtime
             .run_animation_frame(elapsed_ms)
             .map_err(js_error)?;
-        self.drive_navigation_requests()
+        self.commit_pending_navigation_requests()
     }
 
     /// Settles deferred page initialization before a static render snapshot.
@@ -604,6 +730,12 @@ impl CdpSession {
 
         let mut timings = SessionSettleTimings::default();
         for _ in 0..MAX_NAVIGATION_PASSES {
+            while self.pending_document_startup.is_some() {
+                self.advance_deferred_document_startup_with_wait(
+                    0,
+                    crate::js::DocumentScriptWait::Block,
+                )?;
+            }
             let previous_generation = self.document_generation;
             let timers_start = Instant::now();
             self.runtime
@@ -809,7 +941,13 @@ fn js_error(error: boa_engine::JsError) -> JsonRpcError {
 mod tests;
 
 #[cfg(test)]
+mod startup_tests;
+
+#[cfg(test)]
 mod frameset_tests;
 
 #[cfg(test)]
 mod render_demand_tests;
+
+#[cfg(test)]
+mod startup_parallel_tests;

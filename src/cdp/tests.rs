@@ -11,7 +11,596 @@ use crate::test_support::http_fixture::{
 };
 use std::cell::RefCell;
 use std::io::{Read, Write};
+use std::num::NonZeroUsize;
 use std::rc::Rc;
+
+fn install_test_native_scroll_scene(
+    handle: &crate::js::native_scroll::NativeScrollHandle,
+) -> crate::js::native_scroll::TargetKey {
+    use crate::js::native_scroll::{Bounds, FallbackTicket, Offset, PublicationSequence, Scene};
+
+    let gate = handle.publication_gate();
+    assert!(handle.authorize_policy(gate.key, gate.policy_epoch));
+    let extent = Bounds {
+        min: Offset::default(),
+        max: Offset { x: 100.0, y: 100.0 },
+    };
+    assert!(handle.install_scene(Scene {
+        key: gate.key,
+        publication: PublicationSequence::new(1),
+        policy_epoch: gate.policy_epoch,
+        acceptance_epoch: gate.acceptance_epoch,
+        acknowledged: 0,
+        completed_fallback: FallbackTicket::default(),
+        offset: Offset::default(),
+        extent,
+        coverage: extent,
+        eligible: true,
+    }));
+    gate.key
+}
+
+#[test]
+fn replacement_runtime_activates_fresh_native_scroll_owner_before_startup_script() {
+    use crate::js::native_scroll::{Offset, ScrollDecision};
+
+    let mut session = CdpSession::new().unwrap();
+    let old_handle = session.runtime.native_scroll_handle();
+    let old_key = install_test_native_scroll_scene(&old_handle);
+    assert_eq!(old_key.document, 0);
+    assert_eq!(old_key.owner_generation, 1);
+    let old_accepted = match old_handle.scroll(Offset { x: 0.0, y: 10.0 }) {
+        ScrollDecision::Accepted(accepted) => accepted,
+        decision => panic!("old owner must accept before replacement: {decision:?}"),
+    };
+
+    session
+        .install_document(
+            "https://example.test/replacement",
+            "<script>
+             addEventListener('wheel', () => {}, { passive: false });
+             globalThis.startupScrollX = scrollX;
+             </script>",
+            1,
+            "null",
+        )
+        .unwrap();
+
+    let new_handle = session.runtime.native_scroll_handle();
+    let new_gate = new_handle.publication_gate();
+    assert_ne!(new_gate.key, old_key);
+    assert_eq!(new_gate.key.document, session.document_generation);
+    assert!(new_gate.key.owner_generation > old_key.owner_generation);
+    assert_eq!(new_handle.accepted_barrier(), None);
+    assert_eq!(old_handle.notification_backlog(old_key), Ok(1));
+    assert!(!old_handle.validate_for_presentation(old_accepted));
+    assert!(matches!(
+        old_handle.scroll(Offset { x: 0.0, y: 1.0 }),
+        ScrollDecision::Fallback(_)
+    ));
+    assert_eq!(
+        session.runtime.eval("startupScrollX").unwrap().as_number(),
+        Some(0.0)
+    );
+    assert!(!new_handle.authorize_policy(new_gate.key, new_gate.policy_epoch));
+}
+
+#[test]
+fn pending_replacement_activates_fresh_native_scroll_owner_before_startup_script() {
+    use crate::js::native_scroll::{Offset, ScrollDecision};
+
+    let mut session = CdpSession::new().unwrap();
+    let old_handle = session.runtime.native_scroll_handle();
+    let old_key = install_test_native_scroll_scene(&old_handle);
+    let old_accepted = match old_handle.scroll(Offset { x: 0.0, y: 10.0 }) {
+        ScrollDecision::Accepted(accepted) => accepted,
+        decision => panic!("old owner must accept before preparation: {decision:?}"),
+    };
+
+    let (task, pending) = session
+        .prepare_document_page_task(
+            "https://example.test/pending-replacement",
+            &DecodedHtml::from_string(
+                "<script>
+                 addEventListener('wheel', () => {}, { passive: false });
+                 globalThis.startupScrollX = scrollX;
+                 </script>",
+            ),
+            1,
+            "null",
+            &[],
+            200,
+            None,
+        )
+        .unwrap();
+    let mut task = Box::pin(task);
+    let mut context = TaskContext::from_waker(Waker::noop());
+    let started = std::time::Instant::now();
+    let mut completed = loop {
+        assert!(started.elapsed() < Duration::from_secs(10));
+        if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+            break completed;
+        }
+    };
+    assert!(completed.result.as_ref().unwrap().is_empty());
+
+    let new_handle = completed.runtime.native_scroll_handle();
+    let new_gate = new_handle.publication_gate();
+    assert_ne!(new_gate.key, old_key);
+    assert_eq!(new_gate.key.document, pending.generation);
+    assert!(new_gate.key.owner_generation > old_key.owner_generation);
+    assert_eq!(new_handle.accepted_barrier(), None);
+    assert_eq!(old_handle.notification_backlog(old_key), Ok(1));
+    assert_eq!(
+        completed
+            .runtime
+            .eval("startupScrollX")
+            .unwrap()
+            .as_number(),
+        Some(0.0)
+    );
+    assert!(!new_handle.authorize_policy(new_gate.key, new_gate.policy_epoch));
+    assert_eq!(
+        session
+            .runtime
+            .native_scroll_handle()
+            .publication_gate()
+            .key,
+        old_key
+    );
+    assert!(old_handle.validate_for_presentation(old_accepted));
+
+    session
+        .commit_document_page_task(completed, pending)
+        .unwrap();
+    assert_eq!(
+        session
+            .runtime
+            .native_scroll_handle()
+            .publication_gate()
+            .key,
+        new_gate.key
+    );
+    assert!(!old_handle.validate_for_presentation(old_accepted));
+    assert!(matches!(
+        old_handle.scroll(Offset { x: 0.0, y: 1.0 }),
+        ScrollDecision::Fallback(_)
+    ));
+}
+
+#[test]
+fn exhausted_native_scroll_owner_generation_keeps_the_committed_runtime() {
+    use crate::js::native_scroll::{Offset, ScrollDecision};
+
+    let mut session = CdpSession::new().unwrap();
+    let previous_url = session.current_url().to_string();
+    let old_handle = session.runtime.native_scroll_handle();
+    let previous_key = install_test_native_scroll_scene(&old_handle);
+    let old_accepted = match old_handle.scroll(Offset { x: 0.0, y: 10.0 }) {
+        ScrollDecision::Accepted(accepted) => accepted,
+        decision => panic!("old owner must accept before failed replacement: {decision:?}"),
+    };
+    session.next_native_scroll_owner_generation = None;
+
+    let error = session
+        .install_document(
+            "https://example.test/not-committed",
+            "<script>globalThis.mustNotRun = true</script>",
+            1,
+            "null",
+        )
+        .unwrap_err();
+    assert!(matches!(error, CdpSessionError::NativeScrollOwnerExhausted));
+    assert_eq!(session.current_url(), previous_url);
+    assert_eq!(
+        session
+            .runtime
+            .native_scroll_handle()
+            .publication_gate()
+            .key,
+        previous_key
+    );
+    assert_eq!(
+        session
+            .runtime
+            .eval("typeof mustNotRun")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "undefined"
+    );
+    assert!(old_handle.validate_for_presentation(old_accepted));
+}
+
+#[test]
+fn native_startup_paints_parsed_document_before_scripts_and_load() {
+    let mut session = CdpSession::new().unwrap();
+    session.set_deferred_document_startup(true);
+    session
+        .install_document(
+            "https://example.test/",
+            "<style>body { margin:0; background:red }</style><body><script>
+             globalThis.started = true;
+             globalThis.loads = 0;
+             addEventListener('load', () => loads++);
+             document.body.style.background = 'blue';
+             </script></body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    assert_eq!(
+        session
+            .runtime
+            .eval("typeof started")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "undefined"
+    );
+    assert_eq!(session.render_demand(None).next, NextRendering::EveryFrame);
+    let first = crate::frame::render_browser_frame(&mut session, 100, 100, 0).unwrap();
+    assert_eq!(&first.pixels()[0..4], &[255, 0, 0, 255]);
+    assert_eq!(session.render_demand(None).next, NextRendering::EveryFrame);
+    let second = crate::frame::render_browser_frame(&mut session, 100, 100, 16).unwrap();
+    assert_eq!(&second.pixels()[0..4], &[0, 0, 255, 255]);
+    assert_eq!(
+        session.runtime.eval("loads").unwrap().as_number(),
+        Some(1.0)
+    );
+    session.drive_event_loop(16).unwrap();
+    assert_eq!(
+        session.runtime.eval("loads").unwrap().as_number(),
+        Some(1.0)
+    );
+}
+
+#[test]
+fn navigation_replaces_unstarted_document_scripts() {
+    let mut session = CdpSession::new().unwrap();
+    session.set_deferred_document_startup(true);
+    session
+        .install_document(
+            "https://example.test/old",
+            "<script>localStorage.setItem('oldRan', 'yes')</script>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session
+        .install_document(
+            "https://example.test/new",
+            "<script>globalThis.newRan = true</script>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session.drive_event_loop(0).unwrap();
+    session.drive_event_loop(16).unwrap();
+    assert_eq!(
+        session.runtime.eval("newRan").unwrap().as_boolean(),
+        Some(true)
+    );
+    assert!(
+        session
+            .runtime
+            .eval("localStorage.getItem('oldRan')")
+            .unwrap()
+            .is_null()
+    );
+}
+
+#[test]
+fn configured_resource_worker_count_keeps_replacement_free_of_retired_requests() {
+    struct Release(Option<Vec<std::sync::mpsc::Sender<()>>>);
+    impl Release {
+        fn release(&mut self) {
+            if let Some(senders) = self.0.take() {
+                for sender in senders {
+                    let _ = sender.send(());
+                }
+            }
+        }
+    }
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+    struct Transport {
+        started: std::sync::mpsc::Sender<String>,
+        finished: std::sync::mpsc::Sender<String>,
+        release: Vec<Mutex<std::sync::mpsc::Receiver<()>>>,
+    }
+    impl crate::http::HttpTransport for Transport {
+        fn send(
+            &self,
+            request: &crate::http::HttpRequest,
+            _: Option<std::time::Duration>,
+        ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+            let url = request.url().to_string();
+            self.started.send(url.clone()).unwrap();
+            let gate = if url.ends_with("/held") {
+                Some(0)
+            } else if url.ends_with("/configured") {
+                Some(1)
+            } else {
+                None
+            };
+            if let Some(index) = gate {
+                self.release[index].lock().unwrap().recv().unwrap();
+                self.finished.send(url).unwrap();
+            }
+            Ok(crate::http::HttpResponse::new(
+                200,
+                "OK",
+                vec![("Access-Control-Allow-Origin".into(), "*".into())],
+                b"ready".to_vec(),
+            ))
+        }
+    }
+    let (started, observed) = std::sync::mpsc::channel();
+    let (release, gates): (Vec<_>, Vec<_>) = (0..2).map(|_| std::sync::mpsc::channel()).unzip();
+    let (finished, completion) = std::sync::mpsc::channel();
+    let transport = Arc::new(Transport {
+        started,
+        finished,
+        release: gates.into_iter().map(Mutex::new).collect(),
+    });
+    let mut session = CdpSession::new().unwrap();
+    let mut release = Release(Some(release));
+    session.set_resource_queue(crate::resource_worker::ResourceQueue::new(
+        NonZeroUsize::new(1).unwrap(),
+    ));
+    session.set_nonblocking_fetch_loading(true);
+    session
+        .runtime
+        .set_http_resource_transport(Some(transport.clone()));
+    session
+        .runtime
+        .eval("void fetch('https://example.test/held')")
+        .unwrap();
+    session.runtime.run_jobs().unwrap();
+    assert_eq!(
+        observed.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "https://example.test/held"
+    );
+    assert_eq!(session.runtime.resource_worker_count().get(), 1);
+    session.set_resource_worker_count(NonZeroUsize::new(1).unwrap());
+    session
+        .runtime
+        .eval("void fetch('https://example.test/configured')")
+        .unwrap();
+    session.runtime.run_jobs().unwrap();
+    assert_eq!(
+        observed.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "https://example.test/configured"
+    );
+
+    session
+        .install_document(
+            "https://example.test/replacement",
+            "<body>next</body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    assert_eq!(session.runtime.resource_worker_count().get(), 1);
+    session.runtime.set_http_resource_transport(Some(transport));
+    session
+        .runtime
+        .eval("void fetch('https://example.test/next')")
+        .unwrap();
+    session.runtime.run_jobs().unwrap();
+    assert_eq!(
+        observed.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "https://example.test/next",
+        "new navigation must have its own worker while the retired request remains held",
+    );
+    assert_eq!(
+        completion.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    );
+    release.release();
+    let mut finished = (0..2)
+        .map(|_| completion.recv_timeout(Duration::from_secs(5)).unwrap())
+        .collect::<Vec<_>>();
+    finished.sort();
+    assert_eq!(
+        finished,
+        [
+            "https://example.test/configured",
+            "https://example.test/held"
+        ]
+    );
+}
+
+#[test]
+fn configured_resource_queue_is_shared_by_current_and_replacement_documents() {
+    struct Transport;
+    impl crate::http::HttpTransport for Transport {
+        fn send(
+            &self,
+            _: &crate::http::HttpRequest,
+            _: Option<std::time::Duration>,
+        ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+            Ok(crate::http::HttpResponse::new(
+                200,
+                "OK",
+                vec![("Access-Control-Allow-Origin".into(), "*".into())],
+                b"loaded".to_vec(),
+            ))
+        }
+    }
+    let queue = crate::resource_worker::ResourceQueue::new(NonZeroUsize::new(1).unwrap());
+    let mut session = CdpSession::new().unwrap();
+    session.set_resource_queue(queue.clone());
+    session.set_nonblocking_fetch_loading(true);
+    session
+        .runtime
+        .set_http_resource_transport(Some(Arc::new(Transport)));
+    session
+        .runtime
+        .eval("fetch('https://example.test/current').catch(error => { globalThis.queueFetchError = String(error); })")
+        .unwrap();
+    session.runtime.run_jobs().unwrap();
+    assert_eq!(
+        session
+            .runtime
+            .eval("globalThis.queueFetchError")
+            .unwrap()
+            .as_string(),
+        None,
+        "the fetch must reach queue admission without rejecting",
+    );
+
+    session
+        .install_document(
+            "https://example.test/replacement",
+            "<body>replacement</body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session
+        .runtime
+        .set_http_resource_transport(Some(Arc::new(Transport)));
+    session
+        .runtime
+        .eval("fetch('https://example.test/resource').catch(error => { globalThis.queueFetchError = String(error); })")
+        .unwrap();
+    session.runtime.run_jobs().unwrap();
+    assert_eq!(
+        session
+            .runtime
+            .eval("globalThis.queueFetchError")
+            .unwrap()
+            .as_string(),
+        None,
+        "the fetch must reach queue admission without rejecting",
+    );
+
+    let scope = crate::resource_worker::ResourceScope::default();
+    let probe = queue
+        .submit(
+            &scope,
+            crate::resource_worker::ResourcePriority::Background,
+            crate::resource_worker::ResourceKind::Other,
+            |_| (),
+        )
+        .unwrap();
+    assert_eq!(
+        probe.id(),
+        2,
+        "both runtimes must allocate task IDs from the configured queue",
+    );
+}
+
+#[test]
+fn static_render_settles_deferred_document_startup() {
+    let mut session = CdpSession::new().unwrap();
+    session.set_deferred_document_startup(true);
+    session
+        .install_document(
+            "https://example.test/",
+            "<body><script>document.title = 'Initialized'</script></body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session.settle_for_render().unwrap();
+    assert_eq!(
+        session.document_title_without_tasks().unwrap(),
+        "Initialized"
+    );
+}
+
+#[test]
+fn document_title_without_tasks_observes_an_author_override() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document(
+            "https://example.test/title",
+            "<head><title>markup title</title></head><body></body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session
+        .runtime
+        .eval(
+            "Object.defineProperty(document, 'title', {
+                 configurable: true,
+                 get: () => 'author title'
+             })",
+        )
+        .unwrap();
+    assert_eq!(
+        session.document_title_without_tasks().unwrap(),
+        "author title"
+    );
+}
+
+#[test]
+fn task_pump_limit_survives_navigation_and_defers_extra_timer_tasks() {
+    let mut session = CdpSession::new().unwrap();
+    session.set_task_pump_limit(NonZeroUsize::new(1));
+
+    for _ in 0..2 {
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({"url": "data:text/html,<script>globalThis.runs=0;for(let i=0;i<4;i++)setTimeout(()=>runs++,0)</script>"}),
+            )
+            .unwrap();
+        let runs_after_navigation = session.runtime.eval("runs").unwrap().as_number().unwrap();
+        assert!(runs_after_navigation < 4.0);
+        for _ in 0..8 {
+            session.drive_event_loop(0).unwrap();
+        }
+        assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(4.0));
+    }
+}
+
+#[test]
+fn rendering_opportunity_defers_tasks_after_navigation_commit() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document("https://example.test/", "<body></body>", 1, "null")
+        .unwrap();
+    session.set_task_pump_limit(NonZeroUsize::new(1));
+    session
+        .runtime
+        .eval("globalThis.runs=0;for(let i=0;i<3;i++)setTimeout(()=>runs++,0)")
+        .unwrap();
+
+    session.drive_event_loop(0).unwrap();
+    assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(1.0));
+    session.drive_event_loop(0).unwrap();
+    assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(2.0));
+    session.drive_event_loop(0).unwrap();
+    assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(3.0));
+}
+
+#[test]
+fn bounded_rendering_opportunity_defers_timer_queued_by_frame_callback() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document("https://example.test/", "<body></body>", 1, "null")
+        .unwrap();
+    session.set_task_pump_limit(NonZeroUsize::new(1));
+    session
+        .runtime
+        .eval("globalThis.runs = 0; requestAnimationFrame(() => setTimeout(() => runs++, 0))")
+        .unwrap();
+
+    session.drive_event_loop(0).unwrap();
+    assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(0.0));
+    session.drive_event_loop(0).unwrap();
+    assert_eq!(session.runtime.eval("runs").unwrap().as_number(), Some(1.0));
+}
 
 #[test]
 fn javascript_navigation_keeps_history_for_non_string_and_replaces_on_html_completion() {
@@ -353,7 +942,14 @@ fn child_to_top_javascript_navigation_uses_child_default_policy() {
 fn typed_session_errors_preserve_json_rpc_messages_and_sources() {
     let mut session = CdpSession::new().unwrap();
     let error = session
-        .load_page_request("not-a-url", Method::Get, None, None)
+        .load_page_request(
+            "not-a-url",
+            Method::Get,
+            None,
+            None,
+            "test-loader",
+            NavigationCommit::Push,
+        )
         .unwrap_err();
     assert!(matches!(error, CdpSessionError::Url(_)));
     assert_eq!(error.to_string(), "missing '://' in URL");
@@ -390,6 +986,7 @@ fn timed_out_page_task_records_safe_failure_without_committing_document() {
         result: Err(PageTaskError::TimedOut),
     };
     let pending = PendingDocumentCommit {
+        requested_url: "http://localhost/?token=QUERY_SECRET_942".into(),
         url: "http://localhost/?token=QUERY_SECRET_942".into(),
         html: "BODY_SECRET_942".into(),
         generation,
@@ -1470,6 +2067,7 @@ fn pending_page_navigation_times_out_while_a_dialog_is_open() {
             timeout_deadline: deadline_after(timeout),
             task: Box::pin(task),
             commit: PendingDocumentCommit {
+                requested_url: "about:blank".to_string(),
                 url: "about:blank".to_string(),
                 html: "<html><head></head><body></body></html>".to_string(),
                 generation: 1,
@@ -1993,6 +2591,283 @@ fn page_domain_navigates_reloads_and_emits_network_events() {
     );
 
     server.join();
+}
+
+#[test]
+fn no_content_navigation_keeps_document_while_empty_ok_replaces_it() {
+    let listener = bind_loopback().unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        for _ in 0..5 {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            let (status, body) = if request.starts_with("GET /start ") {
+                ("200 OK", "<main id=stable>kept</main>")
+            } else if request.starts_with("GET /no-content ") {
+                ("204 No Content", "")
+            } else if request.starts_with("GET /reset-content ") {
+                ("205 Reset Content", "")
+            } else if request.starts_with("GET /not-modified ") {
+                ("304 Not Modified", "")
+            } else {
+                ("200 OK", "")
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            )
+            .unwrap();
+        }
+    });
+
+    let origin = format!("http://127.0.0.1:{}", address.port());
+    let mut session = CdpSession::new().unwrap();
+    session
+        .dispatch("Page.navigate", json!({ "url": format!("{origin}/start") }))
+        .unwrap();
+    let document = session.runtime.document().identity();
+    let generation = session.document_generation;
+    let history_length = session.history_entries.len();
+    session.drain_events();
+
+    for (path, status) in [("no-content", 204), ("reset-content", 205)] {
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": format!("{origin}/{path}") }),
+            )
+            .unwrap();
+        assert_eq!(session.current_url, format!("{origin}/start"), "{path}");
+        assert_eq!(session.runtime.document().identity(), document, "{path}");
+        assert_eq!(session.document_generation, generation, "{path}");
+        assert_eq!(session.history_entries.len(), history_length, "{path}");
+        assert!(
+            session
+                .runtime
+                .document()
+                .query_selector("#stable")
+                .is_some()
+        );
+        let events = session.drain_events();
+        let response = events
+            .iter()
+            .find(|event| {
+                event.method == "Network.responseReceived"
+                    && event.params["response"]["status"] == status
+            })
+            .unwrap_or_else(|| panic!("missing {status} response event: {events:?}"));
+        let loader = response.params["requestId"].clone();
+        assert_eq!(
+            response.params["response"]["url"],
+            format!("{origin}/{path}")
+        );
+        assert!(events.iter().any(|event| {
+            event.method == "Network.requestWillBeSent"
+                && event.params["requestId"] == loader
+                && event.params["request"]["url"] == format!("{origin}/{path}")
+        }));
+    }
+
+    let error = session
+        .dispatch(
+            "Page.navigate",
+            json!({ "url": format!("{origin}/not-modified") }),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("304 without a cached response entity")
+    );
+    assert_eq!(session.current_url, format!("{origin}/start"));
+    assert_eq!(session.runtime.document().identity(), document);
+    assert_eq!(session.document_generation, generation);
+    assert_eq!(session.history_entries.len(), history_length);
+
+    session
+        .dispatch(
+            "Page.navigate",
+            json!({ "url": format!("{origin}/empty-ok") }),
+        )
+        .unwrap();
+    assert_eq!(session.current_url, format!("{origin}/empty-ok"));
+    assert_ne!(session.runtime.document().identity(), document);
+    assert_eq!(session.document_generation, generation + 1);
+    assert_eq!(session.history_entries.len(), history_length + 1);
+    assert!(
+        session
+            .runtime
+            .document()
+            .query_selector("#stable")
+            .is_none()
+    );
+
+    server.join();
+}
+
+#[test]
+fn prepared_no_content_navigation_keeps_document_while_empty_ok_is_pending() {
+    let listener = bind_loopback().unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        for _ in 0..4 {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            let status = if request.starts_with("GET /no-content ") {
+                "204 No Content"
+            } else if request.starts_with("GET /reset-content ") {
+                "205 Reset Content"
+            } else if request.starts_with("GET /not-modified ") {
+                "304 Not Modified"
+            } else {
+                "200 OK"
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        }
+    });
+
+    let origin = format!("http://127.0.0.1:{}", address.port());
+    let mut session = CdpSession::new().unwrap();
+    session
+        .dispatch(
+            "Page.navigate",
+            json!({"url":"data:text/html,<main id=stable>kept</main>"}),
+        )
+        .unwrap();
+    let document = session.runtime.document().identity();
+    let generation = session.document_generation;
+    let history_length = session.history_entries.len();
+    session.drain_events();
+
+    for (path, status) in [("no-content", 204), ("reset-content", 205)] {
+        assert!(matches!(
+            session
+                .prepare_page_navigate(&json!({"url":format!("{origin}/{path}")}))
+                .unwrap(),
+            PreparedPageNavigation::Complete(_)
+        ));
+        assert_eq!(session.runtime.document().identity(), document, "{path}");
+        assert_eq!(session.document_generation, generation, "{path}");
+        assert_eq!(session.history_entries.len(), history_length, "{path}");
+        let events = session.drain_events();
+        let response = events
+            .iter()
+            .find(|event| {
+                event.method == "Network.responseReceived"
+                    && event.params["response"]["status"] == status
+            })
+            .unwrap_or_else(|| panic!("missing prepared {status} response event: {events:?}"));
+        let loader = response.params["requestId"].clone();
+        assert_eq!(
+            response.params["response"]["url"],
+            format!("{origin}/{path}")
+        );
+        assert!(events.iter().any(|event| {
+            event.method == "Network.requestWillBeSent"
+                && event.params["requestId"] == loader
+                && event.params["request"]["url"] == format!("{origin}/{path}")
+        }));
+    }
+    assert!(
+        session
+            .prepare_page_navigate(&json!({"url":format!("{origin}/not-modified")}))
+            .is_err()
+    );
+    assert_eq!(session.runtime.document().identity(), document);
+
+    let PreparedPageNavigation::Pending { task, commit, .. } = session
+        .prepare_page_navigate(&json!({"url":format!("{origin}/empty-ok")}))
+        .unwrap()
+    else {
+        panic!("empty 200 must prepare a replacement document");
+    };
+    let mut task = Box::pin(task);
+    let mut context = TaskContext::from_waker(Waker::noop());
+    let started = std::time::Instant::now();
+    let completed = loop {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "prepared empty navigation timed out"
+        );
+        if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+            break completed;
+        }
+    };
+    session
+        .commit_document_page_task(completed, commit)
+        .unwrap();
+    assert_ne!(session.runtime.document().identity(), document);
+    assert_eq!(session.document_generation, generation + 1);
+    assert_eq!(session.history_entries.len(), history_length + 1);
+    assert_eq!(session.current_url, format!("{origin}/empty-ok"));
+    server.join();
+}
+
+#[test]
+fn navigation_response_diagnostics_remove_url_secrets_and_limit_headers() {
+    let diagnostic = super::page::navigation_response_diagnostic(
+        "loader-secret-test",
+        NavigationCommit::Reload,
+        Method::Get,
+        200,
+        12,
+        10,
+        "https://user:password@example.test/private/path?token=secret#hidden",
+        "https://example.test/final?session=private",
+        1,
+        &[
+            ("Content-Type".into(), "text/html; charset=utf-8".into()),
+            ("Content-Length".into(), "12".into()),
+            ("Content-Encoding".into(), "gzip".into()),
+            ("Set-Cookie".into(), "secret=value".into()),
+            ("Authorization".into(), "Bearer private".into()),
+        ],
+    );
+    let serialized = diagnostic.to_string();
+    assert_eq!(
+        diagnostic["request_url"],
+        "https://example.test/private/path"
+    );
+    assert_eq!(diagnostic["effective_url"], "https://example.test/final");
+    assert_eq!(diagnostic["content_type"], "text/html; charset=utf-8");
+    assert_eq!(diagnostic["content_encoding"], "gzip");
+    assert_eq!(diagnostic["loader_id"], "loader-secret-test");
+    assert_eq!(diagnostic["commit"], "reload");
+    for secret in ["password", "token", "secret=value", "Bearer private"] {
+        assert!(
+            !serialized.contains(secret),
+            "response diagnostic redaction failed"
+        );
+    }
+    assert_eq!(
+        super::page::diagnostic_navigation_url("data:text/html,private"),
+        "data"
+    );
+    let history = super::page::navigation_history_diagnostic(
+        "finished",
+        "loader-7",
+        NavigationCommit::Traverse(2),
+        "https://user:password@example.test/path?token=private#fragment",
+        Some("data:text/html,private"),
+        Some("preserved"),
+    );
+    let serialized = history.to_string();
+    assert_eq!(history["loader_id"], "loader-7");
+    assert_eq!(history["commit"], "traverse");
+    assert_eq!(history["requested_url"], "https://example.test/path");
+    assert_eq!(history["effective_url"], "data");
+    assert_eq!(history["outcome"], "preserved");
+    for secret in ["password", "token", "private", "fragment"] {
+        assert!(
+            !serialized.contains(secret),
+            "navigation history redaction failed"
+        );
+    }
 }
 
 #[test]
@@ -4175,6 +5050,225 @@ fn pointer_leaving_surface_clears_hover_selector() {
 }
 
 #[test]
+fn native_input_does_not_run_due_timer_tasks() {
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document(
+            "https://example.test/",
+            "<html><body style='height:1000px'></body></html>",
+            1,
+            "null",
+        )
+        .unwrap();
+    session
+        .runtime
+        .eval("globalThis.timerFired = false; setTimeout(() => timerFired = true, 1000)")
+        .unwrap();
+    session
+        .runtime
+        .eval("document.addEventListener('wheel', () => { globalThis.wheelFired = true; history.pushState(null, '', '/wheel/first'); history.pushState(null, '', '/wheel'); })")
+        .unwrap();
+    session.advance_clock_without_tasks(1000);
+
+    session
+        .dispatch(
+            "Input.dispatchMouseEvent",
+            json!({ "type": "mouseWheel", "x": 20, "y": 20, "deltaY": 10 }),
+        )
+        .unwrap();
+    assert_eq!(
+        session.runtime.eval("wheelFired").unwrap().as_boolean(),
+        Some(true),
+    );
+    assert_eq!(session.current_url(), "https://example.test/wheel");
+    assert_eq!(
+        session.runtime.eval("timerFired").unwrap().as_boolean(),
+        Some(false),
+    );
+
+    session.drive_event_loop(0).unwrap();
+    assert_eq!(
+        session.runtime.eval("timerFired").unwrap().as_boolean(),
+        Some(true),
+    );
+}
+
+fn cross_origin_wheel_session(child_html: &str) -> (CdpSession, NodeHandle, usize) {
+    let child = format!(
+        "data:text/html;base64,{}",
+        BASE64_STANDARD.encode(child_html)
+    );
+    let mut session = CdpSession::new().unwrap();
+    session.set_viewport(200, 100);
+    session
+        .install_document(
+            "https://top.test/",
+            &format!(
+                "<style>*{{margin:0}}iframe{{display:block;border:0;width:200px;height:100px}}</style>\
+                 <iframe id=child src='{child}'></iframe>"
+            ),
+            1,
+            "null",
+        )
+        .unwrap();
+    for _ in 0..8 {
+        session.drive_event_loop(0).unwrap();
+    }
+    assert_eq!(
+        session
+            .runtime
+            .eval("document.getElementById('child').contentDocument === null")
+            .unwrap()
+            .as_boolean(),
+        Some(true),
+        "the data URL child must remain cross-origin to the parent Realm",
+    );
+
+    let target = session
+        .runtime
+        .hit_test(10.0, 10.0)
+        .expect("the child target must be hit");
+    assert_eq!(target.get_attribute("id").as_deref(), Some("target"));
+    let target_document_id = session
+        .runtime
+        .input_position_for_node(&target, 10.0, 10.0)
+        .4;
+    (session, target, target_document_id)
+}
+
+#[test]
+fn native_wheel_enters_cross_origin_hit_target_realm_without_exposing_it_to_author_code() {
+    let (mut session, target, _) = cross_origin_wheel_session(
+        "<style>*{margin:0}#target{height:1000px}</style><div id=target>child</div>\
+         <script>const target=document.getElementById('target');\
+         target.addEventListener('wheel',event=>target.setAttribute('data-wheel',\
+         [event.deltaY,Object.getPrototypeOf(event)===WheelEvent.prototype,\
+         event.target.ownerDocument===document].join(':')));\
+         target.addEventListener('wheel',()=>Promise.resolve().then(()=>\
+         target.setAttribute('data-job',String(target.ownerDocument===document))))</script>",
+    );
+    let target_id = target.identity();
+    let author_result = session
+        .runtime
+        .eval(&format!(
+            "(()=>{{try{{__omoikane_dispatch_wheel_input({target_id},{{deltaX:0,deltaY:40}});\
+             return 'allowed'}}catch(error){{return error.name}}}})()"
+        ))
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(author_result, "SecurityError");
+
+    let result = session
+        .dispatch(
+            "Input.dispatchMouseEvent",
+            json!({"type":"mouseWheel","x":10,"y":10,"deltaX":0,"deltaY":40}),
+        )
+        .unwrap();
+    assert_eq!(result["defaultPrevented"], json!(false));
+    assert_eq!(result["hostOverscrollY"], json!(false));
+    assert_eq!(
+        target.get_attribute("data-wheel").as_deref(),
+        Some("40:true:true"),
+        "the child listener and WheelEvent must use the child Realm",
+    );
+    assert_eq!(target.get_attribute("data-job").as_deref(), Some("true"));
+}
+
+#[test]
+fn native_cross_origin_wheel_propagates_prevent_default_to_the_host_result() {
+    let (mut session, target, _) = cross_origin_wheel_session(
+        "<style>*{margin:0}#target{height:1000px}</style><div id=target>child</div>\
+         <script>const target=document.getElementById('target');\
+         target.addEventListener('wheel',event=>{event.preventDefault();\
+         target.setAttribute('data-cancel',\
+         [event.cancelable,event.defaultPrevented,event.target.ownerDocument===document].join(':'))})\
+         </script>",
+    );
+
+    let result = session
+        .dispatch(
+            "Input.dispatchMouseEvent",
+            json!({"type":"mouseWheel","x":10,"y":10,"deltaX":0,"deltaY":40}),
+        )
+        .unwrap();
+    assert_eq!(result["defaultPrevented"], json!(true));
+    assert_eq!(result["hostOverscrollX"], json!(false));
+    assert_eq!(result["hostOverscrollY"], json!(false));
+    assert_eq!(
+        target.get_attribute("data-cancel").as_deref(),
+        Some("true:true:true"),
+        "the child Realm must cancel the trusted event before the host reads the outcome",
+    );
+}
+
+#[test]
+fn input_realm_evaluation_restores_the_main_realm_after_an_error() {
+    let (mut session, _, target_document_id) = cross_origin_wheel_session(
+        "<style>*{margin:0}#target{height:1000px}</style><div id=target>child</div>\
+         <script>globalThis.realmMarker='child'</script>",
+    );
+    session
+        .runtime
+        .eval("globalThis.realmMarker = 'top'")
+        .unwrap();
+
+    let error = session
+        .runtime
+        .eval_input_in_document_realm(target_document_id, "throw new Error('input realm failure')")
+        .expect_err("the child input evaluation must propagate its exception");
+    assert!(
+        error.to_string().contains("input realm failure"),
+        "unexpected child error: {error}",
+    );
+    assert_eq!(
+        session
+            .runtime
+            .eval("realmMarker + ':' + document.URL")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "top:https://top.test/",
+        "an exceptional child evaluation must restore the calling main Realm",
+    );
+}
+
+#[test]
+fn input_realm_evaluation_rejects_a_retired_document() {
+    let (mut session, _, target_document_id) = cross_origin_wheel_session(
+        "<style>*{margin:0}#target{height:1000px}</style><div id=target>child</div>",
+    );
+    session
+        .runtime
+        .eval("document.getElementById('child').remove()")
+        .unwrap();
+
+    let error = session
+        .runtime
+        .eval_input_in_document_realm(target_document_id, "globalThis.retiredInputRan = true")
+        .expect_err("a retired iframe Document must reject trusted input evaluation");
+    assert!(
+        error
+            .to_string()
+            .contains("input Document Realm is not active"),
+        "unexpected retired Document error: {error}",
+    );
+    assert_eq!(
+        session
+            .runtime
+            .eval("document.URL")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "https://top.test/",
+        "rejecting a retired child Document must leave the main Realm active",
+    );
+}
+
+#[test]
 fn mouse_input_hit_tests_paint_order_transforms_clips_and_scroll() {
     let mut session = CdpSession::new().unwrap();
     session
@@ -4714,4 +5808,74 @@ fn keyboard_input_edits_focused_text_control_end_to_end() {
         state["result"]["value"],
         r#"{"value":"miu","start":2,"end":2,"events":["beforeinput:insertText:m","input:insertText:m","beforeinput:insertText:i","input:insertText:i","beforeinput:insertText:k","input:insertText:k","beforeinput:insertText:u","input:insertText:u","beforeinput:deleteContentBackward:null","input:deleteContentBackward:null"]}"#
     );
+}
+
+#[test]
+fn iframe_transport_mode_survives_navigation_and_can_restore_sync_embedding() {
+    struct Transport;
+    impl crate::http::HttpTransport for Transport {
+        fn send(
+            &self,
+            _: &crate::http::HttpRequest,
+            _: Option<std::time::Duration>,
+        ) -> Result<crate::http::HttpResponse, crate::http::HttpParseError> {
+            Ok(crate::http::HttpResponse::new(
+                200,
+                "OK",
+                vec![("Content-Type".into(), "text/html".into())],
+                b"<!doctype html><title>worker child</title>".to_vec(),
+            ))
+        }
+    }
+    let mut session = CdpSession::new().unwrap();
+    for (generation, asynchronous) in [(1, true), (2, true), (3, false)] {
+        if generation != 2 {
+            session.set_nonblocking_iframe_loading(asynchronous);
+        }
+        session
+            .install_document(
+                &format!("https://iframe.example.test/parent-{generation}"),
+                "<iframe id=f></iframe>",
+                generation,
+                "null",
+            )
+            .unwrap();
+        session
+            .runtime
+            .set_http_resource_transport(Some(std::sync::Arc::new(Transport)));
+        let immediate = session
+            .runtime
+            .eval(
+                "globalThis.frame=document.getElementById('f'); \
+                 frame.src='/child'; frame.contentDocument.title",
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            immediate,
+            if asynchronous { "" } else { "worker child" },
+            "replacement must preserve the configured transport mode"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            session.runtime.run_until_idle().unwrap();
+            let title = session
+                .runtime
+                .eval("frame.contentDocument.title")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped();
+            if title == "worker child" {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "iframe did not commit"
+            );
+            std::thread::yield_now();
+        }
+    }
 }

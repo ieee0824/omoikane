@@ -2,6 +2,7 @@
 
 use super::CdpSession;
 use crate::js::render_demand::RuntimePaintKey;
+use crate::resource_worker::ResourceQueue;
 use std::time::Duration;
 
 /// When a host should provide the next page rendering opportunity.
@@ -50,6 +51,68 @@ pub struct RenderDemand {
 }
 
 impl CdpSession {
+    /// Sets resource concurrency while keeping navigation generations independent.
+    ///
+    /// The active document receives a fresh queue. Later navigations create new
+    /// queues with this limit, so retired blocking requests cannot occupy their slots.
+    /// Configure this before starting resource loads; it clears explicit queue sharing.
+    pub fn set_resource_worker_count(&mut self, workers: std::num::NonZeroUsize) {
+        self.resource_worker_count = workers;
+        self.resource_queue = None;
+        self.runtime.set_resource_queue(ResourceQueue::new(workers));
+    }
+
+    /// Explicitly shares one queue across the active document and later navigations.
+    ///
+    /// Clones share their concurrency limit, including slots held by retired
+    /// in-flight transports. The default policy instead gives each navigation a
+    /// fresh queue. Configure sharing before loads; it does not migrate submitted work.
+    pub fn set_resource_queue(&mut self, queue: ResourceQueue) {
+        self.resource_worker_count = queue.worker_count();
+        self.runtime.set_resource_queue(queue.clone());
+        self.resource_queue = Some(queue);
+    }
+
+    /// Keeps child-document HTTP transport off an interactive owner thread.
+    ///
+    /// The setting persists across navigations. Existing pending loads finish
+    /// normally when disabled; later loads use the synchronous embedding path.
+    pub fn set_nonblocking_iframe_loading(&mut self, enabled: bool) {
+        self.nonblocking_iframe_loading = enabled;
+        self.runtime.set_nonblocking_iframe_loading(enabled);
+    }
+
+    /// Shares Fetch/XHR transport workers with other document resources.
+    pub fn set_nonblocking_fetch_loading(&mut self, enabled: bool) {
+        self.nonblocking_fetch_loading = enabled;
+        self.runtime.set_nonblocking_fetch_loading(enabled);
+    }
+
+    /// Shares dynamic script fetch workers with other document resources.
+    pub fn set_nonblocking_script_loading(&mut self, enabled: bool) {
+        self.nonblocking_script_loading = enabled;
+        self.runtime.set_nonblocking_script_loading(enabled);
+    }
+
+    /// Keeps font fetches and decoding off the interactive owner thread.
+    pub fn set_nonblocking_font_loading(&mut self, enabled: bool) {
+        self.nonblocking_font_loading = enabled;
+        self.runtime.set_nonblocking_font_loading(enabled);
+    }
+
+    /// Fetches network images on workers while the host keeps driving frames.
+    pub fn set_nonblocking_image_loading(&mut self, enabled: bool) {
+        self.nonblocking_image_loading = enabled;
+        self.runtime.set_nonblocking_image_loading(enabled);
+    }
+
+    /// Advances page time without running queued tasks or animation callbacks.
+    /// Native hosts call this before input so timers created by that input use
+    /// the current clock even when page tasks are deferred for responsiveness.
+    pub fn advance_clock_without_tasks(&mut self, elapsed_ms: u64) {
+        self.runtime.advance_clock_without_tasks(elapsed_ms);
+    }
+
     /// Returns the monotonic generation of the active document. Native hosts
     /// use this to rebase their clock after a navigation installs a new runtime.
     pub fn document_generation(&self) -> u64 {
@@ -85,7 +148,11 @@ impl CdpSession {
     pub fn render_demand(&self, last_presented: Option<&PaintStateKey>) -> RenderDemand {
         RenderDemand {
             needs_paint: last_presented != Some(&self.paint_state_key()),
-            next: self.runtime.next_rendering(),
+            next: if self.pending_document_startup.is_some() {
+                NextRendering::EveryFrame
+            } else {
+                self.runtime.next_rendering()
+            },
         }
     }
 }

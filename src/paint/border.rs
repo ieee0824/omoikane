@@ -1,5 +1,20 @@
 //! Border painting, box-shadow, and triangle/quad rasterization.
 
+mod shadow_mask_cache;
+
+use std::rc::Rc;
+
+pub(crate) use shadow_mask_cache::{
+    FrameShadowMaskCache, RasterMeasurementToken, ShadowMaskCacheSummary,
+};
+#[cfg(test)]
+use shadow_mask_cache::{MAX_FRAME_SHADOW_MASK_ENTRIES, MAX_FRAME_SHADOW_MASK_RGBA_BYTES};
+use shadow_mask_cache::{
+    MAX_FRAME_SHADOW_MASK_ENTRY_RGBA_BYTES, RectBits, ShadowBlurPlanKey, ShadowMaskGeneration,
+    ShadowMaskKey, ShadowMaskShapeKey,
+};
+
+use crate::css::style::PropertyId;
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::layout::{LayoutBox, Rect};
 
@@ -23,11 +38,11 @@ pub(crate) fn paint_borders(
     let mut border_box = offset.rect(border_box_rect(layout));
     let padding_box = offset.rect(padding_box_rect(layout));
     let mut border = layout.dimensions.border;
-    let table_cell = matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("table-cell"))
-        || (style.get("display").is_none()
+    let table_cell = matches!(style.get_by_id(PropertyId::Display), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("table-cell"))
+        || (style.get_by_id(PropertyId::Display).is_none()
             && matches!(layout.node.tag_name().as_deref(), Some("td" | "th")));
     if table_cell
-        && matches!(style.get("border-collapse"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("collapse"))
+        && matches!(style.get_by_id(PropertyId::BorderCollapse), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("collapse"))
     {
         // Collapsed cell boxes end at the grid line. Paint both halves of the
         // shared border around that line, without enlarging the measured box.
@@ -225,8 +240,15 @@ pub(crate) fn paint_borders(
 }
 
 pub(crate) fn has_solid_border_side(style: &ComputedStyle, side: &str) -> bool {
+    let value = match side {
+        "top" => style.get_by_id(PropertyId::BorderTopStyle),
+        "right" => style.get_by_id(PropertyId::BorderRightStyle),
+        "bottom" => style.get_by_id(PropertyId::BorderBottomStyle),
+        "left" => style.get_by_id(PropertyId::BorderLeftStyle),
+        _ => style.get(&format!("border-{side}-style")),
+    };
     if matches!(
-        style.get(&format!("border-{side}-style")),
+        value,
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("solid")
     ) {
         return true;
@@ -239,8 +261,14 @@ pub(crate) fn has_solid_border_side(style: &ComputedStyle, side: &str) -> bool {
 }
 
 pub(crate) fn border_color_side(style: &ComputedStyle, side: &str) -> Option<Color> {
-    resolve_color_value(style.get(&format!("border-{side}-color")), style)
-        .or_else(|| border_color(style))
+    let value = match side {
+        "top" => style.get_by_id(PropertyId::BorderTopColor),
+        "right" => style.get_by_id(PropertyId::BorderRightColor),
+        "bottom" => style.get_by_id(PropertyId::BorderBottomColor),
+        "left" => style.get_by_id(PropertyId::BorderLeftColor),
+        _ => style.get(&format!("border-{side}-color")),
+    };
+    resolve_color_value(value, style).or_else(|| border_color(style))
 }
 
 #[derive(Clone, Copy)]
@@ -611,8 +639,9 @@ pub(crate) fn paint_box_shadow(
     style: &ComputedStyle,
     border_box: Rect,
     clip: Option<Rect>,
+    shadow_masks: Option<&FrameShadowMaskCache>,
 ) {
-    let shadow_value = match style.get("box-shadow") {
+    let shadow_value = match style.get_by_id(PropertyId::BoxShadow) {
         Some(ComputedValue::Keyword(v)) => v.clone(),
         _ => return,
     };
@@ -631,8 +660,30 @@ pub(crate) fn paint_box_shadow(
             // inset shadow は未実装（スキップ）
             continue;
         }
-        paint_outer_box_shadow(canvas, border_box, shadow, clip, radii);
+        paint_outer_box_shadow_cached(canvas, border_box, shadow, clip, radii, shadow_masks);
     }
+}
+
+fn shadow_buffer_intersects_canvas(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> bool {
+    if width == 0 || height == 0 || canvas_width == 0 || canvas_height == 0 {
+        return false;
+    }
+    if canvas_width > i32::MAX as u32 || canvas_height > i32::MAX as u32 {
+        return true;
+    }
+    let right = i64::from(x) + i64::from(width);
+    let bottom = i64::from(y) + i64::from(height);
+    right > 0
+        && bottom > 0
+        && i64::from(x) < i64::from(canvas_width)
+        && i64::from(y) < i64::from(canvas_height)
 }
 
 /// アウター box-shadow を描画する。
@@ -643,6 +694,258 @@ pub(crate) fn paint_outer_box_shadow(
     shadow: &BoxShadow,
     clip: Option<Rect>,
     radii: Option<(f32, f32, f32, f32)>,
+) {
+    paint_outer_box_shadow_cached(canvas, border_box, shadow, clip, radii, None);
+}
+
+#[derive(Clone, Copy)]
+enum ShadowMaskShape {
+    Rect,
+    Rounded {
+        source_radii: [f32; 4],
+        knockout_radii: [f32; 4],
+    },
+}
+
+#[derive(Clone, Copy)]
+enum ShadowBlurPlan {
+    RoundedZeroBlur,
+    DirectGaussian { sigma: f32 },
+    Box { ordered_radii: [u32; 3] },
+}
+
+struct ShadowMaskSpec {
+    buf_x: i32,
+    buf_y: i32,
+    buf_w: u32,
+    buf_h: u32,
+    local_rect: Rect,
+    border_local: Rect,
+    spread: f32,
+    blur_radius: f32,
+    shape: ShadowMaskShape,
+    blur: ShadowBlurPlan,
+}
+
+impl ShadowMaskSpec {
+    fn cache_entry(&self) -> Option<(ShadowMaskKey, usize)> {
+        if !self.spread.is_finite() || !self.blur_radius.is_finite() {
+            return None;
+        }
+        let shape = match self.shape {
+            ShadowMaskShape::Rect => ShadowMaskShapeKey::Rect,
+            ShadowMaskShape::Rounded {
+                source_radii,
+                knockout_radii,
+            } => {
+                if !source_radii
+                    .iter()
+                    .chain(knockout_radii.iter())
+                    .all(|radius| radius.is_finite())
+                {
+                    return None;
+                }
+                ShadowMaskShapeKey::Rounded {
+                    source_radii: source_radii.map(f32::to_bits),
+                    knockout_radii: knockout_radii.map(f32::to_bits),
+                }
+            }
+        };
+        let blur = match self.blur {
+            ShadowBlurPlan::RoundedZeroBlur => ShadowBlurPlanKey::RoundedZeroBlur,
+            ShadowBlurPlan::DirectGaussian { sigma } if sigma.is_finite() => {
+                ShadowBlurPlanKey::DirectGaussian {
+                    sigma_bits: sigma.to_bits(),
+                }
+            }
+            ShadowBlurPlan::DirectGaussian { .. } => return None,
+            ShadowBlurPlan::Box { ordered_radii } => ShadowBlurPlanKey::Box { ordered_radii },
+        };
+        let rgba_bytes = usize::try_from(self.buf_w)
+            .ok()?
+            .checked_mul(usize::try_from(self.buf_h).ok()?)?
+            .checked_mul(4)?;
+        Some((
+            ShadowMaskKey {
+                policy_version: 1,
+                allocated_width: self.buf_w,
+                allocated_height: self.buf_h,
+                local_rect: RectBits::from_finite(self.local_rect)?,
+                border_local: RectBits::from_finite(self.border_local)?,
+                spread_bits: self.spread.to_bits(),
+                blur_radius_bits: self.blur_radius.to_bits(),
+                shape,
+                blur,
+            },
+            rgba_bytes,
+        ))
+    }
+
+    fn knockout_radii(&self) -> Option<(f32, f32, f32, f32)> {
+        match self.shape {
+            ShadowMaskShape::Rect => None,
+            ShadowMaskShape::Rounded {
+                knockout_radii: [tl, tr, br, bl],
+                ..
+            } => Some((tl, tr, br, bl)),
+        }
+    }
+}
+
+fn shadow_mask_spec(
+    border_box: Rect,
+    shadow_rect: Rect,
+    shadow: &BoxShadow,
+    radii: Option<(f32, f32, f32, f32)>,
+) -> ShadowMaskSpec {
+    let blur_radius = shadow.blur_radius;
+    let spread = shadow.spread_radius;
+    let sigma = blur_radius * 0.5;
+    let direct_gaussian = blur_radius > 0.0 && sigma > 0.5 && sigma <= 2.0;
+    let ordered_radii = gaussian_box_blur_radii(blur_radius);
+    let (blur, margin) = if blur_radius <= 0.0 {
+        (ShadowBlurPlan::RoundedZeroBlur, 0)
+    } else if direct_gaussian {
+        (
+            ShadowBlurPlan::DirectGaussian { sigma },
+            ((sigma * 3.0).ceil() as u32).saturating_add(1),
+        )
+    } else {
+        (
+            ShadowBlurPlan::Box { ordered_radii },
+            ordered_radii
+                .iter()
+                .copied()
+                .fold(0u32, u32::saturating_add)
+                .saturating_add(1),
+        )
+    };
+    let margin_f = margin as f32;
+    let buf_x = (shadow_rect.x - margin_f).floor() as i32;
+    let buf_y = (shadow_rect.y - margin_f).floor() as i32;
+    let buf_w = (shadow_rect.width + margin_f * 2.0).ceil() as u32 + 2;
+    let buf_h = (shadow_rect.height + margin_f * 2.0).ceil() as u32 + 2;
+    let local_rect = Rect {
+        x: shadow_rect.x - buf_x as f32,
+        y: shadow_rect.y - buf_y as f32,
+        width: shadow_rect.width,
+        height: shadow_rect.height,
+    };
+    let border_local = Rect {
+        x: border_box.x - buf_x as f32,
+        y: border_box.y - buf_y as f32,
+        width: border_box.width,
+        height: border_box.height,
+    };
+    let shape = radii.map_or(ShadowMaskShape::Rect, |(tl, tr, br, bl)| {
+        ShadowMaskShape::Rounded {
+            source_radii: [tl + spread, tr + spread, br + spread, bl + spread],
+            knockout_radii: [tl, tr, br, bl],
+        }
+    });
+    ShadowMaskSpec {
+        buf_x,
+        buf_y,
+        buf_w,
+        buf_h,
+        local_rect,
+        border_local,
+        spread,
+        blur_radius,
+        shape,
+        blur,
+    }
+}
+
+fn render_shadow_mask(spec: &ShadowMaskSpec) -> Canvas {
+    let mut mask = Canvas::new(spec.buf_w, spec.buf_h);
+    match spec.shape {
+        ShadowMaskShape::Rect => {
+            mask.fill_rect(spec.local_rect, Color::rgba(255, 255, 255, 255));
+        }
+        ShadowMaskShape::Rounded { source_radii, .. } => mask.fill_rounded_rect(
+            spec.local_rect,
+            Color::rgba(255, 255, 255, 255),
+            source_radii[0],
+            source_radii[1],
+            source_radii[2],
+            source_radii[3],
+            None,
+        ),
+    }
+    match spec.blur {
+        ShadowBlurPlan::RoundedZeroBlur => {}
+        ShadowBlurPlan::DirectGaussian { sigma } => mask.gaussian_blur_alpha_zero_padded(sigma),
+        ShadowBlurPlan::Box { ordered_radii } => {
+            mask.box_blur_alpha_radii_zero_padded(&ordered_radii);
+        }
+    }
+    knock_out_shadow_interior(&mut mask, spec.border_local, spec.knockout_radii());
+    mask
+}
+
+fn composite_shadow_mask(
+    canvas: &mut Canvas,
+    mask: &Canvas,
+    spec: &ShadowMaskSpec,
+    color: Color,
+    clip: Option<Rect>,
+) {
+    canvas.composite_canvas_clipped(
+        mask,
+        spec.buf_x,
+        spec.buf_y,
+        color.r,
+        color.g,
+        color.b,
+        color.a as f32 / 255.0,
+        clip,
+    );
+}
+
+fn paint_shadow_mask(
+    canvas: &mut Canvas,
+    spec: ShadowMaskSpec,
+    color: Color,
+    clip: Option<Rect>,
+    shadow_masks: Option<&FrameShadowMaskCache>,
+) {
+    let mut eligible_miss = None;
+    if let Some(cache) = shadow_masks {
+        match spec.cache_entry() {
+            None => cache.record_generation(ShadowMaskGeneration::Unkeyable),
+            Some((_, rgba_bytes)) if rgba_bytes > MAX_FRAME_SHADOW_MASK_ENTRY_RGBA_BYTES => {
+                cache.record_generation(ShadowMaskGeneration::Oversize);
+            }
+            Some((key, rgba_bytes)) => {
+                if let Some(mask) = cache.lookup(&key, rgba_bytes) {
+                    composite_shadow_mask(canvas, &mask, &spec, color, clip);
+                    return;
+                }
+                cache.record_generation(ShadowMaskGeneration::Eligible);
+                eligible_miss = Some((cache, key, rgba_bytes));
+            }
+        }
+    }
+    let mask = render_shadow_mask(&spec);
+    if let Some((cache, key, expected_rgba_bytes)) = eligible_miss {
+        debug_assert_eq!(mask.pixels.len(), expected_rgba_bytes);
+        let rgba_capacity = mask.pixels.capacity();
+        let mask = Rc::new(mask);
+        cache.retain(key, rgba_capacity, Rc::clone(&mask));
+        composite_shadow_mask(canvas, &mask, &spec, color, clip);
+    } else {
+        composite_shadow_mask(canvas, &mask, &spec, color, clip);
+    }
+}
+
+fn paint_outer_box_shadow_cached(
+    canvas: &mut Canvas,
+    border_box: Rect,
+    shadow: &BoxShadow,
+    clip: Option<Rect>,
+    radii: Option<(f32, f32, f32, f32)>,
+    shadow_masks: Option<&FrameShadowMaskCache>,
 ) {
     let spread = shadow.spread_radius;
     let blur = shadow.blur_radius;
@@ -660,198 +963,96 @@ pub(crate) fn paint_outer_box_shadow(
         return;
     }
 
-    let color = shadow.color;
+    if blur <= 0.0 && radii.is_none() {
+        paint_unblurred_rect_shadow(canvas, border_box, shadow_rect, shadow.color, clip);
+        return;
+    }
+    let spec = shadow_mask_spec(border_box, shadow_rect, shadow, radii);
+    if spec.buf_w == 0
+        || spec.buf_h == 0
+        || !shadow_buffer_intersects_canvas(
+            spec.buf_x,
+            spec.buf_y,
+            spec.buf_w,
+            spec.buf_h,
+            canvas.width(),
+            canvas.height(),
+        )
+    {
+        return;
+    }
+    paint_shadow_mask(canvas, spec, shadow.color, clip, shadow_masks);
+}
 
-    if blur <= 0.0 {
-        if let Some((tl, tr, br, bl)) = radii {
-            // blur=0 かつ border-radius あり: 一時バッファに rounded rect を描画し、
-            // border_box 内側のアルファを消去してから合成する（矩形バンドでは角丸が反映されない）。
-            let buf_x = shadow_rect.x.floor() as i32;
-            let buf_y = shadow_rect.y.floor() as i32;
-            let buf_w = shadow_rect.width.ceil() as u32 + 2;
-            let buf_h = shadow_rect.height.ceil() as u32 + 2;
-            if buf_w == 0 || buf_h == 0 {
-                return;
-            }
-            let mut shadow_buf = Canvas::new(buf_w, buf_h);
-            let local_rect = Rect {
-                x: shadow_rect.x - buf_x as f32,
-                y: shadow_rect.y - buf_y as f32,
-                width: shadow_rect.width,
-                height: shadow_rect.height,
-            };
-            shadow_buf.fill_rounded_rect(
-                local_rect,
-                Color::rgba(color.r, color.g, color.b, 255),
-                tl + spread,
-                tr + spread,
-                br + spread,
-                bl + spread,
-                None,
-            );
-            let box_local = Rect {
-                x: border_box.x - buf_x as f32,
-                y: border_box.y - buf_y as f32,
-                width: border_box.width,
-                height: border_box.height,
-            };
-            knock_out_shadow_interior(&mut shadow_buf, box_local, Some((tl, tr, br, bl)));
-            // color.a は合成時に適用し、一時バッファへの追加走査を避ける。
-            let alpha_scale = color.a as f32 / 255.0;
-            canvas.composite_canvas_clipped(
-                &shadow_buf,
-                buf_x,
-                buf_y,
-                color.r,
-                color.g,
-                color.b,
-                alpha_scale,
-                clip,
-            );
-        } else {
-            // blur なし・角丸なし: shadow_rect のうち border_box の外側のみを矩形バンドで描画する。
-            let sx = shadow_rect.x;
-            let sy = shadow_rect.y;
-            let sw = shadow_rect.width;
-            let sh = shadow_rect.height;
-            let bx = border_box.x;
-            let by = border_box.y;
-            let bw = border_box.width;
-            let bh = border_box.height;
-
-            // top band: shadow の上端から border_box の上端まで
-            if sy < by {
-                canvas.fill_rect_clipped(
-                    Rect {
-                        x: sx,
-                        y: sy,
-                        width: sw,
-                        height: by - sy,
-                    },
-                    color,
-                    clip,
-                );
-            }
-            // bottom band: border_box の下端から shadow の下端まで
-            let shadow_bottom = sy + sh;
-            let box_bottom = by + bh;
-            if shadow_bottom > box_bottom {
-                canvas.fill_rect_clipped(
-                    Rect {
-                        x: sx,
-                        y: box_bottom,
-                        width: sw,
-                        height: shadow_bottom - box_bottom,
-                    },
-                    color,
-                    clip,
-                );
-            }
-            // left band: border_box の高さ範囲で左側
-            let band_top = by.max(sy);
-            let band_bottom = box_bottom.min(shadow_bottom);
-            if band_bottom > band_top {
-                if sx < bx {
-                    canvas.fill_rect_clipped(
-                        Rect {
-                            x: sx,
-                            y: band_top,
-                            width: bx - sx,
-                            height: band_bottom - band_top,
-                        },
-                        color,
-                        clip,
-                    );
-                }
-                // right band: border_box の高さ範囲で右側
-                let box_right = bx + bw;
-                let shadow_right = sx + sw;
-                if shadow_right > box_right {
-                    canvas.fill_rect_clipped(
-                        Rect {
-                            x: box_right,
-                            y: band_top,
-                            width: shadow_right - box_right,
-                            height: band_bottom - band_top,
-                        },
-                        color,
-                        clip,
-                    );
-                }
-            }
-        }
-    } else {
-        // CSS blur radiusの半分を標準偏差とするGaussianへ合わせる。小さいkernelは
-        // 直接畳み込み、それ以外は3つのbox blurで線形時間に近似する。
-        // 全passの支持範囲をmarginに取り、端を透明として畳み込む。
-        let sigma = blur * 0.5;
-        let use_direct_gaussian = sigma > 0.5 && sigma <= 2.0;
-        let blur_radii = gaussian_box_blur_radii(blur);
-        let blur_support = if use_direct_gaussian {
-            (sigma * 3.0).ceil() as u32
-        } else {
-            blur_radii.iter().copied().fold(0u32, u32::saturating_add)
-        };
-        let margin = blur_support.saturating_add(1);
-        let margin_f = margin as f32;
-        let buf_x = (shadow_rect.x - margin_f).floor() as i32;
-        let buf_y = (shadow_rect.y - margin_f).floor() as i32;
-        let buf_w = (shadow_rect.width + margin_f * 2.0).ceil() as u32 + 2;
-        let buf_h = (shadow_rect.height + margin_f * 2.0).ceil() as u32 + 2;
-
-        if buf_w == 0 || buf_h == 0 {
-            return;
-        }
-
-        let mut shadow_buf = Canvas::new(buf_w, buf_h);
-        let local_rect = Rect {
-            x: shadow_rect.x - buf_x as f32,
-            y: shadow_rect.y - buf_y as f32,
-            width: shadow_rect.width,
-            height: shadow_rect.height,
-        };
-        // 影の shape を描画（border_radius あれば rounded）
-        if let Some((tl, tr, br, bl)) = radii {
-            shadow_buf.fill_rounded_rect(
-                local_rect,
-                Color::rgba(color.r, color.g, color.b, 255),
-                tl + spread,
-                tr + spread,
-                br + spread,
-                bl + spread,
-                None,
-            );
-        } else {
-            shadow_buf.fill_rect(local_rect, Color::rgba(color.r, color.g, color.b, 255));
-        }
-
-        // 先に不透明なborder-box形状全体をblurし、完成したouter shadowだけを
-        // border edgeの内側から除外する。
-        if use_direct_gaussian {
-            shadow_buf.gaussian_blur_alpha_zero_padded(sigma);
-        } else {
-            shadow_buf.box_blur_alpha_radii_zero_padded(&blur_radii);
-        }
-        let box_local = Rect {
-            x: border_box.x - buf_x as f32,
-            y: border_box.y - buf_y as f32,
-            width: border_box.width,
-            height: border_box.height,
-        };
-        knock_out_shadow_interior(&mut shadow_buf, box_local, radii);
-
-        // color.a は合成時に適用し、一時バッファへの追加走査を避ける。
-        let alpha_scale = color.a as f32 / 255.0;
-
-        // メインキャンバスに合成（clip 適用）
-        canvas.composite_canvas_clipped(
-            &shadow_buf,
-            buf_x,
-            buf_y,
-            color.r,
-            color.g,
-            color.b,
-            alpha_scale,
+fn paint_unblurred_rect_shadow(
+    canvas: &mut Canvas,
+    border_box: Rect,
+    shadow_rect: Rect,
+    color: Color,
+    clip: Option<Rect>,
+) {
+    let sx = shadow_rect.x;
+    let sy = shadow_rect.y;
+    let sw = shadow_rect.width;
+    let sh = shadow_rect.height;
+    let bx = border_box.x;
+    let by = border_box.y;
+    let bw = border_box.width;
+    let bh = border_box.height;
+    if sy < by {
+        canvas.fill_rect_clipped(
+            Rect {
+                x: sx,
+                y: sy,
+                width: sw,
+                height: by - sy,
+            },
+            color,
+            clip,
+        );
+    }
+    let shadow_bottom = sy + sh;
+    let box_bottom = by + bh;
+    if shadow_bottom > box_bottom {
+        canvas.fill_rect_clipped(
+            Rect {
+                x: sx,
+                y: box_bottom,
+                width: sw,
+                height: shadow_bottom - box_bottom,
+            },
+            color,
+            clip,
+        );
+    }
+    let band_top = by.max(sy);
+    let band_bottom = box_bottom.min(shadow_bottom);
+    if band_bottom <= band_top {
+        return;
+    }
+    if sx < bx {
+        canvas.fill_rect_clipped(
+            Rect {
+                x: sx,
+                y: band_top,
+                width: bx - sx,
+                height: band_bottom - band_top,
+            },
+            color,
+            clip,
+        );
+    }
+    let box_right = bx + bw;
+    let shadow_right = sx + sw;
+    if shadow_right > box_right {
+        canvas.fill_rect_clipped(
+            Rect {
+                x: box_right,
+                y: band_top,
+                width: shadow_right - box_right,
+                height: band_bottom - band_top,
+            },
+            color,
             clip,
         );
     }
@@ -920,3 +1121,15 @@ fn knock_out_shadow_interior(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "border/shadow_cull_tests.rs"]
+mod shadow_cull_tests;
+
+#[cfg(test)]
+#[path = "border/shadow_cache_baseline_tests.rs"]
+mod shadow_cache_baseline_tests;
+
+#[cfg(test)]
+#[path = "border/shadow_mask_cache_tests.rs"]
+mod shadow_mask_cache_tests;

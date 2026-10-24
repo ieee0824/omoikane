@@ -1,5 +1,7 @@
 //! Color types, parsing, and gradient rendering.
 
+mod gradient_raster;
+
 use crate::layout::Rect;
 
 use super::{Canvas, blend_pixel, intersect, normalize_rect};
@@ -82,6 +84,15 @@ pub(crate) struct Gradient {
     kind: GradientKind,
     stops: Vec<GradientStop>,
     repeating: bool,
+}
+
+impl Gradient {
+    /// Heap storage copied into an owned frame-cache key.
+    pub(super) fn cache_key_heap_bytes(&self) -> usize {
+        self.stops
+            .capacity()
+            .saturating_mul(std::mem::size_of::<GradientStop>())
+    }
 }
 
 pub(crate) fn parse_color(value: &str) -> Option<Color> {
@@ -980,6 +991,8 @@ fn resolved_stops(stops: &[GradientStop], basis: f32) -> Vec<(Color, f32, Option
         .collect()
 }
 
+// Keep per-pixel interpolation inline across the raster module boundary.
+#[inline(always)]
 fn sample_stops(stops: &[(Color, f32, Option<f32>)], mut value: f32, repeating: bool) -> Color {
     let first = stops[0].1;
     let last = stops.last().unwrap().1;
@@ -1121,6 +1134,13 @@ pub(crate) fn paint_gradient(
     area: Rect,
     clip: Option<Rect>,
 ) {
+    if canvas.with_retained_operation(
+        super::retained_layers::RetainedPrimitiveKind::Gradient,
+        area,
+        |canvas| paint_gradient(canvas, gradient, area, clip),
+    ) {
+        return;
+    }
     let Some(area) = normalize_rect(area) else {
         return;
     };
@@ -1131,151 +1151,7 @@ pub(crate) fn paint_gradient(
     let Some(draw_area) = draw_area else {
         return;
     };
-    let (center_x, center_y, radius_x, radius_y, basis, radial_scale, zero_height) = match gradient
-        .kind
-    {
-        GradientKind::Linear { angle_deg } => {
-            let angle = angle_deg.to_radians();
-            let dx = angle.sin();
-            let dy = -angle.cos();
-            let length = dx.abs() * area.width + dy.abs() * area.height;
-            (
-                area.x + area.width / 2.0,
-                area.y + area.height / 2.0,
-                dx,
-                dy,
-                length,
-                length,
-                false,
-            )
-        }
-        GradientKind::Radial {
-            circle,
-            extent,
-            center,
-        } => {
-            let cx = resolve_component(center.x, area.x, area.width);
-            let cy = resolve_component(center.y, area.y, area.height);
-            let left = (cx - area.x).abs();
-            let right = (area.x + area.width - cx).abs();
-            let top = (cy - area.y).abs();
-            let bottom = (area.y + area.height - cy).abs();
-            let (mut rx, mut ry) = match extent {
-                RadialExtent::ClosestSide => (left.min(right), top.min(bottom)),
-                RadialExtent::FarthestSide => (left.max(right), top.max(bottom)),
-                RadialExtent::ClosestCorner | RadialExtent::FarthestCorner => {
-                    let choose = if matches!(extent, RadialExtent::ClosestCorner) {
-                        f32::min
-                    } else {
-                        f32::max
-                    };
-                    let x = choose(left, right);
-                    let y = choose(top, bottom);
-                    (x, y)
-                }
-                RadialExtent::Explicit(x, y) => (
-                    resolve_length(x, area.width),
-                    resolve_length(y.unwrap_or(x), area.height),
-                ),
-            };
-            if circle {
-                let radius = match extent {
-                    RadialExtent::ClosestSide => left.min(right).min(top.min(bottom)),
-                    RadialExtent::FarthestSide => left.max(right).max(top.max(bottom)),
-                    RadialExtent::ClosestCorner => {
-                        [(left, top), (left, bottom), (right, top), (right, bottom)]
-                            .into_iter()
-                            .map(|(x, y)| x.hypot(y))
-                            .fold(f32::INFINITY, f32::min)
-                    }
-                    RadialExtent::FarthestCorner => {
-                        [(left, top), (left, bottom), (right, top), (right, bottom)]
-                            .into_iter()
-                            .map(|(x, y)| x.hypot(y))
-                            .fold(0.0, f32::max)
-                    }
-                    RadialExtent::Explicit(x, _) => resolve_length(x, area.width.min(area.height)),
-                };
-                rx = radius;
-                ry = radius;
-            } else if matches!(
-                extent,
-                RadialExtent::ClosestCorner | RadialExtent::FarthestCorner
-            ) {
-                // Scale the side-based ellipse so the selected corner lies on it.
-                let scale = 2.0_f32.sqrt();
-                rx *= scale;
-                ry *= scale;
-            }
-            const DEGENERATE_RADIUS: f32 = 1.0e-6;
-            let mut stop_basis = rx;
-            let mut radial_scale = rx;
-            let mut zero_height = false;
-            if circle && rx <= 0.0 {
-                rx = DEGENERATE_RADIUS;
-                ry = DEGENERATE_RADIUS;
-                stop_basis = 0.0;
-                radial_scale = DEGENERATE_RADIUS;
-            } else if !circle && rx <= 0.0 {
-                rx = DEGENERATE_RADIUS;
-                ry = 1.0 / DEGENERATE_RADIUS;
-                stop_basis = 0.0;
-                radial_scale = DEGENERATE_RADIUS;
-            } else if !circle && ry <= 0.0 {
-                zero_height = true;
-            }
-            (cx, cy, rx, ry, stop_basis, radial_scale, zero_height)
-        }
-        GradientKind::Conic { center, .. } => (
-            resolve_component(center.x, area.x, area.width),
-            resolve_component(center.y, area.y, area.height),
-            0.0,
-            0.0,
-            1.0,
-            1.0,
-            false,
-        ),
-    };
-    let stops = resolved_stops(&gradient.stops, basis);
-    let degenerate_color = zero_height.then(|| {
-        if gradient.repeating {
-            average_gradient_color(&stops)
-        } else {
-            stops.last().unwrap().0
-        }
-    });
-    let x0 = draw_area.x.floor().max(0.0) as i32;
-    let y0 = draw_area.y.floor().max(0.0) as i32;
-    let x1 = (draw_area.x + draw_area.width)
-        .ceil()
-        .min(canvas.width as f32) as i32;
-    let y1 = (draw_area.y + draw_area.height)
-        .ceil()
-        .min(canvas.height as f32) as i32;
-    for py in y0..y1 {
-        for px in x0..x1 {
-            let x = px as f32 + 0.5 - center_x;
-            let y = py as f32 + 0.5 - center_y;
-            let color = if let Some(color) = degenerate_color {
-                color
-            } else {
-                let value = match gradient.kind {
-                    GradientKind::Linear { .. } => x * radius_x + y * radius_y + basis / 2.0,
-                    GradientKind::Radial { .. } => {
-                        ((x / radius_x).powi(2) + (y / radius_y).powi(2)).sqrt() * radial_scale
-                    }
-                    GradientKind::Conic { from_deg, .. } => {
-                        ((x.atan2(-y).to_degrees() - from_deg).rem_euclid(360.0)) / 360.0
-                    }
-                };
-                sample_stops(&stops, value, gradient.repeating)
-            };
-            let index = ((py as u32 * canvas.width + px as u32) * 4) as usize;
-            if index + 3 < canvas.pixels.len() {
-                blend_pixel(&mut canvas.pixels[index..index + 4], color);
-            }
-        }
-    }
+    gradient_raster::paint::<true>(canvas, gradient, area, draw_area);
 }
 
 #[cfg(test)]

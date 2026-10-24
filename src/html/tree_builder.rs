@@ -1633,6 +1633,7 @@ impl Builder {
     ) -> NodeHandle {
         let element = NodeHandle::html_element_ns(name, HTML_NAMESPACE);
         if name == "script" {
+            element.set_script_force_async(false);
             element.set_script_source_position(self.script_source_position);
         }
         for attribute in attributes {

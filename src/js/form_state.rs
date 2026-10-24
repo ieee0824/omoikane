@@ -110,7 +110,7 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
         context,
         bindings,
         js_string!("__omoikane_restore_iframe_form_state"),
-        4,
+        5,
         NativeFunction::from_copy_closure(|_, args, context| {
             let id = parse_node_id(args.first(), context)?;
             ensure_same_origin_node(context, id)?;
@@ -129,7 +129,23 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 .to_string(context)?
                 .to_std_string_escaped();
             let restore_name = args.get(3).is_some_and(JsValue::to_boolean);
+            let epoch = args
+                .get(4)
+                .and_then(JsValue::as_string)
+                .and_then(|value| value.to_std_string_escaped().parse::<u64>().ok());
             with_host_state(|host| {
+                if let Some(epoch) = epoch {
+                    host.borrow_mut().attach_iframe_history_restore(
+                        id,
+                        epoch,
+                        PendingIframeHistoryRestore {
+                            saved,
+                            history_url,
+                            restore_name,
+                        },
+                    );
+                    return Ok(JsValue::undefined());
+                }
                 let restore = {
                     let mut state = host.borrow_mut();
                     let Some(frame) = state.get_node(id) else {
@@ -206,11 +222,78 @@ pub(super) fn restore_pending_document(
     Ok(())
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct IframeHistoryState {
     form_state: FormStateSnapshot,
     url: String,
     name: String,
+}
+
+#[derive(Clone)]
+pub(super) struct PendingIframeHistoryRestore {
+    saved: IframeHistoryState,
+    history_url: String,
+    restore_name: bool,
+}
+
+#[cfg(test)]
+pub(super) fn capture_iframe_history_restore_for_test(
+    host: &Rc<RefCell<HostState>>,
+    iframe: usize,
+    context: &mut Context,
+) -> JsResult<PendingIframeHistoryRestore> {
+    let (document, url, name) = {
+        let state = host.borrow();
+        let entry = state
+            .iframe_documents
+            .get(&iframe)
+            .expect("test iframe document");
+        (
+            entry.document.identity(),
+            entry.document_url.clone(),
+            state
+                .browsing_context_names
+                .get(&iframe)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    };
+    let form_state = capture_document(host, document, context)?;
+    Ok(PendingIframeHistoryRestore {
+        saved: IframeHistoryState {
+            form_state,
+            url: url.clone(),
+            name,
+        },
+        history_url: url,
+        restore_name: true,
+    })
+}
+
+pub(super) fn queue_iframe_history_restore(
+    state: &mut HostState,
+    iframe: usize,
+    restore: PendingIframeHistoryRestore,
+) -> Option<usize> {
+    let Some(entry) = state.iframe_documents.get(&iframe) else {
+        return None;
+    };
+    if without_fragment(&entry.document_url) != without_fragment(&restore.saved.url)
+        && without_fragment(&entry.document_url) != without_fragment(&restore.history_url)
+    {
+        return None;
+    }
+    let document = entry.document.identity();
+    if restore.restore_name {
+        state
+            .browsing_context_names
+            .insert(iframe, restore.saved.name);
+    }
+    state
+        .form_state
+        .pending
+        .insert(document, restore.saved.form_state);
+    Some(document)
 }
 
 fn without_fragment(url: &str) -> &str {

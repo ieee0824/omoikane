@@ -65,6 +65,18 @@ fn allocation_and_edge_representations_share_registry_and_trace_identity() {
             tracer.trace_until_empty();
         }
         let discovered = tracer.take_discovered_ephemerons();
+        for pointer in &representations {
+            tracer.enqueue_ephemeron(*pointer);
+        }
+        // SAFETY: roots retain every requeued allocation throughout this
+        // diagnostic pass.
+        unsafe {
+            tracer.trace_until_empty();
+        }
+        assert!(
+            tracer.take_discovered_ephemerons().is_empty(),
+            "taking discovered ephemerons must retain collection-wide deduplication"
+        );
         for pointer in &discovered {
             // SAFETY: all allocations and their key remain rooted until after this pass.
             assert!(unsafe { pointer.as_ref().minor_trace(&mut tracer) });

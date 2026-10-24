@@ -435,3 +435,164 @@ fn written_module_entry_requires_cors_even_when_corp_allows_cross_origin() {
         );
     }
 }
+
+fn dynamic_child_external_script_keeps_its_realm(page_task: bool, reset_child: bool) {
+    let source = r#"
+        document.currentScript.setAttribute('data-probe-executed', 'yes');
+        globalThis.childDynamicProbe = {
+            documentId: document.__id,
+            currentScriptId: document.currentScript && document.currentScript.__id,
+            windowMatches: window === globalThis && self === globalThis,
+            viewMatches: document.defaultView === window,
+            ownerMatches: document.currentScript !== null &&
+                document.currentScript.ownerDocument === document,
+            frameMatches: frameElement !== null && frameElement.id === 'child-frame'
+        };
+        if (document.currentScript.getAttribute('data-reset') === 'yes') {
+            document.open();
+            document.write('<body><b id="child-replacement">replacement</b>');
+            document.close();
+        } else {
+            const marker = document.createElement('b');
+            marker.id = 'child-added';
+            document.body.appendChild(marker);
+        }
+    "#;
+    let server = WriteServer::new(&[("/child-dynamic.js", source)]);
+    let html = format!(
+        r#"<body><p id="parent-marker">parent</p>
+        <iframe id="child-frame"></iframe><script>
+        globalThis.probeWindow = document.getElementById('child-frame').contentWindow;
+        globalThis.probeDocument = probeWindow.document;
+        probeDocument.body.innerHTML = '<p id="child-marker">child</p>';
+        const script = probeDocument.createElement('script');
+        globalThis.expectedProbeScriptId = script.__id;
+        globalThis.expectedProbeScript = script;
+        script.setAttribute('data-reset', '{}');
+        script.src = '/child-dynamic.js';
+        probeDocument.body.appendChild(script);
+        </script>"#,
+        if reset_child { "yes" } else { "no" }
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let runtime = JsRuntime::with_document_and_url(document, &server.origin).unwrap();
+    let mut runtime = execute(runtime, page_task);
+    if page_task {
+        // execute(page_task=true) drains run_until_idle_async before returning.
+        // Require execution here; a synchronous flush must not hide a pending
+        // resource task or accidentally exercise the synchronous implementation.
+        assert_eq!(
+            runtime
+                .eval("expectedProbeScript.getAttribute('data-probe-executed')")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "yes",
+            "external script did not execute inside the owned page task"
+        );
+    } else {
+        runtime.run_until_idle().unwrap();
+    }
+    let checks = r#"JSON.stringify({
+        parentSurvived: !!document.getElementById('parent-marker'),
+        parentGlobalClean: typeof globalThis.childDynamicProbe === 'undefined',
+        childRan: !!probeWindow.childDynamicProbe,
+        childDocument: probeWindow.childDynamicProbe?.documentId === probeDocument.__id,
+        childCurrentScript: probeWindow.childDynamicProbe?.currentScriptId === expectedProbeScriptId,
+        childWindow: probeWindow.childDynamicProbe?.windowMatches === true,
+        childView: probeWindow.childDynamicProbe?.viewMatches === true,
+        childOwner: probeWindow.childDynamicProbe?.ownerMatches === true,
+        childFrame: probeWindow.childDynamicProbe?.frameMatches === true,
+        childChanged: !!probeDocument.getElementById('child-added') ||
+            !!probeDocument.getElementById('child-replacement')
+    })"#;
+    assert_eq!(
+        runtime
+            .eval(checks)
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        r#"{"parentSurvived":true,"parentGlobalClean":true,"childRan":true,"childDocument":true,"childCurrentScript":true,"childWindow":true,"childView":true,"childOwner":true,"childFrame":true,"childChanged":true}"#,
+        "page_task={page_task}, reset_child={reset_child}"
+    );
+    assert_eq!(
+        runtime
+            .eval("!!probeDocument.getElementById('child-marker')")
+            .unwrap()
+            .as_boolean(),
+        Some(!reset_child)
+    );
+    assert_eq!(runtime.eval("!document.getElementById('child-added') && !document.getElementById('child-replacement')").unwrap().as_boolean(), Some(true));
+    assert_eq!(*server.requests.lock().unwrap(), vec!["/child-dynamic.js"]);
+}
+
+#[test]
+fn synchronous_dynamic_child_external_script_keeps_its_realm() {
+    dynamic_child_external_script_keeps_its_realm(false, false);
+}
+
+#[test]
+fn synchronous_dynamic_child_external_script_keeps_reset_in_its_realm() {
+    dynamic_child_external_script_keeps_its_realm(false, true);
+}
+
+#[test]
+fn page_task_dynamic_child_external_script_keeps_its_realm() {
+    dynamic_child_external_script_keeps_its_realm(true, false);
+}
+
+#[test]
+fn page_task_dynamic_child_external_script_keeps_reset_in_its_realm() {
+    dynamic_child_external_script_keeps_its_realm(true, true);
+}
+
+fn dynamic_child_module_keeps_its_realm(page_task: bool) {
+    let server = WriteServer::new(&[(
+        "/child-module.js",
+        "globalThis.childModuleDocument = document; \
+         document.body.innerHTML = '<b id=module-child>child</b>';",
+    )]);
+    let document = TreeBuilder::parse(
+        r#"<body><p id="parent-marker">parent</p><iframe id="child-frame"></iframe>
+        <script>
+        globalThis.moduleWindow = document.getElementById('child-frame').contentWindow;
+        const script = moduleWindow.document.createElement('script');
+        script.type = 'module'; script.src = '/child-module.js';
+        moduleWindow.document.body.appendChild(script);
+        </script>"#,
+    )
+    .document();
+    let runtime = JsRuntime::with_document_and_url(document, &server.origin).unwrap();
+    let mut runtime = execute(runtime, page_task);
+    if !page_task {
+        runtime.run_until_idle().unwrap();
+    }
+    assert_eq!(
+        runtime
+            .eval(
+                "[!!document.getElementById('parent-marker'), \
+                 typeof globalThis.childModuleDocument, \
+                 moduleWindow.childModuleDocument === moduleWindow.document, \
+                 !!moduleWindow.document.getElementById('module-child')].join('|')",
+            )
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "true|undefined|true|true",
+        "page_task={page_task}"
+    );
+    assert_eq!(*server.requests.lock().unwrap(), vec!["/child-module.js"]);
+}
+
+#[test]
+fn synchronous_dynamic_child_module_keeps_its_realm() {
+    dynamic_child_module_keeps_its_realm(false);
+}
+
+#[test]
+fn page_task_dynamic_child_module_keeps_its_realm() {
+    dynamic_child_module_keeps_its_realm(true);
+}

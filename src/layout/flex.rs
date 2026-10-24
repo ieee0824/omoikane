@@ -1,16 +1,22 @@
 //! Flex layout: `display: flex` container layout.
 
+use crate::css::style::PropertyId;
 use crate::css::{AffineTransform, ComputedDisplay, ComputedStyle, ComputedValue, StyleResolver};
 use crate::dom::{Node, NodeHandle, NodeType};
 
 use super::{
     AlignItems, BoxDimensions, EdgeSizes, FlexDirection, FlexWrap, JustifyContent, LayoutBox, Rect,
     edge_sizes, explicit_length, intrinsic_width, is_out_of_flow_positioned,
-    layout_positioned_child, overflow, resolved_length, sort_children_by_z_index,
-    translate_layout_box_to_outer, visibility, z_index,
+    layout_positioned_child, overflow, sort_children_by_z_index, translate_layout_box_to_outer,
+    visibility, z_index,
 };
 
 mod anonymous;
+
+#[cfg(test)]
+thread_local! {
+    static LAYOUT_VISITS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
 
 #[derive(Debug, Clone)]
 struct FlexItemSpec {
@@ -55,6 +61,9 @@ pub(super) fn layout_flex_container(
     containing_height: f32,
     used_height: Option<super::UsedHeight>,
 ) -> Option<LayoutBox> {
+    let _layout_phase = super::profile::Scope::begin(super::profile::Phase::FlexLayout);
+    #[cfg(test)]
+    LAYOUT_VISITS.with(|visits| visits.set(visits.get().map(|count| count + 1)));
     let direction = flex_direction(&style);
     let wrap = flex_wrap(&style);
     let justify = justify_content(&style);
@@ -62,7 +71,7 @@ pub(super) fn layout_flex_container(
     let main_gap = flex_main_axis_gap(&style, direction);
     let line_gap = flex_cross_axis_gap(&style, direction);
 
-    let specified_height = resolved_length(&style, "height", containing_height)
+    let specified_height = resolved_dimension_by_id(&style, PropertyId::Height, containing_height)
         .map(|height| super::border_box_adjust_height(&style, height, &padding, &border))
         .map(|height| {
             super::clamp_content_height(&style, height, containing_height, padding, border)
@@ -71,6 +80,7 @@ pub(super) fn layout_flex_container(
         .and_then(super::UsedHeight::percentage_basis)
         .or(specified_height);
 
+    let collect_phase = super::profile::Scope::begin(super::profile::Phase::FlexCollect);
     let (items, positioned_children, available_main_size) = collect_flex_items(
         node,
         resolver,
@@ -86,6 +96,7 @@ pub(super) fn layout_flex_container(
         border,
         main_gap,
     );
+    drop(collect_phase);
 
     let lines = build_flex_lines(&items, available_main_size, wrap, main_gap);
     let mut children = Vec::new();
@@ -287,9 +298,11 @@ fn collect_flex_items(
             .or_else(|| resolved_main_size(&child_style, direction, main_basis))
             .unwrap_or_else(|| auto_flex_base_main_size(&child, resolver, direction));
         let min_main_size = match direction {
-            FlexDirection::Row => explicit_length(&child_style, "min-width")
+            FlexDirection::Row => explicit_length_by_id(&child_style, PropertyId::MinWidth)
                 .unwrap_or_else(|| super::minimum_content_width(&child, resolver)),
-            FlexDirection::Column => explicit_length(&child_style, "min-height").unwrap_or(0.0),
+            FlexDirection::Column => {
+                explicit_length_by_id(&child_style, PropertyId::MinHeight).unwrap_or(0.0)
+            }
         };
         let (main_start_auto, main_end_auto) = main_axis_auto_margins(&child_style, direction);
         items.push(FlexItemSpec {
@@ -365,7 +378,7 @@ fn resolve_line_main_sizes<'a>(
         let column_width = item.explicit_cross_size.unwrap_or_else(|| {
             if direction == FlexDirection::Column
                 && item.align_self.unwrap_or(align) != AlignItems::Stretch
-                && resolved_length(&child_style, "width", width).is_none()
+                && resolved_dimension_by_id(&child_style, PropertyId::Width, width).is_none()
             {
                 (intrinsic_width(&item.node, resolver)
                     + edge_sizes(&child_style, "margin").horizontal())
@@ -456,7 +469,7 @@ fn grow_column_line_items(
         // Even an unchanged auto height needs a second layout when
         // flex layout has made its percentage basis definite.
         if height != child.dimensions.content.height
-            || (definite && explicit_length(&child_style, "height").is_none())
+            || (definite && explicit_length_by_id(&child_style, PropertyId::Height).is_none())
         {
             if let Some(reflowed) = layout_item(
                 item,
@@ -547,7 +560,9 @@ fn resolve_line_cross_size(
                 child.dimensions.padding,
                 child.dimensions.border,
             );
-            if used_height.is_some() && child.dimensions.content.height == height {
+            if child.dimensions.content.height == height
+                && (used_height.is_some() || unchanged_stretch_is_invariant(child, resolver))
+            {
                 continue;
             }
             if let Some(reflowed) = layout_item(
@@ -566,6 +581,74 @@ fn resolve_line_cross_size(
     }
 
     line_cross_size
+}
+
+/// Proves a narrow height-independent subtree: unwrapped rows with auto or
+/// absolute heights ending in explicitly sized or plain text leaves. Making an unchanged
+/// height definite cannot change these descendants. Other formatting contexts
+/// and percentage heights still require the normal stretch pass.
+fn unchanged_stretch_is_invariant(layout: &LayoutBox, resolver: &mut StyleResolver) -> bool {
+    if layout.pseudo.is_some() {
+        return false;
+    }
+    let style = resolver.computed_style(&layout.node);
+    if style.get_by_id(PropertyId::Position).is_some_and(
+        |value| !matches!(value, ComputedValue::Keyword(keyword) if keyword == "static"),
+    ) {
+        return false;
+    }
+    let absolute_height = matches!(
+        style.get_by_id(PropertyId::Height),
+        Some(ComputedValue::Px(_))
+    );
+    let auto_height = style
+        .get_by_id(PropertyId::Height)
+        .is_none_or(|value| matches!(value, ComputedValue::Keyword(keyword) if keyword == "auto"));
+    if (!absolute_height && !auto_height)
+        || ![PropertyId::MinHeight, PropertyId::MaxHeight].iter().all(|id| {
+            style.get_by_id(*id).is_none_or(|value| {
+                matches!(value, ComputedValue::Px(_) | ComputedValue::Number(_))
+                    || matches!(value, ComputedValue::Keyword(keyword) if keyword == "auto" || keyword == "none")
+            })
+        })
+    {
+        return false;
+    }
+    if layout.children.is_empty() {
+        return absolute_height
+            || (auto_height && unchanged_text_leaf_is_invariant(layout, &style));
+    }
+    matches!(
+        style.display(),
+        Some(ComputedDisplay::Flex | ComputedDisplay::InlineFlex)
+    ) && flex_direction(&style) == FlexDirection::Row
+        && flex_wrap(&style) == FlexWrap::NoWrap
+        && layout
+            .children
+            .iter()
+            .all(|child| unchanged_stretch_is_invariant(child, resolver))
+}
+
+/// Text wrapping depends on the unchanged inline width, not on whether the
+/// same horizontal block height has become definite. Exclude atomic/replaced
+/// content, generated fragments, vertical flow and aspect-ratio sizing.
+fn unchanged_text_leaf_is_invariant(layout: &LayoutBox, style: &ComputedStyle) -> bool {
+    !super::has_replaced_layout_semantics(&layout.node)
+        && !super::has_preferred_aspect_ratio(style)
+        && style.get_by_id(PropertyId::WritingMode).is_none_or(
+            |value| matches!(value, ComputedValue::Keyword(keyword) if keyword == "horizontal-tb"),
+        )
+        && layout
+            .node
+            .layout_child_nodes()
+            .iter()
+            .all(|node| node.node_type() == NodeType::Text)
+        && layout.lines.iter().all(|line| {
+            line.fragments.iter().all(|fragment| {
+                matches!(&fragment.content, super::InlineFragmentContent::Text(_))
+                    && fragment.style.pseudo.is_none()
+            })
+        })
 }
 
 /// Positions a flex line's items along the main axis, applying
@@ -667,7 +750,7 @@ pub(super) fn is_flex_container(style: &ComputedStyle) -> bool {
 }
 
 pub(super) fn flex_direction(style: &ComputedStyle) -> FlexDirection {
-    match style.get("flex-direction") {
+    match style.get_by_id(PropertyId::FlexDirection) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("column") => {
             FlexDirection::Column
         }
@@ -676,7 +759,7 @@ pub(super) fn flex_direction(style: &ComputedStyle) -> FlexDirection {
 }
 
 fn flex_wrap(style: &ComputedStyle) -> FlexWrap {
-    match style.get("flex-wrap") {
+    match style.get_by_id(PropertyId::FlexWrap) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("wrap") => {
             FlexWrap::Wrap
         }
@@ -687,26 +770,50 @@ fn flex_wrap(style: &ComputedStyle) -> FlexWrap {
 fn main_axis_auto_margins(style: &ComputedStyle, direction: FlexDirection) -> (bool, bool) {
     match direction {
         FlexDirection::Row => (
-            super::is_auto(style.get("margin-left")),
-            super::is_auto(style.get("margin-right")),
+            super::is_auto(style.get_by_id(PropertyId::MarginLeft)),
+            super::is_auto(style.get_by_id(PropertyId::MarginRight)),
         ),
         FlexDirection::Column => (
-            super::is_auto(style.get("margin-top")),
-            super::is_auto(style.get("margin-bottom")),
+            super::is_auto(style.get_by_id(PropertyId::MarginTop)),
+            super::is_auto(style.get_by_id(PropertyId::MarginBottom)),
         ),
     }
 }
 
+fn explicit_length_by_id(style: &ComputedStyle, property: PropertyId) -> Option<f32> {
+    match style.get_by_id(property) {
+        Some(ComputedValue::Px(value)) => Some(*value),
+        Some(ComputedValue::Number(value)) if *value == 0.0 => Some(0.0),
+        _ => None,
+    }
+}
+
+fn resolved_dimension_by_id(
+    style: &ComputedStyle,
+    property: PropertyId,
+    basis: f32,
+) -> Option<f32> {
+    debug_assert!(matches!(property, PropertyId::Width | PropertyId::Height));
+    match style.get_by_id(property) {
+        Some(ComputedValue::Px(value)) => Some(*value),
+        Some(ComputedValue::Number(value)) if *value == 0.0 => Some(0.0),
+        Some(value) if basis > 0.0 => value.resolve_length_percentage(basis),
+        _ => None,
+    }
+    .map(|value| value.max(0.0))
+}
+
 fn flex_gap(style: &ComputedStyle) -> Option<f32> {
+    // `gap` is a serialized shorthand rather than a PropertyId longhand.
     explicit_length(style, "gap")
 }
 
 fn flex_main_axis_gap(style: &ComputedStyle, direction: FlexDirection) -> f32 {
     match direction {
-        FlexDirection::Row => explicit_length(style, "column-gap")
+        FlexDirection::Row => explicit_length_by_id(style, PropertyId::ColumnGap)
             .or_else(|| flex_gap(style))
             .unwrap_or(0.0),
-        FlexDirection::Column => explicit_length(style, "row-gap")
+        FlexDirection::Column => explicit_length_by_id(style, PropertyId::RowGap)
             .or_else(|| flex_gap(style))
             .unwrap_or(0.0),
     }
@@ -714,17 +821,17 @@ fn flex_main_axis_gap(style: &ComputedStyle, direction: FlexDirection) -> f32 {
 
 fn flex_cross_axis_gap(style: &ComputedStyle, direction: FlexDirection) -> f32 {
     match direction {
-        FlexDirection::Row => explicit_length(style, "row-gap")
+        FlexDirection::Row => explicit_length_by_id(style, PropertyId::RowGap)
             .or_else(|| flex_gap(style))
             .unwrap_or(0.0),
-        FlexDirection::Column => explicit_length(style, "column-gap")
+        FlexDirection::Column => explicit_length_by_id(style, PropertyId::ColumnGap)
             .or_else(|| flex_gap(style))
             .unwrap_or(0.0),
     }
 }
 
 fn justify_content(style: &ComputedStyle) -> JustifyContent {
-    match style.get("justify-content") {
+    match style.get_by_id(PropertyId::JustifyContent) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center") => {
             JustifyContent::Center
         }
@@ -742,7 +849,7 @@ fn justify_content(style: &ComputedStyle) -> JustifyContent {
 }
 
 fn align_items(style: &ComputedStyle) -> AlignItems {
-    match style.get("align-items") {
+    match style.get_by_id(PropertyId::AlignItems) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("flex-start") => {
             AlignItems::FlexStart
         }
@@ -757,7 +864,7 @@ fn align_items(style: &ComputedStyle) -> AlignItems {
 }
 
 fn align_self(style: &ComputedStyle) -> Option<AlignItems> {
-    match style.get("align-self") {
+    match style.get_by_id(PropertyId::AlignSelf) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("flex-start") => {
             Some(AlignItems::FlexStart)
         }
@@ -776,8 +883,8 @@ fn align_self(style: &ComputedStyle) -> Option<AlignItems> {
 
 fn explicit_main_size(style: &ComputedStyle, direction: FlexDirection) -> Option<f32> {
     match direction {
-        FlexDirection::Row => explicit_length(style, "width"),
-        FlexDirection::Column => explicit_length(style, "height"),
+        FlexDirection::Row => explicit_length_by_id(style, PropertyId::Width),
+        FlexDirection::Column => explicit_length_by_id(style, PropertyId::Height),
     }
 }
 
@@ -785,28 +892,29 @@ fn explicit_main_size(style: &ComputedStyle, direction: FlexDirection) -> Option
 /// container's main axis size as basis.
 fn resolved_main_size(style: &ComputedStyle, direction: FlexDirection, basis: f32) -> Option<f32> {
     match direction {
-        FlexDirection::Row => resolved_length(style, "width", basis),
-        FlexDirection::Column => resolved_length(style, "height", basis),
+        FlexDirection::Row => resolved_dimension_by_id(style, PropertyId::Width, basis),
+        FlexDirection::Column => resolved_dimension_by_id(style, PropertyId::Height, basis),
     }
 }
 
 fn explicit_cross_size(style: &ComputedStyle, direction: FlexDirection) -> Option<f32> {
     match direction {
-        FlexDirection::Row => explicit_length(style, "height"),
-        FlexDirection::Column => explicit_length(style, "width"),
+        FlexDirection::Row => explicit_length_by_id(style, PropertyId::Height),
+        FlexDirection::Column => explicit_length_by_id(style, PropertyId::Width),
     }
 }
 
 fn flex_basis(style: &ComputedStyle, direction: FlexDirection) -> Option<f32> {
-    explicit_length(style, "flex-basis").or_else(|| explicit_main_size(style, direction))
+    explicit_length_by_id(style, PropertyId::FlexBasis)
+        .or_else(|| explicit_main_size(style, direction))
 }
 
 /// Stretch applies only to an auto cross size without auto cross margins.
 fn stretches_height(style: &ComputedStyle, align: AlignItems) -> bool {
-    let auto_height = style.get("height").is_none()
-        || matches!(style.get("height"), Some(ComputedValue::Keyword(value)) if value == "auto");
-    let auto_margin = ["margin-top", "margin-bottom"].iter().any(
-        |name| matches!(style.get(name), Some(ComputedValue::Keyword(value)) if value == "auto"),
+    let auto_height = style.get_by_id(PropertyId::Height).is_none()
+        || matches!(style.get_by_id(PropertyId::Height), Some(ComputedValue::Keyword(value)) if value == "auto");
+    let auto_margin = [PropertyId::MarginTop, PropertyId::MarginBottom].iter().any(
+        |id| matches!(style.get_by_id(*id), Some(ComputedValue::Keyword(value)) if value == "auto"),
     );
     align == AlignItems::Stretch && auto_height && !auto_margin
 }
@@ -941,7 +1049,7 @@ fn auto_flex_base_main_size(
 }
 
 fn item_order(style: &ComputedStyle) -> i32 {
-    match style.get("order") {
+    match style.get_by_id(PropertyId::Order) {
         Some(ComputedValue::Number(value)) if value.is_finite() && value.fract() == 0.0 => {
             *value as i32
         }
@@ -950,7 +1058,7 @@ fn item_order(style: &ComputedStyle) -> i32 {
 }
 
 fn flex_grow(style: &ComputedStyle) -> f32 {
-    match style.get("flex-grow") {
+    match style.get_by_id(PropertyId::FlexGrow) {
         Some(ComputedValue::Number(value)) => *value,
         Some(ComputedValue::Px(value)) => *value,
         _ => 0.0,
@@ -958,7 +1066,7 @@ fn flex_grow(style: &ComputedStyle) -> f32 {
 }
 
 fn flex_shrink(style: &ComputedStyle) -> f32 {
-    match style.get("flex-shrink") {
+    match style.get_by_id(PropertyId::FlexShrink) {
         Some(ComputedValue::Number(value)) => *value,
         Some(ComputedValue::Px(value)) => *value,
         _ => 1.0,
@@ -1073,4 +1181,199 @@ fn layout_item(
         used_height,
         item.percentage_basis,
     )
+}
+
+#[cfg(test)]
+mod layout_cost_tests {
+    use super::*;
+    use crate::css::{Origin, parse_stylesheet};
+
+    #[test]
+    fn typed_flex_length_lookup_preserves_used_value_rules() {
+        let node = NodeHandle::element("div");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { width:calc(25% + 10px); height:0; min-width:12px; flex-basis:7px }",
+            )
+            .unwrap(),
+        );
+        let style = resolver.computed_style(&node);
+        assert_eq!(
+            resolved_dimension_by_id(&style, PropertyId::Width, 200.0),
+            Some(60.0)
+        );
+        assert_eq!(
+            resolved_dimension_by_id(&style, PropertyId::Width, 0.0),
+            None
+        );
+        assert_eq!(explicit_length_by_id(&style, PropertyId::Height), Some(0.0));
+        assert_eq!(
+            explicit_length_by_id(&style, PropertyId::MinWidth),
+            Some(12.0)
+        );
+        assert_eq!(
+            explicit_length_by_id(&style, PropertyId::FlexBasis),
+            Some(7.0)
+        );
+    }
+
+    #[test]
+    fn nested_auto_height_rows_have_bounded_layout_work() {
+        const DEPTH: usize = 8;
+        let root = NodeHandle::element("div");
+        let mut parent = root.clone();
+        for _ in 1..DEPTH {
+            let child = NodeHandle::element("div");
+            parent.append_child(child.clone());
+            parent = child;
+        }
+        let leaf = NodeHandle::element("span");
+        parent.append_child(leaf);
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("div { display:flex; width:100px } span { width:20px; height:20px }")
+                .unwrap(),
+        );
+        LAYOUT_VISITS.with(|visits| visits.set(Some(0)));
+        let layout = super::super::layout_tree(
+            &root,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        let visits = LAYOUT_VISITS.with(|visits| visits.replace(None).unwrap());
+        eprintln!("{DEPTH} nested rows: {visits} flex layouts");
+        assert_eq!(layout.dimensions.content.height, 20.0);
+        assert!(
+            visits <= DEPTH * 3,
+            "{DEPTH} nested rows required {visits} layouts"
+        );
+    }
+
+    #[test]
+    fn nested_text_rows_have_bounded_layout_work() {
+        const DEPTH: usize = 8;
+        let root = NodeHandle::element("div");
+        let mut parent = root.clone();
+        for _ in 1..DEPTH {
+            let child = NodeHandle::element("div");
+            parent.append_child(child.clone());
+            parent = child;
+        }
+        let label = NodeHandle::element("span");
+        label.append_child(NodeHandle::text("label"));
+        parent.append_child(label);
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(
+                "div { display:flex; width:100px } span { font-size:10px; line-height:20px }",
+            )
+            .unwrap(),
+        );
+        LAYOUT_VISITS.with(|visits| visits.set(Some(0)));
+        let layout = super::super::layout_tree(
+            &root,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        let visits = LAYOUT_VISITS.with(|visits| visits.replace(None).unwrap());
+        eprintln!("{DEPTH} nested text rows: {visits} flex layouts");
+        assert_eq!(layout.dimensions.content.height, 20.0);
+        assert!(
+            visits <= DEPTH * 3,
+            "{DEPTH} nested text rows required {visits} layouts"
+        );
+    }
+
+    #[test]
+    fn wrapped_text_keeps_its_lines_when_a_row_height_becomes_definite() {
+        for stretch_height in [None, Some(160.0)] {
+            let root = NodeHandle::element("div");
+            let row = NodeHandle::element("div");
+            let label = NodeHandle::element("span");
+            label.append_child(NodeHandle::text(
+                "alpha beta gamma delta epsilon zeta eta theta",
+            ));
+            row.append_child(label);
+            root.append_child(row);
+            if let Some(height) = stretch_height {
+                let spacer = NodeHandle::element("i");
+                spacer.set_attribute("style", &format!("width:0px;height:{height}px"));
+                root.append_child(spacer);
+            }
+            let mut resolver = StyleResolver::new();
+            resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+                "div { display:flex; width:100px } span { font:10px monospace; line-height:20px }",
+            ).unwrap());
+            let layout = super::super::layout_tree(
+                &root,
+                &mut resolver,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 200.0,
+                },
+            )
+            .unwrap();
+            let label = &layout.children[0].children[0];
+            assert!(label.lines.len() > 1, "text must wrap at 100px");
+            assert_eq!(
+                label.dimensions.content.height,
+                layout.dimensions.content.height
+            );
+            if let Some(height) = stretch_height {
+                assert_eq!(label.dimensions.content.height, height);
+            } else {
+                assert_eq!(
+                    label.dimensions.content.height,
+                    label.lines.len() as f32 * 20.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn percentage_descendants_still_resolve_after_auto_row_stretch() {
+        let root = NodeHandle::element("div");
+        let nested = NodeHandle::element("div");
+        let percentage = NodeHandle::element("span");
+        nested.append_child(percentage);
+        root.append_child(nested);
+        root.append_child(NodeHandle::element("i"));
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(
+            "div { display:flex; width:100px } span { width:20px; height:50% } i { width:20px; height:80px }",
+        ).unwrap());
+        let layout = super::super::layout_tree(
+            &root,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        let nested = &layout.children[0];
+        assert_eq!(nested.dimensions.content.height, 80.0);
+        assert_eq!(nested.children[0].dimensions.content.height, 40.0);
+        assert!(!unchanged_stretch_is_invariant(nested, &mut resolver));
+    }
 }

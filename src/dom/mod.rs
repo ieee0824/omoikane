@@ -48,6 +48,9 @@ thread_local! {
     // structural/name mutation invalidate slot snapshots in constant time,
     // including parser and embedding mutations that bypass the JS bindings.
     static SLOT_ASSIGNMENT_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    // Live HTMLCollections may reuse one native subtree snapshot until a tree
+    // or attribute mutation can change membership or named properties.
+    static LIVE_COLLECTION_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Number of elements on this thread that currently hold a non-zero scroll
     /// offset. Scrolling is rare, so paint and the layout-metrics bindings use
     /// this to skip their scroll passes entirely on documents that never
@@ -65,6 +68,23 @@ fn invalidate_slot_assignments() {
                 .expect("DOM mutation epoch exhausted"),
         );
     });
+    invalidate_live_collections();
+}
+
+fn invalidate_live_collections() {
+    LIVE_COLLECTION_EPOCH.with(|epoch| {
+        epoch.set(
+            epoch
+                .get()
+                .checked_add(1)
+                .expect("live collection epoch exhausted"),
+        );
+    });
+}
+
+/// Returns the thread-local DOM generation used by live collection snapshots.
+pub(crate) fn live_collection_epoch() -> u64 {
+    LIVE_COLLECTION_EPOCH.with(std::cell::Cell::get)
 }
 
 /// Whether any element on this thread holds a non-zero scroll offset.
@@ -398,6 +418,7 @@ pub struct Element {
     dirty_selectedness: bool,
     form_associated_custom: bool,
     script_source_position: Option<(u32, u32)>,
+    script_force_async: bool,
     css_validity: Option<bool>,
     /// Dynamic selector state shared by style resolution and DOM queries.
     user_action_state: u8,
@@ -498,6 +519,7 @@ impl Element {
             dirty_selectedness: false,
             form_associated_custom: false,
             script_source_position: None,
+            script_force_async: true,
             css_validity: None,
             user_action_state: 0,
             parser_form_owner: None,
@@ -544,6 +566,7 @@ impl Element {
             dirty_selectedness: false,
             form_associated_custom: false,
             script_source_position: None,
+            script_force_async: true,
             css_validity: None,
             user_action_state: 0,
             parser_form_owner: None,
@@ -855,6 +878,26 @@ impl NodeHandle {
     /// Creates an XML element, preserving its qualified name and namespace.
     pub fn xml_element(tag_name: impl Into<String>, namespace_uri: Option<String>) -> Self {
         Self::new(NodeData::Element(Element::new_xml(tag_name, namespace_uri)))
+    }
+
+    /// Returns the script's force-async state combined with its async attribute.
+    pub(crate) fn script_is_async(&self) -> bool {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => {
+                element.script_force_async
+                    || element.attribute_records.iter().any(|attribute| {
+                        attribute.namespace_uri.is_none() && attribute.local_name == "async"
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Sets parser/IDL-owned force-async state without changing attributes.
+    pub(crate) fn set_script_force_async(&self, asynchronous: bool) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.script_force_async = asynchronous;
+        }
     }
 
     /// Retains the parser's one-based script content coordinates as owned data.
@@ -1492,6 +1535,7 @@ impl NodeHandle {
             }
         }
         rebuild_attribute_projection(element);
+        invalidate_live_collections();
     }
 
     /// Returns the number of attributes without cloning their records.
@@ -1574,6 +1618,32 @@ impl NodeHandle {
         self.with_attribute(name, |value| value == Some(expected))
     }
 
+    /// Reports whether an attribute retains exact non-scalar UTF-16 units.
+    /// Name matching follows [`Self::get_attribute`].
+    pub(crate) fn attribute_has_non_scalar_value(&self, name: &str) -> bool {
+        let inner = self.0.borrow();
+        let NodeData::Element(element) = &inner.data else {
+            return false;
+        };
+        element
+            .attribute_records
+            .iter()
+            .find(|record| record.qualified_name == name)
+            .or_else(|| {
+                element
+                    .html
+                    .then(|| {
+                        let lowercase = name.to_ascii_lowercase();
+                        element
+                            .attribute_records
+                            .iter()
+                            .find(|record| record.qualified_name == lowercase)
+                    })
+                    .flatten()
+            })
+            .is_some_and(|record| record.utf16.is_some())
+    }
+
     /// Returns an attribute value as exact UTF-16 code units.
     /// Name matching follows [`Self::get_attribute`].
     pub fn get_attribute_utf16(&self, name: &str) -> Option<Vec<u16>> {
@@ -1635,6 +1705,11 @@ impl NodeHandle {
             };
             if matches!(name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
+            } else {
+                invalidate_live_collections();
+            }
+            if name == "async" {
+                element.script_force_async = false;
             }
             if name == "form" {
                 element.parser_form_owner = None;
@@ -1737,6 +1812,9 @@ impl NodeHandle {
         replace_qualified_name: bool,
     ) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            if namespace_uri.is_none() && local_name == "async" {
+                element.script_force_async = false;
+            }
             if namespace_uri.is_none() && qualified_name == "form" {
                 element.parser_form_owner = None;
             }
@@ -1752,6 +1830,8 @@ impl NodeHandle {
             }
             if matches!(qualified_name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
+            } else {
+                invalidate_live_collections();
             }
             if let Some(attribute) = element.attribute_records.iter_mut().find(|attribute| {
                 attribute.namespace_uri == namespace_uri && attribute.local_name == local_name
@@ -1810,6 +1890,8 @@ impl NodeHandle {
             };
             if matches!(name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
+            } else {
+                invalidate_live_collections();
             }
             if let Some(index) = element
                 .attribute_records
@@ -1836,6 +1918,8 @@ impl NodeHandle {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
             if matches!(qualified_name, "slot" | "name") {
                 invalidate_slot_assignments();
+            } else {
+                invalidate_live_collections();
             }
             if qualified_name == "form"
                 && element.attribute_records.iter().any(|attribute| {
@@ -1867,6 +1951,8 @@ impl NodeHandle {
             let qualified_name = element.attribute_records[index].qualified_name.clone();
             if matches!(qualified_name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
+            } else {
+                invalidate_live_collections();
             }
             if qualified_name == "form" && namespace_uri.is_none() {
                 element.parser_form_owner = None;

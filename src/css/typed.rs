@@ -1,6 +1,6 @@
 //! Typed views of commonly read computed CSS keywords.
 
-use super::{ComputedStyle, ComputedValue};
+use super::{ComputedStyle, ComputedValue, style::PropertyId};
 
 /// A CSS-wide keyword retained in a computed-value map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +134,7 @@ fn css_wide(value: &str) -> Option<CssWideKeyword> {
 impl ComputedStyle {
     /// Returns a typed view of `display`, or `None` when it is absent or non-keyword.
     pub fn display(&self) -> Option<ComputedDisplay<'_>> {
-        let value = keyword(self.get("display"))?;
+        let value = keyword(self.get_by_id(PropertyId::Display))?;
         Some(if let Some(wide) = css_wide(value) {
             ComputedDisplay::CssWide(wide)
         } else if value.eq_ignore_ascii_case("none") {
@@ -179,7 +179,7 @@ impl ComputedStyle {
 
     /// Returns a typed view of `position`, or `None` when it is absent or non-keyword.
     pub fn position(&self) -> Option<ComputedPosition<'_>> {
-        let value = keyword(self.get("position"))?;
+        let value = keyword(self.get_by_id(PropertyId::Position))?;
         Some(if let Some(wide) = css_wide(value) {
             ComputedPosition::CssWide(wide)
         } else if value.eq_ignore_ascii_case("static") {
@@ -199,7 +199,7 @@ impl ComputedStyle {
 
     /// Returns a typed view of `float`, or `None` when it is absent or non-keyword.
     pub fn float(&self) -> Option<ComputedFloat<'_>> {
-        let value = keyword(self.get("float"))?;
+        let value = keyword(self.get_by_id(PropertyId::Float))?;
         Some(if let Some(wide) = css_wide(value) {
             ComputedFloat::CssWide(wide)
         } else if value.eq_ignore_ascii_case("none") {
@@ -219,7 +219,7 @@ impl ComputedStyle {
 
     /// Returns a typed view of `direction`, including string-backed values.
     pub fn direction(&self) -> Option<ComputedDirection<'_>> {
-        let value = keyword_or_string(self.get("direction"))?;
+        let value = keyword_or_string(self.get_by_id(PropertyId::Direction))?;
         Some(if let Some(wide) = css_wide(value) {
             ComputedDirection::CssWide(wide)
         } else if value.eq_ignore_ascii_case("ltr") {
@@ -233,7 +233,7 @@ impl ComputedStyle {
 
     /// Returns a typed view of `writing-mode`, including string-backed values.
     pub fn writing_mode(&self) -> Option<ComputedWritingMode<'_>> {
-        let value = keyword_or_string(self.get("writing-mode"))?;
+        let value = keyword_or_string(self.get_by_id(PropertyId::WritingMode))?;
         Some(if let Some(wide) = css_wide(value) {
             ComputedWritingMode::CssWide(wide)
         } else if value.eq_ignore_ascii_case("horizontal-tb") {
@@ -253,16 +253,16 @@ impl ComputedStyle {
 
     /// Returns a typed view of `break-before`, or `None` when absent.
     pub fn break_before(&self) -> Option<ComputedBreak<'_>> {
-        self.break_value("break-before")
+        self.break_value(PropertyId::BreakBefore)
     }
 
     /// Returns a typed view of `break-after`, or `None` when absent.
     pub fn break_after(&self) -> Option<ComputedBreak<'_>> {
-        self.break_value("break-after")
+        self.break_value(PropertyId::BreakAfter)
     }
 
-    fn break_value(&self, name: &str) -> Option<ComputedBreak<'_>> {
-        let value = keyword(self.get(name))?;
+    fn break_value(&self, id: PropertyId) -> Option<ComputedBreak<'_>> {
+        let value = keyword(self.get_by_id(id))?;
         Some(if let Some(wide) = css_wide(value) {
             ComputedBreak::CssWide(wide)
         } else if value.eq_ignore_ascii_case("auto") {

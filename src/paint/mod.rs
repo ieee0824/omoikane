@@ -3,15 +3,33 @@
 pub(crate) mod animation;
 pub(crate) mod border;
 mod caret;
+mod effect_source_cache;
 pub(crate) use caret::{TextCaretPoint, hit_test_caret_layout};
+pub(crate) use effect_source_cache::{EffectSourceCache, EffectSourceCacheSummary};
 pub(crate) mod color;
 pub(crate) mod color4;
 pub(crate) mod form_control;
+mod gradient_tiles;
+mod hit_test_order;
+use hit_test_order::HitTestPhaseCache;
+pub(crate) use hit_test_order::HitTestTree;
 pub(crate) mod image;
+mod image_blit;
+mod image_scale;
+pub(crate) use gradient_tiles::gradient_tile_cache_scope;
 mod outline;
 mod print_budget;
+mod retained_extract;
+mod retained_layers;
 
 pub use print_budget::{MAX_PRINT_DOCUMENT_PIXELS, MAX_PRINT_PAGE_DIMENSION};
+pub(crate) use retained_extract::{
+    CrossSpaceClipDiagnostic, RetainedOverscanFrame, RetainedOverscanOutcome, RetainedOverscanRun,
+    RetainedOverscanTile, RetainedPaintError, RetainedPaintFrame, RetainedPaintOutcome,
+    RetainedPaintRun, RetainedPaintRunIdentity, RetainedPaintSpace, VerticalOverscanPlan,
+    diagnose_cross_space_clip, paint_layout_with_retained_fallback,
+    paint_layout_with_vertical_overscan, paint_layout_with_vertical_overscan_current,
+};
 pub(crate) mod stylesheet;
 pub(crate) mod text;
 
@@ -139,6 +157,7 @@ fn force_opacity_enabled() -> bool {
 #[allow(unused_imports)]
 use base64::Engine;
 
+use crate::css::style::PropertyId;
 use crate::css::{
     AffineTransform, ComputedStyle, ComputedValue, MediaType, Origin, PageMarginBox, PseudoElement,
     StyleResolver, Value, split_top_level_whitespace,
@@ -147,7 +166,8 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{Font, WebFontRegistry};
 #[allow(unused_imports)]
 use crate::layout::{
-    InlineFragmentContent, LayoutBox, PageMarginFragment, PagedPage, Rect, Visibility,
+    InlineFragment, InlineFragmentContent, LayoutBox, LineBox, PageMarginFragment, PagedPage, Rect,
+    Visibility,
 };
 
 // Re-export public types from submodules
@@ -212,6 +232,21 @@ impl PartialEq for Image {
     }
 }
 impl Eq for Image {}
+
+impl Image {
+    pub(crate) fn retained_pixels_exact(&self, other: &Self) -> bool {
+        self == other
+    }
+
+    /// Includes playback regions and rejects direct animated sources whose
+    /// future sampled pixels cannot yet be compared by a stable cache key.
+    pub(crate) fn retained_source_exact(&self, other: &Self) -> bool {
+        self.animated_pixels.is_none()
+            && other.animated_pixels.is_none()
+            && self == other
+            && self.animation_regions == other.animation_regions
+    }
+}
 
 /// GIF disposal operation applied after a frame's display interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -422,13 +457,33 @@ pub(crate) enum BorderRegion {
 }
 
 /// A simple RGBA bitmap canvas.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Canvas {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
     animation_regions: Vec<animation::AnimationRegion>,
     ink_probe: Option<InkBoundsProbe>,
+    retained_layers: Option<Box<retained_layers::CanvasLayerRecorder>>,
+    retained_operation_guard: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl Clone for Canvas {
+    fn clone(&self) -> Self {
+        self.invalidate_retained_layers();
+        Self {
+            width: self.width,
+            height: self.height,
+            pixels: self.pixels.clone(),
+            animation_regions: self.animation_regions.clone(),
+            ink_probe: self.ink_probe.clone(),
+            // A clone made during recorded painting cannot inherit a second
+            // mutable recorder. The shared clone flag makes the originating
+            // retained attempt fail closed at its run boundary.
+            retained_layers: None,
+            retained_operation_guard: None,
+        }
+    }
 }
 
 /// Short-lived text-only probe: records raster and decoration bounds without pixels.
@@ -440,6 +495,8 @@ struct InkBoundsProbe {
 // Equality compares dimensions and pixels, excluding playback metadata.
 impl PartialEq for Canvas {
     fn eq(&self, other: &Self) -> bool {
+        self.invalidate_retained_layers();
+        other.invalidate_retained_layers();
         self.width == other.width && self.height == other.height && self.pixels == other.pixels
     }
 }
@@ -448,6 +505,7 @@ impl Eq for Canvas {}
 impl Canvas {
     /// Preserves timing metadata when a child document becomes a raster image.
     pub(crate) fn into_image(self) -> Image {
+        self.invalidate_retained_layers();
         Image {
             width: self.width,
             height: self.height,
@@ -465,6 +523,8 @@ impl Canvas {
             pixels: vec![0; width as usize * height as usize * 4],
             animation_regions: Vec::new(),
             ink_probe: None,
+            retained_layers: None,
+            retained_operation_guard: None,
         }
     }
 
@@ -476,6 +536,8 @@ impl Canvas {
             pixels,
             animation_regions: Vec::new(),
             ink_probe: None,
+            retained_layers: None,
+            retained_operation_guard: None,
         })
     }
 
@@ -520,16 +582,19 @@ impl Canvas {
 
     /// Returns the raw RGBA pixels.
     pub fn pixels(&self) -> &[u8] {
+        self.invalidate_retained_layers();
         &self.pixels
     }
 
     /// Consumes the canvas and returns the raw RGBA pixel buffer.
     pub fn into_pixels(self) -> Vec<u8> {
+        self.invalidate_retained_layers();
         self.pixels
     }
 
     /// Sets a single pixel at `(x, y)` to the given color.
     pub fn set_pixel(&mut self, x: u32, y: u32, color: Color) {
+        self.poison_retained_layers();
         if x >= self.width || y >= self.height {
             return;
         }
@@ -542,6 +607,7 @@ impl Canvas {
 
     /// Alpha-blends one pixel over the existing canvas contents.
     pub(crate) fn blend_pixel(&mut self, x: u32, y: u32, color: Color) {
+        self.poison_retained_layers();
         if x >= self.width || y >= self.height || color.a == 0 {
             return;
         }
@@ -551,6 +617,7 @@ impl Canvas {
 
     /// Returns the pixel color at `(x, y)`, if in bounds.
     pub fn pixel(&self, x: u32, y: u32) -> Option<Color> {
+        self.invalidate_retained_layers();
         if x >= self.width || y >= self.height {
             return None;
         }
@@ -582,6 +649,13 @@ impl Canvas {
         bl: f32,
         clip: Option<Rect>,
     ) {
+        if self.with_retained_operation(
+            retained_layers::RetainedPrimitiveKind::RoundedRect,
+            rect,
+            |canvas| canvas.fill_rounded_rect(rect, color, tl, tr, br, bl, clip),
+        ) {
+            return;
+        }
         if color.a == 0 {
             return;
         }
@@ -694,6 +768,66 @@ impl Canvas {
     /// 「outer の内側かつ inner の外側」のピクセルのみ color で塗る。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn fill_rounded_rect_annulus(
+        &mut self,
+        outer_rect: Rect,
+        outer_tl: f32,
+        outer_tr: f32,
+        outer_br: f32,
+        outer_bl: f32,
+        inner_rect: Rect,
+        inner_tl: f32,
+        inner_tr: f32,
+        inner_br: f32,
+        inner_bl: f32,
+        color: Color,
+        clip: Option<Rect>,
+        region: BorderRegion,
+        border_width: f32,
+    ) {
+        if self.with_retained_operation(
+            retained_layers::RetainedPrimitiveKind::RoundedAnnulus,
+            outer_rect,
+            |canvas| {
+                canvas.fill_rounded_rect_annulus_impl(
+                    outer_rect,
+                    outer_tl,
+                    outer_tr,
+                    outer_br,
+                    outer_bl,
+                    inner_rect,
+                    inner_tl,
+                    inner_tr,
+                    inner_br,
+                    inner_bl,
+                    color,
+                    clip,
+                    region,
+                    border_width,
+                );
+            },
+        ) {
+            return;
+        }
+        self.fill_rounded_rect_annulus_impl(
+            outer_rect,
+            outer_tl,
+            outer_tr,
+            outer_br,
+            outer_bl,
+            inner_rect,
+            inner_tl,
+            inner_tr,
+            inner_br,
+            inner_bl,
+            color,
+            clip,
+            region,
+            border_width,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fill_rounded_rect_annulus_impl(
         &mut self,
         outer_rect: Rect,
         outer_tl: f32,
@@ -894,6 +1028,7 @@ impl Canvas {
 
     /// Encodes the canvas as a PNG image.
     pub fn encode_png(&self) -> Vec<u8> {
+        self.invalidate_retained_layers();
         let mut png = Vec::new();
         png.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
 
@@ -926,6 +1061,7 @@ impl Canvas {
     /// browser screenshots use this before encoding to match the opaque page
     /// surface produced by desktop browsers.
     pub(crate) fn composite_over(&mut self, background: Color) {
+        self.poison_retained_layers();
         if self.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255) {
             return;
         }
@@ -948,6 +1084,13 @@ impl Canvas {
     }
 
     pub(crate) fn fill_rect_clipped(&mut self, rect: Rect, color: Color, clip: Option<Rect>) {
+        if self.with_retained_operation(
+            retained_layers::RetainedPrimitiveKind::FillRect,
+            rect,
+            |canvas| canvas.fill_rect_clipped(rect, color, clip),
+        ) {
+            return;
+        }
         if self.record_text_ink(rect, color, clip) {
             return;
         }
@@ -1033,6 +1176,15 @@ impl Canvas {
         clip: Option<Rect>,
         opacity: f32,
     ) {
+        if self.with_retained_operation(
+            retained_layers::RetainedPrimitiveKind::Image,
+            destination,
+            |canvas| {
+                canvas.draw_image_scaled_clipped_with_opacity(image, destination, clip, opacity);
+            },
+        ) {
+            return;
+        }
         let opacity = if opacity.is_finite() {
             opacity.clamp(0.0, 1.0)
         } else {
@@ -1065,17 +1217,63 @@ impl Canvas {
         }
         self.record_animation_regions_from_scaled_image(image, destination, area);
         let image = image.sampled_image(crate::layout::image_animation_time_ms());
+        if self.try_draw_unscaled_image(image, destination, opacity, x0..x1, y0..y1) {
+            return;
+        }
+        self.draw_scaled_image_pixels(image, destination, opacity, x0..x1, y0..y1);
+    }
+
+    /// Paints sampled image pixels after normalization and animation registration.
+    fn draw_scaled_image_pixels(
+        &mut self,
+        image: &Image,
+        destination: Rect,
+        opacity: f32,
+        x_range: std::ops::Range<i32>,
+        y_range: std::ops::Range<i32>,
+    ) {
+        let (x0, x1) = (x_range.start, x_range.end);
+        let (y0, y1) = (y_range.start, y_range.end);
         let shrink_x = destination.width < image.width as f32;
         let shrink_y = destination.height < image.height as f32;
         let source_per_dest_x = image.width as f32 / destination.width;
         let source_per_dest_y = image.height as f32 / destination.height;
+        let scale_plan = if shrink_x || shrink_y {
+            image_scale::ImageScalePlan::try_new(
+                x0..x1,
+                y0..y1,
+                destination.x,
+                destination.y,
+                destination.width,
+                destination.height,
+                image.width,
+                image.height,
+                source_per_dest_x,
+                source_per_dest_y,
+                shrink_x,
+                shrink_y,
+            )
+        } else {
+            None
+        };
 
         for dest_y in y0..y1 {
             for dest_x in x0..x1 {
                 let u = (dest_x as f32 - destination.x) / destination.width;
                 let v = (dest_y as f32 - destination.y) / destination.height;
-                let source_x = (u * image.width as f32).floor() as i32;
-                let source_y = (v * image.height as f32).floor() as i32;
+                // A 1:1 blit must preserve integer pixel addresses. Dividing
+                // and multiplying by an odd extent can round just below an
+                // integer (for example 14 / 23 * 23), repeating the prior row.
+                let source_x = if destination.width == image.width as f32 {
+                    (dest_x as f32 - destination.x).floor() as i32
+                } else {
+                    (u * image.width as f32).floor() as i32
+                };
+                let source_y = if destination.height == image.height as f32 {
+                    (dest_y as f32 - destination.y).floor() as i32
+                } else {
+                    (v * image.height as f32).floor() as i32
+                };
                 if source_x < 0
                     || source_y < 0
                     || source_x >= image.width as i32
@@ -1085,31 +1283,41 @@ impl Canvas {
                 }
 
                 let mut color = if shrink_x || shrink_y {
-                    let source_left = if shrink_x {
-                        ((dest_x as f32 - destination.x) * source_per_dest_x)
-                            .clamp(0.0, image.width as f32)
+                    if let Some(plan) = &scale_plan {
+                        plan.sample(image, dest_x, dest_y)
                     } else {
-                        source_x as f32
-                    };
-                    let source_right = if shrink_x {
-                        (((dest_x + 1) as f32 - destination.x) * source_per_dest_x)
-                            .clamp(0.0, image.width as f32)
-                    } else {
-                        source_x as f32 + 1.0
-                    };
-                    let source_top = if shrink_y {
-                        ((dest_y as f32 - destination.y) * source_per_dest_y)
-                            .clamp(0.0, image.height as f32)
-                    } else {
-                        source_y as f32
-                    };
-                    let source_bottom = if shrink_y {
-                        (((dest_y + 1) as f32 - destination.y) * source_per_dest_y)
-                            .clamp(0.0, image.height as f32)
-                    } else {
-                        source_y as f32 + 1.0
-                    };
-                    box_filter_sample(image, source_left, source_top, source_right, source_bottom)
+                        let source_left = if shrink_x {
+                            ((dest_x as f32 - destination.x) * source_per_dest_x)
+                                .clamp(0.0, image.width as f32)
+                        } else {
+                            source_x as f32
+                        };
+                        let source_right = if shrink_x {
+                            (((dest_x + 1) as f32 - destination.x) * source_per_dest_x)
+                                .clamp(0.0, image.width as f32)
+                        } else {
+                            source_x as f32 + 1.0
+                        };
+                        let source_top = if shrink_y {
+                            ((dest_y as f32 - destination.y) * source_per_dest_y)
+                                .clamp(0.0, image.height as f32)
+                        } else {
+                            source_y as f32
+                        };
+                        let source_bottom = if shrink_y {
+                            (((dest_y + 1) as f32 - destination.y) * source_per_dest_y)
+                                .clamp(0.0, image.height as f32)
+                        } else {
+                            source_y as f32 + 1.0
+                        };
+                        box_filter_sample(
+                            image,
+                            source_left,
+                            source_top,
+                            source_right,
+                            source_bottom,
+                        )
+                    }
                 } else {
                     let source_index =
                         ((source_y as u32 * image.width + source_x as u32) * 4) as usize;
@@ -1143,16 +1351,25 @@ impl Canvas {
         color: Color,
         clip: Option<Rect>,
     ) {
-        if mask_width == 0 || mask_height == 0 || mask.is_empty() {
-            return;
-        }
-
         let destination = Rect {
             x,
             y,
             width: mask_width as f32,
             height: mask_height as f32,
         };
+        if self.with_retained_operation(
+            retained_layers::RetainedPrimitiveKind::Glyph,
+            destination,
+            |canvas| {
+                canvas.draw_glyph_mask(x, y, mask_width, mask_height, mask, color, clip);
+            },
+        ) {
+            return;
+        }
+        if mask_width == 0 || mask_height == 0 || mask.is_empty() {
+            return;
+        }
+
         if self.record_text_ink(destination, color, clip) {
             return;
         }
@@ -1242,6 +1459,7 @@ pub fn paint_layout_with_web_fonts(
     if let Some(background) = viewport_background.color {
         canvas.fill_rect(viewport, background);
     }
+    let shadow_masks = border::FrameShadowMaskCache::new(false);
     text::with_render_glyph_cache(|| {
         paint_box(
             &mut canvas,
@@ -1252,9 +1470,106 @@ pub fn paint_layout_with_web_fonts(
             &fonts,
             web_fonts,
             viewport_background.propagated_node,
+            &shadow_masks,
         );
     });
     canvas
+}
+
+/// Owned counters returned only by the opt-in document-raster attribution path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PaintRasterSummary {
+    pub(crate) nested_snapshot_draw_calls: usize,
+    pub(crate) nested_snapshot_owner_ids: [usize; 16],
+    pub(crate) nested_snapshot_owner_count: usize,
+    pub(crate) nested_snapshot_owner_overflow: usize,
+    pub(crate) shadow_masks: border::ShadowMaskCacheSummary,
+    pub(crate) effect_sources: EffectSourceCacheSummary,
+}
+
+impl PaintRasterSummary {
+    pub(crate) fn merged(mut self, other: Self) -> Self {
+        self.nested_snapshot_draw_calls = self
+            .nested_snapshot_draw_calls
+            .saturating_add(other.nested_snapshot_draw_calls);
+        for owner in other.nested_snapshot_owner_ids[..other.nested_snapshot_owner_count.min(16)]
+            .iter()
+            .copied()
+        {
+            self.record_nested_snapshot_owner(owner);
+        }
+        self.nested_snapshot_owner_overflow = self
+            .nested_snapshot_owner_overflow
+            .saturating_add(other.nested_snapshot_owner_overflow);
+        self.shadow_masks = self.shadow_masks.merged(other.shadow_masks);
+        self.effect_sources = self.effect_sources.merged(other.effect_sources);
+        self
+    }
+
+    fn record_nested_snapshot_owner(&mut self, owner: usize) {
+        let retained = &self.nested_snapshot_owner_ids[..self.nested_snapshot_owner_count.min(16)];
+        if retained.contains(&owner) {
+            return;
+        }
+        if self.nested_snapshot_owner_count < self.nested_snapshot_owner_ids.len() {
+            self.nested_snapshot_owner_ids[self.nested_snapshot_owner_count] = owner;
+            self.nested_snapshot_owner_count += 1;
+        } else {
+            self.nested_snapshot_owner_overflow =
+                self.nested_snapshot_owner_overflow.saturating_add(1);
+        }
+    }
+}
+
+thread_local! {
+    static NESTED_SNAPSHOT_DRAW_SCOPE: RefCell<Option<PaintRasterSummary>> = RefCell::new(None);
+}
+
+/// Bounded attribution for nested snapshots drawn by one main raster,
+/// including retained-layer planning and every full-viewport overscan sample.
+pub(crate) struct NestedSnapshotDrawScope {
+    active: bool,
+}
+
+impl NestedSnapshotDrawScope {
+    pub(crate) fn begin(enabled: bool) -> Self {
+        if enabled {
+            NESTED_SNAPSHOT_DRAW_SCOPE.with(|scope| {
+                debug_assert!(scope.borrow().is_none());
+                *scope.borrow_mut() = Some(PaintRasterSummary::default());
+            });
+        }
+        Self { active: enabled }
+    }
+
+    pub(crate) fn finish(mut self) -> PaintRasterSummary {
+        if !self.active {
+            return PaintRasterSummary::default();
+        }
+        self.active = false;
+        NESTED_SNAPSHOT_DRAW_SCOPE.with(|scope| scope.borrow_mut().take().unwrap_or_default())
+    }
+}
+
+impl Drop for NestedSnapshotDrawScope {
+    fn drop(&mut self) {
+        if self.active {
+            NESTED_SNAPSHOT_DRAW_SCOPE.with(|scope| {
+                scope.borrow_mut().take();
+            });
+        }
+    }
+}
+
+fn record_nested_snapshot_draw(owner: usize) {
+    NESTED_SNAPSHOT_DRAW_SCOPE.with(|scope| {
+        let mut scope = scope.borrow_mut();
+        let Some(summary) = scope.as_mut() else {
+            return;
+        };
+        summary.nested_snapshot_draw_calls = summary.nested_snapshot_draw_calls.saturating_add(1);
+        summary.record_nested_snapshot_owner(owner);
+    });
 }
 
 /// Paints with a private visited-link color snapshot, restored before return.
@@ -1290,7 +1605,140 @@ pub(crate) fn paint_layout_with_document_snapshots(
     visited_link_ids: impl IntoIterator<Item = usize>,
     nested_documents: &HashMap<usize, Image>,
 ) -> Canvas {
+    paint_layout_with_document_snapshots_internal(
+        layout,
+        resolver,
+        viewport,
+        fonts,
+        web_fonts,
+        visited_link_ids,
+        nested_documents,
+        false,
+        None,
+        None,
+    )
+    .0
+}
+
+/// Paints nested documents and returns owned counters for this document raster.
+/// The counters exclude work done while producing a child snapshot because
+/// each child gets its own measurement scope and cache owner.
+pub(crate) fn paint_layout_with_document_snapshots_counted(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    fonts: Vec<Arc<Font>>,
+    web_fonts: Option<&WebFontRegistry>,
+    visited_link_ids: impl IntoIterator<Item = usize>,
+    nested_documents: &HashMap<usize, Image>,
+) -> (Canvas, PaintRasterSummary) {
+    paint_layout_with_document_snapshots_internal(
+        layout,
+        resolver,
+        viewport,
+        fonts,
+        web_fonts,
+        visited_link_ids,
+        nested_documents,
+        true,
+        None,
+        None,
+    )
+}
+
+/// Paints one runtime-owned document with a cache that may outlive this raster.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_layout_with_document_snapshots_cached(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    fonts: Vec<Arc<Font>>,
+    web_fonts: Option<&WebFontRegistry>,
+    visited_link_ids: impl IntoIterator<Item = usize>,
+    nested_documents: &HashMap<usize, Image>,
+    collect_diagnostics: bool,
+    shadow_masks: &border::FrameShadowMaskCache,
+) -> (Canvas, PaintRasterSummary) {
+    paint_layout_with_document_snapshots_internal(
+        layout,
+        resolver,
+        viewport,
+        fonts,
+        web_fonts,
+        visited_link_ids,
+        nested_documents,
+        collect_diagnostics,
+        Some(shadow_masks),
+        None,
+    )
+}
+
+/// Paints a child document while retaining only proven opacity effect sources.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_layout_with_child_effect_cache(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    fonts: Vec<Arc<Font>>,
+    web_fonts: Option<&WebFontRegistry>,
+    visited_link_ids: impl IntoIterator<Item = usize>,
+    nested_documents: &HashMap<usize, Image>,
+    collect_diagnostics: bool,
+    cache: &EffectSourceCache,
+    generation: u64,
+    opacity_nodes: &HashSet<usize>,
+) -> (Canvas, PaintRasterSummary) {
+    paint_layout_with_document_snapshots_internal(
+        layout,
+        resolver,
+        viewport,
+        fonts,
+        web_fonts,
+        visited_link_ids,
+        nested_documents,
+        collect_diagnostics,
+        None,
+        Some((cache, generation, opacity_nodes)),
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    static ORDINARY_DOCUMENT_RASTERS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Test-only count of ordinary snapshot-aware raster traversals on this thread.
+#[cfg(test)]
+pub(crate) fn ordinary_document_raster_count() -> usize {
+    ORDINARY_DOCUMENT_RASTERS.with(Cell::get)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_layout_with_document_snapshots_internal(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    fonts: Vec<Arc<Font>>,
+    web_fonts: Option<&WebFontRegistry>,
+    visited_link_ids: impl IntoIterator<Item = usize>,
+    nested_documents: &HashMap<usize, Image>,
+    collect_diagnostics: bool,
+    external_shadow_masks: Option<&border::FrameShadowMaskCache>,
+    effect_sources: Option<(&EffectSourceCache, u64, &HashSet<usize>)>,
+) -> (Canvas, PaintRasterSummary) {
+    #[cfg(test)]
+    ORDINARY_DOCUMENT_RASTERS.with(|count| count.set(count.get() + 1));
     resolver.begin_visited_paint(visited_link_ids);
+    let local_shadow_masks = external_shadow_masks
+        .is_none()
+        .then(|| border::FrameShadowMaskCache::new(false));
+    let shadow_masks = external_shadow_masks
+        .or(local_shadow_masks.as_ref())
+        .expect("a local or external shadow-mask cache");
+    let shadow_measurement: border::RasterMeasurementToken =
+        shadow_masks.begin_raster_measurement(collect_diagnostics);
+    let snapshot_draw_calls = Cell::new(0);
+    let effect_source_summary = RefCell::new(EffectSourceCacheSummary::default());
     let mut canvas = Canvas::new(
         viewport.width.ceil().max(1.0) as u32,
         viewport.height.ceil().max(1.0) as u32,
@@ -1309,18 +1757,38 @@ pub(crate) fn paint_layout_with_document_snapshots(
                 text_fonts: &fonts,
                 web_fonts,
                 nested_documents: Some(nested_documents),
+                nested_snapshot_draw_calls: collect_diagnostics.then_some(&snapshot_draw_calls),
                 propagated_background_node: viewport_background.propagated_node,
+                shadow_masks: Some(shadow_masks),
+                retained_collector: None,
+                retained_destination: retained_extract::PaintDestination::RootDocument,
+                effect_sources: effect_sources.map(|value| value.0),
+                effect_source_generation: effect_sources.map_or(0, |value| value.1),
+                effect_source_nodes: effect_sources.map(|value| value.2),
+                effect_source_summary: collect_diagnostics.then_some(&effect_source_summary),
             },
             PaintBoxOptions {
                 inherited_clip: None,
                 include_phase_descendants: true,
                 paint_decorations: true,
                 offset: PaintOffset::default(),
+                retained_paint_owner: None,
+                retained_atomic_inline: None,
             },
         );
     });
     resolver.end_visited_paint();
-    canvas
+    (
+        canvas,
+        PaintRasterSummary {
+            nested_snapshot_draw_calls: snapshot_draw_calls.get(),
+            shadow_masks: shadow_masks
+                .finish_raster_measurement(shadow_measurement)
+                .unwrap_or_default(),
+            effect_sources: effect_source_summary.into_inner(),
+            ..PaintRasterSummary::default()
+        },
+    )
 }
 
 fn paint_box_style(layout: &LayoutBox, resolver: &mut StyleResolver) -> Arc<ComputedStyle> {
@@ -1489,6 +1957,7 @@ fn paint_page_content_fragments(
     web_fonts: Option<&WebFontRegistry>,
     propagated_background_node: Option<usize>,
 ) {
+    let shadow_masks = border::FrameShadowMaskCache::new(false);
     for fragment in &page.fragments {
         let painted_area = Rect {
             width: fragment.source.width.min(fragment.destination.width),
@@ -1514,6 +1983,7 @@ fn paint_page_content_fragments(
             fonts,
             web_fonts,
             propagated_background_node,
+            &shadow_masks,
         );
     }
 }
@@ -2166,7 +2636,15 @@ struct PaintContext<'a> {
     text_fonts: &'a [Arc<Font>],
     web_fonts: Option<&'a WebFontRegistry>,
     nested_documents: Option<&'a HashMap<usize, Image>>,
+    nested_snapshot_draw_calls: Option<&'a Cell<usize>>,
     propagated_background_node: Option<usize>,
+    shadow_masks: Option<&'a border::FrameShadowMaskCache>,
+    retained_collector: Option<&'a RefCell<retained_extract::RetainedPaintCollector>>,
+    retained_destination: retained_extract::PaintDestination,
+    effect_sources: Option<&'a EffectSourceCache>,
+    effect_source_generation: u64,
+    effect_source_nodes: Option<&'a HashSet<usize>>,
+    effect_source_summary: Option<&'a RefCell<EffectSourceCacheSummary>>,
 }
 
 /// Per-box traversal state in the destination surface's coordinate system.
@@ -2176,6 +2654,201 @@ struct PaintBoxOptions {
     include_phase_descendants: bool,
     paint_decorations: bool,
     offset: PaintOffset,
+    /// Call-local owner whose canonical child phase invoked this box.
+    retained_paint_owner: Option<usize>,
+    /// Selected atomic-inline text-phase invocation containing this box.
+    retained_atomic_inline: Option<AtomicPaintInvocation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AtomicPaintInvocation {
+    owner_node_id: usize,
+    atomic_node_id: usize,
+    line_index: usize,
+    fragment_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtomicInlineChildPaint {
+    Ordinary,
+    Skipped,
+    Selected(AtomicPaintInvocation),
+}
+
+#[derive(Clone, Copy)]
+struct SelectedAtomicInline {
+    child_index: usize,
+    child_address: usize,
+    invocation: AtomicPaintInvocation,
+}
+
+struct AtomicInlineChildLookup {
+    first_by_node: HashMap<usize, usize>,
+}
+
+impl AtomicInlineChildLookup {
+    fn build(layout: &LayoutBox) -> Self {
+        let mut first_by_node = HashMap::new();
+        for (child_index, child) in layout.children.iter().enumerate() {
+            first_by_node
+                .entry(child.node.identity())
+                .or_insert(child_index);
+        }
+        Self { first_by_node }
+    }
+
+    fn first<'a>(&self, layout: &'a LayoutBox, node_id: usize) -> Option<(usize, &'a LayoutBox)> {
+        let child_index = *self.first_by_node.get(&node_id)?;
+        Some((child_index, layout.children.get(child_index)?))
+    }
+}
+
+/// Call-local proof of the atomic-inline children selected by the text painter.
+/// It owns only indices, addresses and IDs and is discarded after one owner.
+struct AtomicInlineSelection {
+    raw_nodes: HashSet<usize>,
+    selected_by_address: HashMap<usize, AtomicPaintInvocation>,
+    selected: Vec<SelectedAtomicInline>,
+}
+
+impl AtomicInlineSelection {
+    fn build(layout: &LayoutBox) -> Result<Self, ()> {
+        let raw_nodes = raw_atomic_inline_nodes(layout);
+        if raw_nodes.is_empty() {
+            if has_visible_selected_atomic(layout) {
+                return Err(());
+            }
+            return Ok(Self {
+                raw_nodes,
+                selected_by_address: HashMap::new(),
+                selected: Vec::new(),
+            });
+        }
+        let mut child_lookup = None;
+        let mut selected_by_address = HashMap::new();
+        let mut selected = Vec::new();
+        for (line_index, line) in layout.lines.iter().enumerate() {
+            for (fragment_index, fragment) in selected_line_fragments(line).iter().enumerate() {
+                if fragment.style.visibility == Visibility::Hidden
+                    || !matches!(fragment.content, InlineFragmentContent::AtomicInline(_))
+                {
+                    continue;
+                }
+                let atomic_node_id = fragment.node.identity();
+                if !raw_nodes.contains(&atomic_node_id) {
+                    return Err(());
+                }
+                let child_lookup =
+                    child_lookup.get_or_insert_with(|| AtomicInlineChildLookup::build(layout));
+                let (child_index, child) = child_lookup.first(layout, atomic_node_id).ok_or(())?;
+                let child_address = child as *const LayoutBox as usize;
+                let invocation = AtomicPaintInvocation {
+                    owner_node_id: layout.node.identity(),
+                    atomic_node_id,
+                    line_index,
+                    fragment_index,
+                };
+                if selected_by_address
+                    .insert(child_address, invocation)
+                    .is_some()
+                {
+                    return Err(());
+                }
+                selected.push(SelectedAtomicInline {
+                    child_index,
+                    child_address,
+                    invocation,
+                });
+            }
+        }
+        Ok(Self {
+            raw_nodes,
+            selected_by_address,
+            selected,
+        })
+    }
+
+    fn classify(&self, child: &LayoutBox) -> AtomicInlineChildPaint {
+        if !self.raw_nodes.contains(&child.node.identity()) {
+            return AtomicInlineChildPaint::Ordinary;
+        }
+        self.selected_by_address
+            .get(&(child as *const LayoutBox as usize))
+            .copied()
+            .map_or(
+                AtomicInlineChildPaint::Skipped,
+                AtomicInlineChildPaint::Selected,
+            )
+    }
+
+    fn selected(&self) -> &[SelectedAtomicInline] {
+        &self.selected
+    }
+
+    fn selected_child<'a>(
+        &self,
+        layout: &'a LayoutBox,
+        selected: SelectedAtomicInline,
+    ) -> Result<&'a LayoutBox, ()> {
+        let child = layout.children.get(selected.child_index).ok_or(())?;
+        if child as *const LayoutBox as usize != selected.child_address {
+            return Err(());
+        }
+        Ok(child)
+    }
+}
+
+fn raw_atomic_inline_nodes(layout: &LayoutBox) -> HashSet<usize> {
+    layout
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .filter(|fragment| matches!(fragment.content, InlineFragmentContent::AtomicInline(_)))
+        .map(|fragment| fragment.node.identity())
+        .collect()
+}
+
+fn selected_line_fragments(line: &LineBox) -> &[InlineFragment] {
+    line.text_overflow
+        .as_ref()
+        .map_or(line.fragments.as_slice(), |overflow| {
+            overflow.fragments.as_slice()
+        })
+}
+
+fn has_visible_selected_atomic(layout: &LayoutBox) -> bool {
+    layout
+        .lines
+        .iter()
+        .flat_map(selected_line_fragments)
+        .any(|fragment| {
+            fragment.style.visibility != Visibility::Hidden
+                && matches!(fragment.content, InlineFragmentContent::AtomicInline(_))
+        })
+}
+
+fn atomic_inline_invocation<'a>(
+    layout: &'a LayoutBox,
+    line_index: usize,
+    fragment_index: usize,
+    fragment: &InlineFragment,
+) -> Option<(&'a LayoutBox, AtomicPaintInvocation)> {
+    if !matches!(fragment.content, InlineFragmentContent::AtomicInline(_)) {
+        return None;
+    }
+    let child = layout
+        .children
+        .iter()
+        .find(|child| child.node == fragment.node)?;
+    Some((
+        child,
+        AtomicPaintInvocation {
+            owner_node_id: layout.node.identity(),
+            atomic_node_id: fragment.node.identity(),
+            line_index,
+            fragment_index,
+        },
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -2193,6 +2866,7 @@ fn paint_box(
     text_fonts: &[Arc<Font>],
     web_fonts: Option<&WebFontRegistry>,
     propagated_background_node: Option<usize>,
+    shadow_masks: &border::FrameShadowMaskCache,
 ) {
     paint_box_internal(
         canvas,
@@ -2203,13 +2877,23 @@ fn paint_box(
             text_fonts,
             web_fonts,
             nested_documents: None,
+            nested_snapshot_draw_calls: None,
             propagated_background_node,
+            shadow_masks: Some(shadow_masks),
+            retained_collector: None,
+            retained_destination: retained_extract::PaintDestination::RootDocument,
+            effect_sources: None,
+            effect_source_generation: 0,
+            effect_source_nodes: None,
+            effect_source_summary: None,
         },
         PaintBoxOptions {
             inherited_clip,
             include_phase_descendants: true,
             paint_decorations: true,
             offset: PaintOffset::default(),
+            retained_paint_owner: None,
+            retained_atomic_inline: None,
         },
     );
 }
@@ -2238,6 +2922,10 @@ fn paint_box_internal(
         return;
     }
 
+    if retained_extract::intercept_viewport_fixed_root(canvas, layout, resolver, context, options) {
+        return;
+    }
+
     if layout
         .block_fragments
         .iter()
@@ -2263,6 +2951,8 @@ fn paint_box_internal(
                         include_phase_descendants: false,
                         paint_decorations: true,
                         offset,
+                        retained_paint_owner: options.retained_paint_owner,
+                        retained_atomic_inline: options.retained_atomic_inline,
                     },
                     fragment.target,
                 );
@@ -2286,6 +2976,8 @@ fn paint_box_internal(
                     include_phase_descendants,
                     paint_decorations: fragment.clone_content_target.is_none(),
                     offset: offset.shifted(dx, dy),
+                    retained_paint_owner: options.retained_paint_owner,
+                    retained_atomic_inline: options.retained_atomic_inline,
                 },
             );
         }
@@ -2302,6 +2994,8 @@ fn paint_box_internal(
             include_phase_descendants,
             paint_decorations: true,
             offset,
+            retained_paint_owner: options.retained_paint_owner,
+            retained_atomic_inline: options.retained_atomic_inline,
         },
     );
 }
@@ -2370,7 +3064,7 @@ fn has_invertible_box_transform(
         return true;
     }
     let bounds = layout.dimensions.border_box();
-    let font_size = match style.get("font-size") {
+    let font_size = match style.get_by_id(PropertyId::FontSize) {
         Some(ComputedValue::Px(value)) => *value,
         _ => 16.0,
     };
@@ -2542,6 +3236,7 @@ fn paint_transformed_box(
                 resolver,
                 PaintContext {
                     viewport: translated_viewport,
+                    retained_destination: retained_extract::PaintDestination::Temporary,
                     ..context
                 },
                 PaintBoxOptions {
@@ -2549,6 +3244,8 @@ fn paint_transformed_box(
                     include_phase_descendants: true,
                     paint_decorations,
                     offset: tile_offset,
+                    retained_paint_owner: options.retained_paint_owner,
+                    retained_atomic_inline: options.retained_atomic_inline,
                 },
             );
             let tile_transform =
@@ -2604,6 +3301,60 @@ pub(crate) fn apply_scroll_offsets(
     );
 }
 
+fn visibility_from_style(style: &ComputedStyle) -> Visibility {
+    match style.get_by_id(PropertyId::Visibility) {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("hidden") => {
+            Visibility::Hidden
+        }
+        _ => Visibility::Visible,
+    }
+}
+
+fn live_fragment_visibility(fragment: &InlineFragment, resolver: &mut StyleResolver) -> Visibility {
+    let style = if let Some(pseudo) = fragment.style.pseudo {
+        resolver.computed_pseudo_style_shared(&fragment.node, pseudo)
+    } else if fragment.node.node_type() == NodeType::Text {
+        fragment
+            .node
+            .parent_node()
+            .map(|parent| resolver.computed_style_shared(&parent))
+    } else {
+        Some(resolver.computed_style_shared(&fragment.node))
+    };
+    style
+        .as_deref()
+        .map(visibility_from_style)
+        .unwrap_or_default()
+}
+
+/// Refreshes paint-only visibility state without rebuilding unchanged geometry.
+///
+/// `visibility:hidden` keeps boxes in layout. Live keyframe animations can
+/// therefore update the paint/hit-test clone while the committed CSSOM geometry
+/// remains reusable.
+pub(crate) fn refresh_paint_only_visibility(layout: &mut LayoutBox, resolver: &mut StyleResolver) {
+    let style = layout
+        .pseudo
+        .and_then(|pseudo| resolver.computed_pseudo_style_shared(&layout.node, pseudo))
+        .unwrap_or_else(|| resolver.computed_style_shared(&layout.node));
+    layout.visibility = visibility_from_style(&style);
+    for line in &mut layout.lines {
+        for fragment in &mut line.fragments {
+            let visibility = live_fragment_visibility(fragment, resolver);
+            fragment.style.visibility = visibility;
+        }
+        if let Some(overflow) = &mut line.text_overflow {
+            for fragment in &mut overflow.fragments {
+                let visibility = live_fragment_visibility(fragment, resolver);
+                fragment.style.visibility = visibility;
+            }
+        }
+    }
+    for child in &mut layout.children {
+        refresh_paint_only_visibility(child, resolver);
+    }
+}
+
 /// Returns the topmost event target at viewport coordinates using the cached
 /// layout tree's paint order. Callers should apply current Window/element scroll
 /// offsets to a cloned tree before invoking this function.
@@ -2625,6 +3376,7 @@ pub(crate) fn hit_test_layout(
         y,
         &mut hits,
         true,
+        &mut HitTestPhaseCache::default(),
     );
     let HitCollector::First(hit) = hits else {
         unreachable!();
@@ -2656,6 +3408,7 @@ pub(crate) fn hit_test_layout_all(
         y,
         &mut hits,
         true,
+        &mut HitTestPhaseCache::default(),
     );
     let HitCollector::All { hits, .. } = hits else {
         unreachable!();
@@ -2922,6 +3675,7 @@ fn hit_test_child_path(
     mut point: (f32, f32),
     hits: &mut HitCollector,
     include_descendants: bool,
+    phase_cache: &mut HitTestPhaseCache,
 ) -> bool {
     let (&last, ancestors) = path.split_last().expect("nonempty child path");
     for &index in ancestors {
@@ -2945,6 +3699,7 @@ fn hit_test_child_path(
         point.1,
         hits,
         include_descendants,
+        phase_cache,
     )
 }
 
@@ -2959,6 +3714,7 @@ fn hit_test_child_groups(
     x: f32,
     y: f32,
     hits: &mut HitCollector,
+    phase_cache: &mut HitTestPhaseCache,
 ) -> bool {
     for (group, include_descendants) in groups {
         for path in group.iter().rev() {
@@ -2972,6 +3728,7 @@ fn hit_test_child_groups(
                 (x, y),
                 hits,
                 include_descendants,
+                phase_cache,
             ) {
                 return true;
             }
@@ -3129,6 +3886,7 @@ fn hit_test_box(
     y: f32,
     hits: &mut HitCollector,
     include_descendants: bool,
+    phase_cache: &mut HitTestPhaseCache,
 ) -> bool {
     let Some(HitTestGeometry {
         transform,
@@ -3150,7 +3908,7 @@ fn hit_test_box(
         return false;
     };
 
-    let phases = partition_children_for_hit_test(layout, resolver, include_descendants);
+    let phases = phase_cache.phases(layout, resolver, include_descendants);
 
     if hit_test_child_groups(
         layout,
@@ -3166,6 +3924,7 @@ fn hit_test_box(
         query_point.0,
         query_point.1,
         hits,
+        phase_cache,
     ) {
         return true;
     }
@@ -3189,6 +3948,7 @@ fn hit_test_box(
         query_point.0,
         query_point.1,
         hits,
+        phase_cache,
     ) {
         return true;
     }
@@ -3203,7 +3963,11 @@ fn hit_test_box(
 }
 
 fn accepts_pointer_events(style: &ComputedStyle) -> bool {
-    accepts_pointer_events_value(style.get("pointer-events").cloned())
+    accepts_pointer_events_value(
+        style
+            .get_by_id(crate::css::style::PropertyId::PointerEvents)
+            .cloned(),
+    )
 }
 
 fn accepts_pointer_events_value(value: Option<ComputedValue>) -> bool {
@@ -3351,7 +4115,7 @@ fn translate_layout_for_scroll(
 
 fn is_sticky_for_paint(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("position"),
+        style.get_by_id(PropertyId::Position),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("sticky")
     )
 }
@@ -3439,7 +4203,7 @@ fn sticky_axis_translation(
 
 fn is_absolute_for_paint(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("position"),
+        style.get_by_id(PropertyId::Position),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("absolute")
     )
 }
@@ -3451,7 +4215,7 @@ fn establishes_containing_block_for_paint(style: &ComputedStyle) -> bool {
 /// Whether a box uses the fixed-position containing block's scroll chain.
 fn is_fixed_for_paint(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("position"),
+        style.get_by_id(PropertyId::Position),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed")
     )
 }
@@ -3469,11 +4233,15 @@ fn paint_box_internal_untransformed(
         include_phase_descendants,
         paint_decorations,
         offset,
+        ..
     } = options;
     if layout.visibility == Visibility::Hidden {
         return;
     }
 
+    if retained_extract::intercept_filter_source(canvas, layout, resolver, context, options) {
+        return;
+    }
     let style = paint_box_style(layout, resolver);
     let border_box = offset.rect(border_box_rect(layout));
     let padding_box = offset.rect(padding_box_rect(layout));
@@ -3512,130 +4280,53 @@ fn paint_box_internal_untransformed(
         || clip_shape.is_some();
 
     if needs_offscreen {
-        let opacity_value = opacity.unwrap_or(1.0);
-        // Effects only need a surface covering pixels this subtree can paint.
-        // This includes overflow-visible descendants, shadows, transforms, and
-        // nested filter expansion, while clipping the allocation to the final
-        // destination canvas and the inherited clip.
-        let canvas_bounds = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: canvas.width() as f32,
-            height: canvas.height() as f32,
-        };
-        let mut effect_bounds = offset.rect(subtree_paint_bounds(layout, resolver, context));
-        if let Some(shape) = &clip_shape {
-            let Some(shaped_bounds) = intersect(effect_bounds, shape.bounds()) else {
-                return;
-            };
-            effect_bounds = shaped_bounds;
-        }
-        if let Some(clip) = inherited_clip {
-            let Some(clipped_bounds) = intersect(effect_bounds, clip) else {
-                return;
-            };
-            effect_bounds = clipped_bounds;
-        }
-        let Some(effect_bounds) = intersect(effect_bounds, canvas_bounds) else {
-            return;
-        };
-        let buf_x = effect_bounds.x.floor().max(0.0) as i32;
-        let buf_y = effect_bounds.y.floor().max(0.0) as i32;
-        let buf_right = (effect_bounds.x + effect_bounds.width)
-            .ceil()
-            .min(canvas.width() as f32) as i32;
-        let buf_bottom = (effect_bounds.y + effect_bounds.height)
-            .ceil()
-            .min(canvas.height() as f32) as i32;
-        let buf_w = (buf_right - buf_x).max(0) as u32;
-        let buf_h = (buf_bottom - buf_y).max(0) as u32;
-        if buf_w == 0 || buf_h == 0 {
+        let effect_bounds = offset.rect(subtree_paint_bounds(layout, resolver, context));
+        if context.retained_destination != retained_extract::PaintDestination::FilterSource
+            && canvas.with_retained_operation(
+                retained_layers::RetainedPrimitiveKind::EffectComposite,
+                effect_bounds,
+                |canvas| {
+                    paint_effect_group(
+                        canvas,
+                        layout,
+                        resolver,
+                        context,
+                        options,
+                        &style,
+                        inherited_clip,
+                        &clip_shape,
+                        opacity.unwrap_or(1.0),
+                        &filters,
+                        &masks,
+                        effect_bounds,
+                        viewport,
+                        include_phase_descendants,
+                        paint_decorations,
+                        offset,
+                    );
+                },
+            )
+        {
             return;
         }
-        #[cfg(test)]
-        EFFECT_SURFACE_PIXELS.with(|pixels| {
-            pixels.set(pixels.get().saturating_add(buf_w as u64 * buf_h as u64));
-        });
-
-        let surface_offset = offset.shifted(-(buf_x as f32), -(buf_y as f32));
-        let offset_border_box = surface_offset.rect(border_box_rect(layout));
-        let offset_padding_box = surface_offset.rect(padding_box_rect(layout));
-        let offset_inherited_clip = inherited_clip.map(|c| Rect {
-            x: c.x - buf_x as f32,
-            y: c.y - buf_y as f32,
-            width: c.width,
-            height: c.height,
-        });
-        let offset_viewport = Rect {
-            x: viewport.x - buf_x as f32,
-            y: viewport.y - buf_y as f32,
-            width: viewport.width,
-            height: viewport.height,
-        };
-        let mut offscreen = Canvas::new(buf_w, buf_h);
-        paint_box_internal_to(
-            &mut offscreen,
+        paint_effect_group(
+            canvas,
             layout,
             resolver,
-            PaintContext {
-                viewport: offset_viewport,
-                ..context
-            },
+            context,
+            options,
             &style,
-            PaintBoxGeometry {
-                border_box: offset_border_box,
-                padding_box: offset_padding_box,
-            },
-            PaintBoxOptions {
-                inherited_clip: offset_inherited_clip,
-                include_phase_descendants,
-                paint_decorations,
-                offset: surface_offset,
-            },
-        );
-        apply_filters(&mut offscreen, &filters);
-        offscreen.multiply_alpha(opacity_value);
-        if !masks.is_empty() {
-            apply_mask_alpha(&mut offscreen, &masks, &style, offset_border_box);
-        }
-        if let Some(shape) = clip_path_shape(&style, offset_border_box) {
-            apply_clip_path_shape(&mut offscreen, &shape);
-        }
-        // メインキャンバスに合成
-        canvas.record_animation_regions_from_canvas(
-            &offscreen,
-            AffineTransform::translate(buf_x as f32, buf_y as f32),
             inherited_clip,
+            &clip_shape,
+            opacity.unwrap_or(1.0),
+            &filters,
+            &masks,
+            effect_bounds,
+            viewport,
+            include_phase_descendants,
+            paint_decorations,
+            offset,
         );
-        let dst_w = canvas.width() as i32;
-        let dst_h = canvas.height() as i32;
-        let src_w = buf_w as i32;
-        let src_h = buf_h as i32;
-        for sy in 0..src_h {
-            let dy = buf_y + sy;
-            if dy < 0 || dy >= dst_h {
-                continue;
-            }
-            for sx in 0..src_w {
-                let dx = buf_x + sx;
-                if dx < 0 || dx >= dst_w {
-                    continue;
-                }
-                let src_idx = (sy * src_w + sx) as usize * 4;
-                let a = offscreen.pixels[src_idx + 3];
-                if a == 0 {
-                    continue;
-                }
-                let color = Color {
-                    r: offscreen.pixels[src_idx],
-                    g: offscreen.pixels[src_idx + 1],
-                    b: offscreen.pixels[src_idx + 2],
-                    a,
-                };
-                let dst_idx = (dy * dst_w + dx) as usize * 4;
-                blend_pixel(&mut canvas.pixels[dst_idx..dst_idx + 4], color);
-            }
-        }
         return;
     }
 
@@ -3654,8 +4345,315 @@ fn paint_box_internal_untransformed(
             include_phase_descendants,
             paint_decorations,
             offset,
+            retained_paint_owner: options.retained_paint_owner,
+            retained_atomic_inline: options.retained_atomic_inline,
         },
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_effect_group(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    context: PaintContext<'_>,
+    options: PaintBoxOptions,
+    style: &ComputedStyle,
+    inherited_clip: Option<Rect>,
+    clip_shape: &Option<ClipPathShape>,
+    opacity_value: f32,
+    filters: &[crate::css::FilterFunction],
+    masks: &[MaskLayer],
+    effect_bounds: Rect,
+    viewport: Rect,
+    include_phase_descendants: bool,
+    paint_decorations: bool,
+    offset: PaintOffset,
+) {
+    // Effects only need a surface covering pixels this subtree can paint.
+    // This includes overflow-visible descendants, shadows, transforms, and
+    // nested filter expansion, while clipping the allocation to the final
+    // destination canvas and the inherited clip.
+    let canvas_bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: canvas.width() as f32,
+        height: canvas.height() as f32,
+    };
+    let mut effect_bounds = effect_bounds;
+    if let Some(shape) = clip_shape {
+        let Some(shaped_bounds) = intersect(effect_bounds, shape.bounds()) else {
+            return;
+        };
+        effect_bounds = shaped_bounds;
+    }
+    if let Some(clip) = inherited_clip {
+        let Some(clipped_bounds) = intersect(effect_bounds, clip) else {
+            return;
+        };
+        effect_bounds = clipped_bounds;
+    }
+    let Some(effect_bounds) = intersect(effect_bounds, canvas_bounds) else {
+        return;
+    };
+    let buf_x = effect_bounds.x.floor().max(0.0) as i32;
+    let buf_y = effect_bounds.y.floor().max(0.0) as i32;
+    let buf_right = (effect_bounds.x + effect_bounds.width)
+        .ceil()
+        .min(canvas.width() as f32) as i32;
+    let buf_bottom = (effect_bounds.y + effect_bounds.height)
+        .ceil()
+        .min(canvas.height() as f32) as i32;
+    let buf_w = (buf_right - buf_x).max(0) as u32;
+    let buf_h = (buf_bottom - buf_y).max(0) as u32;
+    if buf_w == 0 || buf_h == 0 {
+        return;
+    }
+    #[cfg(test)]
+    EFFECT_SURFACE_PIXELS.with(|pixels| {
+        pixels.set(pixels.get().saturating_add(buf_w as u64 * buf_h as u64));
+    });
+
+    let surface_offset = offset.shifted(-(buf_x as f32), -(buf_y as f32));
+    let offset_border_box = surface_offset.rect(border_box_rect(layout));
+    let offset_padding_box = surface_offset.rect(padding_box_rect(layout));
+    let offset_inherited_clip = inherited_clip.map(|c| Rect {
+        x: c.x - buf_x as f32,
+        y: c.y - buf_y as f32,
+        width: c.width,
+        height: c.height,
+    });
+    let offset_viewport = Rect {
+        x: viewport.x - buf_x as f32,
+        y: viewport.y - buf_y as f32,
+        width: viewport.width,
+        height: viewport.height,
+    };
+    let cache_key = effect_source_cache_key(
+        layout,
+        context,
+        options,
+        style,
+        inherited_clip,
+        clip_shape,
+        filters,
+        masks,
+        include_phase_descendants,
+        paint_decorations,
+        offset,
+        buf_x,
+        buf_y,
+        buf_w,
+        buf_h,
+    );
+    let cached_source = cache_key.and_then(|key| context.effect_sources?.get(key));
+    if cached_source.is_some() {
+        record_effect_source_summary(context, |summary| {
+            summary.hits = summary.hits.saturating_add(1);
+        });
+    }
+    let mut offscreen = cached_source.unwrap_or_else(|| {
+        let mut source = Canvas::new(buf_w, buf_h);
+        paint_box_internal_to(
+            &mut source,
+            layout,
+            resolver,
+            PaintContext {
+                viewport: offset_viewport,
+                retained_destination: retained_extract::PaintDestination::Temporary,
+                // Nested effect groups must not recursively use the same
+                // source cache entry while it is being produced.
+                effect_sources: None,
+                effect_source_nodes: None,
+                ..context
+            },
+            style,
+            PaintBoxGeometry {
+                border_box: offset_border_box,
+                padding_box: offset_padding_box,
+            },
+            PaintBoxOptions {
+                inherited_clip: offset_inherited_clip,
+                include_phase_descendants,
+                paint_decorations,
+                offset: surface_offset,
+                retained_paint_owner: options.retained_paint_owner,
+                retained_atomic_inline: options.retained_atomic_inline,
+            },
+        );
+        if let (Some(key), Some(cache)) = (cache_key, context.effect_sources) {
+            match cache.insert(key, source.clone()) {
+                effect_source_cache::InsertOutcome::Stored => {
+                    record_effect_source_summary(context, |summary| {
+                        summary.source_rasters = summary.source_rasters.saturating_add(1);
+                    });
+                }
+                effect_source_cache::InsertOutcome::AnimatedImage => {
+                    record_effect_source_summary(context, |summary| {
+                        summary.animated_image = summary.animated_image.saturating_add(1);
+                    });
+                }
+                effect_source_cache::InsertOutcome::Oversize => {
+                    record_effect_source_summary(context, |summary| {
+                        summary.oversize = summary.oversize.saturating_add(1);
+                    });
+                }
+            }
+        }
+        source
+    });
+    if retained_extract::capture_filter_source(layout, context, &offscreen, (buf_x, buf_y)) {
+        return;
+    }
+    apply_filters(&mut offscreen, filters);
+    offscreen.multiply_alpha(opacity_value);
+    if !masks.is_empty() {
+        apply_mask_alpha(&mut offscreen, masks, style, offset_border_box);
+    }
+    if let Some(shape) = clip_path_shape(style, offset_border_box) {
+        apply_clip_path_shape(&mut offscreen, &shape);
+    }
+    // メインキャンバスに合成
+    canvas.record_animation_regions_from_canvas(
+        &offscreen,
+        AffineTransform::translate(buf_x as f32, buf_y as f32),
+        inherited_clip,
+    );
+    let dst_w = canvas.width() as i32;
+    let dst_h = canvas.height() as i32;
+    let src_w = buf_w as i32;
+    let src_h = buf_h as i32;
+    for sy in 0..src_h {
+        let dy = buf_y + sy;
+        if dy < 0 || dy >= dst_h {
+            continue;
+        }
+        for sx in 0..src_w {
+            let dx = buf_x + sx;
+            if dx < 0 || dx >= dst_w {
+                continue;
+            }
+            let src_idx = (sy * src_w + sx) as usize * 4;
+            let a = offscreen.pixels[src_idx + 3];
+            if a == 0 {
+                continue;
+            }
+            let color = Color {
+                r: offscreen.pixels[src_idx],
+                g: offscreen.pixels[src_idx + 1],
+                b: offscreen.pixels[src_idx + 2],
+                a,
+            };
+            let dst_idx = (dy * dst_w + dx) as usize * 4;
+            blend_pixel(&mut canvas.pixels[dst_idx..dst_idx + 4], color);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn effect_source_cache_key(
+    layout: &LayoutBox,
+    context: PaintContext<'_>,
+    options: PaintBoxOptions,
+    style: &ComputedStyle,
+    inherited_clip: Option<Rect>,
+    clip_shape: &Option<ClipPathShape>,
+    filters: &[crate::css::FilterFunction],
+    masks: &[MaskLayer],
+    include_phase_descendants: bool,
+    paint_decorations: bool,
+    offset: PaintOffset,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Option<effect_source_cache::EffectSourceKey> {
+    let node = layout.node.identity();
+    context.effect_sources?;
+    let nodes = context.effect_source_nodes?;
+    macro_rules! reject {
+        ($field:ident) => {{
+            record_effect_source_summary(context, |summary| {
+                summary.$field = summary.$field.saturating_add(1);
+            });
+            return None;
+        }};
+    }
+    if !nodes.contains(&node) {
+        reject!(node_not_eligible);
+    }
+    if subtree_has_other_opacity_target(layout, nodes, node) {
+        reject!(descendant_animation);
+    }
+    if !filters.is_empty() || !masks.is_empty() || clip_shape.is_some() {
+        reject!(other_effect);
+    }
+    if !layout.transform.is_identity() || has_transform_style(style) {
+        reject!(transform);
+    }
+    if context
+        .nested_documents
+        .is_some_and(|documents| !documents.is_empty())
+    {
+        reject!(nested_snapshot);
+    }
+    if !matches!(
+        context.retained_destination,
+        retained_extract::PaintDestination::RootDocument
+    ) {
+        reject!(non_root_destination);
+    }
+    Some(effect_source_cache::EffectSourceKey {
+        node,
+        generation: context.effect_source_generation,
+        x,
+        y,
+        width,
+        height,
+        inherited_clip: inherited_clip.map(rect_bits),
+        include_phase_descendants,
+        paint_decorations,
+        offset: [offset.x.to_bits(), offset.y.to_bits()],
+        retained_paint_owner: options.retained_paint_owner,
+        retained_atomic_inline: options.retained_atomic_inline.map(|invocation| {
+            [
+                invocation.owner_node_id,
+                invocation.atomic_node_id,
+                invocation.line_index,
+                invocation.fragment_index,
+            ]
+        }),
+    })
+}
+
+fn rect_bits(rect: Rect) -> [u32; 4] {
+    [
+        rect.x.to_bits(),
+        rect.y.to_bits(),
+        rect.width.to_bits(),
+        rect.height.to_bits(),
+    ]
+}
+
+fn record_effect_source_summary(
+    context: PaintContext<'_>,
+    record: impl FnOnce(&mut EffectSourceCacheSummary),
+) {
+    if let Some(summary) = context.effect_source_summary {
+        record(&mut summary.borrow_mut());
+    }
+}
+
+fn subtree_has_other_opacity_target(
+    layout: &LayoutBox,
+    targets: &HashSet<usize>,
+    owner: usize,
+) -> bool {
+    layout.children.iter().any(|child| {
+        let child_id = child.node.identity();
+        (child_id != owner && targets.contains(&child_id))
+            || subtree_has_other_opacity_target(child, targets, owner)
+    })
 }
 
 fn composite_affine(
@@ -3665,6 +4663,14 @@ fn composite_affine(
     clip: Option<Rect>,
     source_hint: Rect,
 ) {
+    let dirty = transformed_rect_bounds(source_hint, transform);
+    if destination.with_retained_operation(
+        retained_layers::RetainedPrimitiveKind::AffineComposite,
+        dirty,
+        |destination| composite_affine(destination, source, transform, clip, source_hint),
+    ) {
+        return;
+    }
     let Some(inverse) = transform.inverse() else {
         return;
     };
@@ -3836,7 +4842,7 @@ fn subtree_paint_bounds_internal(
     if let Some(outline_bounds) = outline::solid_outline_bounds(&style, border_box_rect(layout)) {
         bounds = union_rect(bounds, outline_bounds);
     }
-    let shadow_value = match style.get("box-shadow") {
+    let shadow_value = match style.get_by_id(PropertyId::BoxShadow) {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
             Some(value.as_str())
         }
@@ -3952,14 +4958,14 @@ enum MaskComposite {
 }
 
 fn mask_mode_for_layer(style: &ComputedStyle, index: usize) -> MaskMode {
-    match computed_style_layer_text(style.get("mask-mode"), index).as_deref() {
+    match computed_style_layer_text(style.get_by_id(PropertyId::MaskMode), index).as_deref() {
         Some(value) if value.eq_ignore_ascii_case("luminance") => MaskMode::Luminance,
         _ => MaskMode::Alpha,
     }
 }
 
 fn mask_composite_for_layer(style: &ComputedStyle, index: usize) -> MaskComposite {
-    match computed_style_layer_text(style.get("mask-composite"), index).as_deref() {
+    match computed_style_layer_text(style.get_by_id(PropertyId::MaskComposite), index).as_deref() {
         Some(value) if value.eq_ignore_ascii_case("subtract") => MaskComposite::Subtract,
         Some(value) if value.eq_ignore_ascii_case("intersect") => MaskComposite::Intersect,
         Some(value) if value.eq_ignore_ascii_case("exclude") => MaskComposite::Exclude,
@@ -4083,6 +5089,7 @@ fn prepare_mask_layers(
 }
 
 fn apply_mask_alpha(canvas: &mut Canvas, layers: &[MaskLayer], style: &ComputedStyle, area: Rect) {
+    canvas.poison_retained_layers();
     let prepared = prepare_mask_layers(layers, style, area);
     if prepared.is_empty() {
         // A mask that could not be prepared (for example because its size is
@@ -4219,6 +5226,7 @@ fn sample_mask_color(
 }
 
 fn apply_clip_path_shape(canvas: &mut Canvas, shape: &ClipPathShape) {
+    canvas.poison_retained_layers();
     let bounds = shape.bounds();
     let x0 = bounds.x.floor().max(0.0) as i32;
     let y0 = bounds.y.floor().max(0.0) as i32;
@@ -4260,7 +5268,7 @@ fn paint_replaced_image_box(
     offset: PaintOffset,
 ) {
     let is_positioned = matches!(
-        style.get("position"),
+        style.get_by_id(PropertyId::Position),
         Some(ComputedValue::Keyword(position))
             if position.eq_ignore_ascii_case("absolute")
                 || position.eq_ignore_ascii_case("fixed")
@@ -4333,6 +5341,7 @@ fn paint_nested_document_snapshot(
     canvas: &mut Canvas,
     layout: &LayoutBox,
     nested_documents: Option<&HashMap<usize, Image>>,
+    snapshot_draw_calls: Option<&Cell<usize>>,
     clip: Option<Rect>,
     offset: PaintOffset,
 ) {
@@ -4345,6 +5354,10 @@ fn paint_nested_document_snapshot(
             None => Some(destination),
         };
         if let Some(image_clip) = image_clip {
+            record_nested_snapshot_draw(layout.node.identity());
+            if let Some(snapshot_draw_calls) = snapshot_draw_calls {
+                snapshot_draw_calls.set(snapshot_draw_calls.get().saturating_add(1));
+            }
             canvas.draw_image_scaled_clipped(image, destination, Some(image_clip));
         }
     }
@@ -4363,6 +5376,8 @@ fn paint_box_internal_to(
         viewport,
         text_fonts,
         nested_documents,
+        nested_snapshot_draw_calls,
+        shadow_masks,
         ..
     } = context;
     let PaintBoxGeometry {
@@ -4374,6 +5389,7 @@ fn paint_box_internal_to(
         include_phase_descendants,
         paint_decorations,
         offset,
+        ..
     } = options;
     let has_paint_containment = crate::layout::has_containment(style, "paint");
     let paint_containment_clip = has_paint_containment
@@ -4382,7 +5398,7 @@ fn paint_box_internal_to(
 
     if paint_decorations {
         // box-shadow を背景より前（下）に描画する
-        border::paint_box_shadow(canvas, style, border_box, inherited_clip);
+        border::paint_box_shadow(canvas, style, border_box, inherited_clip, shadow_masks);
 
         // `background_list` always supplies at least its default, but keep the
         // arithmetic robust if its parsing contract changes.
@@ -4472,6 +5488,7 @@ fn paint_box_internal_to(
         let Some(combined) =
             overflow_clip_rect(layout.overflow, padding_box, inherited_clip, viewport)
         else {
+            retained_extract::record_skipped_filter_sources(canvas, layout, context);
             return;
         };
         Some(combined)
@@ -4479,7 +5496,14 @@ fn paint_box_internal_to(
         inherited_clip
     };
 
-    paint_nested_document_snapshot(canvas, layout, nested_documents, clip, offset);
+    paint_nested_document_snapshot(
+        canvas,
+        layout,
+        nested_documents,
+        nested_snapshot_draw_calls,
+        clip,
+        offset,
+    );
 
     paint_column_rules(canvas, layout, style, clip, offset);
 
@@ -4497,6 +5521,8 @@ fn paint_box_internal_to(
         include_phase_descendants: true,
         paint_decorations: true,
         offset,
+        retained_paint_owner: Some(layout.node.identity()),
+        retained_atomic_inline: options.retained_atomic_inline,
     };
     let flow_options = PaintBoxOptions {
         include_phase_descendants: false,
@@ -4549,13 +5575,7 @@ fn partition_children_for_paint<'a>(
     let mut auto_positioned_children = Vec::new();
     let mut positive_positioned_children = Vec::new();
     let item_container = is_flex_or_grid_container(&paint_box_style(layout, resolver));
-    let atomic_inline_nodes: HashSet<_> = layout
-        .lines
-        .iter()
-        .flat_map(|line| &line.fragments)
-        .filter(|fragment| matches!(fragment.content, InlineFragmentContent::AtomicInline(_)))
-        .map(|fragment| fragment.node.identity())
-        .collect();
+    let atomic_inline_nodes = raw_atomic_inline_nodes(layout);
     for child in &layout.children {
         if atomic_inline_nodes.contains(&child.node.identity()) {
             continue;
@@ -4622,11 +5642,11 @@ fn paint_column_rules(
     let Some(multicol) = &layout.multicol else {
         return;
     };
-    let width = match style.get("column-rule-width") {
+    let width = match style.get_by_id(PropertyId::ColumnRuleWidth) {
         Some(ComputedValue::Px(value)) if *value > 0.0 => *value,
         _ => return,
     };
-    let rule_style = match style.get("column-rule-style") {
+    let rule_style = match style.get_by_id(PropertyId::ColumnRuleStyle) {
         Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
             value.to_ascii_lowercase()
         }
@@ -4635,7 +5655,8 @@ fn paint_column_rules(
     if matches!(rule_style.as_str(), "none" | "hidden") {
         return;
     }
-    let Some(color) = resolve_color_value(style.get("column-rule-color"), style) else {
+    let Some(color) = resolve_color_value(style.get_by_id(PropertyId::ColumnRuleColor), style)
+    else {
         return;
     };
 
@@ -4783,14 +5804,14 @@ fn collect_phase_descendants<'a>(
 
 fn is_float_for_paint(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("float"),
+        style.get_by_id(PropertyId::Float),
         Some(ComputedValue::Keyword(keyword))
             if keyword.eq_ignore_ascii_case("left") || keyword.eq_ignore_ascii_case("right")
     )
 }
 
 fn is_flex_or_grid_container(style: &ComputedStyle) -> bool {
-    matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if matches!(value.to_ascii_lowercase().as_str(), "flex" | "inline-flex" | "grid" | "inline-grid"))
+    matches!(style.get_by_id(PropertyId::Display), Some(ComputedValue::Keyword(value)) if matches!(value.to_ascii_lowercase().as_str(), "flex" | "inline-flex" | "grid" | "inline-grid"))
 }
 
 fn is_positioned_child_for_paint(
@@ -4798,7 +5819,7 @@ fn is_positioned_child_for_paint(
     style: &ComputedStyle,
     item_container: bool,
 ) -> bool {
-    let explicit_z_index = match style.get("z-index") {
+    let explicit_z_index = match style.get_by_id(PropertyId::ZIndex) {
         Some(ComputedValue::Number(_)) => true,
         Some(ComputedValue::Keyword(value)) => value.parse::<i32>().is_ok(),
         _ => false,
@@ -4809,7 +5830,7 @@ fn is_positioned_child_for_paint(
 
 fn is_positioned_for_paint(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("position"),
+        style.get_by_id(PropertyId::Position),
         Some(ComputedValue::Keyword(keyword))
             if keyword.eq_ignore_ascii_case("absolute")
                 || keyword.eq_ignore_ascii_case("fixed")
@@ -4819,13 +5840,20 @@ fn is_positioned_for_paint(style: &ComputedStyle) -> bool {
 }
 
 fn has_transform_style(style: &ComputedStyle) -> bool {
+    const TRANSFORM_PROPERTIES: &[(PropertyId, &str)] = &[
+        (PropertyId::Transform, "transform"),
+        (PropertyId::Translate, "translate"),
+        (PropertyId::Rotate, "rotate"),
+        (PropertyId::Scale, "scale"),
+    ];
+
     style.has_transform_animation_context()
-        || style.get("will-change").is_some_and(|value| {
-            value.css_text().split(',').any(|property| ["transform", "translate", "rotate", "scale"].iter().any(|name| property.trim().eq_ignore_ascii_case(name)))
+        || style.get_by_id(PropertyId::WillChange).is_some_and(|value| {
+            value.css_text().split(',').any(|property| TRANSFORM_PROPERTIES.iter().any(|(_, name)| property.trim().eq_ignore_ascii_case(name)))
         })
-        || ["transform", "translate", "rotate", "scale"].iter().any(|property| {
-        matches!(style.get(property), Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("none"))
-    })
+        || TRANSFORM_PROPERTIES.iter().any(|(property, _)| {
+            matches!(style.get_by_id(*property), Some(ComputedValue::Keyword(value)) if !value.eq_ignore_ascii_case("none"))
+        })
 }
 
 #[derive(Default)]
@@ -4852,7 +5880,7 @@ fn viewport_background_color(
     let root_style = resolver.computed_style(&root.node);
     let root_transparent = background_color(&root_style).is_none_or(|color| color.a == 0);
     let no_root_image = root_style
-        .get("background-image")
+        .get_by_id(PropertyId::BackgroundImage)
         .is_none_or(|value| value.css_text().eq_ignore_ascii_case("none"));
     let html_root = root.node.local_name().as_deref() == Some("html")
         && (root.node.is_html_element()
@@ -4937,7 +5965,7 @@ fn padding_box_rect(layout: &LayoutBox) -> Rect {
 }
 
 fn background_color(style: &ComputedStyle) -> Option<Color> {
-    color_property(style.get("background-color"))
+    color_property(style.get_by_id(PropertyId::BackgroundColor))
 }
 
 fn background_clip_geometry(
@@ -4992,6 +6020,25 @@ fn paint_background_image_rounded(
     rounded_rect: Rect,
     radii: (f32, f32, f32, f32),
 ) {
+    if radii != (0.0, 0.0, 0.0, 0.0)
+        && canvas.with_retained_operation(
+            retained_layers::RetainedPrimitiveKind::BackgroundComposite,
+            rounded_rect,
+            |canvas| {
+                paint_background_image_rounded(
+                    canvas,
+                    style,
+                    rect,
+                    clip,
+                    viewport,
+                    rounded_rect,
+                    radii,
+                );
+            },
+        )
+    {
+        return;
+    }
     let Some(background) = prepare_background_image(style) else {
         return;
     };
@@ -5085,7 +6132,7 @@ enum PreparedBackgroundImage {
 }
 
 fn prepare_background_image(style: &ComputedStyle) -> Option<PreparedBackgroundImage> {
-    let value = match style.get("background-image") {
+    let value = match style.get_by_id(PropertyId::BackgroundImage) {
         Some(ComputedValue::Keyword(value))
         | Some(ComputedValue::String(value))
         | Some(ComputedValue::Color(value)) => value,
@@ -5098,7 +6145,7 @@ fn prepare_background_image(style: &ComputedStyle) -> Option<PreparedBackgroundI
 }
 
 fn background_image(style: &ComputedStyle) -> Option<Image> {
-    match style.get("background-image") {
+    match style.get_by_id(PropertyId::BackgroundImage) {
         Some(ComputedValue::Keyword(keyword)) => image::parse_background_image_value(keyword),
         Some(ComputedValue::String(value)) => image::parse_background_image_value(value),
         _ => None,
@@ -5163,7 +6210,7 @@ fn mask_style_for_layer(style: &ComputedStyle, index: usize) -> ComputedStyle {
 }
 
 fn mask_layers(style: &ComputedStyle) -> Vec<MaskLayer> {
-    let values = match style.get("mask-image") {
+    let values = match style.get_by_id(PropertyId::MaskImage) {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
             crate::css::split_top_level_commas(value)
         }
@@ -5194,7 +6241,7 @@ fn mask_layers(style: &ComputedStyle) -> Vec<MaskLayer> {
 }
 
 fn background_repeat(style: &ComputedStyle) -> (bool, bool) {
-    let value = match style.get("background-repeat") {
+    let value = match style.get_by_id(PropertyId::BackgroundRepeat) {
         Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
         _ => return (true, true),
     };
@@ -5211,7 +6258,7 @@ fn background_repeat(style: &ComputedStyle) -> (bool, bool) {
 }
 
 fn mask_repeat(style: &ComputedStyle) -> (bool, bool) {
-    let value = match style.get("mask-repeat") {
+    let value = match style.get_by_id(PropertyId::MaskRepeat) {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => {
             value.to_ascii_lowercase()
         }
@@ -5238,7 +6285,7 @@ enum BackgroundAttachment {
 }
 
 fn background_attachment(style: &ComputedStyle) -> BackgroundAttachment {
-    match style.get("background-attachment") {
+    match style.get_by_id(PropertyId::BackgroundAttachment) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("fixed") => {
             BackgroundAttachment::Fixed
         }
@@ -5338,7 +6385,7 @@ fn mask_size(style: &ComputedStyle, area: Rect, image_w: f32, image_h: f32) -> (
 
 fn border_color(style: &ComputedStyle) -> Option<Color> {
     resolve_color_value(style.get("border-color"), style)
-        .or_else(|| color_property(style.get("color")))
+        .or_else(|| color_property(style.get_by_id(PropertyId::Color)))
 }
 
 fn color_property(value: Option<&ComputedValue>) -> Option<Color> {
@@ -5356,10 +6403,10 @@ pub(crate) fn resolve_color_value(
 ) -> Option<Color> {
     match value {
         Some(ComputedValue::Color(c)) if c.eq_ignore_ascii_case("currentcolor") => {
-            color_property(style.get("color"))
+            color_property(style.get_by_id(PropertyId::Color))
         }
         Some(ComputedValue::Keyword(k)) if k.eq_ignore_ascii_case("currentcolor") => {
-            color_property(style.get("color"))
+            color_property(style.get_by_id(PropertyId::Color))
         }
         _ => color_property(value),
     }
@@ -5548,7 +6595,7 @@ fn parse_shape_radii(value: &str, rect: Rect) -> Option<(f32, f32, f32, f32)> {
 /// Unsupported or malformed values return `None`, preserving the CSS fallback
 /// behavior of painting without a clip.
 fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathShape> {
-    let value = match style.get("clip-path") {
+    let value = match style.get_by_id(PropertyId::ClipPath) {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value.trim(),
         _ => return None,
     };
@@ -5908,7 +6955,7 @@ fn valid_clip_path_polygon_body(body: &str) -> bool {
 /// Returns `None` for unsupported clip shapes, `Some(None)` for an empty inset,
 /// and `Some(Some(rect))` for a non-empty inset clip.
 fn clip_path_inset_rect(style: &ComputedStyle, border_box: Rect) -> Option<Option<Rect>> {
-    let value = match style.get("clip-path") {
+    let value = match style.get_by_id(PropertyId::ClipPath) {
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value.trim(),
         _ => return None,
     };
@@ -6018,7 +7065,7 @@ fn has_border_radius(style: &ComputedStyle) -> bool {
 /// `opacity` プロパティの値を返す（0.0〜1.0）。未指定の場合は `None`。
 /// `with_force_opacity` が有効な場合、0.0 の値は 1.0 に上書きされる。
 fn element_opacity(style: &ComputedStyle) -> Option<f32> {
-    let value = match style.get("opacity") {
+    let value = match style.get_by_id(PropertyId::Opacity) {
         Some(ComputedValue::Number(v)) => Some(v.clamp(0.0, 1.0)),
         Some(ComputedValue::Px(v)) => Some(v.clamp(0.0, 1.0)),
         Some(ComputedValue::Keyword(k)) if k == "1" || k == "1.0" => Some(1.0),
@@ -6055,6 +7102,7 @@ fn apply_backdrop_filters(
     border_box: Rect,
     inherited_clip: Option<Rect>,
 ) {
+    canvas.poison_retained_layers();
     let Some(area) = normalize_rect(border_box) else {
         return;
     };
@@ -6121,6 +7169,7 @@ fn apply_backdrop_filters(
 ///
 /// The region must be within the canvas bounds.
 fn copy_region_out(canvas: &Canvas, x: usize, y: usize, width: usize, height: usize) -> Canvas {
+    canvas.invalidate_retained_layers();
     let mut region = Canvas::new(width as u32, height as u32);
     region.record_animation_regions_from_canvas(
         canvas,
@@ -6152,6 +7201,8 @@ fn copy_region_in(
     width: usize,
     height: usize,
 ) {
+    canvas.poison_retained_layers();
+    region.invalidate_retained_layers();
     canvas.record_animation_regions_from_canvas(
         region,
         AffineTransform::translate(
@@ -6175,6 +7226,7 @@ fn copy_region_in(
 }
 
 fn apply_filters(canvas: &mut Canvas, filters: &[crate::css::FilterFunction]) {
+    canvas.poison_retained_layers();
     let Some((x0, y0, x1, y1)) = alpha_bounds(canvas) else {
         return;
     };
@@ -6200,6 +7252,7 @@ fn apply_filters(canvas: &mut Canvas, filters: &[crate::css::FilterFunction]) {
 }
 
 fn apply_filters_full(canvas: &mut Canvas, filters: &[crate::css::FilterFunction]) {
+    canvas.poison_retained_layers();
     use crate::css::FilterFunction;
     for filter in filters {
         match filter {
@@ -6237,6 +7290,7 @@ fn apply_filters_full(canvas: &mut Canvas, filters: &[crate::css::FilterFunction
 }
 
 fn alpha_bounds(canvas: &Canvas) -> Option<(usize, usize, usize, usize)> {
+    canvas.invalidate_retained_layers();
     let width = canvas.width as usize;
     let mut x0 = width;
     let mut y0 = canvas.height as usize;
@@ -6370,6 +7424,7 @@ fn filter_source_padding(filters: &[crate::css::FilterFunction]) -> (usize, usiz
 }
 
 fn apply_drop_shadow(canvas: &mut Canvas, offset_x: f32, offset_y: f32, blur: f32, color: Color) {
+    canvas.poison_retained_layers();
     let source = canvas.clone();
     let mut shadow = Canvas::new(canvas.width, canvas.height);
     let mut result = Canvas::new(canvas.width, canvas.height);
@@ -6417,6 +7472,7 @@ fn apply_drop_shadow(canvas: &mut Canvas, offset_x: f32, offset_y: f32, blur: f3
 }
 
 fn apply_color_filter(canvas: &mut Canvas, map: impl Fn(f32) -> f32, alpha: f32) {
+    canvas.poison_retained_layers();
     for pixel in canvas.pixels.chunks_exact_mut(4) {
         for channel in &mut pixel[..3] {
             *channel = (map(*channel as f32 / 255.0).clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -6426,6 +7482,7 @@ fn apply_color_filter(canvas: &mut Canvas, map: impl Fn(f32) -> f32, alpha: f32)
 }
 
 fn apply_color_matrix(canvas: &mut Canvas, matrix: [[f32; 3]; 3]) {
+    canvas.poison_retained_layers();
     for pixel in canvas.pixels.chunks_exact_mut(4) {
         let rgb = [
             pixel[0] as f32 / 255.0,
@@ -6492,6 +7549,7 @@ fn hue_rotate_matrix(degrees: f32) -> [[f32; 3]; 3] {
 }
 
 fn box_blur(canvas: &mut Canvas, radius: usize) {
+    canvas.poison_retained_layers();
     if radius == 0 || canvas.width == 0 || canvas.height == 0 {
         return;
     }
@@ -6619,6 +7677,23 @@ pub(super) fn rounded_rect_pixel_coverage(
         || pixel_top >= rect.y + rect.height
     {
         return 0.0;
+    }
+    // Most pixels of a rounded box shadow lie well away from its corners.
+    // A whole pixel inside either central band has full coverage, avoiding
+    // four corner tests and the subpixel sampling below.
+    if pixel_left >= rect.x
+        && pixel_right <= rect.x + rect.width
+        && pixel_top >= rect.y
+        && pixel_bottom <= rect.y + rect.height
+    {
+        let (tl, tr, br, bl) = radii;
+        if (pixel_left >= rect.x + tl.max(bl).max(0.0)
+            && pixel_right <= rect.x + rect.width - tr.max(br).max(0.0))
+            || (pixel_top >= rect.y + tl.max(tr).max(0.0)
+                && pixel_bottom <= rect.y + rect.height - bl.max(br).max(0.0))
+        {
+            return 1.0;
+        }
     }
     if [
         (pixel_left, pixel_top),
@@ -6753,6 +7828,24 @@ fn fill_triangle_clipped_inner(
     clip: Option<Rect>,
     inclusive_edges: bool,
 ) {
+    let left = p0.0.min(p1.0).min(p2.0);
+    let top = p0.1.min(p1.1).min(p2.1);
+    let right = p0.0.max(p1.0).max(p2.0);
+    let bottom = p0.1.max(p1.1).max(p2.1);
+    if canvas.with_retained_operation(
+        retained_layers::RetainedPrimitiveKind::Triangle,
+        Rect {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        },
+        |canvas| {
+            fill_triangle_clipped_inner(canvas, p0, p1, p2, color, clip, inclusive_edges);
+        },
+    ) {
+        return;
+    }
     if color.a == 0 {
         return;
     }
@@ -7205,7 +8298,7 @@ fn paint_prepared_background_image(
 
     // CSS gradients share the same background tiling, positioning and clipping path.
     if let PreparedBackgroundImage::Gradient(gradient) = background {
-        let has_explicit_size = match style.get("background-size") {
+        let has_explicit_size = match style.get_by_id(PropertyId::BackgroundSize) {
             None => false,
             Some(ComputedValue::Keyword(kw)) => !kw.eq_ignore_ascii_case("auto"),
             _ => true,
@@ -7291,23 +8384,7 @@ fn paint_tiled_gradient_background_sized(
     let tile_image = if repeat_x || repeat_y {
         let tw = tile_w.ceil().max(1.0) as u32;
         let th = tile_h.ceil().max(1.0) as u32;
-        if u64::from(tw) * u64::from(th) <= MAX_TILE_PIXELS {
-            let mut tile_canvas = Canvas::new(tw, th);
-            color::paint_gradient(
-                &mut tile_canvas,
-                gradient,
-                Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: tile_w,
-                    height: tile_h,
-                },
-                None,
-            );
-            Image::new(tw, th, tile_canvas.pixels).ok()
-        } else {
-            None
-        }
+        gradient_tiles::gradient_tile(gradient, tile_w, tile_h, tw, th)
     } else {
         None
     };
@@ -7358,23 +8435,7 @@ fn paint_tiled_gradient_background_auto(
     let tile_height = area.height.max(1.0);
     let tw = tile_width.ceil() as u32;
     let th = tile_height.ceil() as u32;
-    let tile_image = if u64::from(tw) * u64::from(th) <= MAX_TILE_PIXELS {
-        let mut tile_canvas = Canvas::new(tw, th);
-        color::paint_gradient(
-            &mut tile_canvas,
-            gradient,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: tile_width,
-                height: tile_height,
-            },
-            None,
-        );
-        Image::new(tw, th, tile_canvas.pixels).ok()
-    } else {
-        None
-    };
+    let tile_image = gradient_tiles::gradient_tile(gradient, tile_width, tile_height, tw, th);
     let clip_area = clip.unwrap_or(area);
     let x_start = if repeat_x {
         area.x + ((clip_area.x - area.x) / tile_width).floor() * tile_width
@@ -7518,6 +8579,7 @@ impl Canvas {
     /// カーネルは常に`2r+1`ピクセル幅で、端では実効カーネルサイズを調整する。
     #[cfg(test)]
     pub(crate) fn box_blur_alpha_passes(&mut self, radius: u32, passes: usize) {
+        self.poison_retained_layers();
         if radius == 0 || passes == 0 {
             return;
         }
@@ -7595,6 +8657,7 @@ impl Canvas {
     /// Samples outside the canvas are transparent and still count toward the
     /// kernel width, which is required for a finite shadow mask to fade out.
     pub(crate) fn box_blur_alpha_radii_zero_padded(&mut self, radii: &[u32]) {
+        self.poison_retained_layers();
         if radii.iter().all(|&radius| radius == 0) {
             return;
         }
@@ -7671,6 +8734,7 @@ impl Canvas {
     /// outside the canvas. Callers limit this to a six-pixel kernel radius;
     /// larger shadows use the linear-time box approximation above.
     pub(crate) fn gaussian_blur_alpha_zero_padded(&mut self, sigma: f32) {
+        self.poison_retained_layers();
         if sigma <= 0.0 || !sigma.is_finite() {
             return;
         }
@@ -7741,6 +8805,30 @@ impl Canvas {
         alpha_scale: f32,
         clip: Option<Rect>,
     ) {
+        let destination = Rect {
+            x: offset_x as f32,
+            y: offset_y as f32,
+            width: src.width as f32,
+            height: src.height as f32,
+        };
+        if self.with_retained_operation(
+            retained_layers::RetainedPrimitiveKind::ShadowComposite,
+            destination,
+            |canvas| {
+                canvas.composite_canvas_clipped(
+                    src,
+                    offset_x,
+                    offset_y,
+                    r,
+                    g,
+                    b,
+                    alpha_scale,
+                    clip,
+                );
+            },
+        ) {
+            return;
+        }
         let dst_w = self.width as i32;
         let dst_h = self.height as i32;
         let src_w = src.width as i32;
@@ -7791,6 +8879,7 @@ impl Canvas {
     /// `factor <= 0` also clears animation regions: fully transparent images
     /// cannot create visible changes and must not keep requesting frames.
     pub fn multiply_alpha(&mut self, factor: f32) {
+        self.poison_retained_layers();
         if factor <= 0.0 {
             self.animation_regions.clear();
         }
@@ -7807,7 +8896,13 @@ mod font_data_url_tests;
 #[cfg(test)]
 mod font_selection_tests;
 #[cfg(test)]
+mod image_scale_baseline_tests;
+#[cfg(test)]
+mod image_scale_post_tests;
+#[cfg(test)]
 mod outline_tests;
+#[cfg(test)]
+mod retained_extract_tests;
 #[cfg(test)]
 mod tests;
 

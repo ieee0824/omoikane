@@ -1186,9 +1186,9 @@ impl BindingCollectorVisitor<'_> {
             let name = name.to_js_string(self.interner);
             scope.create_immutable_binding(name, strict);
             *name_scope = Some(scope.clone());
-            Scope::new(scope, true)
+            Scope::new_function(scope, arrow)
         } else {
-            Scope::new(self.scope.clone(), true)
+            Scope::new_function(self.scope.clone(), arrow)
         };
 
         let function_scopes = function_declaration_instantiation(

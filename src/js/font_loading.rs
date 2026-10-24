@@ -1,5 +1,10 @@
 //! Document-owned Font Loading API data, shared by style, layout and paint.
 use super::*;
+mod async_fetch;
+
+pub(super) fn poll_resource_loads(state: &mut HostState) {
+    async_fetch::poll(state);
+}
 use crate::font::{
     Font, FontFamilyKey, FontStretchRange, FontStyleRange, FontWeightRange, UnicodeRangeSet,
     WebFontDescriptors, WebFontRegistry,
@@ -12,6 +17,8 @@ pub(super) struct FontStore {
     faces: HashMap<u64, Face>,
     members: HashMap<usize, Vec<u64>>,
     css: HashMap<usize, Vec<((Option<usize>, String), u64)>>,
+    pending: HashMap<u64, async_fetch::Pending>,
+    scopes: HashMap<usize, crate::resource_worker::ResourceScope>,
 }
 
 struct Face {
@@ -42,6 +49,14 @@ impl Face {
 }
 
 impl FontStore {
+    pub(super) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    pub(super) unsafe fn trace_pending(&self, tracer: &mut Tracer) {
+        unsafe { async_fetch::trace_pending(self, tracer) };
+    }
+
     pub(super) fn append_to(
         &self,
         document: usize,
@@ -109,6 +124,7 @@ impl FontStore {
     }
 
     pub(super) fn remove_document(&mut self, document: usize) {
+        async_fetch::retire(self, document);
         self.members.remove(&document);
         self.css.remove(&document);
         self.faces.retain(|_, face| {
@@ -183,10 +199,18 @@ pub(super) fn sync_stylesheets(
                 .unwrap_or_else(|| "U+0-10FFFF".into());
             face.base = base.clone();
         }
-        // Existing document rendering loads CSS fonts before layout. Retain
-        // that behavior, but keep the resource in the document's face registry
-        // so JS and subsequent style rebuilds reuse the same parsed font.
-        let _ = load_face(state, document, id, None);
+        // Embedded fonts can be decoded without I/O. Network faces are loaded
+        // by FontFaceSet's used-font selection after this rendering opportunity;
+        // registering a stylesheet must not download every unicode-range face
+        // or block the first page paint on an unused font.
+        if !state.nonblocking_font_loading
+            && rule
+                .src_url
+                .get(..5)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+        {
+            let _ = load_face(state, document, id, None);
+        }
         current.push((key, id));
     }
     state.font_loading.css.insert(document.identity(), current);
@@ -376,7 +400,7 @@ fn used_fonts(state: &mut HostState, document: &NodeHandle) -> Vec<serde_json::V
     let mut samples: HashMap<String, HashSet<char>> = HashMap::new();
     while let Some((node, mut font)) = stack.pop() {
         if node.node_type() == NodeType::Element {
-            let style = resolver.computed_style(&node);
+            let style = resolver.computed_style_shared(&node);
             if matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value == "none")
             {
                 continue;
@@ -674,10 +698,24 @@ pub(super) fn native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     } else {
         None
     };
+    let completion = if operation == "load" {
+        async_fetch::capture_completion(args.get(4), context)?
+    } else {
+        None
+    };
+    let render_mutation = matches!(
+        operation.as_str(),
+        "load" | "add" | "delete" | "clear" | "update"
+    );
     with_host_state(|host| {
         let mut state = host.borrow_mut();
         let document = state.csp_document_for_context(context)?;
         let document_id = document.identity();
+        if operation == "has-stylesheets" {
+            return Ok(JsValue::from(
+                !collect_stylesheet_nodes(&document).0.is_empty(),
+            ));
+        }
         if operation == "used" {
             let samples = used_fonts(&mut state, &document);
             return Ok(js_string!(serde_json::to_string(&samples).map_err(error)?.as_str()).into());
@@ -757,13 +795,37 @@ pub(super) fn native(_: &JsValue, args: &[JsValue], context: &mut Context) -> Js
                 return Err(error("font belongs to a different origin"));
             }
         }
+        let load_owner = if operation == "load" {
+            let owner_id = state.font_loading.faces[&id].owner;
+            Some(
+                state
+                    .get_node(owner_id)
+                    .ok_or_else(|| error("font document is no longer live"))?,
+            )
+        } else {
+            None
+        };
+        let native_scroll = render_mutation.then(|| state.native_scroll.clone());
+        drop(state);
+        if let Some(native_scroll) = native_scroll {
+            // Every author-reentrant conversion and document/owner validation
+            // has completed. Take the protocol lock with no HostState borrow,
+            // immediately before the first render-visible mutation.
+            native_scroll.revoke_policy();
+        }
+        let mut state = host.borrow_mut();
         match operation.as_str() {
             "load" => {
-                let owner_id = state.font_loading.faces[&id].owner;
-                let owner = state
-                    .get_node(owner_id)
-                    .ok_or_else(|| error("font document is no longer live"))?;
-                load_face(&mut state, &owner, id, csp_source.as_ref())?;
+                let owner = load_owner.as_ref().unwrap();
+                if state.nonblocking_font_loading {
+                    let completion =
+                        completion.ok_or_else(|| error("font completion callbacks required"))?;
+                    if async_fetch::begin(&mut state, &owner, id, completion, csp_source)? {
+                        return Ok(JsValue::from(true));
+                    }
+                } else {
+                    load_face(&mut state, &owner, id, csp_source.as_ref())?;
+                }
             }
             "add" => {
                 let members = state.font_loading.members.entry(document_id).or_default();

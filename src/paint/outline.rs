@@ -1,5 +1,6 @@
 //! Solid CSS outline geometry and painting.
 
+use crate::css::style::PropertyId;
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::layout::Rect;
 
@@ -16,12 +17,12 @@ struct SolidOutline {
 
 fn outline_width(style: &ComputedStyle) -> Option<f32> {
     if !matches!(
-        style.get("outline-style"),
+        style.get_by_id(PropertyId::OutlineStyle),
         Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("solid")
     ) {
         return None;
     }
-    let width = match style.get("outline-width") {
+    let width = match style.get_by_id(PropertyId::OutlineWidth) {
         Some(ComputedValue::Px(value)) | Some(ComputedValue::Number(value)) => *value,
         Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("thin") => 1.0,
         Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("thick") => 5.0,
@@ -66,7 +67,7 @@ fn solid_outline(style: &ComputedStyle, border_box: Rect) -> Option<SolidOutline
     {
         return None;
     }
-    let offset = match style.get("outline-offset") {
+    let offset = match style.get_by_id(PropertyId::OutlineOffset) {
         Some(ComputedValue::Px(value)) | Some(ComputedValue::Number(value)) => *value,
         None => 0.0,
         _ => return None,
@@ -116,8 +117,8 @@ pub(super) fn paint_solid_outline(
     let Some(outline) = solid_outline(style, border_box) else {
         return;
     };
-    let color = resolve_color_value(style.get("outline-color"), style)
-        .or_else(|| resolve_color_value(style.get("color"), style))
+    let color = resolve_color_value(style.get_by_id(PropertyId::OutlineColor), style)
+        .or_else(|| resolve_color_value(style.get_by_id(PropertyId::Color), style))
         .unwrap_or(Color::rgb(0, 0, 0));
     if color.a == 0 {
         return;

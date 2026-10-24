@@ -41,6 +41,13 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeRunMicrotaskCallback = globalThis.__omoikane_run_microtask_callback;
   const nativeCaptureCspSource = globalThis.__omoikane_capture_csp_source;
   const nativeFetch = globalThis.__omoikane_fetch;
+  const nativeComputedStyleMetadata = globalThis.__omoikane_computed_style_metadata;
+  delete globalThis.__omoikane_computed_style_metadata;
+  const computedStyleObjectKeys = Object.keys;
+  const nativeCanvasBlit = globalThis.__omoikane_canvas_blit;
+  delete globalThis.__omoikane_canvas_blit;
+  const nativeBeginFetch = globalThis.__omoikane_begin_fetch;
+  const nativeCancelFetch = globalThis.__omoikane_cancel_fetch;
   const nativeWebSocketConnect = globalThis.__omoikane_websocket_connect;
   const nativeEventSourceFetch = globalThis.__omoikane_event_source_fetch;
   const nativeTrustedTypeCreate = globalThis.__omoikane_trusted_type_create;
@@ -57,6 +64,8 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_import_scripts;
   delete globalThis.__omoikane_capture_csp_source;
   delete globalThis.__omoikane_fetch;
+  delete globalThis.__omoikane_begin_fetch;
+  delete globalThis.__omoikane_cancel_fetch;
   delete globalThis.__omoikane_websocket_connect;
   delete globalThis.__omoikane_event_source_fetch;
   delete globalThis.__omoikane_trusted_type_create;
@@ -70,7 +79,10 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_trusted_remember_script_text;
   delete globalThis.__omoikane_trusted_take_script_text_approval;
   const nativeCurrentWindowEvent = globalThis.__omoikane_current_window_event;
+  const nativeQueueLayoutObserverCheck =
+    globalThis.__omoikane_queue_layout_observer_check;
   delete globalThis.__omoikane_current_window_event;
+  delete globalThis.__omoikane_queue_layout_observer_check;
   const nativeRegisterWindowProxy = globalThis.__omoikane_register_window_proxy;
   delete globalThis.__omoikane_register_window_proxy;
   const nativeDocumentWindow = globalThis.__omoikane_document_window;
@@ -311,6 +323,8 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeSetAttributeNS = globalThis.__omoikane_set_attribute_ns;
   const nativeRemoveAttributeNS = globalThis.__omoikane_remove_attribute_ns;
   const nativeIframeContentDocument = globalThis.__omoikane_iframe_content_document;
+  const nativeWindowNamedSnapshot = globalThis.__omoikane_window_named_snapshot;
+  delete globalThis.__omoikane_window_named_snapshot;
   const nativeIframeGlobal = globalThis.__omoikane_iframe_global;
   const nativeExistingIframeDocument = globalThis.__omoikane_existing_iframe_document;
   delete globalThis.__omoikane_existing_iframe_document;
@@ -1022,6 +1036,32 @@ export const __omoikane_service_worker_lifecycle = {};
     "scroll-margin-inline-start", "scroll-margin-inline-end",
     "scroll-margin-block-start", "scroll-margin-block-end",
   ]);
+  // A conservative fast path: every declaration must be an independent,
+  // unaliased longhand. Logical properties, shorthands and vendor aliases keep
+  // the general remove/append ordering below.
+  const independentInlineStyleProperties = new Set([
+    "position", "width", "height", "top", "right", "bottom", "left", "z-index",
+    "display", "cursor", "visibility", "pointer-events", "transform", "opacity",
+    "background-image", "background-clip", "background-color", "color",
+  ]);
+  // A repeated assignment may keep its place only when no later declaration
+  // can change the property's cascade precedence. Unknown vendor aliases keep
+  // the conservative path; shorthand and logical conflicts must still append.
+  function repeatedInlineAssignmentKeepsPosition(name, declarations, index) {
+    if (!hasSetValue(independentInlineStyleProperties, name)) return false;
+    if (declarations.some((d, i) => i !== index && d.name === name)) return false;
+    for (let i = index + 1; i < declarations.length; i++) {
+      const other = declarations[i].name;
+      if (other === "all" || (other.startsWith("-") && !other.startsWith("--"))) return false;
+      if ((name === "width" || name === "height") &&
+          (other === "inline-size" || other === "block-size")) return false;
+      if ((name === "top" || name === "right" || name === "bottom" || name === "left") &&
+          (other === "inset" || other.startsWith("inset-inline") ||
+           other.startsWith("inset-block"))) return false;
+      if (name.startsWith("background-") && other === "background") return false;
+    }
+    return true;
+  }
   const logicalBoxStyleProperties = new Set([
     "margin-block", "margin-inline", "padding-block", "padding-inline",
     "margin-block-start", "margin-block-end", "margin-inline-start", "margin-inline-end",
@@ -1897,6 +1937,12 @@ export const __omoikane_service_worker_lifecycle = {};
     return owner;
   }
 
+  const nativeScrollAxesHaveNoRange = globalThis.__omoikane_native_scroll_axes_have_no_range;
+  delete globalThis.__omoikane_native_scroll_axes_have_no_range;
+  const nativeWillAddBlockingWheelListener =
+    globalThis.__omoikane_will_add_blocking_wheel_listener;
+  delete globalThis.__omoikane_will_add_blocking_wheel_listener;
+
   function eventListenerOptions(options, target, type) {
     const dictionary = options != null && typeof options !== "boolean" ? Object(options) : null;
     const capture = typeof options === "boolean" ? options : !!dictionary?.capture;
@@ -1948,6 +1994,11 @@ export const __omoikane_service_worker_lifecycle = {};
     const list = listenerList(store, key);
     if (list.some(entry => entry.listener === listener && entry.capture === capture)) return;
     const entry = { listener, capture, once, passive, signal, abortHandler: null, removed: false };
+    // Revocation precedes the first author-observable store mutation. Removal
+    // never re-authorizes; only trusted native policy validation may do that.
+    if ((key === "wheel" || key === "mousewheel") && !passive) {
+      nativeWillAddBlockingWheelListener();
+    }
     list.push(entry);
     setListenerList(store, key, list);
     safeWeakMapGet(listenerStoreChanges, store)?.();
@@ -4064,8 +4115,9 @@ export const __omoikane_service_worker_lifecycle = {};
         decls
           .map(d => d.name + ": " + d.value + (d.priority ? " !" + d.priority : "") + ";")
           .join(" ");
-      const writeDecls = (decls) => {
+      const writeDecls = (decls, skipUnchanged = false) => {
         const source = serializeDecls(decls);
+        if (skipUnchanged && __omoikane_get_attribute(node.__id, "style") === source) return;
         node.setAttribute("style", source);
         safeWeakMapSet(elementStyleDeclarationCache, node, {
           source,
@@ -4120,10 +4172,9 @@ export const __omoikane_service_worker_lifecycle = {};
         }
         return "";
       };
-      // Sets a kebab-case property. Existing occurrences are removed and the
-      // replacement is appended, matching CSSOM's declaration-list ordering.
-      // This also collapses redundant declarations (e.g. from cssText) to the
-      // single value returned by getValue/getPriority.
+      // Keep independent declarations in place, avoiding a style-attribute
+      // mutation when value and priority are unchanged. The general path
+      // retains remove/append precedence for logical and shorthand groups.
       const setValue = (kebab, value, priority) => {
         value = String(value);
         if (!kebab.startsWith("--") && !nativeStyleSupports(kebab, value)) return;
@@ -4142,12 +4193,26 @@ export const __omoikane_service_worker_lifecycle = {};
           for (const [name, expandedValue] of expanded) {
             remaining.push({ name, value: expandedValue, priority: priority || "" });
           }
-          writeDecls(remaining);
+          writeDecls(remaining, true);
+          return;
+        }
+        const existing = decls.findIndex(d => d.name === kebab);
+        if (existing >= 0 && decls[existing].value === value &&
+            decls[existing].priority === (priority || "") &&
+            repeatedInlineAssignmentKeepsPosition(kebab, decls, existing)) return;
+        if (existing >= 0 && decls.every((d, i) =>
+            hasSetValue(independentInlineStyleProperties, d.name) &&
+            (i === existing || d.name !== kebab))) {
+          const previous = decls[existing];
+          const nextPriority = priority || "";
+          if (previous.value === value && previous.priority === nextPriority) return;
+          decls[existing] = { name: kebab, value, priority: nextPriority };
+          writeDecls(decls, true);
           return;
         }
         const remaining = decls.filter(d => d.name !== kebab);
         remaining.push({ name: kebab, value, priority: priority || "" });
-        writeDecls(remaining);
+        writeDecls(remaining, true);
       };
       // Removes a kebab-case property and returns its previous value ("" if it
       // was not set), per CSSOM `removeProperty`. The returned value is the
@@ -10745,19 +10810,27 @@ export const __omoikane_service_worker_lifecycle = {};
           const entry = historyEntries[historyIndex];
           if (entry.generation === activeGeneration) entry.persisted = nativeCaptureIframeFormState(iframe.__id);
         };
-        const restoreHistoryState = (entry, restoreName = true) => {
+        const immediateHistoryRestore = {};
+        const restoreHistoryState = (
+          entry, restoreName = true, epoch = immediateHistoryRestore) => {
           if (entry.persisted !== null) {
-            nativeRestoreIframeFormState(iframe.__id, entry.persisted, entry.href, restoreName);
+            if (epoch !== immediateHistoryRestore && typeof epoch !== "string") return;
+            nativeRestoreIframeFormState(
+              iframe.__id, entry.persisted, entry.href, restoreName,
+              epoch === immediateHistoryRestore ? null : epoch);
             forgetDiscardedNodeWrappers();
           }
         };
         const forceNavigation = (preserveDeclaredOrigin = false, declaredOriginSnapshot) => {
+          let epoch;
           if (declaredOriginSnapshot === undefined) {
-            nativeIframeForceNavigation(iframe.__id, preserveDeclaredOrigin);
+            epoch = nativeIframeForceNavigation(iframe.__id, preserveDeclaredOrigin);
           } else {
-            nativeIframeForceNavigation(iframe.__id, preserveDeclaredOrigin, declaredOriginSnapshot);
+            epoch = nativeIframeForceNavigation(
+              iframe.__id, preserveDeclaredOrigin, declaredOriginSnapshot);
           }
           forgetDiscardedNodeWrappers();
+          return epoch;
         };
         const notePendingResourceNavigation = () => {
           const attribute = hasFrameSrcdoc(iframe) ? "srcdoc" : "src";
@@ -10834,9 +10907,10 @@ export const __omoikane_service_worker_lifecycle = {};
           const entry = historyEntries[historyIndex];
           if (entry.submission !== null) {
             pendingHistoryAction = "reload";
-            nativeIframeReplaySubmission(iframe.__id, entry.submission, entry.href);
+            const epoch =
+              nativeIframeReplaySubmission(iframe.__id, entry.submission, entry.href);
             forgetDiscardedNodeWrappers();
-            restoreHistoryState(entry);
+            restoreHistoryState(entry, true, epoch);
             return;
           }
           const reloadsSrcdoc = entry.attribute === "srcdoc" && entry.href === "about:srcdoc";
@@ -10849,9 +10923,9 @@ export const __omoikane_service_worker_lifecycle = {};
           pendingLocationURL = entry.href;
           pendingHistoryAction = "reload";
           pendingHistoryPreservesDeclaredOrigin = entry.preservesDeclaredOrigin;
-          forceNavigation(entry.preservesDeclaredOrigin,
+          const epoch = forceNavigation(entry.preservesDeclaredOrigin,
             entry.preservesDeclaredOrigin ? entry.declaredOriginSnapshot : undefined);
-          restoreHistoryState(entry);
+          restoreHistoryState(entry, true, epoch);
         };
         const requireHistoryAccess = expectedGeneration => {
           refresh();
@@ -10893,9 +10967,10 @@ export const __omoikane_service_worker_lifecycle = {};
           dispatchIframeNavigationDeparture(iframe);
           if (entry.submission !== null) {
             pendingHistoryAction = "traverse";
-            nativeIframeReplaySubmission(iframe.__id, entry.submission, entry.href);
+            const epoch =
+              nativeIframeReplaySubmission(iframe.__id, entry.submission, entry.href);
             forgetDiscardedNodeWrappers();
-            restoreHistoryState(entry);
+            restoreHistoryState(entry, true, epoch);
             return;
           }
           if (entry.attribute === "srcdoc") {
@@ -10907,9 +10982,9 @@ export const __omoikane_service_worker_lifecycle = {};
           pendingLocationURL = entry.href;
           pendingHistoryAction = "traverse";
           pendingHistoryPreservesDeclaredOrigin = entry.preservesDeclaredOrigin;
-          forceNavigation(entry.preservesDeclaredOrigin,
+          const epoch = forceNavigation(entry.preservesDeclaredOrigin,
             entry.preservesDeclaredOrigin ? entry.declaredOriginSnapshot : undefined);
-          restoreHistoryState(entry);
+          restoreHistoryState(entry, true, epoch);
         };
         const sameDocumentHistoryURL = (value, expectedGeneration) => {
           requireHistoryAccess(expectedGeneration);
@@ -12093,9 +12168,11 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeRegisterValidation = globalThis.__omoikane_register_validation;
   const nativeFlushValidation = globalThis.__omoikane_flush_validation;
   const nativeInvalidateValidation = globalThis.__omoikane_invalidate_validation;
+  const nativeValidationTree = globalThis.__omoikane_validation_tree;
   delete globalThis.__omoikane_register_validation;
   delete globalThis.__omoikane_flush_validation;
   delete globalThis.__omoikane_invalidate_validation;
+  delete globalThis.__omoikane_validation_tree;
   let validationReady = false;
 
   const nativeParserFormOwner = globalThis.__omoikane_parser_form_owner;
@@ -13139,32 +13216,17 @@ export const __omoikane_service_worker_lifecycle = {};
   // their descendants. Shadow trees are independent validation trees.
   function snapshotCssValidity(rootId) {
     const output = [];
-    const roots = [wrapNode(rootId)];
-    while (roots.length) {
-      const root = roots.pop();
-      const records = [];
+    for (const tree of JSON.parse(nativeValidationTree(rootId))) {
+      const records = tree.records;
       const firstIds = new Map();
-      const pending = [{ node: root, parent: -1, form: null }];
-      while (pending.length) {
-        const item = pending.pop();
-        const node = item.node;
-        const element = internalNodeType(node) === 1;
-        const tag = element && hasCanonicalWrapperId(canonicalHtmlElementIds, node) ? internalNodeLocalName(node) : "";
-        const index = records.length;
-        const record = { node, id: internalNodeId(node), tag, parent: item.parent,
-          form: item.form, invalid: 0, value: null };
-        records.push(record);
-        if (element) {
-          const id = nativeAttribute(node, "id");
-          if (id && !firstIds.has(id)) firstIds.set(id, node);
-          const shadow = wrapNode(__omoikane_shadow_root(record.id));
-          if (shadow) roots.push(shadow);
-        }
-        const form = tag === "form" ? node : item.form;
-        const children = internalChildNodes(node);
-        for (let child = children.length - 1; child >= 0; child--) {
-          pending.push({ node: children[child], parent: index, form });
-        }
+      for (const id of tree.first_ids) {
+        firstIds.set(__omoikane_get_attribute(id, "id"), id);
+      }
+      for (const record of records) {
+        record.node = wrapNode(record.id);
+        record.form = record.form === null ? null : wrapNode(record.form);
+        record.invalid = 0;
+        record.value = null;
       }
       const radioGroups = new Map();
       const invalidForms = new Set();
@@ -13176,7 +13238,7 @@ export const __omoikane_service_worker_lifecycle = {};
         const formId = nativeAttribute(node, "form");
         if (parserOwner !== null) record.form = wrapNode(parserOwner);
         else if (formId !== null && internalIsConnected(node)) {
-          const owner = firstIds.get(formId);
+          const owner = wrapNode(firstIds.get(formId));
           record.form = owner && hasCanonicalWrapperId(canonicalHtmlElementIds, owner) &&
             internalNodeLocalName(owner) === "form" ? owner : null;
         }
@@ -14189,9 +14251,10 @@ export const __omoikane_service_worker_lifecycle = {};
       else this.setAttribute("crossorigin", intrinsicString(value));
     }
     get async() {
-      return this.hasAttribute("async");
+      return __omoikane_script_is_async(internalNodeId(this));
     }
     set async(value) {
+      __omoikane_clear_script_force_async(internalNodeId(this));
       if (value) this.setAttribute("async", "");
       else this.removeAttribute("async");
     }
@@ -14360,6 +14423,16 @@ export const __omoikane_service_worker_lifecycle = {};
       }
       const s=this.__s;let sx=0,sy=0,sw=src.width,sh=src.height,dx,dy,dw,dh;
       if(args.length===2){[dx,dy]=args;dw=sw;dh=sh;}else if(args.length===4){[dx,dy,dw,dh]=args;}else{[sx,sy,sw,sh,dx,dy,dw,dh]=args;}
+      const m=s.style.transform;
+      if(!s.style.clip && s.style.globalAlpha===1 && sw===dw && sh===dh &&
+          m[0]===1 && m[1]===0 && m[2]===0 && m[3]===1 &&
+          typeof dx==="number" && typeof dy==="number" &&
+          nativeCanvasBlit(
+            new Uint8Array(src.pixels.buffer,src.pixels.byteOffset,src.pixels.byteLength),
+            new Uint8Array(s.pixels.buffer,s.pixels.byteOffset,s.pixels.byteLength),
+            src.width,src.height,s.width,s.height,sx,sy,sw,sh,dx+m[4],dy+m[5])) {
+        commitCanvas(this.canvas,s);return;
+      }
       for(let y=0;y<dh;y++)for(let x=0;x<dw;x++){const xx=Math.floor(sx+x*sw/dw),yy=Math.floor(sy+y*sh/dh),i=(yy*src.width+xx)*4;blendCanvasPixel(s,dx+x,dy+y,[src.pixels[i],src.pixels[i+1],src.pixels[i+2],Math.round(src.pixels[i+3]*s.style.globalAlpha)]);}commitCanvas(this.canvas,s);}
     measureText(text){const size=parseFloat(this.__s.style.font)||10;return domInterfaces.makeTextMetrics({width:String(text).length*size*.6,actualBoundingBoxAscent:size*.8,actualBoundingBoxDescent:size*.2});}
     fillText(text,x,y){const s=this.__s,size=parseFloat(s.style.font)||10,w=this.measureText(text).width;this.fillRect(x,y-size*.8,w,size);}
@@ -17509,33 +17582,32 @@ export const __omoikane_service_worker_lifecycle = {};
     const names = new Set();
     const firstFrameNames = new Map();
     let frameIndex = 0;
-    const visit = node => {
-      for (const child of windowNameChildren(node)) {
-        if (internalNodeType(child) !== 1) continue;
-        const tag = internalNodeLocalName(child) || "";
-        if (tag === "iframe" || tag === "frame") {
-          const index = `${frameIndex++}`;
-          if (!Object.prototype.hasOwnProperty.call(globalThis, index)) {
-            Object.defineProperty(globalThis, index, {
-              configurable: true,
-              enumerable: true,
-              get() { return child.contentWindow; },
-            });
-          }
+    const documentId = internalNodeId(globalThis.document);
+    const candidates = documentId === undefined ? [] : nativeWindowNamedSnapshot(documentId);
+    for (let offset = 0; offset < candidates.length; offset += 4) {
+      const nodeId = candidates[offset];
+      const isFrame = candidates[offset + 1];
+      const id = candidates[offset + 2];
+      const name = candidates[offset + 3];
+      if (isFrame) {
+        const child = wrapNode(nodeId);
+        const index = `${frameIndex++}`;
+        if (!Object.prototype.hasOwnProperty.call(globalThis, index)) {
+          Object.defineProperty(globalThis, index, {
+            configurable: true,
+            enumerable: true,
+            get() { return child.contentWindow; },
+          });
         }
-        const id = windowNameAttribute(child, "id");
-        if (id) names.add(id);
-        const name = windowNameAttribute(child, "name");
-        if (name && (tag === "embed" || tag === "form" || tag === "img" || tag === "object")) {
-          names.add(name);
-        }
-        if (name && (tag === "iframe" || tag === "frame") && !firstFrameNames.has(name)) {
-          firstFrameNames.set(name, nativeIframeContentDocument(internalNodeId(child)) !== null);
-        }
-        visit(child);
       }
-    };
-    visit(globalThis.document);
+      if (id) names.add(id);
+      if (name && !isFrame) {
+        names.add(name);
+      }
+      if (name && isFrame && !firstFrameNames.has(name)) {
+        firstFrameNames.set(name, nativeIframeContentDocument(nodeId) !== null);
+      }
+    }
     for (const [name, sameOrigin] of firstFrameNames) {
       if (sameOrigin) names.add(name);
     }
@@ -18044,6 +18116,88 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     return (hostOverscrollX ? 2 : 0) | (hostOverscrollY ? 4 : 0);
   }
+  function nativeScrollTargetRejection(explain, reason, nodeId) {
+    return explain ? reason + ":" + (nodeId ?? 0) : false;
+  }
+  function nativeScrollRootTarget(id, explain = false) {
+    if (nativePointerLockTarget() !== null) {
+      return nativeScrollTargetRejection(explain, "pointer_lock", id);
+    }
+    const target = wrapNode(id);
+    if (!target || !isLiveNode(target) || !nativeNodeIsConnected(id) ||
+        internalNodeType(target) === 9) {
+      return nativeScrollTargetRejection(explain, "inactive_target", id);
+    }
+    const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
+    if (internalNodeId(inputDocument) !== __omoikane_document_id) {
+      return nativeScrollTargetRejection(explain, "cross_document", id);
+    }
+    let current = target;
+    let reachedRoot = false;
+    while (current) {
+      const elementId = internalNodeId(current);
+      const nodeType = internalNodeType(current);
+      if (elementId === undefined || nativeNodeHasSlotAncestor(elementId) ||
+          internalAssignedSlot(elementId) != null) {
+        return nativeScrollTargetRejection(explain, "slot_boundary", elementId);
+      }
+      if (nodeType === 9) {
+        return reachedRoot && elementId === __omoikane_document_id ? true :
+          nativeScrollTargetRejection(explain, "root_not_reached", elementId);
+      }
+      if (nodeType !== 1) {
+        // A text hit may take its ordinary light-tree parent. ShadowRoot and
+        // every other unknown flat-tree boundary stay on the canonical owner.
+        if (current !== target || nodeType !== 3) {
+          return nativeScrollTargetRejection(explain, "tree_boundary", elementId);
+        }
+        const parent = nativeParentNode(elementId);
+        current = parent == null ? null : wrapNode(parent);
+        continue;
+      }
+      const parent = nativeParentNode(elementId);
+      const viewport = parent === __omoikane_document_id;
+      if (viewport) reachedRoot = true;
+      const style = platformGetComputedStyleForInnerText(current);
+      if (viewport) {
+        // The numeric protocol does not model CSS scroll snapping.
+        if (style.scrollSnapType !== "none") {
+          return nativeScrollTargetRejection(explain, "scroll_snap", elementId);
+        }
+      } else {
+        const acceptsX = style.overflowX === "auto" || style.overflowX === "scroll";
+        const acceptsY = style.overflowY === "auto" || style.overflowY === "scroll";
+        const blocksX = style.overscrollBehaviorX !== "auto" &&
+          style.overscrollBehaviorX !== "chain";
+        const blocksY = style.overscrollBehaviorY !== "auto" &&
+          style.overscrollBehaviorY !== "chain";
+        // Keep the conservative policy unchanged; the optional trusted-host
+        // diagnostic identifies the first boundary without invoking author code.
+        if (blocksX) return nativeScrollTargetRejection(explain, "overscroll_boundary_x", elementId);
+        if (blocksY) return nativeScrollTargetRejection(explain, "overscroll_boundary_y", elementId);
+        // A declaration alone does not make this ancestor consume a wheel.
+        // Only the trusted current layout can prove an empty scroll range.
+        if ((acceptsX || acceptsY) && !nativeScrollAxesHaveNoRange(elementId, acceptsX, acceptsY)) {
+          return nativeScrollTargetRejection(explain,
+            acceptsX ? "nested_overflow_x" : "nested_overflow_y", elementId);
+        }
+      }
+      current = parent == null ? null : wrapNode(parent);
+    }
+    return nativeScrollTargetRejection(explain, "root_not_reached", id);
+  }
+  function dispatchNativeScrollNotification(id, init) {
+    const target = wrapNode(id);
+    if (!target || !isLiveNode(target) || !nativeNodeIsConnected(id)) return false;
+    const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
+    if (internalNodeId(inputDocument) !== __omoikane_document_id) return false;
+    // The default was already accepted and committed by the trusted host.
+    // Cancellation remains observable, but cannot run a second default.
+    target.dispatchEvent(new WheelEvent("wheel", {
+      ...init, bubbles: true, cancelable: true, composed: true, deltaMode: 0,
+    }));
+    return true;
+  }
   globalThis.__omoikane_dispatch_wheel_input = function(id, init) {
     const locked = wrapNode(nativePointerLockTarget());
     const target = locked || wrapNode(id) || document;
@@ -18511,12 +18665,35 @@ export const __omoikane_service_worker_lifecycle = {};
     if (prop === "cssFloat" || prop === "styleFloat") return "float";
     return String(prop).replace(/[A-Z]/g, m => "-" + m.toLowerCase());
   }
+  // These helpers are shared across declarations: retaining a declaration
+  // adds no enumeration-specific object or per-instance helper closures.
+  function readComputedStyleMetadata(metadataSource, operation, index) {
+    try { return metadataSource(operation, index); }
+    catch (_) { return operation === "length" ? 0 : operation === "item" ? "" : []; }
+  }
+  function computedStyleNames(readMap, metadataSource) {
+    return typeof metadataSource === "function"
+      ? readComputedStyleMetadata(metadataSource, "names") : computedStyleObjectKeys(readMap());
+  }
+  function computedStyleItem(readMap, metadataSource, index) {
+    if (typeof metadataSource === "function" && typeof index === "number" &&
+        index === (index >>> 0)) return readComputedStyleMetadata(metadataSource, "item", index);
+    // Capture names before an object argument can mutate the declaration.
+    return computedStyleNames(readMap, metadataSource)[index] || "";
+  }
+  function computedStyleIndexedName(readMap, metadataSource, prop) {
+    if (typeof prop !== "string" || !/^(0|[1-9][0-9]*)$/.test(prop)) return null;
+    const snapshot = computedStyleNames(readMap, metadataSource);
+    const index = Number(prop);
+    if (!Number.isSafeInteger(index) || index >= 0xFFFFFFFF) return null;
+    return snapshot[index] || "";
+  }
   // Builds a read-only CSSStyleDeclaration-like object over a map provider
   // (kebab-case property names -> CSS string values). Supports camelCase access
   // (`style.whiteSpace`), `cssFloat`, `getPropertyValue('white-space')`,
   // `length`, and indexed/item access. The provider is read for every operation
   // so retained resolved declarations stay live after DOM or CSSOM mutations.
-  function __makeComputedStyle(source, valueSource) {
+  function __makeComputedStyle(source, valueSource, metadataSource) {
     const readMap = typeof source === "function"
       ? () => {
           try {
@@ -18533,12 +18710,6 @@ export const __omoikane_service_worker_lifecycle = {};
       if (typeof valueSource !== "function") return undefined;
       try { return valueSource(key); } catch (_) { return undefined; }
     };
-    const indexedName = (map, prop) => {
-      if (typeof prop !== "string" || !/^(0|[1-9][0-9]*)$/.test(prop)) return null;
-      const index = Number(prop);
-      if (!Number.isSafeInteger(index) || index >= 0xFFFFFFFF) return null;
-      return Object.keys(map)[index] || "";
-    };
     const decl = {
       getPropertyValue(name) {
         const property = String(name);
@@ -18552,9 +18723,12 @@ export const __omoikane_service_worker_lifecycle = {};
           (computedLogicalShorthand(map, key) ?? (key === "z-index" ? "auto" : ""));
       },
       getPropertyPriority() { return ""; },
-      get length() { return Object.keys(readMap()).length; },
-      item(index) { return Object.keys(readMap())[index] || ""; },
-      [Symbol.iterator]() { return Object.keys(readMap())[Symbol.iterator](); },
+      get length() {
+        return typeof metadataSource === "function"
+          ? readComputedStyleMetadata(metadataSource, "length") : computedStyleNames(readMap, metadataSource).length;
+      },
+      item(index) { return computedStyleItem(readMap, metadataSource, index); },
+      [Symbol.iterator]() { return computedStyleNames(readMap, metadataSource)[Symbol.iterator](); },
       get cssText() {
         const map = readMap();
         return Object.keys(map).map(k => k + ": " + map[k] + ";").join(" ");
@@ -18566,9 +18740,9 @@ export const __omoikane_service_worker_lifecycle = {};
         const key = __styleNameToCss(prop);
         const value = readValue(key);
         if (value !== undefined) return value;
-        const map = readMap();
-        const indexed = indexedName(map, prop);
+        const indexed = computedStyleIndexedName(readMap, metadataSource, prop);
         if (indexed !== null) return indexed;
+        const map = readMap();
         return Object.prototype.hasOwnProperty.call(map, key) ? map[key] :
           (computedLogicalShorthand(map, key) ?? (key === "z-index" ? "auto" : ""));
       },
@@ -18582,9 +18756,9 @@ export const __omoikane_service_worker_lifecycle = {};
         // A named read answers membership without resolving layout for the
         // whole property map; indices and logical shorthands still need it.
         if (!/^(0|[1-9][0-9]*)$/.test(prop) && readValue(key) !== undefined) return true;
-        const map = readMap();
-        const indexed = indexedName(map, prop);
+        const indexed = computedStyleIndexedName(readMap, metadataSource, prop);
         if (indexed !== null) return indexed !== "";
+        const map = readMap();
         return Object.prototype.hasOwnProperty.call(map, key) ||
           computedLogicalShorthand(map, key) !== null;
       },
@@ -18631,6 +18805,9 @@ export const __omoikane_service_worker_lifecycle = {};
           }, (key) => {
             flushStyleSheets();
             return __omoikane_computed_style(nodeId, null, true, false, key);
+          }, (operation, index) => {
+            flushStyleSheets();
+            return nativeComputedStyleMetadata(nodeId, null, operation, index);
           });
           __dispatchPendingTransitionEvents();
           return style;
@@ -18644,6 +18821,9 @@ export const __omoikane_service_worker_lifecycle = {};
         }, (key) => {
           flushStyleSheets();
           return __omoikane_computed_style(nodeId, pseudo, true, false, key);
+        }, (operation, index) => {
+          flushStyleSheets();
+          return nativeComputedStyleMetadata(nodeId, pseudo, operation, index);
         });
         __dispatchPendingTransitionEvents();
         return style;
@@ -20287,6 +20467,7 @@ export const __omoikane_service_worker_lifecycle = {};
   function applyWindowScroll(x, y, smooth = false) {
     __omoikane_set_window_scroll(Number(x), Number(y), Boolean(smooth));
   }
+  let queueIntersectionObserverChecks = () => {};
   globalThis.__omoikane_dispatch_scroll_event = function(nodeId, viewport) {
     const target = viewport ? document : wrapNode(nodeId);
     if (!target) return;
@@ -20468,25 +20649,33 @@ export const __omoikane_service_worker_lifecycle = {};
     (browsingInput.fontMutationHooks = new WeakMap());
   let fontMutationDocument = null;
   let fontMutationPending = false;
+  let fontMutationNeedsSourceSync = false;
   const createFontMutationPromise = Promise.resolve.bind(Promise);
   const enqueueFontMutation = Function.prototype.call.bind(Promise.prototype.then);
   const setFontPromiseProperty = Object.defineProperty.bind(Object);
-  globalThis.__omoikane_install_font_mutation_hook = (doc, callback) => {
+  globalThis.__omoikane_install_font_mutation_hook = (doc, callback, shouldNotify) => {
     fontMutationDocument = createNodeWeakRef(doc);
-    safeWeakMapSet(fontMutationHooks, doc, callback);
+    safeWeakMapSet(fontMutationHooks, doc, { callback, shouldNotify });
     delete globalThis.__omoikane_install_font_mutation_hook;
   };
 
   function notifyFontMutation(target, type, init) {
-    if (!fontMutationDocument || fontMutationPending) return;
-    if (type === "attributes" && init.attributeName !== "href" &&
-        init.attributeName !== "rel" && init.attributeName !== "media" &&
-        init.attributeName !== "disabled") return;
+    if (!fontMutationDocument) return;
     if (type !== "childList" && type !== "characterData" && type !== "attributes") return;
     const doc = weakRefDeref(fontMutationDocument);
     if (!doc || (target !== doc && !isInclusiveDescendant(target, doc))) return;
-    const callback = safeWeakMapGet(fontMutationHooks, doc);
-    if (!callback) return;
+    const hook = safeWeakMapGet(fontMutationHooks, doc);
+    if (!hook) return;
+    const sourceChanged = type !== "attributes" || init.attributeName === "href" ||
+        init.attributeName === "rel" || init.attributeName === "media" ||
+        init.attributeName === "disabled";
+    // Do not retain a retired Realm in a promise merely because one of its
+    // surviving nodes changed an attribute. Selection-only mutations with no
+    // unloaded faces do not need a maintenance notification either.
+    if (!hook.shouldNotify(sourceChanged)) return;
+    const callback = hook.callback;
+    if (sourceChanged) fontMutationNeedsSourceSync = true;
+    if (fontMutationPending) return;
     fontMutationPending = true;
     // A completed notification must not leave a promise owned by the Realm's
     // long-lived bootstrap environment. Allocate only when a batch is dirty.
@@ -20494,7 +20683,9 @@ export const __omoikane_service_worker_lifecycle = {};
     setFontPromiseProperty(promise, "constructor", {value: undefined});
     enqueueFontMutation(promise, () => {
       fontMutationPending = false;
-      callback(doc);
+      const sourceChanged = fontMutationNeedsSourceSync;
+      fontMutationNeedsSourceSync = false;
+      callback(doc, sourceChanged);
     });
   }
 
@@ -20554,9 +20745,8 @@ export const __omoikane_service_worker_lifecycle = {};
       observer._records.push(new MutationRecord(type, target, recordInit));
       observer._schedule();
     }
-    if (hasLayoutObservers &&
-        typeof globalThis.__omoikane_layout_observers_changed === "function") {
-      globalThis.__omoikane_layout_observers_changed();
+    if (hasLayoutObservers && typeof nativeQueueLayoutObserverCheck === "function") {
+      nativeQueueLayoutObserverCheck(internalNodeId(globalThis.document));
     }
   }
 
@@ -21552,6 +21742,7 @@ export const __omoikane_service_worker_lifecycle = {};
       });
     }
     open(method, url, async = true) {
+      this._cancelFetch();
       // Re-opening an active request aborts the old fetch.  Preserve the
       // Resource Timing entry even though no terminal network payload arrives.
       this._clearTimeout();
@@ -21614,6 +21805,7 @@ export const __omoikane_service_worker_lifecycle = {};
       removeListener(this._listeners, type, callback, options);
     }
     abort() {
+      this._cancelFetch();
       const active = this._sendFlag && !this._terminal;
       if (!active) {
         this._clearTimeout();
@@ -21697,8 +21889,12 @@ export const __omoikane_service_worker_lifecycle = {};
               bodyPresent: true,
             };
           })
-        : Promise.resolve().then(() =>
-            nativeFetch(
+        : Promise.resolve().then(() => {
+            if (this._async && nativeBeginFetch() &&
+                (requestId !== this._requestId || this._terminal)) {
+              throw new DOMException("The operation was aborted", "AbortError");
+            }
+            const args = [
               this._url,
               this._method,
               JSON.stringify(Object.entries(this._headers)),
@@ -21708,9 +21904,13 @@ export const __omoikane_service_worker_lifecycle = {};
               "follow",
               this._timeout,
               cspSource,
-            )
-          ).then(raw => JSON.parse(String(raw)));
+            ];
+            return this._async
+              ? fetchWithScheduling(args, null, id => { this._fetchRequestId = id; })
+              : nativeFetch(...args);
+          }).then(raw => JSON.parse(String(raw)));
       payload.then(data => {
+        if (requestId === this._requestId) this._fetchRequestId = null;
         if (requestId !== this._requestId || this._terminal) return;
         if (data && data.__omoikane_timeout === true) {
           this._queueNetworking(() => this._finishTimeout(requestId));
@@ -21718,6 +21918,7 @@ export const __omoikane_service_worker_lifecycle = {};
         }
         this._queueNetworking(() => this._finishSuccess(data, requestId));
       }).catch(error => {
+        if (requestId === this._requestId) this._fetchRequestId = null;
         if (requestId !== this._requestId || this._terminal) return;
         if (error && error.__omoikane_timeout === true) {
           this._queueNetworking(() => this._finishTimeout(requestId));
@@ -21732,6 +21933,10 @@ export const __omoikane_service_worker_lifecycle = {};
       } else {
         setTimeout(callback, 0);
       }
+    }
+    _cancelFetch() {
+      if (this._fetchRequestId) nativeCancelFetch(this._fetchRequestId);
+      this._fetchRequestId = null;
     }
     _clearTimeout() {
       if (this._timeoutTimer !== null) {
@@ -21832,6 +22037,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     _finishTimeout(requestId) {
       if (requestId !== this._requestId || this._terminal || !this._sendFlag) return;
+      this._cancelFetch();
       this._clearTimeout();
       if (this.__resourceTiming) {
         finishResourceTiming(this.__resourceTiming, {}, true);
@@ -26857,6 +27063,20 @@ export const __omoikane_service_worker_lifecycle = {};
   };
 
   const mediaQueryListRefs = [];
+  let mediaQueryReportingDepth = 0;
+  let mediaQueryPruneAt = 64;
+  // Reporting need not run on unchanged frames. Bound dead WeakRef metadata
+  // during creation too, without compacting a report's in-flight iteration.
+  function pruneMediaQueryReferences() {
+    if (mediaQueryReportingDepth || mediaQueryListRefs.length < mediaQueryPruneAt) return;
+    let kept = 0;
+    for (let index = 0; index < mediaQueryListRefs.length; index++) {
+      const entry = mediaQueryListRefs[index];
+      if (weakRefDeref(entry)) mediaQueryListRefs[kept++] = entry;
+    }
+    mediaQueryListRefs.length = kept;
+    mediaQueryPruneAt = kept > 32 ? kept * 2 : 64;
+  }
   const mediaQueryListConstructionToken = {};
   const mediaQueryListMedia = new WeakMap();
 
@@ -26934,22 +27154,29 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   globalThis.matchMedia = function(query) {
+    pruneMediaQueryReferences();
     const list = new MediaQueryList(query, mediaQueryListConstructionToken);
-    mediaQueryListRefs.push(typeof WeakRef === "function" ? new WeakRef(list) : list);
+    mediaQueryListRefs.push(new IntrinsicWeakRef(list));
     return list;
   };
   globalThis.__omoikane_media_query_viewport_changed = function() {
-    // Do not process lists created by a callback until the next report cycle.
-    let limit = mediaQueryListRefs.length;
-    for (let index = 0; index < limit; index++) {
-      const entry = mediaQueryListRefs[index];
-      const list = typeof WeakRef === "function" ? entry.deref() : entry;
-      if (list) list.__reevaluate();
-      else {
-        mediaQueryListRefs.splice(index, 1);
-        index--;
-        limit--;
+    mediaQueryReportingDepth++;
+    try {
+      // Do not process lists created by a callback until the next report cycle.
+      let limit = mediaQueryListRefs.length;
+      for (let index = 0; index < limit; index++) {
+        const entry = mediaQueryListRefs[index];
+        const list = weakRefDeref(entry);
+        if (list) list.__reevaluate();
+        else {
+          mediaQueryListRefs.splice(index, 1);
+          index--;
+          limit--;
+        }
       }
+    } finally {
+      mediaQueryReportingDepth--;
+      mediaQueryPruneAt = mediaQueryListRefs.length > 32 ? mediaQueryListRefs.length * 2 : 64;
     }
   };
   globalThis.MediaQueryList = MediaQueryList;
@@ -28049,6 +28276,46 @@ export const __omoikane_service_worker_lifecycle = {};
     return response;
   }
 
+  // A background request keeps only its completion functions in the host.
+  // Blocking embedders retain the existing native Fetch path.
+  function fetchWithScheduling(args, signal = null, onStart = null) {
+    if (!nativeBeginFetch()) return nativeFetch(...args);
+    return new Promise((resolve, reject) => {
+      let requestId = false;
+      let settled = false;
+      const cleanup = () => {
+        if (signal) signal.removeEventListener("abort", abort);
+      };
+      const loaded = raw => {
+        if (settled) return;
+        settled = true; cleanup(); resolve(raw);
+      };
+      const failed = error => {
+        if (settled) return;
+        settled = true; cleanup(); reject(error);
+      };
+      const abort = () => {
+        if (settled) return;
+        failed(signal.reason);
+        if (requestId) nativeCancelFetch(requestId);
+      };
+      try {
+        if (signal && signal.aborted) { failed(signal.reason); return; }
+        if (signal) signal.addEventListener("abort", abort, {once:true});
+        requestId = nativeBeginFetch(...args, [loaded, failed]);
+        if (requestId) {
+          if (onStart) onStart(requestId);
+          if (signal && signal.aborted) abort();
+        } else {
+          loaded(nativeFetch(...args));
+        }
+      } catch (error) {
+        if (requestId) nativeCancelFetch(requestId);
+        failed(error);
+      }
+    });
+  }
+
   // Fetching a blob URL is a store lookup rather than a network request. Only
   // GET is defined for it, and an unknown or revoked URL is a network error.
   function blobUrlResponse(url, method) {
@@ -28087,7 +28354,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     return Promise.resolve().then(() => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
-      return nativeFetch(
+      return fetchWithScheduling([
         request.url,
         request.method,
         JSON.stringify([...request.headers]),
@@ -28097,7 +28364,7 @@ export const __omoikane_service_worker_lifecycle = {};
         request.redirect,
         undefined,
         cspSource,
-      );
+      ], request.signal);
     }).then(raw => {
       if (request.signal && request.signal.aborted) throw request.signal.reason;
       const data = JSON.parse(String(raw));
@@ -29289,16 +29556,47 @@ export const __omoikane_service_worker_lifecycle = {};
     });
   }
 
+  const intersectionObserverEntryStates = browsingInput.intersectionObserverEntryStates ||
+    (browsingInput.intersectionObserverEntryStates = new WeakMap());
+  function intersectionObserverEntryState(entry) {
+    const state = safeWeakMapGet(intersectionObserverEntryStates, entry);
+    if (state === undefined) throw new IntrinsicTypeError("Illegal invocation");
+    return state;
+  }
+
   class IntersectionObserverEntry {
     constructor(init) {
-      this.time = globalThis.performance.now();
-      this.target = init.target;
-      this.rootBounds = init.rootBounds;
-      this.boundingClientRect = init.boundingClientRect;
-      this.intersectionRect = init.intersectionRect;
-      this.isIntersecting = init.isIntersecting;
-      this.intersectionRatio = init.intersectionRatio;
+      safeWeakMapSet(intersectionObserverEntryStates, this, {
+        time: globalThis.performance.now(),
+        target: init.target,
+        rootBounds: init.rootBounds,
+        boundingClientRect: init.boundingClientRect,
+        intersectionRect: init.intersectionRect,
+        isIntersecting: init.isIntersecting,
+        intersectionRatio: init.intersectionRatio,
+      });
     }
+
+    get time() { return intersectionObserverEntryState(this).time; }
+    get target() { return intersectionObserverEntryState(this).target; }
+    get rootBounds() { return intersectionObserverEntryState(this).rootBounds; }
+    get boundingClientRect() {
+      return intersectionObserverEntryState(this).boundingClientRect;
+    }
+    get intersectionRect() { return intersectionObserverEntryState(this).intersectionRect; }
+    get isIntersecting() { return intersectionObserverEntryState(this).isIntersecting; }
+    get intersectionRatio() { return intersectionObserverEntryState(this).intersectionRatio; }
+  }
+  for (const attribute of [
+    "time", "target", "rootBounds", "boundingClientRect", "intersectionRect",
+    "isIntersecting", "intersectionRatio",
+  ]) {
+    const descriptor = safeGetOwnPropertyDescriptor(IntersectionObserverEntry.prototype, attribute);
+    safeDefineProperty(IntersectionObserverEntry.prototype, attribute, {
+      get: descriptor.get,
+      enumerable: true,
+      configurable: true,
+    });
   }
 
   const activeIntersectionObservers = new Set();
@@ -29379,9 +29677,17 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
+  queueIntersectionObserverChecks = function() {
+    for (const observer of activeIntersectionObservers) observer.__queueCheck();
+  };
+  // The host calls this after all animation-frame callbacks for Documents
+  // whose scroll geometry changed during the rendering opportunity.
+  globalThis.__omoikane_intersection_observers_changed = function() {
+    queueIntersectionObserverChecks();
+  };
   globalThis.__omoikane_layout_observers_changed = function() {
     for (const observer of activeResizeObservers) observer.__queueCheck();
-    for (const observer of activeIntersectionObservers) observer.__queueCheck();
+    queueIntersectionObserverChecks();
   };
   globalThis.ResizeObserver = ResizeObserver;
   globalThis.ResizeObserverEntry = ResizeObserverEntry;
@@ -29392,6 +29698,8 @@ export const __omoikane_service_worker_lifecycle = {};
     focus: (kind, ...args) => safeApply(focusDocumentCommands[kind], undefined, args),
     mouse: globalThis.__omoikane_dispatch_mouse_input,
     wheel: globalThis.__omoikane_dispatch_wheel_input,
+    "native-scroll-eligible": nativeScrollRootTarget,
+    "native-scroll-notification": dispatchNativeScrollNotification,
     touch: globalThis.__omoikane_dispatch_touch_input,
     keyboard: globalThis.__omoikane_dispatch_keyboard_input,
     composition: globalThis.__omoikane_dispatch_composition_input,

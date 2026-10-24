@@ -92,6 +92,16 @@ fn auto(style: &ComputedStyle, property: &str) -> bool {
         || matches!(style.get(property), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("auto"))
 }
 
+fn uses_inline_static_position(style: &ComputedStyle) -> bool {
+    position_scheme(style) == PositionScheme::Absolute
+        && matches!(
+            style.get("display"),
+            Some(ComputedValue::Keyword(value))
+                if value.eq_ignore_ascii_case("inline")
+                    || value.eq_ignore_ascii_case("inline-block")
+        )
+}
+
 fn formatting_root(node: &NodeHandle, style: &ComputedStyle, resolver: &mut StyleResolver) -> bool {
     let parent = node.parent_node();
     if parent
@@ -210,6 +220,7 @@ fn place_flow_child(
     viewport: super::LayoutViewport,
     positioned_ancestor: Option<BoxDimensions>,
     resolver: &mut StyleResolver,
+    preceding_inline_line_y: Option<f32>,
     top_open: &mut bool,
     all_through: &mut bool,
     had_clearance: &mut bool,
@@ -253,7 +264,15 @@ fn place_flow_child(
         *top_open = false;
         *had_clearance = true;
     }
-    let child_y = *cursor_y - predicted_delta;
+    // An absolutely positioned inline-level box following inline content keeps
+    // the hypothetical position of its placeholder in the last line. The
+    // inline flush advances `cursor_y` to the line bottom for subsequent
+    // in-flow blocks, so using it here would place its auto top one line low.
+    let child_y = if matches!(&source, LayoutSource::Node(_)) && uses_inline_static_position(&cs) {
+        preceding_inline_line_y.unwrap_or(*cursor_y - predicted_delta)
+    } else {
+        *cursor_y - predicted_delta
+    };
     // Clearance places the border edge below the float. The margin edge
     // may still overlap it and must not retain that float's width offset.
     let float_y = if clear_side(&cs) != ClearSide::None {
@@ -407,6 +426,11 @@ pub(super) fn layout_children(
             &mut lines,
             &mut children,
         );
+        let preceding_inline_line_y = lines[previous_lines..]
+            .iter()
+            .rev()
+            .find(|line| line.rect.height > 0.0)
+            .map(|line| line.rect.y);
         if lines[previous_lines..]
             .iter()
             .any(|line| line.rect.height > 0.0)
@@ -430,6 +454,7 @@ pub(super) fn layout_children(
             viewport,
             positioned_ancestor,
             resolver,
+            preceding_inline_line_y,
             &mut top_open,
             &mut all_through,
             &mut had_clearance,

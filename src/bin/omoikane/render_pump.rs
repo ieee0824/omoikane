@@ -39,11 +39,20 @@ impl PaintTrace {
             "scale": layout.scale().factor(),
             "viewport": layout.page_viewport(),
         });
-        eprintln!("OMOIKANE_PAINT {record}");
+        eprintln!(
+            "{}",
+            omoikane::diagnostics::json_record("OMOIKANE_PAINT", &record)
+        );
     }
 }
 
 impl BrowserApp {
+    /// Defer page tasks briefly while a native pointer gesture is active.
+    pub(super) fn pointer_input_is_recent(&self, now: Instant) -> bool {
+        self.last_pointer_input_at
+            .is_some_and(|last| now.saturating_duration_since(last) < POINTER_TASK_QUIET_PERIOD)
+    }
+
     /// Present a previously delivered wheel's changes before consuming more
     /// input when the frame deadline has passed. Native event loops can drain
     /// an entire input backlog before delivering a queued RedrawRequested.
@@ -56,7 +65,7 @@ impl BrowserApp {
             return;
         }
         let elapsed_ms = self.begin_page_frame(now);
-        if let Err(error) = self.draw(elapsed_ms, false) {
+        if let Err(error) = self.draw_without_page_tasks(elapsed_ms, false) {
             eprintln!("frame failed: {error}");
         }
     }
@@ -92,22 +101,10 @@ impl BrowserApp {
         }
     }
 
-    pub(super) fn sync_page_time_before_input(&mut self, now: Instant) {
-        let elapsed = self.advance_page_clock(now);
-        let started = self.paint_trace.as_ref().map(|_| Instant::now());
-        if let Err(error) = self.session.advance_tasks(elapsed) {
-            report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Frame, &error);
-            eprintln!("page clock advancement failed: {error}");
-        }
-        if let Some(started) = started {
-            eprintln!(
-                "OMOIKANE_INPUT_CLOCK {}",
-                json!({
-                    "page_elapsed_ms": elapsed,
-                    "advance_tasks_ms": started.elapsed().as_secs_f64() * 1000.0,
-                })
-            );
-        }
+    /// Accounts for elapsed page time without letting page tasks delay native input.
+    pub(super) fn defer_page_time_before_input(&mut self, now: Instant) {
+        let elapsed_ms = self.advance_page_clock(now);
+        self.session.advance_clock_without_tasks(elapsed_ms);
         self.rebase_clock_if_document_changed();
     }
 
@@ -144,6 +141,24 @@ impl BrowserApp {
         elapsed_ms: u64,
         os_exposure: bool,
     ) -> Result<(), Box<dyn Error>> {
+        self.draw_with_page_mode(Some(elapsed_ms), os_exposure)
+    }
+
+    /// Presents native scroll changes before resuming page task execution.
+    pub(super) fn draw_without_page_tasks(
+        &mut self,
+        elapsed_ms: u64,
+        os_exposure: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        self.session.advance_clock_without_tasks(elapsed_ms);
+        self.draw_with_page_mode(None, os_exposure)
+    }
+
+    fn draw_with_page_mode(
+        &mut self,
+        elapsed_ms: Option<u64>,
+        os_exposure: bool,
+    ) -> Result<(), Box<dyn Error>> {
         let Some(window) = self.window.clone() else {
             return Ok(());
         };
@@ -156,9 +171,24 @@ impl BrowserApp {
             omoikane::paint::take_last_render_timings();
             Instant::now()
         });
-        let painted = self.update_page_frame(layout.page_viewport(), elapsed_ms)?;
+        let startup_pending = self.session.has_pending_document_startup();
+        let painted = if let Some(elapsed_ms) = elapsed_ms {
+            self.update_page_frame(layout.page_viewport(), elapsed_ms)?
+        } else {
+            self.frame_cache
+                .paint_without_advance(&mut self.session)
+                .map_err(|error| {
+                    report_gui_failure(self.error_reporter.as_deref(), GuiFailure::Frame, &error);
+                    error
+                })?
+        };
         let frame_time = started.map(|start| start.elapsed()).unwrap_or_default();
         let timings = started.map(|_| omoikane::paint::take_last_render_timings());
+        if startup_pending && !self.session.has_pending_document_startup() {
+            // Match navigation's clock rebase: timers created at the end of
+            // slow startup must not inherit earlier script-fetch wall time.
+            self.advance_page_clock(Instant::now());
+        }
         self.rebase_clock_if_document_changed();
         self.sync_find_document();
         self.sync_url_bar();
@@ -216,6 +246,64 @@ mod tests {
         app.render_before_wheel(now + FRAME_INTERVAL / 2);
         assert!(app.frame_scheduler.redraw_pending());
         assert_eq!(app.wheel_frame_deadline, now + FRAME_INTERVAL);
+    }
+
+    #[test]
+    fn wheel_paint_advances_clock_without_running_tasks() {
+        let mut app = BrowserApp::new(
+            "data:text/html,<script>window.fired=false;setTimeout(()=>fired=true,100)</script>",
+        )
+        .unwrap();
+        app.start_initial_navigation().unwrap();
+        app.draw_without_page_tasks(100, false).unwrap();
+        let value = app
+            .session
+            .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
+            .unwrap();
+        assert_eq!(value["result"]["value"], json!(false));
+
+        app.defer_page_time_before_input(Instant::now());
+        app.update_page_frame((100, 100), 0).unwrap();
+        let value = app
+            .session
+            .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
+            .unwrap();
+        assert_eq!(value["result"]["value"], json!(true));
+    }
+
+    #[test]
+    fn timer_created_after_idle_uses_current_page_clock() {
+        let mut app =
+            BrowserApp::new("data:text/html,<script>window.fired=false</script>").unwrap();
+        app.start_initial_navigation().unwrap();
+        app.rebase_clock_if_document_changed();
+        app.defer_page_time_before_input(Instant::now() + Duration::from_secs(2));
+        app.session
+            .dispatch(
+                "Runtime.evaluate",
+                json!({"expression":"setTimeout(()=>fired=true,500)"}),
+            )
+            .unwrap();
+
+        app.update_page_frame((100, 100), 0).unwrap();
+        let value = app
+            .session
+            .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
+            .unwrap();
+        assert_eq!(value["result"]["value"], json!(false));
+
+        app.update_page_frame((100, 100), 499).unwrap();
+        let value = app
+            .session
+            .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
+            .unwrap();
+        assert_eq!(value["result"]["value"], json!(false));
+        app.update_page_frame((100, 100), 1).unwrap();
+        let value = app
+            .session
+            .dispatch("Runtime.evaluate", json!({"expression":"fired"}))
+            .unwrap();
+        assert_eq!(value["result"]["value"], json!(true));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Inline layout: text segments, line breaking, and inline image handling.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
@@ -27,10 +27,38 @@ use super::{
 };
 
 mod boxes;
+#[cfg(test)]
+mod data_image_tests;
 mod text_source;
 
 thread_local! {
     static PRINT_INLINE_SKIP: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
+    // Each active decode records only pending images it actually visits.
+    static IMAGE_PENDING_DEPENDENCIES: RefCell<Vec<HashSet<String>>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ImageDependencies;
+
+impl ImageDependencies {
+    fn begin() -> Self {
+        IMAGE_PENDING_DEPENDENCIES.with(|stack| stack.borrow_mut().push(HashSet::new()));
+        Self
+    }
+
+    fn has_pending(&self) -> bool {
+        IMAGE_PENDING_DEPENDENCIES.with(|stack| !stack.borrow().last().unwrap().is_empty())
+    }
+
+    fn pending_references(&self) -> Vec<String> {
+        IMAGE_PENDING_DEPENDENCIES
+            .with(|stack| stack.borrow().last().unwrap().iter().cloned().collect())
+    }
+}
+
+impl Drop for ImageDependencies {
+    fn drop(&mut self) {
+        IMAGE_PENDING_DEPENDENCIES.with(|stack| stack.borrow_mut().pop());
+    }
 }
 
 /// Relayout inline formatting contexts after their already printed token prefixes.
@@ -265,6 +293,7 @@ fn layout_inline_nodes_impl(
         ));
     }
     for node in nodes {
+        let _phase = super::profile::Scope::begin(super::profile::Phase::InlineCollect);
         collect_inline_segments(node, resolver, &mut segments, context, &mut atomic_boxes);
     }
     if include_after && let Some(owner) = generated_owner {
@@ -377,6 +406,7 @@ pub(super) fn layout_vertical_inline_nodes(
         ));
     }
     for node in nodes {
+        let _phase = super::profile::Scope::begin(super::profile::Phase::InlineCollect);
         collect_inline_segments(node, resolver, &mut segments, context, &mut atomic_boxes);
     }
     if include_after && let Some(owner) = generated_owner {
@@ -1842,6 +1872,10 @@ fn element_inline_image_with_current_color(
 
 /// Decode an image from a data: URI (PNG, JPEG, GIF, WebP, or SVG).
 fn decode_data_uri_image(uri: &str) -> Option<Image> {
+    super::ensure_image_cache_context();
+    if let Some(image) = IMAGE_CACHE.with(|cache| cache.borrow().get(uri).cloned()) {
+        return image;
+    }
     let data_uri = parse_data_uri(uri).ok()?;
     match data_uri {
         DataUri::Binary { mime_type, data } => {
@@ -1857,14 +1891,14 @@ fn decode_data_uri_image(uri: &str) -> Option<Image> {
             } else if mime_type.eq_ignore_ascii_case("image/webp") {
                 Image::decode_webp(&data).ok()
             } else if mime_type.eq_ignore_ascii_case("image/svg+xml") {
-                decode_svg_bytes(&data)
+                decode_data_svg(std::str::from_utf8(&data).ok()?, uri)
             } else {
                 None
             }
         }
         DataUri::Text { mime_type, data } => {
             if mime_type.eq_ignore_ascii_case("image/svg+xml") {
-                decode_svg_text(&data)
+                decode_data_svg(&data, uri)
             } else {
                 None
             }
@@ -1880,6 +1914,49 @@ fn decode_svg_bytes(bytes: &[u8]) -> Option<Image> {
 
 /// Decode SVG from text, parse and rasterize.
 fn decode_svg_text(text: &str) -> Option<Image> {
+    crate::svg::render_svg_to_image(&parse_svg_node(text)?)
+}
+
+const MAX_CACHED_DATA_SVGS: usize = 64;
+const MAX_CACHED_DATA_SVG_PIXEL_BYTES: usize = 256 * 1024;
+const MAX_CACHED_DATA_SVG_URI_BYTES: usize = 64 * 1024;
+
+/// Reuses immutable, self-contained SVG data images across layout and paint.
+/// SVGs containing image elements remain live: their nested resources can be
+/// pending, relative to a changing base URL, revoked, or animated.
+fn decode_data_svg(text: &str, uri: &str) -> Option<Image> {
+    fn contains_image(node: &NodeHandle) -> bool {
+        node.tag_name()
+            .is_some_and(|tag| tag.eq_ignore_ascii_case("image"))
+            || node.child_nodes().iter().any(contains_image)
+    }
+    let svg = parse_svg_node(text)?;
+    let cacheable = !contains_image(&svg);
+    let image = crate::svg::render_svg_to_image(&svg)?;
+    // Bound the added retention even when a page continuously changes its URIs.
+    if cacheable
+        && image.pixels().len() <= MAX_CACHED_DATA_SVG_PIXEL_BYTES
+        && uri.len() <= MAX_CACHED_DATA_SVG_URI_BYTES
+    {
+        IMAGE_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let count = cache
+                .keys()
+                .filter(|key| {
+                    key.get(..5)
+                        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+                })
+                .take(MAX_CACHED_DATA_SVGS)
+                .count();
+            if count < MAX_CACHED_DATA_SVGS {
+                cache.insert(uri.to_owned(), Some(image.clone()));
+            }
+        });
+    }
+    Some(image)
+}
+
+fn parse_svg_node(text: &str) -> Option<NodeHandle> {
     use crate::dom::Node;
     use crate::html::TreeBuilder;
     let doc = TreeBuilder::parse(text).document();
@@ -1895,8 +1972,7 @@ fn decode_svg_text(text: &str) -> Option<Image> {
         }
         None
     }
-    let svg_node = find_svg(&doc)?;
-    crate::svg::render_svg_to_image(&svg_node)
+    find_svg(&doc)
 }
 
 /// Maximum image size to fetch (10 MiB).
@@ -1905,6 +1981,7 @@ const MAX_IMAGE_SIZE: usize = 10 * 1024 * 1024;
 /// Fetch an image from an HTTP/HTTPS URL with caching.
 fn fetch_image(url: &str) -> Option<Image> {
     super::ensure_image_cache_context();
+    super::image_security::record_layout_image_dependency(url);
     if let Some(image) = IMAGE_ANIMATION_CACHE.with(|cache| {
         cache
             .borrow()
@@ -1917,6 +1994,17 @@ fn fetch_image(url: &str) -> Option<Image> {
     let cached = IMAGE_CACHE.with(|cache| cache.borrow().get(url).cloned());
     if let Some(result) = cached {
         return result;
+    }
+
+    if super::image_security::start_async_image(url) {
+        if super::image_security::image_asset_pending(url) {
+            IMAGE_PENDING_DEPENDENCIES.with(|stack| {
+                for dependencies in stack.borrow_mut().iter_mut() {
+                    dependencies.insert(url.to_owned());
+                }
+            });
+        }
+        return None;
     }
 
     // Fetch and decode the image
@@ -1976,6 +2064,9 @@ fn fetch_image_uncached(url: &str) -> Option<Image> {
         }
     })?;
 
+    if !super::image_security::image_request_is_live() {
+        return None;
+    }
     if response.status_code() != 200 {
         return None;
     }
@@ -2079,12 +2170,15 @@ fn decode_blob_url_image(url: &str) -> Option<Image> {
     if entry.bytes.len() > MAX_IMAGE_SIZE {
         return None;
     }
+    let dependencies = ImageDependencies::begin();
     let image = decode_image_bytes(&entry.bytes, &entry.media_type.to_lowercase(), url)?;
-    IMAGE_CACHE.with(|cache| {
-        cache
-            .borrow_mut()
-            .insert(url.to_string(), Some(image.clone()));
-    });
+    if !dependencies.has_pending() {
+        IMAGE_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert(url.to_string(), Some(image.clone()));
+        });
+    }
     Some(image)
 }
 
@@ -2127,6 +2221,17 @@ fn decode_or_fetch_image_with_base(url_like: &str, base_url: Option<&Url>) -> Op
 /// Decodes an image reference using the caller's explicit base URL.
 pub(crate) fn decode_or_fetch_image_asset(url_like: &str, base_url: Option<&Url>) -> Option<Image> {
     decode_or_fetch_image_with_base(url_like, base_url)
+}
+
+/// Resolves an image and reports the pending network dependencies encountered
+/// during this decode, including those inside composite blob or data SVG images.
+pub(crate) fn decode_or_fetch_image_asset_with_pending_dependencies(
+    url_like: &str,
+    base_url: Option<&Url>,
+) -> (Option<Image>, Vec<String>) {
+    let dependencies = ImageDependencies::begin();
+    let image = decode_or_fetch_image_asset(url_like, base_url);
+    (image, dependencies.pending_references())
 }
 
 /// Produces a stable identity for a referenced image without reading ambient URL state.
@@ -2494,6 +2599,7 @@ pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
             metrics.font_size.to_bits(),
         );
         let actual = context.metrics_cache.get(&key).copied().or_else(|| {
+            let font_phase = super::profile::Scope::begin(super::profile::Phase::FontSelect);
             let selected = select_text_font(
                 "layout",
                 metrics.font_family,
@@ -2502,6 +2608,7 @@ pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
                 context.web_fonts.as_deref(),
                 &context.system_fonts,
             );
+            drop(font_phase);
             let actual = selected
                 .as_ref()
                 .map(AsRef::as_ref)
@@ -3363,20 +3470,31 @@ fn is_line_end_prohibited(ch: char) -> bool {
 /// This allows line breaks between CJK characters while respecting kinsoku rules.
 pub(crate) fn split_words_preserving_spaces_cjk(text: &str) -> Vec<String> {
     let mut pieces = Vec::new();
-    let mut current = String::new();
+    for_each_word_preserving_spaces_cjk(text, |piece| pieces.push(piece.to_string()));
+    pieces
+}
 
-    for ch in text.chars() {
+/// Visits the same CJK-aware pieces as [`split_words_preserving_spaces_cjk`]
+/// without allocating owned strings.
+pub(super) fn for_each_word_preserving_spaces_cjk<'a>(
+    text: &'a str,
+    mut visit: impl FnMut(&'a str),
+) {
+    let mut piece_start = 0;
+    let mut previous = None;
+
+    for (offset, ch) in text.char_indices() {
         let is_space = ch == ' ';
         let is_cjk = is_cjk_char(ch);
 
         // Check if we should break before this character
-        let should_break = if current.is_empty() {
+        let should_break = if previous.is_none() {
             false
         } else if is_space {
             // Break before space if previous was not space
-            !current.ends_with(' ')
+            previous != Some(' ')
         } else if is_cjk {
-            let prev_char = current.chars().last().unwrap();
+            let prev_char = previous.expect("non-first character has a predecessor");
             let prev_is_cjk = is_cjk_char(prev_char);
             let prev_is_space = prev_char == ' ';
 
@@ -3394,7 +3512,7 @@ pub(crate) fn split_words_preserving_spaces_cjk(text: &str) -> Vec<String> {
             }
         } else {
             // Non-CJK, non-space character
-            let prev_char = current.chars().last().unwrap();
+            let prev_char = previous.expect("non-first character has a predecessor");
             let prev_is_space = prev_char == ' ';
             let prev_is_cjk = is_cjk_char(prev_char);
 
@@ -3408,18 +3526,16 @@ pub(crate) fn split_words_preserving_spaces_cjk(text: &str) -> Vec<String> {
             }
         };
 
-        if should_break && !current.is_empty() {
-            pieces.push(std::mem::take(&mut current));
+        if should_break {
+            visit(&text[piece_start..offset]);
+            piece_start = offset;
         }
-
-        current.push(ch);
+        previous = Some(ch);
     }
 
-    if !current.is_empty() {
-        pieces.push(current);
+    if previous.is_some() {
+        visit(&text[piece_start..]);
     }
-
-    pieces
 }
 
 // ── Line building ───────────────────────────────────────────────────────────
@@ -3693,6 +3809,7 @@ fn bidi_controls(style: &FragmentStyle) -> (&'static str, &'static str) {
 // ── Text measurement ────────────────────────────────────────────────────────
 
 pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
+    let _measure_phase = super::profile::Scope::begin(super::profile::Phase::TextMeasure);
     LAYOUT_FONTS.with(|cell| {
         let mut fonts_ref = cell.borrow_mut();
         if fonts_ref.is_none() {
@@ -3723,6 +3840,7 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                     })
                 })
                 .unwrap_or_default();
+            let font_phase = super::profile::Scope::begin(super::profile::Phase::FontSelect);
             let selected = select_text_font(
                 "layout",
                 metrics.font_family,
@@ -3731,6 +3849,7 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                 context.web_fonts.as_deref(),
                 &context.system_fonts,
             );
+            drop(font_phase);
             let primary = selected.as_ref().map(AsRef::as_ref);
             if primary.is_some() || !context.system_fonts.is_empty() {
                 let base = measure_text_width_with_fallback(

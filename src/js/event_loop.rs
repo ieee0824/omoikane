@@ -39,11 +39,39 @@ pub(crate) enum TaskSource {
     WebLocks,
 }
 
+/// Sanitized author source captured when a JavaScript timer is registered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScriptSourceLocation {
+    /// URL or opaque label with sensitive URL components removed.
+    pub(crate) file: String,
+    /// One-based source line reported by Boa.
+    pub(crate) line: u32,
+    /// One-based source column reported by Boa.
+    pub(crate) column: u32,
+}
+
+/// Optional registration diagnostics supplied only by the JavaScript timer bindings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TimerScheduleMetadata {
+    /// `None` when Boa has no JavaScript position for the registration call.
+    pub(crate) source: Option<ScriptSourceLocation>,
+}
+
+/// Registration data retained from an author timer until its task runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TimerMetadata {
+    /// HTML timer handle returned to author code.
+    pub(crate) id: u64,
+    /// Sanitized registration position, when Boa provided one.
+    pub(crate) source: Option<ScriptSourceLocation>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Task {
     Timer {
         payload: TimerPayload,
         owner_document_id: Option<usize>,
+        metadata: Option<Box<TimerMetadata>>,
     },
     /// A geolocation request delivered after the current script task.
     Geolocation {
@@ -177,6 +205,7 @@ struct TimerTask {
     id: u64,
     payload: TimerPayload,
     owner_document_id: Option<usize>,
+    metadata: Option<Box<TimerMetadata>>,
     next_run_at: u64,
     interval_ms: u64,
     repeat: bool,
@@ -221,7 +250,7 @@ unsafe impl Trace for EventLoop {
     fn run_finalizer(&self) {}
 }
 
-unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tracer) {
+pub(super) unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tracer) {
     match payload {
         TimerPayload::Callback { callback, args } => {
             unsafe { callback.trace(tracer) };
@@ -237,8 +266,10 @@ unsafe fn trace_timer_payload(payload: &TimerPayload, tracer: &mut Tracer) {
         }
         TimerPayload::Source(_)
         | TimerPayload::ResourceLoad { .. }
+        | TimerPayload::ScriptResourceReady { .. }
         | TimerPayload::ImageResourceEvent { .. }
         | TimerPayload::JavascriptDocumentLoad { .. }
+        | TimerPayload::IframeNavigationReady { .. }
         | TimerPayload::FormSubmission { .. }
         | TimerPayload::GeolocationTimeout { .. } => {}
     }
@@ -335,9 +366,20 @@ impl EventLoop {
         payload: TimerPayload,
         owner_document_id: Option<usize>,
     ) {
+        self.enqueue_timer_for_document_with_metadata(payload, owner_document_id, None);
+    }
+
+    fn enqueue_timer_for_document_with_metadata(
+        &mut self,
+        payload: TimerPayload,
+        owner_document_id: Option<usize>,
+        metadata: Option<Box<TimerMetadata>>,
+    ) {
         let source = match payload {
             TimerPayload::ResourceLoad { .. }
+            | TimerPayload::ScriptResourceReady { .. }
             | TimerPayload::JavascriptDocumentLoad { .. }
+            | TimerPayload::IframeNavigationReady { .. }
             | TimerPayload::FormSubmission { .. } => TaskSource::Networking,
             TimerPayload::ImageResourceEvent { .. } => TaskSource::DomManipulation,
             TimerPayload::GeolocationTimeout { .. } => TaskSource::Geolocation,
@@ -348,6 +390,7 @@ impl EventLoop {
             Task::Timer {
                 payload,
                 owner_document_id,
+                metadata,
             },
         );
     }
@@ -366,6 +409,7 @@ impl EventLoop {
                         payload: TimerPayload::ResourceLoad { node_id }
                             | TimerPayload::ImageResourceEvent { node_id, .. }
                             | TimerPayload::FormSubmission { node_id, .. }
+                            | TimerPayload::IframeNavigationReady { node_id, .. }
                             | TimerPayload::JavascriptDocumentLoad { iframe_id: node_id, .. },
                         ..
                     }
@@ -436,6 +480,7 @@ impl EventLoop {
             Task::Timer {
                 payload,
                 owner_document_id: None,
+                metadata: None,
             },
         );
     }
@@ -447,6 +492,23 @@ impl EventLoop {
             Task::Timer {
                 payload,
                 owner_document_id: None,
+                metadata: None,
+            },
+        );
+    }
+
+    /// Queues a networking completion whose lifetime follows its Document.
+    pub(crate) fn enqueue_networking_for_document(
+        &mut self,
+        payload: TimerPayload,
+        document: usize,
+    ) {
+        self.enqueue(
+            TaskSource::Networking,
+            Task::Timer {
+                payload,
+                owner_document_id: Some(document),
+                metadata: None,
             },
         );
     }
@@ -458,6 +520,7 @@ impl EventLoop {
             Task::Timer {
                 payload,
                 owner_document_id: Some(document_id),
+                metadata: None,
             },
         );
     }
@@ -469,6 +532,7 @@ impl EventLoop {
             Task::Timer {
                 payload,
                 owner_document_id: Some(document_id),
+                metadata: None,
             },
         );
     }
@@ -480,6 +544,7 @@ impl EventLoop {
             Task::Timer {
                 payload,
                 owner_document_id: None,
+                metadata: None,
             },
         );
     }
@@ -671,6 +736,23 @@ impl EventLoop {
         None
     }
 
+    /// Takes a queued navigation without running unrelated page tasks.
+    /// Native input uses this to commit its own navigation while a slow timer
+    /// or resource task remains queued for a later rendering opportunity.
+    pub(crate) fn pop_navigation_task(&mut self) -> Option<Task> {
+        let queue = self.queues.get_mut(&TaskSource::Navigation)?;
+        let index = queue
+            .iter()
+            .position(|(_, task)| matches!(task, Task::Navigation { .. }))?;
+        let (id, task) = queue.remove(index)?;
+        let position = self
+            .order
+            .iter()
+            .position(|(queued_id, _)| *queued_id == id)?;
+        self.order.remove(position);
+        Some(task)
+    }
+
     pub(crate) fn schedule_timer(
         &mut self,
         payload: TimerPayload,
@@ -678,12 +760,44 @@ impl EventLoop {
         repeat: bool,
         owner_document_id: Option<usize>,
     ) -> u64 {
+        self.schedule_timer_with_metadata(payload, delay_ms, repeat, owner_document_id, None)
+    }
+
+    /// Schedules a timer created by `setTimeout` or `setInterval`.
+    ///
+    /// `metadata` is `None` while task diagnostics are disabled. Internal host
+    /// timers use [`schedule_timer`](Self::schedule_timer) and never carry it.
+    pub(crate) fn schedule_script_timer(
+        &mut self,
+        payload: TimerPayload,
+        delay_ms: u64,
+        repeat: bool,
+        owner_document_id: Option<usize>,
+        metadata: Option<TimerScheduleMetadata>,
+    ) -> u64 {
+        self.schedule_timer_with_metadata(payload, delay_ms, repeat, owner_document_id, metadata)
+    }
+
+    fn schedule_timer_with_metadata(
+        &mut self,
+        payload: TimerPayload,
+        delay_ms: u64,
+        repeat: bool,
+        owner_document_id: Option<usize>,
+        metadata: Option<TimerScheduleMetadata>,
+    ) -> u64 {
         let id = self.next_timer_id;
         self.next_timer_id = self.next_timer_id.saturating_add(1);
         self.timers.push(TimerTask {
             id,
             payload,
             owner_document_id,
+            metadata: metadata.map(|metadata| {
+                Box::new(TimerMetadata {
+                    id,
+                    source: metadata.source,
+                })
+            }),
             next_run_at: self.now_ms.saturating_add(delay_ms),
             interval_ms: delay_ms,
             repeat,
@@ -705,6 +819,7 @@ impl EventLoop {
                     timer.id,
                     timer.payload.clone(),
                     timer.owner_document_id,
+                    timer.metadata.clone(),
                 ));
                 if timer.repeat {
                     timer.next_run_at = self.now_ms.saturating_add(timer.interval_ms);
@@ -714,8 +829,8 @@ impl EventLoop {
         ready.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         self.timers
             .retain(|timer| timer.repeat || timer.next_run_at > self.now_ms);
-        for (_, _, payload, owner_document_id) in ready {
-            self.enqueue_timer_for_document(payload, owner_document_id);
+        for (_, _, payload, owner_document_id, metadata) in ready {
+            self.enqueue_timer_for_document_with_metadata(payload, owner_document_id, metadata);
         }
     }
 
@@ -899,6 +1014,22 @@ mod tests {
     }
 
     #[test]
+    fn navigation_can_be_taken_without_consuming_earlier_timer() {
+        let mut event_loop = EventLoop::default();
+        event_loop.enqueue_timer(TimerPayload::Source("timer".into()));
+        event_loop.enqueue_navigation(NavigationRequest::Reload);
+        assert!(matches!(
+            event_loop.pop_navigation_task(),
+            Some(Task::Navigation { .. })
+        ));
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((TaskSource::Timer, Task::Timer { .. }))
+        ));
+        assert!(event_loop.pop_task().is_none());
+    }
+
+    #[test]
     fn file_reading_tasks_run_in_enqueue_order_without_advancing_time() {
         let mut event_loop = EventLoop::default();
         event_loop.enqueue_file_reading(TimerPayload::Source("first".into()));
@@ -972,6 +1103,64 @@ mod tests {
     }
 
     #[test]
+    fn iframe_ready_commits_on_the_networking_source_in_enqueue_order() {
+        let mut event_loop = EventLoop::default();
+        event_loop.enqueue_timer(TimerPayload::Source("before".into()));
+        event_loop.enqueue_timer_for_document(
+            TimerPayload::IframeNavigationReady {
+                node_id: 4,
+                epoch: 9,
+            },
+            Some(2),
+        );
+        event_loop.enqueue_timer(TimerPayload::ResourceLoad { node_id: 4 });
+
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((TaskSource::Timer, Task::Timer { payload: TimerPayload::Source(source), .. }))
+                if source == "before"
+        ));
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((
+                TaskSource::Networking,
+                Task::Timer {
+                    payload: TimerPayload::IframeNavigationReady {
+                        node_id: 4,
+                        epoch: 9
+                    },
+                    owner_document_id: Some(2),
+                    ..
+                }
+            ))
+        ));
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((
+                TaskSource::Networking,
+                Task::Timer {
+                    payload: TimerPayload::ResourceLoad { node_id: 4 },
+                    ..
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn retiring_an_iframe_node_drops_its_uncommitted_ready_task() {
+        let mut event_loop = EventLoop::default();
+        event_loop.enqueue_timer_for_document(
+            TimerPayload::IframeNavigationReady {
+                node_id: 4,
+                epoch: 9,
+            },
+            Some(2),
+        );
+        event_loop.cancel_resource_loads_for_nodes(&HashSet::from([4]));
+        assert!(event_loop.pop_task().is_none());
+    }
+
+    #[test]
     fn destroyed_document_cancels_scheduled_and_queued_callbacks() {
         let mut event_loop = EventLoop::default();
         event_loop.schedule_timer(
@@ -1005,11 +1194,176 @@ mod tests {
                 Task::Timer {
                     payload: TimerPayload::Source(source),
                     owner_document_id: Some(1),
+                    ..
                 }
             )) if source == "queued-main"
         ));
         assert!(event_loop.pop_task().is_none());
         assert!(!event_loop.has_pending_animation_frames());
+    }
+
+    #[test]
+    fn destroyed_document_drops_queued_and_scheduled_author_timer_metadata() {
+        let mut event_loop = EventLoop::default();
+        let child_source = ScriptSourceLocation {
+            file: "https://child.example/timers.js".to_string(),
+            line: 7,
+            column: 11,
+        };
+        let retained_source = ScriptSourceLocation {
+            file: "https://parent.example/timers.js".to_string(),
+            line: 13,
+            column: 17,
+        };
+        event_loop.schedule_script_timer(
+            TimerPayload::Source("queued-child".into()),
+            0,
+            false,
+            Some(7),
+            Some(TimerScheduleMetadata {
+                source: Some(child_source.clone()),
+            }),
+        );
+        let retained_id = event_loop.schedule_script_timer(
+            TimerPayload::Source("queued-main".into()),
+            0,
+            false,
+            Some(1),
+            Some(TimerScheduleMetadata {
+                source: Some(retained_source.clone()),
+            }),
+        );
+        event_loop.advance(0);
+        event_loop.schedule_script_timer(
+            TimerPayload::Source("scheduled-child".into()),
+            10,
+            false,
+            Some(7),
+            Some(TimerScheduleMetadata {
+                source: Some(child_source),
+            }),
+        );
+
+        event_loop.cancel_tasks_for_document(7);
+        event_loop.advance(10);
+
+        let Some((
+            TaskSource::Timer,
+            Task::Timer {
+                payload: TimerPayload::Source(label),
+                owner_document_id: Some(1),
+                metadata: Some(metadata),
+            },
+        )) = event_loop.pop_task()
+        else {
+            panic!("expected the retained document's author timer");
+        };
+        assert_eq!(label, "queued-main");
+        assert_eq!(metadata.id, retained_id);
+        assert_eq!(metadata.source.as_ref(), Some(&retained_source));
+        assert!(event_loop.pop_task().is_none());
+        assert!(!event_loop.has_pending_timers());
+    }
+
+    #[test]
+    fn author_timer_metadata_survives_promotion_while_internal_timers_have_none() {
+        let mut event_loop = EventLoop::default();
+        let source = ScriptSourceLocation {
+            file: "https://example.test/app.js".to_string(),
+            line: 12,
+            column: 34,
+        };
+        let author_id = event_loop.schedule_script_timer(
+            TimerPayload::Source("author".into()),
+            0,
+            false,
+            Some(7),
+            Some(TimerScheduleMetadata {
+                source: Some(source.clone()),
+            }),
+        );
+        event_loop.schedule_timer(TimerPayload::Source("internal".into()), 0, false, None);
+        event_loop.advance(0);
+
+        let Some((
+            TaskSource::Timer,
+            Task::Timer {
+                payload: TimerPayload::Source(label),
+                owner_document_id: Some(7),
+                metadata: Some(metadata),
+            },
+        )) = event_loop.pop_task()
+        else {
+            panic!("expected the promoted author timer");
+        };
+        assert_eq!(label, "author");
+        assert_eq!(metadata.id, author_id);
+        assert_eq!(metadata.source.as_ref(), Some(&source));
+        assert!(matches!(
+            event_loop.pop_task(),
+            Some((
+                TaskSource::Timer,
+                Task::Timer {
+                    payload: TimerPayload::Source(label),
+                    metadata: None,
+                    ..
+                }
+            )) if label == "internal"
+        ));
+    }
+
+    #[test]
+    fn repeating_author_timer_keeps_id_when_source_position_is_unknown() {
+        let mut event_loop = EventLoop::default();
+        let timer_id = event_loop.schedule_script_timer(
+            TimerPayload::Source("interval".into()),
+            5,
+            true,
+            None,
+            Some(TimerScheduleMetadata { source: None }),
+        );
+
+        for _ in 0..2 {
+            event_loop.advance(5);
+            let Some((
+                TaskSource::Timer,
+                Task::Timer {
+                    payload: TimerPayload::Source(label),
+                    metadata: Some(metadata),
+                    ..
+                },
+            )) = event_loop.pop_task()
+            else {
+                panic!("expected a promoted interval task");
+            };
+            assert_eq!(label, "interval");
+            assert_eq!(metadata.id, timer_id);
+            assert!(metadata.source.is_none());
+        }
+    }
+
+    #[test]
+    fn clearing_author_interval_drops_its_metadata_before_promotion() {
+        let mut event_loop = EventLoop::default();
+        let timer_id = event_loop.schedule_script_timer(
+            TimerPayload::Source("interval".into()),
+            5,
+            true,
+            Some(7),
+            Some(TimerScheduleMetadata {
+                source: Some(ScriptSourceLocation {
+                    file: "https://example.test/app.js".to_string(),
+                    line: 12,
+                    column: 34,
+                }),
+            }),
+        );
+
+        event_loop.clear_timer(timer_id);
+        event_loop.advance(5);
+
+        assert!(event_loop.pop_task().is_none());
+        assert!(!event_loop.has_pending_timers());
     }
 
     #[test]

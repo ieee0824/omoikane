@@ -11204,6 +11204,234 @@ fn intersection_observer_fires_callback_on_observe() {
 }
 
 #[test]
+fn intersection_observer_entry_exposes_readonly_webidl_attributes() {
+    let mut runtime = runtime_from_html(
+        r#"<div id="box" style="position:absolute;left:10px;top:20px;width:20px;height:10px"></div>"#,
+    );
+    runtime.set_viewport(320.0, 200.0);
+    runtime
+        .eval(
+            r#"
+            globalThis.ioEntryContractFailures = "callback-not-delivered";
+            const ioEntryAttributeNames = [
+                "time", "target", "rootBounds", "boundingClientRect",
+                "intersectionRect", "isIntersecting", "intersectionRatio",
+            ];
+            const ioEntryTarget = document.getElementById("box");
+            const ioEntryObserver = new IntersectionObserver(entries => {
+                const entry = entries[0];
+                const prototype = IntersectionObserverEntry.prototype;
+                const descriptors = ioEntryAttributeNames.map(name =>
+                    Object.getOwnPropertyDescriptor(prototype, name));
+                const brandChecks = descriptors.every(descriptor => {
+                    try {
+                        descriptor.get.call({});
+                        return false;
+                    } catch (error) {
+                        return error instanceof TypeError;
+                    }
+                });
+                const intrinsicTypeError = TypeError;
+                let intrinsicBrandCheck = false;
+                try {
+                    window.TypeError = class AuthorTypeError extends Error {};
+                    descriptors[0].get.call({});
+                } catch (error) {
+                    intrinsicBrandCheck = error instanceof intrinsicTypeError &&
+                        !(error instanceof window.TypeError);
+                } finally {
+                    window.TypeError = intrinsicTypeError;
+                }
+                const valuesThroughGetters = descriptors.every((descriptor, index) =>
+                    descriptor.get.call(entry) === entry[ioEntryAttributeNames[index]]);
+                const ratioBeforeAssignment = entry.intersectionRatio;
+                let readonlyAssignmentThrows = false;
+                try {
+                    (function() {
+                        "use strict";
+                        entry.intersectionRatio = 0;
+                    })();
+                } catch (error) {
+                    readonlyAssignmentThrows = error instanceof TypeError;
+                }
+                const checks = {
+                    prototype: Object.getPrototypeOf(entry) === prototype,
+                    prototypeAttributes: ioEntryAttributeNames.every(name => name in prototype),
+                    noOwnAttributes: ioEntryAttributeNames.every(name =>
+                        !Object.prototype.hasOwnProperty.call(entry, name)),
+                    descriptors: descriptors.every(descriptor =>
+                        descriptor !== undefined && typeof descriptor.get === "function" &&
+                        descriptor.set === undefined && descriptor.enumerable === true &&
+                        descriptor.configurable === true),
+                    brands: brandChecks,
+                    intrinsicBrand: intrinsicBrandCheck,
+                    getterValues: valuesThroughGetters,
+                    readonly: readonlyAssignmentThrows &&
+                        entry.intersectionRatio === ratioBeforeAssignment &&
+                        !Object.prototype.hasOwnProperty.call(entry, "intersectionRatio"),
+                    time: Number.isFinite(entry.time) && entry.time >= 0,
+                    target: entry.target === ioEntryTarget,
+                    rootBounds: entry.rootBounds.width === 320 && entry.rootBounds.height === 200,
+                    targetBounds: entry.boundingClientRect.width === 20 &&
+                        entry.boundingClientRect.height === 10,
+                    intersectionBounds: entry.intersectionRect.width === 20 &&
+                        entry.intersectionRect.height === 10,
+                    intersection: entry.isIntersecting === true && entry.intersectionRatio === 1,
+                };
+                ioEntryContractFailures = Object.entries(checks)
+                    .filter(([, passed]) => !passed)
+                    .map(([name]) => name)
+                    .join(",");
+            });
+            ioEntryObserver.observe(ioEntryTarget);
+        "#,
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+
+    let failures = runtime
+        .eval("ioEntryContractFailures")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(failures, "");
+}
+
+#[test]
+fn intersection_observer_entry_getters_accept_same_origin_cross_realm_entries() {
+    let mut runtime = runtime_from_html(
+        r#"<html><body><iframe id="frame" srcdoc='<div id="child-target"></div>'></iframe></body></html>"#,
+    );
+    runtime.run_until_idle().unwrap();
+
+    let result = runtime
+        .eval(
+            r#"
+            (() => {
+                const child = document.getElementById("frame").contentWindow;
+                const childTarget = child.document.getElementById("child-target");
+                const rect = {
+                    x: 0, y: 0, width: 1, height: 1,
+                    top: 0, right: 1, bottom: 1, left: 0,
+                };
+                const init = target => ({
+                    target,
+                    rootBounds: rect,
+                    boundingClientRect: rect,
+                    intersectionRect: rect,
+                    isIntersecting: true,
+                    intersectionRatio: 1,
+                });
+                const parentEntry = new IntersectionObserverEntry(init(document.body));
+                const childEntry = new child.IntersectionObserverEntry(init(childTarget));
+                const names = [
+                    "time", "target", "rootBounds", "boundingClientRect",
+                    "intersectionRect", "isIntersecting", "intersectionRatio",
+                ];
+                const parentGetters = names.map(name => Object.getOwnPropertyDescriptor(
+                    IntersectionObserverEntry.prototype, name).get);
+                const childGetters = names.map(name => Object.getOwnPropertyDescriptor(
+                    child.IntersectionObserverEntry.prototype, name).get);
+                let parentRejectsPlainObject = false;
+                try {
+                    parentGetters[0].call({ target: childTarget });
+                } catch (error) {
+                    parentRejectsPlainObject = error instanceof TypeError;
+                }
+                let childRejectsPlainObject = false;
+                try {
+                    childGetters[0].call({ target: childTarget });
+                } catch (error) {
+                    childRejectsPlainObject = error instanceof child.TypeError;
+                }
+                return parentGetters.every((getter, index) =>
+                    getter.call(childEntry) === childEntry[names[index]]) &&
+                    childGetters.every((getter, index) =>
+                        getter.call(parentEntry) === parentEntry[names[index]]) &&
+                    parentEntry.target === document.body && childEntry.target === childTarget &&
+                    parentRejectsPlainObject && childRejectsPlainObject;
+            })()
+        "#,
+        )
+        .unwrap();
+    assert_eq!(result.as_boolean(), Some(true));
+}
+
+#[test]
+fn intersection_observer_entry_passes_google_polyfill_native_detector() {
+    let mut runtime = runtime_from_html(r#"<div id="box"></div>"#);
+    runtime
+        .eval(
+            r#"
+            const detectorNativeObserver = window.IntersectionObserver;
+            const detectorNativeEntry = window.IntersectionObserverEntry;
+            const detectorNativeSetTimeout = window.setTimeout;
+            let detectorReplacementInstalls = 0;
+            let detectorTimerRegistrations = 0;
+            let detectorState;
+            try {
+                window.setTimeout = function() {
+                    detectorTimerRegistrations++;
+                    return 1;
+                };
+                (function installGoogleIntersectionObserverDetectorReplica() {
+                    if ("IntersectionObserver" in window &&
+                        "IntersectionObserverEntry" in window &&
+                        "intersectionRatio" in window.IntersectionObserverEntry.prototype) {
+                        if (!("isIntersecting" in window.IntersectionObserverEntry.prototype)) {
+                            Object.defineProperty(
+                                window.IntersectionObserverEntry.prototype,
+                                "isIntersecting",
+                                { get() { return this.intersectionRatio > 0; } },
+                            );
+                        }
+                        return;
+                    }
+                    detectorReplacementInstalls++;
+                    window.IntersectionObserverEntry = class PolyfillIntersectionObserverEntry {};
+                    window.IntersectionObserver = class PolyfillIntersectionObserver {
+                        observe() { setTimeout(() => {}, 100); }
+                    };
+                })();
+                const detectorProbe = new window.IntersectionObserver(() => {});
+                detectorProbe.observe(document.getElementById("box"));
+                detectorState = [
+                    window.IntersectionObserver === detectorNativeObserver,
+                    window.IntersectionObserverEntry === detectorNativeEntry,
+                    detectorReplacementInstalls,
+                    detectorTimerRegistrations,
+                ];
+            } finally {
+                window.IntersectionObserver = detectorNativeObserver;
+                window.IntersectionObserverEntry = detectorNativeEntry;
+                window.setTimeout = detectorNativeSetTimeout;
+            }
+
+            globalThis.detectorNativeDeliveries = 0;
+            const detectorNativeDeliveryObserver = new detectorNativeObserver(entries => {
+                if (entries.length === 1 && entries[0] instanceof detectorNativeEntry &&
+                    entries[0].target === document.getElementById("box") &&
+                    entries[0].isIntersecting === true) {
+                    detectorNativeDeliveries++;
+                }
+            });
+            detectorNativeDeliveryObserver.observe(document.getElementById("box"));
+        "#,
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+
+    let result = runtime
+        .eval("JSON.stringify([...detectorState, detectorNativeDeliveries])")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(result, "[true,true,0,0,1]");
+}
+
+#[test]
 fn intersection_observer_reobserve_before_delivery_is_coalesced() {
     let doc = NodeHandle::document();
     let div = NodeHandle::element("div");
@@ -11298,6 +11526,12 @@ fn resize_observer_reports_real_boxes_and_size_changes() {
         .eval("document.getElementById('box').style.width = '120px'")
         .unwrap();
     runtime.run_jobs().unwrap();
+    assert_eq!(
+        runtime.eval("resizeEntries.length").unwrap().as_number(),
+        Some(1.0),
+        "mutation-driven resize delivery waits for the rendering opportunity"
+    );
+    runtime.run_animation_frame(16).unwrap();
     assert!(
         runtime
             .eval("resizeEntries.length === 2 && resizeEntries[1].contentWidth === 120")
@@ -11310,6 +11544,7 @@ fn resize_observer_reports_real_boxes_and_size_changes() {
         .eval("document.getElementById('box').style.width = '120px'")
         .unwrap();
     runtime.run_jobs().unwrap();
+    runtime.run_animation_frame(32).unwrap();
     assert_eq!(
         runtime.eval("resizeEntries.length").unwrap().as_number(),
         Some(2.0)
@@ -11353,6 +11588,236 @@ fn intersection_observer_computes_partial_and_outside_geometry() {
         .unwrap()
         .as_boolean()
         .unwrap());
+}
+
+#[test]
+fn intersection_observer_rechecks_window_scroll_after_scroll_event_and_raf() {
+    let mut runtime = runtime_from_html(
+        r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            body { height: 600px; }
+            #target { position: absolute; top: 300px; width: 20px; height: 20px; }
+        </style></head><body><div id="target"></div></body></html>"#,
+    );
+    runtime.set_viewport(200.0, 100.0);
+    runtime
+        .eval(
+            r#"globalThis.windowIntersectionLog = [];
+               globalThis.windowIntersectionTarget = document.getElementById('target');
+               globalThis.windowIntersectionObserver = new IntersectionObserver(entries => {
+                 for (const entry of entries) {
+                   windowIntersectionLog.push(
+                     `io:${entry.isIntersecting}:${entry.boundingClientRect.top}`
+                   );
+                 }
+               });
+               addEventListener('scroll', () => windowIntersectionLog.push(
+                 `scroll:${windowIntersectionTarget.getBoundingClientRect().top}`
+               ));
+               windowIntersectionObserver.observe(windowIntersectionTarget);"#,
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "windowIntersectionLog.join('/')"),
+        "io:false:300"
+    );
+
+    runtime
+        .eval(
+            r#"scrollTo(0, 250);
+               windowIntersectionLog.push(
+                 `sync:${windowIntersectionTarget.getBoundingClientRect().top}`
+               );
+               requestAnimationFrame(() => windowIntersectionLog.push(
+                 `raf:${windowIntersectionTarget.getBoundingClientRect().top}`
+               ));"#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "windowIntersectionLog.join('/')"),
+        "io:false:300/sync:50",
+        "scrolling changes client geometry synchronously but defers the observer callback"
+    );
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "windowIntersectionLog.join('/')"),
+        "io:false:300/sync:50/scroll:50/raf:50/io:true:50"
+    );
+
+    runtime
+        .eval(
+            r#"scrollTo(0, 0);
+               requestAnimationFrame(() => windowIntersectionLog.push(
+                 `raf-out:${windowIntersectionTarget.getBoundingClientRect().top}`
+               ));"#,
+        )
+        .unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "windowIntersectionLog.join('/')"),
+        "io:false:300/sync:50/scroll:50/raf:50/io:true:50/scroll:300/raf-out:300/io:false:300"
+    );
+
+    let callback_count = eval_num(
+        &mut runtime,
+        "windowIntersectionLog.filter(value => value.startsWith('io:')).length",
+    );
+    runtime.eval("scrollTo(0, 0)").unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_num(
+            &mut runtime,
+            "windowIntersectionLog.filter(value => value.startsWith('io:')).length"
+        ),
+        callback_count,
+        "an unchanged scroll offset must not queue a duplicate intersection callback"
+    );
+}
+
+#[test]
+fn intersection_observer_async_frame_observes_final_raf_scroll_geometry() {
+    let mut runtime = runtime_from_html(
+        "<style>*{margin:0;padding:0}body{height:600px}#target{position:absolute;top:300px;width:20px;height:20px}</style><div id='target'></div>",
+    );
+    runtime.set_viewport(200.0, 100.0);
+    runtime
+        .eval(
+            r#"
+        globalThis.asyncIntersectionLog=[];
+        globalThis.asyncIntersectionTarget=document.getElementById('target');
+        new IntersectionObserver(entries=>{
+            for(const entry of entries) asyncIntersectionLog.push(
+                `io:${entry.isIntersecting}:${entry.boundingClientRect.top}`);
+        }).observe(asyncIntersectionTarget);
+        addEventListener('scroll',()=>asyncIntersectionLog.push(
+            `scroll:${asyncIntersectionTarget.getBoundingClientRect().top}`));
+    "#,
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+    runtime
+        .eval(
+            r#"
+        scrollTo(0,50);
+        requestAnimationFrame(()=>{
+            scrollTo(0,250);
+            asyncIntersectionLog.push(`raf:${asyncIntersectionTarget.getBoundingClientRect().top}`);
+        });
+    "#,
+        )
+        .unwrap();
+    {
+        let mut frame = Box::pin(runtime.run_animation_frame_async(16));
+        let mut context = FutureContext::from_waker(Waker::noop());
+        loop {
+            if let Poll::Ready(result) = frame.as_mut().poll(&mut context) {
+                assert_eq!(result.unwrap(), 1);
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        eval_str(&mut runtime, "asyncIntersectionLog.join('/')"),
+        "io:false:300/scroll:250/raf:50/io:true:50"
+    );
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "asyncIntersectionLog.join('/')"),
+        "io:false:300/scroll:250/raf:50/io:true:50/scroll:50"
+    );
+}
+
+#[test]
+fn intersection_observer_rechecks_element_scroll_in_and_out_of_root() {
+    let mut runtime = runtime_from_html(
+        r#"<html><head><style>
+            * { margin: 0; padding: 0; }
+            #scroller { position: absolute; left: 0; top: 0; width: 100px; height: 100px; overflow: auto; }
+            #content { position: relative; width: 100px; height: 300px; }
+            #target { position: absolute; left: 0; top: 200px; width: 20px; height: 20px; }
+        </style></head><body>
+          <div id="scroller"><div id="content"><div id="target"></div></div></div>
+        </body></html>"#,
+    );
+    runtime.set_viewport(300.0, 200.0);
+    runtime
+        .eval(
+            r#"globalThis.elementIntersectionLog = [];
+               globalThis.elementIntersectionRoot = document.getElementById('scroller');
+               globalThis.elementIntersectionTarget = document.getElementById('target');
+               globalThis.elementIntersectionObserver = new IntersectionObserver(entries => {
+                 for (const entry of entries) {
+                   elementIntersectionLog.push(
+                     `io:${entry.isIntersecting}:${entry.boundingClientRect.top}`
+                   );
+                 }
+               }, { root: elementIntersectionRoot });
+               elementIntersectionRoot.addEventListener('scroll', () => {
+                 elementIntersectionLog.push(
+                   `scroll:${elementIntersectionTarget.getBoundingClientRect().top}`
+                 );
+               });
+               elementIntersectionObserver.observe(elementIntersectionTarget);"#,
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "elementIntersectionLog.join('/')"),
+        "io:false:200"
+    );
+
+    runtime
+        .eval(
+            r#"elementIntersectionRoot.scrollTo(0, 150);
+               elementIntersectionLog.push(
+                 `sync:${elementIntersectionTarget.getBoundingClientRect().top}`
+               );
+               requestAnimationFrame(() => elementIntersectionLog.push(
+                 `raf:${elementIntersectionTarget.getBoundingClientRect().top}`
+               ));"#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "elementIntersectionLog.join('/')"),
+        "io:false:200/sync:50"
+    );
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "elementIntersectionLog.join('/')"),
+        "io:false:200/sync:50/scroll:50/raf:50/io:true:50"
+    );
+
+    runtime
+        .eval(
+            r#"elementIntersectionRoot.scrollTo(0, 0);
+               requestAnimationFrame(() => elementIntersectionLog.push(
+                 `raf-out:${elementIntersectionTarget.getBoundingClientRect().top}`
+               ));"#,
+        )
+        .unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "elementIntersectionLog.join('/')"),
+        "io:false:200/sync:50/scroll:50/raf:50/io:true:50/scroll:200/raf-out:200/io:false:200"
+    );
+
+    let callback_count = eval_num(
+        &mut runtime,
+        "elementIntersectionLog.filter(value => value.startsWith('io:')).length",
+    );
+    runtime
+        .eval("elementIntersectionRoot.scrollTo(0, 0)")
+        .unwrap();
+    runtime.run_animation_frame(16).unwrap();
+    assert_eq!(
+        eval_num(
+            &mut runtime,
+            "elementIntersectionLog.filter(value => value.startsWith('io:')).length"
+        ),
+        callback_count,
+        "an unchanged element scroll offset must not duplicate the callback"
+    );
 }
 
 #[test]
@@ -18479,6 +18944,75 @@ fn throwing_dynamic_script_does_not_abort_the_event_loop() {
 }
 
 #[test]
+fn dynamic_classic_declaration_failure_clears_current_script_before_following_script() {
+    let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
+    runtime
+        .eval(
+            r#"globalThis.failureCurrentScriptId = null;
+                   globalThis.onerror = () => {
+                       globalThis.failureCurrentScriptId =
+                           document.currentScript && document.currentScript.id;
+                       return true;
+                   };
+                   const failing = document.createElement("script");
+                   failing.id = "failing";
+                   failing.src = "data:text/javascript,let%20undefined%3B%20globalThis.failedBodyRan%20%3D%20true%3B";
+                   document.head.appendChild(failing);"#,
+        )
+        .unwrap();
+
+    // `undefined` is a non-configurable global property. The source parses,
+    // then evaluation fails during global declaration instantiation before its body.
+    runtime.run_until_idle().unwrap();
+
+    assert!(
+        runtime
+            .eval(
+                "failureCurrentScriptId === 'failing' && \
+                 document.currentScript === null && \
+                 typeof failedBodyRan === 'undefined'",
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap(),
+        "the failed script must be current while reporting and cleared afterward",
+    );
+
+    runtime
+        .eval(
+            r#"const following = document.createElement("script");
+                   following.id = "following";
+                   following.src = "data:text/javascript,globalThis.followingScriptId%20%3D%20document.currentScript.id%3B%20globalThis.followingScriptRan%20%3D%20true%3B";
+                   document.head.appendChild(following);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+
+    assert!(
+        runtime
+            .eval(
+                "followingScriptRan === true && \
+                 followingScriptId === 'following' && \
+                 document.currentScript === null",
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap(),
+        "the following script must run with its own currentScript and clean it up",
+    );
+    let errors = runtime.take_task_errors();
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected one declaration error: {errors:?}"
+    );
+    assert!(
+        errors[0].contains("cannot redefine non-configurable global property"),
+        "unexpected declaration error: {errors:?}",
+    );
+}
+
+#[test]
 fn unfetchable_dynamic_script_fires_error_and_does_not_abort_the_event_loop() {
     let mut runtime = runtime_from_html("<html><head></head><body></body></html>");
     runtime
@@ -19949,6 +20483,105 @@ fn document_links_filters_href_and_keeps_tree_order() {
 }
 
 #[test]
+fn live_html_collection_reuses_one_snapshot_until_dom_mutation() {
+    use crate::dom::{child_snapshot_handle_clones, reset_child_snapshot_handle_clones};
+    use crate::html::TreeBuilder;
+
+    let doc = TreeBuilder::parse(
+        r#"<html><body><div class="hit"><span></span></div><div><b class="hit"></b></div></body></html>"#,
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(doc).unwrap();
+    reset_child_snapshot_handle_clones();
+    assert_eq!(
+        eval_num(
+            &mut runtime,
+            "globalThis.hits = document.getElementsByClassName('hit'); hits.length",
+        ),
+        2.0
+    );
+    let first_snapshot_work = child_snapshot_handle_clones();
+    assert!(first_snapshot_work > 0);
+
+    assert_js_ok(
+        &mut runtime,
+        r#"
+            (function () {
+                for (var i = 0; i < 100; i++) {
+                    if (hits.length !== 2 || hits[0].tagName !== 'DIV' || hits[1].tagName !== 'B') return 1;
+                }
+                return 0;
+            })()
+        "#,
+    );
+    assert_eq!(child_snapshot_handle_clones(), first_snapshot_work);
+
+    assert_js_ok(
+        &mut runtime,
+        r#"
+            (function () {
+                var added = document.createElement('i');
+                added.className = 'hit';
+                document.body.appendChild(added);
+                if (hits.length !== 3 || hits[2] !== added) return 1;
+                added.className = '';
+                if (hits.length !== 2 || hits[2] != null) return 2;
+                return 0;
+            })()
+        "#,
+    );
+    assert!(child_snapshot_handle_clones() > first_snapshot_work);
+}
+
+#[test]
+fn unobserved_data_attribute_keeps_layout_but_attr_value_dependency_rebuilds() {
+    let mut runtime = runtime_from_html(
+        r#"<html><head><style>
+             #dependent::after { content: attr(data-title) }
+           </style></head><body>
+             <a id="inert">link</a><span id="dependent">value</span>
+           </body></html>"#,
+    );
+    assert_js_ok(
+        &mut runtime,
+        "document.getElementById('inert').offsetWidth >= 0 ? 0 : 1",
+    );
+    let initial_generation = runtime.host_state.borrow().layout_generation;
+    let document_id = runtime.document().identity();
+    runtime
+        .host_state
+        .borrow_mut()
+        .document_styles
+        .get_mut(&document_id)
+        .expect("document styles after the initial layout")
+        .needs_full_sample = false;
+    assert_js_ok(
+        &mut runtime,
+        "document.getElementById('inert').setAttribute('data-cl-index', '1'); \
+         document.getElementById('inert').innerText === 'link' ? 0 : 1",
+    );
+    assert_eq!(
+        runtime.host_state.borrow().layout_generation,
+        initial_generation,
+        "an attribute unused by selectors and values must retain layout"
+    );
+    assert!(
+        !runtime.host_state.borrow().document_styles[&document_id].needs_full_sample,
+        "an inert attribute must not schedule a full-document style sample"
+    );
+
+    assert_js_ok(
+        &mut runtime,
+        "document.getElementById('dependent').setAttribute('data-title', 'changed'); \
+         document.getElementById('dependent').offsetWidth >= 0 ? 0 : 1",
+    );
+    assert!(
+        runtime.host_state.borrow().layout_generation > initial_generation,
+        "attr() value dependencies must still rebuild layout"
+    );
+}
+
+#[test]
 fn document_images_and_anchors_collections() {
     use crate::html::TreeBuilder;
     let doc = TreeBuilder::parse(
@@ -21240,6 +21873,24 @@ fn bounding_client_rect_handles_3d_perspective_without_changing_offset_size() {
             1.0 - sqrt_three / 50.0,
         ],
     );
+}
+
+#[test]
+fn repeated_inline_property_assignment_does_not_mutate_style_attribute() {
+    let mut runtime = runtime_from_html("<html><body><div id='box'></div></body></html>");
+    runtime
+        .eval(
+            "globalThis.box = document.getElementById('box');
+             box.style.width = '10px';
+             globalThis.observer = new MutationObserver(() => {});
+             observer.observe(box, { attributes: true });
+             box.style.width = '10px';",
+        )
+        .unwrap();
+    assert_eq!(eval_num(&mut runtime, "observer.takeRecords().length"), 0.0);
+    runtime.eval("box.style.width = '20px'").unwrap();
+    assert_eq!(eval_num(&mut runtime, "observer.takeRecords().length"), 1.0);
+    assert_eq!(eval_num(&mut runtime, "box.offsetWidth"), 20.0);
 }
 
 #[test]
@@ -25281,18 +25932,29 @@ fn outer_iframe_navigation_retires_saved_descendant_window_proxy() {
             .unwrap();
 
     pump_zero_delay_tasks(&mut runtime);
+    runtime
+        .eval(
+            "globalThis.outer = document.getElementById('outer'); \
+             globalThis.outerLoaded = false; \
+             outer.addEventListener('load', () => { outerLoaded = true }); \
+             outer.src = '/outer-one.html';",
+        )
+        .unwrap();
+    wait_for_outer_load(&mut runtime);
+    runtime
+        .eval(
+            "globalThis.oldOuterDocument = outer.contentDocument; \
+             const inner = oldOuterDocument.getElementById('inner'); \
+             globalThis.nestedProxy = inner.contentWindow; \
+             globalThis.nestedDocument = inner.contentDocument; \
+             outerLoaded = false; outer.src = '/outer-two.html';",
+        )
+        .unwrap();
+    wait_for_outer_load(&mut runtime);
     assert_eq!(
         eval_string_value(
             &mut runtime,
             r#"(()=> {
-                  const outer = document.getElementById('outer');
-                  outer.src = '/outer-one.html';
-                  const oldOuterDocument = outer.contentDocument;
-                  const inner = oldOuterDocument.getElementById('inner');
-                  const nestedProxy = inner.contentWindow;
-                  const nestedDocument = inner.contentDocument;
-
-                  outer.src = '/outer-two.html';
                   const replacement = outer.contentDocument;
                   return [
                     nestedProxy.closed,
@@ -25307,6 +25969,21 @@ fn outer_iframe_navigation_retires_saved_descendant_window_proxy() {
         Some("true|true|true|true|replacement"),
         "navigating an ancestor must close every saved descendant WindowProxy"
     );
+
+    fn wait_for_outer_load(runtime: &mut JsRuntime) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            runtime.run_until_idle().unwrap();
+            if runtime.eval("outerLoaded").unwrap().as_boolean() == Some(true) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "iframe load did not complete"
+            );
+            std::thread::yield_now();
+        }
+    }
 }
 
 /// Reloading an iframe must discard the previous sub-document's per-document
@@ -31929,4 +32606,109 @@ fn initial_owned_document_task_mutes_cross_origin_script_reports() {
             .to_std_string_escaped(),
         "Script error.:true"
     );
+}
+
+#[test]
+fn local_data_attribute_gate_accepts_only_simple_html_names() {
+    let html = NodeHandle::element("div");
+    assert_eq!(
+        local_html_data_attribute_name(&html, "DATA-Loaded"),
+        Some("data-loaded".to_string()),
+    );
+    assert_eq!(
+        local_html_data_attribute_name(&html, "data-player_state.2"),
+        Some("data-player_state.2".to_string()),
+    );
+    for name in [
+        "data-",
+        "data-qualified:name",
+        "data-状態",
+        "class",
+        "id",
+        "lang",
+        "dir",
+        "style",
+        "checked",
+    ] {
+        assert_eq!(local_html_data_attribute_name(&html, name), None, "{name}",);
+    }
+
+    let xml = NodeHandle::xml_element("div", None);
+    assert_eq!(local_html_data_attribute_name(&xml, "data-loaded"), None,);
+    let qualified_html = NodeHandle::html_element_ns("p:div", "http://www.w3.org/1999/xhtml");
+    assert_eq!(
+        local_html_data_attribute_name(&qualified_html, "data-loaded"),
+        None,
+    );
+}
+
+#[test]
+fn iframe_form_reservation_survives_history_preparation_and_document_reads() {
+    let (port, _server) = spawn_static_http_server(
+        "text/html",
+        "<html><body><p id=loaded>posted</p></body></html>",
+    );
+    for (workers, nonblocking) in [(1, false), (2, false), (2, true)] {
+        let document =
+            crate::html::TreeBuilder::parse("<iframe id=sink name=sink></iframe>").document();
+        let mut runtime = JsRuntime::with_document_and_url(
+            document,
+            &format!("http://127.0.0.1:{port}/parent.html"),
+        )
+        .unwrap();
+        runtime.set_resource_queue(crate::resource_worker::ResourceQueue::new(
+            std::num::NonZeroUsize::new(workers).unwrap(),
+        ));
+        runtime.set_nonblocking_iframe_loading(nonblocking);
+        pump_zero_delay_tasks(&mut runtime);
+        runtime.eval("globalThis.sink=document.getElementById('sink');            const form=document.createElement('form');form.target='sink';form.method='post';            form.action='/submit';document.body.appendChild(form);form.submit()").unwrap();
+        let iframe = runtime
+            .document()
+            .query_selector("#sink")
+            .unwrap()
+            .identity();
+        let epoch = runtime
+            .host_state
+            .borrow()
+            .current_iframe_navigation_epoch(iframe)
+            .expect("history prepare must not consume the form task's reservation");
+        runtime
+            .eval("void sink.contentWindow.document; void sink.contentDocument")
+            .unwrap();
+        assert_eq!(
+            runtime
+                .host_state
+                .borrow()
+                .current_iframe_navigation_epoch(iframe),
+            Some(epoch)
+        );
+        assert_eq!(
+            runtime.host_state.borrow().iframe_documents[&iframe].document_url,
+            "about:blank"
+        );
+        let expected_url = format!("http://127.0.0.1:{port}/submit");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            runtime.run_until_idle().unwrap();
+            if runtime.host_state.borrow().iframe_documents[&iframe].document_url == expected_url {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "form task must commit its own response"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let state = runtime.host_state.borrow();
+        let entry = &state.iframe_documents[&iframe];
+        assert_eq!(entry.submission.as_ref().unwrap().method, "POST");
+        assert_eq!(
+            crate::dom::collect_descendant_text(
+                &entry.document.query_selector("#loaded").unwrap(),
+                crate::dom::TextTraversal::Containers,
+            ),
+            "posted"
+        );
+        assert_eq!(state.current_iframe_navigation_epoch(iframe), None);
+    }
 }

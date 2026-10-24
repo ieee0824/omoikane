@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::css::style::PropertyId;
 use crate::css::{
     AffineTransform, ComputedDirection, ComputedFloat, ComputedPosition, ComputedStyle,
     ComputedValue, ComputedWritingMode, ContainerContext, Matrix4, PseudoElement, StyleResolver,
@@ -32,9 +33,11 @@ mod counters;
 mod flex;
 mod grid;
 mod inline;
+mod intrinsic;
 mod margins;
 mod multicol;
 mod paged;
+mod profile;
 mod shapes;
 mod table;
 
@@ -56,10 +59,14 @@ use table::{
 };
 
 pub(crate) use inline::element_inline_image;
-pub(crate) use inline::{canonical_image_asset_reference, decode_or_fetch_image_asset};
+pub(crate) use inline::{
+    canonical_image_asset_reference, decode_or_fetch_image_asset,
+    decode_or_fetch_image_asset_with_pending_dependencies,
+};
 mod image_security;
 pub(crate) use image_security::{
-    ImageDocumentState, ImagePolicyNotice, with_image_security_policy,
+    ImageDocumentState, ImagePolicyNotice, poll_async_image_effects, poll_async_images,
+    with_image_layout_dependency_capture, with_image_security_policy,
 };
 
 // Re-exports used by tests
@@ -578,33 +585,11 @@ fn ensure_image_cache_context() {
             )
         })
     });
-    IMAGE_CACHE_OWNER.with(|owner| {
+    let owner_changed = IMAGE_CACHE_OWNER.with(|owner| {
         let mut owner = owner.borrow_mut();
         let same = match (owner.as_ref(), current.as_ref()) {
-            (
-                Some((
-                    left_store,
-                    left_context,
-                    left_document,
-                    left_origin,
-                    left_policy,
-                    left_report_only,
-                )),
-                Some((
-                    right_store,
-                    right_context,
-                    right_document,
-                    right_origin,
-                    right_policy,
-                    right_report_only,
-                )),
-            ) => {
-                Arc::ptr_eq(left_store, right_store)
-                    && left_context == right_context
-                    && left_document == right_document
-                    && left_origin == right_origin
-                    && left_policy == right_policy
-                    && left_report_only == right_report_only
+            (Some(previous), Some(current)) => {
+                image_security::same_image_cache_owner(previous, current)
             }
             (None, None) => true,
             _ => false,
@@ -612,9 +597,13 @@ fn ensure_image_cache_context() {
         if !same {
             IMAGE_CACHE.with(|cache| cache.borrow_mut().clear());
             IMAGE_ANIMATION_CACHE.with(|cache| cache.borrow_mut().clear());
-            *owner = current;
+            *owner = current.clone();
         }
+        !same
     });
+    if owner_changed {
+        image_security::synchronize_layout_dependency_owner(current.as_ref());
+    }
 }
 
 /// A rectangle in layout space.
@@ -655,6 +644,15 @@ pub struct BoxDimensions {
 }
 
 impl BoxDimensions {
+    fn padding_box(&self) -> Rect {
+        Rect {
+            x: self.content.x - self.padding.left,
+            y: self.content.y - self.padding.top,
+            width: self.content.width + self.padding.horizontal(),
+            height: self.content.height + self.padding.vertical(),
+        }
+    }
+
     pub fn border_box(&self) -> Rect {
         Rect {
             x: self.content.x - self.padding.left - self.border.left,
@@ -788,9 +786,10 @@ impl FragmentStyle {
     /// to lowercase to avoid per-paint allocation.
     pub fn from_computed(style: &ComputedStyle) -> Self {
         use crate::css::ComputedValue;
+        use crate::css::style::PropertyId;
 
-        let extract_str = |key: &str| -> Option<String> {
-            match style.get(key) {
+        let extract_str = |key: PropertyId| -> Option<String> {
+            match style.get_by_id(key) {
                 Some(ComputedValue::Keyword(s)) => Some(s.clone()),
                 Some(ComputedValue::Color(s)) => Some(s.clone()),
                 Some(ComputedValue::String(s)) => Some(s.clone()),
@@ -798,12 +797,13 @@ impl FragmentStyle {
             }
         };
 
-        let normalize_lower =
-            |key: &str| -> Option<String> { extract_str(key).map(|s| s.to_ascii_lowercase()) };
+        let normalize_lower = |key: PropertyId| -> Option<String> {
+            extract_str(key).map(|s| s.to_ascii_lowercase())
+        };
 
         // Extract the first font-family name from the CSS value.
         // The value may be quoted (e.g. `"My Font"`) or unquoted (e.g. `sans-serif`).
-        let font_family = extract_str("font-family").map(|s| {
+        let font_family = extract_str(PropertyId::FontFamily).map(|s| {
             // Take the first comma-separated entry and strip quotes
             let first = s.split(',').next().unwrap_or(&s).trim().to_string();
             first.trim_matches('"').trim_matches('\'').to_string()
@@ -812,22 +812,22 @@ impl FragmentStyle {
         Self {
             pseudo: None,
             visibility: visibility(style),
-            color: extract_str("color"),
-            text_transform: normalize_lower("text-transform"),
-            text_decoration_line: normalize_lower("text-decoration-line"),
-            text_decoration_color: extract_str("text-decoration-color"),
+            color: extract_str(PropertyId::Color),
+            text_transform: normalize_lower(PropertyId::TextTransform),
+            text_decoration_line: normalize_lower(PropertyId::TextDecorationLine),
+            text_decoration_color: extract_str(PropertyId::TextDecorationColor),
             text_decorations: Arc::clone(style.text_decorations()),
-            font_weight: normalize_lower("font-weight"),
-            font_style: normalize_lower("font-style"),
-            font_stretch: match style.get("font-stretch") {
+            font_weight: normalize_lower(PropertyId::FontWeight),
+            font_style: normalize_lower(PropertyId::FontStyle),
+            font_stretch: match style.get_by_id(PropertyId::FontStretch) {
                 Some(ComputedValue::Percentage(value)) => Some(format!("{value}%")),
-                _ => normalize_lower("font-stretch"),
+                _ => normalize_lower(PropertyId::FontStretch),
             },
             font_family,
             font_scope_root: style.font_family_scope_root(),
-            writing_mode: normalize_lower("writing-mode"),
-            direction: normalize_lower("direction"),
-            unicode_bidi: normalize_lower("unicode-bidi"),
+            writing_mode: normalize_lower(PropertyId::WritingMode),
+            direction: normalize_lower(PropertyId::Direction),
+            unicode_bidi: normalize_lower(PropertyId::UnicodeBidi),
             resolved_bidi_level: None,
         }
     }
@@ -1460,6 +1460,8 @@ pub(crate) fn layout_tree_with_content_visibility(
     containing_block: Rect,
     input: ContentVisibilityLayoutInput,
 ) -> (Option<LayoutBox>, ContentVisibilityLayoutReport) {
+    let _phase_pass = profile::Pass::begin();
+    let _tree_phase = profile::Scope::begin(profile::Phase::Tree);
     let report = Rc::new(RefCell::new(ContentVisibilityLayoutReport::default()));
     let scope = ContentVisibilityLayoutScope::new(ContentVisibilityLayoutSession {
         input,
@@ -1467,13 +1469,15 @@ pub(crate) fn layout_tree_with_content_visibility(
     });
     let _margin_scope = margins::Scope::new();
     counters::prepare_counter_values(node, resolver);
-    let Some(mut layout) = layout_node(
-        node,
-        resolver,
-        containing_block,
-        LayoutViewport::new(containing_block),
-        None,
-    ) else {
+    let Some(mut layout) = intrinsic::with_pass(|| {
+        layout_node(
+            node,
+            resolver,
+            containing_block,
+            LayoutViewport::new(containing_block),
+            None,
+        )
+    }) else {
         drop(scope);
         let snapshot = report.borrow().clone();
         return (None, snapshot);
@@ -1487,13 +1491,15 @@ pub(crate) fn layout_tree_with_content_visibility(
             }
             *report.borrow_mut() = ContentVisibilityLayoutReport::default();
             counters::prepare_counter_values(node, resolver);
-            let Some(next_layout) = layout_node(
-                node,
-                resolver,
-                containing_block,
-                LayoutViewport::new(containing_block),
-                None,
-            ) else {
+            let Some(next_layout) = intrinsic::with_pass(|| {
+                layout_node(
+                    node,
+                    resolver,
+                    containing_block,
+                    LayoutViewport::new(containing_block),
+                    None,
+                )
+            }) else {
                 drop(scope);
                 let snapshot = report.borrow().clone();
                 return (None, snapshot);
@@ -1566,7 +1572,7 @@ fn populate_layout_transforms(
 ) {
     let style = layout_box_style(layout, resolver);
     let perspective_box = layout.dimensions.border_box();
-    let font_size = match style.get("font-size") {
+    let font_size = match style.get_by_id(PropertyId::FontSize) {
         Some(ComputedValue::Px(value)) => *value,
         _ => 16.0,
     };
@@ -1607,7 +1613,7 @@ fn populate_layout_transforms(
         populate_layout_transforms(child, resolver, root_font_size, perspective_matrix);
     }
     layout.needs_scroll_translation = matches!(
-        style.get("position"),
+        style.get_by_id(PropertyId::Position),
         Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("sticky")
     ) || layout
         .children
@@ -1744,12 +1750,7 @@ impl LayoutViewport {
     fn for_descendants(self, style: &ComputedStyle, dimensions: BoxDimensions) -> Self {
         if establishes_fixed_containing_block(style) {
             Self {
-                fixed: Some(Rect {
-                    x: dimensions.content.x - dimensions.padding.left,
-                    y: dimensions.content.y - dimensions.padding.top,
-                    width: dimensions.content.width + dimensions.padding.horizontal(),
-                    height: dimensions.content.height + dimensions.padding.vertical(),
-                }),
+                fixed: Some(dimensions.padding_box()),
                 ..self
             }
         } else {
@@ -2381,6 +2382,7 @@ fn layout_element(
     subgrid: Option<grid::SubgridContext>,
     used_height: Option<UsedHeight>,
 ) -> Option<LayoutBox> {
+    let _phase = profile::Scope::begin(profile::Phase::Element);
     layout_element_with_cell(
         node,
         resolver,
@@ -2390,6 +2392,7 @@ fn layout_element(
         subgrid,
         used_height,
         None,
+        containing_block.width,
         containing_block.width,
     )
 }
@@ -2414,6 +2417,7 @@ fn layout_element_with_percentage_basis(
         used_height,
         None,
         percentage_basis,
+        containing_block.width,
     )
 }
 
@@ -2704,6 +2708,7 @@ fn layout_generated_pseudo_box(
         resolver,
         style,
         containing_block.width,
+        containing_block.width,
         padding,
         border,
         &mut margin,
@@ -2770,6 +2775,7 @@ fn layout_element_with_cell(
     used_height: Option<UsedHeight>,
     table_cell: Option<EdgeSizes>,
     percentage_basis: f32,
+    width_percentage_basis: f32,
 ) -> Option<LayoutBox> {
     margins::forget(node);
     if is_non_rendered_html_element(node) {
@@ -2797,6 +2803,7 @@ fn layout_element_with_cell(
         table_cell,
         used_height,
         percentage_basis,
+        width_percentage_basis,
     );
     let CellBoxMetrics {
         padding,
@@ -2939,7 +2946,9 @@ struct CellBoxMetrics {
 /// origin from its computed style and the table/float context that
 /// `layout_element_with_cell` was called with. Table tracks assign the
 /// cell's border-box width directly, overriding both the computed width and
-/// margins.
+/// margins. `percentage_basis` applies to margin/padding; width and min/max
+/// constraints use `width_percentage_basis` so allocated flex/grid widths do
+/// not accidentally resolve again against their original container.
 fn resolve_cell_box_metrics(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -2948,6 +2957,7 @@ fn resolve_cell_box_metrics(
     table_cell: Option<EdgeSizes>,
     used_height: Option<UsedHeight>,
     percentage_basis: f32,
+    width_percentage_basis: f32,
 ) -> CellBoxMetrics {
     let padding = edge_sizes_with_basis(style, "padding", percentage_basis);
     let border = table_cell.unwrap_or_else(|| edge_sizes(style, "border"));
@@ -2972,6 +2982,7 @@ fn resolve_cell_box_metrics(
         resolver,
         style,
         containing_block.width,
+        width_percentage_basis,
         padding,
         border,
         &mut margin,
@@ -3084,6 +3095,33 @@ fn skip_cell_for_content_visibility(
         .then_some(skipped)
 }
 
+fn is_replaced_media_element(node: &NodeHandle) -> bool {
+    node.with_tag_name(|tag| {
+        matches!(
+            tag,
+            Some("img" | "picture" | "video" | "canvas" | "svg" | "object")
+        )
+    })
+}
+
+fn is_form_control_layout_element(node: &NodeHandle) -> bool {
+    node.with_tag_name(|tag| {
+        matches!(
+            tag,
+            Some("input" | "textarea" | "select" | "button" | "progress" | "meter")
+        )
+    })
+}
+
+fn has_replaced_layout_semantics(node: &NodeHandle) -> bool {
+    // Keep the engine's media/form-control sizing paths and the remaining
+    // replaced-like defaults out of the non-replaced absolute equation.
+    // This predicate is tag based so image decode state cannot change sizing.
+    is_replaced_media_element(node)
+        || is_form_control_layout_element(node)
+        || node.with_tag_name(|tag| matches!(tag, Some("audio" | "embed" | "frame" | "iframe")))
+}
+
 /// Lays out `img`/`picture`/`video`/`canvas`/`svg`/`object` elements that
 /// participate as block or flex/grid items, so they still paint their image
 /// payload even though the parent isn't collecting inline image fragments.
@@ -3111,14 +3149,7 @@ fn layout_replaced_media_cell(
         used_height,
     } = metrics;
     let is_positioned_img = node.has_tag_name("img") && is_out_of_flow_positioned(style);
-    if is_positioned_img
-        || !node.with_tag_name(|tag| {
-            matches!(
-                tag,
-                Some("img" | "picture" | "video" | "canvas" | "svg" | "object")
-            )
-        })
-    {
+    if is_positioned_img || !is_replaced_media_element(node) {
         return None;
     }
 
@@ -3245,12 +3276,7 @@ fn layout_form_control_cell(
         width,
         used_height,
     } = metrics;
-    if !node.with_tag_name(|tag| {
-        matches!(
-            tag,
-            Some("input" | "textarea" | "select" | "button" | "progress" | "meter")
-        )
-    }) {
+    if !is_form_control_layout_element(node) {
         return None;
     }
 
@@ -4077,13 +4103,14 @@ fn compute_width(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     style: &ComputedStyle,
-    containing_width: f32,
+    available_width: f32,
+    percentage_basis: f32,
     padding: EdgeSizes,
     border: EdgeSizes,
     margin: &mut EdgeSizes,
 ) -> f32 {
     let pb_horizontal = padding.horizontal() + border.horizontal();
-    let stretch_fit_width = (containing_width - pb_horizontal - margin.horizontal()).max(0.0);
+    let stretch_fit_width = (available_width - pb_horizontal - margin.horizontal()).max(0.0);
     let mut intrinsic = IntrinsicContentWidths::default();
 
     // `specified_width` is the value given to the `width` property.
@@ -4094,7 +4121,7 @@ fn compute_width(
         resolver,
         style,
         "width",
-        containing_width,
+        percentage_basis,
         padding,
         border,
         stretch_fit_width,
@@ -4104,7 +4131,7 @@ fn compute_width(
     let margin_right_auto = margin_end_is_auto(style);
 
     let mut width = if let Some(width) = specified_width {
-        let remaining = (containing_width - width - pb_horizontal).max(0.0);
+        let remaining = (available_width - width - pb_horizontal).max(0.0);
 
         match (margin_left_auto, margin_right_auto) {
             (true, true) => {
@@ -4132,7 +4159,7 @@ fn compute_width(
         if node.has_tag_name("iframe") {
             300.0
         } else {
-            (containing_width - pb_horizontal - margin.horizontal()).max(0.0)
+            (available_width - pb_horizontal - margin.horizontal()).max(0.0)
         }
     };
 
@@ -4143,7 +4170,7 @@ fn compute_width(
         resolver,
         style,
         "min-width",
-        containing_width,
+        percentage_basis,
         padding,
         border,
         stretch_fit_width,
@@ -4154,7 +4181,7 @@ fn compute_width(
         resolver,
         style,
         "max-width",
-        containing_width,
+        percentage_basis,
         padding,
         border,
         stretch_fit_width,
@@ -4172,7 +4199,7 @@ fn compute_width(
     }
 
     if margin_left_auto || margin_right_auto {
-        let remaining = (containing_width - width - pb_horizontal).max(0.0);
+        let remaining = (available_width - width - pb_horizontal).max(0.0);
         match (margin_left_auto, margin_right_auto) {
             (true, true) => {
                 margin.left = remaining / 2.0;
@@ -4451,6 +4478,78 @@ pub(crate) fn edge_sizes_with_basis(
 }
 
 fn edge_sizes_using_basis(style: &ComputedStyle, prefix: &str, basis: Option<f32>) -> EdgeSizes {
+    let ids = match prefix {
+        "margin" => [
+            PropertyId::MarginTop,
+            PropertyId::MarginRight,
+            PropertyId::MarginBottom,
+            PropertyId::MarginLeft,
+        ],
+        "padding" => [
+            PropertyId::PaddingTop,
+            PropertyId::PaddingRight,
+            PropertyId::PaddingBottom,
+            PropertyId::PaddingLeft,
+        ],
+        "border" => [
+            PropertyId::BorderTopWidth,
+            PropertyId::BorderRightWidth,
+            PropertyId::BorderBottomWidth,
+            PropertyId::BorderLeftWidth,
+        ],
+        _ => return generic_edge_sizes_using_basis(style, prefix, basis),
+    };
+    let length = |value: Option<&ComputedValue>| {
+        edge_length_value(value, basis).map(|value| {
+            if prefix == "padding" {
+                value.max(0.0)
+            } else {
+                value
+            }
+        })
+    };
+    let shorthand_name = if prefix == "border" {
+        "border-width"
+    } else {
+        prefix
+    };
+    let shorthand = length(style.get(shorthand_name)).unwrap_or(0.0);
+    let aliases = ["border-top", "border-right", "border-bottom", "border-left"];
+    let sides = std::array::from_fn::<_, 4, _>(|index| {
+        length(style.get_by_id(ids[index]))
+            .or_else(|| {
+                if prefix == "border" {
+                    length(style.get(aliases[index]))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(shorthand)
+    });
+    EdgeSizes {
+        top: sides[0],
+        right: sides[1],
+        bottom: sides[2],
+        left: sides[3],
+    }
+}
+
+/// Resolves one already-looked-up value with the existing definite-basis policy.
+fn edge_length_value(value: Option<&ComputedValue>, basis: Option<f32>) -> Option<f32> {
+    let value = value?;
+    match value {
+        ComputedValue::Px(value) => Some(*value),
+        ComputedValue::Number(value) if *value == 0.0 => Some(0.0),
+        _ => basis.and_then(|basis| value.resolve_length_percentage(basis)),
+    }
+}
+
+/// Retains the string-keyed path for other edge families and legacy names.
+fn generic_edge_sizes_using_basis(
+    style: &ComputedStyle,
+    prefix: &str,
+    basis: Option<f32>,
+) -> EdgeSizes {
     let length = |property: &str| {
         explicit_length(style, property)
             .or_else(|| {
@@ -4502,31 +4601,16 @@ fn explicit_length(style: &ComputedStyle, property: &str) -> Option<f32> {
     }
 }
 
-fn percentage_length(style: &ComputedStyle, property: &str) -> Option<f32> {
-    match style.get(property) {
-        Some(ComputedValue::Percentage(value)) => Some(*value),
-        _ => None,
-    }
-}
-
 fn resolved_length(style: &ComputedStyle, property: &str, basis: f32) -> Option<f32> {
-    let resolved = explicit_length(style, property)
-        .or_else(|| {
-            percentage_length(style, property).and_then(|percent| {
-                if basis > 0.0 {
-                    Some(basis * (percent / 100.0))
-                } else {
-                    None
-                }
-            })
-        })
-        .or_else(|| {
-            // Resolve typed length-percentage math only when the caller has a
-            // concrete percentage basis.
-            (basis > 0.0)
-                .then(|| style.get(property)?.resolve_length_percentage(basis))
-                .flatten()
-        });
+    // Project the borrowed property into an owned used scalar while the lookup
+    // is live. The old explicit/percentage/math chain searched the same style
+    // map up to three times for one property.
+    let resolved = match style.get(property) {
+        Some(ComputedValue::Px(value)) => Some(*value),
+        Some(ComputedValue::Number(value)) if *value == 0.0 => Some(0.0),
+        Some(value) if basis > 0.0 => value.resolve_length_percentage(basis),
+        _ => None,
+    };
     if matches!(
         property,
         "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height"
@@ -4583,20 +4667,27 @@ pub(crate) fn establishes_positioned_containing_block(style: &ComputedStyle) -> 
 /// Whether this box anchors fixed descendants instead of the viewport.
 /// Identity transforms still establish a containing block.
 pub(crate) fn establishes_fixed_containing_block(style: &ComputedStyle) -> bool {
-    ["transform", "translate", "rotate", "scale", "perspective"]
-        .iter()
-        .any(|property| {
-            computed_keyword(style, property)
-                .is_some_and(|value| !value.eq_ignore_ascii_case("none"))
+    const TRANSFORM_PROPERTIES: &[(PropertyId, &str)] = &[
+        (PropertyId::Transform, "transform"),
+        (PropertyId::Translate, "translate"),
+        (PropertyId::Rotate, "rotate"),
+        (PropertyId::Scale, "scale"),
+        (PropertyId::Perspective, "perspective"),
+    ];
+    let keyword = |property| match style.get_by_id(property) {
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => Some(value.as_str()),
+        _ => None,
+    };
+
+    TRANSFORM_PROPERTIES.iter().any(|(property, _)| {
+        keyword(*property).is_some_and(|value| !value.eq_ignore_ascii_case("none"))
+    }) || keyword(PropertyId::WillChange).is_some_and(|features| {
+        features.split(',').any(|feature| {
+            TRANSFORM_PROPERTIES
+                .iter()
+                .any(|(_, name)| feature.trim().eq_ignore_ascii_case(name))
         })
-        || computed_keyword(style, "will-change").is_some_and(|features| {
-            features.split(',').any(|feature| {
-                ["transform", "translate", "rotate", "scale", "perspective"]
-                    .iter()
-                    .any(|name| feature.trim().eq_ignore_ascii_case(name))
-            })
-        })
-        || has_containment(style, "layout")
+    }) || has_containment(style, "layout")
         || has_containment(style, "paint")
 }
 
@@ -4755,6 +4846,31 @@ fn minimum_content_width_inner(
     resolver: &mut StyleResolver,
     ignore_own_width: bool,
 ) -> f32 {
+    // With no wrapping opportunity a text node's min-content contribution is
+    // exactly its max-content contribution. Reuse that pass entry instead of
+    // normalizing and shaping the same text once for each intrinsic kind.
+    if node.node_type() == NodeType::Text {
+        let parent_style = node
+            .parent_node()
+            .map(|parent| resolver.computed_style(&parent))
+            .unwrap_or_default();
+        if !white_space(&parent_style).allows_wrapping() {
+            return intrinsic_width_inner(node, resolver, ignore_own_width);
+        }
+    }
+    intrinsic::measure(
+        node.identity(),
+        intrinsic::Kind::Minimum,
+        ignore_own_width,
+        || minimum_content_width_inner_uncached(node, resolver, ignore_own_width),
+    )
+}
+
+fn minimum_content_width_inner_uncached(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    ignore_own_width: bool,
+) -> f32 {
     match node.node_type() {
         NodeType::Text => node
             .data()
@@ -4765,16 +4881,17 @@ fn minimum_content_width_inner(
                     .unwrap_or_default();
                 let metrics = font_metrics(&parent_style);
                 // Find the width of the longest unbreakable unit (word or CJK character).
-                use crate::layout::inline::split_words_preserving_spaces_cjk;
+                use crate::layout::inline::for_each_word_preserving_spaces_cjk;
                 let white_space_mode = white_space(&parent_style);
                 let normalized = normalize_text(&text, white_space_mode);
                 if !white_space_mode.allows_wrapping() {
                     return measure_text_width(&normalized, metrics);
                 }
-                split_words_preserving_spaces_cjk(&normalized)
-                    .into_iter()
-                    .map(|word| measure_text_width(&word, metrics))
-                    .fold(0.0f32, f32::max)
+                let mut minimum = 0.0f32;
+                for_each_word_preserving_spaces_cjk(&normalized, |word| {
+                    minimum = minimum.max(measure_text_width(word, metrics));
+                });
+                minimum
             })
             .unwrap_or(0.0),
         NodeType::Element => {
@@ -4832,6 +4949,19 @@ fn intrinsic_width_for_sizing(node: &NodeHandle, resolver: &mut StyleResolver) -
 }
 
 fn intrinsic_width_inner(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    ignore_own_width: bool,
+) -> f32 {
+    intrinsic::measure(
+        node.identity(),
+        intrinsic::Kind::Maximum,
+        ignore_own_width,
+        || intrinsic_width_inner_uncached(node, resolver, ignore_own_width),
+    )
+}
+
+fn intrinsic_width_inner_uncached(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     ignore_own_width: bool,
@@ -5033,7 +5163,7 @@ fn layout_positioned_source(
 
     let origin = match position_scheme(style) {
         PositionScheme::Fixed => viewport.fixed.unwrap_or(viewport.rect),
-        PositionScheme::Absolute => parent_box.content,
+        PositionScheme::Absolute => parent_box.padding_box(),
         PositionScheme::Static | PositionScheme::Relative | PositionScheme::Sticky => {
             containing_block
         }
@@ -5149,6 +5279,76 @@ fn positioned_auto_content_width(
     width
 }
 
+#[derive(Clone, Copy, Default)]
+struct PositionedAutoStretch {
+    available_width: Option<f32>,
+    content_height: Option<f32>,
+}
+
+fn positioned_size_is_auto(style: &ComputedStyle, property: &str) -> bool {
+    style.get(property).is_none() || is_auto(style.get(property))
+}
+
+fn positioned_self_alignment_is_normal(style: &ComputedStyle, property: &str) -> bool {
+    style.get(property).is_none_or(|value| {
+        matches!(value, ComputedValue::Keyword(keyword) if keyword.eq_ignore_ascii_case("normal"))
+    })
+}
+
+fn has_preferred_aspect_ratio(style: &ComputedStyle) -> bool {
+    style.get("aspect-ratio").is_some_and(|value| {
+        !matches!(value, ComputedValue::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto"))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn positioned_auto_stretch(
+    child: &NodeHandle,
+    style: &ComputedStyle,
+    position: PositionScheme,
+    origin: Rect,
+    left: Option<f32>,
+    right: Option<f32>,
+    top: Option<f32>,
+    bottom: Option<f32>,
+) -> PositionedAutoStretch {
+    if position != PositionScheme::Absolute
+        || has_replaced_layout_semantics(child)
+        || is_table_container_element(child, style)
+        || has_preferred_aspect_ratio(style)
+        || !positioned_self_alignment_is_normal(style, "justify-self")
+        || !positioned_self_alignment_is_normal(style, "align-self")
+    {
+        return PositionedAutoStretch::default();
+    }
+
+    // Preserve the signed inset span until margins and decorations are
+    // removed, then clamp the final content size. compute_width performs the
+    // horizontal equation below; the vertical path mirrors it directly.
+    // Negative margins can therefore leave content space when insets overlap.
+    let available_width = left
+        .zip(right)
+        .filter(|_| positioned_size_is_auto(style, "width"))
+        .map(|(left, right)| origin.width - left - right)
+        .filter(|span| span.is_finite());
+    let content_height = top
+        .zip(bottom)
+        .filter(|_| positioned_size_is_auto(style, "height"))
+        .map(|(top, bottom)| origin.height - top - bottom)
+        .filter(|span| span.is_finite())
+        .map(|span| {
+            let margin = edge_sizes_with_basis(style, "margin", origin.width);
+            let padding = edge_sizes_with_basis(style, "padding", origin.width);
+            let border = edge_sizes(style, "border");
+            (span - margin.vertical() - padding.vertical() - border.vertical()).max(0.0)
+        });
+
+    PositionedAutoStretch {
+        available_width,
+        content_height,
+    }
+}
+
 fn layout_positioned_child_mode(
     child: &NodeHandle,
     resolver: &mut StyleResolver,
@@ -5161,31 +5361,41 @@ fn layout_positioned_child_mode(
     let position = position_scheme(style);
     let origin = match position {
         PositionScheme::Fixed => viewport.fixed.unwrap_or(viewport.rect),
-        PositionScheme::Absolute => parent_box.content,
+        PositionScheme::Absolute => parent_box.padding_box(),
         PositionScheme::Static => containing_block,
         PositionScheme::Relative => containing_block,
         PositionScheme::Sticky => containing_block,
     };
 
     let (left, right, top, bottom) = positioned_insets(style, origin);
+    let stretch = positioned_auto_stretch(child, style, position, origin, left, right, top, bottom);
     let static_outer = containing_block;
     let specified_width = resolved_length(style, "width", origin.width);
-    let child_width = if specified_width.is_none() {
-        shrink_to_fit_layout_width(child, resolver, origin.width)
-    } else {
-        origin.width
-    };
+    let child_width = stretch.available_width.unwrap_or_else(|| {
+        if specified_width.is_none() {
+            shrink_to_fit_layout_width(child, resolver, origin.width)
+        } else {
+            origin.width
+        }
+    });
     let child_containing = Rect {
         x: origin.x,
         y: origin.y,
         width: child_width,
         height: origin.height,
     };
+    let width_percentage_basis = if stretch.available_width.is_some() {
+        origin.width
+    } else {
+        child_containing.width
+    };
     if !top_layer_root && child.top_layer_order().is_some() {
         return None;
     }
     // Shrink-to-fit changes the allocated width, not the containing block
-    // against which percentage margins and padding are resolved.
+    // against which percentage margins and padding are resolved. Ordinary
+    // width constraints keep their allocated-width basis; opposing-inset auto
+    // sizing alone resolves min/max percentages against the original block.
     let mut layout_child = layout_element_with_cell(
         child,
         resolver,
@@ -5193,11 +5403,15 @@ fn layout_positioned_child_mode(
         viewport,
         Some(parent_box),
         None,
-        None,
+        stretch.content_height.map(|value| UsedHeight {
+            value,
+            definite: true,
+        }),
         None,
         origin.width,
+        width_percentage_basis,
     )?;
-    if specified_width.is_none() {
+    if specified_width.is_none() && stretch.available_width.is_none() {
         let auto_width =
             positioned_auto_content_width(child, resolver, style, &layout_child, origin.width);
         if (auto_width - layout_child.dimensions.content.width).abs() > 0.5 {
@@ -5219,9 +5433,13 @@ fn layout_positioned_child_mode(
                 viewport,
                 Some(parent_box),
                 None,
-                None,
+                stretch.content_height.map(|value| UsedHeight {
+                    value,
+                    definite: true,
+                }),
                 None,
                 origin.width,
+                relayout_containing.width,
             )?;
         }
         layout_child.dimensions.content.width =
@@ -5491,7 +5709,7 @@ fn is_inline_child(node: &NodeHandle, resolver: &mut StyleResolver) -> bool {
             if float_side(&style) != FloatSide::None || is_out_of_flow_positioned(&style) {
                 return false;
             }
-            if let Some(ComputedValue::Keyword(keyword)) = style.get("display") {
+            if let Some(ComputedValue::Keyword(keyword)) = style.get_by_id(PropertyId::Display) {
                 return keyword.eq_ignore_ascii_case("inline")
                     || keyword.eq_ignore_ascii_case("inline-block");
             }
@@ -5537,7 +5755,7 @@ fn is_non_rendered_html_element(node: &NodeHandle) -> bool {
 }
 
 fn visibility(style: &ComputedStyle) -> Visibility {
-    match style.get("visibility") {
+    match style.get_by_id(PropertyId::Visibility) {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("hidden") => {
             Visibility::Hidden
         }
@@ -5547,7 +5765,7 @@ fn visibility(style: &ComputedStyle) -> Visibility {
 
 fn text_overflow_is_ellipsis(style: &ComputedStyle) -> bool {
     matches!(
-        style.get("text-overflow"),
+        style.get_by_id(PropertyId::TextOverflow),
         Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("ellipsis")
     )
 }
@@ -5560,8 +5778,8 @@ fn overflow(style: &ComputedStyle) -> Overflow {
         Scroll,
     }
 
-    fn axis(style: &ComputedStyle, property: &str) -> Axis {
-        match style.get(property) {
+    fn axis(style: &ComputedStyle, property: PropertyId) -> Axis {
+        match style.get_by_id(property) {
             Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("clip") => {
                 Axis::Clip
             }
@@ -5572,8 +5790,8 @@ fn overflow(style: &ComputedStyle) -> Overflow {
         }
     }
 
-    let mut x = axis(style, "overflow-x");
-    let mut y = axis(style, "overflow-y");
+    let mut x = axis(style, PropertyId::OverflowX);
+    let mut y = axis(style, PropertyId::OverflowY);
     // CSS Overflow computes visible to auto and clip to hidden when the other
     // axis is neither visible nor clip. Thus any scrollable axis makes both
     // axes part of the scroll container; clip/visible is the special pair that
@@ -5620,7 +5838,7 @@ fn build_list_marker(
 ) -> Option<ListMarker> {
     // Only `display: list-item` generates a marker.
     let display_is_list_item = matches!(
-        style.get("display"),
+        style.get_by_id(PropertyId::Display),
         Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("list-item")
     );
     if !display_is_list_item {
@@ -5628,7 +5846,7 @@ fn build_list_marker(
     }
 
     // Determine list-style-type.
-    let list_style_type = match style.get("list-style-type") {
+    let list_style_type = match style.get_by_id(PropertyId::ListStyleType) {
         Some(ComputedValue::Keyword(kw)) => kw.to_ascii_lowercase(),
         _ => "disc".to_string(),
     };
@@ -5637,13 +5855,13 @@ fn build_list_marker(
         return None;
     }
 
-    let font_size = match style.get("font-size") {
+    let font_size = match style.get_by_id(PropertyId::FontSize) {
         Some(ComputedValue::Px(px)) => *px,
         _ => 16.0,
     };
 
     let outside = !matches!(
-        style.get("list-style-position"),
+        style.get_by_id(PropertyId::ListStylePosition),
         Some(ComputedValue::Keyword(kw)) if kw.eq_ignore_ascii_case("inside")
     );
 
@@ -5798,3 +6016,6 @@ mod inline_box_tests;
 
 mod image_animation;
 pub(crate) use image_animation::{image_animation_time_ms, with_image_animation_timeline};
+
+#[cfg(test)]
+mod edge_lookup_tests;

@@ -340,17 +340,29 @@ impl JsError {
     /// properties are read; errors without a mapped frame return `None`.
     #[must_use]
     pub fn source_location(&self) -> Option<(Option<String>, u32, u32)> {
-        self.backtrace.as_ref()?.iter().rev().find_map(|entry| {
-            let ShadowEntry::Bytecode { pc, source_info } = entry else {
-                return None;
-            };
-            let position = source_info.map().find(*pc)?;
-            let filename = match source_info.map().path() {
-                crate::vm::SourcePath::Path(path) => Some(path.to_string_lossy().into_owned()),
-                _ => None,
-            };
-            Some((filename, position.line_number(), position.column_number()))
-        })
+        self.source_locations().next()
+    }
+
+    /// Iterates captured mapped JavaScript locations, most recent first.
+    ///
+    /// The iterator reads immutable engine metadata without evaluating author
+    /// properties. Native frames and unmapped bytecode positions are skipped.
+    /// Filenames are owned; callers can bound work with `Iterator::take`.
+    pub fn source_locations(&self) -> impl Iterator<Item = (Option<String>, u32, u32)> + '_ {
+        self.backtrace
+            .iter()
+            .flat_map(|trace| trace.iter().rev())
+            .filter_map(|entry| {
+                let ShadowEntry::Bytecode { pc, source_info } = entry else {
+                    return None;
+                };
+                let position = source_info.map().find(*pc)?;
+                let filename = match source_info.map().path() {
+                    crate::vm::SourcePath::Path(path) => Some(path.to_string_lossy().into_owned()),
+                    _ => None,
+                };
+                Some((filename, position.line_number(), position.column_number()))
+            })
     }
 
     /// Returns the immutable host provenance of the throwing classic script.
