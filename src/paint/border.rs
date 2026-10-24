@@ -38,11 +38,11 @@ pub(crate) fn paint_borders(
     let mut border_box = offset.rect(border_box_rect(layout));
     let padding_box = offset.rect(padding_box_rect(layout));
     let mut border = layout.dimensions.border;
-    let table_cell = matches!(style.get("display"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("table-cell"))
-        || (style.get("display").is_none()
+    let table_cell = matches!(style.get_by_id(PropertyId::Display), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("table-cell"))
+        || (style.get_by_id(PropertyId::Display).is_none()
             && matches!(layout.node.tag_name().as_deref(), Some("td" | "th")));
     if table_cell
-        && matches!(style.get("border-collapse"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("collapse"))
+        && matches!(style.get_by_id(PropertyId::BorderCollapse), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("collapse"))
     {
         // Collapsed cell boxes end at the grid line. Paint both halves of the
         // shared border around that line, without enlarging the measured box.
@@ -641,7 +641,7 @@ pub(crate) fn paint_box_shadow(
     clip: Option<Rect>,
     shadow_masks: Option<&FrameShadowMaskCache>,
 ) {
-    let shadow_value = match style.get("box-shadow") {
+    let shadow_value = match style.get_by_id(PropertyId::BoxShadow) {
         Some(ComputedValue::Keyword(v)) => v.clone(),
         _ => return,
     };

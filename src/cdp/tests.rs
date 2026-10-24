@@ -518,6 +518,67 @@ fn static_render_settles_deferred_document_startup() {
 }
 
 #[test]
+fn native_document_title_matches_javascript_title_selection_and_text() {
+    fn assert_native_matches_javascript(session: &mut CdpSession, expected: &str) {
+        let javascript = session
+            .runtime
+            .eval("document.title")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(javascript, expected);
+        assert_eq!(session.document_title_without_tasks().unwrap(), javascript);
+    }
+
+    let mut session = CdpSession::new().unwrap();
+    session
+        .install_document(
+            "https://example.test/title",
+            "<head><title>first</title><title>second</title></head><body></body>",
+            1,
+            "null",
+        )
+        .unwrap();
+    assert_native_matches_javascript(&mut session, "first");
+
+    session
+        .runtime
+        .eval(
+            "const firstTitle = document.head.firstElementChild;
+             firstTitle.textContent = '';
+             firstTitle.append('prefix');
+             const nested = document.createElement('span');
+             nested.append(' nested ');
+             nested.appendChild(document.createComment('ignored'));
+             nested.append('text');
+             firstTitle.appendChild(nested);
+             const wrapper = document.createElement('div');
+             const nestedTitle = document.createElement('title');
+             nestedTitle.textContent = 'not selected';
+             wrapper.appendChild(nestedTitle);
+             document.head.insertBefore(wrapper, firstTitle);",
+        )
+        .unwrap();
+    assert_native_matches_javascript(&mut session, "prefix nested text");
+
+    session.runtime.eval("document.head.remove()").unwrap();
+    assert_native_matches_javascript(&mut session, "");
+
+    session
+        .runtime
+        .eval("document.title = 'created after missing head'")
+        .unwrap();
+    assert_native_matches_javascript(&mut session, "created after missing head");
+
+    session
+        .runtime
+        .eval("document.title = 'updated title'")
+        .unwrap();
+    assert_native_matches_javascript(&mut session, "updated title");
+}
+
+#[test]
 fn task_pump_limit_survives_navigation_and_defers_extra_timer_tasks() {
     let mut session = CdpSession::new().unwrap();
     session.set_task_pump_limit(NonZeroUsize::new(1));

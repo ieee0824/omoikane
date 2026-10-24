@@ -2,11 +2,12 @@
 //! An allocation-free probe obtains source ink before viewport clipping.
 
 use super::*;
+use crate::css::style::PropertyId;
 use crate::css::style::text_shadow::TextShadow;
 
 pub(super) fn style_shadows(style: &ComputedStyle) -> Vec<TextShadow> {
     style
-        .get("text-shadow")
+        .get_by_id(PropertyId::TextShadow)
         .and_then(|value| crate::css::style::text_shadow::parse_computed(&value.css_text()))
         .unwrap_or_default()
 }

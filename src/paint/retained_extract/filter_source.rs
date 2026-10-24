@@ -75,7 +75,7 @@ impl BoundsNode {
             || is_fixed_for_paint(&style)
             || is_sticky_for_paint(&style)
             || layout.node.scroll_offset() != (0.0, 0.0)
-            || has_non_none_value(&style, "box-shadow")
+            || has_non_none_value(&style, PropertyId::BoxShadow)
             || outline::solid_outline_bounds(&style, border_box_rect(layout)).is_some()
             || !bounded_filters(&element_filters(&style))
         {
@@ -570,10 +570,10 @@ impl FilterSourcePlan {
             );
         }
         if element_opacity(&style).is_some_and(|value| value < 1.0)
-            || has_non_none_value(&style, "filter")
-            || has_non_none_layer(&style, "mask-image")
-            || has_non_none_value(&style, "backdrop-filter")
-            || has_non_none_value(&style, "clip-path")
+            || has_non_none_value(&style, PropertyId::Filter)
+            || has_non_none_layer(&style, PropertyId::MaskImage)
+            || has_non_none_value(&style, PropertyId::BackdropFilter)
+            || has_non_none_value(&style, PropertyId::ClipPath)
             || crate::layout::has_containment(&style, "paint")
         {
             return self.reject_filter_descendants(
@@ -617,7 +617,7 @@ impl FilterSourcePlan {
         if has_fixed_background(style) {
             return Err(RetainedPaintError::FixedBackground);
         }
-        if has_non_none_value(style, "backdrop-filter") {
+        if has_non_none_value(style, PropertyId::BackdropFilter) {
             return Err(RetainedPaintError::BackdropFilter);
         }
         scan_inline_fragment_styles(layout, resolver)?;
@@ -720,7 +720,7 @@ impl FilterSourcePlan {
         if has_fixed_background(&style) {
             return Err(RetainedPaintError::FixedBackground);
         }
-        if has_non_none_value(&style, "backdrop-filter") {
+        if has_non_none_value(&style, PropertyId::BackdropFilter) {
             return Err(RetainedPaintError::BackdropFilter);
         }
         scan_inline_fragment_styles(layout, resolver)?;
@@ -1145,7 +1145,7 @@ impl FilterSourcePlan {
         let child = child_scan_state(layout, &style, state, fixed, Some(clip));
         let unsupported_clip_ancestor = unsupported_clip_ancestor
             || crate::layout::has_containment(&style, "paint")
-            || has_non_none_value(&style, "clip-path");
+            || has_non_none_value(&style, PropertyId::ClipPath);
         let clip_checkpoint = ancestor_clips.checkpoint();
         let overflow_is_invariant = layout.overflow.clips_overflow()
             && !child.clip_geometry_unproven
@@ -1265,7 +1265,7 @@ impl PhaseClipRisk {
 }
 
 fn has_explicit_z_index(style: &ComputedStyle) -> bool {
-    match style.get("z-index") {
+    match style.get_by_id(PropertyId::ZIndex) {
         Some(ComputedValue::Number(_)) => true,
         Some(ComputedValue::Keyword(value)) => value.parse::<i32>().is_ok(),
         _ => false,
@@ -1308,7 +1308,7 @@ fn plain_source(
     if has_fixed_background(&style) {
         return Err(RetainedPaintError::FixedBackground);
     }
-    if has_non_none_value(&style, "backdrop-filter") {
+    if has_non_none_value(&style, PropertyId::BackdropFilter) {
         return Err(RetainedPaintError::BackdropFilter);
     }
     scan_inline_fragment_styles(layout, resolver)?;
@@ -1329,8 +1329,8 @@ fn plain_source(
         || is_fixed_for_paint(&style)
         || is_sticky_for_paint(&style)
         || layout.node.scroll_offset() != (0.0, 0.0)
-        || has_non_none_value(&style, "clip-path")
-        || has_non_none_layer(&style, "mask-image")
+        || has_non_none_value(&style, PropertyId::ClipPath)
+        || has_non_none_layer(&style, PropertyId::MaskImage)
         || crate::layout::has_containment(&style, "paint")
         || nested_viewport_edge_filter
     {

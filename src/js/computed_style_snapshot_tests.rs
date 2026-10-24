@@ -13,6 +13,37 @@ fn runtime() -> JsRuntime {
     runtime
 }
 
+#[test]
+fn cssom_enumeration_ignores_author_object_keys() {
+    let mut runtime = runtime();
+    let result = runtime
+        .eval(
+            r#"(() => {
+                const declaration = getComputedStyle(document.getElementById('box'));
+                const expected = [...declaration];
+                const objectKeys = Object.keys;
+                let calls = 0;
+                try {
+                    Object.keys = value => { calls++; return objectKeys(value); };
+                    const actual = [...declaration];
+                    return [
+                        declaration.length === expected.length,
+                        declaration.item(0) === expected[0],
+                        actual.join('|') === expected.join('|'),
+                        calls,
+                    ].join('|');
+                } finally {
+                    Object.keys = objectKeys;
+                }
+            })()"#,
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(result, "true|true|true|0");
+}
+
 fn assert_read_reuses_cache(pseudo: Option<PseudoElement>) {
     let runtime = runtime();
     let mut state = runtime.host_state.borrow_mut();
@@ -95,4 +126,61 @@ fn cssom_used_sizes_and_logical_aliases_leave_cascade_snapshot_unchanged() {
         &expected,
         "retained snapshots stay immutable"
     );
+}
+
+#[test]
+fn cssom_metadata_matches_full_values_and_stays_live() {
+    let mut runtime = runtime();
+    let result = runtime.eval(r#"(() => {
+        const box = document.getElementById('box');
+        const declaration = getComputedStyle(box);
+        const pseudo = getComputedStyle(box, '::before');
+        function consistent(style) {
+            const full = style.cssText.split(';').map(x => x.trim()).filter(Boolean)
+                .map(x => x.slice(0, x.indexOf(':')));
+            const names = [...style];
+            return full.join('|') === names.join('|') && style.length === names.length &&
+                names.every((name, i) => style.item(i) === name && style[i] === name && i in style) &&
+                style.item(names.length) === '' && !(names.length in style);
+        }
+        const initial = consistent(declaration) && consistent(pseudo);
+        box.style.setProperty('--new-custom', 'yes');
+        const added = [...declaration].includes('--new-custom') && consistent(declaration);
+        box.style.removeProperty('--new-custom');
+        const removed = ![...declaration].includes('--new-custom') && consistent(declaration);
+        document.querySelector('style').textContent += '#box::before{--pseudo-live:ok}';
+        return [initial, added, removed,
+            [...pseudo].includes('--pseudo-live') && consistent(pseudo),
+            typeof globalThis.__omoikane_computed_style_metadata === 'undefined'].join('|');
+    })()"#).unwrap().as_string().unwrap().to_std_string_escaped();
+    assert_eq!(result, "true|true|true|true|true");
+}
+
+#[test]
+fn cssom_item_captures_names_before_reentrant_argument_coercion() {
+    let mut runtime = runtime();
+    let result = runtime
+        .eval(
+            r#"(() => {
+        const box = document.getElementById('box');
+        const declaration = getComputedStyle(box);
+        const originalFirst = declaration.item(0);
+        let coerced = 0;
+        const first = declaration.item({toString() {
+            coerced++;
+            box.style.setProperty('--aaa-added-during-coercion', 'yes');
+            return '0';
+        }});
+        const updatedFirst = declaration.item(0);
+        return [first === originalFirst, updatedFirst === '--aaa-added-during-coercion',
+            coerced === 1, declaration.item(-1) === '', declaration.item(1.5) === '',
+            declaration.item(0xFFFFFFFF) === '', declaration.item(NaN) === '',
+            declaration.item('0') === updatedFirst].join('|');
+    })()"#,
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(result, "true|true|true|true|true|true|true|true");
 }

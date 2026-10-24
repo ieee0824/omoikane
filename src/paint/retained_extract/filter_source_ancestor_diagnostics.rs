@@ -35,9 +35,9 @@ impl FilterAncestorTrace {
             return;
         }
         let opacity = element_opacity(style);
-        let filter = has_non_none_value(style, "filter");
-        let mask = has_non_none_layer(style, "mask-image");
-        let clip_path = has_non_none_value(style, "clip-path");
+        let filter = has_non_none_value(style, PropertyId::Filter);
+        let mask = has_non_none_layer(style, PropertyId::MaskImage);
+        let clip_path = has_non_none_value(style, PropertyId::ClipPath);
         let containment = crate::layout::has_containment(style, "paint");
         let transformed =
             layout.transform != AffineTransform::identity() || has_transform_style(style);

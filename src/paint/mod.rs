@@ -5526,7 +5526,7 @@ fn viewport_background_color(
     let root_style = resolver.computed_style(&root.node);
     let root_transparent = background_color(&root_style).is_none_or(|color| color.a == 0);
     let no_root_image = root_style
-        .get("background-image")
+        .get_by_id(PropertyId::BackgroundImage)
         .is_none_or(|value| value.css_text().eq_ignore_ascii_case("none"));
     let html_root = root.node.local_name().as_deref() == Some("html")
         && (root.node.is_html_element()

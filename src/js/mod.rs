@@ -97,6 +97,7 @@ mod compression_stream_tests;
 mod computed_pseudo_tests;
 #[cfg(test)]
 mod computed_style_layout_tests;
+mod computed_style_metadata;
 #[cfg(test)]
 mod computed_style_snapshot_tests;
 #[cfg(test)]
@@ -179,6 +180,8 @@ use permissions_policy::{DocumentPolicy, PolicyFeature};
 mod attribute_normalization_tests;
 #[cfg(test)]
 mod document_body_tests;
+#[cfg(test)]
+mod layout_observer_schedule_tests;
 #[cfg(test)]
 mod node_copy_tests;
 #[cfg(test)]
@@ -2293,6 +2296,11 @@ struct HostState {
     /// Documents whose changed scroll geometry requires an IntersectionObserver
     /// update after all animation-frame callbacks in the rendering opportunity.
     pending_scroll_intersection_documents: Vec<usize>,
+    /// Documents whose DOM mutations require ResizeObserver and
+    /// IntersectionObserver updates in the next rendering opportunity.
+    /// Keeping this out of the promise-job queue prevents a timer mutation from
+    /// forcing synchronous layout while its microtask checkpoint is draining.
+    pending_layout_observer_documents: Vec<usize>,
     smooth_scrolls: Vec<SmoothScrollAnimation>,
     /// Effective element offsets captured before invalidating layout. Reflow
     /// compares these with the rebuilt scrolling extents to detect clamps.
@@ -3247,6 +3255,7 @@ impl HostState {
             pending_visual_viewport_scroll_documents: Vec::new(),
             pending_scroll_targets: Vec::new(),
             pending_scroll_intersection_documents: Vec::new(),
+            pending_layout_observer_documents: Vec::new(),
             smooth_scrolls: Vec::new(),
             scroll_offsets_before_layout: HashMap::new(),
             document_styles,
@@ -6167,6 +6176,8 @@ impl HostState {
             .retain(|id| *id != document_id);
         self.pending_scroll_intersection_documents
             .retain(|id| *id != document_id);
+        self.pending_layout_observer_documents
+            .retain(|id| *id != document_id);
         tree_ids.extend(self.retired_document_node_ids(document_id));
         for id in &tree_ids {
             self.nodes.remove(id);
@@ -6303,6 +6314,8 @@ impl HostState {
         self.pending_visual_viewport_scroll_documents
             .retain(|id| *id != document_id);
         self.pending_scroll_intersection_documents
+            .retain(|id| *id != document_id);
+        self.pending_layout_observer_documents
             .retain(|id| *id != document_id);
         tree_ids.extend(self.retired_document_node_ids(document_id));
         for id in &tree_ids {
@@ -7305,6 +7318,12 @@ impl HostState {
             .map(|document| document.identity())
         {
             Self::queue_document_once(&mut self.pending_scroll_intersection_documents, document_id);
+        }
+    }
+
+    fn queue_layout_observer_document(&mut self, document_id: usize) {
+        if self.document_is_active(document_id) {
+            Self::queue_document_once(&mut self.pending_layout_observer_documents, document_id);
         }
     }
 
@@ -12580,6 +12599,7 @@ impl JsRuntime {
         // callback has observed the new geometry. The microtask checkpoint
         // completes that work before the embedder proceeds to style/layout/paint.
         let stage_started = detail.stage_start();
+        self.flush_pending_layout_observers()?;
         self.flush_pending_scroll_intersection_observers()?;
         let jobs_result = self.run_jobs();
         detail.record_jobs(stage_started);
@@ -12732,6 +12752,7 @@ impl JsRuntime {
                 }
             }
         }
+        self.flush_pending_layout_observers()?;
         self.flush_pending_scroll_intersection_observers()?;
         let jobs_result = self.run_jobs();
         if callbacks_run > 0 && jobs_result.is_err() {
@@ -12791,6 +12812,25 @@ impl JsRuntime {
             self.eval_in_document_realm(
                 *document_id,
                 "__omoikane_dispatch_viewport_events(false, false, true)",
+            )?;
+        }
+        Ok(documents.len())
+    }
+
+    /// Queues mutation-driven layout-observer checks after animation-frame
+    /// callbacks, at the rendering opportunity where their geometry is used.
+    fn flush_pending_layout_observers(&mut self) -> JsResult<usize> {
+        let documents = std::mem::take(
+            &mut self
+                .host_state
+                .borrow_mut()
+                .pending_layout_observer_documents,
+        );
+        for document_id in &documents {
+            self.eval_in_document_realm(
+                *document_id,
+                "if (typeof globalThis.__omoikane_layout_observers_changed === 'function') \
+                 globalThis.__omoikane_layout_observers_changed();",
             )?;
         }
         Ok(documents.len())
@@ -16631,6 +16671,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(current_window_event_native),
         ),
         (
+            js_string!("__omoikane_queue_layout_observer_check"),
+            1,
+            NativeFunction::from_copy_closure(queue_layout_observer_check_native),
+        ),
+        (
             js_string!("setTimeout"),
             2,
             NativeFunction::from_copy_closure(set_timeout_native),
@@ -17234,6 +17279,11 @@ fn register_host_bindings(
             js_string!("__omoikane_computed_style"),
             1,
             NativeFunction::from_copy_closure(computed_style_native),
+        ),
+        (
+            js_string!("__omoikane_computed_style_metadata"),
+            3,
+            NativeFunction::from_copy_closure(computed_style_metadata::read_native),
         ),
         (
             js_string!("__omoikane_csp_violations"),
@@ -19252,6 +19302,38 @@ struct LayoutUsedSize {
     edges: Option<(crate::layout::EdgeSizes, crate::layout::EdgeSizes)>,
 }
 
+/// Searches untransformed geometry, retaining only the first eligible fragment.
+/// A real box anywhere in the remaining tree takes precedence over that fragment.
+/// The borrowed fragment never outlives this used-size lookup.
+fn find_used_size_box<'a>(
+    root: &'a LayoutBox,
+    node: &NodeHandle,
+    first_fragment: &mut Option<&'a crate::layout::InlineFragment>,
+) -> Option<&'a LayoutBox> {
+    if &root.node == node {
+        return Some(root);
+    }
+    if first_fragment.is_none() {
+        *first_fragment = root
+            .lines
+            .iter()
+            .flat_map(|line| &line.fragments)
+            .find(|fragment| {
+                &fragment.node == node
+                    && matches!(
+                        fragment.content,
+                        InlineFragmentContent::InlineBox(_)
+                            | InlineFragmentContent::Image(_, _)
+                            | InlineFragmentContent::FormControl(_, _, _)
+                            | InlineFragmentContent::IconFormControl(_, _, _, _)
+                    )
+            });
+    }
+    root.children
+        .iter()
+        .find_map(|child| find_used_size_box(child, node, first_fragment))
+}
+
 /// Returns the untransformed used box size for CSSOM resolved values. Ordinary
 /// block boxes store it directly in the layout tree. Inline replaced elements
 /// store it in an inline fragment. Non-replaced inline boxes carry a flag so
@@ -19264,10 +19346,8 @@ fn layout_used_size(
     if let Some(pseudo) = pseudo {
         return pseudo_layout_used_size(root, node, pseudo);
     }
-    let mut fragments = Vec::new();
-    if let Some((layout, _)) =
-        find_layout_box_with_transform(root, node, AffineTransform::identity(), &mut fragments)
-    {
+    let mut first_fragment = None;
+    if let Some(layout) = find_used_size_box(root, node, &mut first_fragment) {
         let content = layout.dimensions.content;
         let padding = layout.dimensions.padding;
         let border = layout.dimensions.border;
@@ -19285,12 +19365,19 @@ fn layout_used_size(
         });
     }
 
-    let first = fragments.first()?;
-    let padding = edge_sizes(&first.style, "padding");
-    let border = edge_sizes(&first.style, "border");
+    let first = first_fragment?;
+    let style = match &first.content {
+        InlineFragmentContent::InlineBox(style)
+        | InlineFragmentContent::Image(_, style)
+        | InlineFragmentContent::FormControl(style, _, _)
+        | InlineFragmentContent::IconFormControl(style, _, _, _) => style,
+        _ => unreachable!("used-size search retains only styled box fragments"),
+    };
+    let padding = edge_sizes(style, "padding");
+    let border = edge_sizes(style, "border");
     Some(LayoutUsedSize {
         edges: None,
-        non_replaced_inline: first.non_replaced,
+        non_replaced_inline: matches!(first.content, InlineFragmentContent::InlineBox(_)),
         content_width: (first.rect.width
             - padding.left
             - padding.right
@@ -19355,8 +19442,8 @@ fn pseudo_layout_used_size(
 
 /// Resolves the layout tree belonging to `document` and returns `node`'s used
 /// size. The top-level document reuses its cached layout. A child browsing
-/// context is laid out against its own viewport, stylesheet resolver, resource
-/// base and web-font registry instead of reading the main tree.
+/// context reuses the same unscrolled child-layout cache as paint, hit testing,
+/// and geometry queries. Mutation and viewport invalidation clear that cache.
 fn resolved_layout_size(
     state: &mut HostState,
     document: &NodeHandle,
@@ -19373,35 +19460,7 @@ fn resolved_layout_size(
     }
 
     let viewport = state.viewport_for_document(document);
-    state.ensure_style_resolver(document);
-    let base = crate::paint::stylesheet::extract_document_base_url(
-        document,
-        state.base_url_for_document(document_id).as_ref(),
-    );
-    let image_environment = state.image_environment(document_id);
-    let animation_time = state.event_loop.rendering_time_ms() as u64;
-    let (layout, image_reports) =
-        state
-            .document_styles
-            .get_mut(&document_id)
-            .and_then(|entry| {
-                let resolver = entry.resolver.as_mut()?;
-                Some(crate::layout::with_layout_fonts(
-                    crate::paint::text::load_text_fonts(),
-                    Some(entry.web_fonts.clone()),
-                    || {
-                        image_environment.run(false, || {
-                            crate::layout::with_image_base_url(base, || {
-                                crate::layout::with_image_animation_time(animation_time, || {
-                                    crate::layout::layout_tree(document, resolver, viewport)
-                                })
-                            })
-                        })
-                    },
-                ))
-            })?;
-    state.queue_image_reports(document_id, image_reports);
-    layout
+    build_child_document_layout(state, document, viewport)
         .as_ref()
         .and_then(|root| layout_used_size(root, node, pseudo))
 }
@@ -20615,6 +20674,21 @@ fn request_animation_frame_native(
             state.borrow_mut().event_loop.cancel_animation_frame(id);
         }
         Ok(JsValue::from(id as f64))
+    })
+}
+
+fn queue_layout_observer_check_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_document(context, document_id)?;
+    with_host_state(|state| {
+        state
+            .borrow_mut()
+            .queue_layout_observer_document(document_id);
+        Ok(JsValue::undefined())
     })
 }
 

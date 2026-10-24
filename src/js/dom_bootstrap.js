@@ -41,6 +41,9 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeRunMicrotaskCallback = globalThis.__omoikane_run_microtask_callback;
   const nativeCaptureCspSource = globalThis.__omoikane_capture_csp_source;
   const nativeFetch = globalThis.__omoikane_fetch;
+  const nativeComputedStyleMetadata = globalThis.__omoikane_computed_style_metadata;
+  delete globalThis.__omoikane_computed_style_metadata;
+  const computedStyleObjectKeys = Object.keys;
   const nativeCanvasBlit = globalThis.__omoikane_canvas_blit;
   delete globalThis.__omoikane_canvas_blit;
   const nativeBeginFetch = globalThis.__omoikane_begin_fetch;
@@ -76,7 +79,10 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_trusted_remember_script_text;
   delete globalThis.__omoikane_trusted_take_script_text_approval;
   const nativeCurrentWindowEvent = globalThis.__omoikane_current_window_event;
+  const nativeQueueLayoutObserverCheck =
+    globalThis.__omoikane_queue_layout_observer_check;
   delete globalThis.__omoikane_current_window_event;
+  delete globalThis.__omoikane_queue_layout_observer_check;
   const nativeRegisterWindowProxy = globalThis.__omoikane_register_window_proxy;
   delete globalThis.__omoikane_register_window_proxy;
   const nativeDocumentWindow = globalThis.__omoikane_document_window;
@@ -17578,7 +17584,11 @@ export const __omoikane_service_worker_lifecycle = {};
     let frameIndex = 0;
     const documentId = internalNodeId(globalThis.document);
     const candidates = documentId === undefined ? [] : nativeWindowNamedSnapshot(documentId);
-    for (const [nodeId, isFrame, id, name] of candidates) {
+    for (let offset = 0; offset < candidates.length; offset += 4) {
+      const nodeId = candidates[offset];
+      const isFrame = candidates[offset + 1];
+      const id = candidates[offset + 2];
+      const name = candidates[offset + 3];
       if (isFrame) {
         const child = wrapNode(nodeId);
         const index = `${frameIndex++}`;
@@ -18655,12 +18665,35 @@ export const __omoikane_service_worker_lifecycle = {};
     if (prop === "cssFloat" || prop === "styleFloat") return "float";
     return String(prop).replace(/[A-Z]/g, m => "-" + m.toLowerCase());
   }
+  // These helpers are shared across declarations: retaining a declaration
+  // adds no enumeration-specific object or per-instance helper closures.
+  function readComputedStyleMetadata(metadataSource, operation, index) {
+    try { return metadataSource(operation, index); }
+    catch (_) { return operation === "length" ? 0 : operation === "item" ? "" : []; }
+  }
+  function computedStyleNames(readMap, metadataSource) {
+    return typeof metadataSource === "function"
+      ? readComputedStyleMetadata(metadataSource, "names") : computedStyleObjectKeys(readMap());
+  }
+  function computedStyleItem(readMap, metadataSource, index) {
+    if (typeof metadataSource === "function" && typeof index === "number" &&
+        index === (index >>> 0)) return readComputedStyleMetadata(metadataSource, "item", index);
+    // Capture names before an object argument can mutate the declaration.
+    return computedStyleNames(readMap, metadataSource)[index] || "";
+  }
+  function computedStyleIndexedName(readMap, metadataSource, prop) {
+    if (typeof prop !== "string" || !/^(0|[1-9][0-9]*)$/.test(prop)) return null;
+    const snapshot = computedStyleNames(readMap, metadataSource);
+    const index = Number(prop);
+    if (!Number.isSafeInteger(index) || index >= 0xFFFFFFFF) return null;
+    return snapshot[index] || "";
+  }
   // Builds a read-only CSSStyleDeclaration-like object over a map provider
   // (kebab-case property names -> CSS string values). Supports camelCase access
   // (`style.whiteSpace`), `cssFloat`, `getPropertyValue('white-space')`,
   // `length`, and indexed/item access. The provider is read for every operation
   // so retained resolved declarations stay live after DOM or CSSOM mutations.
-  function __makeComputedStyle(source, valueSource) {
+  function __makeComputedStyle(source, valueSource, metadataSource) {
     const readMap = typeof source === "function"
       ? () => {
           try {
@@ -18677,12 +18710,6 @@ export const __omoikane_service_worker_lifecycle = {};
       if (typeof valueSource !== "function") return undefined;
       try { return valueSource(key); } catch (_) { return undefined; }
     };
-    const indexedName = (map, prop) => {
-      if (typeof prop !== "string" || !/^(0|[1-9][0-9]*)$/.test(prop)) return null;
-      const index = Number(prop);
-      if (!Number.isSafeInteger(index) || index >= 0xFFFFFFFF) return null;
-      return Object.keys(map)[index] || "";
-    };
     const decl = {
       getPropertyValue(name) {
         const property = String(name);
@@ -18696,9 +18723,12 @@ export const __omoikane_service_worker_lifecycle = {};
           (computedLogicalShorthand(map, key) ?? (key === "z-index" ? "auto" : ""));
       },
       getPropertyPriority() { return ""; },
-      get length() { return Object.keys(readMap()).length; },
-      item(index) { return Object.keys(readMap())[index] || ""; },
-      [Symbol.iterator]() { return Object.keys(readMap())[Symbol.iterator](); },
+      get length() {
+        return typeof metadataSource === "function"
+          ? readComputedStyleMetadata(metadataSource, "length") : computedStyleNames(readMap, metadataSource).length;
+      },
+      item(index) { return computedStyleItem(readMap, metadataSource, index); },
+      [Symbol.iterator]() { return computedStyleNames(readMap, metadataSource)[Symbol.iterator](); },
       get cssText() {
         const map = readMap();
         return Object.keys(map).map(k => k + ": " + map[k] + ";").join(" ");
@@ -18710,9 +18740,9 @@ export const __omoikane_service_worker_lifecycle = {};
         const key = __styleNameToCss(prop);
         const value = readValue(key);
         if (value !== undefined) return value;
-        const map = readMap();
-        const indexed = indexedName(map, prop);
+        const indexed = computedStyleIndexedName(readMap, metadataSource, prop);
         if (indexed !== null) return indexed;
+        const map = readMap();
         return Object.prototype.hasOwnProperty.call(map, key) ? map[key] :
           (computedLogicalShorthand(map, key) ?? (key === "z-index" ? "auto" : ""));
       },
@@ -18726,9 +18756,9 @@ export const __omoikane_service_worker_lifecycle = {};
         // A named read answers membership without resolving layout for the
         // whole property map; indices and logical shorthands still need it.
         if (!/^(0|[1-9][0-9]*)$/.test(prop) && readValue(key) !== undefined) return true;
-        const map = readMap();
-        const indexed = indexedName(map, prop);
+        const indexed = computedStyleIndexedName(readMap, metadataSource, prop);
         if (indexed !== null) return indexed !== "";
+        const map = readMap();
         return Object.prototype.hasOwnProperty.call(map, key) ||
           computedLogicalShorthand(map, key) !== null;
       },
@@ -18775,6 +18805,9 @@ export const __omoikane_service_worker_lifecycle = {};
           }, (key) => {
             flushStyleSheets();
             return __omoikane_computed_style(nodeId, null, true, false, key);
+          }, (operation, index) => {
+            flushStyleSheets();
+            return nativeComputedStyleMetadata(nodeId, null, operation, index);
           });
           __dispatchPendingTransitionEvents();
           return style;
@@ -18788,6 +18821,9 @@ export const __omoikane_service_worker_lifecycle = {};
         }, (key) => {
           flushStyleSheets();
           return __omoikane_computed_style(nodeId, pseudo, true, false, key);
+        }, (operation, index) => {
+          flushStyleSheets();
+          return nativeComputedStyleMetadata(nodeId, pseudo, operation, index);
         });
         __dispatchPendingTransitionEvents();
         return style;
@@ -20709,9 +20745,8 @@ export const __omoikane_service_worker_lifecycle = {};
       observer._records.push(new MutationRecord(type, target, recordInit));
       observer._schedule();
     }
-    if (hasLayoutObservers &&
-        typeof globalThis.__omoikane_layout_observers_changed === "function") {
-      globalThis.__omoikane_layout_observers_changed();
+    if (hasLayoutObservers && typeof nativeQueueLayoutObserverCheck === "function") {
+      nativeQueueLayoutObserverCheck(internalNodeId(globalThis.document));
     }
   }
 

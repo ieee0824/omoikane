@@ -459,6 +459,16 @@ impl ComputedStyle {
         self.properties.get(&id)
     }
 
+    /// Returns the number of computed properties without copying their values.
+    pub(crate) fn property_count(&self) -> usize {
+        self.properties.len()
+    }
+
+    /// Borrows computed property names in ascending order.
+    pub(crate) fn property_names(&self) -> impl Iterator<Item = &str> {
+        self.properties.keys()
+    }
+
     /// Returns a snapshot of all computed properties, keyed by name.
     ///
     /// The map is built on each call; use [`Self::get`] to read a single

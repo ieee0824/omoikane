@@ -22,7 +22,7 @@ pub(super) fn trace_viewport_edge_filter(layout: &LayoutBox, style: &ComputedSty
 
 fn filter_kernel_diagnostic(style: &ComputedStyle) -> serde_json::Value {
     use crate::css::FilterFunction;
-    let filters = match style.get("filter") {
+    let filters = match style.get_by_id(PropertyId::Filter) {
         Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
             crate::css::parse_filter_list(value)
         }
@@ -140,7 +140,7 @@ fn find(
         return None;
     }
     let contain_paint = crate::layout::has_containment(&style, "paint");
-    let clip_path = has_non_none_value(&style, "clip-path");
+    let clip_path = has_non_none_value(&style, PropertyId::ClipPath);
     let clips = layout.overflow.clips_overflow() || contain_paint || clip_path;
     let previous_len = ancestors.len();
     if clips && ancestors.len() < 32 {

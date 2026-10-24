@@ -24,6 +24,44 @@ fn child_layout_cache_reuses_geometry_across_queries_and_parent_paints() {
 }
 
 #[test]
+fn child_computed_used_sizes_share_layout_with_geometry_and_parent_paint() {
+    let mut runtime = runtime();
+    let builds_before = runtime.host_state.borrow().child_layout_builds;
+    assert_eq!(
+        runtime
+            .eval(
+                "[getComputedStyle(a).width, \
+                 getComputedStyle(d.getElementById('b')).height].join(',')"
+            )
+            .unwrap()
+            .to_string(&mut runtime.context)
+            .unwrap()
+            .to_std_string_escaped(),
+        "20px,10px"
+    );
+    let builds_after_sizes = runtime.host_state.borrow().child_layout_builds;
+    assert_eq!(
+        builds_after_sizes,
+        builds_before + 1,
+        "multiple CSSOM used-size reads must share one child layout"
+    );
+
+    assert_eq!(
+        runtime
+            .eval("a.getBoundingClientRect().width")
+            .unwrap()
+            .as_number(),
+        Some(20.0)
+    );
+    runtime.paint_current_document().unwrap();
+    assert_eq!(
+        runtime.host_state.borrow().child_layout_builds,
+        builds_after_sizes,
+        "geometry and parent paint must reuse the CSSOM child layout"
+    );
+}
+
+#[test]
 fn child_layout_cache_observes_style_dom_and_viewport_changes() {
     let mut runtime = runtime();
     runtime.paint_current_document().unwrap();

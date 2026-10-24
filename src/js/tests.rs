@@ -11526,6 +11526,12 @@ fn resize_observer_reports_real_boxes_and_size_changes() {
         .eval("document.getElementById('box').style.width = '120px'")
         .unwrap();
     runtime.run_jobs().unwrap();
+    assert_eq!(
+        runtime.eval("resizeEntries.length").unwrap().as_number(),
+        Some(1.0),
+        "mutation-driven resize delivery waits for the rendering opportunity"
+    );
+    runtime.run_animation_frame(16).unwrap();
     assert!(
         runtime
             .eval("resizeEntries.length === 2 && resizeEntries[1].contentWidth === 120")
@@ -11538,6 +11544,7 @@ fn resize_observer_reports_real_boxes_and_size_changes() {
         .eval("document.getElementById('box').style.width = '120px'")
         .unwrap();
     runtime.run_jobs().unwrap();
+    runtime.run_animation_frame(32).unwrap();
     assert_eq!(
         runtime.eval("resizeEntries.length").unwrap().as_number(),
         Some(2.0)

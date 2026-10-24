@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Offline CSSOM used-size traversal probe</title>
+<style>
+  body { margin: 0; }
+  .nest { transform: translate(1px, 2px) rotate(1deg); }
+  .row { width: 90px; }
+  .split { padding: 2px; border: 1px solid; }
+  .block { width: 40px; height: 25px; padding: 3px; border: 2px solid; }
+</style>
+<div id="probe"></div>
+<script>
+// Setup is separate from measured reads. Call setupUsedSizeProbe(128 or 1024),
+// then runUsedSizeReads(128) repeatedly after layout warmup. Compare checksums
+// and samples across revisions; this fixture does not model live-site delays.
+var usedSizeTargets = [];
+function setupUsedSizeProbe(count) {
+    var host = document.getElementById('probe');
+    host.textContent = '';
+    usedSizeTargets = [];
+    for (var depth = 0; depth < 32; depth++) {
+        var nest = document.createElement('div');
+        nest.className = 'nest';
+        host.appendChild(nest);
+        host = nest;
+    }
+    for (var index = 0; index < count; index++) {
+        var row = document.createElement('div');
+        row.className = 'row';
+        var target = document.createElement(index % 2 ? 'span' : 'div');
+        target.className = index % 2 ? 'split' : 'block';
+        if (index % 2) target.textContent = 'one two three four five six seven eight nine ten';
+        row.appendChild(target);
+        host.appendChild(row);
+        usedSizeTargets.push(target);
+    }
+    document.body.getBoundingClientRect();
+}
+function runUsedSizeReads(reads) {
+    var checksum = 0;
+    var start = performance.now();
+    for (var index = 0; index < reads; index++) {
+        var target = usedSizeTargets[(index * 17) % usedSizeTargets.length];
+        var style = getComputedStyle(target);
+        // Non-replaced inline widths may resolve to "auto". Keep those reads
+        // while including their string lengths in the deterministic checksum.
+        var width = style.width;
+        var height = style.height;
+        checksum += width.length + height.length;
+        checksum += (parseFloat(width) || 0) + (parseFloat(height) || 0);
+    }
+    return { milliseconds: performance.now() - start, checksum: checksum };
+}
+setupUsedSizeProbe(1024);
+</script>

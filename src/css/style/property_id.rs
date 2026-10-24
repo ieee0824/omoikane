@@ -601,6 +601,11 @@ impl PropertyMap {
         }
     }
 
+    /// Returns the number of stored properties, excluding color metadata.
+    pub(crate) fn len(&self) -> usize {
+        self.known.len() + self.other.len()
+    }
+
     /// Returns whether no properties are stored.
     pub(crate) fn is_empty(&self) -> bool {
         self.known.is_empty() && self.other.is_empty()

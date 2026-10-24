@@ -1806,7 +1806,7 @@ impl InvariantOverflowClip {
 
     fn covers_viewport(self, layout: &LayoutBox, style: &ComputedStyle) -> bool {
         if crate::layout::has_containment(style, "paint")
-            || has_non_none_value(style, "clip-path")
+            || has_non_none_value(style, PropertyId::ClipPath)
             || [
                 "border-top-left-radius",
                 "border-top-right-radius",
@@ -2677,7 +2677,7 @@ fn scan_layout(
     if has_fixed_background(&style) {
         return Err(RetainedPaintError::FixedBackground);
     }
-    if has_non_none_value(&style, "backdrop-filter") {
+    if has_non_none_value(&style, PropertyId::BackdropFilter) {
         return Err(RetainedPaintError::BackdropFilter);
     }
 
@@ -2733,8 +2733,8 @@ fn child_scan_state(
     invariant_clip: Option<InvariantOverflowClip>,
 ) -> ScanState {
     let grouping_effect = element_opacity(style).is_some_and(|value| value < 1.0)
-        || has_non_none_value(style, "filter")
-        || has_non_none_layer(style, "mask-image");
+        || has_non_none_value(style, PropertyId::Filter)
+        || has_non_none_layer(style, PropertyId::MaskImage);
     let clip_geometry_unproven = invariant_clip.is_some()
         && (state.clip_geometry_unproven
             || layout.transform != AffineTransform::identity()
@@ -2746,7 +2746,7 @@ fn child_scan_state(
         && invariant_clip.is_some_and(|proof| proof.covers_viewport(layout, style));
     let descendant_clip = (layout.overflow.clips_overflow() && !overflow_is_invariant)
         || crate::layout::has_containment(style, "paint")
-        || has_non_none_value(style, "clip-path");
+        || has_non_none_value(style, PropertyId::ClipPath);
     ScanState {
         fixed_containing_ancestor: state.fixed_containing_ancestor
             || crate::layout::establishes_fixed_containing_block(style),
@@ -2854,10 +2854,11 @@ fn validate_vertical_overscan_layout(
 /// adjacent viewport tile cannot change their output. Spatial kernels and
 /// unknown computed values retain the conservative viewport-edge fallback.
 fn has_viewport_edge_filter(style: &ComputedStyle) -> bool {
-    if !has_non_none_value(style, "filter") {
+    if !has_non_none_value(style, PropertyId::Filter) {
         return false;
     }
-    let Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) = style.get("filter")
+    let Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) =
+        style.get_by_id(PropertyId::Filter)
     else {
         return true;
     };
@@ -2901,8 +2902,8 @@ fn inline_fragments_have_viewport_edge_filter(
     })
 }
 
-fn has_non_none_value(style: &ComputedStyle, property: &str) -> bool {
-    match style.get(property) {
+fn has_non_none_value(style: &ComputedStyle, property: PropertyId) -> bool {
+    match style.get_by_id(property) {
         None => false,
         Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
             let value = value.trim();
@@ -2912,8 +2913,8 @@ fn has_non_none_value(style: &ComputedStyle, property: &str) -> bool {
     }
 }
 
-fn has_non_none_layer(style: &ComputedStyle, property: &str) -> bool {
-    match style.get(property) {
+fn has_non_none_layer(style: &ComputedStyle, property: PropertyId) -> bool {
+    match style.get_by_id(property) {
         None => false,
         Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
             crate::css::split_top_level_commas(value)
@@ -2927,7 +2928,7 @@ fn has_non_none_layer(style: &ComputedStyle, property: &str) -> bool {
 
 fn has_fixed_background(style: &ComputedStyle) -> bool {
     style
-        .get("background-attachment")
+        .get_by_id(PropertyId::BackgroundAttachment)
         .map(ComputedValue::css_text)
         .is_some_and(|value| {
             crate::css::split_top_level_commas(&value)
