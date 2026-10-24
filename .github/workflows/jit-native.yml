@@ -51,6 +51,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: native-jit-v1-${{ matrix.target }}
+          # PRs restore main's entry; see #1451 for the cache budget.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
           cache-on-failure: true
       - name: Verify the native host and record the revision

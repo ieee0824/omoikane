@@ -37,6 +37,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gui-pointer-lock-${{ runner.arch }}
+          # PRs restore main's entry; see #1451 for the cache budget.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
       - name: Install virtual desktop and input tools
         run: |

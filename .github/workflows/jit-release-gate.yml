@@ -79,11 +79,15 @@ jobs:
           path: .artifacts/jit-gate5/inputs/
       - name: Use the shared lockfile
         run: cp .artifacts/jit-gate5/inputs/Cargo.lock Cargo.lock
+      # The release package build is short and off the critical path, so only
+      # the suite keeps a Rust cache within the 10 GB repository limit (#1451).
       - uses: Swatinem/rust-cache@v2
+        if: matrix.kind == 'suite'
         with:
           # A failed suite may leave an incomplete cache at a permanent key.
-          # Refresh the existing entries and save only after successful jobs.
+          # Save only after successful jobs on main; PRs restore main's entry.
           key: jit-gate5-v3-${{ matrix.target }}-${{ matrix.kind }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
       # rust-cache sees only the root workspace and drops the nested Boa path
       # dependencies from target/debug. Restore them after rust-cache cleanup.
@@ -123,7 +127,7 @@ jobs:
           python3 scripts/diagnose-gate5-wpt.py
           .artifacts/jit-gate5/aarch64-apple-darwin/suite
       - name: Save Boa suite artifacts
-        if: matrix.kind == 'suite' && steps.boa-cache.outputs.cache-hit != 'true' && success()
+        if: matrix.kind == 'suite' && steps.boa-cache.outputs.cache-hit != 'true' && success() && github.ref == 'refs/heads/main'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:

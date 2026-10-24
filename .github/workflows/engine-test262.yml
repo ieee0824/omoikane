@@ -31,6 +31,7 @@ jobs:
           - {os: macos-14, target: aarch64-apple-darwin}
     env:
       CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
       CARGO_TERM_COLOR: never
       CARGO_TARGET_DIR: ${{ github.workspace }}/engine/boa/target
     steps:
@@ -41,12 +42,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: engine/boa -> target
-          key: engine-test262-v1-${{ matrix.platform.target }}-${{ matrix.variant }}
-          cache-workspace-crates: true
-          cache-on-failure: true
+      # No Rust cache: this Boa-only job is short and off the critical path,
+      # and its entries would evict the long jobs' caches from the 10 GB
+      # repository limit (#1451).
       - name: Read fixed Test262 revision
         id: suite
         shell: bash

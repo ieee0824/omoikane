@@ -61,10 +61,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: engine/boa -> target
-          key: engine-parser-asan-v1-${{ matrix.target }}-${{ matrix.profile }}
+      # No Rust cache: this Boa-only job is short and off the critical path,
+      # and its entries would evict the long jobs' caches from the 10 GB
+      # repository limit (#1451).
       - name: Record exact diagnostic settings and suite revision
         id: suite
         shell: bash
