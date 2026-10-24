@@ -26,6 +26,7 @@ use winit::event_loop::EventLoopProxy;
 const DEFAULT_GUI_RESOURCE_WORKERS: usize = 4;
 const MAX_GUI_RESOURCE_WORKERS: usize = 64;
 const MAX_NATIVE_SCROLL_DROP_DIAGNOSTICS: u64 = 16;
+const MAX_NATIVE_WHEEL_BATCH_DURATION: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Shared visited-link revocation is provided by the v50 storage observer.
 /// It revokes every registered live handle before a new visited key becomes
@@ -213,8 +214,12 @@ impl NativeWheel {
     fn merge(&mut self, next: &Self) -> bool {
         use winit::event::TouchPhase;
         let gap = next.received.checked_duration_since(self.received);
-        if self.pixel_delta
-            || next.pixel_delta
+        // Line and pixel deltas are both normalized to CSS pixels before this
+        // queue, but never combine the two source kinds. Gesture boundaries
+        // and accepted native notifications remain separate FIFO entries.
+        if self.is_phase_barrier()
+            || next.is_phase_barrier()
+            || self.pixel_delta != next.pixel_delta
             || self.phase != TouchPhase::Moved
             || next.phase != TouchPhase::Moved
             || self.device != next.device
@@ -222,14 +227,12 @@ impl NativeWheel {
             || self.modifiers != next.modifiers
             || self.buttons != next.buttons
             || self.document != next.document
-            || !gap.is_some_and(|gap| gap <= std::time::Duration::from_millis(50))
+            || !gap.is_some_and(|gap| gap <= MAX_NATIVE_WHEEL_BATCH_DURATION)
         {
             return false;
         }
         fn same_direction(a: f64, b: f64) -> bool {
-            a.is_finite()
-                && b.is_finite()
-                && ((a == 0.0 && b == 0.0) || (a != 0.0 && b != 0.0 && a.signum() == b.signum()))
+            a.is_finite() && b.is_finite() && (a == 0.0 || b == 0.0 || a.signum() == b.signum())
         }
         let sum = (self.delta.0 + next.delta.0, self.delta.1 + next.delta.1);
         if !same_direction(self.delta.0, next.delta.0)
@@ -343,14 +346,30 @@ fn next_command(
     if !matches!(&current.command, PageCommand::NativeWheel(wheel) if wheel.document == document) {
         return Some(current);
     }
+    let batch_started = match &current.command {
+        PageCommand::NativeWheel(wheel) => wheel.received,
+        _ => unreachable!("raw wheel checked above"),
+    };
     // Bound work independently of tracing, even while a producer keeps sending.
+    // The fixed time window also prevents a continuous stream with short
+    // rolling gaps from collapsing seconds of separately cancelable input.
     let mut source_count = 1;
     while source_count < 128 {
         let Ok(next) = commands.try_recv() else { break };
-        let merged = match (&mut current.command, &next.command) {
-            (PageCommand::NativeWheel(wheel), PageCommand::NativeWheel(next)) => wheel.merge(next),
+        let inside_batch_window = match &next.command {
+            PageCommand::NativeWheel(wheel) => wheel
+                .received
+                .checked_duration_since(batch_started)
+                .is_some_and(|elapsed| elapsed <= MAX_NATIVE_WHEEL_BATCH_DURATION),
             _ => false,
         };
+        let merged = inside_batch_window
+            && match (&mut current.command, &next.command) {
+                (PageCommand::NativeWheel(wheel), PageCommand::NativeWheel(next)) => {
+                    wheel.merge(next)
+                }
+                _ => false,
+            };
         if !merged {
             *pending = Some(next);
             break;
@@ -2670,6 +2689,86 @@ mod tests {
     }
 
     #[test]
+    fn merged_pixel_wheel_dispatches_one_cancelable_total_delta() {
+        let mut page = wheel_page();
+        evaluate(
+            &mut page,
+            "globalThis.pixelWheelEvents=[];addEventListener('wheel',event=>{pixelWheelEvents.push([event.cancelable,event.deltaX,event.deltaY]);event.preventDefault()}, {passive:false})",
+        );
+        let native = NativeWheel {
+            gui_sequence: 0,
+            gui_sequences: Vec::new(),
+            gui_sequence_last: 0,
+            gui_source_count: 0,
+            gui_sequences_truncated: false,
+            delta: (0.0, 12.5),
+            device: winit::event::DeviceId::dummy(),
+            cursor: (10.0, 10.0),
+            modifiers: InputModifiers::default(),
+            buttons: 0,
+            pixel_delta: true,
+            phase: winit::event::TouchPhase::Moved,
+            document: page.session.document_generation(),
+            received: Instant::now(),
+        };
+        let mut next = native.clone();
+        next.delta = (1.25, 7.5);
+        let mut merged = native;
+        assert!(merged.merge(&next));
+        page.apply(PageCommand::NativeWheel(merged)).unwrap();
+        assert_eq!(
+            evaluate(&mut page, "JSON.stringify(pixelWheelEvents)"),
+            json!("[[true,1.25,20]]")
+        );
+        assert_eq!(evaluate(&mut page, "scrollY"), json!(0));
+    }
+
+    #[test]
+    fn pixel_wheel_batch_window_preserves_later_default_action() {
+        let mut page = wheel_page();
+        evaluate(
+            &mut page,
+            "globalThis.pixelWheelCount=0;addEventListener('wheel',event=>{pixelWheelCount++;if(pixelWheelCount===1)event.preventDefault()}, {passive:false})",
+        );
+        let started = Instant::now();
+        let (tx, rx) = mpsc::channel();
+        for index in 0..5 {
+            let wheel = NativeWheel {
+                gui_sequence: 0,
+                gui_sequences: Vec::new(),
+                gui_sequence_last: 0,
+                gui_source_count: 0,
+                gui_sequences_truncated: false,
+                delta: (0.0, 10.0),
+                device: winit::event::DeviceId::dummy(),
+                cursor: (10.0, 10.0),
+                modifiers: InputModifiers::default(),
+                buttons: 0,
+                pixel_delta: true,
+                phase: winit::event::TouchPhase::Moved,
+                document: page.session.document_generation(),
+                received: started + std::time::Duration::from_millis(index * 16),
+            };
+            tx.send(QueuedCommand {
+                canonical_ingress: None,
+                command: PageCommand::NativeWheel(wheel),
+                input: None,
+            })
+            .unwrap();
+        }
+        let mut pending = None;
+        let first = next_command(&rx, &mut pending, page.session.document_generation()).unwrap();
+        let second = next_command(&rx, &mut pending, page.session.document_generation()).unwrap();
+        page.apply(first.command).unwrap();
+        assert_eq!(evaluate(&mut page, "scrollY"), json!(0));
+        page.apply(second.command).unwrap();
+        assert_eq!(
+            evaluate(&mut page, "JSON.stringify([pixelWheelCount,scrollY])"),
+            json!("[2,10]")
+        );
+    }
+
+    #[test]
     fn owned_navigation_input_find_and_frame_share_one_page_owner() {
         let mut page = owner();
         page.apply(PageCommand::Viewport(320, 200)).unwrap();
@@ -2795,6 +2894,123 @@ mod native_wheel_tests {
             next_command(&rx, &mut pending, 7).unwrap().command,
             PageCommand::Frame { .. }
         ));
+    }
+
+    #[test]
+    fn pixel_wheel_merge_preserves_last_ingress_ack_and_event_order() {
+        let ingress = CanonicalIngress::default();
+        let (tx, rx) = mpsc::channel();
+        let mut first = wheel();
+        first.pixel_delta = true;
+        first.delta = (0.0, 12.5);
+        let mut second = first.clone();
+        second.delta = (1.25, 7.5);
+        for wheel in [first.clone(), second] {
+            tx.send(QueuedCommand {
+                canonical_ingress: ingress.enqueue(),
+                command: PageCommand::NativeWheel(wheel),
+                input: None,
+            })
+            .unwrap();
+        }
+        tx.send(QueuedCommand {
+            canonical_ingress: ingress.enqueue(),
+            command: PageCommand::Modifiers(InputModifiers {
+                shift: true,
+                ..Default::default()
+            }),
+            input: None,
+        })
+        .unwrap();
+        tx.send(QueuedCommand {
+            canonical_ingress: ingress.enqueue(),
+            command: PageCommand::NativeWheel(first),
+            input: None,
+        })
+        .unwrap();
+
+        let mut pending = None;
+        let merged = next_command(&rx, &mut pending, 7).unwrap();
+        assert_eq!(merged.canonical_ingress, Some(CanonicalIngressId(2)));
+        let PageCommand::NativeWheel(wheel) = merged.command else {
+            panic!("raw wheel expected")
+        };
+        assert_eq!(wheel.delta, (1.25, 20.0));
+        ingress.completed.store(2, Ordering::Release);
+        assert!(!ingress.drained(), "later FIFO inputs remain barriers");
+
+        assert!(matches!(
+            next_command(&rx, &mut pending, 7).unwrap().command,
+            PageCommand::Modifiers(InputModifiers { shift: true, .. })
+        ));
+        ingress.completed.store(3, Ordering::Release);
+        assert!(!ingress.drained());
+        assert!(matches!(
+            next_command(&rx, &mut pending, 7).unwrap().command,
+            PageCommand::NativeWheel(NativeWheel {
+                pixel_delta: true,
+                ..
+            })
+        ));
+        ingress.completed.store(4, Ordering::Release);
+        assert!(ingress.drained());
+    }
+
+    #[test]
+    fn pixel_wheel_batch_uses_a_fixed_window_from_first_receipt() {
+        let (tx, rx) = mpsc::channel();
+        let started = Instant::now();
+        for index in 0..5 {
+            let mut next = wheel();
+            next.pixel_delta = true;
+            next.received = started + Duration::from_millis(index * 16);
+            tx.send(queued(next, index + 1)).unwrap();
+        }
+        let mut pending = None;
+        let first = next_command(&rx, &mut pending, 7).unwrap();
+        let PageCommand::NativeWheel(first_wheel) = first.command else {
+            panic!("raw wheel expected")
+        };
+        assert_eq!(first_wheel.delta, (0.0, 160.0));
+        assert_eq!(first.canonical_ingress, Some(CanonicalIngressId(4)));
+        assert_eq!(first.input.unwrap().source_count, 4);
+
+        let fifth = next_command(&rx, &mut pending, 7).unwrap();
+        assert_eq!(fifth.canonical_ingress, Some(CanonicalIngressId(5)));
+        let PageCommand::NativeWheel(fifth_wheel) = fifth.command else {
+            panic!("raw wheel expected")
+        };
+        assert_eq!(fifth_wheel.delta, (0.0, 40.0));
+    }
+
+    #[test]
+    fn pixel_wheel_started_phase_separates_moved_batches() {
+        let (tx, rx) = mpsc::channel();
+        let mut moved = wheel();
+        moved.pixel_delta = true;
+        let mut started = moved.clone();
+        started.delta = (0.0, 0.0);
+        started.phase = TouchPhase::Started;
+        tx.send(queued(moved.clone(), 1)).unwrap();
+        tx.send(queued(started, 2)).unwrap();
+        tx.send(queued(moved, 3)).unwrap();
+
+        let mut pending = None;
+        for (sequence, phase) in [
+            (1, TouchPhase::Moved),
+            (2, TouchPhase::Started),
+            (3, TouchPhase::Moved),
+        ] {
+            let command = next_command(&rx, &mut pending, 7).unwrap();
+            assert_eq!(
+                command.canonical_ingress,
+                Some(CanonicalIngressId(sequence))
+            );
+            assert!(matches!(
+                command.command,
+                PageCommand::NativeWheel(NativeWheel { phase: actual, .. }) if actual == phase
+            ));
+        }
     }
 
     fn wheel() -> NativeWheel {
@@ -3095,9 +3311,13 @@ mod native_wheel_tests {
         let first = wheel();
         for change in 0..13 {
             let mut next = first.clone();
+            let mut current = first.clone();
             match change {
                 0 => next.delta.1 = -40.0,
-                1 => next.delta.0 = 1.0,
+                1 => {
+                    current.delta.0 = 1.0;
+                    next.delta.0 = -1.0;
+                }
                 2 => next.phase = TouchPhase::Started,
                 3 => next.phase = TouchPhase::Ended,
                 4 => next.phase = TouchPhase::Cancelled,
@@ -3110,9 +3330,9 @@ mod native_wheel_tests {
                 11 => next.delta.1 = f64::INFINITY,
                 _ => next.received -= Duration::from_millis(1),
             }
-            let mut current = first.clone();
+            let expected_delta = current.delta;
             assert!(!current.merge(&next), "case {change}");
-            assert_eq!(current.delta, first.delta);
+            assert_eq!(current.delta, expected_delta);
         }
         let mut huge = first.clone();
         huge.delta.1 = f64::MAX;
@@ -3125,6 +3345,59 @@ mod native_wheel_tests {
             let mut boundary = first.clone();
             boundary.phase = phase;
             assert!(!boundary.merge(&first));
+        }
+    }
+
+    #[test]
+    fn pixel_wheel_merge_requires_matching_delta_kind_and_allows_zero_axis() {
+        let mut first = wheel();
+        first.pixel_delta = true;
+        first.delta = (0.0, 10.0);
+        let mut next = first.clone();
+        next.delta = (2.0, 5.0);
+        assert!(first.merge(&next));
+        assert_eq!(first.delta, (2.0, 15.0));
+
+        let mut line = wheel();
+        let mut pixel = line.clone();
+        pixel.pixel_delta = true;
+        assert!(!line.merge(&pixel));
+
+        let mut opposite = wheel();
+        opposite.pixel_delta = true;
+        opposite.delta = (1.0, 10.0);
+        let mut reversed = opposite.clone();
+        reversed.delta.0 = -1.0;
+        assert!(!opposite.merge(&reversed));
+    }
+
+    #[test]
+    fn zero_moved_wheel_preserves_its_fifo_ingress_barrier() {
+        let (tx, rx) = mpsc::channel();
+        for (index, delta) in [(0.0, 10.0), (0.0, 0.0), (0.0, 20.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut wheel = wheel();
+            wheel.pixel_delta = true;
+            wheel.delta = delta;
+            wheel.phase = TouchPhase::Moved;
+            let mut command = queued(wheel, index as u64 + 1);
+            command.canonical_ingress = Some(CanonicalIngressId(index as u64 + 1));
+            tx.send(command).unwrap();
+        }
+        let mut pending = None;
+        for (index, expected) in [10.0, 0.0, 20.0].into_iter().enumerate() {
+            let command = next_command(&rx, &mut pending, 7).unwrap();
+            assert_eq!(
+                command.canonical_ingress,
+                Some(CanonicalIngressId(index as u64 + 1))
+            );
+            let PageCommand::NativeWheel(wheel) = command.command else {
+                panic!("raw wheel expected");
+            };
+            assert_eq!(wheel.delta, (0.0, expected));
+            assert_eq!(wheel.phase, TouchPhase::Moved);
         }
     }
 
