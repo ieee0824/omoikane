@@ -495,6 +495,10 @@ impl BuiltInConstructor for Promise {
             // 7. Set promise.[[PromiseIsHandled]] to false.
             Self::new(),
         );
+        // Settlement clears the resolving functions' shared Promise capture.
+        // The executor can collect again before this native local reaches the
+        // VM stack, so retain the result throughout construction.
+        let _promise_root = promise.clone().root();
 
         // 8. Let resolvingFunctions be CreateResolvingFunctions(promise).
         let resolving_functions = Self::create_resolving_functions(&promise, context);

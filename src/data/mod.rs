@@ -22,21 +22,46 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 /// The bytes and media type a `blob:` URL resolves to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlobUrlEntry {
     /// The blob's bytes. Shared rather than cloned because image decoding and
     /// `fetch()` both only read them.
-    pub bytes: Rc<Vec<u8>>,
+    pub bytes: Arc<Vec<u8>>,
     /// The blob's `type`, already normalized by the JavaScript `Blob`
     /// constructor. Empty when the blob has no type.
     pub media_type: String,
 }
 
+/// Owned URL mappings that may be shared explicitly with resource workers.
+#[derive(Clone, Default)]
+pub(crate) struct BlobUrlStore(Arc<Mutex<HashMap<String, BlobUrlEntry>>>);
+
 thread_local! {
-    static BLOB_URLS: RefCell<HashMap<String, BlobUrlEntry>> = RefCell::new(HashMap::new());
+    static BLOB_URLS: RefCell<BlobUrlStore> = RefCell::new(BlobUrlStore::default());
+}
+
+/// Captures this thread's current store without copying registered blob bytes.
+pub(crate) fn current_blob_url_store() -> BlobUrlStore {
+    BLOB_URLS.with(|store| store.borrow().clone())
+}
+
+/// Uses an explicitly shared store for a short operation, restoring the prior
+/// thread-local store on return or unwind. Revocation and clearing affect all
+/// users of the shared handle; unrelated threads retain independent defaults.
+pub(crate) fn with_blob_url_store<T>(store: BlobUrlStore, operation: impl FnOnce() -> T) -> T {
+    struct Restore(Option<BlobUrlStore>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            BLOB_URLS.with(|store| store.replace(self.0.take().unwrap()));
+        }
+    }
+
+    let _restore = Restore(Some(BLOB_URLS.with(|current| current.replace(store))));
+    operation()
 }
 
 /// Registers `url` as resolving to `bytes` with media type `media_type`.
@@ -61,18 +86,20 @@ thread_local! {
 /// ```
 pub fn register_blob_url(url: String, bytes: Vec<u8>, media_type: String) {
     let entry = BlobUrlEntry {
-        bytes: Rc::new(bytes),
+        bytes: Arc::new(bytes),
         media_type,
     };
-    BLOB_URLS.with(|store| {
-        store.borrow_mut().insert(url, entry);
-    });
+    current_blob_url_store()
+        .0
+        .lock()
+        .unwrap()
+        .insert(url, entry);
 }
 
 /// Returns the entry `url` resolves to, or `None` when it was never registered
 /// or has been revoked.
 pub fn lookup_blob_url(url: &str) -> Option<BlobUrlEntry> {
-    BLOB_URLS.with(|store| store.borrow().get(url).cloned())
+    current_blob_url_store().0.lock().unwrap().get(url).cloned()
 }
 
 /// Removes `url` from the store, returning whether it was registered.
@@ -80,7 +107,12 @@ pub fn lookup_blob_url(url: &str) -> Option<BlobUrlEntry> {
 /// `URL.revokeObjectURL()` is defined to ignore unknown URLs, so callers use the
 /// return value for diagnostics only.
 pub fn revoke_blob_url(url: &str) -> bool {
-    BLOB_URLS.with(|store| store.borrow_mut().remove(url).is_some())
+    current_blob_url_store()
+        .0
+        .lock()
+        .unwrap()
+        .remove(url)
+        .is_some()
 }
 
 /// Empties the store.
@@ -89,17 +121,75 @@ pub fn revoke_blob_url(url: &str) -> bool {
 /// scoped to the Document that created them, and nothing can resolve them once
 /// it is gone.
 pub fn clear_blob_urls() {
-    BLOB_URLS.with(|store| store.borrow_mut().clear());
+    current_blob_url_store().0.lock().unwrap().clear();
 }
 
 /// Returns how many object URLs are currently registered.
 pub fn blob_url_count() -> usize {
-    BLOB_URLS.with(|store| store.borrow().len())
+    current_blob_url_store().0.lock().unwrap().len()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicitly_shared_store_observes_revocation_and_restores_worker_default() {
+        clear_blob_urls();
+        let revoked = "blob:null/shared-revoked";
+        let cleared = "blob:null/shared-cleared";
+        register_blob_url(revoked.into(), vec![1, 2, 3], String::new());
+        register_blob_url(cleared.into(), vec![4], String::new());
+        let original_bytes = lookup_blob_url(revoked).unwrap().bytes;
+        let shared = current_blob_url_store();
+        let (ready, started) = std::sync::mpsc::channel();
+        let (resume, wait) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            // The fresh thread has an independent default store.
+            assert_eq!(blob_url_count(), 0);
+            register_blob_url(revoked.into(), vec![9], String::new());
+            with_blob_url_store(shared, || {
+                let entry = lookup_blob_url(revoked).unwrap();
+                assert!(Arc::ptr_eq(&entry.bytes, &original_bytes));
+                ready.send(()).unwrap();
+                wait.recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                assert!(lookup_blob_url(revoked).is_none());
+                assert!(lookup_blob_url(cleared).is_some());
+                clear_blob_urls();
+            });
+            assert_eq!(lookup_blob_url(revoked).unwrap().bytes.as_slice(), &[9]);
+            assert_eq!(blob_url_count(), 1);
+        });
+        started
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(revoke_blob_url(revoked));
+        resume.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(blob_url_count(), 0);
+        assert!(lookup_blob_url(cleared).is_none());
+    }
+
+    #[test]
+    fn nested_store_scopes_restore_after_unwind() {
+        clear_blob_urls();
+        let url = "blob:null/scoped";
+        register_blob_url(url.into(), vec![1], String::new());
+        with_blob_url_store(BlobUrlStore::default(), || {
+            assert!(lookup_blob_url(url).is_none());
+            register_blob_url(url.into(), vec![2], String::new());
+            let result = std::panic::catch_unwind(|| {
+                with_blob_url_store(BlobUrlStore::default(), || {
+                    register_blob_url(url.into(), vec![3], String::new());
+                    panic!("exercise scoped restoration");
+                });
+            });
+            assert!(result.is_err());
+            assert_eq!(lookup_blob_url(url).unwrap().bytes.as_slice(), &[2]);
+        });
+        assert_eq!(lookup_blob_url(url).unwrap().bytes.as_slice(), &[1]);
+    }
 
     #[test]
     fn registered_urls_resolve_to_their_bytes_and_type() {

@@ -13,6 +13,22 @@ pub(super) struct Submission {
     pub source_document_id: Option<usize>,
 }
 
+/// A child reload is forwarded through the container's Realm. Its captured
+/// navigation client, rather than that Realm or the historical form owner,
+/// supplies the current Cookie and Storage Access authority.
+fn replay_source_document(state: &HostState, iframe: usize, context: &Context) -> JsResult<usize> {
+    if state.active_child_navigation_frame == Some(iframe)
+        && let Some(document) = state
+            .pending_iframe_referrers
+            .get(&iframe)
+            .and_then(|source| source.document_id)
+            .filter(|document| state.document_is_active(*document))
+    {
+        return Ok(document);
+    }
+    Ok(state.csp_document_for_context(context)?.identity())
+}
+
 pub(super) enum NamedLinkTarget {
     NotFound,
     Blocked,
@@ -217,21 +233,24 @@ impl HostState {
     ) -> Option<usize> {
         if let FormTarget::Frame(frame) = target {
             request.source_document_id = Some(source.identity());
+            let frame_id = frame.identity();
+            let epoch = self.reserve_iframe_form_submission(&frame, source.identity())?;
             // A planned navigation supersedes an initial about:blank load or
             // an earlier submission that has not started yet.
             self.event_loop
-                .cancel_resource_loads_for_nodes(&HashSet::from([frame.identity()]));
-            self.pending_resource_loads.remove(&frame.identity());
-            let frame_id = frame.identity();
+                .cancel_resource_loads_for_nodes(&HashSet::from([frame_id]));
+            self.pending_resource_loads.remove(&frame_id);
             self.pending_iframe_visits.remove(&frame_id);
             self.pending_iframe_referrers.remove(&frame_id);
             self.pending_iframe_clients.remove(&frame_id);
+            self.pending_resource_loads.insert(frame_id);
             let visit_source = self.visit_source_for_document(source.identity());
             let referrer_source = self.navigation_referrer_source_for_document(source.identity());
             let client_security = self.navigation_security_snapshot(source.identity());
             self.event_loop.enqueue_timer_for_document(
                 TimerPayload::FormSubmission {
                     node_id: frame.identity(),
+                    epoch,
                     request,
                     source_document_id: source.identity(),
                     client_security,
@@ -462,30 +481,42 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 .to_std_string_escaped();
             with_host_state(|host| {
                 let mut state = host.borrow_mut();
-                let source_document = state.csp_document_for_context(context)?.identity();
+                let source_document = replay_source_document(&state, id, context)?;
                 let Some(frame) = state.get_node(id) else {
                     return Ok(JsValue::undefined());
                 };
                 if !state.node_is_in_active_document(&frame) {
                     return Ok(JsValue::undefined());
                 }
+                let Some(epoch) = state.reserve_iframe_form_submission(&frame, source_document)
+                else {
+                    return Ok(JsValue::null());
+                };
                 state
                     .event_loop
                     .cancel_resource_loads_for_nodes(&HashSet::from([id]));
                 state.pending_resource_loads.remove(&id);
-                if state.active_child_navigation_frame != Some(id) {
-                    state.capture_iframe_referrer_source(id, source_document);
-                }
-                state
-                    .iframe_document_with_submission(
-                        &frame,
-                        Some(&request),
-                        request.source_document_id,
-                        false,
-                    )
-                    .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
-                state.schedule_connected_resource_loads(&frame, true, None);
-                Ok(JsValue::undefined())
+                state.pending_iframe_visits.remove(&id);
+                state.pending_iframe_referrers.remove(&id);
+                state.pending_iframe_clients.remove(&id);
+                state.pending_resource_loads.insert(id);
+                let visit_source = state.visit_source_for_document(source_document);
+                let referrer_source =
+                    state.navigation_referrer_source_for_document(source_document);
+                let client_security = state.navigation_security_snapshot(source_document);
+                state.event_loop.enqueue_timer_for_document(
+                    TimerPayload::FormSubmission {
+                        node_id: id,
+                        epoch,
+                        request,
+                        source_document_id: source_document,
+                        client_security,
+                        visit_source,
+                        referrer_source,
+                    },
+                    Some(source_document),
+                );
+                Ok(js_string!(epoch.to_string()).into())
             })
         }),
     )?;

@@ -22,8 +22,34 @@ pub(crate) struct RuntimePaintKey {
 }
 
 impl JsRuntime {
+    /// Revokes committed scrolling before advancing a canonical smooth scroll.
+    /// Animated styles and images only dirty the next visual snapshot; their
+    /// clock must not retire the complete scene currently owned by the GUI.
+    pub(super) fn revoke_native_scroll_for_render_clock_advance(&self, elapsed_ms: u64) {
+        if elapsed_ms == 0 {
+            return;
+        }
+        let native_scroll = {
+            let state = self.host_state.borrow();
+            (!state.smooth_scrolls.is_empty()).then(|| state.native_scroll.clone())
+        };
+        if let Some(native_scroll) = native_scroll {
+            native_scroll.revoke_policy();
+        }
+    }
+
     /// Selects the browser's live animation clock rather than static snapshots.
     pub(crate) fn enable_live_css_animations(&mut self) {
+        let native_scroll = {
+            let state = self.host_state.borrow();
+            if state.live_css_animations {
+                return;
+            }
+            state.native_scroll.clone()
+        };
+        // Switching clocks changes the sampled pixels and can change layout on
+        // the next style sample. Close retained authority before flipping it.
+        native_scroll.revoke_policy();
         let mut state = self.host_state.borrow_mut();
         state.live_css_animations = true;
         state.mark_all_document_styles_dirty();
@@ -67,9 +93,26 @@ impl JsRuntime {
     /// constructing computed styles. Background work is initially polled each
     /// frame until the worker/worklet/module queues have drained.
     pub(crate) fn next_rendering(&self) -> NextRendering {
+        self.next_rendering_with_visited(&mut HashSet::new())
+    }
+
+    pub(super) fn next_rendering_with_visited(
+        &self,
+        visited: &mut HashSet<usize>,
+    ) -> NextRendering {
+        if !visited.insert(Rc::as_ptr(&self.host_state) as usize) {
+            return NextRendering::Idle;
+        }
+        let own = self.own_next_rendering(visited);
+        let shared = shared_worker::owner_next_rendering(&self.host_state, visited);
+        merge_next_rendering(own, shared)
+    }
+
+    fn own_next_rendering(&self, visited: &mut HashSet<usize>) -> NextRendering {
         let state = self.host_state.borrow();
         let visual_work = !state.page_hidden
             && (state.pending_media_query_report
+                || !state.pending_layout_observer_documents.is_empty()
                 || state.event_loop.has_pending_animation_frames()
                 || !state.smooth_scrolls.is_empty()
                 || state
@@ -83,14 +126,39 @@ impl JsRuntime {
                 }));
         // Completed downloads still need an opportunity to resume their promise.
         let modules = !self.module_loader.pending.borrow().is_empty();
-        let workers = state.workers.values().any(|worker| {
-            let worker = worker.borrow();
-            !worker.terminated
-                && (!worker.outgoing.is_empty()
-                    || worker.startup_error.is_some()
-                    || worker.runtime.next_rendering() != NextRendering::Idle)
-        });
-        if visual_work || modules || workers || state.worklet.has_pending_render_work() {
+        // Worker clocks advance by the same elapsed delta as their owner.
+        // Preserve their relative deadlines instead of polling future timers
+        // every frame; queued owner notifications still need an opportunity.
+        let workers = state
+            .workers
+            .values()
+            .fold(NextRendering::Idle, |demand, worker| {
+                let worker = worker.borrow();
+                if worker.terminated {
+                    return demand;
+                }
+                let next = if !worker.outgoing.is_empty() || worker.startup_error.is_some() {
+                    NextRendering::EveryFrame
+                } else {
+                    worker.runtime.next_rendering_with_visited(visited)
+                };
+                merge_next_rendering(demand, next)
+            });
+        let images = !state.pending_image_events.is_empty()
+            || state
+                .image_resources
+                .values()
+                .any(|images| images.borrow().has_pending_images());
+        if visual_work
+            || modules
+            || workers == NextRendering::EveryFrame
+            || images
+            || state.font_loading.has_pending()
+            || state.script_loads.has_pending()
+            || state.fetch_loads.has_pending()
+            || state.iframe_navigation.has_pending_loads()
+            || state.worklet.has_pending_render_work()
+        {
             return NextRendering::EveryFrame;
         }
         let timer_delay = state
@@ -104,8 +172,8 @@ impl JsRuntime {
         {
             // Worker globals can retain bootstrap-private CookieStore callbacks
             // after removing the page-facing API. They do not deliver change
-            // events, and scheduling them for cookie expiry would keep their
-            // owner Window in EveryFrame mode for the cookie's lifetime.
+            // events, so their private callbacks must not schedule the owner
+            // Window for cookie expiration.
             None
         } else {
             let cookie_store = state.cookie_store.lock().unwrap();
@@ -117,7 +185,7 @@ impl JsRuntime {
                 cookie_store.next_expiry_delay_at(SystemTime::now())
             }
         };
-        match (timer_delay, cookie_delay) {
+        let own = match (timer_delay, cookie_delay) {
             (Some(page_delay), Some(wall_delay)) => NextRendering::AfterBoth {
                 page_delay,
                 wall_delay,
@@ -125,13 +193,93 @@ impl JsRuntime {
             (Some(delay), None) => NextRendering::After(delay),
             (None, Some(delay)) => NextRendering::AfterWall(delay),
             (None, None) => NextRendering::Idle,
-        }
+        };
+        merge_next_rendering(own, workers)
+    }
+}
+
+/// Combines requirements while keeping page and wall clocks distinct.
+pub(super) fn merge_next_rendering(a: NextRendering, b: NextRendering) -> NextRendering {
+    if a == NextRendering::EveryFrame || b == NextRendering::EveryFrame {
+        return NextRendering::EveryFrame;
+    }
+    let clocks = |demand| match demand {
+        NextRendering::After(delay) => (Some(delay), None),
+        NextRendering::AfterWall(delay) => (None, Some(delay)),
+        NextRendering::AfterBoth {
+            page_delay,
+            wall_delay,
+        } => (Some(page_delay), Some(wall_delay)),
+        _ => (None, None),
+    };
+    let earlier = |a: Option<Duration>, b: Option<Duration>| match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    let (a_page, a_wall) = clocks(a);
+    let (b_page, b_wall) = clocks(b);
+    match (earlier(a_page, b_page), earlier(a_wall, b_wall)) {
+        (Some(page_delay), Some(wall_delay)) => NextRendering::AfterBoth {
+            page_delay,
+            wall_delay,
+        },
+        (Some(delay), None) => NextRendering::After(delay),
+        (None, Some(delay)) => NextRendering::AfterWall(delay),
+        (None, None) => NextRendering::Idle,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merging_worker_demands_preserves_independent_clock_deadlines() {
+        let page = NextRendering::After(Duration::from_millis(100));
+        let wall = NextRendering::AfterWall(Duration::from_millis(50));
+        let both = NextRendering::AfterBoth {
+            page_delay: Duration::from_millis(100),
+            wall_delay: Duration::from_millis(50),
+        };
+        assert_eq!(merge_next_rendering(page, wall), both);
+        assert_eq!(
+            merge_next_rendering(both, NextRendering::After(Duration::ZERO)),
+            NextRendering::AfterBoth {
+                page_delay: Duration::ZERO,
+                wall_delay: Duration::from_millis(50)
+            }
+        );
+        let values = [
+            NextRendering::Idle,
+            NextRendering::EveryFrame,
+            page,
+            wall,
+            both,
+        ];
+        for a in values {
+            assert_eq!(merge_next_rendering(a, a), a);
+            assert_eq!(merge_next_rendering(a, NextRendering::Idle), a);
+            for b in values {
+                assert_eq!(merge_next_rendering(a, b), merge_next_rendering(b, a));
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_runtime_visits_terminate_without_losing_the_first_deadline() {
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.eval("setTimeout(()=>{},123)").unwrap();
+        let mut visited = HashSet::new();
+        assert_eq!(
+            runtime.next_rendering_with_visited(&mut visited),
+            NextRendering::After(Duration::from_millis(123))
+        );
+        assert_eq!(
+            runtime.next_rendering_with_visited(&mut visited),
+            NextRendering::Idle
+        );
+    }
 
     #[test]
     fn expiring_cookie_wakes_an_otherwise_idle_window() {

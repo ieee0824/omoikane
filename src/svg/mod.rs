@@ -2349,9 +2349,10 @@ fn fill_compound_source(
         .fold(f32::MIN, f32::max);
     let y_start = (min_y.floor() as i32).max(0) as u32;
     let y_end = (max_y.ceil() as u32).min(canvas.height());
+    let mut intersections = Vec::new();
     for y in y_start..y_end {
         let scan_y = y as f32 + 0.5;
-        let mut intersections = Vec::new();
+        intersections.clear();
         for points in subpaths {
             for index in 0..points.len() {
                 let next = (index + 1) % points.len();
@@ -2379,12 +2380,30 @@ fn fill_compound_source(
             if inside {
                 let x_start = (pair[0].0.floor() as i32).max(0) as u32;
                 let x_end = (pair[1].0.ceil() as u32).min(canvas.width());
-                for x in x_start..x_end {
-                    canvas.blend_pixel(
-                        x,
-                        y,
-                        source_color(source, x as f32 + 0.5, scan_y, bbox, transform),
-                    );
+                if x_start >= x_end {
+                    continue;
+                }
+                // Keep each span separate: floor/ceil can make neighboring
+                // spans blend the same boundary pixel more than once.
+                match source {
+                    PaintSource::Solid(color) => canvas.fill_rect(
+                        Rect {
+                            x: x_start as f32,
+                            y: y as f32,
+                            width: (x_end - x_start) as f32,
+                            height: 1.0,
+                        },
+                        *color,
+                    ),
+                    PaintSource::Gradient { .. } => {
+                        for x in x_start..x_end {
+                            canvas.blend_pixel(
+                                x,
+                                y,
+                                source_color(source, x as f32 + 0.5, scan_y, bbox, transform),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -3415,6 +3434,339 @@ mod tests {
     use super::*;
     use crate::dom::{Node, NodeHandle};
     use crate::html::TreeBuilder;
+
+    fn scanline_transform() -> SvgTransform {
+        SvgTransform {
+            sx: 1.25,
+            sy: 0.75,
+            tx: -0.5,
+            ty: 1.25,
+            viewport_width: 16.0,
+            viewport_height: 12.0,
+        }
+    }
+
+    fn assert_scanline_pixels_match_reference(
+        subpaths: &[Vec<(f32, f32)>],
+        source: &PaintSource,
+        fill_rule: FillRule,
+    ) {
+        let bbox = Rect {
+            x: -2.25,
+            y: -1.5,
+            width: 20.5,
+            height: 16.0,
+        };
+        for background in [
+            Color::rgba(0, 0, 0, 0),
+            Color::rgba(37, 91, 163, 119),
+            Color::rgb(37, 91, 163),
+        ] {
+            let mut actual = Canvas::new(16, 12);
+            let mut expected = Canvas::new(16, 12);
+            for canvas in [&mut actual, &mut expected] {
+                canvas.fill_rect(
+                    Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 16.0,
+                        height: 12.0,
+                    },
+                    background,
+                );
+            }
+            fill_compound_source(
+                &mut actual,
+                subpaths,
+                source,
+                fill_rule,
+                scanline_transform(),
+                bbox,
+            );
+            fill_compound_source_reference(
+                &mut expected,
+                subpaths,
+                source,
+                fill_rule,
+                scanline_transform(),
+                bbox,
+            );
+            assert_eq!(
+                actual.pixels(),
+                expected.pixels(),
+                "{fill_rule:?}, {background:?}, {subpaths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compound_solid_scanlines_match_original_rgba_for_clipping_and_winding() {
+        let outer = vec![(0.25, 0.25), (14.75, 0.25), (14.75, 11.75), (0.25, 11.75)];
+        let inner = vec![(5.25, 3.25), (9.75, 3.25), (9.75, 8.75), (5.25, 8.75)];
+        let cases = [
+            vec![],
+            vec![vec![]],
+            vec![outer.clone(), inner.clone()],
+            vec![outer.clone(), inner.iter().rev().copied().collect()],
+            vec![outer.clone(), outer],
+            vec![vec![
+                (-4.25, -2.5),
+                (20.5, 14.5),
+                (-3.25, 14.5),
+                (18.5, -2.5),
+            ]],
+            vec![vec![
+                (18.25, 1.25),
+                (21.5, 1.25),
+                (21.5, 8.75),
+                (18.25, 8.75),
+            ]],
+            vec![vec![(1.5, 2.5), (8.5, 2.5), (14.5, 2.5)]],
+        ];
+        for subpaths in cases {
+            for fill_rule in [FillRule::NonZero, FillRule::EvenOdd] {
+                for alpha in [0, 1, 128, 254, 255] {
+                    assert_scanline_pixels_match_reference(
+                        &subpaths,
+                        &PaintSource::Solid(Color::rgba(213, 71, 43, alpha)),
+                        fill_rule,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compound_solid_scanlines_preserve_repeated_boundary_blending() {
+        let subpaths = vec![
+            vec![(0.25, 0.25), (14.75, 0.25), (14.75, 11.75), (0.25, 11.75)],
+            vec![(5.25, 3.25), (9.75, 3.25), (9.75, 8.75), (5.25, 8.75)],
+        ];
+        let mut canvas = Canvas::new(16, 12);
+        fill_compound_source(
+            &mut canvas,
+            &subpaths,
+            &PaintSource::Solid(Color::rgba(255, 0, 0, 128)),
+            FillRule::NonZero,
+            scanline_transform(),
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 16.0,
+                height: 12.0,
+            },
+        );
+        assert_eq!(canvas.pixel(4, 5).unwrap().a, 128);
+        assert_eq!(canvas.pixel(5, 5).unwrap().a, 192);
+        assert_eq!(canvas.pixel(9, 5).unwrap().a, 192);
+    }
+
+    #[test]
+    fn compound_gradient_scanlines_match_original_rgba() {
+        let subpaths = vec![
+            vec![(-2.5, -1.5), (19.25, 11.75), (-1.25, 13.5), (18.75, 0.25)],
+            vec![(5.25, 3.25), (9.75, 3.25), (9.75, 8.75), (5.25, 8.75)],
+        ];
+        for kind in [
+            SvgGradientKind::Linear {
+                x1: GradientCoord::Percent(0.0),
+                y1: GradientCoord::Percent(15.0),
+                x2: GradientCoord::Percent(75.0),
+                y2: GradientCoord::Percent(100.0),
+            },
+            SvgGradientKind::Radial {
+                cx: GradientCoord::Percent(50.0),
+                cy: GradientCoord::Percent(50.0),
+                r: GradientCoord::Percent(65.0),
+                fx: GradientCoord::Percent(25.0),
+                fy: GradientCoord::Percent(40.0),
+            },
+        ] {
+            for units in [
+                GradientUnits::ObjectBoundingBox,
+                GradientUnits::UserSpaceOnUse,
+            ] {
+                for spread in [
+                    SpreadMethod::Pad,
+                    SpreadMethod::Repeat,
+                    SpreadMethod::Reflect,
+                ] {
+                    let source = PaintSource::Gradient {
+                        gradient: SvgGradient {
+                            units,
+                            spread,
+                            kind: kind.clone(),
+                            stops: vec![
+                                SvgGradientStop {
+                                    offset: 0.0,
+                                    color: Color::rgba(255, 0, 0, 64),
+                                },
+                                SvgGradientStop {
+                                    offset: 0.5,
+                                    color: Color::rgba(0, 255, 0, 192),
+                                },
+                                SvgGradientStop {
+                                    offset: 1.0,
+                                    color: Color::rgb(0, 0, 255),
+                                },
+                            ],
+                        },
+                        opacity: 0.625,
+                    };
+                    for fill_rule in [FillRule::NonZero, FillRule::EvenOdd] {
+                        assert_scanline_pixels_match_reference(&subpaths, &source, fill_rule);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Run independently in release mode with `compound_scanline_microbenchmark
+    /// --ignored --nocapture`. No DOM, network, fonts, or SVG parsing is involved.
+    #[test]
+    #[ignore = "manual comparison of original and optimized SVG scanline rendering"]
+    fn compound_scanline_microbenchmark() {
+        const ITERATIONS: usize = 32;
+        let subpaths = vec![
+            vec![
+                (0.25, 0.25),
+                (255.75, 0.25),
+                (255.75, 127.75),
+                (0.25, 127.75),
+            ],
+            vec![
+                (63.25, 31.25),
+                (191.75, 31.25),
+                (191.75, 95.75),
+                (63.25, 95.75),
+            ],
+        ];
+        let bbox = Rect {
+            x: 0.25,
+            y: 0.25,
+            width: 255.5,
+            height: 127.5,
+        };
+        let transform = SvgTransform {
+            sx: 1.0,
+            sy: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+            viewport_width: 256.0,
+            viewport_height: 128.0,
+        };
+        let background = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 256.0,
+            height: 128.0,
+        };
+        for alpha in [255, 128] {
+            let source = PaintSource::Solid(Color::rgba(213, 71, 43, alpha));
+            let mut original = Canvas::new(256, 128);
+            let mut optimized = Canvas::new(256, 128);
+            let started = std::time::Instant::now();
+            for _ in 0..ITERATIONS {
+                original.fill_rect(background, Color::rgb(37, 91, 163));
+                fill_compound_source_reference(
+                    &mut original,
+                    std::hint::black_box(&subpaths),
+                    std::hint::black_box(&source),
+                    FillRule::NonZero,
+                    transform,
+                    bbox,
+                );
+                std::hint::black_box(original.pixels());
+            }
+            let original_elapsed = started.elapsed();
+            let started = std::time::Instant::now();
+            for _ in 0..ITERATIONS {
+                optimized.fill_rect(background, Color::rgb(37, 91, 163));
+                fill_compound_source(
+                    &mut optimized,
+                    std::hint::black_box(&subpaths),
+                    std::hint::black_box(&source),
+                    FillRule::NonZero,
+                    transform,
+                    bbox,
+                );
+                std::hint::black_box(optimized.pixels());
+            }
+            let optimized_elapsed = started.elapsed();
+            assert_eq!(original.pixels(), optimized.pixels(), "alpha={alpha}");
+            println!(
+                "SVG_SCANLINE_BENCH alpha={alpha} iterations={ITERATIONS} original_ms={:.3} optimized_ms={:.3} original_over_optimized={:.3}",
+                original_elapsed.as_secs_f64() * 1000.0,
+                optimized_elapsed.as_secs_f64() * 1000.0,
+                original_elapsed.as_secs_f64() / optimized_elapsed.as_secs_f64(),
+            );
+        }
+    }
+
+    fn fill_compound_source_reference(
+        canvas: &mut Canvas,
+        subpaths: &[Vec<(f32, f32)>],
+        source: &PaintSource,
+        fill_rule: FillRule,
+        transform: SvgTransform,
+        bbox: Rect,
+    ) {
+        if subpaths.is_empty() {
+            return;
+        }
+        let min_y = subpaths
+            .iter()
+            .flatten()
+            .map(|point| point.1)
+            .fold(f32::MAX, f32::min);
+        let max_y = subpaths
+            .iter()
+            .flatten()
+            .map(|point| point.1)
+            .fold(f32::MIN, f32::max);
+        let y_start = (min_y.floor() as i32).max(0) as u32;
+        let y_end = (max_y.ceil() as u32).min(canvas.height());
+        for y in y_start..y_end {
+            let scan_y = y as f32 + 0.5;
+            let mut intersections = Vec::new();
+            for points in subpaths {
+                for index in 0..points.len() {
+                    let next = (index + 1) % points.len();
+                    let (x0, y0) = points[index];
+                    let (x1, y1) = points[next];
+                    if (y0 <= scan_y && y1 > scan_y) || (y1 <= scan_y && y0 > scan_y) {
+                        let t = (scan_y - y0) / (y1 - y0);
+                        let winding = if y1 > y0 { 1 } else { -1 };
+                        intersections.push((x0 + t * (x1 - x0), winding));
+                    }
+                }
+            }
+            intersections.sort_by(|left, right| {
+                left.0
+                    .partial_cmp(&right.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut winding = 0i32;
+            for pair in intersections.windows(2) {
+                winding += pair[0].1;
+                let inside = match fill_rule {
+                    FillRule::NonZero => winding != 0,
+                    FillRule::EvenOdd => winding.unsigned_abs() % 2 == 1,
+                };
+                if inside {
+                    let x_start = (pair[0].0.floor() as i32).max(0) as u32;
+                    let x_end = (pair[1].0.ceil() as u32).min(canvas.width());
+                    for x in x_start..x_end {
+                        canvas.blend_pixel(
+                            x,
+                            y,
+                            source_color(source, x as f32 + 0.5, scan_y, bbox, transform),
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn polygon_fill_hit_testing_includes_edges_vertices_and_degenerate_path() {

@@ -15,6 +15,8 @@
   const weakGet = Function.prototype.call.bind(WeakMap.prototype.get);
   const weakSet = Function.prototype.call.bind(WeakMap.prototype.set);
   const weakHas = Function.prototype.call.bind(WeakMap.prototype.has);
+  const collectionGeneration = globalThis.__omoikane_collection_generation;
+  delete globalThis.__omoikane_collection_generation;
   const fail = () => { throw new TypeErrorIntrinsic("Illegal invocation"); };
   const read = (map, object) => weakGet(map, object) || fail();
   class AbstractRange {
@@ -54,9 +56,17 @@
   }
 
   const isIndex = key => typeof key === "string" && /^(?:0|[1-9]\d*)$/.test(key) && Number(key) < 4294967295;
+  function collectionItems(state) {
+    const generation = collectionGeneration();
+    if (state.generation !== generation) {
+      state.items = state.collect();
+      state.generation = generation;
+    }
+    return state.items;
+  }
   function namedItem(state, name) {
     if (name === "") return null;
-    for (const element of state.collect()) {
+    for (const element of collectionItems(state)) {
       if (element.getAttribute("id") === name ||
           (state.allowsName(element) && element.getAttribute("name") === name)) return element;
     }
@@ -64,10 +74,10 @@
   }
   class HTMLCollection {
     constructor(key = undefined) { if (key !== token) throw new TypeErrorIntrinsic("Illegal constructor"); }
-    get length() { return read(collections, this).collect().length; }
+    get length() { return collectionItems(read(collections, this)).length; }
     item(index) {
       if (!arguments.length) throw new TypeErrorIntrinsic("item requires an index");
-      return read(collections, this).collect()[(+index) >>> 0] ?? null;
+      return collectionItems(read(collections, this))[(+index) >>> 0] ?? null;
     }
     namedItem(name) {
       if (!arguments.length) throw new TypeErrorIntrinsic("namedItem requires a name");
@@ -75,12 +85,14 @@
     }
     *[Symbol.iterator]() {
       const state = read(collections, this);
-      for (let index = 0; index < state.collect().length; index++) yield state.collect()[index];
+      for (let index = 0; index < collectionItems(state).length; index++) {
+        yield collectionItems(state)[index];
+      }
     }
   }
   function collectionNames(state) {
     const names = new Set();
-    for (const element of state.collect()) {
+    for (const element of collectionItems(state)) {
       const id = element.getAttribute("id");
       if (id) names.add(id);
       const name = state.allowsName(element) && element.getAttribute("name");
@@ -90,8 +102,8 @@
   }
   function makeCollection(collect, allowsName, missingValue) {
     const target = new HTMLCollection(token);
-    const state = { collect, allowsName };
-    const value = key => isIndex(key) ? collect()[Number(key)] :
+    const state = { collect, allowsName, generation: undefined, items: [] };
+    const value = key => isIndex(key) ? collectionItems(state)[Number(key)] :
       typeof key === "string" && !(key in target) ? namedItem(state, key) ?? undefined : undefined;
     const handler = {
       get(_target, key, receiver) {
@@ -103,7 +115,7 @@
       },
       has(_target, key) { return value(key) !== undefined || key in target; },
       ownKeys() {
-        const indices = collect().map((_, index) => String(index));
+        const indices = collectionItems(state).map((_, index) => String(index));
         const names = collectionNames(state).filter(name => !isIndex(name) && !(name in target));
         return [...new Set([...indices, ...names, ...Reflect.ownKeys(target)])];
       },

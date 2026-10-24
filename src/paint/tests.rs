@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -44,6 +45,41 @@ fn opaque_fill_repeats_only_the_clipped_rows_and_columns() {
             assert_eq!(canvas.pixel(x, y), Some(expected), "pixel ({x}, {y})");
         }
     }
+}
+
+#[test]
+fn absolute_auto_inset_thumbnail_paints_inside_ratio_padding_box() {
+    let html = format!(
+        r#"<style>
+            html, body {{ margin:0; background:white }}
+            .slot {{ width:160px }}
+            .media {{ position:relative; width:100%; height:0; padding-top:56.25% }}
+            .wrapper {{ position:absolute; top:0; width:100%; height:100% }}
+            .thumbnail {{ position:relative; width:100%; height:0; padding-top:56.25%;
+                          overflow:hidden }}
+            .image {{ position:absolute; inset:0; margin:-10px;
+                      background:url('{}') center / cover no-repeat }}
+        </style>
+        <div class="slot"><div class="media"><div class="wrapper"><div class="thumbnail">
+          <div class="image"></div>
+        </div></div></div></div>"#,
+        red_pixel_data_uri(),
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 180.0,
+            height: 110.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(canvas.pixel(80, 45), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(165, 45), Some(Color::rgb(255, 255, 255)));
+    assert_eq!(canvas.pixel(80, 95), Some(Color::rgb(255, 255, 255)));
 }
 
 #[test]
@@ -164,6 +200,56 @@ fn visited_paint_changes_only_allowed_link_colors() {
         resolver.computed_style(&link).get("background-color"),
         Some(&crate::css::ComputedValue::Color("#ff0000".into()))
     );
+}
+
+#[test]
+fn nested_snapshot_draw_count_matches_actual_scaled_draw_calls() {
+    let document = TreeBuilder::parse(
+        "<style>html,body{margin:0;background:white}iframe{display:block;border:0;width:20px;height:20px}#off{position:absolute;left:200px;top:0}</style><iframe id=visible></iframe><iframe id=off></iframe>",
+    )
+    .document();
+    let visible = document.query_selector("#visible").unwrap();
+    let offscreen = document.query_selector("#off").unwrap();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 30.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let mut snapshot = Canvas::new(20, 20);
+    snapshot.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
+    let image = snapshot.into_image();
+    let nested = std::collections::HashMap::from([
+        (visible.identity(), image.clone()),
+        (offscreen.identity(), image),
+    ]);
+
+    let (canvas, summary) = paint_layout_with_document_snapshots_counted(
+        &layout,
+        &mut resolver,
+        viewport,
+        Vec::new(),
+        None,
+        std::iter::empty(),
+        &nested,
+    );
+
+    assert_eq!(summary.nested_snapshot_draw_calls, 2);
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(canvas.pixel(30, 5), Some(Color::rgb(255, 255, 255)));
 }
 
 #[test]
@@ -7543,6 +7629,122 @@ fn opacity_reduces_element_alpha() {
 }
 
 #[test]
+fn child_opacity_effect_cache_reuses_source_and_invalidates_by_generation() {
+    fn paint(
+        opacity: f32,
+        color: &str,
+        generation: u64,
+        cache: &EffectSourceCache,
+        document: &NodeHandle,
+        node: &NodeHandle,
+    ) -> (Canvas, Canvas) {
+        let css = format!(
+            "body{{margin:0}}div{{width:20px;height:20px;background:{color};opacity:{opacity}}}"
+        );
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 24.0,
+            height: 24.0,
+        };
+        let layout = layout_tree(document, &mut resolver, viewport).unwrap();
+        let ordinary = paint_layout(&layout, &mut resolver, viewport);
+        let nodes = HashSet::from([node.identity()]);
+        let cached = paint_layout_with_child_effect_cache(
+            &layout,
+            &mut resolver,
+            viewport,
+            text::load_text_fonts(),
+            None,
+            [],
+            &HashMap::new(),
+            false,
+            cache,
+            generation,
+            &nodes,
+        )
+        .0;
+        (cached, ordinary)
+    }
+
+    let cache = EffectSourceCache::default();
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let node = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(node.clone());
+    let (first, first_ordinary) = paint(0.25, "red", 7, &cache, &document, &node);
+    let (second, second_ordinary) = paint(0.75, "red", 7, &cache, &document, &node);
+    assert_eq!(cache.source_rasters(), 1);
+    assert_eq!(first.pixels(), first_ordinary.pixels());
+    assert_eq!(second.pixels(), second_ordinary.pixels());
+    assert_eq!(first.pixel(5, 5).unwrap().a, 64);
+    assert_eq!(second.pixel(5, 5).unwrap().a, 191);
+
+    let (mutated, mutated_ordinary) = paint(0.75, "blue", 8, &cache, &document, &node);
+    assert_eq!(cache.source_rasters(), 2);
+    assert_eq!(mutated.pixels(), mutated_ordinary.pixels());
+    assert_eq!(mutated.pixel(5, 5), Some(Color::rgba(0, 0, 255, 191)));
+}
+
+#[test]
+fn child_opacity_effect_cache_rejects_nested_animated_alpha() {
+    fn paint(opacities: (f32, f32), cache: &EffectSourceCache) -> (Canvas, Canvas) {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let outer = NodeHandle::element("section");
+        let inner = NodeHandle::element("div");
+        document.append_child(body.clone());
+        body.append_child(outer.clone());
+        outer.append_child(inner.clone());
+        let css = format!(
+            "body{{margin:0}}section{{width:20px;height:20px;opacity:{}}}\
+             div{{width:20px;height:20px;background:red;opacity:{}}}",
+            opacities.0, opacities.1
+        );
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 24.0,
+            height: 24.0,
+        };
+        let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+        let ordinary = paint_layout(&layout, &mut resolver, viewport);
+        let nodes = HashSet::from([outer.identity(), inner.identity()]);
+        let cached = paint_layout_with_child_effect_cache(
+            &layout,
+            &mut resolver,
+            viewport,
+            text::load_text_fonts(),
+            None,
+            [],
+            &HashMap::new(),
+            false,
+            cache,
+            11,
+            &nodes,
+        )
+        .0;
+        (cached, ordinary)
+    }
+
+    let cache = EffectSourceCache::default();
+    for opacities in [(0.25, 0.5), (0.75, 0.8)] {
+        let (cached, ordinary) = paint(opacities, &cache);
+        assert_eq!(cached.pixels(), ordinary.pixels());
+    }
+    assert_eq!(
+        cache.source_rasters(),
+        0,
+        "an animated descendant must prevent retaining its parent's old alpha"
+    );
+}
+
+#[test]
 fn opacity_zero_makes_element_invisible() {
     // opacity: 0 を指定すると、要素が完全に透明になる。
     let document = NodeHandle::document();
@@ -11730,5 +11932,155 @@ fn underline_nested_fixed_font_keeps_the_origin_line_despite_child_overrides() {
             actual.encode_png(),
         )
         .unwrap();
+    }
+}
+
+fn computed_style_for_transform_hot_path_contract(declarations: &str) -> crate::css::ComputedStyle {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", declarations);
+    StyleResolver::new().computed_style(&element)
+}
+
+#[test]
+fn paint_transform_style_property_matrix_preserves_existing_semantics() {
+    let cases = [
+        ("initial values", "", false),
+        (
+            "explicit transform none values",
+            "transform:none;translate:none;rotate:none;scale:none;will-change:auto",
+            false,
+        ),
+        ("transform", "transform:translateX(1px)", true),
+        ("translate", "translate:1px 0px", true),
+        ("rotate", "rotate:1deg", true),
+        ("scale identity", "scale:1", true),
+        ("will-change transform", "will-change:transform", true),
+        ("will-change translate", "will-change:translate", true),
+        ("will-change rotate", "will-change:rotate", true),
+        ("will-change scale", "will-change:scale", true),
+        ("perspective alone", "perspective:100px", false),
+        ("will-change perspective", "will-change:perspective", false),
+        ("unrelated will-change", "will-change:opacity", false),
+    ];
+
+    for (name, declarations, expected) in cases {
+        let style = computed_style_for_transform_hot_path_contract(declarations);
+        assert_eq!(
+            super::has_transform_style(&style),
+            expected,
+            "{name}: {declarations}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "fixed-workload profiling fixture; run explicitly"]
+fn profile_fixed_transform_property_lookup_hot_paths() {
+    const ITERATIONS_PER_CASE: u64 = 250_000;
+
+    let cases = [
+        (
+            "plain-default-none",
+            computed_style_for_transform_hot_path_contract(""),
+            false,
+            false,
+        ),
+        (
+            "explicit-none",
+            computed_style_for_transform_hot_path_contract(
+                "transform:none;translate:none;rotate:none;scale:none;perspective:none;will-change:auto",
+            ),
+            false,
+            false,
+        ),
+        (
+            "positive-individual-scale",
+            computed_style_for_transform_hot_path_contract("scale:2"),
+            true,
+            true,
+        ),
+        (
+            "will-change-only-scale",
+            computed_style_for_transform_hot_path_contract("will-change:scale"),
+            true,
+            true,
+        ),
+        (
+            "unrelated-will-change",
+            computed_style_for_transform_hot_path_contract("will-change:opacity"),
+            false,
+            false,
+        ),
+    ];
+
+    for (name, style, expected_layout, expected_paint) in cases {
+        assert_eq!(
+            crate::layout::establishes_fixed_containing_block(&style),
+            expected_layout,
+            "layout result for {name}"
+        );
+        assert_eq!(
+            super::has_transform_style(&style),
+            expected_paint,
+            "paint result for {name}"
+        );
+
+        let started = std::time::Instant::now();
+        let mut checksum = 0_u64;
+        for _ in 0..ITERATIONS_PER_CASE {
+            let style = std::hint::black_box(&style);
+            let layout =
+                std::hint::black_box(crate::layout::establishes_fixed_containing_block(style));
+            let paint = std::hint::black_box(super::has_transform_style(style));
+            checksum = checksum.wrapping_add(1 + layout as u64 + (paint as u64) * 2);
+        }
+        let elapsed = started.elapsed();
+        let expected_checksum =
+            ITERATIONS_PER_CASE * (1 + expected_layout as u64 + (expected_paint as u64) * 2);
+
+        assert_eq!(checksum, expected_checksum, "checksum for {name}");
+        eprintln!(
+            "OMOIKANE_PROPERTY_ID_FIXED_PROFILE case={} iterations={} layout={} paint={} elapsed_ns={} checksum={}",
+            name,
+            ITERATIONS_PER_CASE,
+            expected_layout,
+            expected_paint,
+            elapsed.as_nanos(),
+            checksum
+        );
+    }
+}
+
+#[test]
+fn unit_scale_image_blit_preserves_every_pixel_at_odd_extents() {
+    for (width, height) in [(26, 23), (23, 26), (13, 29)] {
+        let mut source = Canvas::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                source.set_pixel(x, y, Color::rgb(x as u8, y as u8, 173));
+            }
+        }
+        let image = source.into_image();
+        for (left, top) in [(0, 0), (6, 9), (-3, -5)] {
+            let mut actual = Canvas::new(40, 40);
+            actual.draw_image(&image, left as f32, top as f32);
+            for y in 0..40 {
+                for x in 0..40 {
+                    let sx = x as i32 - left;
+                    let sy = y as i32 - top;
+                    let expected =
+                        if (0..width as i32).contains(&sx) && (0..height as i32).contains(&sy) {
+                            Color::rgb(sx as u8, sy as u8, 173)
+                        } else {
+                            Color::rgba(0, 0, 0, 0)
+                        };
+                    assert_eq!(
+                        actual.pixel(x, y),
+                        Some(expected),
+                        "extent={width}x{height} origin=({left},{top}) pixel=({x},{y})"
+                    );
+                }
+            }
+        }
     }
 }

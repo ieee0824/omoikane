@@ -753,7 +753,7 @@ impl BuiltinTypedArray {
 
         // 14. Set taRecord to MakeTypedArrayWithBufferWitnessRecord(O, seq-cst).
         // 15. If IsTypedArrayOutOfBounds(taRecord) is true, throw a TypeError exception.
-        let len = {
+        let (len, kind, byte_offset, buffer) = {
             let ta = ta.borrow();
 
             let Some(buf_len) = ta
@@ -770,7 +770,12 @@ impl BuiltinTypedArray {
             };
 
             // 16. Set len to TypedArrayLength(taRecord).
-            ta.data().array_length(buf_len)
+            (
+                ta.data().array_length(buf_len),
+                ta.data().kind(),
+                ta.data().byte_offset(),
+                ta.data().viewed_array_buffer().clone(),
+            )
         };
 
         // 17. Set endIndex to min(endIndex, len).
@@ -778,6 +783,18 @@ impl BuiltinTypedArray {
 
         // 18. Let k be startIndex.
         // 19. Repeat, while k < endIndex,
+
+        if try_fill_single_byte_typed_array(
+            kind,
+            &buffer,
+            byte_offset,
+            start_index,
+            end_index,
+            &value,
+            context,
+        )? {
+            return Ok(this.clone());
+        }
 
         let ta = ta.upcast();
         for k in start_index..end_index {
@@ -3211,6 +3228,68 @@ impl BuiltinTypedArray {
 
         Ok(obj)
     }
+}
+
+/// Fills the range directly when each element maps to exactly one byte in a normal buffer.
+///
+/// Returns `false` when the caller must use the ordinary integer-indexed element path.
+fn try_fill_single_byte_typed_array(
+    kind: TypedArrayKind,
+    buffer: &BufferObject,
+    byte_offset: u64,
+    start_index: u64,
+    end_index: u64,
+    value: &JsValue,
+    context: &mut Context,
+) -> JsResult<bool> {
+    if !matches!(
+        kind,
+        TypedArrayKind::Int8 | TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped
+    ) {
+        return Ok(false);
+    }
+
+    let BufferObject::Buffer(buffer) = buffer else {
+        return Ok(false);
+    };
+
+    // The ordinary element loop does not perform another numeric conversion for an empty range.
+    if start_index >= end_index {
+        return Ok(true);
+    }
+
+    // `fill` has already converted the original argument to a Number before converting either
+    // bound. This second conversion is consequently callback-free and happens before borrowing
+    // the buffer.
+    let byte = match kind {
+        TypedArrayKind::Int8 => value.to_int8(context)?.to_ne_bytes()[0],
+        TypedArrayKind::Uint8 => value.to_uint8(context)?,
+        TypedArrayKind::Uint8Clamped => value.to_uint8_clamp(context)?,
+        _ => unreachable!("the typed array kind was checked above"),
+    };
+
+    let Some(byte_start) = byte_offset
+        .checked_add(start_index)
+        .and_then(|index| usize::try_from(index).ok())
+    else {
+        return Ok(false);
+    };
+    let Some(byte_end) = byte_offset
+        .checked_add(end_index)
+        .and_then(|index| usize::try_from(index).ok())
+    else {
+        return Ok(false);
+    };
+
+    let mut buffer = buffer.borrow_mut();
+    let Some(bytes) = buffer.data_mut().bytes_mut() else {
+        return Ok(false);
+    };
+    let Some(range) = bytes.get_mut(byte_start..byte_end) else {
+        return Ok(false);
+    };
+    range.fill(byte);
+    Ok(true)
 }
 
 #[derive(Debug)]

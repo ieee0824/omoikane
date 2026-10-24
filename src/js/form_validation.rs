@@ -1,6 +1,8 @@
 //! Shares form-validation results with native selector matching and painting.
 use super::*;
 
+mod tree;
+
 #[derive(Default)]
 pub(super) struct State {
     callbacks: HashMap<usize, JsValue>,
@@ -93,6 +95,10 @@ pub(super) fn flush(node_id: usize, context: &mut Context) -> JsResult<()> {
             .to_std_string_escaped();
         let values: Vec<(usize, Option<bool>)> = serde_json::from_str(&json)
             .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
+        // Derived selector state is render work: keep committed root pixels
+        // available until their replacement is published. Author code above
+        // still revokes through the dedicated listener, navigation and scroll
+        // boundaries if it changes the input contract.
         let mut state = host.borrow_mut();
         #[cfg(test)]
         {
@@ -125,6 +131,7 @@ pub(super) fn flush(node_id: usize, context: &mut Context) -> JsResult<()> {
 }
 
 pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {
+    tree::register(context, bindings)?;
     register_private_builtin_callable(
         context,
         bindings,
@@ -184,6 +191,183 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
 mod tests {
     use super::*;
 
+    fn scene_runtime() -> JsRuntime {
+        let document = crate::html::TreeBuilder::parse(
+            "<style>body{height:1000px}input:valid{width:40px}\
+             input:invalid{width:20px}</style><form><input required value=filled></form>\
+             <iframe></iframe>",
+        )
+        .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.set_viewport(200.0, 100.0);
+        runtime
+            .eval("globalThis.control=document.querySelector('input');getComputedStyle(control).width")
+            .unwrap();
+        runtime
+    }
+
+    #[test]
+    fn validation_scene_survives_validity_style_changes() {
+        use native_scroll::{Offset, ScrollDecision};
+        let mut runtime = scene_runtime();
+        let handle =
+            super::super::native_scroll_clock_tests::install_clock_test_scene(&mut runtime);
+        let gate = handle.publication_gate();
+        let generations = runtime.render_generations();
+        for (message, width, valid) in [("invalid", "20px", false), ("", "40px", true)] {
+            let result = runtime
+                .eval(&format!(
+                    "control.setCustomValidity('{}');getComputedStyle(control).width",
+                    message
+                ))
+                .unwrap();
+            assert_eq!(result.as_string().unwrap().to_std_string_escaped(), width);
+            assert_eq!(
+                runtime
+                    .document()
+                    .query_selector("input")
+                    .unwrap()
+                    .css_validity(),
+                Some(valid)
+            );
+            assert_eq!(handle.publication_gate(), gate);
+        }
+        assert_ne!(runtime.render_generations(), generations);
+        let accepted = match handle.scroll(Offset { x: 0.0, y: 10.0 }) {
+            ScrollDecision::Accepted(accepted) => accepted,
+            other => panic!("validity styling retired committed pixels: {other:?}"),
+        };
+        assert!(handle.validate_for_presentation(accepted));
+        assert_eq!(runtime.eval("scrollY").unwrap().as_number(), Some(10.0));
+    }
+
+    #[test]
+    fn validation_scene_survives_child_validity_changes() {
+        use native_scroll::{Offset, ScrollDecision};
+        let mut runtime = scene_runtime();
+        runtime
+            .eval(
+                "globalThis.childWindow=document.querySelector('iframe').contentWindow;\
+             globalThis.childControl=childWindow.document.createElement('input');\
+             childControl.required=true;childControl.value='filled';\
+             childWindow.document.body.appendChild(childControl);\
+             childControl.matches(':valid')",
+            )
+            .unwrap();
+        let handle =
+            super::super::native_scroll_clock_tests::install_clock_test_scene(&mut runtime);
+        let gate = handle.publication_gate();
+        assert_eq!(
+            runtime
+                .eval("childControl.setCustomValidity('invalid');childControl.matches(':invalid')")
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+        assert_eq!(handle.publication_gate(), gate);
+        assert!(matches!(
+            handle.scroll(Offset { x: 0.0, y: 10.0 }),
+            ScrollDecision::Accepted(_)
+        ));
+        assert_eq!(runtime.eval("scrollY").unwrap().as_number(), Some(10.0));
+    }
+
+    #[test]
+    fn validation_scene_still_rejects_author_input_contract_changes() {
+        use native_scroll::{Offset, ScrollDecision};
+        for operation in [
+            "window.addEventListener('wheel',()=>{}, {passive:false})",
+            "window.scrollTo(0,30)",
+        ] {
+            let mut runtime = scene_runtime();
+            let handle =
+                super::super::native_scroll_clock_tests::install_clock_test_scene(&mut runtime);
+            let gate = handle.publication_gate();
+            let callback = runtime
+                .eval(&format!(
+                    "(function(){{{};return JSON.stringify([[control.__id,false]])}})",
+                    operation
+                ))
+                .unwrap();
+            {
+                let mut state = runtime.host_state.borrow_mut();
+                let id = state.document.identity();
+                state.form_validation.callbacks.insert(id, callback);
+                state.form_validation.invalidate();
+            }
+            runtime.eval("control.matches(':invalid')").unwrap();
+            assert!(
+                handle.publication_gate().policy_epoch > gate.policy_epoch,
+                "{operation}"
+            );
+            assert!(
+                !handle.authorize_policy(gate.key, gate.policy_epoch),
+                "{operation}"
+            );
+            assert!(
+                matches!(
+                    handle.scroll(Offset { x: 0.0, y: 10.0 }),
+                    ScrollDecision::Fallback(_)
+                ),
+                "{operation}"
+            );
+        }
+    }
+
+    #[test]
+    fn computed_style_without_validity_changes_preserves_native_policy_epoch() {
+        let document = crate::html::TreeBuilder::parse("<div>content</div>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        let handle = runtime.native_scroll_handle();
+        let before = handle.publication_gate().policy_epoch;
+        runtime
+            .eval("getComputedStyle(document.querySelector('div')).overscrollBehaviorX")
+            .unwrap();
+        assert_eq!(handle.publication_gate().policy_epoch, before);
+        assert_eq!(
+            runtime.host_state.borrow().form_validation.completed_scans,
+            1
+        );
+    }
+
+    #[test]
+    fn validity_rescans_update_selectors_without_retiring_committed_policy() {
+        let document = crate::html::TreeBuilder::parse("<form><input required></form>").document();
+        let input = document.query_selector("input").unwrap();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        let handle = runtime.native_scroll_handle();
+        let before = handle.publication_gate().policy_epoch;
+        runtime
+            .eval("globalThis.control=document.querySelector('input');control.matches(':invalid')")
+            .unwrap();
+        assert_eq!(input.css_validity(), Some(false));
+        assert_eq!(handle.publication_gate().policy_epoch, before);
+
+        runtime.host_state.borrow_mut().form_validation.invalidate();
+        let unchanged = handle.publication_gate().policy_epoch;
+        runtime.eval("control.matches(':invalid')").unwrap();
+        assert_eq!(handle.publication_gate().policy_epoch, unchanged);
+        assert_eq!(
+            runtime.host_state.borrow().form_validation.completed_scans,
+            2
+        );
+
+        runtime.eval("control.value='filled'").unwrap();
+        let before_change = handle.publication_gate();
+        assert!(handle.authorize_policy(before_change.key, before_change.policy_epoch));
+        runtime.eval("control.matches(':valid')").unwrap();
+        assert_eq!(input.css_validity(), Some(true));
+        assert_eq!(
+            handle.publication_gate().policy_epoch,
+            before_change.policy_epoch
+        );
+        assert!(handle.authorize_policy(before_change.key, before_change.policy_epoch));
+        assert_eq!(
+            runtime.host_state.borrow().form_validation.completed_scans,
+            3
+        );
+    }
+
     #[test]
     fn repeated_css_queries_share_one_validation_scan_until_a_mutation() {
         let document = crate::html::TreeBuilder::parse("<form><input required></form>").document();
@@ -216,5 +400,62 @@ mod tests {
         );
         runtime.eval("input.removeAttribute('required'); if(!input.matches(':valid')) throw Error('valid expected');").unwrap();
         assert_eq!(scans(&runtime), 2, "a validity attribute change rescans");
+    }
+    #[test]
+    fn ordinary_data_attribute_changes_keep_constraint_validation_snapshot_fresh() {
+        let document = crate::html::TreeBuilder::parse("<form><input required></form>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.eval("globalThis.input=document.querySelector('input'); if(!input.matches(':invalid')) throw Error('invalid expected');").unwrap();
+        let initial = runtime.host_state.borrow().form_validation.completed_scans;
+        runtime.eval("for(let i=0;i<100;i++){input.dataset.probe=String(i); if(!input.matches(':invalid')) throw Error('must stay invalid')} input.setAttribute('data-other','yes');input.removeAttribute('data-other');if(!input.matches(':invalid')) throw Error('must stay invalid')").unwrap();
+        assert_eq!(
+            runtime.host_state.borrow().form_validation.completed_scans,
+            initial
+        );
+        runtime.eval("input.removeAttribute('required');if(!input.matches(':valid'))throw Error('must become valid')").unwrap();
+        assert_eq!(
+            runtime.host_state.borrow().form_validation.completed_scans,
+            initial + 1
+        );
+    }
+
+    #[test]
+    fn css_observed_data_attribute_restyles_without_changing_constraint_validity() {
+        let document = crate::html::TreeBuilder::parse(
+        "<style>input{width:20px;height:10px;padding:0;border:0}input[data-probe]{width:40px}</style><input required>",
+    )
+    .document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        assert!(runtime.eval("globalThis.input=document.querySelector('input');input.matches(':invalid') && input.getBoundingClientRect().width===20").unwrap().to_boolean());
+        let initial = runtime.host_state.borrow().form_validation.completed_scans;
+        assert!(runtime.eval("input.dataset.probe='yes';input.matches(':invalid') && input.getBoundingClientRect().width===40").unwrap().to_boolean());
+        assert_eq!(
+            runtime.host_state.borrow().form_validation.completed_scans,
+            initial
+        );
+    }
+
+    #[test]
+    fn data_attribute_author_callback_can_change_custom_constraint_validity() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.eval("customElements.define('validity-probe',class extends HTMLElement{static formAssociated=true;static get observedAttributes(){return ['data-valid']}constructor(){super();this._internals=this.attachInternals()}attributeChangedCallback(){this._internals.setValidity(this.dataset.valid==='no'?{customError:true}:{},this.dataset.valid==='no'?'invalid':'')}});globalThis.probe=document.createElement('validity-probe');document.body.appendChild(probe)").unwrap();
+        assert!(
+            runtime
+                .eval("probe.matches(':valid')")
+                .unwrap()
+                .to_boolean()
+        );
+        assert!(
+            runtime
+                .eval("probe.dataset.valid='no';probe.matches(':invalid')")
+                .unwrap()
+                .to_boolean()
+        );
+        assert!(
+            runtime
+                .eval("probe.dataset.valid='yes';probe.matches(':valid')")
+                .unwrap()
+                .to_boolean()
+        );
     }
 }

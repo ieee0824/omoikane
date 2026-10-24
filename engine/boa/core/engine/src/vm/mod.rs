@@ -779,7 +779,10 @@ pub(crate) struct NativeCallBoundary {
 #[derive(Debug, Trace, Finalize)]
 pub(crate) enum NativeCallBoundaryTarget {
     FrameDepth(usize),
-    NativePlaceholder(JsObject),
+    NativePlaceholder {
+        target: JsObject,
+        frame_depth: usize,
+    },
 }
 
 #[allow(clippy::print_stdout)]
@@ -886,7 +889,7 @@ impl Context {
             .native_call_continuations
             .last()
             .and_then(|boundary| match &boundary.target {
-                NativeCallBoundaryTarget::NativePlaceholder(target)
+                NativeCallBoundaryTarget::NativePlaceholder { target, .. }
                     if JsObject::equals(target, placeholder) =>
                 {
                     Some(())
@@ -1072,6 +1075,17 @@ impl Context {
                 };
                 frame = Some(f);
             }
+            // Host aborts skip callback continuations. The exit-early frame
+            // also completes at this boundary; keeping its depth (or a deeper
+            // one) could apply an aborted callback to an unrelated later call.
+            let frame_depth = self.vm.frames.len();
+            self.vm.native_call_continuations.retain(|boundary| {
+                let owner_depth = match &boundary.target {
+                    NativeCallBoundaryTarget::FrameDepth(depth) => *depth,
+                    NativeCallBoundaryTarget::NativePlaceholder { frame_depth, .. } => *frame_depth,
+                };
+                owner_depth < frame_depth
+            });
             self.vm.environments.truncate(env_fp);
             if let Some(frame) = frame {
                 self.vm.stack.truncate_to_frame(&frame);

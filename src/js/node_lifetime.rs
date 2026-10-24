@@ -20,6 +20,7 @@ struct WrapperGroup {
     _document: DocumentNodes,
     object: Option<JsObject>,
     wrappers: HashMap<usize, WrapperEntry>,
+    event_states_dirty: Rc<Cell<bool>>,
 }
 
 struct WrapperEntry {
@@ -32,6 +33,15 @@ struct WrapperEntry {
 struct GroupData(Group);
 
 impl Finalize for WrapperGroup {}
+
+impl Drop for WrapperGroup {
+    fn drop(&mut self) {
+        // Event states are strongly owned by wrapper entries. Once a group
+        // dies, the weak index may contain dead states. Notify without borrowing
+        // HostState: this destructor can run inside a Boa collection.
+        self.event_states_dirty.set(true);
+    }
+}
 
 unsafe impl Trace for WrapperGroup {
     unsafe fn trace(&self, tracer: &mut Tracer) {
@@ -82,8 +92,11 @@ pub(super) struct NodeLifetimes {
     nodes: HashMap<usize, WeakNodeHandle>,
     owners: HashMap<usize, usize>,
     event_states: HashMap<usize, Weak<JsObject>>,
+    event_states_dirty: Rc<Cell<bool>>,
     #[cfg(test)]
     pub(super) enrollment_visits: usize,
+    #[cfg(test)]
+    event_state_sweep_visits: usize,
 }
 
 impl Finalize for NodeLifetimes {}
@@ -176,6 +189,7 @@ impl HostState {
             _document: document.clone(),
             object: None,
             wrappers: HashMap::new(),
+            event_states_dirty: self.node_lifetimes.event_states_dirty.clone(),
         }));
         let object = JsObject::from_proto_and_data(None, GroupData(group.clone()));
         group.borrow_mut().object = Some(object.clone());
@@ -419,9 +433,18 @@ impl HostState {
                 .get(id)
                 .is_some_and(|document| document.strong_count() != 0)
         });
-        self.node_lifetimes
-            .event_states
-            .retain(|_, state| state.strong_count() != 0);
+        // Moving entries during adoption preserves their shared event-state
+        // Rc; replacing a wrapper reuses that same Rc. Only group destruction
+        // can release the last owner, so unchanged host entries need no scan.
+        if self.node_lifetimes.event_states_dirty.replace(false) {
+            self.node_lifetimes.event_states.retain(|_, state| {
+                #[cfg(test)]
+                {
+                    self.node_lifetimes.event_state_sweep_visits += 1;
+                }
+                state.strong_count() != 0
+            });
+        }
         self.node_lifetimes
             .groups
             .retain(|_, group| group.strong_count() != 0);
@@ -563,5 +586,68 @@ impl NodeLifetimes {
     }
     pub(super) fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::*;
+    use crate::html::TreeBuilder;
+
+    #[test]
+    fn unchanged_host_entries_do_not_scan_every_node_event_state() {
+        let document = TreeBuilder::parse("<body><p>stable</p></body>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.eval("globalThis.node = document.querySelector('p'); node.addEventListener('probe', () => {});").unwrap();
+        runtime.context.clear_kept_objects();
+        boa_gc::force_collect();
+        runtime.host_state.borrow_mut().sweep_node_lifetimes();
+        let before = runtime
+            .host_state
+            .borrow()
+            .node_lifetimes
+            .event_state_sweep_visits;
+        for _ in 0..20 {
+            assert_eq!(runtime.eval("1 + 1").unwrap().as_number(), Some(2.0));
+        }
+        assert_eq!(
+            runtime
+                .host_state
+                .borrow()
+                .node_lifetimes
+                .event_state_sweep_visits,
+            before,
+            "unchanged host entries must not walk the per-node weak event index"
+        );
+    }
+
+    #[test]
+    fn collected_groups_reclaim_weak_event_index_on_next_host_entry() {
+        let document = TreeBuilder::parse("<body></body>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.eval("globalThis.inert = document.implementation.createHTMLDocument('inert'); globalThis.retained = inert.createElement('p'); inert.body.appendChild(retained); retained.addEventListener('probe', () => {});").unwrap();
+        runtime.eval("inert = null; retained = null;").unwrap();
+        runtime.context.clear_kept_objects();
+        boa_gc::force_collect();
+        assert!(
+            runtime
+                .host_state
+                .borrow()
+                .node_lifetimes
+                .event_states
+                .values()
+                .any(|state| state.strong_count() == 0),
+            "fixture must release an event state before sweeping"
+        );
+        runtime.eval("1").unwrap();
+        assert!(
+            runtime
+                .host_state
+                .borrow()
+                .node_lifetimes
+                .event_states
+                .values()
+                .all(|state| state.strong_count() != 0)
+        );
     }
 }

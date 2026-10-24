@@ -25,7 +25,142 @@ fn button_mask(button: i32) -> u64 {
     }
 }
 
+fn trace_native_target_rejection(enabled: bool, reason: &str, node: Option<usize>) {
+    if enabled {
+        eprintln!(
+            "{}",
+            crate::diagnostics::json_record(
+                "OMOIKANE_NATIVE_SCROLL_TARGET_POLICY",
+                &json!({"reason":reason,"target":node}),
+            )
+        );
+    }
+}
+
 impl CdpSession {
+    /// Returns the numeric-only native-scroll handle owned by this session.
+    pub fn native_scroll_handle(&self) -> crate::js::native_scroll::NativeScrollHandle {
+        self.runtime.native_scroll_handle()
+    }
+
+    /// Resolves a conservative top-level root-scroll target from trusted hit
+    /// testing and the bootstrap-private policy callback. A blank viewport
+    /// point falls back to the top-level document element so root scrolling can
+    /// remain compositor-driven while the page thread is busy.
+    ///
+    /// Cross-Document targets, pointer lock, nested scroll containers, and
+    /// overscroll chaining boundaries are rejected. The returned node and Realm
+    /// identities must be retained unchanged with a native input.
+    pub fn native_scroll_target_at(
+        &mut self,
+        x: f64,
+        y: f64,
+    ) -> Result<Option<crate::platform_input::NativeScrollTarget>, JsonRpcError> {
+        if !x.is_finite() || !y.is_finite() {
+            return Ok(None);
+        }
+        let trace = std::env::var_os("OMOIKANE_TRACE_INPUT").is_some();
+        let target = self.runtime.hit_test(x as f32, y as f32).or_else(|| {
+            self.runtime
+                .document()
+                .child_nodes()
+                .into_iter()
+                .find(|node| node.tag_name().is_some())
+        });
+        let Some(target) = target else {
+            trace_native_target_rejection(trace, "hit_test_miss", None);
+            return Ok(None);
+        };
+        let target_id = target.identity();
+        let (client_x, client_y, scroll_x, scroll_y, document) =
+            self.runtime.input_position_for_node(&target, x, y);
+        if document != self.runtime.document().identity() {
+            trace_native_target_rejection(trace, "cross_document", Some(target_id));
+            return Ok(None);
+        }
+        let policy = self
+            .runtime
+            .dispatch_private_input_in_document_realm(
+                document,
+                "native-scroll-eligible",
+                &[json!(target_id), json!(trace)],
+            )
+            .map_err(js_error)?;
+        let eligible = policy.as_boolean().unwrap_or(false);
+        if trace && !eligible {
+            let reason = policy
+                .as_string()
+                .map(|value| value.to_std_string_escaped())
+                .unwrap_or_else(|| "unspecified".into());
+            trace_native_target_rejection(true, &reason, Some(target_id));
+        }
+        Ok(
+            eligible.then_some(crate::platform_input::NativeScrollTarget {
+                document,
+                node: target_id,
+                cursor: (x, y),
+                client: (client_x, client_y),
+                page: (
+                    client_x + f64::from(scroll_x),
+                    client_y + f64::from(scroll_y),
+                ),
+            }),
+        )
+    }
+
+    /// Claims one exact accepted input and commits its default once through the
+    /// canonical owner setter. The caller must then deliver its notification
+    /// with [`Self::dispatch_native_scroll_notification`].
+    pub fn claim_native_scroll_notification(
+        &mut self,
+        expected: crate::js::native_scroll::AcceptedScroll,
+    ) -> Result<crate::js::native_scroll::OwnerNotification, JsonRpcError> {
+        self.runtime
+            .claim_native_scroll_notification(expected)
+            .map_err(native_scroll_owner_error)
+    }
+
+    /// Dispatches a wheel notification to an exact trusted target without
+    /// running the scrolling default a second time.
+    pub fn dispatch_native_scroll_notification(
+        &mut self,
+        target: crate::platform_input::NativeScrollTarget,
+        delta: (f64, f64),
+        modifiers: crate::platform_input::InputModifiers,
+        buttons: u8,
+    ) -> Result<(), JsonRpcError> {
+        let init = json!({
+            "clientX": target.client.0, "clientY": target.client.1,
+            "pageX": target.page.0, "pageY": target.page.1,
+            "screenX": target.cursor.0, "screenY": target.cursor.1,
+            "deltaX": delta.0, "deltaY": delta.1, "deltaZ": 0,
+            "deltaMode": 0, "button": 0, "buttons": buttons,
+            "altKey": modifiers.alt,
+            "ctrlKey": modifiers.control,
+            "metaKey": modifiers.meta,
+            "shiftKey": modifiers.shift,
+        });
+        let dispatched = self
+            .runtime
+            .dispatch_private_input_in_document_realm(
+                target.document,
+                "native-scroll-notification",
+                &[json!(target.node), init],
+            )
+            .map_err(js_error)?
+            .as_boolean()
+            .unwrap_or(false);
+        self.runtime.run_jobs().map_err(js_error)?;
+        self.commit_pending_navigation_requests()?;
+        if !dispatched {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: "native scroll target was retired before notification".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn input_dispatch_key_event(
         &mut self,
         params: &Value,
@@ -137,7 +272,7 @@ impl CdpSession {
             .and_then(Value::as_u64)
             .filter(|id| *id > 0)
             .unwrap_or(1);
-        let (client_x, client_y, scroll_x, scroll_y) =
+        let (client_x, client_y, scroll_x, scroll_y, target_document_id) =
             self.runtime.input_position_for_node(&target_node, x, y);
         let mut init = json!({
             "clientX": client_x, "clientY": client_y,
@@ -159,9 +294,10 @@ impl CdpSession {
             init["deltaY"] = json!(optional_f64(params, "deltaY", 0.0)?);
             init["deltaZ"] = json!(0);
             init["deltaMode"] = json!(0);
-            let outcome = self.eval_input_number(&format!(
-                "__omoikane_dispatch_wheel_input({target_id}, {init})"
-            ))?;
+            let outcome = self.eval_input_number_in_document(
+                target_document_id,
+                &format!("__omoikane_dispatch_wheel_input({target_id}, {init})"),
+            )?;
             let not_canceled = outcome & 1 != 0;
             return Ok(json!({
                 "defaultPrevented": !not_canceled,
@@ -403,7 +539,7 @@ impl CdpSession {
             evaluate(&mut self.runtime)
         }
         .map_err(js_error)?;
-        self.drive_navigation_requests()?;
+        self.commit_pending_navigation_requests()?;
         Ok(not_canceled)
     }
 
@@ -416,7 +552,31 @@ impl CdpSession {
                 Ok(value.as_number().unwrap_or(1.0) as u8)
             })
             .map_err(js_error)?;
-        self.drive_navigation_requests()?;
+        self.commit_pending_navigation_requests()?;
         Ok(outcome)
+    }
+
+    fn eval_input_number_in_document(
+        &mut self,
+        document_id: usize,
+        script: &str,
+    ) -> Result<u8, JsonRpcError> {
+        let outcome = self
+            .runtime
+            .eval_input_in_document_realm(document_id, script)
+            .and_then(|value| {
+                self.runtime.run_jobs()?;
+                Ok(value.as_number().unwrap_or(1.0) as u8)
+            })
+            .map_err(js_error)?;
+        self.commit_pending_navigation_requests()?;
+        Ok(outcome)
+    }
+}
+
+fn native_scroll_owner_error(error: crate::js::native_scroll::OwnerRejection) -> JsonRpcError {
+    JsonRpcError {
+        code: -32000,
+        message: format!("native scroll owner rejected input: {error:?}"),
     }
 }

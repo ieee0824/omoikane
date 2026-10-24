@@ -13,6 +13,44 @@ thread_local! {
     static NEXT_SHARED_WORKER_CONNECTION_ID: Cell<u64> = const { Cell::new(1) };
 }
 
+/// Reads scheduling needs of connected shared globals without retaining registry borrows.
+pub(super) fn owner_next_rendering(
+    owner: &Rc<RefCell<HostState>>,
+    visited: &mut HashSet<usize>,
+) -> crate::cdp::NextRendering {
+    let runtimes = SHARED_WORKER_REGISTRY.with(|registry| {
+        registry
+            .borrow()
+            .iter()
+            .filter_map(|entry| {
+                let shared = entry.borrow();
+                shared
+                    .connections
+                    .values()
+                    .any(|connection| {
+                        !connection.closed
+                            && connection
+                                .owner_state
+                                .upgrade()
+                                .is_some_and(|candidate| Rc::ptr_eq(&candidate, owner))
+                    })
+                    .then(|| Rc::clone(&shared.runtime))
+            })
+            .collect::<Vec<_>>()
+    });
+    runtimes
+        .into_iter()
+        .fold(crate::cdp::NextRendering::Idle, |demand, runtime| {
+            let Ok(runtime) = runtime.try_borrow() else {
+                return demand;
+            };
+            super::render_demand::merge_next_rendering(
+                demand,
+                runtime.next_rendering_with_visited(visited),
+            )
+        })
+}
+
 /// SharedWorker endpoints and identity held by one global.
 #[derive(Default)]
 pub(super) struct State {
@@ -628,6 +666,7 @@ fn create_shared_worker_runtime(
         let owner = owner_state.borrow();
         let mut state = runtime.host_state.borrow_mut();
         state.inherit_worker_cookie_session(&owner, owner_document_id);
+        state.inherit_resource_loading(&owner);
         let document_id = state.document.identity();
         state.secure_context_override = Some(secure_context);
         state

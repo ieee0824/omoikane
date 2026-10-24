@@ -1,5 +1,6 @@
 //! Private, Realm-scoped delivery of Boa promise rejection tracker changes.
 use super::*;
+mod exception_trace;
 #[cfg(test)]
 use boa_gc::Rooted;
 
@@ -757,6 +758,7 @@ fn dispatch_exception_report(
     })?;
     if let Some(((callback, realm), filename)) = reporter {
         let (source, line, column) = error.source_location().unwrap_or((None, 0, 0));
+        let source = JsString::from(source.unwrap_or(filename));
         let value = if muted {
             JsValue::null()
         } else {
@@ -768,13 +770,17 @@ fn dispatch_exception_report(
             &realm,
             &[
                 value,
-                JsString::from(source.unwrap_or(filename)).into(),
+                source.clone().into(),
                 JsValue::from(line),
                 JsValue::from(column),
                 JsValue::from(muted),
             ],
         )?;
-        return decode_exception_report(report, context);
+        let report = decode_exception_report(report, context)?;
+        if let Some(report) = &report {
+            exception_trace::record(document, report, muted, error, (&source, line, column));
+        }
+        return Ok(report);
     }
     Ok(None)
 }

@@ -158,6 +158,212 @@ fn tiled_offsets_preserve_nested_effects_clipping_text_and_stacking() {
     }
 }
 
+fn paint_with_test_shadow_cache(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    use_cache: bool,
+) -> (Canvas, border::ShadowMaskCacheSummary) {
+    let mut canvas = Canvas::new(viewport.width as u32, viewport.height as u32);
+    let shadow_masks = border::FrameShadowMaskCache::new(true);
+    paint_box_internal(
+        &mut canvas,
+        layout,
+        resolver,
+        PaintContext {
+            viewport,
+            text_fonts: &[],
+            web_fonts: None,
+            nested_documents: None,
+            nested_snapshot_draw_calls: None,
+            propagated_background_node: None,
+            shadow_masks: use_cache.then_some(&shadow_masks),
+            retained_collector: None,
+            retained_destination: retained_extract::PaintDestination::RootDocument,
+            effect_sources: None,
+            effect_source_generation: 0,
+            effect_source_nodes: None,
+            effect_source_summary: None,
+        },
+        PaintBoxOptions {
+            inherited_clip: None,
+            include_phase_descendants: true,
+            paint_decorations: true,
+            offset: PaintOffset::default(),
+            retained_paint_owner: None,
+            retained_atomic_inline: None,
+        },
+    );
+    (canvas, shadow_masks.summary().unwrap())
+}
+
+#[test]
+fn transformed_and_effect_surfaces_share_the_frame_shadow_mask_owner() {
+    for (case, effect) in [
+        ("transform", "transform:translateX(5px)"),
+        ("opacity", "opacity:0.5"),
+        ("filter", "filter:blur(1px)"),
+    ] {
+        let host = NodeHandle::element("main");
+        host.set_attribute("class", "host");
+        for class_name in ["card first", "card second"] {
+            let card = NodeHandle::element("div");
+            card.set_attribute("class", class_name);
+            host.append_child(card);
+        }
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                ".host {{display:block;position:relative;width:140px;height:60px;{effect}}}\
+                 .card {{display:block;position:absolute;top:12px;width:32px;height:24px;\
+                         border-radius:6px;background:white;box-shadow:0 0 6px 2px rgba(20,40,80,.7)}}\
+                 .first {{left:12px}} .second {{left:72px}}"
+            ))
+            .unwrap(),
+        );
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 180.0,
+            height: 90.0,
+        };
+        let layout = crate::layout::layout_tree(&host, &mut resolver, viewport).unwrap();
+        let (expected, disabled) =
+            paint_with_test_shadow_cache(&layout, &mut resolver, viewport, false);
+        if case == "transform" {
+            assert!(!layout.transform.is_identity());
+            TRANSFORM_SURFACE_STATS.with(|stats| stats.set((0, 0, 0)));
+        } else {
+            let _ = take_effect_surface_pixels();
+        }
+        let (actual, enabled) =
+            paint_with_test_shadow_cache(&layout, &mut resolver, viewport, true);
+
+        assert_pixels(&actual, &expected, case);
+        if case == "transform" {
+            assert!(TRANSFORM_SURFACE_STATS.with(|stats| stats.get().0) > 0);
+        } else {
+            assert!(take_effect_surface_pixels() > 0, "{case}");
+        }
+        assert_eq!(disabled, border::ShadowMaskCacheSummary::default());
+        assert_eq!(enabled.eligible, 2, "{case}");
+        assert_eq!(enabled.generated, 1, "{case}");
+        assert_eq!(enabled.hits, 1, "{case}");
+        assert_eq!(enabled.retained_entries, 1, "{case}");
+    }
+}
+
+fn paint_with_persistent_test_shadow_cache(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    viewport: Rect,
+    shadow_masks: &border::FrameShadowMaskCache,
+) -> (Canvas, border::ShadowMaskCacheSummary) {
+    let token = shadow_masks.begin_raster_measurement(true);
+    let mut canvas = Canvas::new(viewport.width as u32, viewport.height as u32);
+    paint_box_internal(
+        &mut canvas,
+        layout,
+        resolver,
+        PaintContext {
+            viewport,
+            text_fonts: &[],
+            web_fonts: None,
+            nested_documents: None,
+            nested_snapshot_draw_calls: None,
+            propagated_background_node: None,
+            shadow_masks: Some(shadow_masks),
+            retained_collector: None,
+            retained_destination: retained_extract::PaintDestination::RootDocument,
+            effect_sources: None,
+            effect_source_generation: 0,
+            effect_source_nodes: None,
+            effect_source_summary: None,
+        },
+        PaintBoxOptions {
+            inherited_clip: None,
+            include_phase_descendants: true,
+            paint_decorations: true,
+            offset: PaintOffset::default(),
+            retained_paint_owner: None,
+            retained_atomic_inline: None,
+        },
+    );
+    (
+        canvas,
+        shadow_masks.finish_raster_measurement(token).unwrap(),
+    )
+}
+
+#[test]
+fn transformed_effect_surface_reuses_persistent_masks_across_rasters() {
+    let host = NodeHandle::element("main");
+    host.set_attribute("class", "host");
+    for class_name in ["card first", "card second"] {
+        let card = NodeHandle::element("div");
+        card.set_attribute("class", class_name);
+        host.append_child(card);
+    }
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".host{display:block;position:relative;width:140px;height:60px;\
+             transform:translateX(5px);opacity:.6;filter:blur(1px)}\
+             .card{display:block;position:absolute;top:12px;width:32px;height:24px;\
+             border-radius:6px;background:white;box-shadow:0 0 6px 2px rgba(20,40,80,.7)}\
+             .first{left:12px}.second{left:72px}",
+        )
+        .unwrap(),
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 180.0,
+        height: 90.0,
+    };
+    let layout = crate::layout::layout_tree(&host, &mut resolver, viewport).unwrap();
+    let (expected, _) = paint_with_test_shadow_cache(&layout, &mut resolver, viewport, false);
+    let shadow_masks = border::FrameShadowMaskCache::new(false);
+
+    TRANSFORM_SURFACE_STATS.with(|stats| stats.set((0, 0, 0)));
+    let _ = take_effect_surface_pixels();
+    let (first, first_summary) =
+        paint_with_persistent_test_shadow_cache(&layout, &mut resolver, viewport, &shadow_masks);
+    assert_pixels(
+        &first,
+        &expected,
+        "first persistent transformed effect raster",
+    );
+    assert!(TRANSFORM_SURFACE_STATS.with(|stats| stats.get().0) > 0);
+    assert!(take_effect_surface_pixels() > 0);
+    assert_eq!(
+        (
+            first_summary.generated,
+            first_summary.same_raster_hits,
+            first_summary.prior_raster_hits,
+        ),
+        (1, 1, 0)
+    );
+
+    let (second, second_summary) =
+        paint_with_persistent_test_shadow_cache(&layout, &mut resolver, viewport, &shadow_masks);
+    assert_pixels(
+        &second,
+        &expected,
+        "second persistent transformed effect raster",
+    );
+    assert_eq!(
+        (
+            second_summary.generated,
+            second_summary.same_raster_hits,
+            second_summary.prior_raster_hits,
+        ),
+        (0, 0, 2)
+    );
+}
+
 // Frozen pre-#649 tile implementation: deliberately copies and translates the
 // subtree to provide an independent pixel reference for the shared-layout path.
 pub(super) fn paint_reference(
@@ -208,7 +414,15 @@ pub(super) fn paint_reference(
         text_fonts,
         web_fonts,
         nested_documents: None,
+        nested_snapshot_draw_calls: None,
         propagated_background_node: None,
+        shadow_masks: None,
+        retained_collector: None,
+        retained_destination: retained_extract::PaintDestination::RootDocument,
+        effect_sources: None,
+        effect_source_generation: 0,
+        effect_source_nodes: None,
+        effect_source_summary: None,
     };
     let Some(source_region) = intersect(
         subtree_paint_bounds(layout, resolver, context),
@@ -252,13 +466,23 @@ pub(super) fn paint_reference(
                     text_fonts,
                     web_fonts,
                     nested_documents: None,
+                    nested_snapshot_draw_calls: None,
                     propagated_background_node: None,
+                    shadow_masks: None,
+                    retained_collector: None,
+                    retained_destination: retained_extract::PaintDestination::Temporary,
+                    effect_sources: None,
+                    effect_source_generation: 0,
+                    effect_source_nodes: None,
+                    effect_source_summary: None,
                 },
                 PaintBoxOptions {
                     inherited_clip: None,
                     include_phase_descendants: true,
                     paint_decorations,
                     offset: PaintOffset::default(),
+                    retained_paint_owner: None,
+                    retained_atomic_inline: None,
                 },
             );
             let tile_transform = layout

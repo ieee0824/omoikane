@@ -12,6 +12,7 @@
 use std::collections::btree_map::{self, BTreeMap};
 use std::fmt;
 use std::iter::Peekable;
+use std::sync::Arc;
 
 use super::ComputedValue;
 
@@ -48,12 +49,10 @@ macro_rules! define_properties {
             /// Returns `None` for shorthands, legacy aliases, custom
             /// properties, and any name this engine does not implement.
             pub(crate) fn parse(name: &str) -> Option<Self> {
-                // `NAMES` is sorted (see `variants_are_declared_in_name_order`),
-                // so this costs the same comparisons as a string-keyed map.
-                Self::NAMES
-                    .binary_search(&name)
-                    .ok()
-                    .map(|index| Self::ALL[index])
+                match name {
+                    $($lh_str => Some(Self::$lh_variant),)+
+                    _ => None,
+                }
             }
 
             /// Returns the canonical CSS property name.
@@ -474,12 +473,13 @@ impl IntoPropertyKey for String {
 /// A given name always resolves to the same side, so the representation is
 /// canonical. Equality also compares owned system-color source identities,
 /// because equal RGB values can produce different used colors.
+/// Cloned snapshots share their maps until a mutation needs a private copy.
 #[derive(Clone, PartialEq, Default)]
 pub(crate) struct PropertyMap {
-    known: BTreeMap<PropertyId, ComputedValue>,
-    other: BTreeMap<Box<str>, ComputedValue>,
+    known: Arc<BTreeMap<PropertyId, ComputedValue>>,
+    other: Arc<BTreeMap<Box<str>, ComputedValue>>,
     /// Owned source identity; equal RGB values can have different forcing rules.
-    system_colors: BTreeMap<Box<str>, Box<str>>,
+    system_colors: Arc<BTreeMap<Box<str>, Box<str>>>,
 }
 
 impl PropertyMap {
@@ -510,10 +510,10 @@ impl PropertyMap {
             Ok(id) => id.as_str(),
             Err(name) => name,
         };
-        self.system_colors.remove(name);
+        Arc::make_mut(&mut self.system_colors).remove(name);
         match key.resolve() {
-            Ok(id) => self.known.remove(&id),
-            Err(name) => self.other.remove(name),
+            Ok(id) => Arc::make_mut(&mut self.known).remove(&id),
+            Err(name) => Arc::make_mut(&mut self.other).remove(name),
         }
     }
 
@@ -525,12 +525,12 @@ impl PropertyMap {
     ) -> Option<ComputedValue> {
         match key.into_key() {
             Ok(id) => {
-                self.system_colors.remove(id.as_str());
-                self.known.insert(id, value)
+                Arc::make_mut(&mut self.system_colors).remove(id.as_str());
+                Arc::make_mut(&mut self.known).insert(id, value)
             }
             Err(name) => {
-                self.system_colors.remove(name.as_ref());
-                self.other.insert(name, value)
+                Arc::make_mut(&mut self.system_colors).remove(name.as_ref());
+                Arc::make_mut(&mut self.other).insert(name, value)
             }
         }
     }
@@ -539,12 +539,12 @@ impl PropertyMap {
     pub(crate) fn entry(&mut self, key: impl IntoPropertyKey) -> PropertyEntry<'_> {
         match key.into_key() {
             Ok(id) => {
-                self.system_colors.remove(id.as_str());
-                PropertyEntry::Known(self.known.entry(id))
+                Arc::make_mut(&mut self.system_colors).remove(id.as_str());
+                PropertyEntry::Known(Arc::make_mut(&mut self.known).entry(id))
             }
             Err(name) => {
-                self.system_colors.remove(name.as_ref());
-                PropertyEntry::Other(self.other.entry(name))
+                Arc::make_mut(&mut self.system_colors).remove(name.as_ref());
+                PropertyEntry::Other(Arc::make_mut(&mut self.other).entry(name))
             }
         }
     }
@@ -557,7 +557,7 @@ impl PropertyMap {
     /// Marks an existing value as coming from an explicit system color.
     pub(crate) fn mark_system_color(&mut self, name: &str, system_name: &str) {
         if self.contains_key(name) {
-            self.system_colors
+            Arc::make_mut(&mut self.system_colors)
                 .insert(name.into(), system_name.to_ascii_lowercase().into());
         }
     }
@@ -572,6 +572,24 @@ impl PropertyMap {
         }
     }
 
+    /// Copies one implemented property without resolving its name again.
+    pub(crate) fn insert_from_by_id(&mut self, id: PropertyId, source: &Self) {
+        if let Some(value) = source.get(&id) {
+            self.insert(id, value.clone());
+            if let Some(system_name) = source.system_color_name(id.as_str()) {
+                Arc::make_mut(&mut self.system_colors)
+                    .insert(id.as_str().into(), system_name.to_ascii_lowercase().into());
+            }
+        }
+    }
+
+    /// Iterates custom properties without visiting implemented longhands.
+    pub(crate) fn custom_properties(&self) -> impl Iterator<Item = (&str, &ComputedValue)> {
+        self.other
+            .iter()
+            .filter_map(|(name, value)| name.starts_with("--").then_some((name.as_ref(), value)))
+    }
+
     /// Resolves a reference to another property while retaining source identity.
     pub(crate) fn copy_property(&mut self, from: &str, to: &str) {
         let system_name = self.system_color_name(from).map(str::to_owned);
@@ -581,6 +599,11 @@ impl PropertyMap {
                 self.mark_system_color(to, &system_name);
             }
         }
+    }
+
+    /// Returns the number of stored properties, excluding color metadata.
+    pub(crate) fn len(&self) -> usize {
+        self.known.len() + self.other.len()
     }
 
     /// Returns whether no properties are stored.
@@ -715,6 +738,28 @@ mod tests {
             longhands += usize::from(is_longhand);
         }
         assert_eq!(longhands, PropertyId::ALL.len());
+    }
+
+    #[test]
+    fn cloned_property_maps_keep_values_and_system_sources_independent() {
+        let mut original = PropertyMap::new();
+        original.insert("width", ComputedValue::Px(10.0));
+        original.insert("--custom", ComputedValue::Number(2.0));
+        original.insert("color", ComputedValue::Number(3.0));
+        original.mark_system_color("color", "CanvasText");
+        let mut changed = original.clone();
+
+        *changed.entry("width").or_insert(ComputedValue::Px(0.0)) = ComputedValue::Px(20.0);
+        changed.remove("--custom");
+        changed.insert("color", ComputedValue::Number(4.0));
+        assert_eq!(original.get("width"), Some(&ComputedValue::Px(10.0)));
+        assert_eq!(original.get("--custom"), Some(&ComputedValue::Number(2.0)));
+        assert_eq!(original.get("color"), Some(&ComputedValue::Number(3.0)));
+        assert_eq!(original.system_color_name("color"), Some("canvastext"));
+        assert_eq!(changed.get("width"), Some(&ComputedValue::Px(20.0)));
+        assert!(changed.get("--custom").is_none());
+        assert_eq!(changed.get("color"), Some(&ComputedValue::Number(4.0)));
+        assert_eq!(changed.system_color_name("color"), None);
     }
 
     #[test]

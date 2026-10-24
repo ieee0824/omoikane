@@ -2,11 +2,12 @@
 //! An allocation-free probe obtains source ink before viewport clipping.
 
 use super::*;
+use crate::css::style::PropertyId;
 use crate::css::style::text_shadow::TextShadow;
 
 pub(super) fn style_shadows(style: &ComputedStyle) -> Vec<TextShadow> {
     style
-        .get("text-shadow")
+        .get_by_id(PropertyId::TextShadow)
         .and_then(|value| crate::css::style::text_shadow::parse_computed(&value.css_text()))
         .unwrap_or_default()
 }
@@ -237,19 +238,6 @@ pub(super) fn paint_shadow_masks(
     offset: super::super::PaintOffset,
     mut paint_mask: impl FnMut(&mut Canvas, super::super::PaintOffset),
 ) {
-    let canvas_bounds = Rect {
-        x: 0.0,
-        y: 0.0,
-        width: canvas.width() as f32,
-        height: canvas.height() as f32,
-    };
-    let visible = match clip {
-        Some(clip) => super::super::intersect(canvas_bounds, clip),
-        None => Some(canvas_bounds),
-    };
-    let Some(visible) = visible else {
-        return;
-    };
     for shadow in shadows.iter().rev() {
         let color = if shadow.color.eq_ignore_ascii_case("currentcolor") {
             current_color
@@ -263,46 +251,97 @@ pub(super) fn paint_shadow_masks(
             continue;
         }
         let full_bounds = offset.rect(shadow_bounds(ink, shadow));
-        let Some(destination) = super::super::intersect(full_bounds, visible) else {
+        if canvas.with_retained_operation(
+            super::super::retained_layers::RetainedPrimitiveKind::ShadowComposite,
+            full_bounds,
+            |canvas| {
+                paint_one_shadow_mask(
+                    canvas,
+                    shadow,
+                    color,
+                    clip,
+                    offset,
+                    full_bounds,
+                    &mut paint_mask,
+                );
+            },
+        ) {
             continue;
-        };
-        // Retain all source samples that can contribute through the blur.
-        let support = blur_support(shadow.blur) + 1.0;
-        let required = Rect {
-            x: destination.x - support,
-            y: destination.y - support,
-            width: destination.width + 2.0 * support,
-            height: destination.height + 2.0 * support,
-        };
-        let Some(bounds) = super::super::intersect(full_bounds, required) else {
-            continue;
-        };
-        let x = bounds.x.floor();
-        let y = bounds.y.floor();
-        let width = (bounds.x + bounds.width).ceil() - x;
-        let height = (bounds.y + bounds.height).ceil() - y;
-        let mut mask = Canvas::new(width.max(0.0) as u32, height.max(0.0) as u32);
-        paint_mask(
-            &mut mask,
-            offset.shifted(shadow.offset_x - x, shadow.offset_y - y),
-        );
-        let sigma = shadow.blur * 0.5;
-        if sigma > 0.5 && sigma <= 2.0 {
-            mask.gaussian_blur_alpha_zero_padded(sigma);
-        } else {
-            mask.box_blur_alpha_radii_zero_padded(&super::super::border::gaussian_box_blur_radii(
-                shadow.blur,
-            ));
         }
-        canvas.composite_canvas_clipped(
-            &mask,
-            x as i32,
-            y as i32,
-            color.r,
-            color.g,
-            color.b,
-            f32::from(color.a) / 255.0,
+        paint_one_shadow_mask(
+            canvas,
+            shadow,
+            color,
             clip,
+            offset,
+            full_bounds,
+            &mut paint_mask,
         );
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_one_shadow_mask(
+    canvas: &mut Canvas,
+    shadow: &TextShadow,
+    color: Color,
+    clip: Option<Rect>,
+    offset: super::super::PaintOffset,
+    full_bounds: Rect,
+    paint_mask: &mut impl FnMut(&mut Canvas, super::super::PaintOffset),
+) {
+    let canvas_bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: canvas.width() as f32,
+        height: canvas.height() as f32,
+    };
+    let visible = match clip {
+        Some(clip) => super::super::intersect(canvas_bounds, clip),
+        None => Some(canvas_bounds),
+    };
+    let Some(visible) = visible else {
+        return;
+    };
+    let Some(destination) = super::super::intersect(full_bounds, visible) else {
+        return;
+    };
+    // Retain all source samples that can contribute through the blur.
+    let support = blur_support(shadow.blur) + 1.0;
+    let required = Rect {
+        x: destination.x - support,
+        y: destination.y - support,
+        width: destination.width + 2.0 * support,
+        height: destination.height + 2.0 * support,
+    };
+    let Some(bounds) = super::super::intersect(full_bounds, required) else {
+        return;
+    };
+    let x = bounds.x.floor();
+    let y = bounds.y.floor();
+    let width = (bounds.x + bounds.width).ceil() - x;
+    let height = (bounds.y + bounds.height).ceil() - y;
+    let mut mask = Canvas::new(width.max(0.0) as u32, height.max(0.0) as u32);
+    paint_mask(
+        &mut mask,
+        offset.shifted(shadow.offset_x - x, shadow.offset_y - y),
+    );
+    let sigma = shadow.blur * 0.5;
+    if sigma > 0.5 && sigma <= 2.0 {
+        mask.gaussian_blur_alpha_zero_padded(sigma);
+    } else {
+        mask.box_blur_alpha_radii_zero_padded(&super::super::border::gaussian_box_blur_radii(
+            shadow.blur,
+        ));
+    }
+    canvas.composite_canvas_clipped(
+        &mask,
+        x as i32,
+        y as i32,
+        color.r,
+        color.g,
+        color.b,
+        f32::from(color.a) / 255.0,
+        clip,
+    );
 }

@@ -103,6 +103,8 @@ pub(super) fn new_canvas(width: u32, height: u32) -> Result<Canvas, PaintError> 
         pixels,
         animation_regions: Vec::new(),
         ink_probe: None,
+        retained_layers: None,
+        retained_operation_guard: None,
     })
 }
 

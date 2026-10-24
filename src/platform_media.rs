@@ -13,6 +13,9 @@ mod macos;
 mod macos_input;
 #[path = "platform_media/monitor.rs"]
 mod monitor;
+#[cfg(target_os = "linux")]
+#[path = "platform_media/portal.rs"]
+mod portal;
 #[cfg(all(target_os = "windows", feature = "gui"))]
 #[path = "platform_media/windows.rs"]
 mod windows;
@@ -215,7 +218,8 @@ fn windows_preferences(
 #[cfg(target_os = "linux")]
 fn read_portal_setting(key: &str) -> Option<u32> {
     use std::process::{Command, Stdio};
-    let output = Command::new("gdbus")
+    let mut command = Command::new("gdbus");
+    command
         .args([
             "call",
             "--session",
@@ -230,9 +234,8 @@ fn read_portal_setting(key: &str) -> Option<u32> {
             "org.freedesktop.appearance",
             key,
         ])
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+        .stderr(Stdio::null());
+    let output = portal::output(command, std::time::Duration::from_secs(1))?;
     if !output.status.success() {
         return None;
     }

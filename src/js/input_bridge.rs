@@ -26,6 +26,85 @@ impl State {
     }
 }
 
+impl JsRuntime {
+    /// Calls the bootstrap-private input dispatcher for one live Document.
+    ///
+    /// The callback was captured before author script ran and is retained in
+    /// host state. Callers must derive `document` and every node identity from
+    /// trusted hit testing or a previously published native-scroll target.
+    pub(crate) fn dispatch_private_input_in_document_realm(
+        &mut self,
+        document: usize,
+        kind: &str,
+        arguments: &[serde_json::Value],
+    ) -> JsResult<JsValue> {
+        let (active, callback, main_document, main_realm) = {
+            let state = self.host_state.borrow();
+            (
+                state.document_is_active(document),
+                state.input_bridge.dispatchers.get(&document).cloned(),
+                state.document.identity(),
+                state.main_realm.clone(),
+            )
+        };
+        if !active {
+            return Err(JsNativeError::error()
+                .with_message("input Document Realm is not active")
+                .into());
+        }
+        let callback = callback.ok_or_else(|| {
+            JsNativeError::error().with_message("private input dispatcher is unavailable")
+        })?;
+        let realm = if document == main_document {
+            main_realm
+        } else {
+            self.realm_for_document(document)?
+        }
+        .ok_or_else(|| {
+            JsNativeError::error().with_message("input Document Realm is not available")
+        })?;
+        let previous = self.context.enter_realm(realm);
+        let _document = activate_module_document(&self.host_state, document);
+        let result = self.with_active_host(|context| {
+            let values = arguments
+                .iter()
+                .map(|value| JsValue::from_json(value, context))
+                .collect::<JsResult<Vec<_>>>()?;
+            let values = JsArray::from_iter(values, context);
+            callback
+                .as_callable()
+                .expect("registered input dispatcher")
+                .call(
+                    &JsValue::undefined(),
+                    &[js_string!(kind).into(), values.into()],
+                    context,
+                )
+        });
+        self.context.enter_realm(previous);
+        result
+    }
+
+    /// Claims one exact accepted input and commits its default through the
+    /// canonical non-revoking native-default setter before author delivery.
+    pub(crate) fn claim_native_scroll_notification(
+        &mut self,
+        expected: native_scroll::AcceptedScroll,
+    ) -> Result<native_scroll::OwnerNotification, native_scroll::OwnerRejection> {
+        let mut state = self.host_state.borrow_mut();
+        let handle = state.native_scroll.clone();
+        let key = state.native_scroll_owner;
+        let (current, extent) = state.native_scroll_geometry();
+        let notification = handle.claim_notification_for(key, expected, current, extent)?;
+        if notification.offset != current {
+            state.set_window_scroll_from_native_default(
+                notification.offset.x as f32,
+                notification.offset.y as f32,
+            );
+        }
+        Ok(notification)
+    }
+}
+
 /// Browser-internal focus traversal returns identities, never foreign DOM
 /// wrappers. Each document's input dispatcher applies its own part of a move.
 pub(super) fn focus_chain_native(
@@ -162,4 +241,60 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
         }),
     )?;
     Ok(())
+}
+
+/// Proves that a rendered main-document ancestor cannot consume the requested
+/// user-scroll axes. Read owned layout geometry rather than author-overridable
+/// Element metrics; unknown geometry keeps the input on the canonical owner.
+pub(super) fn native_scroll_axes_have_no_range(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let (Some(check_x), Some(check_y)) = (
+        args.get(1).and_then(JsValue::as_boolean),
+        args.get(2).and_then(JsValue::as_boolean),
+    ) else {
+        return Ok(JsValue::from(false));
+    };
+    if !check_x && !check_y {
+        return Ok(JsValue::from(false));
+    }
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let Some(node) = state.get_node(node_id) else {
+            return Ok(JsValue::from(false));
+        };
+        if document_root_for_node(&node) != Some(state.document.clone()) {
+            return Ok(JsValue::from(false));
+        }
+        state.ensure_content_visibility_geometry(&node);
+        let Some(layout) = state
+            .layout_root
+            .as_ref()
+            .and_then(|root| find_layout_box(root, &node))
+        else {
+            return Ok(JsValue::from(false));
+        };
+        let (max_x, max_y) = layout.max_scroll_offset();
+        let rect = layout.dimensions.content;
+        let finite = [rect.x, rect.y, rect.width, rect.height, max_x, max_y]
+            .into_iter()
+            .all(f32::is_finite);
+        let empty = finite && (!check_x || max_x == 0.0) && (!check_y || max_y == 0.0);
+        if std::env::var_os("OMOIKANE_TRACE_INPUT").is_some() {
+            eprintln!(
+                "{}",
+                crate::diagnostics::json_record(
+                    "OMOIKANE_NATIVE_SCROLL_ANCESTOR_RANGE",
+                    &serde_json::json!({"node":node_id,
+                        "tag":node.tag_name().map(|tag|tag.chars().take(48).collect::<String>()),
+                        "axes":[check_x,check_y],"maximum":[max_x,max_y],"empty":empty}),
+                )
+            );
+        }
+        Ok(JsValue::from(empty))
+    })
 }

@@ -51,7 +51,20 @@ pub(super) fn fragment_native(
             .node_lifetime_owner(id)
             .map(|owner| owner.identity())
             .unwrap_or_else(|| context_document_id(context, &state));
-        if let Some(parsed_root) = parsed.context_shadow_root() {
+        let parsed_root = parsed.context_shadow_root();
+        let native_scroll = parsed_root
+            .as_ref()
+            .filter(|root| root.shadow_root_mode().is_some())
+            .filter(|_| state.node_is_in_active_document(&parsing_context))
+            .map(|_| state.native_scroll.clone());
+        drop(state);
+        if let Some(native_scroll) = native_scroll {
+            // Parsing and sanitizer callbacks are complete. Revoke immediately
+            // before a declarative shadow root can become part of the live tree.
+            native_scroll.revoke_policy();
+        }
+        let mut state = host.borrow_mut();
+        if let Some(parsed_root) = parsed_root {
             if let Some(mode) = parsed_root.shadow_root_mode() {
                 if let Some(root) = parsing_context.attach_shadow(mode) {
                     if let Some(settings) = parsed_root.shadow_root_settings() {
@@ -117,6 +130,7 @@ pub(super) fn document_native(
                 web_fonts: Default::default(),
                 dirty: true,
                 needs_full_sample: true,
+                child_layout: None,
             },
         );
         Ok(js_string!(serde_json::json!({"id": id, "quirks": quirks}).to_string()).into())

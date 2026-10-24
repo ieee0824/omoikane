@@ -65,7 +65,12 @@ pub(super) fn record(
             "none"
         };
         let families = family
-            .map(|key| key.families().to_vec())
+            .map(|key| {
+                key.families()
+                    .iter()
+                    .map(|member| member.name.clone())
+                    .collect()
+            })
             .unwrap_or_default();
         if let Some(last) = records.last_mut()
             && last.phase == phase

@@ -57,7 +57,7 @@ impl ImagePlayback {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct AnimationRegion {
     rect: Rect,
     playback: Arc<ImagePlayback>,
@@ -114,6 +114,7 @@ impl Image {
 
 impl Canvas {
     pub(crate) fn image_playbacks(&self) -> Vec<Arc<ImagePlayback>> {
+        self.invalidate_retained_layers();
         let mut result = Vec::new();
         for region in &self.animation_regions {
             if !result
@@ -132,6 +133,7 @@ impl Canvas {
         destination: Rect,
         clip: Rect,
     ) {
+        self.poison_retained_layers();
         let transform = AffineTransform {
             a: destination.width / image.width.max(1) as f32,
             d: destination.height / image.height.max(1) as f32,
@@ -148,6 +150,8 @@ impl Canvas {
         transform: AffineTransform,
         clip: Option<Rect>,
     ) {
+        self.poison_retained_layers();
+        source.invalidate_retained_layers();
         self.record_transformed_animation_regions(&source.animation_regions, transform, clip);
     }
 
@@ -207,6 +211,9 @@ impl Canvas {
                 rect = clipped;
             }
             if rect.width > 0.0 && rect.height > 0.0 {
+                if !self.permit_retained_animation_region(self.animation_regions.len()) {
+                    return;
+                }
                 self.animation_regions.push(AnimationRegion {
                     rect,
                     playback: Arc::clone(&region.playback),

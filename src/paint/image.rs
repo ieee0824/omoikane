@@ -7,8 +7,8 @@ use flate2::read::ZlibDecoder;
 
 use super::{DataUri, GifDisposal, Image, ImageAnimation, ImageFrame, PaintError};
 
-use crate::css::ComputedStyle;
-use crate::css::ComputedValue;
+use crate::css::style::PropertyId;
+use crate::css::{ComputedStyle, ComputedValue};
 use crate::layout::Rect;
 
 pub(crate) fn decode_gif(bytes: &[u8]) -> Result<Image, PaintError> {
@@ -529,7 +529,7 @@ pub(crate) fn object_fit_destination(
 }
 
 fn object_fit_keyword(style: &ComputedStyle) -> String {
-    match style.get("object-fit") {
+    match style.get_by_id(PropertyId::ObjectFit) {
         Some(ComputedValue::Keyword(keyword)) => keyword.to_ascii_lowercase(),
         _ => "fill".to_string(),
     }
@@ -542,7 +542,7 @@ fn object_fit_keyword(style: &ComputedStyle) -> String {
 /// how a percentage picks the slice `cover` keeps: `100%` then shifts the object
 /// left by exactly its overflow.
 fn object_position_offsets(style: &ComputedStyle, free_x: f32, free_y: f32) -> (f32, f32) {
-    match style.get("object-position") {
+    match style.get_by_id(PropertyId::ObjectPosition) {
         Some(ComputedValue::Position { x, y }) => (
             x.resolve_length_percentage(free_x).unwrap_or(free_x * 0.5),
             y.resolve_length_percentage(free_y).unwrap_or(free_y * 0.5),

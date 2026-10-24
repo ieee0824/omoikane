@@ -190,6 +190,7 @@ pub(crate) struct Inner {
     index: Cell<u32>,
     bindings: RefCell<ScopeBindings>,
     function: bool,
+    lexical_this: bool,
     // Has the `this` been accessed/escaped outside the function environment boundry.
     this_escaped: Cell<bool>,
 }
@@ -205,6 +206,7 @@ impl Scope {
                 index: Cell::default(),
                 bindings: RefCell::default(),
                 function: true,
+                lexical_this: false,
                 this_escaped: Cell::new(false),
             }),
         }
@@ -221,9 +223,19 @@ impl Scope {
                 index: Cell::new(index),
                 bindings: RefCell::default(),
                 function,
+                lexical_this: false,
                 this_escaped: Cell::new(false),
             }),
         }
+    }
+
+    /// Creates a function scope, distinguishing lexical arrow `this` from an owner binding.
+    pub(crate) fn new_function(parent: Self, lexical_this: bool) -> Self {
+        let mut scope = Self::new(parent, true);
+        Rc::get_mut(&mut scope.inner)
+            .expect("a newly created scope is not shared")
+            .lexical_this = lexical_this;
+        scope
     }
 
     /// Checks if the scope has only local bindings.
@@ -403,17 +415,12 @@ impl Scope {
     /// Escape enclosing function environment's `this`.
     pub fn escape_this_in_enclosing_function_scope(&self) {
         let mut current = self;
-        let mut crossed_function_border = false;
-
         loop {
-            if crossed_function_border && current.is_function() {
+            if current.is_function() && !current.inner.lexical_this {
                 current.inner.this_escaped.set(true);
                 return;
             }
             if let Some(outer) = &current.inner.outer {
-                if current.is_function() {
-                    crossed_function_border = true;
-                }
                 current = outer;
             } else {
                 return;

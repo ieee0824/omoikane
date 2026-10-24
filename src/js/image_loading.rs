@@ -1,6 +1,17 @@
 //! Document-owned image loading and deferred security notifications.
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
+pub(super) struct PendingImageEvent {
+    node_id: usize,
+    document_id: usize,
+    source: String,
+    dependencies: Vec<String>,
+    started: Instant,
+}
+
 pub(super) struct DocumentImageEnvironment {
     document_id: usize,
     cache: Rc<RefCell<crate::layout::ImageDocumentState>>,
@@ -44,12 +55,42 @@ impl DocumentImageEnvironment {
         );
         (result, ImageReports { coep, csp })
     }
+
+    /// Runs a full layout whose successful result will be retained by the
+    /// owning Document, and replaces its image dependency coverage atomically.
+    pub(super) fn run_cached_layout<T>(
+        self,
+        operation: impl FnOnce() -> (T, bool),
+    ) -> (T, ImageReports) {
+        self.run(false, || {
+            crate::layout::with_image_layout_dependency_capture(operation)
+        })
+    }
 }
 
 impl HostState {
+    /// Drops pending downloads without waiting for in-flight transport I/O.
+    pub(super) fn cancel_image_loads(&mut self) {
+        self.image_resources.clear();
+        self.pending_image_events.clear();
+    }
+
+    /// Cancels queued image work and notifications when a Document retires.
+    pub(super) fn retire_document_images(&mut self, document_id: usize) {
+        self.image_resources.remove(&document_id);
+        self.pending_image_events
+            .retain(|event| event.document_id != document_id);
+    }
+
     pub(super) fn image_environment(&mut self, document_id: usize) -> DocumentImageEnvironment {
         let embedder = self.isolation_policy_for_document(document_id).embedder;
         let cache = Rc::clone(self.image_resources.entry(document_id).or_default());
+        cache
+            .borrow_mut()
+            .set_async_loading(self.nonblocking_image_loading);
+        cache
+            .borrow_mut()
+            .set_resource_queue(self.resource_queue.clone());
         DocumentImageEnvironment {
             document_id,
             cache,
@@ -94,6 +135,89 @@ impl HostState {
 }
 
 impl JsRuntime {
+    /// Keeps image network/decode work off an interactive embedder's thread.
+    pub fn set_nonblocking_image_loading(&mut self, enabled: bool) {
+        self.host_state.borrow_mut().nonblocking_image_loading = enabled;
+    }
+
+    pub(super) fn poll_image_resource_loads(&mut self) -> JsResult<()> {
+        let documents: Vec<_> = self
+            .host_state
+            .borrow()
+            .image_resources
+            .iter()
+            .filter_map(|(id, images)| images.borrow().has_pending_images().then_some(*id))
+            .collect();
+        for document_id in documents {
+            let environment = {
+                let mut state = self.host_state.borrow_mut();
+                if !state.document_is_active(document_id) {
+                    continue;
+                }
+                state.image_environment(document_id)
+            };
+            let (effects, reports) =
+                environment.run(false, crate::layout::poll_async_image_effects);
+            let render_change = {
+                let mut state = self.host_state.borrow_mut();
+                state.queue_image_reports(document_id, reports);
+                effects.changed.then(|| {
+                    state
+                        .get_node(document_id)
+                        .filter(|document| state.document_is_active(document.identity()))
+                        .map(|document| document)
+                })
+            }
+            .flatten();
+            if let Some(document) = render_change {
+                // Keep the last committed scene scrollable while the decoded
+                // pixels and any intrinsic-size layout reach the next scene.
+                let mut state = self.host_state.borrow_mut();
+                if effects.requires_layout {
+                    state.mark_document_layout_dirty(&document, "image_resource_completed");
+                } else {
+                    state.invalidate_document_paint_source(document.identity());
+                }
+            }
+        }
+        let waiting = std::mem::take(&mut self.host_state.borrow_mut().pending_image_events);
+        for pending in waiting {
+            let current = {
+                let state = self.host_state.borrow();
+                state.document_is_active(pending.document_id)
+                    && state.get_node(pending.node_id).is_some_and(|node| {
+                        node.get_attribute("src").unwrap_or_default() == pending.source
+                            && document_root_for_node(&node)
+                                .or_else(|| state.node_lifetime_owner(pending.node_id))
+                                .is_some_and(|doc| doc.identity() == pending.document_id)
+                    })
+            };
+            if current {
+                let still_pending = self
+                    .host_state
+                    .borrow()
+                    .image_resources
+                    .get(&pending.document_id)
+                    .is_some_and(|images| {
+                        let images = images.borrow();
+                        pending
+                            .dependencies
+                            .iter()
+                            .any(|url| images.is_image_pending(url))
+                    });
+                if still_pending {
+                    self.host_state
+                        .borrow_mut()
+                        .pending_image_events
+                        .push(pending);
+                } else {
+                    self.run_image_resource_load_started(pending.node_id, pending.started, false)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Reuses this document's decoded assets and security policy during rendering.
     pub(crate) fn with_document_images<T>(
         &mut self,
@@ -109,6 +233,15 @@ impl JsRuntime {
     }
 
     pub(super) fn run_image_resource_load(&mut self, node_id: usize) -> JsResult<bool> {
+        self.run_image_resource_load_started(node_id, Instant::now(), true)
+    }
+
+    fn run_image_resource_load_started(
+        &mut self,
+        node_id: usize,
+        start: Instant,
+        report_cached: bool,
+    ) -> JsResult<bool> {
         let (node, source, base, environment, document_id) = {
             let mut state = self.host_state.borrow_mut();
             let Some(node) = state.get_node(node_id) else {
@@ -135,9 +268,11 @@ impl JsRuntime {
             let environment = state.image_environment(document_id);
             (node, source, base, environment, document_id)
         };
-        let start = Instant::now();
-        let (image, reports) = environment.run(true, || {
-            crate::layout::decode_or_fetch_image_asset(&source, base.as_ref())
+        let ((image, dependencies), reports) = environment.run(report_cached, || {
+            crate::layout::decode_or_fetch_image_asset_with_pending_dependencies(
+                &source,
+                base.as_ref(),
+            )
         });
         {
             let mut state = self.host_state.borrow_mut();
@@ -145,6 +280,22 @@ impl JsRuntime {
             if !state.document_is_active(document_id)
                 || node.get_attribute("src").unwrap_or_default() != source
             {
+                return Ok(true);
+            }
+            if !dependencies.is_empty() {
+                if !state.pending_image_events.iter().any(|event| {
+                    event.node_id == node_id
+                        && event.document_id == document_id
+                        && event.source == source
+                }) {
+                    state.pending_image_events.push(PendingImageEvent {
+                        node_id,
+                        document_id,
+                        source,
+                        dependencies,
+                        started: start,
+                    });
+                }
                 return Ok(true);
             }
         }
