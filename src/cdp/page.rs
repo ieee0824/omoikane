@@ -55,6 +55,185 @@ fn trace_startup_page(phase: &str, started: std::time::Instant) {
     }
 }
 
+/// Returns a bounded URL suitable for startup diagnostics. Credentials, query,
+/// fragment, and non-HTTP payloads are never retained.
+pub(super) fn diagnostic_navigation_url(input: &str) -> String {
+    let Ok(mut url) = url::Url::parse(input) else {
+        return String::new();
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return url.scheme().to_owned();
+    }
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    let value = url.to_string();
+    value.chars().take(512).collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn navigation_response_diagnostic(
+    loader_id: &str,
+    commit: NavigationCommit,
+    method: Method,
+    status: u16,
+    body_bytes: usize,
+    decoded_chars: usize,
+    request_url: &str,
+    effective_url: &str,
+    redirects: usize,
+    headers: &[(String, String)],
+) -> Value {
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| {
+                value
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .take(256)
+                    .collect::<String>()
+            })
+    };
+    json!({
+        "phase": "response_detail",
+        "loader_id": loader_id,
+        "commit": navigation_commit_label(commit),
+        "method": method.as_str(),
+        "status": status,
+        "body_bytes": body_bytes,
+        "decoded_chars": decoded_chars,
+        "request_url": diagnostic_navigation_url(request_url),
+        "effective_url": diagnostic_navigation_url(effective_url),
+        "redirects": redirects,
+        "content_type": header("content-type"),
+        "content_length": header("content-length"),
+        "content_encoding": header("content-encoding"),
+        "transfer_encoding": header("transfer-encoding"),
+    })
+}
+
+fn navigation_commit_label(commit: NavigationCommit) -> &'static str {
+    match commit {
+        NavigationCommit::Push => "push",
+        NavigationCommit::Replace => "replace",
+        NavigationCommit::Reload => "reload",
+        NavigationCommit::Traverse(_) => "traverse",
+    }
+}
+
+pub(super) fn navigation_history_diagnostic(
+    phase: &'static str,
+    loader_id: &str,
+    commit: NavigationCommit,
+    requested_url: &str,
+    effective_url: Option<&str>,
+    outcome: Option<&'static str>,
+) -> Value {
+    json!({
+        "phase": phase,
+        "loader_id": loader_id,
+        "commit": navigation_commit_label(commit),
+        "requested_url": diagnostic_navigation_url(requested_url),
+        "effective_url": effective_url.map(diagnostic_navigation_url),
+        "outcome": outcome,
+    })
+}
+
+fn trace_navigation_response(value: &Value) {
+    if std::env::var_os("OMOIKANE_TRACE_STARTUP").is_some() {
+        eprintln!(
+            "{}",
+            crate::diagnostics::json_record("OMOIKANE_STARTUP_PAGE", value)
+        );
+    }
+}
+
+fn trace_navigation_history(
+    phase: &'static str,
+    loader_id: &str,
+    commit: NavigationCommit,
+    requested_url: &str,
+    effective_url: Option<&str>,
+    outcome: Option<&'static str>,
+) {
+    if std::env::var_os("OMOIKANE_TRACE_STARTUP").is_some() {
+        let value = navigation_history_diagnostic(
+            phase,
+            loader_id,
+            commit,
+            requested_url,
+            effective_url,
+            outcome,
+        );
+        eprintln!(
+            "{}",
+            crate::diagnostics::json_record("OMOIKANE_NAVIGATION_HISTORY", &value)
+        );
+    }
+}
+
+fn navigation_json_error(
+    error: impl std::fmt::Display,
+    loader_id: &str,
+    commit: NavigationCommit,
+    requested_url: &str,
+    effective_url: Option<&str>,
+) -> JsonRpcError {
+    trace_navigation_history(
+        "finished",
+        loader_id,
+        commit,
+        requested_url,
+        effective_url,
+        Some("error"),
+    );
+    JsonRpcError {
+        code: -32000,
+        message: error.to_string(),
+    }
+}
+
+enum NavigationResponseDisposition {
+    Install,
+    KeepCurrent,
+}
+
+fn navigation_response_disposition(
+    status: u16,
+) -> Result<NavigationResponseDisposition, CdpSessionError> {
+    match status {
+        204 | 205 => Ok(NavigationResponseDisposition::KeepCurrent),
+        304 => Err(CdpSessionError::MissingCachedNavigationResponse),
+        _ => Ok(NavigationResponseDisposition::Install),
+    }
+}
+
+fn resolve_navigation_response(
+    status: u16,
+    loader_id: &str,
+    commit: NavigationCommit,
+    requested_url: &str,
+    effective_url: &str,
+) -> Result<NavigationResponseDisposition, JsonRpcError> {
+    navigation_response_disposition(status).map_err(|error| {
+        navigation_json_error(error, loader_id, commit, requested_url, Some(effective_url))
+    })
+}
+
+fn trace_pending_commit_error(pending: &PendingDocumentCommit) {
+    trace_navigation_history(
+        "finished",
+        &pending.loader_id,
+        pending.history_commit,
+        &pending.requested_url,
+        Some(&pending.url),
+        Some("error"),
+    );
+}
+
 fn is_fragment_only_navigation(current: &str, target: &str) -> bool {
     let (current_base, current_fragment) = current.split_once('#').unwrap_or((current, ""));
     let (target_base, target_fragment) = target.split_once('#').unwrap_or((target, ""));
@@ -295,13 +474,54 @@ impl CdpSession {
                 "type": "Document",
             }),
         );
+        trace_navigation_history("requested", &loader_id, history_commit, url, None, None);
         let (html, status, document_url, response_headers) = self
-            .load_page_request(url, Method::Get, None, None)
-            .map_err(|error| JsonRpcError {
-                code: -32000,
-                message: error.to_string(),
+            .load_page_request(url, Method::Get, None, None, &loader_id, history_commit)
+            .map_err(|error| navigation_json_error(error, &loader_id, history_commit, url, None))?;
+        let disposition =
+            resolve_navigation_response(status, &loader_id, history_commit, url, &document_url)?;
+        match disposition {
+            NavigationResponseDisposition::KeepCurrent => {
+                self.emit(
+                    "Network.responseReceived",
+                    json!({
+                        "requestId": loader_id,
+                        "type": "Document",
+                        "response": {
+                            "url": document_url,
+                            "status": status,
+                            "mimeType": "text/html",
+                        },
+                    }),
+                );
+                trace_navigation_history(
+                    "finished",
+                    &loader_id,
+                    history_commit,
+                    url,
+                    Some(&document_url),
+                    Some("preserved"),
+                );
+                return Ok(PreparedPageNavigation::Complete(json!({
+                    "frameId": self.frame_id,
+                    "loaderId": loader_id,
+                })));
+            }
+            NavigationResponseDisposition::Install => {}
+        }
+        let form_state = self
+            .navigation_form_state(history_commit, &document_url)
+            .map_err(|error| {
+                trace_navigation_history(
+                    "finished",
+                    &loader_id,
+                    history_commit,
+                    url,
+                    Some(&document_url),
+                    Some("error"),
+                );
+                error
             })?;
-        let form_state = self.navigation_form_state(history_commit, &document_url)?;
         let (history_length, history_state) = self.prospective_history_state(history_commit);
         let (task, mut commit) = self
             .prepare_document_page_task(
@@ -313,13 +533,13 @@ impl CdpSession {
                 status,
                 form_state.as_ref(),
             )
-            .map_err(|error| JsonRpcError {
-                code: -32000,
-                message: error.to_string(),
+            .map_err(|error| {
+                navigation_json_error(error, &loader_id, history_commit, url, Some(&document_url))
             })?;
         commit.history_commit = history_commit;
         commit.loader_id = loader_id.clone();
         commit.status = status;
+        commit.requested_url = url.to_owned();
         Ok(PreparedPageNavigation::Pending {
             task,
             commit,
@@ -350,6 +570,7 @@ impl CdpSession {
             _ => is_fragment_only_navigation(&self.current_url, url),
         };
         if method == Method::Get && commit != NavigationCommit::Reload && same_document_navigation {
+            trace_navigation_history("requested", &loader_id, commit, url, None, None);
             let form_state = self.navigation_form_state(commit, url)?;
             let previous_url = self.current_url.clone();
             self.commit_history_url(url, commit, None);
@@ -371,6 +592,14 @@ impl CdpSession {
                 "Page.navigatedWithinDocument",
                 json!({ "frameId": self.frame_id, "url": url, "navigationType": "fragment" }),
             );
+            trace_navigation_history(
+                "finished",
+                &loader_id,
+                commit,
+                url,
+                Some(url),
+                Some("committed"),
+            );
             return Ok(json!({ "frameId": self.frame_id }));
         }
 
@@ -383,16 +612,55 @@ impl CdpSession {
                 "type": "Document",
             }),
         );
+        trace_navigation_history("requested", &loader_id, commit, url, None, None);
 
         let (html, status, document_url, response_headers) = self
-            .load_page_request(url, method, body, content_type)
-            .map_err(|error| JsonRpcError {
-                code: -32000,
-                message: error.to_string(),
-            })?;
+            .load_page_request(url, method, body, content_type, &loader_id, commit)
+            .map_err(|error| navigation_json_error(error, &loader_id, commit, url, None))?;
         trace_startup_page("response_ready", navigation_started);
 
-        let form_state = self.navigation_form_state(commit, &document_url)?;
+        let disposition =
+            resolve_navigation_response(status, &loader_id, commit, url, &document_url)?;
+        match disposition {
+            NavigationResponseDisposition::KeepCurrent => {
+                self.emit(
+                    "Network.responseReceived",
+                    json!({
+                        "requestId": loader_id,
+                        "type": "Document",
+                        "response": {
+                            "url": document_url,
+                            "status": status,
+                            "mimeType": "text/html",
+                        },
+                    }),
+                );
+                trace_navigation_history(
+                    "finished",
+                    &loader_id,
+                    commit,
+                    url,
+                    Some(&document_url),
+                    Some("preserved"),
+                );
+                return Ok(json!({ "frameId": self.frame_id, "loaderId": loader_id }));
+            }
+            NavigationResponseDisposition::Install => {}
+        }
+
+        let form_state = self
+            .navigation_form_state(commit, &document_url)
+            .map_err(|error| {
+                trace_navigation_history(
+                    "finished",
+                    &loader_id,
+                    commit,
+                    url,
+                    Some(&document_url),
+                    Some("error"),
+                );
+                error
+            })?;
         let (next_history_length, next_history_state) = self.prospective_history_state(commit);
         self.install_document_with_headers(
             &document_url,
@@ -404,13 +672,20 @@ impl CdpSession {
             form_state.as_ref(),
             false,
         )
-        .map_err(|error| JsonRpcError {
-            code: -32000,
-            message: error.to_string(),
+        .map_err(|error| {
+            navigation_json_error(error, &loader_id, commit, url, Some(&document_url))
         })?;
         trace_startup_page("document_installed", navigation_started);
 
         self.commit_history_url(&document_url, commit, None);
+        trace_navigation_history(
+            "finished",
+            &loader_id,
+            commit,
+            url,
+            Some(&document_url),
+            Some("committed"),
+        );
         self.sync_history_length()?;
         if matches!(commit, NavigationCommit::Traverse(_)) {
             self.runtime
@@ -726,25 +1001,49 @@ impl CdpSession {
         method: Method,
         body: Option<Vec<u8>>,
         content_type: Option<String>,
+        loader_id: &str,
+        commit: NavigationCommit,
     ) -> Result<(DecodedHtml, u16, String, Vec<(String, String)>), CdpSessionError> {
         if method == Method::Get {
             if url == "about:blank" {
-                return Ok((
-                    DecodedHtml::from_string("<html><head></head><body></body></html>"),
-                    200,
-                    url.to_string(),
-                    Vec::new(),
-                ));
+                let decoded = DecodedHtml::from_string("<html><head></head><body></body></html>");
+                if std::env::var_os("OMOIKANE_TRACE_STARTUP").is_some() {
+                    trace_navigation_response(&navigation_response_diagnostic(
+                        loader_id,
+                        commit,
+                        method,
+                        200,
+                        decoded.text.len(),
+                        decoded.text.chars().count(),
+                        url,
+                        url,
+                        0,
+                        &[],
+                    ));
+                }
+                return Ok((decoded, 200, url.to_string(), Vec::new()));
             }
             if let Some(data) = crate::http::parse_data_uri(url)
                 && data.mime_type.eq_ignore_ascii_case("text/html")
             {
-                return Ok((
-                    crate::html::encoding::decode_html_bytes(&data.data, Some(&data.mime_type)),
-                    200,
-                    url.to_string(),
-                    Vec::new(),
-                ));
+                let decoded =
+                    crate::html::encoding::decode_html_bytes(&data.data, Some(&data.mime_type));
+                let headers = vec![("Content-Type".to_owned(), data.mime_type)];
+                if std::env::var_os("OMOIKANE_TRACE_STARTUP").is_some() {
+                    trace_navigation_response(&navigation_response_diagnostic(
+                        loader_id,
+                        commit,
+                        method,
+                        200,
+                        data.data.len(),
+                        decoded.text.chars().count(),
+                        url,
+                        url,
+                        0,
+                        &headers,
+                    ));
+                }
+                return Ok((decoded, 200, url.to_string(), headers));
             }
         }
         let parsed: crate::http::url::Url = url.parse()?;
@@ -764,8 +1063,23 @@ impl CdpSession {
             .map(ToString::to_string)
             .unwrap_or_else(|| url.to_string());
         let response_headers = response.headers().to_vec();
+        let decoded = decode_html_response(&response);
+        if std::env::var_os("OMOIKANE_TRACE_STARTUP").is_some() {
+            trace_navigation_response(&navigation_response_diagnostic(
+                loader_id,
+                commit,
+                method,
+                response.status_code(),
+                response.body().len(),
+                decoded.text.chars().count(),
+                url,
+                &effective_url,
+                response.redirect_count(),
+                &response_headers,
+            ));
+        }
         Ok((
-            decode_html_response(&response),
+            decoded,
             response.status_code(),
             effective_url,
             response_headers,
@@ -919,6 +1233,7 @@ impl CdpSession {
         Ok((
             task,
             PendingDocumentCommit {
+                requested_url: url.to_string(),
                 url: url.to_string(),
                 html: html.text.clone(),
                 generation,
@@ -941,15 +1256,18 @@ impl CdpSession {
             || pending.generation != self.document_generation.saturating_add(1)
         {
             self.report_cdp_failure(CdpFailure::PageTask);
+            trace_pending_commit_error(&pending);
             return Err(CdpSessionError::StalePageTaskCompletion);
         }
         match &completed.result {
             Err(PageTaskError::Cancelled) => {
                 self.report_cdp_failure(CdpFailure::PageTask);
+                trace_pending_commit_error(&pending);
                 return Err(CdpSessionError::PageTaskCancelled);
             }
             Err(PageTaskError::TimedOut) => {
                 self.report_cdp_failure(CdpFailure::PageTask);
+                trace_pending_commit_error(&pending);
                 return Err(CdpSessionError::PageTaskTimedOut);
             }
             Ok(_) => {}
@@ -969,7 +1287,10 @@ impl CdpSession {
         // query lists in the new runtime observe the intervening update.
         runtime
             .set_media_environment(self.runtime.media_environment())
-            .map_err(CdpSessionError::JavaScript)?;
+            .map_err(|error| {
+                trace_pending_commit_error(&pending);
+                CdpSessionError::JavaScript(error)
+            })?;
 
         // Teardown is delayed until the replacement runtime has completed its
         // startup work, so cancellation or startup setup failure keeps the old
@@ -994,6 +1315,14 @@ impl CdpSession {
         self.rebuild_node_index();
         let current_url = self.current_url.clone();
         self.commit_history_url(&current_url, pending.history_commit, None);
+        trace_navigation_history(
+            "finished",
+            &pending.loader_id,
+            pending.history_commit,
+            &pending.requested_url,
+            Some(&current_url),
+            Some("committed"),
+        );
         self.emit(
             "Network.responseReceived",
             json!({

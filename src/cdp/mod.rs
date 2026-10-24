@@ -98,6 +98,8 @@ pub enum CdpSessionError {
     Url(UrlParseError),
     /// Loading the requested document failed.
     Http(HttpParseError),
+    /// A 304 response could not be resolved because no HTTP entity cache exists.
+    MissingCachedNavigationResponse,
     /// A page startup task completed for a retired document generation.
     StalePageTaskCompletion,
     /// A page startup task was cancelled.
@@ -116,6 +118,12 @@ impl std::fmt::Display for CdpSessionError {
             Self::JavaScript(error) => write!(f, "{error}"),
             Self::Url(error) => write!(f, "{error}"),
             Self::Http(error) => write!(f, "{error}"),
+            Self::MissingCachedNavigationResponse => {
+                write!(
+                    f,
+                    "navigation returned 304 without a cached response entity"
+                )
+            }
             Self::StalePageTaskCompletion => write!(f, "stale page startup task completion"),
             Self::PageTaskCancelled => write!(f, "page startup task was cancelled"),
             Self::PageTaskTimedOut => {
@@ -282,6 +290,7 @@ struct SessionHistoryEntry {
 /// Document metadata held by the CDP host while its new runtime is owned by a
 /// suspendable page-startup task.
 pub(crate) struct PendingDocumentCommit {
+    requested_url: String,
     url: String,
     html: String,
     generation: u64,

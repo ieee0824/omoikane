@@ -942,7 +942,14 @@ fn child_to_top_javascript_navigation_uses_child_default_policy() {
 fn typed_session_errors_preserve_json_rpc_messages_and_sources() {
     let mut session = CdpSession::new().unwrap();
     let error = session
-        .load_page_request("not-a-url", Method::Get, None, None)
+        .load_page_request(
+            "not-a-url",
+            Method::Get,
+            None,
+            None,
+            "test-loader",
+            NavigationCommit::Push,
+        )
         .unwrap_err();
     assert!(matches!(error, CdpSessionError::Url(_)));
     assert_eq!(error.to_string(), "missing '://' in URL");
@@ -979,6 +986,7 @@ fn timed_out_page_task_records_safe_failure_without_committing_document() {
         result: Err(PageTaskError::TimedOut),
     };
     let pending = PendingDocumentCommit {
+        requested_url: "http://localhost/?token=QUERY_SECRET_942".into(),
         url: "http://localhost/?token=QUERY_SECRET_942".into(),
         html: "BODY_SECRET_942".into(),
         generation,
@@ -2059,6 +2067,7 @@ fn pending_page_navigation_times_out_while_a_dialog_is_open() {
             timeout_deadline: deadline_after(timeout),
             task: Box::pin(task),
             commit: PendingDocumentCommit {
+                requested_url: "about:blank".to_string(),
                 url: "about:blank".to_string(),
                 html: "<html><head></head><body></body></html>".to_string(),
                 generation: 1,
@@ -2582,6 +2591,277 @@ fn page_domain_navigates_reloads_and_emits_network_events() {
     );
 
     server.join();
+}
+
+#[test]
+fn no_content_navigation_keeps_document_while_empty_ok_replaces_it() {
+    let listener = bind_loopback().unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        for _ in 0..5 {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            let (status, body) = if request.starts_with("GET /start ") {
+                ("200 OK", "<main id=stable>kept</main>")
+            } else if request.starts_with("GET /no-content ") {
+                ("204 No Content", "")
+            } else if request.starts_with("GET /reset-content ") {
+                ("205 Reset Content", "")
+            } else if request.starts_with("GET /not-modified ") {
+                ("304 Not Modified", "")
+            } else {
+                ("200 OK", "")
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            )
+            .unwrap();
+        }
+    });
+
+    let origin = format!("http://127.0.0.1:{}", address.port());
+    let mut session = CdpSession::new().unwrap();
+    session
+        .dispatch("Page.navigate", json!({ "url": format!("{origin}/start") }))
+        .unwrap();
+    let document = session.runtime.document().identity();
+    let generation = session.document_generation;
+    let history_length = session.history_entries.len();
+    session.drain_events();
+
+    for (path, status) in [("no-content", 204), ("reset-content", 205)] {
+        session
+            .dispatch(
+                "Page.navigate",
+                json!({ "url": format!("{origin}/{path}") }),
+            )
+            .unwrap();
+        assert_eq!(session.current_url, format!("{origin}/start"), "{path}");
+        assert_eq!(session.runtime.document().identity(), document, "{path}");
+        assert_eq!(session.document_generation, generation, "{path}");
+        assert_eq!(session.history_entries.len(), history_length, "{path}");
+        assert!(
+            session
+                .runtime
+                .document()
+                .query_selector("#stable")
+                .is_some()
+        );
+        let events = session.drain_events();
+        let response = events
+            .iter()
+            .find(|event| {
+                event.method == "Network.responseReceived"
+                    && event.params["response"]["status"] == status
+            })
+            .unwrap_or_else(|| panic!("missing {status} response event: {events:?}"));
+        let loader = response.params["requestId"].clone();
+        assert_eq!(
+            response.params["response"]["url"],
+            format!("{origin}/{path}")
+        );
+        assert!(events.iter().any(|event| {
+            event.method == "Network.requestWillBeSent"
+                && event.params["requestId"] == loader
+                && event.params["request"]["url"] == format!("{origin}/{path}")
+        }));
+    }
+
+    let error = session
+        .dispatch(
+            "Page.navigate",
+            json!({ "url": format!("{origin}/not-modified") }),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("304 without a cached response entity")
+    );
+    assert_eq!(session.current_url, format!("{origin}/start"));
+    assert_eq!(session.runtime.document().identity(), document);
+    assert_eq!(session.document_generation, generation);
+    assert_eq!(session.history_entries.len(), history_length);
+
+    session
+        .dispatch(
+            "Page.navigate",
+            json!({ "url": format!("{origin}/empty-ok") }),
+        )
+        .unwrap();
+    assert_eq!(session.current_url, format!("{origin}/empty-ok"));
+    assert_ne!(session.runtime.document().identity(), document);
+    assert_eq!(session.document_generation, generation + 1);
+    assert_eq!(session.history_entries.len(), history_length + 1);
+    assert!(
+        session
+            .runtime
+            .document()
+            .query_selector("#stable")
+            .is_none()
+    );
+
+    server.join();
+}
+
+#[test]
+fn prepared_no_content_navigation_keeps_document_while_empty_ok_is_pending() {
+    let listener = bind_loopback().unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = FixtureWorker::spawn(move || {
+        for _ in 0..4 {
+            let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+            let request = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
+            let status = if request.starts_with("GET /no-content ") {
+                "204 No Content"
+            } else if request.starts_with("GET /reset-content ") {
+                "205 Reset Content"
+            } else if request.starts_with("GET /not-modified ") {
+                "304 Not Modified"
+            } else {
+                "200 OK"
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        }
+    });
+
+    let origin = format!("http://127.0.0.1:{}", address.port());
+    let mut session = CdpSession::new().unwrap();
+    session
+        .dispatch(
+            "Page.navigate",
+            json!({"url":"data:text/html,<main id=stable>kept</main>"}),
+        )
+        .unwrap();
+    let document = session.runtime.document().identity();
+    let generation = session.document_generation;
+    let history_length = session.history_entries.len();
+    session.drain_events();
+
+    for (path, status) in [("no-content", 204), ("reset-content", 205)] {
+        assert!(matches!(
+            session
+                .prepare_page_navigate(&json!({"url":format!("{origin}/{path}")}))
+                .unwrap(),
+            PreparedPageNavigation::Complete(_)
+        ));
+        assert_eq!(session.runtime.document().identity(), document, "{path}");
+        assert_eq!(session.document_generation, generation, "{path}");
+        assert_eq!(session.history_entries.len(), history_length, "{path}");
+        let events = session.drain_events();
+        let response = events
+            .iter()
+            .find(|event| {
+                event.method == "Network.responseReceived"
+                    && event.params["response"]["status"] == status
+            })
+            .unwrap_or_else(|| panic!("missing prepared {status} response event: {events:?}"));
+        let loader = response.params["requestId"].clone();
+        assert_eq!(
+            response.params["response"]["url"],
+            format!("{origin}/{path}")
+        );
+        assert!(events.iter().any(|event| {
+            event.method == "Network.requestWillBeSent"
+                && event.params["requestId"] == loader
+                && event.params["request"]["url"] == format!("{origin}/{path}")
+        }));
+    }
+    assert!(
+        session
+            .prepare_page_navigate(&json!({"url":format!("{origin}/not-modified")}))
+            .is_err()
+    );
+    assert_eq!(session.runtime.document().identity(), document);
+
+    let PreparedPageNavigation::Pending { task, commit, .. } = session
+        .prepare_page_navigate(&json!({"url":format!("{origin}/empty-ok")}))
+        .unwrap()
+    else {
+        panic!("empty 200 must prepare a replacement document");
+    };
+    let mut task = Box::pin(task);
+    let mut context = TaskContext::from_waker(Waker::noop());
+    let started = std::time::Instant::now();
+    let completed = loop {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "prepared empty navigation timed out"
+        );
+        if let Poll::Ready(completed) = task.as_mut().poll(&mut context) {
+            break completed;
+        }
+    };
+    session
+        .commit_document_page_task(completed, commit)
+        .unwrap();
+    assert_ne!(session.runtime.document().identity(), document);
+    assert_eq!(session.document_generation, generation + 1);
+    assert_eq!(session.history_entries.len(), history_length + 1);
+    assert_eq!(session.current_url, format!("{origin}/empty-ok"));
+    server.join();
+}
+
+#[test]
+fn navigation_response_diagnostics_remove_url_secrets_and_limit_headers() {
+    let diagnostic = super::page::navigation_response_diagnostic(
+        "loader-secret-test",
+        NavigationCommit::Reload,
+        Method::Get,
+        200,
+        12,
+        10,
+        "https://user:password@example.test/private/path?token=secret#hidden",
+        "https://example.test/final?session=private",
+        1,
+        &[
+            ("Content-Type".into(), "text/html; charset=utf-8".into()),
+            ("Content-Length".into(), "12".into()),
+            ("Content-Encoding".into(), "gzip".into()),
+            ("Set-Cookie".into(), "secret=value".into()),
+            ("Authorization".into(), "Bearer private".into()),
+        ],
+    );
+    let serialized = diagnostic.to_string();
+    assert_eq!(
+        diagnostic["request_url"],
+        "https://example.test/private/path"
+    );
+    assert_eq!(diagnostic["effective_url"], "https://example.test/final");
+    assert_eq!(diagnostic["content_type"], "text/html; charset=utf-8");
+    assert_eq!(diagnostic["content_encoding"], "gzip");
+    assert_eq!(diagnostic["loader_id"], "loader-secret-test");
+    assert_eq!(diagnostic["commit"], "reload");
+    for secret in ["password", "token", "secret=value", "Bearer private"] {
+        assert!(!serialized.contains(secret), "leaked {secret}");
+    }
+    assert_eq!(
+        super::page::diagnostic_navigation_url("data:text/html,private"),
+        "data"
+    );
+    let history = super::page::navigation_history_diagnostic(
+        "finished",
+        "loader-7",
+        NavigationCommit::Traverse(2),
+        "https://user:password@example.test/path?token=private#fragment",
+        Some("data:text/html,private"),
+        Some("preserved"),
+    );
+    let serialized = history.to_string();
+    assert_eq!(history["loader_id"], "loader-7");
+    assert_eq!(history["commit"], "traverse");
+    assert_eq!(history["requested_url"], "https://example.test/path");
+    assert_eq!(history["effective_url"], "data");
+    assert_eq!(history["outcome"], "preserved");
+    for secret in ["password", "token", "private", "fragment"] {
+        assert!(!serialized.contains(secret), "leaked {secret}");
+    }
 }
 
 #[test]
