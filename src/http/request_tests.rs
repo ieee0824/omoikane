@@ -99,7 +99,8 @@ fn get_request_includes_browser_language_preferences() {
     let req = HttpRequest::get("http://example.com").unwrap();
     let text = String::from_utf8(req.serialize()).unwrap();
 
-    assert!(text.contains("Accept-Language: en-US,en;q=0.5\r\n"));
+    let expected = crate::language::preferences().accept_language();
+    assert!(text.contains(&format!("Accept-Language: {expected}\r\n")));
 }
 
 #[test]

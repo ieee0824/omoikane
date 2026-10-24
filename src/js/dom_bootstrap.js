@@ -20170,8 +20170,8 @@ export const __omoikane_service_worker_lifecycle = {};
     constructor(token) {
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
       this.userAgent = __omoikane_navigator_user_agent;
-      this.language = "en";
-      this.languages = ["en"];
+      this.language = __omoikane_navigator_language;
+      this.languages = Object.freeze(Array.from(__omoikane_navigator_languages));
       this.platform = "";
       this.cookieEnabled = true;
       this.onLine = true;
