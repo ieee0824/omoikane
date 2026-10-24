@@ -212,6 +212,40 @@ impl AnimationClockEffects {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct KeyframePropertyEffects {
+    requires_layout: bool,
+    refreshes_visibility: bool,
+    opacity_only: bool,
+}
+
+/// Classifies properties whose values are sampled into the computed style.
+/// `animation-timing-function` is keyframe metadata: the current sampler does
+/// not implement per-keyframe easing, but it must not turn an otherwise
+/// opacity-only animation into a geometry animation.
+fn classify_keyframe_properties(steps: &[KeyframeStep]) -> KeyframePropertyEffects {
+    let mut effects = KeyframePropertyEffects {
+        opacity_only: true,
+        ..Default::default()
+    };
+    let mut has_animated_property = false;
+    for declaration in steps.iter().flat_map(|step| &step.declarations) {
+        if declaration.name == "animation-timing-function" {
+            continue;
+        }
+        has_animated_property = true;
+        effects.opacity_only &= declaration.name == "opacity";
+        if declaration.name == "visibility" {
+            effects.refreshes_visibility = true;
+        } else {
+            effects.requires_layout |=
+                super::super::transition::animated_property_requires_layout(&declaration.name);
+        }
+    }
+    effects.opacity_only &= has_animated_property;
+    effects
+}
+
 /// Bounded summary of one transition and animation clock sample.
 ///
 /// The summary contains counts, booleans, and a bounded cache outcome only. It
@@ -711,27 +745,12 @@ impl StyleResolver {
         };
         let mut spec = AnimationSpec::from_properties(&name, scope, properties);
         // Paint-only properties do not change containing blocks or geometry.
-        // Unknown/custom properties retain conservative reflow.
-        spec.refreshes_visibility = steps.iter().any(|step| {
-            step.declarations
-                .iter()
-                .any(|declaration| declaration.name == "visibility")
-        });
-        spec.opacity_only = steps.iter().all(|step| {
-            !step.declarations.is_empty()
-                && step
-                    .declarations
-                    .iter()
-                    .all(|declaration| declaration.name == "opacity")
-        });
-        spec.requires_layout = steps.iter().any(|step| {
-            step.declarations.iter().any(|declaration| {
-                declaration.name != "visibility"
-                    && super::super::transition::animated_property_requires_layout(
-                        &declaration.name,
-                    )
-            })
-        });
+        // Unknown/custom properties retain conservative reflow. Keyframe
+        // metadata is not itself an animated computed-style target.
+        let property_effects = classify_keyframe_properties(steps);
+        spec.refreshes_visibility = property_effects.refreshes_visibility;
+        spec.opacity_only = property_effects.opacity_only;
+        spec.requires_layout = property_effects.requires_layout;
         let paused = matches!(
             properties.get(&PropertyId::AnimationPlayState),
             Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("paused")
@@ -868,6 +887,92 @@ fn declaration_in<'a>(step: &'a KeyframeStep, name: &str) -> Option<(f32, &'a Va
         .rev()
         .find(|declaration| declaration.name == name)
         .map(|declaration| (step.offset, &declaration.value))
+}
+
+#[cfg(test)]
+mod keyframe_property_effect_tests {
+    use super::*;
+
+    fn step(offset: f32, names: &[&str]) -> KeyframeStep {
+        KeyframeStep {
+            offset,
+            declarations: names
+                .iter()
+                .map(|name| Declaration {
+                    name: (*name).to_owned(),
+                    value: Value::Keyword("test".to_owned()),
+                    important: false,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn timing_metadata_preserves_an_opacity_only_target() {
+        let effects = classify_keyframe_properties(&[
+            step(0.0, &["opacity", "animation-timing-function"]),
+            step(0.5, &["animation-timing-function"]),
+            step(1.0, &["opacity"]),
+        ]);
+        assert_eq!(
+            effects,
+            KeyframePropertyEffects {
+                opacity_only: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn timing_metadata_does_not_request_layout_for_live_opacity_animation() {
+        let node = NodeHandle::element("div");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            crate::css::parse_stylesheet(
+                "@keyframes fade { \
+                   from { opacity: 0; animation-timing-function: steps(2) } \
+                   to { opacity: 1 } \
+                 } \
+                 div { animation: fade 1s linear infinite }",
+            )
+            .unwrap(),
+        );
+        resolver.set_animation_time_ms(0.0);
+        resolver.computed_style(&node);
+
+        let effects = resolver.advance_style_clocks(500.0, true);
+        assert!(effects.animation_changed);
+        assert!(effects.animation_opacity_only);
+        assert!(!effects.animation_requires_layout);
+        assert!(!effects.requires_layout());
+    }
+
+    #[test]
+    fn metadata_without_an_animated_target_is_not_opacity_only() {
+        assert_eq!(
+            classify_keyframe_properties(&[step(0.0, &["animation-timing-function"])]),
+            KeyframePropertyEffects::default()
+        );
+    }
+
+    #[test]
+    fn non_metadata_properties_keep_conservative_classification() {
+        for property in ["width", "unknown-property", "--custom"] {
+            let effects = classify_keyframe_properties(&[step(0.0, &[property])]);
+            assert!(effects.requires_layout, "{property}");
+            assert!(!effects.opacity_only, "{property}");
+            assert!(!effects.refreshes_visibility, "{property}");
+        }
+
+        assert_eq!(
+            classify_keyframe_properties(&[step(0.0, &["visibility"])]),
+            KeyframePropertyEffects {
+                refreshes_visibility: true,
+                ..Default::default()
+            }
+        );
+    }
 }
 
 /// Samples discrete custom-property token streams without losing their source scopes.
