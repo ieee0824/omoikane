@@ -89,6 +89,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 webpki-roots = "1.0"
 image-webp = "0.2.4"
 softbuffer = { version = "0.4.8", optional = true }
+sys-locale = "0.3.2"
 winit = { version = "0.30.12", optional = true }
 # HTTP URL authority, IDNA, and request-target normalization use the WHATWG parser.
 url = "2.5.8"

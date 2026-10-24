@@ -18,6 +18,7 @@ mod geometry;
 pub mod html;
 pub mod http;
 pub mod js;
+mod language;
 pub mod layout;
 pub mod paint;
 pub mod platform_browser;
