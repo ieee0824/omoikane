@@ -23,6 +23,8 @@ struct TaskStyleInvalidationCounts {
     local: u32,
     local_raw_style_subject: u32,
     local_data_attribute: u32,
+    data_attribute_same_value: u32,
+    data_attribute_changed_value: u32,
     local_user_action: u32,
     deferred_resolver: u32,
     fallback_raw_style_selector: u32,
@@ -69,6 +71,8 @@ impl TaskStyleInvalidationCounts {
             "local": self.local,
             "local_raw_style_subject": self.local_raw_style_subject,
             "local_data_attribute": self.local_data_attribute,
+            "data_attribute_same_value": self.data_attribute_same_value,
+            "data_attribute_changed_value": self.data_attribute_changed_value,
             "local_user_action": self.local_user_action,
             "deferred_resolver": self.deferred_resolver,
             "fallback_raw_style_selector": self.fallback_raw_style_selector,
@@ -179,6 +183,24 @@ fn record_local_data_attribute_invalidation_active() {
 pub(super) fn record_local_data_attribute_invalidation() {
     if tracing_enabled() {
         record_local_data_attribute_invalidation_active();
+    }
+}
+
+fn record_data_attribute_assignment_active(same_value: bool) {
+    update_active_style_invalidations(|counts| {
+        let counter = if same_value {
+            &mut counts.data_attribute_same_value
+        } else {
+            &mut counts.data_attribute_changed_value
+        };
+        TaskStyleInvalidationCounts::increment(counter);
+    });
+}
+
+/// Records whether one `data-*` assignment preserves the exact UTF-16 value.
+pub(super) fn record_data_attribute_assignment(same_value: bool) {
+    if tracing_enabled() {
+        record_data_attribute_assignment_active(same_value);
     }
 }
 
@@ -624,6 +646,9 @@ mod turn_timing_tests {
             record_inline_style_invalidation_active(outcome);
         }
         record_local_data_attribute_invalidation_active();
+        record_data_attribute_assignment_active(true);
+        record_data_attribute_assignment_active(true);
+        record_data_attribute_assignment_active(false);
         record_local_user_action_invalidation_active();
         record_ordinary_node_mutation_full_active();
         record_ordinary_node_mutation_full_active();
@@ -638,6 +663,8 @@ mod turn_timing_tests {
                 "local": 1,
                 "local_raw_style_subject": 1,
                 "local_data_attribute": 1,
+                "data_attribute_same_value": 2,
+                "data_attribute_changed_value": 1,
                 "local_user_action": 1,
                 "deferred_resolver": 1,
                 "fallback_raw_style_selector": 1,

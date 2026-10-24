@@ -112,6 +112,14 @@ fn previous_value(node: &NodeHandle, name: &str, value: &JsString) -> (Option<us
     )
 }
 
+/// Compares an attribute with a JavaScript DOMString without scalar conversion.
+///
+/// This keeps lone surrogates distinct and treats a missing attribute as
+/// different from an explicitly present empty attribute.
+pub(super) fn has_same_utf16_value(node: &NodeHandle, name: &str, value: &JsString) -> bool {
+    previous_value(node, name, value).1
+}
+
 #[derive(Debug, serde::Serialize)]
 struct StyleDifference {
     changed_properties: Vec<String>,
@@ -364,13 +372,16 @@ mod tests {
         let node = NodeHandle::element("div");
         let empty = JsString::from("");
         assert_eq!(previous_value(&node, "style", &empty), (None, false));
+        assert!(!has_same_utf16_value(&node, "data-state", &empty));
         node.set_attribute("style", "");
         assert_eq!(previous_value(&node, "style", &empty), (Some(0), true));
-        node.set_attribute_utf16("style", &[0xd800]);
+        node.set_attribute("data-state", "");
+        assert!(has_same_utf16_value(&node, "data-state", &empty));
+        node.set_attribute_utf16("data-state", &[0xd800]);
         let same = JsString::from(&[0xd800u16][..]);
         let different = JsString::from(&[0xd801u16][..]);
-        assert_eq!(previous_value(&node, "style", &same), (Some(1), true));
-        assert_eq!(previous_value(&node, "style", &different), (Some(1), false));
-        assert_eq!(node.get_attribute_utf16("style"), Some(vec![0xd800]));
+        assert!(has_same_utf16_value(&node, "data-state", &same));
+        assert!(!has_same_utf16_value(&node, "data-state", &different));
+        assert_eq!(node.get_attribute_utf16("data-state"), Some(vec![0xd800]));
     }
 }

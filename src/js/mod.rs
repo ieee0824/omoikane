@@ -22489,6 +22489,13 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         attribute_assignment::trace(&node, &name, &value, || {
             attribute_assignment::cached_state(&state.borrow(), &node)
         });
+        if let Some(attribute_name) = local_data_attribute.as_deref()
+            && task_diagnostics::tracing_enabled()
+        {
+            task_diagnostics::record_data_attribute_assignment(
+                attribute_assignment::has_same_utf16_value(&node, attribute_name, &value),
+            );
+        }
         let resource_attr = node.tag_name().and_then(|tag| {
             if tag.eq_ignore_ascii_case("iframe") && name.eq_ignore_ascii_case("srcdoc") {
                 Some("srcdoc")
