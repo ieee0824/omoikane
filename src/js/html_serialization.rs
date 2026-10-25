@@ -57,6 +57,7 @@ impl HtmlOutput {
 struct Options {
     serializable: bool,
     roots: HashSet<usize>,
+    registry_attribute_roots: HashSet<usize>,
 }
 
 pub(super) fn fragment_utf16(node: &NodeHandle, state: &HostState) -> Vec<u16> {
@@ -97,6 +98,14 @@ pub(super) fn get_html_native(
     for &root in &roots {
         ensure_same_origin_node(context, root)?;
     }
+    let registry_attribute_roots: HashSet<usize> = match args.get(4) {
+        Some(value) => serde_json::from_str(&value.to_string(context)?.to_std_string_escaped())
+            .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?,
+        None => HashSet::new(),
+    };
+    for &root in &registry_attribute_roots {
+        ensure_same_origin_node(context, root)?;
+    }
     with_host_state(|state| {
         let state = state.borrow();
         let node = state
@@ -105,6 +114,7 @@ pub(super) fn get_html_native(
         let options = Options {
             serializable,
             roots: roots.into_iter().collect(),
+            registry_attribute_roots,
         };
         let mut html = HtmlOutput::default();
         if args.get(3).is_some_and(JsValue::to_boolean) {
@@ -140,6 +150,7 @@ pub(super) fn settings_native(
                 "serializable": settings.serializable,
                 "delegatesFocus": settings.delegates_focus,
                 "clonable": settings.clonable,
+                "keepCustomElementRegistryNull": settings.keep_custom_element_registry_null,
                 "slotAssignment": if settings.manual_slot_assignment {"manual"} else {"named"},
             })
             .to_string()
@@ -161,6 +172,7 @@ pub(super) fn set_settings_native(
         clonable: args.get(3).is_some_and(JsValue::to_boolean),
         manual_slot_assignment: args.get(4).is_some_and(JsValue::to_boolean),
         declarative: false,
+        keep_custom_element_registry_null: args.get(5).is_some_and(JsValue::to_boolean),
     };
     with_host_state(|state| {
         let node = state
@@ -237,6 +249,10 @@ fn fragment(node: &NodeHandle, options: &Options, state: &HostState, html: &mut 
                     "shadowrootslotassignment=\"manual\"",
                 ),
                 (settings.clonable, "shadowrootclonable=\"\""),
+                (
+                    options.registry_attribute_roots.contains(&root.identity()),
+                    "shadowrootcustomelementregistry=\"\"",
+                ),
             ] {
                 if enabled {
                     html.push(' ');

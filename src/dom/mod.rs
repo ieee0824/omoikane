@@ -345,6 +345,8 @@ pub struct ShadowRootSettings {
     pub delegates_focus: bool,
     /// Permit the shadow tree to be included in cloning operations.
     pub clonable: bool,
+    /// Preserve an explicitly absent registry across cloning and adoption.
+    pub keep_custom_element_registry_null: bool,
     /// Whether this root was created by declarative HTML parsing.
     pub declarative: bool,
     /// Whether slot assignments are explicitly managed by script.

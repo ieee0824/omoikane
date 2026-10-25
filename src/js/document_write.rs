@@ -173,17 +173,20 @@ pub(super) fn write(
         let created = parser.borrow_mut().parser.take_created_nodes();
         {
             let mut host = state.borrow_mut();
+            register_parser_nodes(&mut host, document_id, &created);
             for node in &created {
-                host.nodes.insert(node.identity(), node.clone());
-                if let Some(content) = node.template_content() {
-                    host.nodes.insert(content.identity(), content);
-                }
                 host.apply_connected_referrer_meta(node);
                 if matches!(node.tag_name().as_deref(), Some("iframe" | "object")) {
                     host.schedule_connected_resource_loads(node, false, None);
                 }
             }
             host.mark_document_style_dirty(&document);
+        }
+        if let Err(error) = notify_parser_nodes(state, document_id, &created, &parser, context) {
+            if is_wall_clock_timeout(&error) {
+                return Err(error);
+            }
+            record_error(state, &error);
         }
         let Some(script) = script else {
             break;
@@ -208,6 +211,56 @@ pub(super) fn write(
         state.borrow_mut().write_parsers.remove(&document_id);
     }
     Ok(JsValue::undefined())
+}
+
+fn register_parser_nodes(host: &mut HostState, document_id: usize, created: &[NodeHandle]) {
+    let ids: HashSet<_> = created.iter().map(NodeHandle::identity).collect();
+    for node in created {
+        let parent = node.parent_node().or_else(|| node.shadow_host());
+        if parent
+            .as_ref()
+            .is_none_or(|parent| !ids.contains(&parent.identity()))
+        {
+            host.register_tree_for_document(node, Some(document_id));
+        }
+    }
+}
+
+fn notify_parser_nodes(
+    state: &Rc<RefCell<HostState>>,
+    document_id: usize,
+    created: &[NodeHandle],
+    parser: &Rc<RefCell<WriteState>>,
+    context: &mut Context,
+) -> JsResult<()> {
+    if created.is_empty() {
+        return Ok(());
+    }
+    let callback = state
+        .borrow()
+        .parser_update_callbacks
+        .get(&document_id)
+        .cloned();
+    let Some(callback) = callback.and_then(|value| value.as_callable()) else {
+        return Ok(());
+    };
+    let ids = JsArray::from_iter(
+        created
+            .iter()
+            .filter(|node| {
+                document_root_for_node(node)
+                    .is_some_and(|document| document.identity() == document_id)
+            })
+            .map(|node| JsValue::from(node.identity() as f64)),
+        context,
+    );
+    let tail = parser.borrow_mut().parser.take_pending_input_owned();
+    let result = {
+        let _execution = ScriptExecution::new(parser.clone());
+        callback.call(&JsValue::undefined(), &[ids.into()], context)
+    };
+    parser.borrow_mut().parser.push_input_owned(&tail);
+    result.map(|_| ())
 }
 
 fn record_error(state: &Rc<RefCell<HostState>>, error: &JsError) {

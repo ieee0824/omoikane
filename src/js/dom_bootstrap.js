@@ -2,6 +2,7 @@ export let __omoikane_queue_reporting_api_report;
 export let __omoikane_cookie_change_dispatch;
 export let __omoikane_cookie_change_reset;
 export let __omoikane_update_auxiliary_opener;
+export let __omoikane_parser_update;
 export const __omoikane_service_worker_lifecycle = {};
 
 (() => {
@@ -1219,6 +1220,10 @@ export const __omoikane_service_worker_lifecycle = {};
   const customElementDefinitionByConstructor = new Map();
   const customElementRegistryByDocument = browsingInput.customElementRegistryByDocument ||
     (browsingInput.customElementRegistryByDocument = new WeakMap());
+  const customRegistryStates = browsingInput.customRegistryStates ||
+    (browsingInput.customRegistryStates = new WeakMap());
+  const activeCustomRegistries = browsingInput.activeCustomRegistries ||
+    (browsingInput.activeCustomRegistries = new WeakMap());
   const knownSlots = [];
   const slotAssignmentSignatures = new WeakMap();
   const pendingSlotChanges = [];
@@ -1449,6 +1454,8 @@ export const __omoikane_service_worker_lifecycle = {};
     const ctor = hasOwnProperty(constructors, normalizedLocalName)
       ? constructors[normalizedLocalName]
       : undefined;
+    if (!ctor && htmlElement && !customizableBuiltinNames.has(normalizedLocalName) &&
+        !isValidCustomElementName(localName)) return HTMLUnknownElement;
     return ctor || (namespace === SVG_NAMESPACE
       ? SVGElement
       : htmlElement ? HTMLElement : Element);
@@ -3482,14 +3489,17 @@ export const __omoikane_service_worker_lifecycle = {};
 
     if (__omoikane_node_type(newId) === 11) {
       const children = internalChildNodes(newNode);
-      const connectedBeforeMove = [];
+      const connectedBeforeMove = [], adoptions = [];
       for (let index = 0; index < children.length; index++) {
         connectedBeforeMove.push(internalIsConnected(children[index]));
       }
       for (const child of children) {
+        const adoption = customRegistryAdoptionPlan(child, nodeDocument(parent));
+        adoptions.push(adoption);
         notifyImplicitRemoval(child, true);
         if (trustedHTMLGuard) trustedHTMLGuard();
         __omoikane_insert_before(parentId, internalNodeId(child), refId);
+        applyCustomRegistryAdoption(adoption);
       }
       if (children.length) {
         queueMutation(newNode, "childList", {
@@ -3503,6 +3513,7 @@ export const __omoikane_service_worker_lifecycle = {};
           disconnectCustomElementTree(children[index], reactions);
         }
       }
+      for (const adoption of adoptions) customRegistryAdoptionCallbacks(adoption, reactions);
       forgetDiscardedNodeWrappers();
       if (!reactions) upgradeInsertedCustomElements(parent, children);
       if (children.length) {
@@ -3519,14 +3530,17 @@ export const __omoikane_service_worker_lifecycle = {};
     }
 
     const connectedBeforeMove = internalIsConnected(newNode);
+    const adoption = customRegistryAdoptionPlan(newNode, nodeDocument(parent));
     notifyImplicitRemoval(newNode);
     if (trustedHTMLGuard) trustedHTMLGuard();
     __omoikane_insert_before(parentId, newId, refId);
+    applyCustomRegistryAdoption(adoption);
     stampInsertedOwnerDocument(parent, [newNode]);
     if (connectedBeforeMove) {
       retireIframeWindowProxies(newNode);
       disconnectCustomElementTree(newNode, reactions);
     }
+    customRegistryAdoptionCallbacks(adoption, reactions);
     forgetDiscardedNodeWrappers();
     if (!reactions) upgradeInsertedCustomElements(parent, [newNode]);
     queueMutation(parent, "childList", {
@@ -3732,7 +3746,7 @@ export const __omoikane_service_worker_lifecycle = {};
     signalFallbackSlotChanges(node);
   }
 
-  function setInnerHTMLWithApprovedString(receiver, html, guard) {
+  function setInnerHTMLWithApprovedString(receiver, html, guard, registry = undefined) {
     const id = internalNodeId(receiver);
     const owner = internalOwnerDocument(receiver);
     const hasDocumentParts = nativeNodeLocalName(id) === "html" &&
@@ -3780,10 +3794,11 @@ export const __omoikane_service_worker_lifecycle = {};
     if (wasConnected) {
       for (const child of removedNodes) disconnectCustomElementTree(child);
     }
-    const registry = owner && safeWeakMapGet(customElementRegistryByDocument, owner);
-    if (registry) {
-      for (const node of addedNodes) upgradeCustomElementTree(registry, node);
+    if (registry === undefined) {
+      registry = internalNodeType(receiver) === 1 || isEventShadowRoot(receiver)
+        ? customRegistryForNode(receiver) : customRegistryForDocument(owner);
     }
+    initializeParsedCustomElements(addedNodes, registry);
     if (removedNodes.length || addedNodes.length) {
       queueMutation(receiver, "childList", { addedNodes, removedNodes });
     }
@@ -5564,6 +5579,8 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     const owner = elementNodeDocument(element);
     const html = owner.contentType === "text/html";
+    const registry = internalNodeType(context) === 1 || isEventShadowRoot(context)
+      ? customRegistryForNode(context) : customRegistryForDocument(owner);
     if (internalNodeType(context) !== 1 ||
         (html && internalNodeLocalName(context) === "html")) {
       context = owner.createElement("body");
@@ -5573,11 +5590,17 @@ export const __omoikane_service_worker_lifecycle = {};
       internalNodeId(context), markup, !html,
     ));
     stampOwnerDoc(fragment, owner);
+    initializeParsedCustomElements(internalChildNodes(fragment), registry);
     guard();
     insertAdjacent(element, where, fragment, guard);
   }
 
   class Element extends Node {
+    get customElementRegistry() {
+      requireCanonicalElement(this, "Element required");
+      return customRegistryForNode(this);
+    }
+
     remove() { removeChildNode.call(this); }
 
     insertAdjacentElement(where, element) {
@@ -5673,6 +5696,15 @@ export const __omoikane_service_worker_lifecycle = {};
       if (init === null || init === undefined || init.mode === undefined) {
         throw new TypeError("ShadowRootInit.mode is required");
       }
+      const selectedRegistry = init.customElementRegistry;
+      const ownerRegistry = customRegistryForDocument(internalOwnerDocument(this));
+      const registry = selectedRegistry === undefined ? ownerRegistry : selectedRegistry;
+      if (registry !== null) {
+        const state = requireCustomRegistry(registry);
+        if (!state.scoped && registry !== ownerRegistry) {
+          throw new DOMException("A foreign global registry cannot be used", "NotSupportedError");
+        }
+      }
       const mode = String(init.mode);
       if (mode !== "open" && mode !== "closed") {
         throw new TypeError(mode + " is not a valid ShadowRootMode");
@@ -5695,6 +5727,7 @@ export const __omoikane_service_worker_lifecycle = {};
         !!init.clonable, init.slotAssignment === "manual");
       const owner = this.ownerDocument;
       if (owner) stampOwnerDoc(root, owner);
+      setCustomRegistry(root, registry);
       this.__shadowRootInternal = root;
       return root;
     }
@@ -5744,10 +5777,9 @@ export const __omoikane_service_worker_lifecycle = {};
         return;
       }
 
-      const entry = customElementConstructionStack[
-        customElementConstructionStack.length - 1
-      ];
-      if (entry && entry.constructor === new.target && !entry.constructed) {
+      const entry = customConstructionEntry(new.target);
+      if (entry) {
+        if (entry.constructed) throw new DOMException("The element is already constructed", "InvalidStateError");
         requireCustomElementInterface(entry.definition,
           interfaceToken === htmlConstructorInterfaceToken ? constructorInterface : HTMLElement);
         entry.constructed = true;
@@ -5822,6 +5854,13 @@ export const __omoikane_service_worker_lifecycle = {};
 
     togglePopover(options = {}) {
       return togglePopoverElement(this, options);
+    }
+  }
+
+  class HTMLUnknownElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLUnknownElement);
     }
   }
 
@@ -6485,21 +6524,42 @@ export const __omoikane_service_worker_lifecycle = {};
 
     get sheet() { return sheetFor(this); }
   }
+  function internalTemplateContent(element) {
+    if (!hasCanonicalWrapperId(canonicalHtmlElementIds, element) ||
+        internalNodeLocalName(element) !== "template") {
+      throw new IntrinsicTypeError("HTMLTemplateElement required");
+    }
+    const fragment = wrapNode(__omoikane_template_content(internalNodeId(element)));
+    const owner = internalOwnerDocument(element);
+    // Preserve an explicitly adopted content fragment's independent owner.
+    if (fragment && owner && getOwnerDocumentId(ownerDocumentIds, fragment) === undefined) {
+      stampOwnerDoc(fragment, templateContentsOwnerDocument(owner));
+    }
+    return fragment;
+  }
+
   class HTMLTemplateElement extends HTMLElement {
     constructor(...args) {
       super(args[0], htmlConstructorInterfaceToken,
         args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLTemplateElement);
     }
 
-    get content() {
-      const fragment = wrapNode(__omoikane_template_content(this.__id));
-      const owner = this.ownerDocument;
-      // Initialize parser-created contents once. An explicit adoptNode on
-      // the fragment changes its owner independently of the template host.
-      if (fragment && owner && getOwnerDocumentId(ownerDocumentIds, fragment) === undefined) {
-        stampOwnerDoc(fragment, templateContentsOwnerDocument(owner));
+    get shadowRootCustomElementRegistry() {
+      if (!hasCanonicalWrapperId(canonicalHtmlElementIds, this) || internalNodeLocalName(this) !== "template") {
+        throw new TypeError("HTMLTemplateElement required");
       }
-      return fragment;
+      return nativeAttributeValueNS(internalNodeId(this), null, "shadowrootcustomelementregistry") ?? "";
+    }
+    set shadowRootCustomElementRegistry(value) {
+      if (!hasCanonicalWrapperId(canonicalHtmlElementIds, this) || internalNodeLocalName(this) !== "template") {
+        throw new TypeError("HTMLTemplateElement required");
+      }
+      setAttributeValueNS(this, null, "shadowrootcustomelementregistry",
+        "shadowrootcustomelementregistry", toDOMString(value), true);
+    }
+
+    get content() {
+      return internalTemplateContent(this);
     }
     get innerHTML() {
       return Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML")
@@ -7428,6 +7488,8 @@ export const __omoikane_service_worker_lifecycle = {};
         !htmlDocument,
       ));
       stampOwnerDoc(fragment, doc);
+      const registry = context instanceof HTMLTemplateElement ? null : customRegistryForNode(context);
+      initializeParsedCustomElements(internalChildNodes(fragment), registry);
       return fragment;
     }
     surroundContents(newParent) {
@@ -8089,6 +8151,11 @@ export const __omoikane_service_worker_lifecycle = {};
   globalThis.FeaturePolicy = PermissionsPolicy;
 
   class Document extends Node {
+    get customElementRegistry() {
+      if (!isDocumentNode(this)) throw new TypeError("Document required");
+      return customRegistryForDocument(this);
+    }
+
     constructor(id, construction) {
       if (construction === DOCUMENT_CONSTRUCTION) {
         super(id);
@@ -8135,7 +8202,7 @@ export const __omoikane_service_worker_lifecycle = {};
 
     createElement(tag, options) {
       const name = String(tag);
-      const is = customElementCreationIs(options);
+      const creation = customElementCreationOptions(options, this);
       if (!isValidXmlName(name)) {
         throw new DOMException(
           "The tag name provided ('" + name + "') is not a valid name.",
@@ -8149,13 +8216,13 @@ export const __omoikane_service_worker_lifecycle = {};
       const namespace = htmlDocument || contentType === "application/xhtml+xml" ? HTML_NAMESPACE : null;
       const nativeId = __omoikane_create_element(htmlDocument ? asciiLowercase(name) : name, namespace);
       const element = this.__own(wrapNode(nativeId));
-      nativeCustomElementIs(nativeId, is);
+      nativeCustomElementIs(nativeId, creation.is);
+      setCustomRegistry(element, creation.registry);
       if (name.toLowerCase() === "script") {
         __omoikane_mark_inserted_script(element.__id);
       }
       if (browsingInput.hasCustomElementDefinitions) {
-        const registry = safeWeakMapGet(customElementRegistryByDocument, this);
-        if (registry) considerCustomElement(registry, element);
+        if (creation.registry) considerCustomElement(creation.registry, element);
       }
       return element;
     }
@@ -8166,15 +8233,15 @@ export const __omoikane_service_worker_lifecycle = {};
         : String(namespace);
       const qname = String(qualifiedName);
       const info = validateAndExtractNS(ns, qname);
-      const is = customElementCreationIs(options);
+      const creation = customElementCreationOptions(options, this);
       const node = this.__own(wrapNode(nativeCreateElementNS(info.namespace, qname)));
-      nativeCustomElementIs(internalNodeId(node), is);
+      nativeCustomElementIs(internalNodeId(node), creation.is);
+      setCustomRegistry(node, creation.registry);
       if (info.namespace === HTML_NAMESPACE && info.localName.toLowerCase() === "script") {
         __omoikane_mark_inserted_script(node.__id);
       }
       if (info.namespace === HTML_NAMESPACE && browsingInput.hasCustomElementDefinitions) {
-        const registry = safeWeakMapGet(customElementRegistryByDocument, this);
-        if (registry) considerCustomElement(registry, node);
+        if (creation.registry) considerCustomElement(creation.registry, node);
       }
       return node;
     }
@@ -8232,8 +8299,10 @@ export const __omoikane_service_worker_lifecycle = {};
       }
       const oldDocument = attributeState ? attributeState.ownerDocument : nodeDocument(node);
       const parent = attributeState ? null : internalParentNode(node);
+      const adoption = attributeState ? null : customRegistryAdoptionPlan(node, this);
       if (parent) removeChildInternal(parent, node);
       if (oldDocument !== this) {
+        applyCustomRegistryAdoption(adoption);
         stampOwnerDoc(node, this);
         if (!attributeState) {
           customElementTreeWalk(node, element => {
@@ -8244,14 +8313,28 @@ export const __omoikane_service_worker_lifecycle = {};
       return node;
     }
 
-    importNode(node, deep = false) {
-      if (!(node instanceof Node)) {
-        throw new TypeError("Document.importNode requires a Node");
+    importNode(node, options = false) {
+      requireNodeReceiver(this);
+      if (internalNodeType(this) !== 9) throw new TypeError("Document required");
+      const attribute = safeWeakMapGet(attributeNodeStates, node);
+      if (!attribute) requireNodeReceiver(node);
+      const type = attribute ? 2 : internalNodeType(node);
+      if (type === 9 || (type === 11 && nativeShadowHost(internalNodeId(node)) !== null)) {
+        throw new DOMException("This node cannot be imported", "NotSupportedError");
       }
-      if (node.nodeType === 9) {
-        throw new DOMException("Documents cannot be imported.", "NotSupportedError");
-      }
-      return cloneCanonicalNode(node, !!deep, this);
+      let deep, registry = customRegistryForDocument(this);
+      if (options === null || typeof options === "object" || typeof options === "function") {
+        const selected = options === null ? undefined : options.customElementRegistry;
+        if (selected !== undefined) requireCustomRegistry(selected);
+        deep = !(options && options.selfOnly);
+        if (selected !== undefined) {
+          if (!requireCustomRegistry(selected).scoped && selected !== registry) {
+            throw new DOMException("A foreign global registry cannot be used", "NotSupportedError");
+          }
+          registry = selected;
+        }
+      } else deep = !!options;
+      return cloneCanonicalNode(node, deep, this, registry);
     }
 
     get implementation() {
@@ -8687,6 +8770,13 @@ export const __omoikane_service_worker_lifecycle = {};
       }
       super(id, DOCUMENT_FRAGMENT_CONSTRUCTION);
     }
+    get customElementRegistry() {
+      requireNodeReceiver(this);
+      if (internalNodeType(this) !== 11 || nativeShadowHost(internalNodeId(this)) === null) {
+        throw new TypeError("ShadowRoot required");
+      }
+      return customRegistryForNode(this);
+    }
     get host() { return wrapNode(__omoikane_shadow_host(this.__id)); }
     get mode() { return __omoikane_shadow_mode(this.__id); }
     get delegatesFocus() { return parseShadowSettings(nativeShadowSettings(internalNodeId(this))).delegatesFocus; }
@@ -8880,6 +8970,29 @@ export const __omoikane_service_worker_lifecycle = {};
     });
   }
 
+  function serializedRegistryAttributeRoots(receiver) {
+    const roots = [], pending = [receiver];
+    while (pending.length) {
+      const node = pending.pop(), id = internalNodeId(node);
+      if (isEventShadowRoot(node)) {
+        const documentRegistry = customRegistryForDocument(internalOwnerDocument(node));
+        const shadowRegistry = customRegistryForNode(node);
+        const bothNull = documentRegistry === null && shadowRegistry === null;
+        const bothGlobal = effectiveGlobalCustomRegistry(documentRegistry) !== null &&
+          effectiveGlobalCustomRegistry(shadowRegistry) !== null;
+        if (!bothNull && !bothGlobal) roots.push(id);
+      }
+      const children = internalChildNodes(node);
+      for (let i = children.length - 1; i >= 0; i--) pending.push(children[i]);
+      const shadow = nativeShadowRoot(id);
+      if (shadow !== null && shadow !== undefined) pending.push(wrapNode(shadow));
+      if (hasCanonicalWrapperId(canonicalHtmlElementIds, node) && internalNodeLocalName(node) === "template") {
+        pending.push(wrapNode(__omoikane_template_content(id)));
+      }
+    }
+    return roots;
+  }
+
   function getHTML(options = {}) {
     requireNodeReceiver(this);
     const id = internalNodeId(this);
@@ -8890,7 +9003,8 @@ export const __omoikane_service_worker_lifecycle = {};
     if (!["object", "function"].includes(typeof options)) throw new IntrinsicTypeError("Invalid options dictionary");
     const serializable = !!options.serializableShadowRoots;
     const roots = serializedShadowRootIds(options.shadowRoots);
-    return nativeGetHTML(id, serializable, serializeHTMLRoots(roots));
+    return nativeGetHTML(id, serializable, serializeHTMLRoots(roots), false,
+      serializeHTMLRoots(serializedRegistryAttributeRoots(this)));
   }
 
   for (const prototype of [Element.prototype, ShadowRoot.prototype]) {
@@ -12484,7 +12598,8 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_set_custom_element_defined;
   const nativeSetFormAssociatedCustom = globalThis.__omoikane_set_form_associated_custom;
   delete globalThis.__omoikane_set_form_associated_custom;
-  const customInternalsDefinitions = new WeakMap();
+  const customInternalsDefinitions = browsingInput.customInternalsDefinitions ||
+    (browsingInput.customInternalsDefinitions = new WeakMap());
   const internalsConstructionToken = {};
 
   function formDataEntries(value) {
@@ -13165,7 +13280,10 @@ export const __omoikane_service_worker_lifecycle = {};
   const constructingFormEntries = new WeakSet();
   class FormData {
     constructor(form = undefined, submitter = null) {
-      if (form !== undefined && !(form instanceof HTMLFormElement)) throw new TypeError("FormData argument must be a form");
+      if (form !== undefined && (!hasCanonicalWrapperId(canonicalHtmlElementIds, form) ||
+          internalNodeLocalName(form) !== "form")) {
+        throw new TypeError("FormData argument must be a form");
+      }
       if (submitter !== null && !(submitter instanceof HTMLElement)) throw new TypeError("submitter must be an HTMLElement");
       if (!form) { safeWeakMapSet(formDataObjects, this, []); return; }
       if (submitter !== null) {
@@ -16827,12 +16945,31 @@ export const __omoikane_service_worker_lifecycle = {};
   ).split(" "));
 
   const CUSTOM_ELEMENT_REGISTRY_CONSTRUCTION = {};
+  const customElementSequenceIterator = Symbol.iterator;
 
   function requireCustomElementInterface(definition, constructorInterface) {
     const expected = definition.localName === definition.name
       ? HTMLElement : ELEMENT_CTORS[definition.localName] || HTMLElement;
     if (constructorInterface !== expected) {
       throw new TypeError("The custom element constructor uses the wrong HTML interface");
+    }
+  }
+
+  function customElementStringSequence(value) {
+    const isObject = value => value !== null &&
+      (typeof value === "object" || typeof value === "function");
+    if (!isObject(value)) throw new IntrinsicTypeError("Expected a string sequence");
+    const method = value[customElementSequenceIterator];
+    if (typeof method !== "function") throw new IntrinsicTypeError("Expected an iterable sequence");
+    const iterator = safeApply(method, value, []);
+    if (!isObject(iterator)) throw new IntrinsicTypeError("The iterator is not an object");
+    const next = iterator.next;
+    const result = [];
+    while (true) {
+      const step = safeApply(next, iterator, []);
+      if (!isObject(step)) throw new IntrinsicTypeError("The iterator result is not an object");
+      if (step.done) return result;
+      safeArrayPush(result, toDOMString(step.value));
     }
   }
 
@@ -16981,6 +17118,8 @@ export const __omoikane_service_worker_lifecycle = {};
     const internals = initializeCustomInternals(element, definition, "precustomized");
     const entry = { element, definition, constructor: definition.constructor, constructed: false };
     safeArrayPush(customElementConstructionStack, entry);
+    const previousRegistry = safeWeakMapGet(activeCustomRegistries, definition.constructor);
+    safeWeakMapSet(activeCustomRegistries, definition.constructor, definition.registry);
     try {
       const result = Reflect.construct(
         definition.constructor,
@@ -17023,21 +17162,71 @@ export const __omoikane_service_worker_lifecycle = {};
       nativeSetFormAssociatedCustom(id, false);
       element.__customElementError = error;
     } finally {
+      if (previousRegistry) safeWeakMapSet(activeCustomRegistries, definition.constructor, previousRegistry);
+      else safeWeakMapDelete(activeCustomRegistries, definition.constructor);
       safeArrayPop(customElementConstructionStack);
     }
   }
 
   function upgradeCustomElementTree(registry, root) {
     if (!root) return;
-    const owner = internalNodeType(root) === 9 ? root : internalOwnerDocument(root);
-    if (owner !== registry.__document) return;
+    if (!registry) return;
     customElementTreeWalk(root, element => {
       const definition = customDefinitionForElement(registry, element);
       if (definition) upgradeCustomElement(element, definition);
     });
   }
 
-  function cloneCanonicalNode(source, deep, ownerDoc) {
+  // Copy private state in native clone creation order, including template
+  // contents. Only explicit registry associations can upgrade inert contents.
+  function preserveClonedNodeState(source, target, deep, fallbackRegistry, candidates) {
+    const type = internalNodeType(source);
+    if (type === 9) {
+      const registry = customRegistryForDocument(source);
+      if (registry && requireCustomRegistry(registry).scoped) {
+        safeWeakMapSet(customElementRegistryByDocument, target, registry);
+      }
+    } else if (type === 1 || isEventShadowRoot(source)) {
+      let registry = customRegistryForNode(source);
+      if (registry === null && type === 1) registry = fallbackRegistry;
+      if (registry && !requireCustomRegistry(registry).scoped) {
+        registry = effectiveGlobalCustomRegistry(customRegistryForDocument(internalOwnerDocument(target)));
+      }
+      setCustomRegistry(target, registry);
+      if (type === 1) safeArrayPush(candidates, target);
+    }
+    if (source instanceof CDATASection) {
+      Object.setPrototypeOf(target, CDATASection.prototype);
+      Object.defineProperty(target, "__cdataSection", { value: true, configurable: true });
+      markCanonicalCdata(target);
+    }
+    if (source instanceof CharacterData) target.textContent = source.textContent;
+    const name = internalNodeLocalName(source);
+    if (hasCanonicalWrapperId(canonicalHtmlElementIds, source) &&
+        (name === "input" || name === "textarea")) {
+      const value = safeWeakMapGet(nodeEventStates, source).__value;
+      if (value !== undefined) {
+        safeWeakMapGet(nodeEventStates, target).__value = value;
+        nativeSetControlValueEmpty(internalNodeId(target), value === "", value);
+      }
+    }
+    if (deep) {
+      if (hasCanonicalWrapperId(canonicalHtmlElementIds, source) && name === "template") {
+        preserveClonedNodeState(internalTemplateContent(source), internalTemplateContent(target), true, null, candidates);
+      }
+      const sourceChildren = internalChildNodes(source);
+      const targetChildren = internalChildNodes(target);
+      for (let i = 0; i < sourceChildren.length; i++) {
+        preserveClonedNodeState(sourceChildren[i], targetChildren[i], true, fallbackRegistry, candidates);
+      }
+    }
+    const shadowId = nativeShadowRoot(internalNodeId(target));
+    if (shadowId !== null && shadowId !== undefined) {
+      preserveClonedNodeState(wrapNode(nativeShadowRoot(internalNodeId(source))), wrapNode(shadowId), true, null, candidates);
+    }
+  }
+
+  function cloneCanonicalNode(source, deep, ownerDoc, fallbackRegistry = null) {
     const attribute = safeWeakMapGet(attributeNodeStates, source);
     if (attribute) {
       const value = attribute.ownerElement
@@ -17057,60 +17246,178 @@ export const __omoikane_service_worker_lifecycle = {};
     if (clone && ownerDoc) {
       stampOwnerDoc(clone, ownerDoc);
     }
-    // Preserve JS UTF-16 code units that Rust UTF-8 strings cannot represent,
-    // including CharacterData descendants of a deep clone.
-    const preserveClonedState = (source, target) => {
-      if (source instanceof CDATASection) {
-        Object.setPrototypeOf(target, CDATASection.prototype);
-        Object.defineProperty(target, "__cdataSection", { value: true, configurable: true });
-        markCanonicalCdata(target);
+    const candidates = [];
+    if (clone) preserveClonedNodeState(source, clone, deep, fallbackRegistry, candidates);
+    if (browsingInput.hasCustomElementDefinitions) {
+      for (let i = 0; i < candidates.length; i++) {
+        const registry = customRegistryForNode(candidates[i]);
+        if (registry) considerCustomElement(registry, candidates[i]);
       }
-      if (source instanceof CharacterData) target.textContent = source.textContent;
-      const name = internalNodeLocalName(source);
-      if (hasCanonicalWrapperId(canonicalHtmlElementIds, source) &&
-          (name === "input" || name === "textarea")) {
-        const value = safeWeakMapGet(nodeEventStates, source).__value;
-        if (value !== undefined) {
-          safeWeakMapGet(nodeEventStates, target).__value = value;
-          nativeSetControlValueEmpty(internalNodeId(target), value === "", value);
-        }
-      }
-      if (!deep) return;
-      if (source instanceof HTMLTemplateElement) {
-        preserveClonedState(source.content, target.content);
-      }
-      const sourceChildren = source.childNodes;
-      const targetChildren = target.childNodes;
-      for (let i = 0; i < sourceChildren.length; i++) {
-        preserveClonedState(sourceChildren[i], targetChildren[i]);
-      }
-    };
-    if (clone) preserveClonedState(source, clone);
-    if (clone && ownerDoc && browsingInput.hasCustomElementDefinitions) {
-      const registry = safeWeakMapGet(customElementRegistryByDocument, ownerDoc);
-      if (registry) upgradeCustomElementTree(registry, clone);
     }
     return clone;
   }
 
-  function customElementCreationIs(options) {
-    // The legacy DOMString overload is ignored; dictionary `is` is a DOMString.
-    if (options === undefined || options === null) return null;
-    if (typeof options !== "object" && typeof options !== "function") {
-      toDOMString(options);
-      return null;
+  function requireCustomRegistry(registry) {
+    const state = safeWeakMapGet(customRegistryStates, registry);
+    if (!state) throw new TypeError("CustomElementRegistry required");
+    return state;
+  }
+
+  function customRegistryForDocument(document) {
+    const registry = safeWeakMapGet(customElementRegistryByDocument, document);
+    return registry || (windowForDocument(document) ? registryForDocument(document) : null);
+  }
+
+  function effectiveGlobalCustomRegistry(registry) {
+    return registry && !requireCustomRegistry(registry).scoped ? registry : null;
+  }
+
+  function setCustomRegistry(node, registry, document = internalOwnerDocument(node)) {
+    const events = safeWeakMapGet(nodeEventStates, node);
+    events.customRegistry = registry;
+    if (registry) {
+      const state = requireCustomRegistry(registry);
+      if (state.scoped) state.documents.add(document);
     }
-    const value = options.is;
-    return value === undefined ? null : toDOMString(value);
+  }
+
+  function customRegistryForNode(node) {
+    if (internalNodeType(node) === 9) return customRegistryForDocument(node);
+    const events = safeWeakMapGet(nodeEventStates, node);
+    if (hasOwnProperty(events, "customRegistry")) return events.customRegistry;
+    const shadow = internalNodeType(node) === 11 && nativeShadowHost(internalNodeId(node)) !== null;
+    const parent = internalParentNode(node);
+    const registry = shadow && parseShadowSettings(nativeShadowSettings(internalNodeId(node))).keepCustomElementRegistryNull
+      ? null : parent && (internalNodeType(parent) === 1 || isEventShadowRoot(parent))
+        ? customRegistryForNode(parent) : customRegistryForDocument(internalOwnerDocument(node));
+    setCustomRegistry(node, registry);
+    return registry;
+  }
+
+  function customRegistryAdoptionPlan(root, document) {
+    const oldDocument = internalOwnerDocument(root);
+    if (oldDocument === document) return null;
+    const entries = [], selected = new Map(), pending = [root];
+    while (pending.length) {
+      const node = pending.pop(), type = internalNodeType(node);
+      if (type === 1 || isEventShadowRoot(node)) {
+        let registry = customRegistryForNode(node);
+        if (type === 1 && (!registry || !requireCustomRegistry(registry).scoped)) {
+          const parent = internalParentNode(node);
+          const fromDocument = registry !== null || node === root || !parent ||
+            (internalNodeType(parent) === 11 && !isEventShadowRoot(parent));
+          registry = effectiveGlobalCustomRegistry(fromDocument
+            ? customRegistryForDocument(document) : safeMapGet(selected, parent));
+        } else if (type === 11 && (!registry
+            ? !parseShadowSettings(nativeShadowSettings(internalNodeId(node))).keepCustomElementRegistryNull
+            : !requireCustomRegistry(registry).scoped)) {
+          registry = effectiveGlobalCustomRegistry(customRegistryForDocument(document));
+        }
+        safeMapSet(selected, node, registry);
+        entries.push({node, registry});
+      }
+      const children = internalChildNodes(node);
+      for (let i = children.length - 1; i >= 0; i--) pending.push(children[i]);
+      const shadow = nativeShadowRoot(internalNodeId(node));
+      if (shadow !== null && shadow !== undefined) pending.push(wrapNode(shadow));
+    }
+    return {entries, document, oldDocument};
+  }
+
+  function applyCustomRegistryAdoption(plan) {
+    if (!plan) return;
+    for (const {node, registry} of plan.entries) setCustomRegistry(node, registry, plan.document);
+  }
+
+  function customRegistryAdoptionCallbacks(plan, reactions = null) {
+    if (!plan) return;
+    for (const {node} of plan.entries) {
+      if (internalNodeType(node) !== 1) continue;
+      const callback = () => invokeCustomElementCallback(node, "adoptedCallback", [plan.oldDocument, plan.document]);
+      if (reactions) reactions.push(callback);
+      else callback();
+    }
+  }
+
+  function initializeParsedCustomElements(nodes, registry) {
+    const pending = nodes.slice().reverse();
+    while (pending.length) {
+      const node = pending.pop();
+      if (internalNodeType(node) === 1) setCustomRegistry(node, registry);
+      const children = internalChildNodes(node);
+      for (let i = children.length - 1; i >= 0; i--) pending.push(children[i]);
+    }
+    if (registry) {
+      for (const node of nodes) upgradeCustomElementTree(registry, node);
+    }
+  }
+
+  function customConstructionEntry(constructor) {
+    const registry = safeWeakMapGet(activeCustomRegistries, constructor);
+    for (let i = customElementConstructionStack.length - 1; i >= 0; i--) {
+      const entry = customElementConstructionStack[i];
+      if (entry.constructor === constructor && entry.definition.registry === registry) return entry;
+    }
+    return null;
+  }
+
+  function customElementCreationOptions(options, document) {
+    let registry = customRegistryForDocument(document), is = null;
+    if (options !== undefined && options !== null) {
+      if (typeof options !== "object" && typeof options !== "function") toDOMString(options);
+      else {
+        const selected = options.customElementRegistry;
+        if (selected !== undefined) {
+          if (selected !== null) requireCustomRegistry(selected);
+          registry = selected;
+        }
+        const value = options.is;
+        if (value !== undefined) is = toDOMString(value);
+        if (selected !== undefined && is !== null) throw new DOMException("is and registry cannot be combined", "NotSupportedError");
+        if (registry && !requireCustomRegistry(registry).scoped &&
+            registry !== customRegistryForDocument(document)) {
+          throw new DOMException("A foreign global registry cannot be used", "NotSupportedError");
+        }
+      }
+    }
+    return {registry, is};
+  }
+
+  function initializeCustomRegistry(registry, root) {
+    requireNodeReceiver(root);
+    const state = requireCustomRegistry(registry);
+    const type = internalNodeType(root);
+    const document = type === 9 ? root : internalOwnerDocument(root);
+    if (!state.scoped && (type === 9 || customRegistryForDocument(document) !== registry)) {
+      throw new DOMException("The root does not belong to this registry", "NotSupportedError");
+    }
+    if (type === 9 && customRegistryForDocument(root) === null) {
+      safeWeakMapSet(customElementRegistryByDocument, root, registry);
+    } else if (type === 11 && nativeShadowHost(internalNodeId(root)) !== null &&
+        customRegistryForNode(root) === null) {
+      setCustomRegistry(root, registry);
+    }
+    const pending = [root];
+    while (pending.length) {
+      const node = pending.pop();
+      if (internalNodeType(node) === 1) {
+        if (customRegistryForNode(node) === null) setCustomRegistry(node, registry);
+        if (customRegistryForNode(node) === registry) considerCustomElement(registry, node);
+      }
+      const children = internalChildNodes(node);
+      for (let i = children.length - 1; i >= 0; i--) pending.push(children[i]);
+    }
   }
 
   function customDefinitionForElement(registry, element) {
-    if (!hasCanonicalWrapperId(canonicalHtmlElementIds, element)) return null;
+    if (!hasCanonicalWrapperId(canonicalHtmlElementIds, element) ||
+        customRegistryForNode(element) !== registry) return null;
+    const definitions = requireCustomRegistry(registry).definitions;
     const localName = internalNodeLocalName(element);
-    const autonomous = registry.__definitions.get(localName);
+    const autonomous = definitions.get(localName);
     if (autonomous && autonomous.localName === localName) return autonomous;
     const is = nativeCustomElementIs(internalNodeId(element));
-    const definition = is === null ? null : registry.__definitions.get(is);
+    const definition = is === null ? null : definitions.get(is);
     return definition && definition.localName === localName ? definition : null;
   }
 
@@ -17124,9 +17431,6 @@ export const __omoikane_service_worker_lifecycle = {};
   function upgradeInsertedCustomElements(parent, nodes, reactions = null) {
     if (!browsingInput.hasCustomElementDefinitions) return;
     if (!parent || !internalIsConnected(parent)) return;
-    const owner = internalNodeType(parent) === 9 ? parent : internalOwnerDocument(parent);
-    const registry = owner && safeWeakMapGet(customElementRegistryByDocument, owner);
-    if (!registry) return;
     for (const node of nodes) {
       customElementTreeWalk(node, element => {
         if (element.__customElementState === "custom") {
@@ -17138,7 +17442,8 @@ export const __omoikane_service_worker_lifecycle = {};
           } else connectCustomElement(element);
           return;
         }
-        const definition = customDefinitionForElement(registry, element);
+        const registry = customRegistryForNode(element);
+        const definition = registry && customDefinitionForElement(registry, element);
         if (definition) {
           const reaction = () => upgradeCustomElement(element, definition);
           if (reactions) reactions.push(reaction);
@@ -17160,108 +17465,98 @@ export const __omoikane_service_worker_lifecycle = {};
     return registry;
   }
 
-  class CustomElementRegistry {
-    constructor(token, document) {
-      if (token !== CUSTOM_ELEMENT_REGISTRY_CONSTRUCTION) {
-        throw new TypeError("Illegal constructor");
+  function customElementDefinitionExtends(options) {
+    if (options === undefined || options === null) return null;
+    if (typeof options !== "object" && typeof options !== "function") {
+      throw new IntrinsicTypeError("Invalid element definition options dictionary");
+    }
+    const value = options.extends;
+    return value === undefined ? null : toDOMString(value);
+  }
+
+  function readCustomElementDefinitionMetadata(constructor) {
+    const prototype = constructor.prototype;
+    if (prototype === null || (typeof prototype !== "object" && typeof prototype !== "function")) {
+      throw new IntrinsicTypeError("The custom element constructor prototype is not an object");
+    }
+    const callbacks = {};
+    for (const name of ["connectedCallback", "disconnectedCallback", "connectedMoveCallback",
+        "adoptedCallback", "attributeChangedCallback"]) {
+      const value = prototype[name];
+      if (value !== undefined && typeof value !== "function") {
+        throw new IntrinsicTypeError(name + " is not callable");
       }
-      this.__document = document;
-      this.__definitions = new Map();
-      this.__constructors = new Map();
-      this.__whenDefined = new Map();
-      this.__definitionRunning = false;
+      callbacks[name] = value || null;
+    }
+    let observedAttributes = [], disabledFeatures = [];
+    if (callbacks.attributeChangedCallback) {
+      const observed = constructor.observedAttributes;
+      if (observed !== undefined) observedAttributes = customElementStringSequence(observed);
+    }
+    const disabled = constructor.disabledFeatures;
+    if (disabled !== undefined) disabledFeatures = customElementStringSequence(disabled);
+    const formAssociated = Boolean(constructor.formAssociated);
+    if (formAssociated) {
+      for (const name of ["formAssociatedCallback", "formDisabledCallback",
+          "formResetCallback", "formStateRestoreCallback"]) {
+        const value = prototype[name];
+        if (value !== undefined && typeof value !== "function") {
+          throw new IntrinsicTypeError(name + " is not callable");
+        }
+        callbacks[name] = value || null;
+      }
+    }
+    return {prototype, callbacks, observedAttributes, disabledFeatures, formAssociated};
+  }
+
+  class CustomElementRegistry {
+    constructor(token = undefined, document = null) {
+      const scoped = token !== CUSTOM_ELEMENT_REGISTRY_CONSTRUCTION;
+      safeWeakMapSet(customRegistryStates, this, {
+        scoped, document: scoped ? null : document, documents: new Set(),
+        definitions: new Map(), constructors: new Map(), whenDefined: new Map(),
+        definitionRunning: false,
+      });
     }
 
-    define(nameValue, constructor, options) {
-      const name = String(nameValue);
+    initialize(root) {
+      initializeCustomRegistry(this, root);
+    }
+
+    define(nameValue, constructor, options = undefined) {
+      const state = requireCustomRegistry(this);
+      if (arguments.length < 2) throw new IntrinsicTypeError("A name and constructor are required");
+      const name = toDOMString(nameValue);
+      if (typeof constructor !== "function") throw new IntrinsicTypeError("The constructor is not callable");
+      const extendsValue = customElementDefinitionExtends(options);
       if (!isConstructor(constructor)) {
-        throw new TypeError("The custom element constructor is not a constructor");
+        throw new IntrinsicTypeError("The custom element constructor is not a constructor");
       }
       if (!isValidCustomElementName(name)) {
-        throw new DOMException(
-          "The custom element name ('" + name + "') is not valid.",
-          "SyntaxError",
-        );
+        throw new DOMException("The custom element name ('" + name + "') is not valid.", "SyntaxError");
       }
-      if (this.__definitions.has(name) || this.__constructors.has(constructor)) {
-        throw new DOMException(
-          "The name or constructor has already been registered.",
-          "NotSupportedError",
-        );
+      if (state.definitions.has(name) || state.constructors.has(constructor)) {
+        throw new DOMException("The name or constructor has already been registered.", "NotSupportedError");
       }
-      if (this.__definitionRunning) {
-        throw new DOMException(
-          "A custom element definition is already running.",
-          "NotSupportedError",
-        );
+      if (extendsValue !== null) {
+        if (state.scoped) throw new DOMException("Scoped registries cannot extend built-ins", "NotSupportedError");
+        if (isValidCustomElementName(extendsValue) || !customizableBuiltinNames.has(extendsValue)) {
+          throw new DOMException("The extended element is not a built-in HTML element", "NotSupportedError");
+        }
       }
-
-      this.__definitionRunning = true;
-      let prototype;
-      let extendsValue = null;
-      const callbacks = {};
-      let observedAttributes = [];
-      let disabledFeatures = [];
-      let formAssociated = false;
+      if (state.definitionRunning) {
+        throw new DOMException("A custom element definition is already running.", "NotSupportedError");
+      }
+      state.definitionRunning = true;
+      let metadata;
       try {
-        prototype = constructor.prototype;
-        if ((typeof prototype !== "object" && typeof prototype !== "function") ||
-            prototype === null) {
-          throw new TypeError("The custom element constructor prototype is not an object");
-        }
-        if (options !== undefined && options !== null) {
-          const extended = options.extends;
-          extendsValue = extended === undefined ? null : toDOMString(extended);
-        }
-        if (extendsValue !== null) {
-          if (isValidCustomElementName(extendsValue) || !customizableBuiltinNames.has(extendsValue)) {
-            throw new DOMException("The extended element is not a built-in HTML element", "NotSupportedError");
-          }
-        }
-        for (const callbackName of [
-          "connectedCallback",
-          "connectedMoveCallback",
-          "disconnectedCallback",
-          "adoptedCallback",
-          "attributeChangedCallback",
-        ]) {
-          const callback = prototype[callbackName];
-          if (callback !== undefined && callback !== null &&
-              typeof callback !== "function") {
-            throw new TypeError(callbackName + " is not callable");
-          }
-          callbacks[callbackName] = callback || null;
-        }
-        if (callbacks.attributeChangedCallback) {
-          const observed = constructor.observedAttributes;
-          if (observed !== undefined && observed !== null) {
-            observedAttributes = Array.from(observed, value => String(value));
-          }
-        }
-        const disabled = constructor.disabledFeatures;
-        if (disabled !== undefined) {
-          if (disabled === null || !["object", "function"].includes(typeof disabled) ||
-              typeof disabled[Symbol.iterator] !== "function") {
-            throw new TypeError("disabledFeatures must be a sequence");
-          }
-          disabledFeatures = Array.from(disabled, String);
-        }
-        formAssociated = Boolean(constructor.formAssociated);
-        if (formAssociated) {
-          for (const name of ["formAssociatedCallback", "formDisabledCallback",
-              "formResetCallback", "formStateRestoreCallback"]) {
-            const callback = prototype[name];
-            if (callback !== undefined && typeof callback !== "function") {
-              throw new TypeError(name + " is not callable");
-            }
-            callbacks[name] = callback || null;
-          }
-        }
+        metadata = readCustomElementDefinitionMetadata(constructor);
       } finally {
-        this.__definitionRunning = false;
+        state.definitionRunning = false;
       }
+      const {prototype, callbacks, observedAttributes, disabledFeatures, formAssociated} = metadata;
 
-      const pending = this.__whenDefined.get(name);
+      const pending = state.whenDefined.get(name);
       const definition = {
         name,
         localName: extendsValue ?? name,
@@ -17271,65 +17566,79 @@ export const __omoikane_service_worker_lifecycle = {};
         observedAttributes: new Set(observedAttributes),
         disabledFeatures: new Set(disabledFeatures),
         formAssociated,
-        document: this.__document,
+        registry: this,
+        document: state.document,
         promise: pending ? pending.promise : Promise.resolve(constructor),
       };
       safeWeakMapSet(customInternalsDefinitions, definition, {
         customized: definition.localName !== name,
-        formAssociated,
+        // Built-ins retain native form behavior; this flag applies to autonomous elements.
+        formAssociated: definition.localName === name && formAssociated,
         disabledFeatures: new Set(disabledFeatures),
         callbacks: { ...callbacks },
       });
-      this.__definitions.set(name, definition);
+      state.definitions.set(name, definition);
       browsingInput.hasCustomElementDefinitions = true;
-      this.__constructors.set(constructor, name);
-      if (!safeMapHas(customElementDefinitionByConstructor, constructor)) {
+      state.constructors.set(constructor, name);
+      if (!state.scoped && !safeMapHas(customElementDefinitionByConstructor, constructor)) {
         safeMapSet(customElementDefinitionByConstructor, constructor, definition);
       }
 
       // Existing connected candidates are upgraded in shadow-including tree
       // order. Detached candidates remain undefined until insertion or an
       // explicit upgrade(), as required by the custom-elements algorithm.
-      upgradeCustomElementTree(this, this.__document);
+      if (state.scoped) {
+        for (const document of state.documents) upgradeCustomElementTree(this, document);
+      } else upgradeCustomElementTree(this, state.document);
       if (pending) {
         pending.resolve(constructor);
-        this.__whenDefined.delete(name);
+        state.whenDefined.delete(name);
       }
     }
 
     get(nameValue) {
-      const definition = this.__definitions.get(String(nameValue));
+      const state = requireCustomRegistry(this);
+      if (arguments.length === 0) throw new IntrinsicTypeError("A name is required");
+      const definition = state.definitions.get(toDOMString(nameValue));
       return definition ? definition.constructor : undefined;
     }
 
     getName(constructor) {
-      if (!isConstructor(constructor)) {
-        throw new TypeError("The value is not a constructor");
+      const state = requireCustomRegistry(this);
+      if (typeof constructor !== "function") {
+        throw new IntrinsicTypeError("The value is not callable");
       }
-      return this.__constructors.get(constructor) || null;
+      return state.constructors.get(constructor) || null;
     }
 
     whenDefined(nameValue) {
-      const name = String(nameValue);
-      if (!isValidCustomElementName(name)) {
-        return Promise.reject(new DOMException(
-          "The custom element name ('" + name + "') is not valid.",
-          "SyntaxError",
-        ));
+      try {
+        const state = requireCustomRegistry(this);
+        if (arguments.length === 0) throw new IntrinsicTypeError("A name is required");
+        const name = toDOMString(nameValue);
+        if (!isValidCustomElementName(name)) {
+          return Promise.reject(new DOMException(
+            "The custom element name ('" + name + "') is not valid.",
+            "SyntaxError",
+          ));
+        }
+        const definition = state.definitions.get(name);
+        if (definition) return definition.promise;
+        let pending = state.whenDefined.get(name);
+        if (!pending) {
+          let resolve;
+          const promise = new Promise(resolver => { resolve = resolver; });
+          pending = { promise, resolve };
+          state.whenDefined.set(name, pending);
+        }
+        return pending.promise;
+      } catch (error) {
+        return Promise.reject(error);
       }
-      const definition = this.__definitions.get(name);
-      if (definition) return definition.promise;
-      let pending = this.__whenDefined.get(name);
-      if (!pending) {
-        let resolve;
-        const promise = new Promise(resolver => { resolve = resolver; });
-        pending = { promise, resolve };
-        this.__whenDefined.set(name, pending);
-      }
-      return pending.promise;
     }
 
     upgrade(root) {
+      const state = requireCustomRegistry(this);
       requireNodeReceiver(root);
       upgradeCustomElementTree(this, root);
     }
@@ -17470,6 +17779,7 @@ export const __omoikane_service_worker_lifecycle = {};
   globalThis.Window = Window;
   globalThis.Element = Element;
   globalThis.HTMLElement = HTMLElement;
+  globalThis.HTMLUnknownElement = HTMLUnknownElement;
   globalThis.HTMLHtmlElement = HTMLHtmlElement;
   globalThis.HTMLHeadElement = HTMLHeadElement;
   globalThis.HTMLBodyElement = HTMLBodyElement;
@@ -18138,6 +18448,15 @@ export const __omoikane_service_worker_lifecycle = {};
         },
       });
       windowNamedGetters.set(name, getter);
+    }
+  };
+  __omoikane_parser_update = function(ids) {
+    refreshWindowNamedProperties();
+    for (const id of ids) {
+      if (nativeNodeType(id) !== 1) continue;
+      const element = wrapNode(id);
+      const registry = customRegistryForNode(element);
+      if (registry) considerCustomElement(registry, element);
     }
   };
   globalThis.__omoikane_install_window_named_properties = refreshWindowNamedProperties;
