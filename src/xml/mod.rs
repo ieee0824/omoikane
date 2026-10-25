@@ -265,6 +265,7 @@ impl<'a> Parser<'a> {
             let local_name = local_name.to_string();
             node.set_xml_attribute_ns(attr, attribute_namespace, local_name, value);
         }
+        node.initialize_parser_custom_element();
         self.parent().append_child(node.clone());
         self.radio_form_refs.reconcile(&node);
         if !empty {

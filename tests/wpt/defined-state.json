@@ -1,0 +1,10 @@
+{
+  "tests": [
+    {
+      "path": "custom-elements/pseudo-class-defined.html"
+    },
+    {
+      "path": "custom-elements/pseudo-class-defined-customized-builtins.html"
+    }
+  ]
+}

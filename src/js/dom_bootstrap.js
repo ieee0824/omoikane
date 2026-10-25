@@ -4498,46 +4498,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
 
     cloneNode(deep = false) {
-      const clone = wrapNode(__omoikane_clone_node(this.__id, !!deep));
-      // The clone is detached, so its ownerDocument comes from its creation
-      // context, not its (absent) tree root. Propagate this node's owning
-      // document to the clone and, for a deep clone, its descendants — so a
-      // clone of a sub-document node keeps reporting that sub-document as its
-      // ownerDocument rather than defaulting to the top-level document.
-      const ownerDoc = this.ownerDocument;
-      if (clone && ownerDoc) {
-        stampOwnerDoc(clone, ownerDoc);
-      }
-      // Preserve JS UTF-16 code units that Rust UTF-8 strings cannot represent,
-      // including CharacterData descendants of a deep clone.
-      const preserveClonedState = (source, target) => {
-        if (source instanceof CDATASection) {
-          Object.setPrototypeOf(target, CDATASection.prototype);
-          Object.defineProperty(target, "__cdataSection", { value: true, configurable: true });
-          markCanonicalCdata(target);
-        }
-        if (source instanceof CharacterData) target.textContent = source.textContent;
-        const name = internalNodeLocalName(source);
-        if (hasCanonicalWrapperId(canonicalHtmlElementIds, source) &&
-            (name === "input" || name === "textarea")) {
-          const value = safeWeakMapGet(nodeEventStates, source).__value;
-          if (value !== undefined) {
-            safeWeakMapGet(nodeEventStates, target).__value = value;
-            nativeSetControlValueEmpty(internalNodeId(target), value === "", value);
-          }
-        }
-        if (!deep) return;
-        if (source instanceof HTMLTemplateElement) {
-          preserveClonedState(source.content, target.content);
-        }
-        const sourceChildren = source.childNodes;
-        const targetChildren = target.childNodes;
-        for (let i = 0; i < sourceChildren.length; i++) {
-          preserveClonedState(sourceChildren[i], targetChildren[i]);
-        }
-      };
-      if (clone) preserveClonedState(this, clone);
-      return clone;
+      return cloneCanonicalNode(this, !!deep, internalOwnerDocument(this));
     }
 
     isEqualNode(otherNode) {
@@ -5774,8 +5735,10 @@ export const __omoikane_service_worker_lifecycle = {};
     "__scrollOffset", "__applyScroll", "__isViewportScrollingElement",
   ]);
 
+  const htmlConstructorInterfaceToken = {};
+
   class HTMLElement extends Element {
-    constructor(id) {
+    constructor(id = undefined, interfaceToken, constructorInterface) {
       if (id !== undefined) {
         super(id);
         return;
@@ -5785,6 +5748,8 @@ export const __omoikane_service_worker_lifecycle = {};
         customElementConstructionStack.length - 1
       ];
       if (entry && entry.constructor === new.target && !entry.constructed) {
+        requireCustomElementInterface(entry.definition,
+          interfaceToken === htmlConstructorInterfaceToken ? constructorInterface : HTMLElement);
         entry.constructed = true;
         super(entry.element.__id);
         return entry.element;
@@ -5794,11 +5759,15 @@ export const __omoikane_service_worker_lifecycle = {};
         ? null
         : safeMapGet(customElementDefinitionByConstructor, new.target);
       if (definition) {
-        const element = wrapNode(__omoikane_create_element(definition.name));
+        requireCustomElementInterface(definition,
+          interfaceToken === htmlConstructorInterfaceToken ? constructorInterface : HTMLElement);
+        const element = wrapNode(__omoikane_create_element(definition.localName));
+        nativeCustomElementIs(internalNodeId(element), definition.localName === definition.name ? null : definition.name);
         definition.document.__own(element);
         Object.setPrototypeOf(element, new.target.prototype);
         element.__customElementDefinition = definition;
         element.__customElementState = "custom";
+        nativeSetCustomElementDefined(internalNodeId(element), true);
         element.__customElementConnected = false;
         initializeCustomInternals(element, definition, "custom");
         super(element.__id);
@@ -5814,7 +5783,7 @@ export const __omoikane_service_worker_lifecycle = {};
         throw new TypeError("Illegal invocation");
       }
       const state = customInternalsState(this);
-      if (!state || state.definition.disabledFeatures.has("internals") ||
+      if (!state || state.definition.customized || state.definition.disabledFeatures.has("internals") ||
           state.internals || !["custom", "precustomized"].includes(state.phase)) {
         throw new DOMException("Internals cannot be attached to this element", "NotSupportedError");
       }
@@ -6153,14 +6122,54 @@ export const __omoikane_service_worker_lifecycle = {};
   function clearPopoverTargetOverride(control) {
     popoverTargetOverrides.delete(control);
   }
-  class HTMLHtmlElement extends HTMLElement {}
-  class HTMLHeadElement extends HTMLElement {}
-  class HTMLBodyElement extends HTMLElement {}
-  class HTMLFrameSetElement extends HTMLElement {}
-  class HTMLDivElement extends HTMLElement {}
-  class HTMLSpanElement extends HTMLElement {}
-  class HTMLParagraphElement extends HTMLElement {}
+  class HTMLHtmlElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLHtmlElement);
+    }
+  }
+  class HTMLHeadElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLHeadElement);
+    }
+  }
+  class HTMLBodyElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLBodyElement);
+    }
+  }
+  class HTMLFrameSetElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLFrameSetElement);
+    }
+  }
+  class HTMLDivElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLDivElement);
+    }
+  }
+  class HTMLSpanElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLSpanElement);
+    }
+  }
+  class HTMLParagraphElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLParagraphElement);
+    }
+  }
   class HTMLAnchorElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLAnchorElement);
+    }
+
     get href() {
       const raw = this.getAttribute("href");
       return raw === null ? "" : __omoikane_resolve_url(raw);
@@ -6170,6 +6179,11 @@ export const __omoikane_service_worker_lifecycle = {};
     set rel(value) { this.setAttribute("rel", String(value)); }
   }
   class HTMLAreaElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLAreaElement);
+    }
+
     get href() {
       const raw = this.getAttribute("href");
       return raw === null ? "" : __omoikane_resolve_url(raw);
@@ -6359,6 +6373,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLDialogElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLDialogElement);
+    }
+
     get open() { return this.hasAttribute("open"); }
     set open(value) {
       if (value) this.setAttribute("open", "");
@@ -6447,6 +6466,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLDetailsElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLDetailsElement);
+    }
+
     get open() { return this.hasAttribute("open"); }
     set open(value) {
       if (value) this.setAttribute("open", "");
@@ -6454,9 +6478,19 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
   class HTMLStyleElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLStyleElement);
+    }
+
     get sheet() { return sheetFor(this); }
   }
   class HTMLTemplateElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLTemplateElement);
+    }
+
     get content() {
       const fragment = wrapNode(__omoikane_template_content(this.__id));
       const owner = this.ownerDocument;
@@ -6484,6 +6518,11 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
   class HTMLSlotElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLSlotElement);
+    }
+
     get name() { return this.getAttribute("name") || ""; }
     set name(value) { this.setAttribute("name", String(value)); }
     assignedNodes(options = {}) {
@@ -6675,7 +6714,7 @@ export const __omoikane_service_worker_lifecycle = {};
     get isConnected() { return false; }
     cloneNode() {
       const state = safeWeakMapGet(attributeNodeStates, this);
-      return new Attr(ATTR_CONSTRUCTION, { ...state, ownerElement: null });
+      return cloneCanonicalNode(this, false, state.ownerDocument);
     }
     isSameNode(other) { return this === other; }
     isEqualNode(other) {
@@ -8094,8 +8133,9 @@ export const __omoikane_service_worker_lifecycle = {};
       return findElementById(scope, id);
     }
 
-    createElement(tag) {
+    createElement(tag, options) {
       const name = String(tag);
+      const is = customElementCreationIs(options);
       if (!isValidXmlName(name)) {
         throw new DOMException(
           "The tag name provided ('" + name + "') is not a valid name.",
@@ -8109,6 +8149,7 @@ export const __omoikane_service_worker_lifecycle = {};
       const namespace = htmlDocument || contentType === "application/xhtml+xml" ? HTML_NAMESPACE : null;
       const nativeId = __omoikane_create_element(htmlDocument ? asciiLowercase(name) : name, namespace);
       const element = this.__own(wrapNode(nativeId));
+      nativeCustomElementIs(nativeId, is);
       if (name.toLowerCase() === "script") {
         __omoikane_mark_inserted_script(element.__id);
       }
@@ -8119,13 +8160,15 @@ export const __omoikane_service_worker_lifecycle = {};
       return element;
     }
 
-    createElementNS(namespace, qualifiedName) {
+    createElementNS(namespace, qualifiedName, options) {
       const ns = (namespace === undefined || namespace === null || namespace === "")
         ? null
         : String(namespace);
       const qname = String(qualifiedName);
       const info = validateAndExtractNS(ns, qname);
+      const is = customElementCreationIs(options);
       const node = this.__own(wrapNode(nativeCreateElementNS(info.namespace, qname)));
+      nativeCustomElementIs(internalNodeId(node), is);
       if (info.namespace === HTML_NAMESPACE && info.localName.toLowerCase() === "script") {
         __omoikane_mark_inserted_script(node.__id);
       }
@@ -8208,9 +8251,7 @@ export const __omoikane_service_worker_lifecycle = {};
       if (node.nodeType === 9) {
         throw new DOMException("Documents cannot be imported.", "NotSupportedError");
       }
-      const clone = node.cloneNode(!!deep);
-      stampOwnerDoc(clone, this);
-      return clone;
+      return cloneCanonicalNode(node, !!deep, this);
     }
 
     get implementation() {
@@ -10516,6 +10557,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLIFrameElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLIFrameElement);
+    }
+
     get permissionsPolicy() {
       if (internalNodeLocalName(this) !== "iframe" ||
           nativeNodeNamespaceURI(internalNodeId(this)) !== HTML_NAMESPACE) {
@@ -11394,7 +11440,12 @@ export const __omoikane_service_worker_lifecycle = {};
 
   // Legacy frames reuse the same Window facade without inheriting iframe's
   // distinct interface or iframe-only sandbox/srcdoc attributes.
-  class HTMLFrameElement extends HTMLElement {}
+  class HTMLFrameElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLFrameElement);
+    }
+  }
   for (const name of Object.getOwnPropertyNames(HTMLIFrameElement.prototype)) {
     if (["constructor", "sandbox", "srcdoc", "allow", "allowFullscreen", "width", "height", "permissionsPolicy", "featurePolicy"].includes(name)) continue;
     Object.defineProperty(HTMLFrameElement.prototype, name,
@@ -11402,6 +11453,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLObjectElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLObjectElement);
+    }
+
     get contentDocument() {
       const id = nativeIframeContentDocument(this.__id);
       forgetDiscardedNodeWrappers();
@@ -11515,8 +11571,9 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLMediaElement extends HTMLElement {
-    constructor(id) {
-      super(id);
+    constructor(id = undefined, interfaceToken, constructorInterface) {
+      super(id, htmlConstructorInterfaceToken,
+        interfaceToken === htmlConstructorInterfaceToken ? constructorInterface : HTMLMediaElement);
       this.__mediaLoadId = 0;
       this.__mediaPlaybackId = 0;
       this.__mediaPlaybackTimer = null;
@@ -11870,8 +11927,18 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
-  class HTMLAudioElement extends HTMLMediaElement {}
+  class HTMLAudioElement extends HTMLMediaElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLAudioElement);
+    }
+  }
   class HTMLVideoElement extends HTMLMediaElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLVideoElement);
+    }
+
     get width() { return Math.max(0, Math.trunc(Number(this.getAttribute("width")) || 0)); }
     set width(value) { this.setAttribute("width", String(Math.max(0, Math.trunc(Number(value) || 0)))); }
     get height() { return Math.max(0, Math.trunc(Number(this.getAttribute("height")) || 0)); }
@@ -11900,6 +11967,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLTableElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLTableElement);
+    }
+
     get caption() {
       return childElementsByTag(this, "CAPTION")[0] || null;
     }
@@ -12011,6 +12083,11 @@ export const __omoikane_service_worker_lifecycle = {};
 
   // thead / tbody / tfoot share the HTMLTableSectionElement interface.
   class HTMLTableSectionElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLTableSectionElement);
+    }
+
     get rows() {
       return childElementsByTag(this, "TR");
     }
@@ -12041,6 +12118,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLTableRowElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLTableRowElement);
+    }
+
     // td and th children, in tree order.
     get cells() {
       return this.childNodes.filter(
@@ -12126,6 +12208,11 @@ export const __omoikane_service_worker_lifecycle = {};
   // results back to the default span value before the getter re-applies the
   // HTML defaults/caps when the attribute is read.
   class HTMLTableCellElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLTableCellElement);
+    }
+
     get cellIndex() {
       const parent = this.parentNode;
       if (!parent || parent.tagName !== "TR") return -1;
@@ -12386,6 +12473,12 @@ export const __omoikane_service_worker_lifecycle = {};
 
   const nativeParserFormOwner = globalThis.__omoikane_parser_form_owner;
   delete globalThis.__omoikane_parser_form_owner;
+  const nativeValidCustomElementName = globalThis.__omoikane_valid_custom_element_name;
+  delete globalThis.__omoikane_valid_custom_element_name;
+  const nativeCustomElementIs = globalThis.__omoikane_custom_element_is;
+  delete globalThis.__omoikane_custom_element_is;
+  const nativeSetCustomElementDefined = globalThis.__omoikane_set_custom_element_defined;
+  delete globalThis.__omoikane_set_custom_element_defined;
   const nativeSetFormAssociatedCustom = globalThis.__omoikane_set_form_associated_custom;
   delete globalThis.__omoikane_set_form_associated_custom;
   const customInternalsDefinitions = new WeakMap();
@@ -13495,6 +13588,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLFormElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLFormElement);
+    }
+
     __controls() {
       const root = formTreeRoot(this);
       const id = nativeAttribute(this, "id");
@@ -14012,6 +14110,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLInputElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLInputElement);
+    }
+
     get indeterminate() { return nativeGetIndeterminate(htmlInputControlId(this)); }
     set indeterminate(value) { nativeSetIndeterminate(htmlInputControlId(this), !!value); }
 
@@ -14165,6 +14268,11 @@ export const __omoikane_service_worker_lifecycle = {};
   });
 
   class HTMLTextAreaElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLTextAreaElement);
+    }
+
     get value() {
       if (this.__value !== undefined) return this.__value;
       const initial = normalizeTextAreaValue(this.textContent || "");
@@ -14220,6 +14328,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLButtonElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLButtonElement);
+    }
+
     get type() {
       if (!hasCanonicalWrapperId(canonicalHtmlElementIds, this) ||
           internalNodeLocalName(this) !== "button") throw new TypeError("Illegal invocation");
@@ -14240,6 +14353,11 @@ export const __omoikane_service_worker_lifecycle = {};
   installPopoverTargetMixin(HTMLButtonElement.prototype);
 
   class HTMLLabelElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLLabelElement);
+    }
+
     get control() { return labelControl(this); }
     get form() { const control = labelControl(this); return control ? formOwner(control) : null; }
     get htmlFor() {
@@ -14251,6 +14369,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLMetaElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLMetaElement);
+    }
+
     get name() {
       return this.getAttribute("name") || "";
     }
@@ -14272,6 +14395,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLSelectElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLSelectElement);
+    }
+
     get options() {
       return childElementsByTag(this, "OPTION");
     }
@@ -14340,6 +14468,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLFieldSetElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLFieldSetElement);
+    }
+
     get elements() { return makeHTMLCollection(() => listedControls(this), () => true, null); }
     get disabled() { return this.hasAttribute("disabled"); }
     set disabled(value) {
@@ -14349,6 +14482,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLOutputElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLOutputElement);
+    }
+
     get value() { return this.textContent; }
     set value(value) {
       value = String(value);
@@ -14405,6 +14543,11 @@ export const __omoikane_service_worker_lifecycle = {};
   });
 
   class HTMLOptionElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLOptionElement);
+    }
+
     get defaultSelected() {
       return nativeAttributeValueNS(internalNodeId(this), null, "selected") !== null;
     }
@@ -14433,6 +14576,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLScriptElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLScriptElement);
+    }
+
     setAttribute(name, value) {
       const guard = trustedSinkDocumentGuard(this);
       const attrName = toDOMString(name);
@@ -14493,6 +14641,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLImageElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLImageElement);
+    }
+
     setAttribute(name, value) {
       const isSource = String(name).toLowerCase() === "src";
       if (isSource) noteElementResourceStart(this);
@@ -15337,6 +15490,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLCanvasElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLCanvasElement);
+    }
+
     get width(){return canvasDimensions(this)[0];} set width(value){this.setAttribute("width",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
     get height(){return canvasDimensions(this)[1];} set height(value){this.setAttribute("height",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
     getContext(type){
@@ -15510,6 +15668,11 @@ export const __omoikane_service_worker_lifecycle = {};
   };
 
   class HTMLLinkElement extends HTMLElement {
+    constructor(...args) {
+      super(args[0], htmlConstructorInterfaceToken,
+        args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLLinkElement);
+    }
+
     setAttribute(name, value) {
       const attribute = String(name).toLowerCase();
       const isHref = attribute === "href";
@@ -16647,30 +16810,31 @@ export const __omoikane_service_worker_lifecycle = {};
     details: HTMLDetailsElement,
   };
 
+  // HTML elements with an HTMLElement-derived interface, including obsolete
+  // elements that still have a defined HTML interface. HTMLUnknownElement names
+  // are excluded, as are autonomous custom element names.
+  const customizableBuiltinNames = new Set((
+    "a abbr acronym address area article aside audio b base basefont bdi bdo big blockquote body br button " +
+    "canvas caption center cite code col colgroup data datalist dd del details dfn dialog dir div dl dt em embed " +
+    "fieldset figcaption figure font footer form frame frameset h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe " +
+    "img input ins kbd label legend li link listing main map mark marquee menu meta meter nav nobr noembed noframes " +
+    "noscript object ol optgroup option output p param picture plaintext pre progress q rb rp rt rtc ruby s samp " +
+    "script search section select selectedcontent slot small source span strike strong style sub summary sup table " +
+    "tbody td template textarea tfoot th thead time title tr track tt u ul var video wbr xmp"
+  ).split(" "));
+
   const CUSTOM_ELEMENT_REGISTRY_CONSTRUCTION = {};
 
+  function requireCustomElementInterface(definition, constructorInterface) {
+    const expected = definition.localName === definition.name
+      ? HTMLElement : ELEMENT_CTORS[definition.localName] || HTMLElement;
+    if (constructorInterface !== expected) {
+      throw new TypeError("The custom element constructor uses the wrong HTML interface");
+    }
+  }
+
   function isValidCustomElementName(name) {
-    if (name.length < 2 || name.charCodeAt(0) < 0x61 || name.charCodeAt(0) > 0x7a ||
-        RESERVED_CUSTOM_ELEMENT_NAMES.has(name)) {
-      return false;
-    }
-    let hasHyphen = false;
-    for (let i = 1; i < name.length;) {
-      const cp = name.codePointAt(i);
-      if (cp === 0x2d) hasHyphen = true;
-      const allowed = cp === 0x2d || cp === 0x2e || cp === 0x5f ||
-        (cp >= 0x30 && cp <= 0x39) || (cp >= 0x61 && cp <= 0x7a) ||
-        cp === 0xb7 || (cp >= 0xc0 && cp <= 0xd6) ||
-        (cp >= 0xd8 && cp <= 0xf6) || (cp >= 0xf8 && cp <= 0x37d) ||
-        (cp >= 0x37f && cp <= 0x1fff) || (cp >= 0x200c && cp <= 0x200d) ||
-        (cp >= 0x203f && cp <= 0x2040) || (cp >= 0x2070 && cp <= 0x218f) ||
-        (cp >= 0x2c00 && cp <= 0x2fef) || (cp >= 0x3001 && cp <= 0xd7ff) ||
-        (cp >= 0xf900 && cp <= 0xfdcf) || (cp >= 0xfdf0 && cp <= 0xfffd) ||
-        (cp >= 0x10000 && cp <= 0xeffff);
-      if (!allowed) return false;
-      i += cp > 0xffff ? 2 : 1;
-    }
-    return hasHyphen;
+    return nativeValidCustomElementName(name);
   }
 
   function isConstructor(value) {
@@ -16797,7 +16961,7 @@ export const __omoikane_service_worker_lifecycle = {};
         element.__customElementState === "precustomized" ||
         element.__customElementState === "failed" ||
         !hasCanonicalWrapperId(canonicalHtmlElementIds, element) ||
-        internalNodeLocalName(element) !== definition.name) {
+        internalNodeLocalName(element) !== definition.localName) {
       return;
     }
 
@@ -16810,8 +16974,9 @@ export const __omoikane_service_worker_lifecycle = {};
     Object.setPrototypeOf(element, definition.prototype);
     element.__customElementDefinition = definition;
     element.__customElementState = "precustomized";
+    nativeSetCustomElementDefined(internalNodeId(element), false);
     const internals = initializeCustomInternals(element, definition, "precustomized");
-    const entry = { element, constructor: definition.constructor, constructed: false };
+    const entry = { element, definition, constructor: definition.constructor, constructed: false };
     safeArrayPush(customElementConstructionStack, entry);
     try {
       const result = Reflect.construct(
@@ -16826,6 +16991,7 @@ export const __omoikane_service_worker_lifecycle = {};
         );
       }
       element.__customElementState = "custom";
+      nativeSetCustomElementDefined(internalNodeId(element), true);
       internals.phase = "custom";
       nativeSetFormAssociatedCustom(id, internals.definition.formAssociated);
       element.__customElementConnected = false;
@@ -16849,6 +17015,7 @@ export const __omoikane_service_worker_lifecycle = {};
       }
     } catch (error) {
       element.__customElementState = "failed";
+      nativeSetCustomElementDefined(internalNodeId(element), false);
       internals.phase = "failed";
       nativeSetFormAssociatedCustom(id, false);
       element.__customElementError = error;
@@ -16862,16 +17029,90 @@ export const __omoikane_service_worker_lifecycle = {};
     const owner = internalNodeType(root) === 9 ? root : internalOwnerDocument(root);
     if (owner !== registry.__document) return;
     customElementTreeWalk(root, element => {
-      const definition = registry.__definitions.get(
-        internalNodeLocalName(element),
-      );
+      const definition = customDefinitionForElement(registry, element);
       if (definition) upgradeCustomElement(element, definition);
     });
   }
 
+  function cloneCanonicalNode(source, deep, ownerDoc) {
+    const attribute = safeWeakMapGet(attributeNodeStates, source);
+    if (attribute) {
+      const value = attribute.ownerElement
+        ? nativeAttributeValueNS(internalNodeId(attribute.ownerElement), attribute.namespace, attribute.localName) ?? attribute.value
+        : attribute.value;
+      return new Attr(ATTR_CONSTRUCTION, {
+        ...attribute, value, ownerElement: null, ownerDocument: ownerDoc,
+      });
+    }
+    const clone = wrapNode(__omoikane_clone_node(internalNodeId(source), !!deep));
+    // The clone is detached, so its ownerDocument comes from its creation
+    // context, not its (absent) tree root. Propagate this node's owning
+    // document to the clone and, for a deep clone, its descendants — so a
+    // clone of a sub-document node keeps reporting that sub-document as its
+    // ownerDocument rather than defaulting to the top-level document.
+
+    if (clone && ownerDoc) {
+      stampOwnerDoc(clone, ownerDoc);
+    }
+    // Preserve JS UTF-16 code units that Rust UTF-8 strings cannot represent,
+    // including CharacterData descendants of a deep clone.
+    const preserveClonedState = (source, target) => {
+      if (source instanceof CDATASection) {
+        Object.setPrototypeOf(target, CDATASection.prototype);
+        Object.defineProperty(target, "__cdataSection", { value: true, configurable: true });
+        markCanonicalCdata(target);
+      }
+      if (source instanceof CharacterData) target.textContent = source.textContent;
+      const name = internalNodeLocalName(source);
+      if (hasCanonicalWrapperId(canonicalHtmlElementIds, source) &&
+          (name === "input" || name === "textarea")) {
+        const value = safeWeakMapGet(nodeEventStates, source).__value;
+        if (value !== undefined) {
+          safeWeakMapGet(nodeEventStates, target).__value = value;
+          nativeSetControlValueEmpty(internalNodeId(target), value === "", value);
+        }
+      }
+      if (!deep) return;
+      if (source instanceof HTMLTemplateElement) {
+        preserveClonedState(source.content, target.content);
+      }
+      const sourceChildren = source.childNodes;
+      const targetChildren = target.childNodes;
+      for (let i = 0; i < sourceChildren.length; i++) {
+        preserveClonedState(sourceChildren[i], targetChildren[i]);
+      }
+    };
+    if (clone) preserveClonedState(source, clone);
+    if (clone && ownerDoc && browsingInput.hasCustomElementDefinitions) {
+      const registry = safeWeakMapGet(customElementRegistryByDocument, ownerDoc);
+      if (registry) upgradeCustomElementTree(registry, clone);
+    }
+    return clone;
+  }
+
+  function customElementCreationIs(options) {
+    // The legacy DOMString overload is ignored; dictionary `is` is a DOMString.
+    if (options === undefined || options === null) return null;
+    if (typeof options !== "object" && typeof options !== "function") {
+      toDOMString(options);
+      return null;
+    }
+    const value = options.is;
+    return value === undefined ? null : toDOMString(value);
+  }
+
+  function customDefinitionForElement(registry, element) {
+    if (!hasCanonicalWrapperId(canonicalHtmlElementIds, element)) return null;
+    const localName = internalNodeLocalName(element);
+    const autonomous = registry.__definitions.get(localName);
+    if (autonomous && autonomous.localName === localName) return autonomous;
+    const is = nativeCustomElementIs(internalNodeId(element));
+    const definition = is === null ? null : registry.__definitions.get(is);
+    return definition && definition.localName === localName ? definition : null;
+  }
+
   function considerCustomElement(registry, element) {
-    const name = String(element.localName);
-    const definition = registry.__definitions.get(name);
+    const definition = customDefinitionForElement(registry, element);
     if (definition) {
       upgradeCustomElement(element, definition);
     }
@@ -16894,9 +17135,7 @@ export const __omoikane_service_worker_lifecycle = {};
           } else connectCustomElement(element);
           return;
         }
-        const definition = registry.__definitions.get(
-          internalNodeLocalName(element)
-        );
+        const definition = customDefinitionForElement(registry, element);
         if (definition) {
           const reaction = () => upgradeCustomElement(element, definition);
           if (reactions) reactions.push(reaction);
@@ -16968,13 +17207,13 @@ export const __omoikane_service_worker_lifecycle = {};
           throw new TypeError("The custom element constructor prototype is not an object");
         }
         if (options !== undefined && options !== null) {
-          extendsValue = options.extends;
+          const extended = options.extends;
+          extendsValue = extended === undefined ? null : toDOMString(extended);
         }
-        if (extendsValue !== undefined && extendsValue !== null) {
-          throw new DOMException(
-            "Customized built-in elements are not supported yet.",
-            "NotSupportedError",
-          );
+        if (extendsValue !== null) {
+          if (isValidCustomElementName(extendsValue) || !customizableBuiltinNames.has(extendsValue)) {
+            throw new DOMException("The extended element is not a built-in HTML element", "NotSupportedError");
+          }
         }
         for (const callbackName of [
           "connectedCallback",
@@ -17022,6 +17261,7 @@ export const __omoikane_service_worker_lifecycle = {};
       const pending = this.__whenDefined.get(name);
       const definition = {
         name,
+        localName: extendsValue ?? name,
         constructor,
         prototype,
         callbacks,
@@ -17032,6 +17272,7 @@ export const __omoikane_service_worker_lifecycle = {};
         promise: pending ? pending.promise : Promise.resolve(constructor),
       };
       safeWeakMapSet(customInternalsDefinitions, definition, {
+        customized: definition.localName !== name,
         formAssociated,
         disabledFeatures: new Set(disabledFeatures),
         callbacks: { ...callbacks },

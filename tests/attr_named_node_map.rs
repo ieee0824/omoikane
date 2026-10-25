@@ -135,3 +135,26 @@ fn namespace_replacement_preserves_identity_order_and_method_names() {
         "true|p:item|p|updated|true|urn:second|tail|function|true|true|true|true|second|second"
     );
 }
+
+#[test]
+fn importing_attached_attributes_uses_live_private_values_and_destination_document() {
+    let actual = evaluate_string(
+        r#"(() => {
+            const owner = document.createElement('div');
+            owner.setAttributeNS('urn:test', 'p:value', 'initial');
+            const attr = owner.getAttributeNodeNS('urn:test', 'value');
+            owner.setAttributeNS('urn:test', 'p:value', 'live\ud800');
+            Object.defineProperty(attr, 'value', {get(){throw Error('author value');}});
+            Object.defineProperty(attr, 'cloneNode', {value(){throw Error('author clone');}});
+            const destination = new Document();
+            const imported = destination.importNode(attr);
+            const cloned = Attr.prototype.cloneNode.call(attr);
+            return [imported.value === 'live\ud800', imported.ownerDocument === destination,
+                imported.ownerElement === null, imported.namespaceURI === 'urn:test',
+                imported.prefix === 'p', imported.localName === 'value',
+                cloned.value === 'live\ud800', cloned.ownerDocument === document,
+                cloned.ownerElement === null, attr.ownerElement === owner].join('|');
+        })()"#,
+    );
+    assert_eq!(actual, "true|true|true|true|true|true|true|true|true|true");
+}

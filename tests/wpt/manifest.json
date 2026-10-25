@@ -195,6 +195,8 @@
     { "path": "html/semantics/forms/the-input-element/range-2.html" },
     { "path": "html/semantics/forms/the-input-element/input-valueasnumber.html" },
     { "path": "html/semantics/forms/the-input-element/datetime-local.html" },
+    { "path": "custom-elements/pseudo-class-defined.html" },
+    { "path": "custom-elements/pseudo-class-defined-customized-builtins.html" },
     { "path": "css/selectors/has-matches-to-uninserted-elements.html" },
     { "path": "css/selectors/invalidation/any-link-pseudo.html" },
     { "path": "css/selectors/invalidation/target-pseudo-in-has.html" },

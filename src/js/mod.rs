@@ -17460,6 +17460,21 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(parser_form_owner_native),
         ),
         (
+            js_string!("__omoikane_valid_custom_element_name"),
+            1,
+            NativeFunction::from_copy_closure(valid_custom_element_name_native),
+        ),
+        (
+            js_string!("__omoikane_custom_element_is"),
+            1,
+            NativeFunction::from_copy_closure(custom_element_is_native),
+        ),
+        (
+            js_string!("__omoikane_set_custom_element_defined"),
+            2,
+            NativeFunction::from_copy_closure(set_custom_element_defined_native),
+        ),
+        (
             js_string!("__omoikane_set_form_associated_custom"),
             2,
             NativeFunction::from_copy_closure(set_form_associated_custom_native),
@@ -20046,6 +20061,66 @@ fn parser_form_owner_native(
             .get_node(node_id)
             .and_then(|node| node.parser_form_owner());
         Ok(node_to_js_value(owner))
+    })
+}
+
+/// Pure classification shared by custom element registration and native CSS.
+fn valid_custom_element_name_native(
+    _: &JsValue,
+    args: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    let valid = args
+        .first()
+        .and_then(JsValue::as_string)
+        .and_then(|name| name.to_std_string().ok())
+        .is_some_and(|name| crate::dom::custom_element::valid_name(&name));
+    Ok(JsValue::from(valid))
+}
+
+fn custom_element_is_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let value = args
+        .get(1)
+        .and_then(JsValue::as_string)
+        .map(|value| value.to_vec());
+    with_render_mutation(|state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::typ().with_message("Element required")))?;
+        if args.len() > 1 {
+            node.initialize_custom_element_is(value);
+            state.borrow_mut().invalidate_style_cache_for_node(&node);
+        }
+        Ok(node
+            .custom_element_is()
+            .map(|value| JsString::from(value.as_slice()).into())
+            .unwrap_or_else(JsValue::null))
+    })
+}
+
+fn set_custom_element_defined_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let defined = args.get(1).is_some_and(JsValue::to_boolean);
+    with_render_mutation(|state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::typ().with_message("Element required")))?;
+        node.set_custom_element_defined(defined);
+        state.borrow_mut().invalidate_style_cache_for_node(&node);
+        Ok(JsValue::undefined())
     })
 }
 
@@ -26425,6 +26500,7 @@ fn clone_element_node(node: &NodeHandle) -> NodeHandle {
             clone.set_attribute_value_ns_utf16(namespace.as_deref(), &local_name, &value);
         }
     }
+    clone.initialize_custom_element_is(node.custom_element_is());
     node.copy_input_state_to(&clone);
     clone
 }
