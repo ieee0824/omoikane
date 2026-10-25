@@ -36,6 +36,7 @@ fn nth_filter_support_queries_and_invalid_lists() {
         const invalid = [':nth-child(1 of)', ':nth-child(of .x)',
             ':nth-child(1 of .x,)', ':nth-child(1 of .x, :unknown)',
             ':nth-child(1 of ::before)', ':nth-of-type(1 of .x)',
+            ':nth-child(1 of :before)', ':nth-last-child(1 of :AFTER)',
             ':nth-last-of-type(1 of .x)', ':nth-child(1 of > .x)'];
         return valid.filter(s => !CSS.supports(`selector(${s})`) || document.querySelectorAll(s).length < 0)
             .concat(invalid.filter(s => {
@@ -198,7 +199,9 @@ fn nth_filter_forgiving_unknown_branches_do_not_raise_specificity() {
         const probe = document.getElementById('probe');
         return probe.matches(':nth-child(1 of :is(.pick, #unused:unknown))') &&
             probe.matches(':nth-child(1 of :is(.pick, ::before))') &&
+            probe.matches(':nth-child(1 of :is(.pick, :before))') &&
             !CSS.supports('selector(:nth-child(1 of :is(.pick, #unused:unknown)))') &&
+            !CSS.supports('selector(:nth-child(1 of :is(.pick, :before)))') &&
             getComputedStyle(probe).color === 'rgb(0, 128, 0)';
     })()"#
             )

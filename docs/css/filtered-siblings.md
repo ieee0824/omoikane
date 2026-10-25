@@ -33,8 +33,10 @@ inclusive element siblingsとして扱う。Acid3原本の旧test 35との仕様
 - Acid3の生スコア・正確な失敗集合・完走:
   `cargo test --locked --test acid3_harness`
 
-Firefox 158.0.1との比較では、兄弟順序、構文、詳細度、DOM変更、scopeの期待を確認する。
-focusを含む比較は参照環境の`document.hasFocus()`がfalseのため成立していない。
-Omoikaneのアクティブ文書での属性・focusによる兄弟の再評価はAPIテストで検証する。
+Firefox 158.0.1 / geckodriver 0.37.1で、`tests/css_nth_filter.rs` と同じHTML・JavaScriptを
+9ケース比較し、すべて一致した。兄弟順序、構文、詳細度、DOM変更、scopeに加え、
+文書をアクティブにした状態のfocusによる兄弟の再評価も確認した。
+focusのケースでは`document.hasFocus() === true`、`activeElement.id === "a"`、
+`activeElement.matches(":focus") === true`を別途確認した。
 
 #1278にある他のフォーム・メディア等の状態擬似クラスは引き続き同Issueの対象である。

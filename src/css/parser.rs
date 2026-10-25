@@ -310,6 +310,8 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                 );
                 let host = base == "host";
                 (known || location || host)
+                    && (context.allow_pseudo_element
+                        || !matches!(base.as_str(), "before" | "after"))
                     && (!location || !name.contains('('))
                     && (!user_action || !name.contains('('))
                     && (!host

@@ -733,7 +733,7 @@ fn matches_pseudo_class(
     pseudo: Option<PseudoElement>,
     cache: &mut SelectorMatchCache,
     scope_root: Option<&NodeHandle>,
-    allow_scope_ancestor_escape: bool,
+    _allow_scope_ancestor_escape: bool,
 ) -> bool {
     if let Some((function, argument)) = functional_pseudo(name) {
         // Pseudo-class names are ASCII case-insensitive; the argument keeps
