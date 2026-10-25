@@ -293,6 +293,8 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         | "valid"
                         | "invalid"
                         | "checked"
+                        | "required"
+                        | "optional"
                         | "hover"
                         | "active"
                         | "focus"
@@ -310,6 +312,7 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                 );
                 let host = base == "host";
                 (known || location || host)
+                    && (!matches!(base.as_str(), "required" | "optional") || !name.contains('('))
                     && (context.allow_pseudo_element
                         || !matches!(base.as_str(), "before" | "after"))
                     && (!location || !name.contains('('))
@@ -1372,7 +1375,10 @@ impl Parser {
         if !matches!(self.peek(), Some(CssToken::ParenOpen)) {
             return Ok(SimpleSelector::PseudoClass(name));
         }
-        if is_location_pseudo_class(&name) {
+        if is_location_pseudo_class(&name)
+            || name.eq_ignore_ascii_case("required")
+            || name.eq_ignore_ascii_case("optional")
+        {
             return Err(CssParseError::InvalidSelector);
         }
         self.next(); // consume ParenOpen
