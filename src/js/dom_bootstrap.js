@@ -17121,6 +17121,12 @@ export const __omoikane_service_worker_lifecycle = {};
     const previousRegistry = safeWeakMapGet(activeCustomRegistries, definition.constructor);
     safeWeakMapSet(activeCustomRegistries, definition.constructor, definition.registry);
     try {
+      if (hasSetValue(internals.definition.disabledFeatures, "shadow") && nativeShadowRoot(id) != null) {
+        throw new DOMException(
+          "A custom element that disables shadow cannot upgrade an element with a shadow root.",
+          "NotSupportedError",
+        );
+      }
       const result = Reflect.construct(
         definition.constructor,
         [],
