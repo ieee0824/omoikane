@@ -2,6 +2,8 @@
 
 use super::{Node, NodeHandle};
 
+pub(crate) mod state_index;
+
 /// Returns HTML local names, including legacy HTML nodes without a namespace.
 pub(crate) fn html_local_name(node: &NodeHandle) -> Option<String> {
     let html = match node.namespace_uri().as_deref() {
