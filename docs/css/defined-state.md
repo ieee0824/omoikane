@@ -40,6 +40,10 @@ DOM local nameで禁止される文字・予約名を含まないことを確認
 scoped registryでの組み込み要素拡張は拒否する。直接の`new`はglobal registryへfallbackし、
 upgrade中は共有construction stackで選択中のregistryを保持し、入れ子の失敗後も元に戻す。
 callbackと`observedAttributes`・`disabledFeatures`の取得は定義中の例外後にも回復できる。
+`disabledFeatures`に`shadow`を含む定義は、既存のShadow Rootを持つ要素のupgradeを
+コンストラクター実行前に失敗させる。open/closedの双方で`:defined`はfalseのままとなり、
+同じ定義によるShadow Rootのない要素の後続作成には影響しない。
+内部のフラグ判定では保存済みの組み込み関数を使い、作者が置換した`Set.prototype.has`を呼ばない。
 文字列sequenceはiterableなobjectを要求し、iterator/nextのgetterを各一度だけ取得する。
 
 Document、Element、ShadowRootは所有するregistryを返す。関連付けは作者が変更できる

@@ -365,3 +365,75 @@ fn xml_namespace_controls_initial_definition_state_and_creation_time_is() {
     builtin.remove_attribute("is");
     assert!(!omoikane::css::matches_selector(&builtin, &selector[0]));
 }
+
+#[test]
+fn disabled_shadow_upgrades_fail_before_construction_and_leave_later_creation_usable() {
+    assert_eq!(
+        evaluate(
+            "<head></head><body></body>",
+            r#"
+        let index=0;
+        for(const registry of [customElements,new CustomElementRegistry()]) {
+            for(const mode of ['open','closed']) {
+                const name='x-disabled-shadow-'+index++;
+                const style=document.createElement('style');
+                style.textContent=name+'{color:red}'+name+':defined{color:green}';document.head.append(style);
+                const pending=document.createElement(name,{customElementRegistry:registry});
+                const root=pending.attachShadow({mode,customElementRegistry:null});root.innerHTML='<span>kept</span>';
+                document.body.append(pending);
+                let calls=0;
+                class Target extends HTMLElement {
+                    static disabledFeatures=['shadow'];
+                    constructor(){super();calls++;}
+                }
+                registry.define(name,Target);
+                if(calls!==0)return 'constructor-ran:'+mode;
+                if(pending.matches(':defined')||getComputedStyle(pending).color!=='rgb(255, 0, 0)')return 'failed-state';
+                if(root.textContent!=='kept'||root.host!==pending)return 'shadow-changed';
+                registry.upgrade(pending);
+                if(calls!==0||pending.matches(':defined'))return 'retried';
+                const fresh=document.createElement(name,{customElementRegistry:registry});document.body.append(fresh);
+                if(calls!==1||!fresh.matches(':defined')||getComputedStyle(fresh).color!=='rgb(0, 128, 0)')return 'later-creation';
+                try{fresh.attachShadow({mode:'open'});return 'allowed-shadow';}
+                catch(e){if(e.name!=='NotSupportedError')return 'shadow-error:'+e.name;}
+            }
+        }
+        return 'ok';
+    "#
+        ),
+        "ok"
+    );
+}
+
+#[test]
+fn disabled_shadow_upgrade_checks_do_not_invoke_author_set_methods() {
+    assert_eq!(
+        evaluate(
+            "<body></body>",
+            r#"
+        let index=0;
+        for(const registry of [customElements,new CustomElementRegistry()]) {
+            const name='x-private-shadow-'+index++;
+            const pending=document.createElement(name,{customElementRegistry:registry});
+            pending.attachShadow({mode:'closed'});document.body.append(pending);
+            let constructorCalls=0,featureChecks=0;
+            class Target extends HTMLElement {
+                static disabledFeatures=['shadow'];
+                constructor(){super();constructorCalls++;}
+            }
+            const originalHas=Set.prototype.has;
+            Set.prototype.has=function(value){
+                if(value==='shadow')featureChecks++;
+                return Reflect.apply(originalHas,this,[value]);
+            };
+            try{registry.define(name,Target);}
+            finally{Set.prototype.has=originalHas;}
+            if(featureChecks!==0)return 'author-feature-check:'+featureChecks;
+            if(constructorCalls!==0||pending.matches(':defined'))return 'upgrade';
+        }
+        return 'ok';
+    "#
+        ),
+        "ok"
+    );
+}
