@@ -41,6 +41,41 @@ pub fn parse(bytes: &[u8]) -> Result<NodeHandle, XmlParseError> {
     Parser::new(input).parse_document()
 }
 
+/// Parses UTF-8 XML with the supplied XML MIME type recorded on the Document.
+///
+/// The MIME essence is trimmed and ASCII-lowercased; parameters do not change
+/// the UTF-8 input requirement of [`parse`]. Non-XML or invalid MIME types,
+/// malformed XML, and invalid UTF-8 return [`XmlParseError`].
+pub fn parse_with_content_type(
+    bytes: &[u8],
+    content_type: &str,
+) -> Result<NodeHandle, XmlParseError> {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let valid_token = |value: &str| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+    };
+    let is_xml = essence.split_once('/').is_some_and(|(kind, subtype)| {
+        valid_token(kind)
+            && valid_token(subtype)
+            && (matches!(essence.as_str(), "application/xml" | "text/xml")
+                || subtype.ends_with("+xml"))
+    });
+    if !is_xml {
+        return Err(XmlParseError::new("content type is not an XML MIME type"));
+    }
+    let document = parse(bytes)?;
+    document.set_document_content_type(essence);
+    Ok(document)
+}
+
 /// Parses an XML fragment with the namespace bindings visible from `context`.
 pub fn parse_fragment(bytes: &[u8], context: &NodeHandle) -> Result<NodeHandle, XmlParseError> {
     let input = std::str::from_utf8(bytes)
@@ -525,6 +560,40 @@ mod tests {
             .find(|n| n.node_type() == NodeType::Element)
             .unwrap()
     }
+    #[test]
+    fn explicit_xml_content_type_is_normalized_and_validated() {
+        let source = br#"<html xmlns="http://www.w3.org/1999/xhtml"/>"#;
+        for (supplied, expected) in [
+            (
+                " Application/XHTML+XML; charset=UTF-8",
+                "application/xhtml+xml",
+            ),
+            ("image/svg+xml", "image/svg+xml"),
+            ("text/xml", "text/xml"),
+        ] {
+            let document = parse_with_content_type(source, supplied).unwrap();
+            assert_eq!(document.document_content_type().as_deref(), Some(expected));
+            assert!(!document.is_html_document());
+        }
+        for invalid in [
+            "text/html",
+            "image/png",
+            "nonsense+xml",
+            "application/xml/more",
+            "app lication/xml",
+        ] {
+            assert!(
+                parse_with_content_type(source, invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse(source).unwrap().document_content_type().as_deref(),
+            Some("application/xml")
+        );
+        assert!(parse_with_content_type(b"<root>", "application/xml").is_err());
+    }
+
     #[test]
     fn parses_namespaces_entities_cdata_and_preserves_case() {
         let doc = parse(br#"<?xml version='1.0'?><Root xmlns='urn:d' xmlns:p='urn:p' A='&lt;&amp;&#65;&#x42;'><!--ok--><p:Child><![CDATA[<raw>]]></p:Child></Root>"#).unwrap();
