@@ -120,6 +120,7 @@ struct Parser<'a> {
     pos: usize,
     document: NodeHandle,
     stack: Vec<OpenElement>,
+    radio_form_refs: crate::dom::form_controls::state_index::ParsedFormReferences,
 }
 
 impl<'a> Parser<'a> {
@@ -131,6 +132,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             document,
             stack: Vec::new(),
+            radio_form_refs: Default::default(),
         }
     }
 
@@ -264,6 +266,7 @@ impl<'a> Parser<'a> {
             node.set_xml_attribute_ns(attr, attribute_namespace, local_name, value);
         }
         self.parent().append_child(node.clone());
+        self.radio_form_refs.reconcile(&node);
         if !empty {
             self.stack.push(OpenElement {
                 name,

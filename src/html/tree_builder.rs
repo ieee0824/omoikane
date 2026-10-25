@@ -306,6 +306,19 @@ impl WriteParser {
     /// Parse through the next script end tag, leaving later input untouched.
     pub(crate) fn advance(&mut self, eof: bool) -> Option<NodeHandle> {
         let (tokens, mut errors) = self.tokenizer.drain(eof, true);
+        let changes_ids = tokens.iter().any(|token| match token {
+            Token::StartTag { attributes, .. } => attributes
+                .iter()
+                .any(|attr| attr.name().eq_ignore_ascii_case("id")),
+            _ => false,
+        });
+        if changes_ids {
+            let active = self.builder.insertion_parent();
+            self.builder
+                .radio_form_refs
+                .borrow_mut()
+                .refresh(&self.builder.document, &active);
+        }
         let mut script = None;
         let positions = self.tokenizer.script_source_positions();
         let mut positions = positions.iter().peekable();
@@ -335,6 +348,8 @@ struct Builder {
     open_elements: Vec<NodeHandle>,
     active_formatting_elements: Vec<NodeHandle>,
     form_element: Option<NodeHandle>,
+    radio_form_refs:
+        std::cell::RefCell<crate::dom::form_controls::state_index::ParsedFormReferences>,
     template_insertion_modes: Vec<InsertionMode>,
     mode: InsertionMode,
     write_boundary: Option<(NodeHandle, Option<NodeHandle>)>,
@@ -354,6 +369,7 @@ impl Builder {
             open_elements: Vec::new(),
             active_formatting_elements: Vec::new(),
             form_element: None,
+            radio_form_refs: std::cell::RefCell::default(),
             template_insertion_modes: Vec::new(),
             mode: InsertionMode::Initial,
             write_boundary: None,
@@ -1415,6 +1431,7 @@ impl Builder {
             );
         }
         self.append_node(parent, element.clone());
+        self.radio_form_refs.borrow_mut().reconcile(&element);
         element
     }
 
@@ -1550,6 +1567,7 @@ impl Builder {
             node.set_attribute_owned(name, value);
         }
         self.append_node(&self.document, node.clone());
+        self.radio_form_refs.borrow_mut().reconcile(&node);
         node
     }
 
@@ -1625,9 +1643,8 @@ impl Builder {
         template
     }
 
-    fn insert_into(
+    fn new_html_element_with_attributes(
         &self,
-        parent: &NodeHandle,
         name: &str,
         attributes: Vec<super::Attribute>,
     ) -> NodeHandle {
@@ -1640,8 +1657,19 @@ impl Builder {
             let (name, value) = attribute.into_owned();
             element.set_attribute_owned(name, value);
         }
+        element
+    }
+
+    fn insert_into(
+        &self,
+        parent: &NodeHandle,
+        name: &str,
+        attributes: Vec<super::Attribute>,
+    ) -> NodeHandle {
+        let element = self.new_html_element_with_attributes(name, attributes);
         self.append_node(parent, element.clone());
         self.associate_parser_form(&element);
+        self.radio_form_refs.borrow_mut().reconcile(&element);
         element
     }
 
@@ -1670,12 +1698,17 @@ impl Builder {
     }
 
     fn merge_missing_attributes(&self, element: &NodeHandle, attributes: Vec<super::Attribute>) {
+        let mut added_id = false;
         let existing = element.attributes().unwrap_or_default();
         for attribute in attributes {
             if !existing.contains_key(attribute.name()) {
                 let (name, value) = attribute.into_owned();
+                added_id |= name == "id";
                 element.set_attribute_owned(name, value);
             }
+        }
+        if added_id {
+            self.radio_form_refs.borrow_mut().reconcile(element);
         }
     }
 
@@ -1774,10 +1807,13 @@ impl Builder {
         if let Some(table) = self.current_table()
             && let Some(parent) = table.parent_node()
         {
-            let element = self.insert_into(&parent, name, attributes);
-            let _ = parent.remove_child(&element);
+            let element = self.new_html_element_with_attributes(name, attributes);
+            if let Some(created) = &self.created_nodes {
+                created.borrow_mut().push(element.clone());
+            }
             let _ = parent.insert_before(element.clone(), &table);
             self.associate_parser_form(&element);
+            self.radio_form_refs.borrow_mut().reconcile(&element);
             if !self_closing && !is_void_element(name) {
                 self.open_elements.push(element);
             }
@@ -3183,5 +3219,99 @@ mod sibling_position_tests {
             assert!(small > 0, "position operations must be counted");
             assert!(large <= small * 2 + 32, "{kind}: {small} -> {large}");
         }
+    }
+
+    #[test]
+    fn written_radio_preempts_checked_later_sibling_without_javascript() {
+        let doc = TreeBuilder::parse(
+            "<form><script id=s></script><input id=b type=radio name=g checked></form>",
+        )
+        .document();
+        let script = doc.query_selector("#s").unwrap();
+        let b = doc.query_selector("#b").unwrap();
+        let mut writer = WriteParser::new(doc.clone(), Some(script));
+        writer.push_input("<input id=a type=radio name=g checked>");
+        assert!(writer.advance(true).is_none());
+        let a = doc.query_selector("#a").unwrap();
+        assert_eq!(a.next_sibling(), Some(b.clone()));
+        assert!(a.checked());
+        assert!(!b.checked());
+        assert!(b.attribute_value_ns(None, "checked").is_some());
+    }
+
+    fn deep_radio_id_work(kind: &str, depth: usize) -> usize {
+        let mut markup = if kind == "html" {
+            "<body><input id=probe type=radio name=g form=future checked>".to_owned()
+        } else {
+            "<root xmlns:h='http://www.w3.org/1999/xhtml'><h:input id='probe' type='radio' name='g' form='future' checked=''/>".to_owned()
+        };
+        for i in 0..depth {
+            markup.push_str(&format!("<section id='unrelated-{i}'>"));
+        }
+        markup.push_str(&"</section>".repeat(depth));
+        if kind == "xml" {
+            markup.push_str("</root>");
+        }
+        reset_sibling_position_work();
+        let doc = if kind == "html" {
+            TreeBuilder::parse(&markup).document()
+        } else {
+            crate::xml::parse(markup.as_bytes()).unwrap()
+        };
+        let work = sibling_position_work();
+        assert!(doc.query_selector("#probe").unwrap().checked());
+        work
+    }
+
+    #[test]
+    fn unrelated_deep_ids_have_linear_radio_position_work() {
+        for kind in ["html", "xml"] {
+            let small = deep_radio_id_work(kind, 64);
+            let large = deep_radio_id_work(kind, 128);
+            eprintln!("RADIO_ID_POSITION kind={kind} N=64 work={small} twice_N=128 work={large}");
+            assert!(large <= small * 2 + 32, "{kind}: {small} -> {large}");
+        }
+    }
+
+    #[test]
+    fn written_foreign_id_reassociates_a_radio_changed_after_parser_creation() {
+        let doc = TreeBuilder::parse("<input id=q type=radio name=g checked><script id=s></script><form id=f><input id=x type=checkbox name=g form=f checked></form>").document();
+        let q = doc.query_selector("#q").unwrap();
+        let x = doc.query_selector("#x").unwrap();
+        let mut writer = WriteParser::new(doc.clone(), doc.query_selector("#s"));
+        x.set_attribute("type", "radio");
+        assert!(q.checked() && x.checked());
+        writer.push_input("<svg id=f></svg>");
+        assert!(writer.advance(true).is_none());
+        assert!(
+            !q.checked(),
+            "foreign ID joins the external radio to q's ownerless group"
+        );
+        assert!(x.checked());
+    }
+
+    fn removed_radio_reference_work(depth: usize) -> usize {
+        let doc = TreeBuilder::parse("<body><script id=s></script>").document();
+        let mut writer = WriteParser::new(doc.clone(), doc.query_selector("#s"));
+        writer.push_input("<input id=probe type=radio name=g form=former checked>");
+        assert!(writer.advance(false).is_none());
+        let probe = doc.query_selector("#probe").unwrap();
+        probe.parent_node().unwrap().remove_child(&probe).unwrap();
+        let markup = "<section id=former>".repeat(depth) + &"</section>".repeat(depth);
+        reset_sibling_position_work();
+        writer.push_input(&markup);
+        assert!(writer.advance(true).is_none());
+        let work = sibling_position_work();
+        assert!(doc.query_selector("#probe").is_none());
+        assert!(doc.query_selector("#former").is_some());
+        work
+    }
+
+    #[test]
+    fn removed_form_references_do_not_keep_deep_id_scans() {
+        let small = removed_radio_reference_work(64);
+        let large = removed_radio_reference_work(128);
+        eprintln!("REMOVED_RADIO_ID N=64 work={small} twice_N=128 work={large}");
+        assert!(large <= small * 2 + 32, "{small} -> {large}");
     }
 }
