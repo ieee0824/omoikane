@@ -14396,14 +14396,14 @@ fn event_dispatch_reentry_and_listener_removal_follow_dom_semantics() {
 #[test]
 fn custom_element_registry_defines_and_constructs_autonomous_elements() {
     let mut runtime = JsRuntime::new().unwrap();
-    assert!(runtime
-        .eval(
-            r#"(() => {
-                  let illegalConstructor = false;
+    assert!(
+        runtime
+            .eval(
+                r#"(() => {
+                  const scopedRegistry = new CustomElementRegistry();
                   let invalidName = "";
                   let duplicateName = "";
                   let duplicateConstructor = "";
-                  try { new CustomElementRegistry(); } catch (e) { illegalConstructor = e.name === "TypeError"; }
                   try { customElements.define("invalid", class extends HTMLElement {}); }
                   catch (e) { invalidName = e.name; }
 
@@ -14440,7 +14440,10 @@ fn custom_element_registry_defines_and_constructs_autonomous_elements() {
                   const nonAscii = document.createElement("x-À");
                   return typeof CustomElementRegistry === "function" &&
                     customElements instanceof CustomElementRegistry &&
-                    illegalConstructor && invalidName === "SyntaxError" &&
+                    scopedRegistry instanceof CustomElementRegistry &&
+                    scopedRegistry !== customElements &&
+                    scopedRegistry.get("test-element") === undefined &&
+                    invalidName === "SyntaxError" &&
                     duplicateName === "NotSupportedError" &&
                     duplicateConstructor === "NotSupportedError" &&
                     htmlElementStayedIllegal &&
@@ -14457,10 +14460,11 @@ fn custom_element_registry_defines_and_constructs_autonomous_elements() {
                     nonAscii.localName === "x-À" &&
                     calls === 2;
                 })()"#,
-        )
-        .unwrap()
-        .as_boolean()
-        .unwrap());
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap()
+    );
     runtime.run_jobs().unwrap();
     assert!(
         runtime

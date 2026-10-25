@@ -857,6 +857,25 @@ impl BootstrapBindings {
     }
 }
 
+fn capture_parser_update_callback(
+    host_state: &Rc<RefCell<HostState>>,
+    namespace: &JsObject,
+    document_id: usize,
+    context: &mut Context,
+) -> JsResult<()> {
+    let callback = namespace.get(js_string!("__omoikane_parser_update"), context)?;
+    if callback.as_callable().is_none() {
+        return Err(JsNativeError::error()
+            .with_message("parser update callback is unavailable")
+            .into());
+    }
+    host_state
+        .borrow_mut()
+        .parser_update_callbacks
+        .insert(document_id, callback);
+    Ok(())
+}
+
 fn evaluate_dom_bootstrap(
     context: &mut Context,
     host_state: &Rc<RefCell<HostState>>,
@@ -899,6 +918,7 @@ fn evaluate_dom_bootstrap(
         module.link(context)?;
         complete(module.evaluate(context))?;
         let namespace = module.namespace(context);
+        capture_parser_update_callback(host_state, &namespace, document_id, context)?;
         let lifecycle =
             namespace.get(js_string!("__omoikane_service_worker_lifecycle"), context)?;
         let lifecycle = lifecycle.as_object().ok_or_else(|| {
@@ -2264,6 +2284,7 @@ struct HostState {
     report_observer_dispatchers: HashMap<usize, JsValue>,
     /// Private bootstrap callbacks, keyed by their owning Document realm.
     service_worker_lifecycle_callbacks: HashMap<usize, JsObject>,
+    parser_update_callbacks: HashMap<usize, JsValue>,
     /// Default policy callbacks belong to the target Document's realm,
     /// including when an element is adopted or used through another realm.
     /// Slots are TrustedHTML, TrustedScript, and TrustedScriptURL.
@@ -2658,6 +2679,9 @@ unsafe impl Trace for HostState {
         }
         for callbacks in self.service_worker_lifecycle_callbacks.values() {
             unsafe { callbacks.trace(tracer) };
+        }
+        for callback in self.parser_update_callbacks.values() {
+            unsafe { callback.trace(tracer) };
         }
         for callbacks in self.trusted_type_default_callbacks.values() {
             for callback in callbacks {
@@ -3262,6 +3286,7 @@ impl HostState {
             canonical_node_identity_resolver: None,
             report_observer_dispatchers: HashMap::new(),
             service_worker_lifecycle_callbacks: HashMap::new(),
+            parser_update_callbacks: HashMap::new(),
             trusted_type_default_callbacks: HashMap::new(),
             trusted_script_text_approvals: HashMap::new(),
             current_window_events: HashMap::new(),
@@ -6276,6 +6301,7 @@ impl HostState {
         self.retire_document_images(document_id);
         self.report_observer_dispatchers.remove(&document_id);
         self.service_worker_lifecycle_callbacks.remove(&document_id);
+        self.parser_update_callbacks.remove(&document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
@@ -6417,6 +6443,7 @@ impl HostState {
         self.retire_document_images(document_id);
         self.report_observer_dispatchers.remove(&document_id);
         self.service_worker_lifecycle_callbacks.remove(&document_id);
+        self.parser_update_callbacks.remove(&document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
@@ -26551,13 +26578,35 @@ fn clone_node_impl(node: &NodeHandle, deep: bool) -> NodeHandle {
             for child in source_content.child_nodes() {
                 clone_content.append_child(clone_node_impl(&child, true));
             }
-        } else {
-            for child in node.child_nodes() {
-                clone.append_child(clone_node_impl(&child, true));
-            }
+        }
+        for child in node.child_nodes() {
+            clone.append_child(clone_node_impl(&child, true));
         }
     }
+    clone_shadow_tree(node, &clone);
     clone
+}
+
+fn clone_shadow_tree(source: &NodeHandle, target: &NodeHandle) {
+    let Some(root) = source.shadow_root() else {
+        return;
+    };
+    let Some(settings) = root
+        .shadow_root_settings()
+        .filter(|settings| settings.clonable)
+    else {
+        return;
+    };
+    let Some(mode) = root.shadow_root_mode() else {
+        return;
+    };
+    let Some(clone_root) = target.attach_shadow(mode) else {
+        return;
+    };
+    clone_root.set_shadow_root_settings(settings);
+    for child in root.child_nodes() {
+        clone_root.append_child(clone_node_impl(&child, true));
+    }
 }
 
 fn clone_node_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -26604,9 +26653,15 @@ fn copy_inserted_script_state(
 ) {
     if state.runnable_inserted_scripts.contains(&source.identity()) {
         state.runnable_inserted_scripts.insert(target.identity());
-        if state.started_inserted_scripts.contains(&source.identity()) {
-            state.started_inserted_scripts.insert(target.identity());
-        }
+    }
+    if state.started_inserted_scripts.contains(&source.identity()) {
+        state.started_inserted_scripts.insert(target.identity());
+    }
+    // Clonable shadow trees include their descendants even for a shallow host
+    // clone. Copy script preparation state over that same owned subtree.
+    if let (Some(source_shadow), Some(target_shadow)) = (source.shadow_root(), target.shadow_root())
+    {
+        copy_inserted_script_state(state, &source_shadow, &target_shadow, true);
     }
     if !deep {
         return;

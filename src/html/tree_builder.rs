@@ -403,11 +403,12 @@ impl Builder {
         let html_context = namespace
             .as_deref()
             .is_none_or(|value| value == HTML_NAMESPACE);
-        let effective_name = if html_context && context_name.eq_ignore_ascii_case("html") {
-            "body".to_string()
-        } else {
-            context_name
-        };
+        if html_context && context_name.eq_ignore_ascii_case("html") {
+            builder.open_elements = vec![html.clone()];
+            builder.mode = InsertionMode::BeforeHead;
+            return (builder, html);
+        }
+        let effective_name = context_name;
         let container = match namespace {
             Some(namespace) if namespace == HTML_NAMESPACE => {
                 NodeHandle::html_element_ns(&effective_name, namespace)
@@ -1608,6 +1609,7 @@ impl Builder {
             serializable: has("shadowrootserializable"),
             delegates_focus: has("shadowrootdelegatesfocus"),
             clonable: has("shadowrootclonable"),
+            keep_custom_element_registry_null: has("shadowrootcustomelementregistry"),
             declarative: true,
             manual_slot_assignment: attributes.iter().any(|attribute| {
                 attribute
