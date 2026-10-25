@@ -298,6 +298,8 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         | "required"
                         | "optional"
                         | "placeholder-shown"
+                        | "in-range"
+                        | "out-of-range"
                         | "hover"
                         | "active"
                         | "focus"
@@ -317,7 +319,13 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                 (known || location || host)
                     && (!matches!(
                         base.as_str(),
-                        "required" | "optional" | "placeholder-shown" | "default" | "indeterminate"
+                        "required"
+                            | "optional"
+                            | "placeholder-shown"
+                            | "default"
+                            | "indeterminate"
+                            | "in-range"
+                            | "out-of-range"
                     ) || !name.contains('('))
                     && (context.allow_pseudo_element
                         || !matches!(base.as_str(), "before" | "after"))
@@ -1387,6 +1395,8 @@ impl Parser {
             || name.eq_ignore_ascii_case("placeholder-shown")
             || name.eq_ignore_ascii_case("default")
             || name.eq_ignore_ascii_case("indeterminate")
+            || name.eq_ignore_ascii_case("in-range")
+            || name.eq_ignore_ascii_case("out-of-range")
         {
             return Err(CssParseError::InvalidSelector);
         }

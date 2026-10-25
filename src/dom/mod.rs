@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 mod children;
 pub(crate) mod form_controls;
+pub(crate) mod input_range;
 pub(crate) mod input_value;
 mod string;
 pub(crate) use string::DomString;
@@ -160,25 +161,25 @@ pub(crate) fn is_actually_disabled(node: &NodeHandle) -> bool {
         "button", "input", "select", "textarea", "option", "optgroup", "fieldset",
     ];
 
-    let Some(tag) = node.tag_name() else {
+    let Some(tag) = form_controls::html_local_name(node) else {
         return false;
     };
     if !DISABLEABLE_TAGS.contains(&tag.as_str()) && !node.is_form_associated_custom() {
         return false;
     }
-    if node.get_attribute("disabled").is_some() {
+    if node.attribute_value_ns(None, "disabled").is_some() {
         return true;
     }
 
     let mut ancestor = node.parent_node();
     while let Some(current) = ancestor {
-        if current.tag_name().as_deref() == Some("fieldset")
-            && current.get_attribute("disabled").is_some()
+        if form_controls::html_local_name(&current).as_deref() == Some("fieldset")
+            && current.attribute_value_ns(None, "disabled").is_some()
         {
             let first_legend = current
                 .child_nodes()
                 .into_iter()
-                .find(|child| child.tag_name().as_deref() == Some("legend"));
+                .find(|child| form_controls::html_local_name(child).as_deref() == Some("legend"));
             let inside_first_legend = first_legend.is_some_and(|legend| {
                 let mut descendant = Some(node.clone());
                 while let Some(candidate) = descendant {
@@ -425,6 +426,7 @@ pub struct Element {
     css_validity: Option<bool>,
     /// Emptiness of a dirty control value held by JavaScript; None uses DOM defaults.
     control_dirty_value_empty: Option<bool>,
+    control_numeric_value: Option<input_range::NumericInputValue>,
     /// Dynamic selector state shared by style resolution and DOM queries.
     user_action_state: u8,
     parser_form_owner: Option<ParserFormOwner>,
@@ -528,6 +530,7 @@ impl Element {
             script_force_async: true,
             css_validity: None,
             control_dirty_value_empty: None,
+            control_numeric_value: None,
             user_action_state: 0,
             parser_form_owner: None,
             text_control_state: None,
@@ -577,6 +580,7 @@ impl Element {
             script_force_async: true,
             css_validity: None,
             control_dirty_value_empty: None,
+            control_numeric_value: None,
             user_action_state: 0,
             parser_form_owner: None,
             text_control_state: None,
@@ -2323,6 +2327,23 @@ impl NodeHandle {
     pub(crate) fn set_control_dirty_value_empty(&self, empty: Option<bool>) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
             element.control_dirty_value_empty = empty;
+        }
+    }
+
+    /// Reads derived numeric metadata without invoking author accessors.
+    pub(crate) fn control_numeric_value(&self, kind: &str) -> Option<f64> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element
+                .control_numeric_value
+                .and_then(|value| value.for_type(kind)),
+            _ => None,
+        }
+    }
+
+    /// Synchronizes an owned scalar; actual dirty UTF-16 values remain in JS.
+    pub(crate) fn set_control_numeric_value(&self, value: Option<input_range::NumericInputValue>) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.control_numeric_value = value;
         }
     }
 

@@ -16,6 +16,22 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 let mut state = host.borrow_mut();
                 if let Some(node) = state.get_node(id) {
                     node.set_control_dirty_value_empty(empty);
+                    let kind = node.attribute_value_ns(None, "type").unwrap_or_default();
+                    let kind = crate::dom::input_value::canonical_type(&kind);
+                    let numeric = if matches!(
+                        kind,
+                        "number" | "range" | "date" | "month" | "week" | "time" | "datetime-local"
+                    ) {
+                        args.get(2).and_then(JsValue::as_string).and_then(|value| {
+                            crate::dom::input_range::NumericInputValue::parse(
+                                kind,
+                                &value.to_std_string_escaped(),
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                    node.set_control_numeric_value(numeric);
                     // Every value change can affect validity, even when its
                     // emptiness stays the same. Preserve the existing full
                     // style/validation invalidation for these mutations.
@@ -51,7 +67,101 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
             })
         }),
     )?;
+    register_private_builtin_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_sanitize_range"),
+        5,
+        NativeFunction::from_copy_closure(|_, args, context| {
+            let value = string_argument(args.first(), "", context)?;
+            let min = string_argument(args.get(1), "", context)?;
+            let max = string_argument(args.get(2), "", context)?;
+            let step = string_argument(args.get(3), "", context)?;
+            let default = string_argument(args.get(4), "", context)?;
+            let sanitized =
+                crate::dom::input_range::sanitize_range(&value, &min, &max, &step, &default);
+            if crate::dom::input_range::number("range", &value) == Some(sanitized) {
+                Ok(JsValue::from(
+                    args.first()
+                        .and_then(JsValue::as_string)
+                        .expect("internal string")
+                        .clone(),
+                ))
+            } else {
+                Ok(JsValue::from(sanitized))
+            }
+        }),
+    )?;
+    register_numeric_values(context, bindings)?;
     register_input_flags(context, bindings)
+}
+
+fn register_numeric_values(
+    context: &mut Context,
+    bindings: &mut BootstrapBindings,
+) -> JsResult<()> {
+    register_private_builtin_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_input_number"),
+        3,
+        NativeFunction::from_copy_closure(|_, args, context| {
+            let kind = string_argument(args.first(), "", context)?;
+            let value = string_argument(args.get(1), "", context)?;
+            let attribute = args.get(2).is_some_and(JsValue::to_boolean);
+            let result = if attribute {
+                crate::dom::input_range::attribute_number(&kind, &value)
+            } else {
+                crate::dom::input_range::number(&kind, &value)
+            };
+            Ok(JsValue::from(result.unwrap_or(f64::NAN)))
+        }),
+    )?;
+    register_private_builtin_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_advance_input_number"),
+        7,
+        NativeFunction::from_copy_closure(|_, args, _| {
+            let number = |index: usize| {
+                args.get(index)
+                    .and_then(JsValue::as_number)
+                    .unwrap_or(f64::NAN)
+            };
+            let range = crate::dom::input_range::StepRange {
+                minimum: number(1).is_finite().then(|| number(1)),
+                maximum: number(2).is_finite().then(|| number(2)),
+                step: number(3),
+                base: number(4),
+            };
+            let value = number(0);
+            let result = range.advance(
+                if value.is_finite() { value } else { 0.0 },
+                number(5) as i32,
+                args.get(6).is_some_and(JsValue::to_boolean),
+            );
+            Ok(JsValue::from(result.unwrap_or(f64::NAN)))
+        }),
+    )?;
+    register_private_builtin_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_input_step_mismatch"),
+        4,
+        NativeFunction::from_copy_closure(|_, args, _| {
+            let number = |index: usize| {
+                args.get(index)
+                    .and_then(JsValue::as_number)
+                    .unwrap_or(f64::NAN)
+            };
+            Ok(JsValue::from(crate::dom::input_range::step_mismatch(
+                number(0),
+                number(1),
+                number(2),
+                number(3) as u64,
+            )))
+        }),
+    )
 }
 
 fn register_input_flags(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {

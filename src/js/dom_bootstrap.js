@@ -1102,6 +1102,7 @@ export const __omoikane_service_worker_lifecycle = {};
     "column-rule": ["column-rule-width", "column-rule-style", "column-rule-color"],
     "contain-intrinsic-size": ["contain-intrinsic-width", "contain-intrinsic-height"],
     "overscroll-behavior": ["overscroll-behavior-x", "overscroll-behavior-y"],
+    "overflow": ["overflow-x", "overflow-y"],
     "scroll-padding": ["scroll-padding-top", "scroll-padding-right", "scroll-padding-bottom", "scroll-padding-left"],
     "scroll-margin": ["scroll-margin-top", "scroll-margin-right", "scroll-margin-bottom", "scroll-margin-left"],
     "scroll-padding-inline": ["scroll-padding-inline-start", "scroll-padding-inline-end"],
@@ -1168,7 +1169,7 @@ export const __omoikane_service_worker_lifecycle = {};
 
   function computedLogicalShorthand(map, kebab) {
     if (!logicalBoxStyleProperties.has(kebab) &&
-        kebab !== "overscroll-behavior" &&
+        kebab !== "overscroll-behavior" && kebab !== "overflow" &&
         kebab !== "inset" && kebab !== "inset-inline" && kebab !== "inset-block" &&
         kebab !== "border-inline" && kebab !== "border-block" &&
         !kebab.startsWith("border-inline-") && !kebab.startsWith("border-block-")) {
@@ -1176,6 +1177,8 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     const longhands = styleShorthandLonghands[kebab];
     if (!longhands) return null;
+    if (kebab === "overflow" &&
+        !longhands.every(name => Object.prototype.hasOwnProperty.call(map, name))) return null;
     const declarations = longhands.map(name => ({
       name,
       value: Object.prototype.hasOwnProperty.call(map, name) ? map[name] : "auto",
@@ -4520,7 +4523,7 @@ export const __omoikane_service_worker_lifecycle = {};
           const value = safeWeakMapGet(nodeEventStates, source).__value;
           if (value !== undefined) {
             safeWeakMapGet(nodeEventStates, target).__value = value;
-            nativeSetControlValueEmpty(internalNodeId(target), value === "");
+            nativeSetControlValueEmpty(internalNodeId(target), value === "", value);
           }
         }
         if (!deep) return;
@@ -5108,9 +5111,7 @@ export const __omoikane_service_worker_lifecycle = {};
     // disabledness from a fieldset (with its first-legend exception).
     __isDisabledControl() {
       if (isFormAssociatedElement(this)) return customControlDisabled(this);
-      const DISABLEABLE_TAGS = ["input", "button", "select", "textarea", "option", "optgroup", "fieldset"];
-      if (!DISABLEABLE_TAGS.includes(this.nodeName.toLowerCase())) return false;
-      return !!__omoikane_is_actually_disabled(this.__id);
+      return !!__omoikane_is_actually_disabled(internalNodeId(this));
     }
 
     click() {
@@ -5243,13 +5244,10 @@ export const __omoikane_service_worker_lifecycle = {};
     }
 
     get disabled() {
-      return this.hasAttribute("disabled");
+      return nativeAttributeValueNS(internalNodeId(this), null, "disabled") !== null;
     }
 
-    set disabled(v) {
-      if (v) this.setAttribute("disabled", "");
-      else this.removeAttribute("disabled");
-    }
+    set disabled(v) { reflectFormBooleanAttribute(this, "disabled", v); }
 
     get type() {
       return this.getAttribute("type") || "";
@@ -12184,6 +12182,10 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeInvalidateValidation = globalThis.__omoikane_invalidate_validation;
   const nativeSetControlValueEmpty = globalThis.__omoikane_set_control_value_empty;
   const nativeSanitizeInputValue = globalThis.__omoikane_sanitize_input_value;
+  const nativeSanitizeRange = globalThis.__omoikane_sanitize_range;
+  const nativeInputNumber = globalThis.__omoikane_input_number;
+  const nativeAdvanceInputNumber = globalThis.__omoikane_advance_input_number;
+  const nativeInputStepMismatch = globalThis.__omoikane_input_step_mismatch;
   const nativeInputType = globalThis.__omoikane_input_type;
   const nativeButtonType = globalThis.__omoikane_button_type;
   const nativeGetIndeterminate = globalThis.__omoikane_get_indeterminate;
@@ -12207,6 +12209,10 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_invalidate_validation;
   delete globalThis.__omoikane_set_control_value_empty;
   delete globalThis.__omoikane_sanitize_input_value;
+  delete globalThis.__omoikane_sanitize_range;
+  delete globalThis.__omoikane_input_number;
+  delete globalThis.__omoikane_advance_input_number;
+  delete globalThis.__omoikane_input_step_mismatch;
   delete globalThis.__omoikane_input_type;
   delete globalThis.__omoikane_button_type;
   delete globalThis.__omoikane_get_indeterminate;
@@ -13135,48 +13141,8 @@ export const __omoikane_service_worker_lifecycle = {};
   const DAY_MILLISECONDS = 86_400_000;
   const WEEK_MILLISECONDS = 7 * DAY_MILLISECONDS;
 
-  function validNumber(value) {
-    const source = String(value);
-    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(source)) return null;
-    const number = Number(source);
-    return Number.isFinite(number) ? number : null;
-  }
-
-  function validDateMilliseconds(value) {
-    const match = /^(\d{4,})-(\d{2})-(\d{2})$/.exec(String(value));
-    if (!match) return null;
-    const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
-    if (year < 1 || month < 1 || month > 12 || day < 1 || day > 31) return null;
-    const date = new Date(0);
-    date.setUTCFullYear(year, month - 1, day);
-    date.setUTCHours(0, 0, 0, 0);
-    const result = date.getTime();
-    return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 &&
-      date.getUTCDate() === day ? result : null;
-  }
-
-  function validMonthNumber(value) {
-    const match = /^(\d{4,})-(\d{2})$/.exec(String(value));
-    if (!match) return null;
-    const year = Number(match[1]), month = Number(match[2]);
-    return year >= 1 && month >= 1 && month <= 12 ? (year - 1970) * 12 + month - 1 : null;
-  }
-
-  function validTimeMilliseconds(value) {
-    const match = /^(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(String(value));
-    if (!match) return null;
-    const hour = Number(match[1]), minute = Number(match[2]), second = Number(match[3] || 0);
-    if (hour > 23 || minute > 59 || second > 59) return null;
-    const fraction = (match[4] || "").padEnd(3, "0");
-    return ((hour * 60 + minute) * 60 + second) * 1000 + Number(fraction || 0);
-  }
-
-  function validLocalDateTimeMilliseconds(value) {
-    const match = /^(\d{4,}-\d{2}-\d{2})[T ](.+)$/.exec(String(value));
-    if (!match) return null;
-    const date = validDateMilliseconds(match[1]);
-    const time = validTimeMilliseconds(match[2]);
-    return date === null || time === null ? null : date + time;
+  function htmlFormControlLocalName(control) {
+    return hasCanonicalWrapperId(canonicalHtmlElementIds, control) ? internalNodeLocalName(control) : "";
   }
 
   function isoWeeksInYear(year) {
@@ -13206,16 +13172,13 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function inputValueAsNumber(type, value) {
-    switch (type) {
-      case "number":
-      case "range": return validNumber(value);
-      case "date": return validDateMilliseconds(value);
-      case "month": return validMonthNumber(value);
-      case "week": return validWeekMilliseconds(value);
-      case "time": return validTimeMilliseconds(value);
-      case "datetime-local": return validLocalDateTimeMilliseconds(value);
-      default: return null;
-    }
+    const number = nativeInputNumber(type, String(value), false);
+    return Number.isNaN(number) ? null : number;
+  }
+
+  function inputAttributeAsNumber(type, value) {
+    const number = nativeInputNumber(type, String(value), true);
+    return Number.isNaN(number) ? null : number;
   }
 
   function inputStep(type) {
@@ -13229,42 +13192,17 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
-  function decimalParts(value) {
-    const match = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(String(value));
-    if (!match || (!match[2] && !match[3])) return null;
-    const digits = (match[2] || "") + (match[3] || "");
-    const coefficient = BigInt((match[1] === "-" ? "-" : "") + (digits || "0"));
-    return { coefficient, exponent: Number(match[4] || 0) - (match[3] || "").length };
-  }
-
-  function decimalStepMismatch(value, base, step) {
-    const parts = [decimalParts(value), decimalParts(base), decimalParts(step)];
-    if (parts.some(part => part === null)) return null;
-    const exponent = Math.min(...parts.map(part => part.exponent));
-    const integers = parts.map(part =>
-      part.coefficient * 10n ** BigInt(part.exponent - exponent));
-    return (integers[0] - integers[1]) % integers[2] !== 0n;
-  }
-
   function inputStepMismatch(control, type, numericValue) {
     if (numericValue === null || !RANGE_INPUT_TYPES.has(type)) return false;
-    const rawStep = control.getAttribute("step");
+    const id = internalNodeId(control), rawStep = nativeAttributeValueNS(id, null, "step");
     if (rawStep && rawStep.toLowerCase() === "any") return false;
     const config = inputStep(type);
-    const parsedStep = rawStep === null || rawStep === "" ? null : validNumber(rawStep);
-    const step = (parsedStep !== null && parsedStep > 0 ? parsedStep : config.defaultStep) * config.scale;
-    const minimum = inputValueAsNumber(type, control.getAttribute("min") || "");
-    const attributeValue = inputValueAsNumber(type, control.getAttribute("value") || "");
+    const parsedStep = inputAttributeAsNumber("number", rawStep || "");
+    const step = parsedStep !== null && parsedStep > 0 ? parsedStep : config.defaultStep;
+    const minimum = inputAttributeAsNumber(type, nativeAttributeValueNS(id, null, "min") || "");
+    const attributeValue = inputAttributeAsNumber(type, nativeAttributeValueNS(id, null, "value") || "");
     const base = minimum ?? attributeValue ?? config.defaultBase;
-    if ((type === "number" || type === "range") && parsedStep !== null && parsedStep > 0) {
-      const baseSource = minimum !== null ? control.getAttribute("min") :
-        (attributeValue !== null ? control.getAttribute("value") : "0");
-      const mismatch = decimalStepMismatch(control.value, baseSource, rawStep);
-      if (mismatch !== null) return mismatch;
-    }
-    const quotient = (numericValue - base) / step;
-    const distance = Math.abs(quotient - Math.round(quotient));
-    return distance > 1e-7;
+    return nativeInputStepMismatch(numericValue, base, step, config.scale);
   }
 
   function validEmailAddress(value) {
@@ -13312,15 +13250,15 @@ export const __omoikane_service_worker_lifecycle = {};
     if (!inputs.includes(control)) inputs.push(control);
     const group = inputs.filter(candidate => candidate.type === "radio" &&
       candidate.name === name && candidate.__owningForm() === form);
-    return group.some(candidate => candidate.hasAttribute("required")) &&
+    return group.some(candidate => (nativeAttribute(candidate, "required") !== null)) &&
       !group.some(candidate => candidate.checked);
   }
 
   function controlValueMissing(control, radioGroups = null) {
-    if (!control.hasAttribute("required")) {
-      if (!(control.tagName === "INPUT" && control.type === "radio")) return false;
+    if (!(nativeAttribute(control, "required") !== null)) {
+      if (!(htmlFormControlLocalName(control) === "input" && control.type === "radio")) return false;
     }
-    if (control.tagName === "INPUT") {
+    if (htmlFormControlLocalName(control) === "input") {
       const type = control.type;
       if (!REQUIRED_INPUT_TYPES.has(type)) return false;
       if (type === "checkbox") return !control.checked;
@@ -13330,14 +13268,14 @@ export const __omoikane_service_worker_lifecycle = {};
       if (RANGE_INPUT_TYPES.has(type)) return control.value === "" || inputValueAsNumber(type, control.value) === null;
       return control.value === "";
     }
-    if (control.tagName === "SELECT") {
+    if (htmlFormControlLocalName(control) === "select") {
       const selected = control.options.filter(option => option.selected);
       if (control.multiple || control.size > 1) return selected.length === 0;
       if (selected.length === 0) return true;
       const first = control.options[0];
       return selected[0] === first && first.parentNode === control && first.value === "";
     }
-    if (control.tagName === "TEXTAREA") {
+    if (htmlFormControlLocalName(control) === "textarea") {
       return !control.__isDisabledControl() && !control.readOnly && control.value === "";
     }
     return false;
@@ -13346,13 +13284,13 @@ export const __omoikane_service_worker_lifecycle = {};
   function buildRadioGroupStates(controls) {
     const states = new Map();
     for (const control of controls) {
-      if (control.tagName !== "INPUT" || control.type !== "radio" || !control.name) continue;
+      if (htmlFormControlLocalName(control) !== "input" || control.type !== "radio" || !control.name) continue;
       let state = states.get(control.name);
       if (!state) {
         state = { required: false, checked: false };
         states.set(control.name, state);
       }
-      state.required ||= control.hasAttribute("required");
+      state.required ||= (nativeAttribute(control, "required") !== null);
       state.checked ||= control.checked;
     }
     return states;
@@ -13363,12 +13301,12 @@ export const __omoikane_service_worker_lifecycle = {};
     if (internals?.definition.formAssociated) {
       return { ...internals.flags, valid: !Object.values(internals.flags).some(Boolean) };
     }
-    const type = control.tagName === "INPUT" ? control.type : "";
+    const type = htmlFormControlLocalName(control) === "input" ? control.type : "";
     const value = String(control.value ?? "");
     const numericValue = inputValueAsNumber(type, value);
-    const minimum = inputValueAsNumber(type, control.getAttribute("min") || "");
-    const maximum = inputValueAsNumber(type, control.getAttribute("max") || "");
-    const tracksLength = control.tagName === "TEXTAREA" || LENGTH_INPUT_TYPES.has(type);
+    const minimum = inputAttributeAsNumber(type, nativeAttributeValueNS(internalNodeId(control), null, "min") || "") ?? (type === "range" ? 0 : null);
+    const maximum = inputAttributeAsNumber(type, nativeAttributeValueNS(internalNodeId(control), null, "max") || "") ?? (type === "range" ? 100 : null);
+    const tracksLength = htmlFormControlLocalName(control) === "textarea" || LENGTH_INPUT_TYPES.has(type);
     const minimumLength = tracksLength ? control.minLength : -1;
     const maximumLength = tracksLength ? control.maxLength : -1;
     const userEdited = Boolean(control.__lastValueChangeWasUser);
@@ -13378,15 +13316,15 @@ export const __omoikane_service_worker_lifecycle = {};
       numericValue > maximum && numericValue < minimum;
     const flags = {
       valueMissing: controlValueMissing(control, radioGroups),
-      typeMismatch: control.tagName === "INPUT" && inputTypeMismatch(control, type, value),
-      patternMismatch: control.tagName === "INPUT" && inputPatternMismatch(control, type, value),
+      typeMismatch: htmlFormControlLocalName(control) === "input" && inputTypeMismatch(control, type, value),
+      patternMismatch: htmlFormControlLocalName(control) === "input" && inputPatternMismatch(control, type, value),
       tooLong: userEdited && maximumLength >= 0 && value.length > maximumLength,
       tooShort: userEdited && value !== "" && minimumLength >= 0 && value.length < minimumLength,
       rangeUnderflow: reversedTimeRange ? outsideReversedTimeRange :
         numericValue !== null && minimum !== null && numericValue < minimum,
       rangeOverflow: reversedTimeRange ? outsideReversedTimeRange :
         numericValue !== null && maximum !== null && numericValue > maximum,
-      stepMismatch: control.tagName === "INPUT" && inputStepMismatch(control, type, numericValue),
+      stepMismatch: htmlFormControlLocalName(control) === "input" && inputStepMismatch(control, type, numericValue),
       badInput: false,
       customError: String(control.__customValidityMessage || "") !== "",
     };
@@ -13395,10 +13333,10 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function hasDataListAncestor(control) {
-    let ancestor = control.parentNode;
+    let ancestor = internalParentNode(control);
     while (ancestor) {
-      if (ancestor.nodeType === 1 && ancestor.tagName === "DATALIST") return true;
-      ancestor = ancestor.parentNode;
+      if (htmlFormControlLocalName(ancestor) === "datalist") return true;
+      ancestor = internalParentNode(ancestor);
     }
     return false;
   }
@@ -13406,13 +13344,13 @@ export const __omoikane_service_worker_lifecycle = {};
   function controlWillValidate(control) {
     if (control.__isDisabledControl() || hasDataListAncestor(control)) return false;
     if (isFormAssociatedElement(control)) return nativeAttribute(control, "readonly") === null;
-    if (control.tagName === "INPUT") {
+    if (htmlFormControlLocalName(control) === "input") {
       return VALIDATED_INPUT_TYPES.has(control.type) && !BARRED_INPUT_TYPES.has(control.type) &&
         !control.readOnly;
     }
-    if (control.tagName === "BUTTON") return control.type === "submit";
-    return control.tagName === "SELECT" ||
-      (control.tagName === "TEXTAREA" && !control.readOnly);
+    if (htmlFormControlLocalName(control) === "button") return control.type === "submit";
+    return htmlFormControlLocalName(control) === "select" ||
+      (htmlFormControlLocalName(control) === "textarea" && !control.readOnly);
   }
 
   // One tree walk builds form IDs and inherited owners. Radio groups are
@@ -13453,7 +13391,7 @@ export const __omoikane_service_worker_lifecycle = {};
         if (!groups) radioGroups.set(ownerId, groups = new Map());
         let group = groups.get(node.name);
         if (!group) groups.set(node.name, group = { required: false, checked: false });
-        group.required ||= node.hasAttribute("required");
+        group.required ||= (nativeAttribute(node, "required") !== null);
         group.checked ||= node.checked;
       }
       for (const record of records) {
@@ -14011,6 +13949,68 @@ export const __omoikane_service_worker_lifecycle = {};
     });
   }
 
+  function inputNumberTimeString(value) {
+    const milliseconds = Math.trunc(((value % DAY_MILLISECONDS) + DAY_MILLISECONDS) % DAY_MILLISECONDS);
+    const hour = Math.floor(milliseconds / 3600000), minute = Math.floor(milliseconds / 60000) % 60;
+    const second = Math.floor(milliseconds / 1000) % 60, fraction = milliseconds % 1000;
+    const two = value => String(value).padStart(2, "0");
+    let result = two(hour) + ":" + two(minute);
+    if (second || fraction) result += ":" + two(second);
+    if (fraction) result += "." + String(fraction).padStart(3, "0").replace(/0+$/, "");
+    return result;
+  }
+
+  // Explicit numeric input and UTC operations avoid clock/time-zone dependence.
+  function inputNumberString(kind, value) {
+    if (kind === "number" || kind === "range") return String(value);
+    if (kind === "time") return inputNumberTimeString(value);
+    const yearString = year => String(year).padStart(4, "0");
+    if (kind === "month") {
+      const month = Math.floor(value), year = 1970 + Math.floor(month / 12);
+      return year < 1 ? "" : yearString(year) + "-" + String(((month % 12) + 12) % 12 + 1).padStart(2, "0");
+    }
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime()) || date.getUTCFullYear() < 1) return "";
+    if (kind === "week") {
+      const thursday = new Date(value);
+      thursday.setUTCDate(thursday.getUTCDate() + 3 - ((thursday.getUTCDay() + 6) % 7));
+      const year = thursday.getUTCFullYear();
+      if (year < 1) return "";
+      const week = Math.floor((value - validWeekMilliseconds(yearString(year) + "-W01")) / WEEK_MILLISECONDS) + 1;
+      return yearString(year) + "-W" + String(week).padStart(2, "0");
+    }
+    const result = yearString(date.getUTCFullYear()) + "-" + String(date.getUTCMonth() + 1).padStart(2, "0") +
+      "-" + String(date.getUTCDate()).padStart(2, "0");
+    return kind === "datetime-local" ? result + "T" + inputNumberTimeString(value) : result;
+  }
+
+  function stepInputControl(control, rawCount, up) {
+    const id = htmlInputControlId(control), kind = nativeInputType(id), count = rawCount >> 0;
+    const rawStep = nativeAttributeValueNS(id, null, "step") || "";
+    if (!RANGE_INPUT_TYPES.has(kind) || rawStep.toLowerCase() === "any") {
+      throw new DOMException("The input has no permitted value step", "InvalidStateError");
+    }
+    const attribute = name => nativeAttributeValueNS(id, null, name) || "";
+    const config = inputStep(kind), parsedStep = nativeInputNumber("number", rawStep, true);
+    const step = (Number.isFinite(parsedStep) && parsedStep > 0 ? parsedStep : config.defaultStep) * config.scale;
+    let min = nativeInputNumber(kind, attribute("min"), true), max = nativeInputNumber(kind, attribute("max"), true);
+    const defaultValue = nativeInputNumber(kind, attribute("value"), true);
+    const base = Number.isFinite(min) ? min : Number.isFinite(defaultValue) ? defaultValue : config.defaultBase;
+    if (kind === "range") { if (!Number.isFinite(min)) min = 0; if (!Number.isFinite(max)) max = 100; }
+    const state = safeWeakMapGet(nodeEventStates, control);
+    const value = state.__value !== undefined ? state.__value : sanitizeInputControlValue(id, kind, attribute("value"), false);
+    const next = nativeAdvanceInputNumber(nativeInputNumber(kind, value, false), min, max, step, base, count, up);
+    if (Number.isFinite(next)) setInputNumericValue(control, id, kind, inputNumberString(kind, next));
+  }
+
+  function setInputNumericValue(control, id, kind, value) {
+    const state = safeWeakMapGet(nodeEventStates, control);
+    state.__value = sanitizeInputControlValue(id, kind, value, false);
+    state.__lastValueChangeWasUser = false;
+    nativeSetControlValueEmpty(id, state.__value === "", state.__value);
+    setTextControlSelection(control, state.__value.length, state.__value.length, "none");
+  }
+
   class HTMLInputElement extends HTMLElement {
     get indeterminate() { return nativeGetIndeterminate(htmlInputControlId(this)); }
     set indeterminate(value) { nativeSetIndeterminate(htmlInputControlId(this), !!value); }
@@ -14064,8 +14064,9 @@ export const __omoikane_service_worker_lifecycle = {};
         return files.length ? "C:\\fakepath\\" + files[0].name.split(/[\\/]/).pop() : "";
       }
       const id = internalNodeId(this);
-      const value = this.__value !== undefined ? this.__value : nativeAttributeValueNS(id, null, "value") || "";
-      return nativeSanitizeInputValue(nativeAttributeValueNS(id, null, "type") || "", value,
+      if (this.__value !== undefined) return this.__value;
+      const value = nativeAttributeValueNS(id, null, "value") || "";
+      return sanitizeInputControlValue(internalNodeId(this), nativeAttributeValueNS(id, null, "type") || "", value,
         nativeAttributeValueNS(id, null, "multiple") !== null);
     }
     set value(v) {
@@ -14075,27 +14076,36 @@ export const __omoikane_service_worker_lifecycle = {};
         return;
       }
       const id = internalNodeId(this);
-      this.__value = nativeSanitizeInputValue(nativeAttributeValueNS(id, null, "type") || "",
+      this.__value = sanitizeInputControlValue(internalNodeId(this), nativeAttributeValueNS(id, null, "type") || "",
         v == null ? "" : String(v), nativeAttributeValueNS(id, null, "multiple") !== null);
       this.__lastValueChangeWasUser = false;
       setTextControlSelection(this, this.__value.length, this.__value.length, "none");
     }
+    get valueAsNumber() {
+      const id = htmlInputControlId(this), kind = nativeInputType(id);
+      const state = safeWeakMapGet(nodeEventStates, this);
+      const raw = state.__value !== undefined ? state.__value : nativeAttributeValueNS(id, null, "value") || "";
+      const value = state.__value !== undefined ? raw : sanitizeInputControlValue(id, kind, raw, false);
+      return nativeInputNumber(kind, value, false);
+    }
+    set valueAsNumber(raw) {
+      const id = htmlInputControlId(this), kind = nativeInputType(id), value = +raw;
+      if (value === Infinity || value === -Infinity) throw new TypeError("Input valueAsNumber must be finite");
+      if (!RANGE_INPUT_TYPES.has(kind)) throw new DOMException("The input type has no numeric value", "InvalidStateError");
+      setInputNumericValue(this, id, kind, Number.isNaN(value) ? "" : inputNumberString(kind, value));
+    }
+    stepUp(n = 1) { stepInputControl(this, n, true); }
+    stepDown(n = 1) { stepInputControl(this, n, false); }
     get defaultValue() {
       return nativeAttributeValueNS(internalNodeId(this), null, "value") || "";
     }
     set defaultValue(v) {
       this.setAttributeNS(null, "value", String(v));
     }
-    get readOnly() { return this.hasAttribute("readonly"); }
-    set readOnly(value) {
-      if (value) this.setAttribute("readonly", "");
-      else this.removeAttribute("readonly");
-    }
-    get required() { return this.hasAttribute("required"); }
-    set required(value) {
-      if (value) this.setAttribute("required", "");
-      else this.removeAttribute("required");
-    }
+    get readOnly() { return nativeAttributeValueNS(internalNodeId(this), null, "readonly") !== null; }
+    set readOnly(value) { reflectFormBooleanAttribute(this, "readonly", value); }
+    get required() { return nativeAttributeValueNS(internalNodeId(this), null, "required") !== null; }
+    set required(value) { reflectFormBooleanAttribute(this, "required", value); }
     get multiple() { return nativeAttributeValueNS(internalNodeId(this), null, "multiple") !== null; }
     set multiple(value) {
       if (value) this.setAttributeNS(null, "multiple", "");
@@ -14103,12 +14113,12 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     get pattern() { return this.getAttribute("pattern") || ""; }
     set pattern(value) { this.setAttribute("pattern", String(value)); }
-    get min() { return this.getAttribute("min") || ""; }
-    set min(value) { this.setAttribute("min", String(value)); }
-    get max() { return this.getAttribute("max") || ""; }
-    set max(value) { this.setAttribute("max", String(value)); }
-    get step() { return this.getAttribute("step") || ""; }
-    set step(value) { this.setAttribute("step", String(value)); }
+    get min() { return nativeAttributeValueNS(internalNodeId(this), null, "min") || ""; }
+    set min(value) { this.setAttributeNS(null, "min", String(value)); }
+    get max() { return nativeAttributeValueNS(internalNodeId(this), null, "max") || ""; }
+    set max(value) { this.setAttributeNS(null, "max", String(value)); }
+    get step() { return nativeAttributeValueNS(internalNodeId(this), null, "step") || ""; }
+    set step(value) { this.setAttributeNS(null, "step", String(value)); }
     get formNoValidate() { return this.hasAttribute("formnovalidate"); }
     set formNoValidate(value) {
       if (value) this.setAttribute("formnovalidate", "");
@@ -16699,7 +16709,7 @@ export const __omoikane_service_worker_lifecycle = {};
     namespace,
   ) {
     if (!element) return;
-    inputValueAttributeChanged(element, name, namespace);
+    inputValueAttributeChanged(element, name, namespace, oldValue, newValue);
     radioAttributeChanged(element, name, namespace, oldValue, newValue);
     detailsAttributeChanged(element, name, oldValue, newValue, namespace);
     const definition = element.__customElementDefinition;
@@ -16711,9 +16721,21 @@ export const __omoikane_service_worker_lifecycle = {};
     customFormAttributeChanged(element, name, oldValue, newValue, namespace);
   }
 
+  function sanitizeInputControlValue(id, kind, value, multiple) {
+    if (String(kind).toLowerCase() === "range") {
+      return String(nativeSanitizeRange(value,
+        nativeAttributeValueNS(id, null, "min") || "",
+        nativeAttributeValueNS(id, null, "max") || "",
+        nativeAttributeValueNS(id, null, "step") || "",
+        nativeAttributeValueNS(id, null, "value") || ""));
+    }
+    return nativeSanitizeInputValue(kind, value, multiple);
+  }
+
   // Attribute mutation updates internal value state before author callbacks.
-  function inputValueAttributeChanged(element, name, namespace) {
-    if (namespace !== null || (name !== "type" && name !== "multiple") ||
+  function inputValueAttributeChanged(element, name, namespace, oldValue, newValue) {
+    if (oldValue === newValue) return;
+    if (namespace !== null || !["type", "multiple", "min", "max", "step"].includes(name) ||
         !hasCanonicalWrapperId(canonicalHtmlElementIds, element) ||
         internalNodeLocalName(element) !== "input") return;
     const state = safeWeakMapGet(nodeEventStates, element);
@@ -16721,11 +16743,12 @@ export const __omoikane_service_worker_lifecycle = {};
     const id = internalNodeId(element);
     const kind = nativeAttributeValueNS(id, null, "type") || "";
     const multiple = nativeAttributeValueNS(id, null, "multiple") !== null;
-    const value = nativeSanitizeInputValue(kind, state.__value, multiple);
+    const value = sanitizeInputControlValue(id, kind, state.__value, multiple);
     if (value !== state.__value) {
       state.__value = value;
-      nativeSetControlValueEmpty(id, value === "");
     }
+    // The type may change while preserving the same string value.
+    nativeSetControlValueEmpty(id, value === "", value);
   }
 
   function customElementTreeWalk(root, callback) {
@@ -17104,7 +17127,7 @@ export const __omoikane_service_worker_lifecycle = {};
         const changed = state[name] !== value;
         state[name] = value;
         if (changed && name === "__value") {
-          nativeSetControlValueEmpty(internalNodeId(this), value === undefined ? undefined : value === "");
+          nativeSetControlValueEmpty(internalNodeId(this), value === undefined ? undefined : value === "", value);
         } else if (changed && ["__customValidityMessage", "__lastValueChangeWasUser", "__files"].includes(name)) {
           nativeInvalidateValidation(internalNodeId(this));
         }

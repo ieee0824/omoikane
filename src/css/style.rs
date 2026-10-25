@@ -12586,6 +12586,8 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::TextTransform, InitialValue::Keyword("none")),
     (PropertyId::WhiteSpace, InitialValue::Keyword("normal")),
     (PropertyId::TextOverflow, InitialValue::Keyword("clip")),
+    (PropertyId::OverflowX, InitialValue::Keyword("visible")),
+    (PropertyId::OverflowY, InitialValue::Keyword("visible")),
     (PropertyId::TextShadow, InitialValue::Keyword("none")),
     (
         PropertyId::TextDecorationLine,
