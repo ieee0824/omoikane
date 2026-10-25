@@ -25,6 +25,40 @@ impl Normalization {
     }
 }
 
+/// Resolves an input type keyword using ASCII case folding and the text default.
+/// This pure calculation does not read attributes or document state.
+pub(crate) fn canonical_type(raw: &str) -> &'static str {
+    const TYPES: &[&str] = &[
+        "hidden",
+        "text",
+        "search",
+        "tel",
+        "url",
+        "email",
+        "password",
+        "date",
+        "month",
+        "week",
+        "time",
+        "datetime-local",
+        "number",
+        "range",
+        "color",
+        "checkbox",
+        "radio",
+        "file",
+        "submit",
+        "image",
+        "reset",
+        "button",
+    ];
+    TYPES
+        .iter()
+        .copied()
+        .find(|kind| raw.eq_ignore_ascii_case(kind))
+        .unwrap_or("text")
+}
+
 /// Plans text/URL/email/number sanitization from explicit type and multiple state.
 /// Other known input types retain their existing value behavior. Unknown types
 /// use text's newline removal. No DOM, JavaScript, or environment state is read.
@@ -32,7 +66,7 @@ pub(crate) fn normalize<I>(kind: &str, multiple: bool, units: I) -> Normalizatio
 where
     I: Iterator<Item = u16> + Clone,
 {
-    let kind = kind.to_ascii_lowercase();
+    let kind = canonical_type(kind);
     if kind == "number" {
         return if valid_number(units) {
             Normalization::Unchanged
@@ -41,7 +75,7 @@ where
         };
     }
     if matches!(
-        kind.as_str(),
+        kind,
         "hidden"
             | "date"
             | "month"
@@ -63,7 +97,7 @@ where
     if kind == "email" && multiple {
         return normalize_email_list(units);
     }
-    normalize_text(units, matches!(kind.as_str(), "url" | "email"))
+    normalize_text(units, matches!(kind, "url" | "email"))
 }
 
 fn ascii_whitespace(unit: u16) -> bool {

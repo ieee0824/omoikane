@@ -22828,7 +22828,7 @@ fn get_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
         let checked = state
             .borrow()
             .get_node(node_id)
-            .is_some_and(|node| node.checked());
+            .is_some_and(|node| node.input_checkedness());
         Ok(JsValue::from(checked))
     })
 }
@@ -22837,12 +22837,17 @@ fn set_checked_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     let node_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, node_id)?;
     let checked = args.get(1).is_some_and(JsValue::to_boolean);
+    let mark_dirty = args.get(2).is_none_or(JsValue::to_boolean);
     with_render_mutation(|state| {
         let node = state
             .borrow()
             .get_node(node_id)
             .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        node.set_checked(checked);
+        if mark_dirty {
+            node.set_checked(checked);
+        } else {
+            node.set_checkedness(checked);
+        }
         state.borrow_mut().invalidate_style_cache_for_node(&node);
         Ok(JsValue::undefined())
     })
@@ -26420,6 +26425,7 @@ fn clone_element_node(node: &NodeHandle) -> NodeHandle {
             clone.set_attribute_value_ns_utf16(namespace.as_deref(), &local_name, &value);
         }
     }
+    node.copy_input_state_to(&clone);
     clone
 }
 

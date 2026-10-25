@@ -13192,11 +13192,11 @@ fn get_element_by_id_does_not_parse_id_as_a_selector() {
 }
 
 #[test]
-fn checkedness_is_limited_to_checkable_inputs() {
+fn input_checkedness_is_preserved_while_css_checked_requires_checkable_type() {
     use crate::html::TreeBuilder;
-    // A `checked` attribute on a text input or a non-input element must
-    // not surface through the `.checked` IDL property (nor `:checked`);
-    // checkedness only applies to checkbox/radio inputs.
+    // HTMLInputElement.checked exposes the stored flag in every input state.
+    // CSS :checked applies only to checkable inputs; non-input elements have
+    // neither the IDL property nor CSS checkedness.
     let doc = TreeBuilder::parse(
         r#"<html><body><input id="text" type="text" checked><div id="div" checked></div><input id="box" type="checkbox" checked></body></html>"#,
     )
@@ -13209,8 +13209,16 @@ fn checkedness_is_limited_to_checkable_inputs() {
                   const text = document.getElementById("text");
                   const div = document.getElementById("div");
                   const box = document.getElementById("box");
-                  return [text.checked, div.checked === undefined, box.checked,
-                          document.querySelector(":checked") === box].join("|");
+                  const initial = [text.checked, div.checked === undefined, box.checked,
+                    document.querySelector(":checked") === box,
+                    document.querySelectorAll(":checked").length === 1];
+                  text.type = "checkbox";
+                  const asCheckbox = text.checked && text.matches(":checked") &&
+                    document.querySelectorAll(":checked").length === 2;
+                  text.type = "text";
+                  const asText = text.checked && !text.matches(":checked") &&
+                    document.querySelectorAll(":checked").length === 1;
+                  return [...initial, asCheckbox, asText].join("|");
                 })()
                 "#,
         )
@@ -13218,7 +13226,7 @@ fn checkedness_is_limited_to_checkable_inputs() {
         .to_string(&mut runtime.context)
         .unwrap()
         .to_std_string_escaped();
-    assert_eq!(result, "false|true|true|true");
+    assert_eq!(result, "true|true|true|true|true|true|true");
 }
 
 #[test]

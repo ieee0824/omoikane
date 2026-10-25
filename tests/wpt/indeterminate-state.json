@@ -1,0 +1,22 @@
+{
+  "tests": [
+    {
+      "path": "html/semantics/selectors/pseudo-classes/indeterminate.html"
+    },
+    {
+      "path": "html/semantics/selectors/pseudo-classes/indeterminate-radio.html"
+    },
+    {
+      "path": "html/semantics/selectors/pseudo-classes/indeterminate-type-change.html"
+    },
+    {
+      "path": "html/semantics/selectors/pseudo-classes/checked-indeterminate.window.js"
+    },
+    {
+      "path": "html/semantics/forms/the-input-element/radio.html"
+    },
+    {
+      "path": "html/semantics/forms/the-input-element/radio-input-cancel.html"
+    }
+  ]
+}
