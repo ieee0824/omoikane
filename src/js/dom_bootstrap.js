@@ -11574,6 +11574,9 @@ export const __omoikane_service_worker_lifecycle = {};
     constructor(id = undefined, interfaceToken, constructorInterface) {
       super(id, htmlConstructorInterfaceToken,
         interfaceToken === htmlConstructorInterfaceToken ? constructorInterface : HTMLMediaElement);
+      // Upgrades return an existing wrapper. Direct custom construction also
+      // returns the canonical wrapper already initialized by wrapNode().
+      if (hasCanonicalWrapperId(canonicalHtmlElementIds, this)) return;
       this.__mediaLoadId = 0;
       this.__mediaPlaybackId = 0;
       this.__mediaPlaybackTimer = null;

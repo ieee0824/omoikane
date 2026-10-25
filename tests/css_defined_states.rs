@@ -313,3 +313,31 @@ fn creation_options_follow_the_legacy_string_and_dictionary_conversions() {
         "ok"
     );
 }
+
+#[test]
+fn upgrading_media_builtins_preserves_existing_state_during_and_after_super() {
+    assert_eq!(
+        evaluate(
+            "<body></body>",
+            r#"
+        for (const [tag, Base] of [['video', HTMLVideoElement], ['audio', HTMLAudioElement]]) {
+            const name = 'x-keep-'+tag;
+            const element = document.createElement(tag, {is:name});
+            element.volume = 0.25;element.currentTime = 2.5;
+            document.body.append(element);
+            let during;
+            class Extended extends Base {
+                constructor(){super();during=[this.volume,this.currentTime].join(',');}
+            }
+            customElements.define(name, Extended, {extends:tag});
+            if (during !== '0.25,2.5') return 'constructor:'+tag+':'+during;
+            if (!element.matches(':defined') || element.volume !== 0.25 || element.currentTime !== 2.5) return 'after:'+tag;
+            const fresh = new Extended();
+            if (!fresh.matches(':defined') || fresh.volume !== 1 || fresh.currentTime !== 0) return 'fresh:'+tag;
+        }
+        return 'ok';
+    "#
+        ),
+        "ok"
+    );
+}
