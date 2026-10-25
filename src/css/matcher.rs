@@ -8,6 +8,7 @@ use super::{
     AttributeOperator, Combinator, RelativeSelector, Selector, SelectorPart, SimpleSelector,
 };
 
+mod form_state;
 mod nth_filter;
 
 /// Supported pseudo-elements for style matching.
@@ -800,6 +801,8 @@ fn matches_pseudo_class(
         "enabled" => is_form_control(node) && !is_actually_disabled(node),
         "disabled" => is_actually_disabled(node),
         "checked" => node.checked(),
+        "required" => form_state::requiredness(node) == Some(true),
+        "optional" => form_state::requiredness(node) == Some(false),
         "valid" => pseudo.is_none() && node.css_validity() == Some(true),
         "invalid" => pseudo.is_none() && node.css_validity() == Some(false),
         "any-link" => is_html_hyperlink(node),
