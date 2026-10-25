@@ -70,14 +70,11 @@ pub fn parse_selector_list(input: &str) -> Result<Vec<Selector>, CssParseError> 
 /// Tests one complex selector for `@supports selector()` and `CSS.supports()`.
 /// This uses the stylesheet's selector grammar, including selectors that DOM
 /// queries currently reject.
-pub(crate) fn supports_selector(input: &str) -> bool {
-    let Ok(tokens) = tokenize(input) else {
-        return false;
-    };
-    if !forgiving_pseudo_branches_supported(&tokens) {
+pub(crate) fn supports_selector(tokens: &[CssToken]) -> bool {
+    if !forgiving_pseudo_branches_supported(tokens) {
         return false;
     }
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens.to_vec());
     parser.skip_whitespace();
     let Ok(selectors) = parser.parse_selector_list_until(false) else {
         return false;
@@ -140,7 +137,20 @@ fn forgiving_pseudo_branches_supported(tokens: &[CssToken]) -> bool {
                 _ => {}
             }
         }
-        if parens != 0 || brackets != 0 || parse_forgiving_selector_list(argument).len() != branches
+        let selectors = parse_forgiving_selector_list(argument);
+        if parens != 0
+            || brackets != 0
+            || selectors.len() != branches
+            || !selectors.iter().all(|selector| {
+                selector_is_supported(
+                    selector,
+                    SelectorSupportContext {
+                        style_query: true,
+                        inside_has: false,
+                        allow_pseudo_element: false,
+                    },
+                )
+            })
         {
             return false;
         }
@@ -298,7 +308,7 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                     base.as_str(),
                     "hover" | "active" | "focus" | "focus-visible" | "focus-within"
                 );
-                let host = context.style_query && base == "host";
+                let host = base == "host";
                 (known || location || host)
                     && (!location || !name.contains('('))
                     && (!user_action || !name.contains('('))
@@ -312,11 +322,21 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         || name
                             .split_once('(')
                             .and_then(|(_, rest)| rest.strip_suffix(')'))
-                            .and_then(super::matcher::parse_an_plus_b)
-                            .is_some())
+                            .is_some_and(|argument| {
+                                super::matcher::parse_an_plus_b(argument).is_some()
+                            }))
             }
+            SimpleSelector::NthChild { selectors, .. } => selectors.iter().all(|selector| {
+                selector_is_supported(
+                    selector,
+                    SelectorSupportContext {
+                        allow_pseudo_element: false,
+                        ..context
+                    },
+                )
+            }),
             SimpleSelector::PseudoElement(name) => {
-                (!context.style_query || context.allow_pseudo_element)
+                context.allow_pseudo_element
                     && (name.eq_ignore_ascii_case("before")
                         || name.eq_ignore_ascii_case("after")
                         || name.eq_ignore_ascii_case("backdrop")
@@ -353,19 +373,18 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         }))
             }
             SimpleSelector::Has(selectors) => {
-                !context.style_query
-                    || (!context.inside_has
-                        && !selectors.is_empty()
-                        && selectors.iter().all(|selector| {
-                            selector_is_supported(
-                                &selector.selector,
-                                SelectorSupportContext {
-                                    inside_has: true,
-                                    allow_pseudo_element: false,
-                                    ..context
-                                },
-                            )
-                        }))
+                !context.inside_has
+                    && !selectors.is_empty()
+                    && selectors.iter().all(|selector| {
+                        selector_is_supported(
+                            &selector.selector,
+                            SelectorSupportContext {
+                                inside_has: true,
+                                allow_pseudo_element: false,
+                                ..context
+                            },
+                        )
+                    })
             }
             SimpleSelector::Not(selectors) => selectors.iter().all(|selector| {
                 selector_is_supported(
@@ -402,6 +421,60 @@ fn supported_compound_selector(input: &str, context: SelectorSupportContext) -> 
             SelectorSupportContext {
                 allow_pseudo_element: false,
                 ..context
+            },
+        )
+}
+
+fn parse_nth_selector(name: &str, tokens: &[CssToken]) -> Result<SimpleSelector, CssParseError> {
+    let of = tokens.iter().position(|token| {
+        matches!(token,
+        CssToken::Ident(value) if value.eq_ignore_ascii_case("of"))
+    });
+    let formula = render_nth_argument(&tokens[..of.unwrap_or(tokens.len())]);
+    if super::matcher::parse_an_plus_b(&formula).is_none() {
+        return Err(CssParseError::InvalidSelector);
+    }
+    let Some(of) = of else {
+        return Ok(SimpleSelector::PseudoClass(format!("{name}({formula})")));
+    };
+    if !name.eq_ignore_ascii_case("nth-child") && !name.eq_ignore_ascii_case("nth-last-child") {
+        return Err(CssParseError::InvalidSelector);
+    }
+    let mut selectors = parse_nested_selector_tokens(&tokens[of + 1..])?;
+    if !selectors.iter_mut().all(sanitize_nth_filter_selector) {
+        return Err(CssParseError::InvalidSelector);
+    }
+    Ok(SimpleSelector::NthChild {
+        formula,
+        selectors,
+        reverse: name.eq_ignore_ascii_case("nth-last-child"),
+    })
+}
+
+fn sanitize_nth_filter_selector(selector: &mut Selector) -> bool {
+    let valid = selector.parts.iter_mut().all(|part| {
+        part.simples.iter_mut().all(|simple| match simple {
+            SimpleSelector::Is(selectors) | SimpleSelector::Where(selectors) => {
+                // Invalid forgiving branches never contribute to specificity.
+                selectors.retain_mut(sanitize_nth_filter_selector);
+                true
+            }
+            SimpleSelector::Not(selectors) => {
+                selectors.iter_mut().all(sanitize_nth_filter_selector)
+            }
+            SimpleSelector::Has(selectors) => selectors
+                .iter_mut()
+                .all(|relative| sanitize_nth_filter_selector(&mut relative.selector)),
+            _ => true,
+        })
+    });
+    valid
+        && selector_is_supported(
+            selector,
+            SelectorSupportContext {
+                style_query: false,
+                inside_has: false,
+                allow_pseudo_element: false,
             },
         )
 }
@@ -650,7 +723,12 @@ impl Parser {
                         }
                         let block = block?;
                         let prelude = if name.eq_ignore_ascii_case("scope") {
-                            render_tokens(&replace_nesting_ampersands(&prelude_tokens, nesting))
+                            render_selector_tokens(&replace_nesting_ampersands(
+                                &prelude_tokens,
+                                nesting,
+                            ))
+                        } else if name.eq_ignore_ascii_case("supports") {
+                            render_selector_tokens(&prelude_tokens)
                         } else {
                             render_tokens(&prelude_tokens)
                         }
@@ -1297,11 +1375,13 @@ impl Parser {
         }
         self.next(); // consume ParenOpen
         let argument_tokens = self.collect_parenthesized_tokens()?;
+        if name.to_ascii_lowercase().starts_with("nth-") {
+            return parse_nth_selector(&name, &argument_tokens);
+        }
         if matches!(
             name.to_ascii_lowercase().as_str(),
             "is" | "where" | "not" | "has"
         ) {
-            let argument_str = render_tokens(&argument_tokens).trim().to_string();
             match name.to_ascii_lowercase().as_str() {
                 "is" => Ok(SimpleSelector::Is(parse_forgiving_selector_list(
                     &argument_tokens,
@@ -1309,8 +1389,8 @@ impl Parser {
                 "where" => Ok(SimpleSelector::Where(parse_forgiving_selector_list(
                     &argument_tokens,
                 ))),
-                "not" => Ok(SimpleSelector::Not(parse_nested_selector_list(
-                    &argument_str,
+                "not" => Ok(SimpleSelector::Not(parse_nested_selector_tokens(
+                    &argument_tokens,
                 )?)),
                 "has" => Ok(SimpleSelector::Has(parse_relative_selector_list(
                     &argument_tokens,
@@ -1318,11 +1398,7 @@ impl Parser {
                 _ => unreachable!(),
             }
         } else {
-            let argument = if name.to_ascii_lowercase().starts_with("nth-") {
-                render_nth_argument(&argument_tokens)
-            } else {
-                render_tokens(&argument_tokens).trim().to_string()
-            };
+            let argument = render_selector_tokens(&argument_tokens).trim().to_string();
             if argument.is_empty() {
                 return Err(CssParseError::InvalidSelector);
             }
@@ -1701,6 +1777,16 @@ fn parse_comma_separated_value(tokens: &[CssToken]) -> Result<Value, CssParseErr
 }
 
 fn render_nth_argument(tokens: &[CssToken]) -> String {
+    if let Some(index) = tokens
+        .iter()
+        .position(|token| matches!(token, CssToken::Ident(name) if name.eq_ignore_ascii_case("of")))
+    {
+        return format!(
+            "{} of {}",
+            render_nth_argument(&tokens[..index]),
+            render_selector_tokens(&tokens[index + 1..]).trim()
+        );
+    }
     let mut rendered = String::new();
     for (index, token) in tokens.iter().enumerate() {
         let piece = render_tokens(std::slice::from_ref(token));
@@ -1724,6 +1810,43 @@ fn render_nth_argument(tokens: &[CssToken]) -> String {
         rendered.push_str(&piece);
     }
     rendered.trim().to_string()
+}
+
+/// Keep folded An+B signs when rendering selectors nested inside `of`/`:not`.
+pub(super) fn render_selector_tokens(tokens: &[CssToken]) -> String {
+    let mut rendered = String::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if matches!(tokens.get(index), Some(CssToken::Colon))
+            && matches!(tokens.get(index + 1), Some(CssToken::Ident(name)) if name.to_ascii_lowercase().starts_with("nth-"))
+            && matches!(tokens.get(index + 2), Some(CssToken::ParenOpen))
+        {
+            let start = index + 3;
+            let mut depth = 0usize;
+            let end = (start..tokens.len()).find(|&i| match tokens[i] {
+                CssToken::ParenOpen => {
+                    depth += 1;
+                    false
+                }
+                CssToken::ParenClose if depth == 0 => true,
+                CssToken::ParenClose => {
+                    depth -= 1;
+                    false
+                }
+                _ => false,
+            });
+            if let Some(end) = end {
+                rendered.push_str(&render_tokens(&tokens[index..start]));
+                rendered.push_str(&render_nth_argument(&tokens[start..end]));
+                rendered.push(')');
+                index = end + 1;
+                continue;
+            }
+        }
+        rendered.push_str(&render_tokens(&tokens[index..index + 1]));
+        index += 1;
+    }
+    rendered
 }
 
 fn parse_value_tokens(tokens: &[CssToken]) -> Result<Value, CssParseError> {
@@ -2024,9 +2147,8 @@ fn parse_single_value(token: &CssToken) -> Result<Value, CssParseError> {
 }
 
 /// Parses a selector list nested inside a functional pseudo-class.
-fn parse_nested_selector_list(argument: &str) -> Result<Vec<Selector>, CssParseError> {
-    let tokens = tokenize(argument)?;
-    let mut parser = Parser::new(tokens);
+fn parse_nested_selector_tokens(tokens: &[CssToken]) -> Result<Vec<Selector>, CssParseError> {
+    let mut parser = Parser::new(tokens.to_vec());
     parser.skip_whitespace();
     if parser.peek().is_none() {
         return Err(CssParseError::InvalidSelector);
@@ -2147,7 +2269,9 @@ fn sanitize_has_argument(selector: &mut Selector) -> bool {
                 selectors.retain_mut(sanitize_has_argument);
                 true
             }
-            SimpleSelector::Not(selectors) => selectors.iter_mut().all(sanitize_has_argument),
+            SimpleSelector::Not(selectors) | SimpleSelector::NthChild { selectors, .. } => {
+                selectors.iter_mut().all(sanitize_has_argument)
+            }
             _ => true,
         })
     })

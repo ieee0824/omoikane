@@ -17,6 +17,11 @@ import time
 import traceback
 
 
+# Also resolve the shared validator when invoked directly as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.acid3_expectations import load_expectation, report_matches_expectation
+
+
 TARGETS = {
     "x86_64-unknown-linux-gnu": ("libomoikane.so", "omoikane-linux-x86_64.tar.gz"),
     "aarch64-unknown-linux-gnu": ("libomoikane.so", "omoikane-linux-aarch64.tar.gz"),
@@ -245,9 +250,7 @@ def aggregate(root, jobs_result):
             and native.get("architecture") == target.split("-")[0]
             and len(native.get("cases", [])) == 16
             and all(case.get("success") is True for case in native["cases"]))
-        checks[target + ":acid3"] = isinstance(acid, dict) and all(
-            acid.get(mode, {}).get("score") == 100 and acid[mode].get("total") == 100
-            for mode in ("faithful", "direct"))
+        checks[target + ":acid3"] = report_matches_expectation(acid, load_expectation())
         checks[target + ":wpt"] = isinstance(wpt, dict) and (
             wpt.get("summary", {}).get("regression") == 0 and wpt["summary"].get("total", 0) > 0
             and wpt.get("revision") == Path("tests/wpt/revision.txt").read_text().strip())

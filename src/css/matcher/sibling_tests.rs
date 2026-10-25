@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn filtered_sibling_positions_are_built_once_without_owning_nodes() {
+    let parent = NodeHandle::element("main");
+    let nodes: Vec<_> = (0..512)
+        .map(|index| {
+            let node = NodeHandle::element("i");
+            if index % 2 == 0 {
+                node.set_attribute("class", "pick");
+            }
+            parent.append_child(node.clone());
+            node
+        })
+        .collect();
+    let selectors = super::super::parse_selector_list(":nth-child(2n of .pick)").unwrap();
+    let mut cache = SelectorMatchCache::default();
+    for (index, node) in nodes.iter().enumerate() {
+        assert_eq!(
+            matches_selector_cached(node, &selectors[0], &mut cache),
+            index % 4 == 2
+        );
+    }
+    assert_eq!(cache.filtered_positions.len(), 1);
+    assert_eq!(cache.structural_builds, 1);
+    let weak = nodes[0].downgrade();
+    parent.remove_child(&nodes[0]).unwrap();
+    drop(nodes);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn visited_history_cannot_change_filtered_sibling_positions() {
+    let parent = NodeHandle::element("main");
+    let first = NodeHandle::element("a");
+    let second = NodeHandle::element("a");
+    first.set_attribute("href", "/first");
+    second.set_attribute("href", "/second");
+    parent.append_child(first.clone());
+    parent.append_child(second.clone());
+    let selectors =
+        super::super::parse_selector_list(":nth-child(2 of :link), :nth-child(1 of :visited)")
+            .unwrap();
+    let mut cache = SelectorMatchCache::for_visited_links([first.identity(), second.identity()]);
+    assert!(matches_selector_cached(&second, &selectors[0], &mut cache));
+    assert!(!matches_selector_cached(&first, &selectors[1], &mut cache));
+    assert!(!matches_selector_cached(&second, &selectors[1], &mut cache));
+}
+
+#[test]
 fn adjacent_relational_and_nth_selectors_share_one_sibling_index() {
     for count in [32, 128, 512] {
         let parent = NodeHandle::element("main");

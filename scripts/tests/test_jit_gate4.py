@@ -14,6 +14,15 @@ gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 
 
+def acid3_report():
+    expected = gate.load_expectation()
+    return {mode: {key: expected[key] for key in ("score", "total", "index")} | {
+        "log": "\n".join(expected["failed_lines"]), "termination_reason": "completed",
+        "script_errors": [], "task_errors": [], "drive_errors": [],
+    } for mode in ("faithful", "direct")}
+
+
+
 class GateTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -67,8 +76,7 @@ class GateTests(unittest.TestCase):
             "ok\n"
             "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
             "0 filtered out; finished in 600.1s\n")
-        gate.write_json(self.root / "acid3/acid3.json", {
-            mode: {"score": 100, "total": 100} for mode in ("faithful", "direct")})
+        gate.write_json(self.root / "acid3/acid3.json", acid3_report())
         gate.write_json(self.root / "compatibility/wpt.json", {"summary": {"regression": 0}})
         gate.write_json(self.root / "compatibility/web-api.json", {"regressions": []})
         gate.write_json(self.root / "stress/stress.json", {

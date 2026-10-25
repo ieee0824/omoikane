@@ -180,6 +180,7 @@ collect_pattern "/html/webappapis/scripting/processing-model-2/" "/cors/support.
 collect_pattern "/compression/"
 collect_pattern "/encoding/streams/" "/common/sab.js"
 collect_pattern "/css/selectors/is-where-error-recovery.html"
+collect_pattern "/css/selectors/child-indexed-pseudo-class.html" "/css/selectors/nth-last-child-invalid.html" "/css/selectors/invalidation/nth-child-whole-subtree.html"
 collect_pattern "/css/selectors/has-matches-to-uninserted-elements.html"
 collect_pattern \
   "/css/selectors/invalidation/any-link-pseudo.html" \

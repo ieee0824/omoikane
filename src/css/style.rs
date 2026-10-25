@@ -1853,7 +1853,8 @@ fn selector_observes_style_attribute(selector: &Selector) -> bool {
             SimpleSelector::Attribute { name, .. } => name.eq_ignore_ascii_case("style"),
             SimpleSelector::Is(selectors)
             | SimpleSelector::Where(selectors)
-            | SimpleSelector::Not(selectors) => {
+            | SimpleSelector::Not(selectors)
+            | SimpleSelector::NthChild { selectors, .. } => {
                 selectors.iter().any(selector_observes_style_attribute)
             }
             SimpleSelector::Has(selectors) => selectors
@@ -1944,7 +1945,10 @@ fn selector_contains_has(selector: &Selector) -> bool {
             SimpleSelector::Has(_) => true,
             SimpleSelector::Is(selectors)
             | SimpleSelector::Where(selectors)
-            | SimpleSelector::Not(selectors) => selectors.iter().any(selector_contains_has),
+            | SimpleSelector::Not(selectors)
+            | SimpleSelector::NthChild { selectors, .. } => {
+                selectors.iter().any(selector_contains_has)
+            }
             _ => false,
         })
     })
@@ -1958,7 +1962,8 @@ fn selector_contains_shadow_pseudo(selector: &Selector) -> bool {
         part.simples.iter().any(|simple| match simple {
             SimpleSelector::Is(selectors)
             | SimpleSelector::Where(selectors)
-            | SimpleSelector::Not(selectors) => {
+            | SimpleSelector::Not(selectors)
+            | SimpleSelector::NthChild { selectors, .. } => {
                 selectors.iter().any(selector_contains_shadow_pseudo)
             }
             SimpleSelector::Has(selectors) => selectors
@@ -1999,6 +2004,13 @@ fn simple_style_attribute_dependency(
                 dependency.max(nested)
             },
         ),
+        SimpleSelector::NthChild { selectors, .. } => {
+            if selectors.iter().any(selector_observes_style_attribute) {
+                StyleAttributeSelectorDependency::NonLocal
+            } else {
+                StyleAttributeSelectorDependency::None
+            }
+        }
         SimpleSelector::Has(selectors) => {
             if selectors
                 .iter()
@@ -2117,7 +2129,8 @@ fn selector_observes_data_attribute(selector: &Selector, attribute_name: &str) -
             SimpleSelector::Attribute { name, .. } => name.eq_ignore_ascii_case(attribute_name),
             SimpleSelector::Is(selectors)
             | SimpleSelector::Where(selectors)
-            | SimpleSelector::Not(selectors) => selectors
+            | SimpleSelector::Not(selectors)
+            | SimpleSelector::NthChild { selectors, .. } => selectors
                 .iter()
                 .any(|selector| selector_observes_data_attribute(selector, attribute_name)),
             SimpleSelector::Has(selectors) => selectors.iter().any(|relative| {
@@ -2188,6 +2201,16 @@ fn simple_data_attribute_dependency(
                     };
                     dependency.max(nested)
                 })
+        }
+        SimpleSelector::NthChild { selectors, .. } => {
+            if selectors
+                .iter()
+                .any(|selector| selector_observes_data_attribute(selector, attribute_name))
+            {
+                AttributeSelectorDependency::NonLocal
+            } else {
+                AttributeSelectorDependency::None
+            }
         }
         SimpleSelector::Has(selectors) => {
             if selectors.iter().any(|relative| {
@@ -8265,7 +8288,10 @@ fn selector_references_scope(selector: &Selector) -> bool {
             SimpleSelector::PseudoClass(name) => name.eq_ignore_ascii_case("scope"),
             SimpleSelector::Is(selectors)
             | SimpleSelector::Where(selectors)
-            | SimpleSelector::Not(selectors) => selectors.iter().any(selector_references_scope),
+            | SimpleSelector::Not(selectors)
+            | SimpleSelector::NthChild { selectors, .. } => {
+                selectors.iter().any(selector_references_scope)
+            }
             SimpleSelector::Has(relative) => relative
                 .iter()
                 .any(|relative| selector_references_scope(&relative.selector)),

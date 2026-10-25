@@ -1,7 +1,8 @@
 //! Integration tests for the Acid3 harness.
 //!
 //! The fixture checks verify status, headers and DOM structure. Both the
-//! default interpreter and baseline JIT must score 100/100 in both drive modes.
+//! default interpreter and baseline JIT must match the precise Selectors 4
+//! expectation in both drive modes, retaining the original fixture's raw score.
 
 #[path = "acid3_common/harness.rs"]
 mod harness;
@@ -9,6 +10,7 @@ mod harness;
 use harness::{DriveMode, FixtureServer, TerminationReason, run_acid3};
 use omoikane::html::TreeBuilder;
 use omoikane::http::Client;
+use sha2::{Digest, Sha256};
 
 struct TemporaryFixture(std::path::PathBuf);
 
@@ -194,9 +196,19 @@ fn runner_preserves_task_errors_progress_and_termination_reason() {
     );
 }
 
-/// Both drive modes must score 100/100 without script or driving errors.
+/// Both drive modes must complete with only the obsolete Acid3 test 35 failure.
 #[test]
-fn runner_scores_100_in_both_drive_modes() {
+fn runner_matches_selectors4_expectation_in_both_drive_modes() {
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/acid3/selectors4-expectation.json")).unwrap();
+    assert_eq!(expected["profile"], "selectors-4");
+    assert_eq!(
+        format!(
+            "{:x}",
+            Sha256::digest(include_bytes!("fixtures/acid3/acid3.html"))
+        ),
+        expected["fixture_sha256"].as_str().unwrap()
+    );
     let server = FixtureServer::start();
 
     let faithful = run_acid3(&server.base_url(), DriveMode::Faithful);
@@ -226,10 +238,28 @@ fn runner_scores_100_in_both_drive_modes() {
                 "{name}: test26 wall time missing: {report}"
             );
             assert_eq!(
-                (run.score, run.total),
-                (Some(100), Some(100)),
+                (run.score, run.total, run.index),
+                (
+                    expected["score"].as_i64(),
+                    expected["total"].as_i64(),
+                    expected["index"].as_i64()
+                ),
                 "{name}: {report}"
             );
+            let failures: Vec<_> = run
+                .log
+                .as_deref()
+                .expect("Acid3 failure log")
+                .lines()
+                .filter(|line| line.starts_with("Test ") && line.contains(" failed:"))
+                .collect();
+            let expected_failures: Vec<_> = expected["failed_lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|line| line.as_str().unwrap())
+                .collect();
+            assert_eq!(failures, expected_failures, "{name}: {report}");
             assert!(
                 run.script_errors.is_empty(),
                 "{name}: {:?}",

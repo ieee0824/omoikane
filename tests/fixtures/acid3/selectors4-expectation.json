@@ -1,0 +1,12 @@
+{
+  "profile": "selectors-4",
+  "fixture_sha256": "54e921f770c775f1e255558c34c380792f102bbf0e81a3a64032afe3e1bc15b9",
+  "score": 99,
+  "total": 100,
+  "index": 100,
+  "failed_lines": [
+    "Test 35 failed: expected '0' but got '1' - root element, with no parent node, claims to be a :first-child"
+  ],
+  "reason": "Selectors 4 counts inclusive element siblings, including the document element. The unchanged Acid3 test 35 expects the legacy exception. Fixed WPT child-indexed-pseudo-class.html verifies the modern behavior.",
+  "issue": "https://github.com/ieee0824/omoikane/issues/1455"
+}

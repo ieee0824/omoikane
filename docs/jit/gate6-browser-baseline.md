@@ -35,7 +35,8 @@ URL変更は新しいresourceを読み込み、文書の再読み込みでは新
 ## 再検証
 
 操作と画像の取得手順は [tests/README.md](../../tests/README.md#browser-operation-journeys)。
-通常実行とbaseline-jitの両方でAcid3の両drive modeを100/100にする。ブラウザ操作は
+通常実行とbaseline-jitの両方でAcid3の両drive modeを[Selectors 4の固定期待結果](../../tests/fixtures/acid3/selectors4-expectation.json)
+（生の99/100、旧test 35の正確な失敗1件、完走）と照合する。ブラウザ操作は
 Linux x86_64、Linux ARM64、macOS ARM64のCIで実行し、ログ・JSON・PNG・Cargo.lock・
 対象revision・toolchainをartifactへ保存する。macOS x86_64は対象外。
 

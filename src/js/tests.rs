@@ -29862,8 +29862,8 @@ fn acid3_supported_selector_cases_resolve_in_iframe_document() {
         "the title IDL setter must reflect into [title=...] and match the target only"
     );
 
-    // test 35: :first-child. The parentless root element must never match it
-    // (its parent is the Document, not an element).
+    // Selectors 4 counts the document element among inclusive siblings.
+    // The raw Acid3 test 35 keeps its obsolete opposite expectation (#1455).
     assert_eq!(
         eval_str(
             &mut runtime,
@@ -29875,8 +29875,8 @@ fn acid3_supported_selector_cases_resolve_in_iframe_document() {
                     return [zi(doc.documentElement), zi(p1), zi(p2)].join(',');
                 })()"#
         ),
-        "0,1,0",
-        ":first-child must match only the first child and never the parentless root element"
+        "1,1,0",
+        ":first-child must include the document element and the first element child"
     );
 
     // test 36: :last-child.

@@ -113,8 +113,7 @@ impl SupportsConditionParser {
         self.index += 1;
         let argument = self.take_parenthesized()?;
         if function.eq_ignore_ascii_case("selector") {
-            let selector = render_tokens(trim_tokens(&argument));
-            return Some(super::parser::supports_selector(&selector));
+            return Some(super::parser::supports_selector(trim_tokens(&argument)));
         }
         // Unknown functions are valid general-enclosed conditions and evaluate
         // false for forward compatibility.

@@ -151,6 +151,13 @@ impl Observers {
                             self.selector(selector, state, nested, requires_layout);
                         }
                     }
+                    SimpleSelector::NthChild { selectors, .. } => {
+                        let arguments_start = self.subjects.len();
+                        for selector in selectors {
+                            self.selector(selector, state, true, requires_layout);
+                        }
+                        self.mark_new_nonlocal(arguments_start);
+                    }
                     SimpleSelector::Has(selectors) => {
                         let arguments_start = self.subjects.len();
                         for relative in selectors {

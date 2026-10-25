@@ -53,6 +53,16 @@ fn simple_reach(simple: &SimpleSelector, class: &str) -> ClassReach {
             })
             .max()
             .unwrap_or_default(),
+        SimpleSelector::NthChild { selectors, .. } => {
+            if selectors
+                .iter()
+                .any(|selector| selector_reach(selector, class) != ClassReach::Absent)
+            {
+                ClassReach::NonLocal
+            } else {
+                ClassReach::Absent
+            }
+        }
         SimpleSelector::Has(selectors) => {
             if selectors
                 .iter()
