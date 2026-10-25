@@ -1,0 +1,28 @@
+{
+  "tests": [
+    {
+      "path": "html/semantics/selectors/pseudo-classes/inrange-outofrange.html"
+    },
+    {
+      "path": "html/semantics/selectors/pseudo-classes/inrange-outofrange-type-change.html"
+    },
+    {
+      "path": "html/semantics/selectors/pseudo-classes/inrange-outofrange-time-reversed.html"
+    },
+    {
+      "path": "html/semantics/forms/the-input-element/number.html"
+    },
+    {
+      "path": "html/semantics/forms/the-input-element/range.html"
+    },
+    {
+      "path": "html/semantics/forms/the-input-element/range-2.html"
+    },
+    {
+      "path": "html/semantics/forms/the-input-element/input-valueasnumber.html"
+    },
+    {
+      "path": "html/semantics/forms/the-input-element/datetime-local.html"
+    }
+  ]
+}

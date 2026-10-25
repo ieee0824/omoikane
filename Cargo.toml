@@ -73,6 +73,8 @@ gif = "0.13"
 getrandom = "0.3"
 hmac = "0.12"
 jpeg-decoder = "0.3"
+# Decimal HTML input steps require exact ties; already used by vendored Boa.
+num-bigint = "0.4.8"
 png = "0.17"
 rustls = "0.23"
 rustybuzz = "0.20.1"

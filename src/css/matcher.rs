@@ -812,6 +812,8 @@ fn matches_pseudo_class(
         "required" => form_state::requiredness(node) == Some(true),
         "optional" => form_state::requiredness(node) == Some(false),
         "placeholder-shown" => form_state::placeholder_shown(node),
+        "in-range" => form_state::range_state(node) == Some(false),
+        "out-of-range" => form_state::range_state(node) == Some(true),
         "valid" => pseudo.is_none() && node.css_validity() == Some(true),
         "invalid" => pseudo.is_none() && node.css_validity() == Some(false),
         "any-link" => is_html_hyperlink(node),
