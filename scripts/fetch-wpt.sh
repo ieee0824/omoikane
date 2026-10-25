@@ -184,6 +184,7 @@ collect_pattern "/css/selectors/child-indexed-pseudo-class.html" "/css/selectors
 collect_pattern "/html/semantics/selectors/pseudo-classes/required-optional.html" "/html/semantics/selectors/pseudo-classes/required-optional-hidden.html" "/html/semantics/selectors/pseudo-classes/utils.js"
 collect_pattern "/html/semantics/selectors/pseudo-classes/placeholder-shown-type-change.html"
 collect_pattern "/html/semantics/selectors/pseudo-classes/default.html"
+collect_pattern "/html/semantics/selectors/pseudo-classes/indeterminate.html" "/html/semantics/selectors/pseudo-classes/indeterminate-radio.html" "/html/semantics/selectors/pseudo-classes/indeterminate-type-change.html" "/html/semantics/selectors/pseudo-classes/checked-indeterminate.window.js" "/html/semantics/forms/the-input-element/radio.html" "/html/semantics/forms/the-input-element/radio-input-cancel.html"
 collect_pattern "/css/selectors/has-matches-to-uninserted-elements.html"
 collect_pattern \
   "/css/selectors/invalidation/any-link-pseudo.html" \

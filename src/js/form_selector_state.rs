@@ -50,7 +50,79 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
                 Ok(js_string!(kind).into())
             })
         }),
+    )?;
+    register_input_flags(context, bindings)
+}
+
+fn register_input_flags(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {
+    register_private_builtin_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_input_type"),
+        1,
+        NativeFunction::from_copy_closure(|_, args, context| {
+            let node = input_node(args, context)?;
+            let kind = node.attribute_value_ns(None, "type").unwrap_or_default();
+            Ok(js_string!(crate::dom::input_value::canonical_type(&kind)).into())
+        }),
+    )?;
+    register_private_builtin_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_get_indeterminate"),
+        1,
+        NativeFunction::from_copy_closure(|_, args, context| {
+            Ok(JsValue::from(
+                input_node(args, context)?.input_indeterminate(),
+            ))
+        }),
+    )?;
+    register_private_builtin_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_set_indeterminate"),
+        2,
+        NativeFunction::from_copy_closure(|_, args, context| {
+            let node = input_node(args, context)?;
+            let value = args.get(1).is_some_and(JsValue::to_boolean);
+            with_render_mutation(|host| {
+                node.set_input_indeterminate(value);
+                host.borrow_mut().invalidate_style_cache_for_node(&node);
+                Ok(JsValue::undefined())
+            })
+        }),
+    )?;
+    register_private_builtin_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_reset_checkedness"),
+        1,
+        NativeFunction::from_copy_closure(|_, args, context| {
+            let node = input_node(args, context)?;
+            with_render_mutation(|host| {
+                node.reset_input_checkedness();
+                host.borrow_mut().invalidate_style_cache_for_node(&node);
+                Ok(JsValue::undefined())
+            })
+        }),
     )
+}
+
+fn input_node(args: &[JsValue], context: &mut Context) -> JsResult<NodeHandle> {
+    let id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, id)?;
+    with_host_state(|host| {
+        host.borrow()
+            .get_node(id)
+            .filter(|node| {
+                crate::dom::form_controls::html_local_name(node).as_deref() == Some("input")
+            })
+            .ok_or_else(|| {
+                JsNativeError::typ()
+                    .with_message("Invalid input receiver")
+                    .into()
+            })
+    })
 }
 
 /// Computes a value without DOM access; unchanged strings keep their JS storage.

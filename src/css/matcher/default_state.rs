@@ -19,82 +19,9 @@ pub(super) fn matches(node: &NodeHandle, cache: &mut SelectorMatchCache) -> bool
     if !is_submit_button(node) {
         return false;
     }
-    let root = tree_root(node);
-    use std::collections::hash_map::Entry;
-    let defaults = match cache.default_submit_buttons.entry(root.identity()) {
-        Entry::Occupied(entry) => entry.into_mut(),
-        Entry::Vacant(entry) => {
-            #[cfg(test)]
-            {
-                cache.default_submit_builds += 1;
-            }
-            entry.insert(default_submit_buttons(&root))
-        }
-    };
-    defaults.contains(&node.identity())
-}
-
-fn tree_root(node: &NodeHandle) -> NodeHandle {
-    let mut root = node.clone();
-    while let Some(parent) = root.parent_node() {
-        root = parent;
-    }
-    root
-}
-
-fn connected(root: &NodeHandle) -> bool {
-    let mut root = root.clone();
-    while let Some(host) = root.shadow_host() {
-        root = tree_root(&host);
-    }
-    root.node_type() == NodeType::Document
-}
-
-fn default_submit_buttons(root: &NodeHandle) -> HashSet<usize> {
-    // Only IDs survive this function. Temporary control handles never become
-    // part of the matcher cache, so it cannot retain removed DOM subtrees.
-    let mut first_ids = HashMap::<Vec<u16>, Option<usize>>::new();
-    let mut controls = Vec::new();
-    let mut pending = vec![(root.clone(), None)];
-    while let Some((node, ancestor_form)) = pending.pop() {
-        let tag = html_local_name(&node);
-        let form = (tag.as_deref() == Some("form")).then(|| node.identity());
-        if let Some(id) = node.attribute_value_ns_utf16(None, "id") {
-            first_ids.entry(id).or_insert(form);
-        }
-        if matches!(tag.as_deref(), Some("input" | "button")) && is_submit_button(&node) {
-            controls.push((node.clone(), ancestor_form));
-        }
-        let next_form = form.or(ancestor_form);
-        for child in node.child_nodes().into_iter().rev() {
-            pending.push((child, next_form));
-        }
-    }
-    let connected = connected(root);
-    let mut seen_forms = HashSet::new();
-    let mut defaults = HashSet::new();
-    for (control, ancestor_form) in controls {
-        let parser_owner = control
-            .peek_parser_form_owner()
-            .filter(|owner| html_local_name(owner).as_deref() == Some("form"));
-        let owner = if let Some(owner) = parser_owner {
-            Some(owner.identity())
-        } else if connected && let Some(id) = control.attribute_value_ns_utf16(None, "form") {
-            if id.is_empty() {
-                None
-            } else {
-                first_ids.get(&id).copied().flatten()
-            }
-        } else {
-            ancestor_form
-        };
-        if let Some(owner) = owner
-            && seen_forms.insert(owner)
-        {
-            defaults.insert(control.identity());
-        }
-    }
-    defaults
+    super::form_state_index::for_node(node, cache)
+        .defaults
+        .contains(&node.identity())
 }
 
 #[cfg(test)]
@@ -112,8 +39,8 @@ mod tests {
         let mut cache = SelectorMatchCache::default();
         assert!(matches(&a, &mut cache));
         assert!(!matches(&b, &mut cache));
-        assert_eq!(cache.default_submit_buttons.len(), 1);
-        assert_eq!(cache.default_submit_builds, 1);
+        assert_eq!(cache.form_states.len(), 1);
+        assert_eq!(cache.form_state_builds, 1);
     }
 
     #[test]

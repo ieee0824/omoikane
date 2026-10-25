@@ -2512,7 +2512,8 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
-  const mouseMovement = new WeakMap();
+  const mouseMovement = browsingInput.mouseMovement ||
+    (browsingInput.mouseMovement = new WeakMap());
   class MouseEvent extends Event {
     constructor(type, init = {}) {
       init = init ?? {};
@@ -2816,6 +2817,7 @@ export const __omoikane_service_worker_lifecycle = {};
     if (activationInfo) activationInfo.target = clickActivationTarget(path, event);
 
     try {
+      if (activationInfo) activationInfo.checkable = beginCheckableActivation(activationInfo.target, event);
       if (path.length === 0) return !event.defaultPrevented;
       let stopped = false;
       for (let i = path.length - 1; i >= 1; i -= 1) {
@@ -3859,7 +3861,13 @@ export const __omoikane_service_worker_lifecycle = {};
     dispatchEvent(event) {
       const dispatchEvent = isEventInstance(event) ? event : new Event(event);
       const activationInfo = dispatchEvent.type === "click" ? { target: null } : null;
-      const notCanceled = dispatchEventOnTarget(this, dispatchEvent, activationInfo);
+      let notCanceled;
+      try { notCanceled = dispatchEventOnTarget(this, dispatchEvent, activationInfo); }
+      catch (error) {
+        completeCheckableActivation(activationInfo?.checkable, true);
+        throw error;
+      }
+      completeCheckableActivation(activationInfo?.checkable, !notCanceled);
       // Run the event path's activation target after an uncanceled click. This
       // also covers a click on a descendant of a link or form control.
       if (notCanceled && activationInfo?.target &&
@@ -3930,10 +3938,10 @@ export const __omoikane_service_worker_lifecycle = {};
     }
 
     get id() {
-      return __omoikane_get_attribute(this.__id, "id");
+      return nativeAttributeValueNS(internalNodeId(this), null, "id") ?? "";
     }
 
-    set id(value) { this.setAttribute("id", value); }
+    set id(value) { setAttributeValueNS(this, null, "id", "id", value, true); }
 
     get title() {
       // DOMString-reflecting attributes use the empty string when absent.
@@ -5106,19 +5114,15 @@ export const __omoikane_service_worker_lifecycle = {};
     }
 
     click() {
-      // A disabled form control is not activated at all: it does not even
-      // dispatch a click event. A stray `<div disabled>` must still dispatch.
-      if (this.__isDisabledControl()) return;
-      if (this.nodeName === "INPUT") {
-        const type = this.type.toLowerCase();
-        if (type === "checkbox") this.checked = !this.checked;
-        else if (type === "radio") this.checked = true;
-      }
-      // The click event's activation behavior (form submit/reset) is its
-      // default action; dispatchEvent runs it when the event is not canceled.
-      this.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true, composed: true })
-      );
+      // A disabled control does not dispatch or run its pre-activation behavior.
+      const state = safeWeakMapGet(nodeEventStates, this);
+      if (!state) throw new TypeError("Illegal invocation");
+      if (this.__isDisabledControl() || state.clickInProgress) return;
+      state.clickInProgress = true;
+      try {
+        nativeFormDispatch(this,
+          new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }));
+      } finally { state.clickInProgress = false; }
     }
 
     __owningForm() { return formOwner(this); }
@@ -5223,33 +5227,18 @@ export const __omoikane_service_worker_lifecycle = {};
       __omoikane_set_attribute(this.__id, "value", String(v));
     }
 
-    get checked() {
-      return __omoikane_get_checked(this.__id);
-    }
-
-    set checked(v) {
-      const checked = !!v;
-      if (checked && this.nodeName === "INPUT" && this.type.toLowerCase() === "radio") {
-        const name = this.name;
-        if (name) {
-          const root = formTreeRoot(this);
-          const owner = formOwner(this);
-          for (const radio of root.querySelectorAll("input")) {
-            if (radio.__id !== this.__id && radio.type === "radio" &&
-                radio.name === name && formOwner(radio) === owner) {
-              __omoikane_set_checked(radio.__id, false);
-            }
-          }
-        }
-      }
-      __omoikane_set_checked(this.__id, checked);
+    get checked() { return nativeCheckableGetChecked(htmlInputControlId(this)); }
+    set checked(value) {
+      htmlInputControlId(this);
+      setCheckableChecked(this, !!value);
     }
 
     get defaultChecked() {
-      return nativeAttributeValueNS(internalNodeId(this), null, "checked") !== null;
+      return nativeAttributeValueNS(htmlInputControlId(this), null, "checked") !== null;
     }
 
     set defaultChecked(v) {
+      htmlInputControlId(this);
       reflectFormBooleanAttribute(this, "checked", v);
     }
 
@@ -5271,13 +5260,13 @@ export const __omoikane_service_worker_lifecycle = {};
     }
 
     get name() {
-      if (this.nodeType === 10) return this.nodeName;
-      return __omoikane_get_attribute(this.__id, "name") ?? "";
+      if (internalNodeType(this) === 10) return nativeNodeName(internalNodeId(this));
+      return nativeAttributeValueNS(internalNodeId(this), null, "name") ?? "";
     }
 
-    set name(v) {
-      if (this.nodeType === 10) return;
-      __omoikane_set_attribute(this.__id, "name", String(v));
+    set name(value) {
+      if (internalNodeType(this) === 10) return;
+      setAttributeValueNS(this, null, "name", "name", value, true);
     }
 
     hasChildNodes() {
@@ -12195,7 +12184,22 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeInvalidateValidation = globalThis.__omoikane_invalidate_validation;
   const nativeSetControlValueEmpty = globalThis.__omoikane_set_control_value_empty;
   const nativeSanitizeInputValue = globalThis.__omoikane_sanitize_input_value;
+  const nativeInputType = globalThis.__omoikane_input_type;
   const nativeButtonType = globalThis.__omoikane_button_type;
+  const nativeGetIndeterminate = globalThis.__omoikane_get_indeterminate;
+  const nativeSetIndeterminate = globalThis.__omoikane_set_indeterminate;
+  const nativeResetCheckedness = globalThis.__omoikane_reset_checkedness;
+  const nativeCheckableGetChecked = globalThis.__omoikane_get_checked;
+  const nativeCheckableSetChecked = globalThis.__omoikane_set_checked;
+  const nativeCheckableQueryAll = globalThis.__omoikane_query_selector_all;
+  const nativeFormDispatch = Function.prototype.call.bind(Node.prototype.dispatchEvent);
+  const formControlTypeError = TypeError;
+  const formRadioIdSet = Set;
+  const formRadioIdAdd = Function.prototype.call.bind(Set.prototype.add);
+  const formRadioIdHas = Function.prototype.call.bind(Set.prototype.has);
+  const formRadioIdSize = Function.prototype.call.bind(Object.getOwnPropertyDescriptor(Set.prototype, "size").get);
+
+
   const removeFormAttributeNS = Function.prototype.call.bind(Element.prototype.removeAttributeNS);
   const nativeValidationTree = globalThis.__omoikane_validation_tree;
   delete globalThis.__omoikane_register_validation;
@@ -12203,9 +12207,171 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_invalidate_validation;
   delete globalThis.__omoikane_set_control_value_empty;
   delete globalThis.__omoikane_sanitize_input_value;
+  delete globalThis.__omoikane_input_type;
   delete globalThis.__omoikane_button_type;
+  delete globalThis.__omoikane_get_indeterminate;
+  delete globalThis.__omoikane_set_indeterminate;
+  delete globalThis.__omoikane_reset_checkedness;
   delete globalThis.__omoikane_validation_tree;
   let validationReady = false;
+
+  function htmlInputControlId(element) {
+    if (!hasCanonicalWrapperId(canonicalHtmlElementIds, element) ||
+        internalNodeLocalName(element) !== "input") throw new formControlTypeError("Illegal invocation");
+    return internalNodeId(element);
+  }
+
+  function checkableType(element) {
+    return nativeInputType(htmlInputControlId(element));
+  }
+
+  function checkableRadioGroup(element) {
+    const id = internalNodeId(element), group = [element];
+    const name = nativeAttributeValueNS(id, null, "name");
+    if (!name) return group;
+    const owner = internalNodeId(formOwner(element));
+    const rootId = internalNodeId(formTreeRoot(element));
+    const ids = nativeCheckableQueryAll(rootId, "input");
+    for (let i = -1; i < ids.length; i++) {
+      const peerId = i < 0 ? rootId : ids[i];
+      if (peerId === id) continue;
+      const candidate = wrapNode(peerId);
+      if (hasCanonicalWrapperId(canonicalHtmlElementIds, candidate) &&
+          internalNodeLocalName(candidate) === "input" && checkableType(candidate) === "radio" &&
+          nativeAttributeValueNS(peerId, null, "name") === name &&
+          internalNodeId(formOwner(candidate)) === owner) group.push(candidate);
+    }
+    return group;
+  }
+
+  function setCheckableChecked(element, checked, group = null, markDirty = true) {
+    const id = internalNodeId(element);
+    if (checked && checkableType(element) === "radio") {
+      group = group || checkableRadioGroup(element);
+      for (let i = 0; i < group.length; i++) {
+        const peer = internalNodeId(group[i]);
+        if (peer !== id) nativeCheckableSetChecked(peer, false, false);
+      }
+    }
+    nativeCheckableSetChecked(id, checked, markDirty);
+  }
+
+  function syncCheckedRadio(element) {
+    if (hasCanonicalWrapperId(canonicalHtmlElementIds, element) &&
+        internalNodeLocalName(element) === "input" && checkableType(element) === "radio" &&
+        nativeCheckableGetChecked(internalNodeId(element))) {
+      setCheckableChecked(element, true, null, false);
+    }
+  }
+
+  function syncRadioFormIds(root, ids) {
+    if (!formRadioIdSize(ids) || !isLiveNode(root)) return;
+    const candidates = nativeCheckableQueryAll(internalNodeId(root), "input");
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      if (formRadioIdHas(ids, nativeAttributeValueNS(candidates[i], null, "form"))) {
+        syncCheckedRadio(wrapNode(candidates[i]));
+      }
+    }
+  }
+
+  function radioAttributeChanged(element, name, namespace, oldValue, newValue) {
+    if (namespace !== null) return;
+    if (name === "id") {
+      const ids = new formRadioIdSet();
+      if (oldValue) formRadioIdAdd(ids, oldValue);
+      if (newValue) formRadioIdAdd(ids, newValue);
+      syncRadioFormIds(formTreeRoot(element), ids);
+    } else if (name === "type" || name === "name" || name === "form" ||
+        (name === "checked" && oldValue === null && newValue !== null)) {
+      syncCheckedRadio(element);
+    }
+  }
+
+  function syncRadioChangedSubtree(node, ids) {
+    if (!isLiveNode(node)) return;
+    const id = internalNodeId(node), type = nativeNodeType(id);
+    if (type !== 1 && type !== 9 && type !== 11) return;
+    const visit = elementId => {
+      const value = nativeAttributeValueNS(elementId, null, "id");
+      if (value) formRadioIdAdd(ids, value);
+      if (nativeNodeLocalName(elementId) === "input") syncCheckedRadio(wrapNode(elementId));
+      const shadowId = nativeShadowRoot(elementId);
+      if (shadowId !== null && shadowId !== undefined) {
+        const shadow = wrapNode(shadowId), shadowIds = new formRadioIdSet();
+        syncRadioChangedSubtree(shadow, shadowIds);
+        syncRadioFormIds(shadow, shadowIds);
+      }
+    };
+    const elements = nativeCheckableQueryAll(id, "*");
+    // Later checked descendants win when parsed siblings enter a group together.
+    for (let i = elements.length - 1; i >= 0; i--) visit(elements[i]);
+    if (type === 1) visit(id);
+  }
+
+  function radioChildrenChanged(parent, init) {
+    const removed = init.removedNodes || [], added = init.addedNodes || [];
+    // An implicit-removal record is published before the native detach.
+    for (let i = 0; i < removed.length; i++) {
+      if (internalNodeId(internalParentNode(removed[i])) === internalNodeId(parent)) return;
+    }
+    const ids = new formRadioIdSet();
+    for (let i = removed.length - 1; i >= 0; i--) syncRadioChangedSubtree(removed[i], ids);
+    for (let i = added.length - 1; i >= 0; i--) syncRadioChangedSubtree(added[i], ids);
+    syncRadioFormIds(formTreeRoot(parent), ids);
+  }
+
+  function beginCheckableActivation(element, event) {
+    if (!safeWeakMapGet(mouseMovement, event) ||
+        !hasCanonicalWrapperId(canonicalHtmlElementIds, element) ||
+        internalNodeLocalName(element) !== "input" || !isLiveNode(element)) return null;
+    const type = checkableType(element);
+    if (type !== "checkbox" && type !== "radio") return null;
+    const id = internalNodeId(element);
+    const snapshot = { element, type, checked: nativeCheckableGetChecked(id),
+      indeterminate: nativeGetIndeterminate(id), previousRadio: null };
+    if (type === "checkbox") {
+      nativeCheckableSetChecked(id, !snapshot.checked);
+      nativeSetIndeterminate(id, false);
+    } else {
+      const group = checkableRadioGroup(element);
+      for (let i = 0; i < group.length; i++) {
+        const peer = internalNodeId(group[i]);
+        if (nativeCheckableGetChecked(peer)) { snapshot.previousRadio = peer; break; }
+      }
+      setCheckableChecked(element, true, group);
+    }
+    return snapshot;
+  }
+
+  function restoreCanceledCheckable(snapshot) {
+    const element = snapshot.element, id = internalNodeId(element), type = checkableType(element);
+    if (type === "checkbox") {
+      nativeCheckableSetChecked(id, snapshot.checked);
+      nativeSetIndeterminate(id, snapshot.indeterminate);
+    } else if (type === "radio") {
+      const group = checkableRadioGroup(element);
+      let previous = null;
+      for (let i = 0; i < group.length; i++) {
+        if (internalNodeId(group[i]) === snapshot.previousRadio) { previous = group[i]; break; }
+      }
+      if (previous) setCheckableChecked(previous, true, group);
+      else nativeCheckableSetChecked(id, false);
+    }
+  }
+
+  function completeCheckableActivation(snapshot, canceled) {
+    if (!snapshot || !isLiveNode(snapshot.element)) return;
+    if (canceled) { restoreCanceledCheckable(snapshot); return; }
+    const element = snapshot.element, type = checkableType(element);
+    if ((type !== "checkbox" && type !== "radio") || !internalIsConnected(element) ||
+        (snapshot.type === "radio" && snapshot.checked)) return;
+    for (let i = 0; i < 2; i++) {
+      if (!isLiveNode(element)) break;
+      const event = new Event(i === 0 ? "input" : "change", { bubbles: true, composed: i === 0 });
+      event.isTrusted = true;
+      dispatchEventOnTarget(element, event);
+    }
+  }
 
   function reflectFormBooleanAttribute(element, name, value) {
     if (value) setAttributeValueNS(element, null, name, name, "", true);
@@ -12735,6 +12901,7 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function customFormChildrenChanged(parent, init) {
+    radioChildrenChanged(parent, init);
     if (!browsingInput.hasCustomFormControls) return;
     // notifyImplicitRemoval publishes its MutationRecord before native code
     // detaches the node. The eventual insertion will flush the reaction queue.
@@ -12965,7 +13132,6 @@ export const __omoikane_service_worker_lifecycle = {};
     "date", "datetime-local", "month", "number", "range", "time", "week",
   ]);
   const BARRED_INPUT_TYPES = new Set(["button", "hidden", "image", "reset"]);
-  const KNOWN_INPUT_TYPES = new Set([...VALIDATED_INPUT_TYPES, ...BARRED_INPUT_TYPES]);
   const DAY_MILLISECONDS = 86_400_000;
   const WEEK_MILLISECONDS = 7 * DAY_MILLISECONDS;
 
@@ -13528,9 +13694,10 @@ export const __omoikane_service_worker_lifecycle = {};
       // reactions, including when an output's text mutation changes the DOM.
       for (const control of this.__controls()) {
         if (isFormAssociatedElement(control)) reactions.push(customInternalsState(control));
-        else if (control.tagName === "INPUT") {
+        else if (hasCanonicalWrapperId(canonicalHtmlElementIds, control) && internalNodeLocalName(control) === "input") {
           control.value = control.defaultValue;
-          control.checked = control.defaultChecked;
+          nativeResetCheckedness(internalNodeId(control));
+          setCheckableChecked(control, nativeCheckableGetChecked(internalNodeId(control)), null, false);
           control.__value = undefined;
           control.__lastValueChangeWasUser = false;
         } else if (control.tagName === "TEXTAREA") {
@@ -13845,9 +14012,11 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class HTMLInputElement extends HTMLElement {
+    get indeterminate() { return nativeGetIndeterminate(htmlInputControlId(this)); }
+    set indeterminate(value) { nativeSetIndeterminate(htmlInputControlId(this), !!value); }
+
     get type() {
-      const t = (nativeAttributeValueNS(internalNodeId(this), null, "type") || "").toLowerCase();
-      return KNOWN_INPUT_TYPES.has(t) ? t : "text";
+      return nativeInputType(htmlInputControlId(this));
     }
     set type(v) {
       const before = this.type;
@@ -13980,6 +14149,10 @@ export const __omoikane_service_worker_lifecycle = {};
   function normalizeTextAreaValue(value) {
     return String(value).replace(/\r\n?/g, "\n");
   }
+
+  Object.defineProperty(HTMLInputElement.prototype, "indeterminate", {
+    ...Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "indeterminate"), enumerable: true,
+  });
 
   class HTMLTextAreaElement extends HTMLElement {
     get value() {
@@ -16527,6 +16700,7 @@ export const __omoikane_service_worker_lifecycle = {};
   ) {
     if (!element) return;
     inputValueAttributeChanged(element, name, namespace);
+    radioAttributeChanged(element, name, namespace, oldValue, newValue);
     detailsAttributeChanged(element, name, oldValue, newValue, namespace);
     const definition = element.__customElementDefinition;
     if (element.__customElementState === "custom" && definition?.observedAttributes.has(name)) {

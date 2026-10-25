@@ -416,6 +416,7 @@ pub struct Element {
     attribute_records: Vec<AttributeRecord>,
     checked: bool,
     dirty_checkedness: bool,
+    indeterminate: bool,
     selected: bool,
     dirty_selectedness: bool,
     form_associated_custom: bool,
@@ -519,6 +520,7 @@ impl Element {
             attribute_records: Vec::new(),
             checked: false,
             dirty_checkedness: false,
+            indeterminate: false,
             selected: false,
             dirty_selectedness: false,
             form_associated_custom: false,
@@ -567,6 +569,7 @@ impl Element {
             attribute_records: Vec::new(),
             checked: false,
             dirty_checkedness: false,
+            indeterminate: false,
             selected: false,
             dirty_selectedness: false,
             form_associated_custom: false,
@@ -621,6 +624,12 @@ impl Element {
     }
     pub fn is_html(&self) -> bool {
         self.html
+    }
+
+    fn is_html_input(&self) -> bool {
+        self.local_name() == "input"
+            && (self.namespace_uri.as_deref() == Some("http://www.w3.org/1999/xhtml")
+                || (self.namespace_uri.is_none() && self.html))
     }
 
     /// Returns the element attributes.
@@ -1742,7 +1751,12 @@ impl NodeHandle {
             if name == "form" {
                 element.parser_form_owner = None;
             }
-            if name == "checked" && !element.dirty_checkedness {
+            let adds_checked = name == "checked"
+                && !element
+                    .attribute_records
+                    .iter()
+                    .any(|attribute| attribute.qualified_name == name);
+            if adds_checked && !element.dirty_checkedness {
                 element.checked = true;
             }
             if name == "selected" && !element.dirty_selectedness {
@@ -1846,8 +1860,12 @@ impl NodeHandle {
             if namespace_uri.is_none() && qualified_name == "form" {
                 element.parser_form_owner = None;
             }
-            if namespace_uri.is_none() && qualified_name == "checked" && !element.dirty_checkedness
-            {
+            let adds_checked = namespace_uri.is_none()
+                && local_name == "checked"
+                && !element.attribute_records.iter().any(|attribute| {
+                    attribute.namespace_uri.is_none() && attribute.local_name == "checked"
+                });
+            if adds_checked && !element.dirty_checkedness {
                 element.checked = true;
             }
             if namespace_uri.is_none()
@@ -1901,11 +1919,19 @@ impl NodeHandle {
         }
     }
 
+    /// Returns the element's local name without its namespace prefix.
     pub fn local_name(&self) -> Option<String> {
-        match &self.0.borrow().data {
-            NodeData::Element(element) => Some(element.local_name().to_string()),
+        self.with_local_name(|name| name.map(str::to_owned))
+    }
+
+    /// Reads the local name without cloning it. Do not mutate this node while
+    /// the callback runs, because it holds a short immutable borrow.
+    pub fn with_local_name<R>(&self, read: impl FnOnce(Option<&str>) -> R) -> R {
+        let inner = self.0.borrow();
+        read(match &inner.data {
+            NodeData::Element(element) => Some(element.local_name()),
             _ => None,
-        }
+        })
     }
 
     /// Removes an attribute from an element node. No-op for other node kinds.
@@ -1926,14 +1952,17 @@ impl NodeHandle {
                 .iter()
                 .position(|attribute| attribute.qualified_name == name)
             {
-                element.attribute_records.remove(index);
+                let attribute = element.attribute_records.remove(index);
+                if attribute.namespace_uri.is_none()
+                    && attribute.local_name == "checked"
+                    && !element.dirty_checkedness
+                {
+                    element.checked = false;
+                }
                 rebuild_attribute_projection(element);
             }
             if name == "form" {
                 element.parser_form_owner = None;
-            }
-            if name == "checked" && !element.dirty_checkedness {
-                element.checked = false;
             }
             if name == "selected" && !element.dirty_selectedness {
                 element.selected = false;
@@ -1961,7 +1990,13 @@ impl NodeHandle {
                 .iter()
                 .position(|attribute| attribute.qualified_name == qualified_name)
             {
-                element.attribute_records.remove(index);
+                let attribute = element.attribute_records.remove(index);
+                if attribute.namespace_uri.is_none()
+                    && attribute.local_name == "checked"
+                    && !element.dirty_checkedness
+                {
+                    element.checked = false;
+                }
                 rebuild_attribute_projection(element);
             }
         }
@@ -2023,13 +2058,79 @@ impl NodeHandle {
     /// them checkable (`checkbox` or `radio`, ASCII case-insensitive).
     pub fn is_checkable_input(&self) -> bool {
         match &self.0.borrow().data {
-            NodeData::Element(element) => {
-                element.tag_name == "input"
-                    && element.attributes.get("type").is_some_and(|kind| {
-                        matches!(kind.to_ascii_lowercase().as_str(), "checkbox" | "radio")
-                    })
-            }
+            NodeData::Element(element) if element.is_html_input() => element
+                .attribute_records
+                .iter()
+                .find(|record| record.namespace_uri.is_none() && record.local_name == "type")
+                .is_some_and(|record| {
+                    record.value.eq_ignore_ascii_case("checkbox")
+                        || record.value.eq_ignore_ascii_case("radio")
+                }),
             _ => false,
+        }
+    }
+
+    /// Returns raw HTML input checkedness, including non-checkable input types.
+    pub(crate) fn input_checkedness(&self) -> bool {
+        matches!(&self.0.borrow().data,
+            NodeData::Element(element) if element.is_html_input() && element.checked)
+    }
+
+    /// Updates checkedness without changing its dirty flag, for radio peers.
+    pub(crate) fn set_checkedness(&self, checked: bool) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data
+            && element.is_html_input()
+        {
+            element.checked = checked;
+        }
+    }
+
+    /// Resets checkedness from its content attribute and clears its dirty flag.
+    /// Indeterminateness is preserved by the HTML input reset algorithm.
+    pub(crate) fn reset_input_checkedness(&self) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data
+            && element.is_html_input()
+        {
+            element.checked = element
+                .attribute_records
+                .iter()
+                .any(|record| record.namespace_uri.is_none() && record.local_name == "checked");
+            element.dirty_checkedness = false;
+        }
+    }
+
+    /// Returns an HTML input's owned indeterminateness, independent of its type.
+    pub(crate) fn input_indeterminate(&self) -> bool {
+        matches!(&self.0.borrow().data,
+            NodeData::Element(element) if element.is_html_input() && element.indeterminate)
+    }
+
+    /// Updates an HTML input's flag; callers invalidate dependent styles.
+    pub(crate) fn set_input_indeterminate(&self, value: bool) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data
+            && element.is_html_input()
+        {
+            element.indeterminate = value;
+        }
+    }
+
+    /// Copies input flags to a clone without author accessors or retained borrows.
+    pub(crate) fn copy_input_state_to(&self, target: &Self) {
+        let flags = match &self.0.borrow().data {
+            NodeData::Element(element) if element.is_html_input() => Some((
+                element.checked,
+                element.dirty_checkedness,
+                element.indeterminate,
+            )),
+            _ => None,
+        };
+        if let Some((checked, dirty_checkedness, indeterminate)) = flags
+            && let NodeData::Element(element) = &mut target.0.borrow_mut().data
+            && element.is_html_input()
+        {
+            element.checked = checked;
+            element.dirty_checkedness = dirty_checkedness;
+            element.indeterminate = indeterminate;
         }
     }
 

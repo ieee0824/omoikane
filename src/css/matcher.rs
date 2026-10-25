@@ -10,6 +10,8 @@ use super::{
 
 mod default_state;
 mod form_state;
+mod form_state_index;
+mod indeterminate_state;
 mod nth_filter;
 
 /// Supported pseudo-elements for style matching.
@@ -81,7 +83,7 @@ pub fn matches_selector_with_pseudo(
 
 #[derive(Debug, Default)]
 pub(crate) struct SelectorMatchCache {
-    default_submit_buttons: HashMap<usize, HashSet<usize>>,
+    form_states: HashMap<usize, form_state_index::FormStateIndex>,
     structural_positions: HashMap<usize, StructuralPositions>,
     relational_matches: HashMap<(usize, usize), bool>,
     filtered_positions: HashMap<nth_filter::FilterKey, HashMap<usize, (usize, usize)>>,
@@ -92,7 +94,7 @@ pub(crate) struct SelectorMatchCache {
     #[cfg(test)]
     pub(crate) structural_builds: usize,
     #[cfg(test)]
-    default_submit_builds: usize,
+    form_state_builds: usize,
 }
 
 impl SelectorMatchCache {
@@ -488,8 +490,8 @@ fn matches_simple_selector(
     allow_scope_ancestor_escape: bool,
 ) -> bool {
     match simple {
-        SimpleSelector::Type(name) => node.with_tag_name(|tag_name| {
-            tag_name.is_some_and(|tag_name| tag_name.eq_ignore_ascii_case(name))
+        SimpleSelector::Type(name) => node.with_local_name(|local_name| {
+            local_name.is_some_and(|local_name| local_name.eq_ignore_ascii_case(name))
         }),
         SimpleSelector::Universal => node.node_type() == NodeType::Element,
         SimpleSelector::Class(class_name) => node.with_attribute("class", |class_attr| {
@@ -805,6 +807,7 @@ fn matches_pseudo_class(
         "enabled" => is_form_control(node) && !is_actually_disabled(node),
         "disabled" => is_actually_disabled(node),
         "checked" => node.checked(),
+        "indeterminate" => indeterminate_state::matches(node, cache),
         "default" => default_state::matches(node, cache),
         "required" => form_state::requiredness(node) == Some(true),
         "optional" => form_state::requiredness(node) == Some(false),
