@@ -10,6 +10,7 @@ use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 mod children;
+pub(crate) mod custom_element;
 pub(crate) mod form_controls;
 pub(crate) mod input_range;
 pub(crate) mod input_value;
@@ -421,6 +422,8 @@ pub struct Element {
     selected: bool,
     dirty_selectedness: bool,
     form_associated_custom: bool,
+    custom_element_defined: Option<bool>,
+    custom_element_is: Option<Vec<u16>>,
     script_source_position: Option<(u32, u32)>,
     script_force_async: bool,
     css_validity: Option<bool>,
@@ -526,6 +529,8 @@ impl Element {
             selected: false,
             dirty_selectedness: false,
             form_associated_custom: false,
+            custom_element_defined: None,
+            custom_element_is: None,
             script_source_position: None,
             script_force_async: true,
             css_validity: None,
@@ -576,6 +581,8 @@ impl Element {
             selected: false,
             dirty_selectedness: false,
             form_associated_custom: false,
+            custom_element_defined: None,
+            custom_element_is: None,
             script_source_position: None,
             script_force_async: true,
             css_validity: None,
@@ -2399,6 +2406,47 @@ impl NodeHandle {
     /// custom element. A hyphenated tag name alone does not confer this state.
     pub(crate) fn is_form_associated_custom(&self) -> bool {
         matches!(&self.0.borrow().data, NodeData::Element(element) if element.form_associated_custom)
+    }
+
+    /// Retains the creation-time `is` value separately from mutable attributes.
+    pub(crate) fn initialize_custom_element_is(&self, value: Option<Vec<u16>>) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            if element.is_html() && value.is_some() {
+                element.custom_element_defined = Some(false);
+            }
+            element.custom_element_is = value;
+        }
+    }
+
+    /// Initializes parser-created elements after their attributes are installed.
+    pub(crate) fn initialize_parser_custom_element(&self) {
+        self.initialize_custom_element_is(self.attribute_value_ns_utf16(None, "is"));
+    }
+
+    /// Returns an owned copy of the immutable creation-time `is` value.
+    pub(crate) fn custom_element_is(&self) -> Option<Vec<u16>> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.custom_element_is.clone(),
+            _ => None,
+        }
+    }
+
+    /// Returns the definition state without invoking author JavaScript.
+    pub(crate) fn is_defined_element(&self) -> bool {
+        let inner = self.0.borrow();
+        let NodeData::Element(element) = &inner.data else {
+            return false;
+        };
+        element.custom_element_defined.unwrap_or_else(|| {
+            !element.is_html() || !custom_element::valid_name(element.local_name())
+        })
+    }
+
+    /// Publishes construction and upgrade outcomes to native selector matching.
+    pub(crate) fn set_custom_element_defined(&self, defined: bool) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.custom_element_defined = Some(defined);
+        }
     }
 
     /// Publishes the custom element definition's form participation to native

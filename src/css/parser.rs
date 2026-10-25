@@ -300,6 +300,7 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         | "placeholder-shown"
                         | "in-range"
                         | "out-of-range"
+                        | "defined"
                         | "hover"
                         | "active"
                         | "focus"
@@ -326,6 +327,7 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                             | "indeterminate"
                             | "in-range"
                             | "out-of-range"
+                            | "defined"
                     ) || !name.contains('('))
                     && (context.allow_pseudo_element
                         || !matches!(base.as_str(), "before" | "after"))
@@ -1397,6 +1399,7 @@ impl Parser {
             || name.eq_ignore_ascii_case("indeterminate")
             || name.eq_ignore_ascii_case("in-range")
             || name.eq_ignore_ascii_case("out-of-range")
+            || name.eq_ignore_ascii_case("defined")
         {
             return Err(CssParseError::InvalidSelector);
         }

@@ -1566,6 +1566,7 @@ impl Builder {
             let (name, value) = attribute.into_owned();
             node.set_attribute_owned(name, value);
         }
+        node.initialize_parser_custom_element();
         self.append_node(&self.document, node.clone());
         self.radio_form_refs.borrow_mut().reconcile(&node);
         node
@@ -1657,6 +1658,7 @@ impl Builder {
             let (name, value) = attribute.into_owned();
             element.set_attribute_owned(name, value);
         }
+        element.initialize_parser_custom_element();
         element
     }
 
