@@ -140,6 +140,7 @@ mod font_descriptors;
 mod font_loading;
 #[cfg(test)]
 mod font_loading_tests;
+mod form_selector_state;
 mod form_state;
 mod form_submission;
 mod frame_policy;
@@ -16293,6 +16294,7 @@ fn register_host_bindings(
     form_state::register(context, &mut bindings)?;
     iframe_navigation::register(context, &mut bindings)?;
     form_validation::register(context, &mut bindings)?;
+    form_selector_state::register(context, &mut bindings)?;
     form_submission::register(context, &mut bindings)?;
     geolocation::register(context, &mut bindings)?;
     permissions_policy::register(context, &mut bindings)?;

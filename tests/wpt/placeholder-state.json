@@ -1,0 +1,5 @@
+{
+  "tests": [
+    { "path": "html/semantics/selectors/pseudo-classes/placeholder-shown-type-change.html" }
+  ]
+}

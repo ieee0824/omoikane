@@ -33,3 +33,58 @@ pub(super) fn requiredness(node: &NodeHandle) -> Option<bool> {
     }
     Some(node.attribute_value_ns(None, "required").is_some())
 }
+
+/// Matches the placeholder state using attributes and owned dirty-value metadata.
+pub(super) fn placeholder_shown(node: &NodeHandle) -> bool {
+    let is_html = match node.namespace_uri().as_deref() {
+        Some(HTML_NAMESPACE) => true,
+        None => node.is_html_element(),
+        _ => false,
+    };
+    if !is_html || node.attribute_value_ns(None, "placeholder").is_none() {
+        return false;
+    }
+    let textarea = match node.local_name().as_deref() {
+        Some("textarea") => true,
+        Some("input") => {
+            let kind = node.attribute_value_ns(None, "type").unwrap_or_default();
+            if [
+                "hidden",
+                "date",
+                "month",
+                "week",
+                "time",
+                "datetime-local",
+                "range",
+                "color",
+                "checkbox",
+                "radio",
+                "file",
+                "submit",
+                "image",
+                "reset",
+                "button",
+            ]
+            .iter()
+            .any(|excluded| kind.eq_ignore_ascii_case(excluded))
+            {
+                return false;
+            }
+            false
+        }
+        _ => return false,
+    };
+    node.control_dirty_value_empty().unwrap_or_else(|| {
+        if textarea {
+            // Match the textarea value getter's initial newline handling.
+            let value = crate::dom::collect_descendant_text(node, crate::dom::TextTraversal::All);
+            matches!(value.as_str(), "" | "\n" | "\r" | "\r\n")
+        } else {
+            let value = node.attribute_value_ns(None, "value").unwrap_or_default();
+            let kind = node.attribute_value_ns(None, "type").unwrap_or_default();
+            let multiple = node.attribute_value_ns(None, "multiple").is_some();
+            crate::dom::input_value::normalize(&kind, multiple, value.encode_utf16())
+                .produces_empty(value.is_empty())
+        }
+    })
+}
