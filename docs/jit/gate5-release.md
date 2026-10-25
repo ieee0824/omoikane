@@ -52,7 +52,10 @@ report, Acid3 faithful/direct scores, pinned WPT results and Web API regressions
 Acid3, WPT and Web API probes retain the browser's default runtime policy, matching
 the shipped default library. Native contract tests and the packaged diagnostic
 explicitly select JIT execution and require native-entry evidence.
-Acid3 must be 100/100 in both modes, and WPT/Web API regressions must be zero.
+Acid3 must match the [pinned Selectors 4 expectation](../../tests/fixtures/acid3/selectors4-expectation.json)
+in both modes: raw 99/100, completed index 100, and exactly the obsolete test 35
+assertion. The original fixture and raw failure log are retained; another failure,
+a missing log, or a synthetic 100-point score is rejected. WPT/Web API regressions must be zero.
 The existing separately profiled ten-minute Gate 4 stress check remains required
 on PRs; the native corpus in this workflow does not replace that check.
 

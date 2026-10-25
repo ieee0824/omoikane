@@ -45,7 +45,8 @@ artifactを取得して内容を照合した。件数はこのrevisionの実測�
 各環境の配布suiteは `baseline-jit` 有効で2,392件成功、0 failed / 0 ignored。
 PR #656の2,391件の完全なsuite名・case名・個別成功を保持し、計算結果テスト1件を追加した。
 stdoutを出すケース、空白を含むshould-panicの表示名、doc testsも照合対象に含む。
-各環境でAcid3両方式100/100、WPTは固定
+各環境でAcid3両方式が[Selectors 4の固定期待結果](../../tests/fixtures/acid3/selectors4-expectation.json)
+（生の99/100、旧test 35の正確な失敗1件、完走）に一致し、WPTは固定
 `dc97e7bed3096ac9e0e591ab5fa22e7fb8844ead` の69件でregression 0、
 Web APIは97項目でerror/regression 0を確認した。全項目supportedという意味ではない。
 

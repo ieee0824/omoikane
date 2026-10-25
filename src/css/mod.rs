@@ -266,7 +266,7 @@ pub enum CssToken {
 }
 
 /// Selector combinators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Combinator {
     Descendant,
     Child,
@@ -275,27 +275,27 @@ pub enum Combinator {
 }
 
 /// A parsed selector.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Selector {
     pub parts: Vec<SelectorPart>,
 }
 
 /// A selector segment plus the combinator to the segment on its left.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SelectorPart {
     pub combinator: Option<Combinator>,
     pub simples: Vec<SimpleSelector>,
 }
 
 /// A selector evaluated relative to an anchor element, as used by `:has()`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelativeSelector {
     pub leading_combinator: Combinator,
     pub selector: Selector,
 }
 
 /// A basic CSS simple selector.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SimpleSelector {
     Type(String),
     Universal,
@@ -308,6 +308,16 @@ pub enum SimpleSelector {
     },
     PseudoClass(String),
     PseudoElement(String),
+    /// A filtered `:nth-child(An+B of S)` or `:nth-last-child(An+B of S)`.
+    /// Owns the parsed selector list so matching and dependency tracking share it.
+    NthChild {
+        /// The validated An+B expression.
+        formula: String,
+        /// The unforgiving complex selector list after `of`.
+        selectors: Vec<Selector>,
+        /// Whether positions are counted from the last sibling.
+        reverse: bool,
+    },
     /// `:is(<selector-list>)` -- matches any selector in the argument list.
     Is(Vec<Selector>),
     /// `:where(<selector-list>)` -- like `:is()`, with zero specificity.
@@ -319,7 +329,7 @@ pub enum SimpleSelector {
 }
 
 /// Attribute selector operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AttributeOperator {
     /// `=` -- exact match.
     Equals,

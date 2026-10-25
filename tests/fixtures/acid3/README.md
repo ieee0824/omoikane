@@ -48,10 +48,11 @@ Acid3 は各リソースの **HTTP ステータスコードと Content-Type の�
 これらは取得時点のオリジンサーバーの実挙動をそのまま保存したもの。
 `manifest.json` に記録した値がテストサーバーの真実の source となる。
 
-## 自作ファイルの有無
+## 原本とローカル設定
 
-**なし。** 本ディレクトリの全ファイルは `acid3.acidtests.org` から取得した本物の
-バイト列そのままである（自作・改変ファイルは存在しない）。
+上表のベンダリングしたリソースは `acid3.acidtests.org` から取得したバイト列そのままである。
+原本は改変しない。`manifest.json` と `selectors4-expectation.json` はローカルの
+HTTP再現・検証設定であり、上流から取得した原本ではない。
 
 ## 実行方法
 
@@ -108,3 +109,24 @@ runnerは各モードの進行index、終了理由、document script / drive / e
   `fetch_script_source` の非対応でフェッチできず、`document.write` も未実装。
 
 解消の経緯は `issues/closed/016-acid3-conformance.md` 系の子 issue を参照。
+
+
+## Selectors 4 と test 35（2026-10-25）
+
+Selectors 4 の child-indexed 擬似クラスは inclusive element siblings を数えるため、
+文書要素も `:first-child` に一致する。無改変の原本 test 35 は、この点について旧仕様の
+「文書要素は一致しない」という期待値を持つ。
+
+`selectors4-expectation.json` は上流から取得したリソースではなく、ローカル検証用の
+明示的な期待結果である。原本 SHA-256 を固定し、Faithful / DirectDrive それぞれで
+**生の99/100・index 100・test 35の正確な失敗1件のみ**を検証する。
+原本、HTTP manifest、スコア、失敗ログを変更・正規化しない。
+別の失敗、追加の失敗、未完走、script / drive / task error、ログ欠落は拒否する。
+Rust harness と Gate 4 / Gate 5 はこの同じ期待結果を参照する。
+
+Firefox 158.0.1 の同じ原本で、test 35 は同じメッセージで失敗した。
+Firefox の原本全体は96/100（test 22・23・25・35が失敗）であり、これを100点と扱わない。
+Omoikaneの期待に含める仕様差はtest 35だけである。
+文書要素・切り離された要素・DocumentFragment 内の現行挙動は、固定WPT
+`css/selectors/child-indexed-pseudo-class.html` の57 subtestで別途検証する。
+詳細は [#1455](https://github.com/ieee0824/omoikane/issues/1455)。

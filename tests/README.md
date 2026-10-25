@@ -387,7 +387,8 @@ OMOIKANE_JIT_GATE_REPORT_DIR=.artifacts/browser/acid3 \
 ```
 
 Add `--features baseline-jit` before `--` to repeat these contracts with that
-feature enabled. Acid3 requires 100/100 and no script/drive errors in both drive
+feature enabled. Acid3 requires the pinned Selectors 4 expectation (raw 99/100, exactly the
+obsolete test 35 assertion, completed index 100, and no script/drive/task errors) in both drive
 modes, including the default interpreter build. `browser-behavior.yml` runs both
 configurations on Linux ARM64 and macOS ARM64, and `baseline-jit` on Linux x86_64.
 The Linux x86_64 interpreter configuration runs inside CI's full `test` job, which

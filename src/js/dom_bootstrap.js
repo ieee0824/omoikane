@@ -4000,6 +4000,8 @@ export const __omoikane_service_worker_lifecycle = {};
         return token;
       });
       return {
+        get value() { return node.className; },
+        set value(value) { node.className = value; },
         add(...classes) {
           classes = validate(classes);
           const current = new Set((node.className || "").split(/\s+/).filter(Boolean));

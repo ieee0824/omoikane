@@ -15,6 +15,15 @@ gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
 
+def acid3_report():
+    expected = gate.load_expectation()
+    return {mode: {key: expected[key] for key in ("score", "total", "index")} | {
+        "log": "\n".join(expected["failed_lines"]), "termination_reason": "completed",
+        "script_errors": [], "task_errors": [], "drive_errors": [],
+    } for mode in ("faithful", "direct")}
+
+
+
 def probe(target):
     rows = [{"seed": seed, "shape": shape, "sample": sample, "jit_enabled": enabled,
              "success": True, "expected": 42, "actual": 42, "elapsed_ns": 1000,
@@ -51,8 +60,7 @@ class GateTests(unittest.TestCase):
                     "name": archive, "bytes": 30, "manifest": manifest},
                 "steps": [{"name": name, "exit": 0} for name in
                           ("default-library", "jit-probe-build", "ffi-smoke", "jit-smoke")]})
-            self.save(f"{target}/suite/acid3.json", {mode: {"score": 100, "total": 100}
-                                                   for mode in ("faithful", "direct")})
+            self.save(f"{target}/suite/acid3.json", acid3_report())
             self.save(f"{target}/suite/wpt.json", {"summary": {"total": 69, "regression": 0},
                        "revision": Path("tests/wpt/revision.txt").read_text().strip()})
             self.save(f"{target}/suite/web-api.json", {"regressions": [], "total": 78})

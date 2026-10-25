@@ -92,7 +92,8 @@ The final `jit-stress` job always runs and retains the existing required-check
 name. It collects the partition reports and writes `gate.json`. A missing,
 incomplete, failed or cancelled partition, mismatched input, dirty source, or
 incomplete unit coverage produces `no-go`. A `go` also requires both Acid3 modes
-to reach 100/100, zero WPT/Web API regressions, and all 64 or more profiled stress
+to match the [pinned Selectors 4 expectation](../../tests/fixtures/acid3/selectors4-expectation.json)
+(raw 99/100 with exactly the obsolete test 35 assertion), zero WPT/Web API regressions, and all 64 or more profiled stress
 seeds to succeed over at least ten minutes. Stress continues generating new
 seeds until both limits are met; it does not sleep to satisfy the duration.
 

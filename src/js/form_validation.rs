@@ -42,7 +42,10 @@ pub(super) fn selector_uses_validation(selectors: &[Selector]) -> bool {
                 }
                 SimpleSelector::Is(list)
                 | SimpleSelector::Where(list)
-                | SimpleSelector::Not(list) => selector_uses_validation(list),
+                | SimpleSelector::Not(list)
+                | SimpleSelector::NthChild {
+                    selectors: list, ..
+                } => selector_uses_validation(list),
                 SimpleSelector::Has(list) => list.iter().any(|relative| {
                     selector_uses_validation(std::slice::from_ref(&relative.selector))
                 }),

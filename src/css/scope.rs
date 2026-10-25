@@ -1,6 +1,6 @@
 //! Parsing for CSS Scoping `@scope` rule preludes.
 
-use super::tokenizer::render_tokens;
+use super::parser::render_selector_tokens;
 use super::{
     CssToken, Selector, SimpleSelector, parse_selector_list, skip_css_whitespace, tokenize,
 };
@@ -97,7 +97,7 @@ fn parse_boundary_branch(tokens: &[CssToken]) -> Option<Selector> {
     let first = tokens
         .iter()
         .find(|token| **token != CssToken::Whitespace)?;
-    let mut text = render_tokens(tokens).trim().to_string();
+    let mut text = render_selector_tokens(tokens).trim().to_string();
     if matches!(first, CssToken::Delim('>' | '+' | '~')) {
         text.insert_str(0, ":scope ");
     }
@@ -116,7 +116,10 @@ fn selector_has_pseudo_element(selector: &Selector) -> bool {
             }
             SimpleSelector::Is(selectors)
             | SimpleSelector::Where(selectors)
-            | SimpleSelector::Not(selectors) => selectors.iter().any(selector_has_pseudo_element),
+            | SimpleSelector::Not(selectors)
+            | SimpleSelector::NthChild { selectors, .. } => {
+                selectors.iter().any(selector_has_pseudo_element)
+            }
             SimpleSelector::Has(relative) => relative
                 .iter()
                 .any(|relative| selector_has_pseudo_element(&relative.selector)),

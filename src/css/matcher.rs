@@ -8,6 +8,8 @@ use super::{
     AttributeOperator, Combinator, RelativeSelector, Selector, SelectorPart, SimpleSelector,
 };
 
+mod nth_filter;
+
 /// Supported pseudo-elements for style matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PseudoElement {
@@ -79,6 +81,7 @@ pub fn matches_selector_with_pseudo(
 pub(crate) struct SelectorMatchCache {
     structural_positions: HashMap<usize, StructuralPositions>,
     relational_matches: HashMap<(usize, usize), bool>,
+    filtered_positions: HashMap<nth_filter::FilterKey, HashMap<usize, (usize, usize)>>,
     // Only a dedicated style/paint match cache may contain visit state. DOM
     // selector APIs always construct the default, unvisited cache.
     visited_link_ids: Option<HashSet<usize>>,
@@ -277,6 +280,10 @@ fn add_simple_specificity(value: &mut Specificity, simple: &SimpleSelector) {
         SimpleSelector::Class(_) | SimpleSelector::Attribute { .. } => value.classes += 1,
         SimpleSelector::PseudoClass(name) if matches!(name.as_str(), "before" | "after") => {
             value.elements += 1
+        }
+        SimpleSelector::NthChild { selectors, .. } => {
+            value.classes += 1;
+            add_selector_list_specificity(value, selectors);
         }
         SimpleSelector::PseudoClass(name)
             if functional_pseudo(name)
@@ -493,6 +500,19 @@ fn matches_simple_selector(
             operator,
             value,
         } => matches_attribute_selector(node, name, *operator, value.as_deref()),
+        SimpleSelector::NthChild {
+            formula,
+            selectors,
+            reverse,
+        } => nth_filter::matches(
+            node,
+            formula,
+            selectors,
+            *reverse,
+            cache,
+            scope_root,
+            allow_scope_ancestor_escape,
+        ),
         SimpleSelector::PseudoClass(name) => matches_pseudo_class(
             node,
             name,
@@ -721,10 +741,17 @@ fn matches_pseudo_class(
         // an+b parsing lowercases internally).
         let function = function.to_ascii_lowercase();
         return match function.as_str() {
-            "nth-child" => matches_nth_child(node, argument, cache),
-            "nth-last-child" => element_position(node, cache).is_some_and(|(index, total)| {
-                parse_an_plus_b(argument).is_some_and(|formula| formula.matches(total - index + 1))
-            }),
+            "nth-child" | "nth-last-child" => {
+                element_position(node, cache).is_some_and(|(index, total)| {
+                    parse_an_plus_b(argument).is_some_and(|formula| {
+                        formula.matches(if function == "nth-last-child" {
+                            total - index + 1
+                        } else {
+                            index
+                        })
+                    })
+                })
+            }
             "nth-of-type" => type_position(node, cache).is_some_and(|(index, _)| {
                 parse_an_plus_b(argument).is_some_and(|formula| formula.matches(index))
             }),
@@ -860,14 +887,6 @@ fn matches_pseudo_element(name: &str, pseudo: Option<PseudoElement>) -> bool {
     }
 }
 
-fn matches_nth_child(node: &NodeHandle, expression: &str, cache: &mut SelectorMatchCache) -> bool {
-    let Some(index) = element_index_in_parent(node, cache) else {
-        return false;
-    };
-
-    parse_an_plus_b(expression).is_some_and(|formula| formula.matches(index))
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct AnPlusB {
     a: i64,
@@ -947,26 +966,19 @@ fn element_index_in_parent(node: &NodeHandle, cache: &mut SelectorMatchCache) ->
 }
 
 fn element_position(node: &NodeHandle, cache: &mut SelectorMatchCache) -> Option<(usize, usize)> {
-    let parent = node.parent_node()?;
-    // Tree-structural pseudo-classes (`:first-child`, `:last-child`,
-    // `:nth-child`) are defined in terms of an element being a child of *some
-    // other element*. A root element whose parent is the `Document` node (or a
-    // `DocumentFragment`) has no element parent and therefore has no sibling
-    // position: it must never match `:first-child`/`:last-child`/`:nth-child`.
-    // Without this guard the document element would report position `1 of 1`
-    // and wrongly claim to be a `:first-child` (Acid3 test 35).
-    if parent.node_type() != NodeType::Element {
-        return None;
-    }
+    // Selectors 4 indexes inclusive element siblings, including detached
+    // elements and children of Documents/DocumentFragments.
+    let Some(parent) = node.parent_node() else {
+        return Some((1, 1));
+    };
     let positions = cache.positions(&parent);
     positions.element.get(&node.identity()).copied()
 }
 
 fn type_position(node: &NodeHandle, cache: &mut SelectorMatchCache) -> Option<(usize, usize)> {
-    let parent = node.parent_node()?;
-    if parent.node_type() != NodeType::Element {
-        return None;
-    }
+    let Some(parent) = node.parent_node() else {
+        return Some((1, 1));
+    };
     let positions = cache.positions(&parent);
     positions.of_type.get(&node.identity()).copied()
 }
@@ -1405,24 +1417,22 @@ mod tests {
     }
 
     #[test]
-    fn root_element_does_not_match_structural_child_pseudo_classes() {
-        // `html`'s parent is the `Document` node, not an element. Per the CSS
-        // Selectors spec these pseudo-classes only apply to a child of another
-        // *element*, so the root element must not match even though it is the
-        // sole child of the document. (Acid3 test 35 regression guard.)
+    fn root_element_matches_inclusive_structural_child_pseudo_classes() {
+        // Selectors 4 uses inclusive element siblings, not an element-parent
+        // requirement. The pinned child-indexed-pseudo-class WPT checks this.
         let (_document, html, _body, _main, _lead, _title, _cta) = sample_tree();
 
         assert!(
-            !matches_selector(&html, &selector(":first-child {}")),
-            "the root element has no element parent and must not be :first-child"
+            matches_selector(&html, &selector(":first-child {}")),
+            "the document element is its first element child"
         );
         assert!(
-            !matches_selector(&html, &selector(":last-child {}")),
-            "the root element has no element parent and must not be :last-child"
+            matches_selector(&html, &selector(":last-child {}")),
+            "the document element is its last element child"
         );
         assert!(
-            !matches_selector(&html, &selector(":nth-child(1) {}")),
-            "the root element has no sibling position and must not be :nth-child(1)"
+            matches_selector(&html, &selector(":nth-child(1) {}")),
+            "the document element has inclusive sibling position 1"
         );
         // It is, however, still the :root element.
         assert!(matches_selector(&html, &selector(":root {}")));

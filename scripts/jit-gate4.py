@@ -14,6 +14,11 @@ import sys
 import time
 
 
+# Also resolve the shared validator when invoked directly as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.acid3_expectations import load_expectation, report_matches_expectation
+
+
 UNIT_SHARDS = 4
 SHARDS = [f"unit-{i}" for i in range(UNIT_SHARDS)] + [
     "integration", "acid3", "compatibility", "stress",
@@ -357,9 +362,7 @@ def aggregate(root, jobs_succeeded=True):
         "stress_matrix_once": integration_coverage and stress_matrix_execution,
         "build": any(s.get("name") == "build" and s.get("exit") == 0
                      for s in (shards.get("integration") or {}).get("steps", [])),
-        "acid3_100": isinstance(acid3, dict) and all(
-            acid3.get(mode, {}).get("score") == 100 and acid3[mode].get("total") == 100
-            for mode in ("faithful", "direct")),
+        "acid3_expected_result": report_matches_expectation(acid3, load_expectation()),
         "acid3_test26_reported": has_acid3_test26_timing(shards.get("acid3")),
         "wpt_regression_zero": isinstance(wpt, dict) and wpt.get("summary", {}).get("regression") == 0,
         "web_api_regression_zero": isinstance(web_api, dict) and web_api.get("regressions") == [],

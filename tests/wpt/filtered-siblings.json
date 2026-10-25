@@ -1,0 +1,7 @@
+{
+  "tests": [
+    { "path": "css/selectors/child-indexed-pseudo-class.html" },
+    { "path": "css/selectors/nth-last-child-invalid.html" },
+    { "path": "css/selectors/invalidation/nth-child-whole-subtree.html" }
+  ]
+}
