@@ -91,6 +91,7 @@ pub(crate) struct SelectorMatchCache {
     // selector APIs always construct the default, unvisited cache.
     visited_link_ids: Option<HashSet<usize>>,
     active_visited_subject: Option<usize>,
+    shadow_part_subject: Option<usize>,
     #[cfg(test)]
     pub(crate) structural_builds: usize,
     #[cfg(test)]
@@ -284,7 +285,9 @@ pub fn specificity(selector: &Selector) -> Specificity {
 fn add_simple_specificity(value: &mut Specificity, simple: &SimpleSelector) {
     match simple {
         SimpleSelector::Id(_) => value.ids += 1,
-        SimpleSelector::Class(_) | SimpleSelector::Attribute { .. } => value.classes += 1,
+        SimpleSelector::Class(_)
+        | SimpleSelector::Attribute { .. }
+        | SimpleSelector::CustomState(_) => value.classes += 1,
         SimpleSelector::PseudoClass(name) if matches!(name.as_str(), "before" | "after") => {
             value.elements += 1
         }
@@ -481,6 +484,45 @@ fn matches_compound(
     })
 }
 
+/// Matches a part's own pseudo-class suffix without exposing its tree structure.
+pub(super) fn matches_shadow_part_target(
+    node: &NodeHandle,
+    selector: &Selector,
+    cache: &mut SelectorMatchCache,
+) -> bool {
+    let previous = cache.shadow_part_subject.replace(node.identity());
+    let matched =
+        matches_selector_with_scope_mode_cached(node, selector, None, cache, Some(node), false);
+    cache.shadow_part_subject = previous;
+    matched
+}
+
+fn shadow_part_disallows(simple: &SimpleSelector) -> bool {
+    match simple {
+        SimpleSelector::Has(_) | SimpleSelector::NthChild { .. } => true,
+        SimpleSelector::PseudoClass(name) => {
+            let base = name.split_once('(').map_or(name.as_str(), |(base, _)| base);
+            let base = base.to_ascii_lowercase();
+            base.starts_with("nth-")
+                || matches!(
+                    base.as_str(),
+                    "root"
+                        | "empty"
+                        | "first-child"
+                        | "last-child"
+                        | "only-child"
+                        | "first-of-type"
+                        | "last-of-type"
+                        | "only-of-type"
+                        | "scope"
+                        | "host"
+                        | "host-context"
+                )
+        }
+        _ => false,
+    }
+}
+
 fn matches_simple_selector(
     node: &NodeHandle,
     simple: &SimpleSelector,
@@ -489,6 +531,9 @@ fn matches_simple_selector(
     scope_root: Option<&NodeHandle>,
     allow_scope_ancestor_escape: bool,
 ) -> bool {
+    if cache.shadow_part_subject == Some(node.identity()) && shadow_part_disallows(simple) {
+        return false;
+    }
     match simple {
         SimpleSelector::Type(name) => node.with_local_name(|local_name| {
             local_name.is_some_and(|local_name| local_name.eq_ignore_ascii_case(name))
@@ -520,6 +565,7 @@ fn matches_simple_selector(
             scope_root,
             allow_scope_ancestor_escape,
         ),
+        SimpleSelector::CustomState(name) => node.has_custom_state(name),
         SimpleSelector::PseudoClass(name) => matches_pseudo_class(
             node,
             name,

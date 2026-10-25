@@ -1169,6 +1169,17 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function computedLogicalShorthand(map, kebab) {
+    if (kebab === "border-style") {
+      const parts = ["top", "right", "bottom", "left"].map(
+        side => map["border-" + side + "-style"]
+      );
+      if (parts.some(value => typeof value !== "string" || !value)) return null;
+      const [top, right, bottom, left] = parts;
+      if (top === right && top === bottom && top === left) return top;
+      if (top === bottom && right === left) return top + " " + right;
+      if (right === left) return top + " " + right + " " + bottom;
+      return parts.join(" ");
+    }
     if (!logicalBoxStyleProperties.has(kebab) &&
         kebab !== "overscroll-behavior" && kebab !== "overflow" &&
         kebab !== "inset" && kebab !== "inset-inline" && kebab !== "inset-block" &&
@@ -9178,6 +9189,7 @@ export const __omoikane_service_worker_lifecycle = {};
         continue;
       }
       if (ch === "/" && next === "*") { comment = true; index++; continue; }
+      if (ch === "\\") { index++; continue; }
       if (ch === "'" || ch === '"') { quote = ch; continue; }
       if (ch === "(") parenDepth++;
       else if (ch === ")") parenDepth = Math.max(0, parenDepth - 1);
@@ -9374,6 +9386,9 @@ export const __omoikane_service_worker_lifecycle = {};
     return lines.join("\n");
   }
 
+  const nativeCssSelectorText = globalThis.__omoikane_css_selector_text;
+  delete globalThis.__omoikane_css_selector_text;
+
   class CSSStyleRule extends CSSGroupingRule {
     constructor(text, sheet = null, index = -1) {
       super();
@@ -9386,6 +9401,7 @@ export const __omoikane_service_worker_lifecycle = {};
       this.__selectorText = this.__hasBlock ? this.__text.slice(0, open).trim() : "";
       if (sheet && sheet.__nestingContext)
         this.__selectorText = nestedSelectorText(this.__selectorText, sheet.__nestingContext);
+      this.__selectorText = nativeCssSelectorText(this.__selectorText);
       const body = this.__hasBlock ? this.__text.slice(open + 1, close) : "";
       const contents = splitNestedStyleBody(body);
       this.__style = declarationView(
@@ -9411,7 +9427,9 @@ export const __omoikane_service_worker_lifecycle = {};
       if (!this.__hasBlock) return;
       const selector = String(value).trim();
       if (!nestedSelectorIsValid(selector, this.__sheet && this.__sheet.__nestingContext)) return;
-      this.__selectorText = nestedSelectorText(selector, this.__sheet && this.__sheet.__nestingContext);
+      this.__selectorText = nativeCssSelectorText(
+        nestedSelectorText(selector, this.__sheet && this.__sheet.__nestingContext)
+      );
       this.__text = this.__serializeCssText();
       if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
     }
@@ -12867,6 +12885,82 @@ export const __omoikane_service_worker_lifecycle = {};
     if (typeof anchor.focus === "function") anchor.focus();
   }
 
+  const nativeUpdateCustomState = globalThis.__omoikane_update_custom_state;
+  delete globalThis.__omoikane_update_custom_state;
+  const customStateSetObjects = browsingInput.customStateSetObjects ||
+    (browsingInput.customStateSetObjects = new WeakMap());
+  const customStateSetToken = {};
+  const customStateSetConstructor = Set;
+  const customStateSetClear = Function.prototype.call.bind(Set.prototype.clear);
+  const customStateSetSize = Function.prototype.call.bind(
+    Object.getOwnPropertyDescriptor(Set.prototype, "size").get);
+  const customStateSetValues = Function.prototype.call.bind(Set.prototype.values);
+  const customStateSetEntries = Function.prototype.call.bind(Set.prototype.entries);
+  const customStateSetForEach = Function.prototype.call.bind(Set.prototype.forEach);
+  const customStateApply = Reflect.apply;
+
+  function requireCustomStateSet(object) {
+    const state = safeWeakMapGet(customStateSetObjects, object);
+    if (!state) throw new IntrinsicTypeError("Illegal CustomStateSet invocation");
+    return state;
+  }
+
+  class CustomStateSet {
+    constructor(...args) {
+      if (args[1] !== customStateSetToken) throw new IntrinsicTypeError("Illegal constructor");
+      safeWeakMapSet(customStateSetObjects, this, {
+        element: args[0], entries: new customStateSetConstructor(),
+      });
+    }
+    get size() { return customStateSetSize(requireCustomStateSet(this).entries); }
+    has(value) {
+      const state = requireCustomStateSet(this);
+      return hasSetValue(state.entries, toDOMString(value));
+    }
+    add(value) {
+      const state = requireCustomStateSet(this), name = toDOMString(value);
+      if (!hasSetValue(state.entries, name)) {
+        nativeUpdateCustomState(internalNodeId(state.element), 1, name);
+        addSetValue(state.entries, name);
+      }
+      return this;
+    }
+    delete(value) {
+      const state = requireCustomStateSet(this), name = toDOMString(value);
+      if (!hasSetValue(state.entries, name)) return false;
+      nativeUpdateCustomState(internalNodeId(state.element), 2, name);
+      return safeSetDelete(state.entries, name);
+    }
+    clear() {
+      const state = requireCustomStateSet(this);
+      if (customStateSetSize(state.entries) !== 0) {
+        nativeUpdateCustomState(internalNodeId(state.element), 0);
+        customStateSetClear(state.entries);
+      }
+    }
+    values() { return customStateSetValues(requireCustomStateSet(this).entries); }
+    entries() { return customStateSetEntries(requireCustomStateSet(this).entries); }
+    forEach(callback, ...args) {
+      const state = requireCustomStateSet(this);
+      if (typeof callback !== "function") throw new IntrinsicTypeError("Callback required");
+      customStateSetForEach(state.entries,
+        value => customStateApply(callback, args[0], [value, value, this]));
+    }
+  }
+  for (const name of Object.getOwnPropertyNames(CustomStateSet.prototype)) {
+    if (name === "constructor") continue;
+    const descriptor = Object.getOwnPropertyDescriptor(CustomStateSet.prototype, name);
+    Object.defineProperty(CustomStateSet.prototype, name, { ...descriptor, enumerable: true });
+  }
+  Object.defineProperties(CustomStateSet.prototype, {
+    keys: { value: CustomStateSet.prototype.values, writable: true, enumerable: true, configurable: true },
+    [Symbol.iterator]: { value: CustomStateSet.prototype.values, writable: true, configurable: true },
+    [Symbol.toStringTag]: { value: "CustomStateSet", configurable: true },
+  });
+  Object.defineProperty(globalThis, "CustomStateSet", {
+    value: CustomStateSet, writable: true, enumerable: false, configurable: true,
+  });
+
   class ElementInternals {
     constructor(...args) {
       if (args[1] !== internalsConstructionToken) throw new TypeError("Illegal constructor");
@@ -12875,6 +12969,10 @@ export const __omoikane_service_worker_lifecycle = {};
     get shadowRoot() {
       const element = internalsTarget(this, false).element;
       return wrapNode(__omoikane_shadow_root(internalNodeId(element)));
+    }
+    get states() {
+      const state = internalsTarget(this, false);
+      return state.states || (state.states = new CustomStateSet(state.element, customStateSetToken));
     }
     get form() { return internalsTarget(this).form; }
     get labels() {
@@ -12927,6 +13025,9 @@ export const __omoikane_service_worker_lifecycle = {};
   }
   Object.defineProperty(ElementInternals.prototype, Symbol.toStringTag, {
     configurable: true, value: "ElementInternals",
+  });
+  Object.defineProperty(ElementInternals.prototype, "states", {
+    ...Object.getOwnPropertyDescriptor(ElementInternals.prototype, "states"), enumerable: true,
   });
   globalThis.ElementInternals = ElementInternals;
 
@@ -24948,6 +25049,7 @@ export const __omoikane_service_worker_lifecycle = {};
     const seen = new IntrinsicSet();
     for (let index = 0; index < list.length; index++) {
       const transferable = list[index];
+      if (safeWeakMapHas(customStateSetObjects, transferable)) throw dataCloneError();
       const port = transferable instanceof MessagePort;
       if ((nativeArrayBufferInfo(transferable) === null && !port) ||
           (port && transferable._closed) || hasSetValue(seen, transferable)) {
@@ -24971,7 +25073,8 @@ export const __omoikane_service_worker_lifecycle = {};
         typeof value === "boolean" || typeof value === "number" ||
         typeof value === "string" || typeof value === "bigint") return ["p", value];
     if (typeof value === "symbol" || typeof value === "function") throw dataCloneError();
-    if (value instanceof Node ||
+    if (safeWeakMapHas(customStateSetObjects, value) ||
+        value instanceof Node ||
         (value instanceof EventTarget && !(value instanceof MessagePort))) throw dataCloneError();
     if (safeMapHas(state.memory, value)) return ["r", safeMapGet(state.memory, value)];
 
@@ -27406,7 +27509,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     try { delete globalThis.history; } catch (_) { globalThis.history = undefined; }
     Object.defineProperty(globalThis, "name", { configurable:true, enumerable:true, value:"", writable:false });
-    for (const name of ["ElementInternals", "RadioNodeList"]) {
+    for (const name of ["ElementInternals", "CustomStateSet", "RadioNodeList"]) {
       try { delete globalThis[name]; } catch (_) { globalThis[name] = undefined; }
     }
     // Async Clipboard is a Window-only surface in this runtime. Keep the

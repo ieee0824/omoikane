@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 mod children;
 pub(crate) mod custom_element;
+mod custom_state;
 pub(crate) mod form_controls;
 pub(crate) mod input_range;
 pub(crate) mod input_value;
@@ -425,6 +426,7 @@ pub struct Element {
     dirty_selectedness: bool,
     form_associated_custom: bool,
     custom_element_defined: Option<bool>,
+    custom_states: Option<Box<custom_state::CustomStates>>,
     custom_element_is: Option<Vec<u16>>,
     script_source_position: Option<(u32, u32)>,
     script_force_async: bool,
@@ -532,6 +534,7 @@ impl Element {
             dirty_selectedness: false,
             form_associated_custom: false,
             custom_element_defined: None,
+            custom_states: None,
             custom_element_is: None,
             script_source_position: None,
             script_force_async: true,
@@ -584,6 +587,7 @@ impl Element {
             dirty_selectedness: false,
             form_associated_custom: false,
             custom_element_defined: None,
+            custom_states: None,
             custom_element_is: None,
             script_source_position: None,
             script_force_async: true,

@@ -185,6 +185,7 @@ collect_pattern "/html/semantics/selectors/pseudo-classes/required-optional.html
 collect_pattern "/html/semantics/selectors/pseudo-classes/placeholder-shown-type-change.html"
 collect_pattern "/custom-elements/pseudo-class-defined.html" "/custom-elements/pseudo-class-defined-customized-builtins.html"
 collect_pattern "/custom-elements/registries/" "/custom-elements/resources/" "/common/blank.html" "/common/object-association.js"
+collect_pattern "/custom-elements/state/" "/css/selectors/parsing/parse-state.html" "/common/gc.js"
 collect_pattern "/html/semantics/selectors/pseudo-classes/inrange-outofrange.html" "/html/semantics/selectors/pseudo-classes/inrange-outofrange-type-change.html" "/html/semantics/selectors/pseudo-classes/inrange-outofrange-time-reversed.html" "/html/semantics/forms/the-input-element/number.html" "/html/semantics/forms/the-input-element/range.html" "/html/semantics/forms/the-input-element/range-2.html" "/html/semantics/forms/the-input-element/input-valueasnumber.html" "/html/semantics/forms/the-input-element/datetime-local.html"
 collect_pattern "/html/semantics/selectors/pseudo-classes/default.html"
 collect_pattern "/html/semantics/selectors/pseudo-classes/indeterminate.html" "/html/semantics/selectors/pseudo-classes/indeterminate-radio.html" "/html/semantics/selectors/pseudo-classes/indeterminate-type-change.html" "/html/semantics/selectors/pseudo-classes/checked-indeterminate.window.js" "/html/semantics/forms/the-input-element/radio.html" "/html/semantics/forms/the-input-element/radio-input-cancel.html"

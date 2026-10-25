@@ -7374,7 +7374,7 @@ fn matches_shadow_scoped_selector(
     cache: &mut SelectorMatchCache,
 ) -> bool {
     if selector_uses_part_pseudo(selector) {
-        return pseudo.is_none() && matches_part_selector(node, selector, Some(scope), cache);
+        return matches_part_selector(node, selector, Some(scope), pseudo, cache);
     }
     if selector.parts.iter().any(|part| {
         part.simples.iter().any(|simple| {
@@ -7825,9 +7825,14 @@ fn collect_rule_candidates(
                             && shadow_scope.is_none()
                             && node.containing_shadow_root().is_some()
                         {
-                            pseudo.is_none()
-                                && selector_uses_part_pseudo(selector)
-                                && matches_part_selector(node, selector, None, selector_cache)
+                            selector_uses_part_pseudo(selector)
+                                && matches_part_selector(
+                                    node,
+                                    selector,
+                                    None,
+                                    pseudo,
+                                    selector_cache,
+                                )
                         } else if let Some(scope) = shadow_scope {
                             matches_shadow_scoped_selector(
                                 node,
@@ -8075,11 +8080,17 @@ fn matches_part_selector(
     node: &NodeHandle,
     selector: &Selector,
     stylesheet_scope: Option<&NodeHandle>,
+    pseudo: Option<PseudoElement>,
     cache: &mut SelectorMatchCache,
 ) -> bool {
-    let Some((part_name, host_selector)) = part_selector_components(selector) else {
+    let Some(part) = part_selector_components(selector) else {
         return false;
     };
+    if part.pseudo != pseudo
+        || !super::matcher::matches_shadow_part_target(node, &part.target, cache)
+    {
+        return false;
+    }
     let Some(mut root) = node.containing_shadow_root() else {
         return false;
     };
@@ -8099,11 +8110,11 @@ fn matches_part_selector(
             Some(scope) => &root == scope || host.containing_shadow_root().as_ref() == Some(scope),
             None => host.containing_shadow_root().is_none(),
         };
-        if visible_in_stylesheet_scope && exposed_names.contains(&part_name) {
+        if visible_in_stylesheet_scope && exposed_names.contains(&part.name) {
             let host_matches = if let Some(scope) = stylesheet_scope {
-                matches_shadow_scoped_selector(&host, &host_selector, scope, None, cache)
+                matches_shadow_scoped_selector(&host, &part.host, scope, None, cache)
             } else {
-                matches_selector_with_pseudo_cached(&host, &host_selector, None, cache)
+                matches_selector_with_pseudo_cached(&host, &part.host, None, cache)
             };
             if host_matches {
                 return true;
@@ -8121,36 +8132,65 @@ fn matches_part_selector(
     }
 }
 
-fn part_selector_components(selector: &Selector) -> Option<(String, Selector)> {
-    let mut host_selector = selector.clone();
-    let mut part_name = None;
-    for (part_index, part) in host_selector.parts.iter_mut().enumerate() {
-        part.simples.retain(|simple| {
+struct PartSelector {
+    name: String,
+    host: Selector,
+    target: Selector,
+    pseudo: Option<PseudoElement>,
+}
+
+fn part_selector_components(selector: &Selector) -> Option<PartSelector> {
+    let subject = selector.parts.last()?;
+    let (index, argument) = subject
+        .simples
+        .iter()
+        .enumerate()
+        .find_map(|(index, simple)| {
             let SimpleSelector::PseudoElement(name) = simple else {
-                return true;
+                return None;
             };
-            let Some((function, argument)) = functional_selector(name) else {
-                return true;
-            };
-            if !function.eq_ignore_ascii_case("part") {
-                return true;
-            }
-            if part_index + 1 != selector.parts.len() || part_name.is_some() {
-                return true;
-            }
-            part_name = Some(argument.to_string());
-            false
-        });
+            let (function, argument) = functional_selector(name)?;
+            function
+                .eq_ignore_ascii_case("part")
+                .then_some((index, argument))
+        })?;
+    let mut host = selector.clone();
+    let last = host.parts.last_mut()?;
+    let mut tail = last.simples.split_off(index + 1);
+    last.simples.pop();
+    if last.simples.is_empty() {
+        last.simples.push(SimpleSelector::Universal);
     }
-    let part_name = part_name?;
-    if host_selector.parts.last()?.simples.is_empty() {
-        host_selector
-            .parts
-            .last_mut()?
-            .simples
-            .push(SimpleSelector::Universal);
+    let pseudo_start = tail.iter().position(|simple| match simple {
+        SimpleSelector::PseudoElement(_) => true,
+        SimpleSelector::PseudoClass(name) => matches!(name.as_str(), "before" | "after"),
+        _ => false,
+    });
+    let pseudo = if let Some(start) = pseudo_start {
+        let pseudo_selector = Selector {
+            parts: vec![SelectorPart {
+                combinator: None,
+                simples: tail.split_off(start),
+            }],
+        };
+        Some(super::matcher::selector_pseudo_element(&pseudo_selector)?)
+    } else {
+        None
+    };
+    if tail.is_empty() {
+        tail.push(SimpleSelector::Universal);
     }
-    Some((part_name, host_selector))
+    Some(PartSelector {
+        name: argument.to_string(),
+        host,
+        target: Selector {
+            parts: vec![SelectorPart {
+                combinator: None,
+                simples: tail,
+            }],
+        },
+        pseudo,
+    })
 }
 
 fn forwarded_part_names(host: &NodeHandle, inner_names: &HashSet<String>) -> HashSet<String> {

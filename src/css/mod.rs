@@ -37,6 +37,7 @@ pub use media::{
     ForcedColorPalette, MediaEnvironment, MediaType, evaluate_media_query,
     evaluate_media_query_for_type, evaluate_media_query_with_environment, parse_media_query_list,
 };
+pub(crate) use parser::canonical_state_selector_text;
 pub use parser::{
     extract_font_face_rules, parse_selector_list, parse_style_attribute, parse_stylesheet,
 };
@@ -307,6 +308,8 @@ pub enum SimpleSelector {
         value: Option<String>,
     },
     PseudoClass(String),
+    /// A decoded `:state(<ident>)` argument, owned as UTF-16 for DOM matching.
+    CustomState(Vec<u16>),
     PseudoElement(String),
     /// A filtered `:nth-child(An+B of S)` or `:nth-last-child(An+B of S)`.
     /// Owns the parsed selector list so matching and dependency tracking share it.
@@ -651,6 +654,38 @@ mod tests {
         let tokens = tokenize("div { margin-bottom: -6em; top: -.5px; }").unwrap();
         assert!(tokens.contains(&CssToken::Dimension(-6.0, "em".to_string())));
         assert!(tokens.contains(&CssToken::Dimension(-0.5, "px".to_string())));
+    }
+
+    #[test]
+    fn identifier_boundaries_and_unicode_follow_css_syntax() {
+        for (source, expected) in [
+            ("-", vec![CssToken::Delim('-')]),
+            ("--", vec![CssToken::Ident("--".into())]),
+            (r"\-", vec![CssToken::Ident("-".into())]),
+            ("emoji-😀", vec![CssToken::Ident("emoji-😀".into())]),
+            ("-é", vec![CssToken::Ident("-é".into())]),
+            ("\u{80}", vec![CssToken::Ident("\u{80}".into())]),
+            (r"\31 leading", vec![CssToken::Ident("1leading".into())]),
+            ("1-", vec![CssToken::Number(1.0), CssToken::Delim('-')]),
+            ("1-foo", vec![CssToken::Dimension(1.0, "-foo".into())]),
+            (r"1\65 m", vec![CssToken::Dimension(1.0, "em".into())]),
+            (r"\0 z", vec![CssToken::Ident("�z".into())]),
+            (r"\d800 x", vec![CssToken::Ident("�x".into())]),
+            (r"\110000 x", vec![CssToken::Ident("�x".into())]),
+            ("x\0y", vec![CssToken::Ident("x�y".into())]),
+            ("a\\", vec![CssToken::Ident("a�".into())]),
+            (
+                "a\\\nb",
+                vec![
+                    CssToken::Ident("a".into()),
+                    CssToken::Delim('\\'),
+                    CssToken::Whitespace,
+                    CssToken::Ident("b".into()),
+                ],
+            ),
+        ] {
+            assert_eq!(tokenize(source).unwrap(), expected, "{source:?}");
+        }
     }
 
     #[test]
