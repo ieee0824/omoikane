@@ -8,6 +8,7 @@ use super::{
     AttributeOperator, Combinator, RelativeSelector, Selector, SelectorPart, SimpleSelector,
 };
 
+mod default_state;
 mod form_state;
 mod nth_filter;
 
@@ -80,6 +81,7 @@ pub fn matches_selector_with_pseudo(
 
 #[derive(Debug, Default)]
 pub(crate) struct SelectorMatchCache {
+    default_submit_buttons: HashMap<usize, HashSet<usize>>,
     structural_positions: HashMap<usize, StructuralPositions>,
     relational_matches: HashMap<(usize, usize), bool>,
     filtered_positions: HashMap<nth_filter::FilterKey, HashMap<usize, (usize, usize)>>,
@@ -89,6 +91,8 @@ pub(crate) struct SelectorMatchCache {
     active_visited_subject: Option<usize>,
     #[cfg(test)]
     pub(crate) structural_builds: usize,
+    #[cfg(test)]
+    default_submit_builds: usize,
 }
 
 impl SelectorMatchCache {
@@ -801,6 +805,7 @@ fn matches_pseudo_class(
         "enabled" => is_form_control(node) && !is_actually_disabled(node),
         "disabled" => is_actually_disabled(node),
         "checked" => node.checked(),
+        "default" => default_state::matches(node, cache),
         "required" => form_state::requiredness(node) == Some(true),
         "optional" => form_state::requiredness(node) == Some(false),
         "placeholder-shown" => form_state::placeholder_shown(node),

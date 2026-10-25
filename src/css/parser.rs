@@ -293,6 +293,7 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         | "valid"
                         | "invalid"
                         | "checked"
+                        | "default"
                         | "required"
                         | "optional"
                         | "placeholder-shown"
@@ -313,8 +314,10 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                 );
                 let host = base == "host";
                 (known || location || host)
-                    && (!matches!(base.as_str(), "required" | "optional" | "placeholder-shown")
-                        || !name.contains('('))
+                    && (!matches!(
+                        base.as_str(),
+                        "required" | "optional" | "placeholder-shown" | "default"
+                    ) || !name.contains('('))
                     && (context.allow_pseudo_element
                         || !matches!(base.as_str(), "before" | "after"))
                     && (!location || !name.contains('('))
@@ -1381,6 +1384,7 @@ impl Parser {
             || name.eq_ignore_ascii_case("required")
             || name.eq_ignore_ascii_case("optional")
             || name.eq_ignore_ascii_case("placeholder-shown")
+            || name.eq_ignore_ascii_case("default")
         {
             return Err(CssParseError::InvalidSelector);
         }

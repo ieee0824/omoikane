@@ -5246,12 +5246,11 @@ export const __omoikane_service_worker_lifecycle = {};
     }
 
     get defaultChecked() {
-      return this.hasAttribute("checked");
+      return nativeAttributeValueNS(internalNodeId(this), null, "checked") !== null;
     }
 
     set defaultChecked(v) {
-      if (v) this.setAttribute("checked", "");
-      else this.removeAttribute("checked");
+      reflectFormBooleanAttribute(this, "checked", v);
     }
 
     get disabled() {
@@ -12196,14 +12195,22 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeInvalidateValidation = globalThis.__omoikane_invalidate_validation;
   const nativeSetControlValueEmpty = globalThis.__omoikane_set_control_value_empty;
   const nativeSanitizeInputValue = globalThis.__omoikane_sanitize_input_value;
+  const nativeButtonType = globalThis.__omoikane_button_type;
+  const removeFormAttributeNS = Function.prototype.call.bind(Element.prototype.removeAttributeNS);
   const nativeValidationTree = globalThis.__omoikane_validation_tree;
   delete globalThis.__omoikane_register_validation;
   delete globalThis.__omoikane_flush_validation;
   delete globalThis.__omoikane_invalidate_validation;
   delete globalThis.__omoikane_set_control_value_empty;
   delete globalThis.__omoikane_sanitize_input_value;
+  delete globalThis.__omoikane_button_type;
   delete globalThis.__omoikane_validation_tree;
   let validationReady = false;
+
+  function reflectFormBooleanAttribute(element, name, value) {
+    if (value) setAttributeValueNS(element, null, name, name, "", true);
+    else removeFormAttributeNS(element, null, name);
+  }
 
   const nativeParserFormOwner = globalThis.__omoikane_parser_form_owner;
   delete globalThis.__omoikane_parser_form_owner;
@@ -12268,7 +12275,7 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function nativeAttribute(element, name) {
-    return __omoikane_get_attribute(internalNodeId(element), name);
+    return nativeAttributeValueNS(internalNodeId(element), null, name);
   }
 
   function formOwner(element, removing = null) {
@@ -12281,13 +12288,14 @@ export const __omoikane_service_worker_lifecycle = {};
     if (formId !== null && internalIsConnected(element) && !removing) {
       if (!formId) return null;
       const candidate = wrapNode(nativeGetElementById(internalNodeId(root), formId));
-      return candidate && internalNodeLocalName(candidate) === "form" ? candidate : null;
+      return candidate && hasCanonicalWrapperId(canonicalHtmlElementIds, candidate) &&
+        internalNodeLocalName(candidate) === "form" ? candidate : null;
     }
     const removingId = internalNodeId(removing);
     for (let node = element; node && internalNodeId(node) !== removingId;) {
       node = internalParentNode(node);
       if (!node) break;
-      if (internalNodeType(node) === 1 && internalNodeLocalName(node) === "form") return node;
+      if (hasCanonicalWrapperId(canonicalHtmlElementIds, node) && internalNodeLocalName(node) === "form") return node;
     }
     return null;
   }
@@ -14030,14 +14038,14 @@ export const __omoikane_service_worker_lifecycle = {};
 
   class HTMLButtonElement extends HTMLElement {
     get type() {
-      const t = (this.getAttribute("type") || "").toLowerCase();
-      if (t === "submit" || t === "reset" || t === "button" || t === "menu") {
-        return t;
-      }
-      return "submit";
+      if (!hasCanonicalWrapperId(canonicalHtmlElementIds, this) ||
+          internalNodeLocalName(this) !== "button") throw new TypeError("Illegal invocation");
+      return nativeButtonType(internalNodeId(this));
     }
     set type(v) {
-      this.setAttribute("type", String(v));
+      if (!hasCanonicalWrapperId(canonicalHtmlElementIds, this) ||
+          internalNodeLocalName(this) !== "button") throw new TypeError("Illegal invocation");
+      setAttributeValueNS(this, null, "type", "type", String(v), true);
     }
     get formNoValidate() { return this.hasAttribute("formnovalidate"); }
     set formNoValidate(value) {
@@ -14215,11 +14223,10 @@ export const __omoikane_service_worker_lifecycle = {};
 
   class HTMLOptionElement extends HTMLElement {
     get defaultSelected() {
-      return this.hasAttribute("selected");
+      return nativeAttributeValueNS(internalNodeId(this), null, "selected") !== null;
     }
     set defaultSelected(v) {
-      if (v) this.setAttribute("selected", "");
-      else this.removeAttribute("selected");
+      reflectFormBooleanAttribute(this, "selected", v);
     }
     get selected() {
       return nativeGetOptionSelected(canonicalNodeIdentity(this));

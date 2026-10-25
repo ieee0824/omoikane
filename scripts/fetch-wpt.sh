@@ -183,6 +183,7 @@ collect_pattern "/css/selectors/is-where-error-recovery.html"
 collect_pattern "/css/selectors/child-indexed-pseudo-class.html" "/css/selectors/nth-last-child-invalid.html" "/css/selectors/invalidation/nth-child-whole-subtree.html"
 collect_pattern "/html/semantics/selectors/pseudo-classes/required-optional.html" "/html/semantics/selectors/pseudo-classes/required-optional-hidden.html" "/html/semantics/selectors/pseudo-classes/utils.js"
 collect_pattern "/html/semantics/selectors/pseudo-classes/placeholder-shown-type-change.html"
+collect_pattern "/html/semantics/selectors/pseudo-classes/default.html"
 collect_pattern "/css/selectors/has-matches-to-uninserted-elements.html"
 collect_pattern \
   "/css/selectors/invalidation/any-link-pseudo.html" \

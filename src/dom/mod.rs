@@ -10,6 +10,7 @@ use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 mod children;
+pub(crate) mod form_controls;
 pub(crate) mod input_value;
 mod string;
 pub(crate) use string::DomString;
@@ -1578,6 +1579,28 @@ impl NodeHandle {
         })
     }
 
+    /// Compares exact attribute units without allocating a UTF-16 copy.
+    pub(crate) fn attribute_value_ns_eq_units(
+        &self,
+        namespace: Option<&str>,
+        local_name: &str,
+        expected: impl Iterator<Item = u16>,
+    ) -> bool {
+        let inner = self.0.borrow();
+        let NodeData::Element(element) = &inner.data else {
+            return false;
+        };
+        let Some(record) = element.attribute_records.iter().find(|record| {
+            record.namespace_uri.as_deref() == namespace && record.local_name == local_name
+        }) else {
+            return false;
+        };
+        match &record.utf16 {
+            Some(units) => units.iter().copied().eq(expected),
+            None => record.value.encode_utf16().eq(expected),
+        }
+    }
+
     /// Returns a clone of one element attribute value, if it exists.
     ///
     /// The exact attribute name is checked first to preserve case-sensitive XML
@@ -2149,6 +2172,16 @@ impl NodeHandle {
     /// Returns an exceptional parser form owner until a relevant reparenting
     /// or explicit form-attribute mutation resets the association.
     pub(crate) fn parser_form_owner(&self) -> Option<Self> {
+        self.resolve_parser_form_owner(true)
+    }
+
+    /// Reads a valid parser association without changing cached metadata.
+    /// This can be used while a short-lived immutable DOM view is borrowed.
+    pub(crate) fn peek_parser_form_owner(&self) -> Option<Self> {
+        self.resolve_parser_form_owner(false)
+    }
+
+    fn resolve_parser_form_owner(&self, clear_stale: bool) -> Option<Self> {
         let result = {
             let inner = self.0.borrow();
             let NodeData::Element(element) = &inner.data else {
@@ -2160,7 +2193,7 @@ impl NodeHandle {
                     && owner.has_ancestry_revisions(&record.owner_ancestry)
             })
         };
-        if result.is_none() {
+        if clear_stale && result.is_none() {
             if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
                 element.parser_form_owner = None;
             }

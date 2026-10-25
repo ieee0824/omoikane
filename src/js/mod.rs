@@ -20933,8 +20933,7 @@ fn get_element_by_id_native(
         .get(1)
         .cloned()
         .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
+        .to_string(context)?;
     // An empty id attribute does not give the element an ID.
     if expected.is_empty() {
         return Ok(JsValue::null());
@@ -20946,7 +20945,9 @@ fn get_element_by_id_native(
         let mut pending = root.child_nodes();
         pending.reverse();
         while let Some(node) = pending.pop() {
-            if node.node_type() == NodeType::Element && node.attribute_eq("id", &expected) {
+            if node.node_type() == NodeType::Element
+                && node.attribute_value_ns_eq_units(None, "id", expected.iter())
+            {
                 return Ok(node_to_js_value(Some(node)));
             }
             // Ordinary children exclude shadow trees, template contents and

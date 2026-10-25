@@ -31,6 +31,25 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
         js_string!("__omoikane_sanitize_input_value"),
         3,
         NativeFunction::from_copy_closure(sanitize_input_value),
+    )?;
+    register_private_builtin_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_button_type"),
+        1,
+        NativeFunction::from_copy_closure(|_, args, context| {
+            let id = parse_node_id(args.first(), context)?;
+            ensure_same_origin_node(context, id)?;
+            with_host_state(|host| {
+                let node = host
+                    .borrow()
+                    .get_node(id)
+                    .ok_or_else(|| JsNativeError::typ().with_message("Invalid button receiver"))?;
+                let kind = crate::dom::form_controls::button_type(&node)
+                    .ok_or_else(|| JsNativeError::typ().with_message("Invalid button receiver"))?;
+                Ok(js_string!(kind).into())
+            })
+        }),
     )
 }
 
