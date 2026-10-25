@@ -291,6 +291,9 @@ fn content_type(path: &Path) -> &str {
         // Match wptserve's default MIME mapping: an HTML fixture's encoding
         // declaration must not be overridden by an invented transport charset.
         Some("html" | "htm") => "text/html",
+        Some("xhtml" | "xht") => "application/xhtml+xml",
+        Some("xml") => "application/xml",
+        Some("svg") => "image/svg+xml",
         Some("js") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
         Some("json") => "application/json",
@@ -518,6 +521,10 @@ mod tests {
         for (path, expected) in [
             ("page.html", "text/html"),
             ("page.htm", "text/html"),
+            ("page.xhtml", "application/xhtml+xml"),
+            ("page.xht", "application/xhtml+xml"),
+            ("page.xml", "application/xml"),
+            ("image.svg", "image/svg+xml"),
             ("script.js", "text/javascript; charset=utf-8"),
             ("style.css", "text/css; charset=utf-8"),
             ("data.json", "application/json"),

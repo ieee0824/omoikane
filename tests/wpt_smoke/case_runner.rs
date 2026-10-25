@@ -313,6 +313,21 @@ fn actual_status_with_allowed_exceptions(
     }
 }
 
+fn parse_markup_document(source: &[u8], content_type: Option<&str>) -> Result<NodeHandle, String> {
+    let essence = content_type
+        .unwrap_or("text/html")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(essence.as_str(), "application/xml" | "text/xml") || essence.ends_with("+xml") {
+        return omoikane::xml::parse_with_content_type(source, &essence)
+            .map_err(|error| format!("parse XML WPT document: {error}"));
+    }
+    Ok(TreeBuilder::parse_bytes(source, content_type).document())
+}
+
 pub(super) fn run_case(base_url: &str, path: &str) -> CaseExecution {
     run_case_with_transport(base_url, path, None)
 }
@@ -348,7 +363,17 @@ pub(super) fn run_case_with_transport(
         );
         TreeBuilder::parse(&document_source).document()
     } else {
-        TreeBuilder::parse_bytes(response.body(), response.header("content-type")).document()
+        match parse_markup_document(response.body(), response.header("content-type")) {
+            Ok(document) => document,
+            Err(error) => {
+                return CaseExecution {
+                    actual: ActualStatus::Error,
+                    script_errors: vec![error.clone()],
+                    subtests: serde_json::json!([]),
+                    details: error,
+                };
+            }
+        }
     };
     let timeout = case_timeout(response.body(), &document, javascript);
     let base: Url = url.parse().expect("parse WPT URL");
@@ -447,6 +472,57 @@ pub(super) fn run_case_with_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markup_mime_selects_xml_cdata_and_preserves_html_script_text() {
+        let source = br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><script><![CDATA[globalThis.answer='<tag>&';]]></script></body></html>"#;
+        let xml =
+            parse_markup_document(source, Some("Application/XHTML+XML; charset=UTF-8")).unwrap();
+        let script = xml.query_selector("script").unwrap();
+        assert!(script.child_nodes()[0].is_cdata_section());
+        assert_eq!(
+            script.child_nodes()[0].data().as_deref(),
+            Some("globalThis.answer='<tag>&';")
+        );
+        assert_eq!(
+            xml.document_content_type().as_deref(),
+            Some("application/xhtml+xml")
+        );
+        let html = parse_markup_document(source, Some("text/html")).unwrap();
+        let script = html.query_selector("script").unwrap();
+        assert!(!script.child_nodes()[0].is_cdata_section());
+        assert!(
+            script.child_nodes()[0]
+                .data()
+                .unwrap()
+                .contains("<![CDATA[")
+        );
+    }
+
+    #[test]
+    fn xhtml_cdata_scripts_observe_xml_mime_and_upgrade_definition_state() {
+        let source = br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><x-xml-defined id="candidate"/><script><![CDATA[
+            const candidate=document.getElementById('candidate');
+            globalThis.initiallyUndefined=!candidate.matches(':defined');
+            customElements.define('x-xml-defined',class extends HTMLElement{});
+            globalThis.upgraded=candidate.matches(':defined');
+        ]]></script></body></html>"#;
+        let document = parse_markup_document(source, Some("application/xhtml+xml")).unwrap();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        assert!(runtime.execute_document_scripts(None).is_empty());
+        let observed = runtime
+            .eval("JSON.stringify([document.contentType,initiallyUndefined,upgraded])")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(observed, r#"["application/xhtml+xml",true,true]"#);
+    }
+
+    #[test]
+    fn malformed_xml_is_reported_instead_of_parsed_as_html() {
+        assert!(parse_markup_document(b"<root><child></root>", Some("application/xml")).is_err());
+    }
 
     #[test]
     fn task_driver_runs_rendering_opportunities_before_harness_timeout() {

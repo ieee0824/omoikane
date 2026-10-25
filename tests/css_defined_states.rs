@@ -341,3 +341,27 @@ fn upgrading_media_builtins_preserves_existing_state_during_and_after_super() {
         "ok"
     );
 }
+
+#[test]
+fn xml_namespace_controls_initial_definition_state_and_creation_time_is() {
+    let document = omoikane::xml::parse(br#"<root xmlns:h="http://www.w3.org/1999/xhtml" xmlns:f="http://www.w3.org/2000/svg"><h:x-pending id="pending"/><h:p id="builtin" is="x-p"/><h:font-face id="reserved"/><h:x-Upper id="uppercase"/><f:x-foreign id="foreign"/><x-unqualified id="unqualified"/></root>"#).unwrap();
+    let selector = omoikane::css::parse_selector_list(":defined").unwrap();
+    for (id, expected) in [
+        ("pending", false),
+        ("builtin", false),
+        ("reserved", true),
+        ("uppercase", true),
+        ("foreign", true),
+        ("unqualified", true),
+    ] {
+        let node = document.query_selector(&format!("#{id}")).unwrap();
+        assert_eq!(
+            omoikane::css::matches_selector(&node, &selector[0]),
+            expected,
+            "{id}"
+        );
+    }
+    let builtin = document.query_selector("#builtin").unwrap();
+    builtin.remove_attribute("is");
+    assert!(!omoikane::css::matches_selector(&builtin, &selector[0]));
+}

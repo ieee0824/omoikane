@@ -637,6 +637,11 @@ impl Element {
         self.html
     }
 
+    fn has_html_namespace(&self) -> bool {
+        self.namespace_uri.as_deref() == Some("http://www.w3.org/1999/xhtml")
+            || (self.namespace_uri.is_none() && self.html)
+    }
+
     fn is_html_input(&self) -> bool {
         self.local_name() == "input"
             && (self.namespace_uri.as_deref() == Some("http://www.w3.org/1999/xhtml")
@@ -2411,7 +2416,7 @@ impl NodeHandle {
     /// Retains the creation-time `is` value separately from mutable attributes.
     pub(crate) fn initialize_custom_element_is(&self, value: Option<Vec<u16>>) {
         if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
-            if element.is_html() && value.is_some() {
+            if element.has_html_namespace() && value.is_some() {
                 element.custom_element_defined = Some(false);
             }
             element.custom_element_is = value;
@@ -2438,7 +2443,7 @@ impl NodeHandle {
             return false;
         };
         element.custom_element_defined.unwrap_or_else(|| {
-            !element.is_html() || !custom_element::valid_name(element.local_name())
+            !element.has_html_namespace() || !custom_element::valid_name(element.local_name())
         })
     }
 
