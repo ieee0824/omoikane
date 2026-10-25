@@ -4499,24 +4499,33 @@ export const __omoikane_service_worker_lifecycle = {};
       }
       // Preserve JS UTF-16 code units that Rust UTF-8 strings cannot represent,
       // including CharacterData descendants of a deep clone.
-      const preserveCharacterData = (source, target) => {
+      const preserveClonedState = (source, target) => {
         if (source instanceof CDATASection) {
           Object.setPrototypeOf(target, CDATASection.prototype);
           Object.defineProperty(target, "__cdataSection", { value: true, configurable: true });
           markCanonicalCdata(target);
         }
         if (source instanceof CharacterData) target.textContent = source.textContent;
+        const name = internalNodeLocalName(source);
+        if (hasCanonicalWrapperId(canonicalHtmlElementIds, source) &&
+            (name === "input" || name === "textarea")) {
+          const value = safeWeakMapGet(nodeEventStates, source).__value;
+          if (value !== undefined) {
+            safeWeakMapGet(nodeEventStates, target).__value = value;
+            nativeSetControlValueEmpty(internalNodeId(target), value === "");
+          }
+        }
         if (!deep) return;
         if (source instanceof HTMLTemplateElement) {
-          preserveCharacterData(source.content, target.content);
+          preserveClonedState(source.content, target.content);
         }
         const sourceChildren = source.childNodes;
         const targetChildren = target.childNodes;
         for (let i = 0; i < sourceChildren.length; i++) {
-          preserveCharacterData(sourceChildren[i], targetChildren[i]);
+          preserveClonedState(sourceChildren[i], targetChildren[i]);
         }
       };
-      if (clone) preserveCharacterData(this, clone);
+      if (clone) preserveClonedState(this, clone);
       return clone;
     }
 
@@ -12185,10 +12194,14 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeRegisterValidation = globalThis.__omoikane_register_validation;
   const nativeFlushValidation = globalThis.__omoikane_flush_validation;
   const nativeInvalidateValidation = globalThis.__omoikane_invalidate_validation;
+  const nativeSetControlValueEmpty = globalThis.__omoikane_set_control_value_empty;
+  const nativeSanitizeInputValue = globalThis.__omoikane_sanitize_input_value;
   const nativeValidationTree = globalThis.__omoikane_validation_tree;
   delete globalThis.__omoikane_register_validation;
   delete globalThis.__omoikane_flush_validation;
   delete globalThis.__omoikane_invalidate_validation;
+  delete globalThis.__omoikane_set_control_value_empty;
+  delete globalThis.__omoikane_sanitize_input_value;
   delete globalThis.__omoikane_validation_tree;
   let validationReady = false;
 
@@ -13825,12 +13838,12 @@ export const __omoikane_service_worker_lifecycle = {};
 
   class HTMLInputElement extends HTMLElement {
     get type() {
-      const t = (this.getAttribute("type") || "").toLowerCase();
+      const t = (nativeAttributeValueNS(internalNodeId(this), null, "type") || "").toLowerCase();
       return KNOWN_INPUT_TYPES.has(t) ? t : "text";
     }
     set type(v) {
       const before = this.type;
-      this.setAttribute("type", String(v));
+      this.setAttributeNS(null, "type", String(v));
       if (before === "file" && this.type !== "file") this.__files = undefined;
       if (before !== "file" && this.type === "file") this.__files = new FileList();
     }
@@ -13873,8 +13886,10 @@ export const __omoikane_service_worker_lifecycle = {};
         const files = this.files;
         return files.length ? "C:\\fakepath\\" + files[0].name.split(/[\\/]/).pop() : "";
       }
-      if (this.__value !== undefined) return this.__value;
-      return this.getAttribute("value") || "";
+      const id = internalNodeId(this);
+      const value = this.__value !== undefined ? this.__value : nativeAttributeValueNS(id, null, "value") || "";
+      return nativeSanitizeInputValue(nativeAttributeValueNS(id, null, "type") || "", value,
+        nativeAttributeValueNS(id, null, "multiple") !== null);
     }
     set value(v) {
       if (this.type === "file") {
@@ -13882,15 +13897,17 @@ export const __omoikane_service_worker_lifecycle = {};
         this.files = null;
         return;
       }
-      this.__value = v == null ? "" : String(v);
+      const id = internalNodeId(this);
+      this.__value = nativeSanitizeInputValue(nativeAttributeValueNS(id, null, "type") || "",
+        v == null ? "" : String(v), nativeAttributeValueNS(id, null, "multiple") !== null);
       this.__lastValueChangeWasUser = false;
       setTextControlSelection(this, this.__value.length, this.__value.length, "none");
     }
     get defaultValue() {
-      return this.getAttribute("value") || "";
+      return nativeAttributeValueNS(internalNodeId(this), null, "value") || "";
     }
     set defaultValue(v) {
-      this.setAttribute("value", String(v));
+      this.setAttributeNS(null, "value", String(v));
     }
     get readOnly() { return this.hasAttribute("readonly"); }
     set readOnly(value) {
@@ -13902,10 +13919,10 @@ export const __omoikane_service_worker_lifecycle = {};
       if (value) this.setAttribute("required", "");
       else this.removeAttribute("required");
     }
-    get multiple() { return this.hasAttribute("multiple"); }
+    get multiple() { return nativeAttributeValueNS(internalNodeId(this), null, "multiple") !== null; }
     set multiple(value) {
-      if (value) this.setAttribute("multiple", "");
-      else this.removeAttribute("multiple");
+      if (value) this.setAttributeNS(null, "multiple", "");
+      else this.removeAttributeNS(null, "multiple");
     }
     get pattern() { return this.getAttribute("pattern") || ""; }
     set pattern(value) { this.setAttribute("pattern", String(value)); }
@@ -16502,6 +16519,7 @@ export const __omoikane_service_worker_lifecycle = {};
     namespace,
   ) {
     if (!element) return;
+    inputValueAttributeChanged(element, name, namespace);
     detailsAttributeChanged(element, name, oldValue, newValue, namespace);
     const definition = element.__customElementDefinition;
     if (element.__customElementState === "custom" && definition?.observedAttributes.has(name)) {
@@ -16510,6 +16528,23 @@ export const __omoikane_service_worker_lifecycle = {};
       ]);
     }
     customFormAttributeChanged(element, name, oldValue, newValue, namespace);
+  }
+
+  // Attribute mutation updates internal value state before author callbacks.
+  function inputValueAttributeChanged(element, name, namespace) {
+    if (namespace !== null || (name !== "type" && name !== "multiple") ||
+        !hasCanonicalWrapperId(canonicalHtmlElementIds, element) ||
+        internalNodeLocalName(element) !== "input") return;
+    const state = safeWeakMapGet(nodeEventStates, element);
+    if (state.__value === undefined) return;
+    const id = internalNodeId(element);
+    const kind = nativeAttributeValueNS(id, null, "type") || "";
+    const multiple = nativeAttributeValueNS(id, null, "multiple") !== null;
+    const value = nativeSanitizeInputValue(kind, state.__value, multiple);
+    if (value !== state.__value) {
+      state.__value = value;
+      nativeSetControlValueEmpty(id, value === "");
+    }
   }
 
   function customElementTreeWalk(root, callback) {
@@ -16887,7 +16922,9 @@ export const __omoikane_service_worker_lifecycle = {};
         const state = safeWeakMapGet(nodeEventStates, this);
         const changed = state[name] !== value;
         state[name] = value;
-        if (changed && ["__value", "__customValidityMessage", "__lastValueChangeWasUser", "__files"].includes(name)) {
+        if (changed && name === "__value") {
+          nativeSetControlValueEmpty(internalNodeId(this), value === undefined ? undefined : value === "");
+        } else if (changed && ["__customValidityMessage", "__lastValueChangeWasUser", "__files"].includes(name)) {
           nativeInvalidateValidation(internalNodeId(this));
         }
       },

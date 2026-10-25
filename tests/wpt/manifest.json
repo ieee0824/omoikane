@@ -179,6 +179,7 @@
     { "path": "css/selectors/nth-last-child-invalid.html" },
     { "path": "css/selectors/invalidation/nth-child-whole-subtree.html" },
     { "path": "html/semantics/selectors/pseudo-classes/required-optional.html" },
+    { "path": "html/semantics/selectors/pseudo-classes/placeholder-shown-type-change.html" },
     { "path": "css/selectors/has-matches-to-uninserted-elements.html" },
     { "path": "css/selectors/invalidation/any-link-pseudo.html" },
     { "path": "css/selectors/invalidation/target-pseudo-in-has.html" },

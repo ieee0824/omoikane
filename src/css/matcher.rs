@@ -803,6 +803,7 @@ fn matches_pseudo_class(
         "checked" => node.checked(),
         "required" => form_state::requiredness(node) == Some(true),
         "optional" => form_state::requiredness(node) == Some(false),
+        "placeholder-shown" => form_state::placeholder_shown(node),
         "valid" => pseudo.is_none() && node.css_validity() == Some(true),
         "invalid" => pseudo.is_none() && node.css_validity() == Some(false),
         "any-link" => is_html_hyperlink(node),

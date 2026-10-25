@@ -10,6 +10,7 @@ use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 mod children;
+pub(crate) mod input_value;
 mod string;
 pub(crate) use string::DomString;
 
@@ -420,6 +421,8 @@ pub struct Element {
     script_source_position: Option<(u32, u32)>,
     script_force_async: bool,
     css_validity: Option<bool>,
+    /// Emptiness of a dirty control value held by JavaScript; None uses DOM defaults.
+    control_dirty_value_empty: Option<bool>,
     /// Dynamic selector state shared by style resolution and DOM queries.
     user_action_state: u8,
     parser_form_owner: Option<ParserFormOwner>,
@@ -521,6 +524,7 @@ impl Element {
             script_source_position: None,
             script_force_async: true,
             css_validity: None,
+            control_dirty_value_empty: None,
             user_action_state: 0,
             parser_form_owner: None,
             text_control_state: None,
@@ -568,6 +572,7 @@ impl Element {
             script_source_position: None,
             script_force_async: true,
             css_validity: None,
+            control_dirty_value_empty: None,
             user_action_state: 0,
             parser_form_owner: None,
             text_control_state: None,
@@ -2169,6 +2174,21 @@ impl NodeHandle {
         match &self.0.borrow().data {
             NodeData::Element(element) => element.css_validity,
             _ => None,
+        }
+    }
+
+    /// Returns dirty-value emptiness without copying the JavaScript UTF-16 value.
+    pub(crate) fn control_dirty_value_empty(&self) -> Option<bool> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.control_dirty_value_empty,
+            _ => None,
+        }
+    }
+
+    /// Updates dirty-value metadata. The caller must invalidate cached styles.
+    pub(crate) fn set_control_dirty_value_empty(&self, empty: Option<bool>) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.control_dirty_value_empty = empty;
         }
     }
 
