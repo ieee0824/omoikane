@@ -1477,6 +1477,7 @@ export const __omoikane_service_worker_lifecycle = {};
     const htmlElement = namespace === HTML_NAMESPACE || nativeNodeIsHtmlElement(id);
     const constructors = namespace === SVG_NAMESPACE
       ? SVG_ELEMENT_CTORS
+      : namespace === MATHML_NAMESPACE ? MATHML_ELEMENT_CTORS
       : htmlElement ? ELEMENT_CTORS : {};
     const localName = nativeNodeLocalName(id) || nativeNodeName(id) || "";
     const normalizedLocalName = asciiLowercase(localName);
@@ -1487,6 +1488,7 @@ export const __omoikane_service_worker_lifecycle = {};
         !isValidCustomElementName(localName)) return HTMLUnknownElement;
     return ctor || (namespace === SVG_NAMESPACE
       ? SVGElement
+      : namespace === MATHML_NAMESPACE ? MathMLElement
       : htmlElement ? HTMLElement : Element);
   }
 
@@ -12507,6 +12509,280 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
+  function specialElementConstructor(ctor, args) {
+    return [
+      args[0], htmlConstructorInterfaceToken,
+      args[1] === htmlConstructorInterfaceToken ? args[2] : ctor,
+    ];
+  }
+
+  function reflectedFiniteDouble(element, name, fallback) {
+    const raw = element.getAttribute(name);
+    const token = raw === null ? "" : raw.trim();
+    if (!/^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(token)) return fallback;
+    const value = Number(token);
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  function setReflectedFiniteDouble(element, name, value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) throw new TypeError(name + " must be a finite number");
+    element.setAttribute(name, String(number));
+  }
+
+  function reflectedUnsignedLong(element, name) {
+    const raw = element.getAttribute(name);
+    const match = raw === null ? null : /^[ \t\n\f\r]*\+?([0-9]+)/.exec(raw);
+    const value = match ? Number(match[1]) : NaN;
+    return Number.isFinite(value) && value <= 2147483647 ? value : 0;
+  }
+
+  function setReflectedUnsignedLong(element, name, value) {
+    const number = Number(value);
+    const integer = Number.isFinite(number) ? Math.trunc(number) : 0;
+    const converted = ((integer % 4294967296) + 4294967296) % 4294967296;
+    element.setAttribute(name, String(converted <= 2147483647 ? converted : 0));
+  }
+
+  function reflectedUrl(element, name) {
+    const value = element.getAttribute(name);
+    return value === null ? "" : __omoikane_resolve_url(value);
+  }
+
+  function scalarValueString(value) {
+    const input = String(value);
+    let result = "";
+    for (let index = 0; index < input.length; index += 1) {
+      const code = stringCharCodeAt(input, index);
+      if (code >= 0xd800 && code <= 0xdbff && index + 1 < input.length) {
+        const next = stringCharCodeAt(input, index + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          result += input[index] + input[index + 1];
+          index += 1;
+          continue;
+        }
+      }
+      result += code >= 0xd800 && code <= 0xdfff ? "\ufffd" : input[index];
+    }
+    return result;
+  }
+
+  const specialElementCollections = new WeakMap();
+  function specialElementCollection(element, name, create) {
+    let collections = specialElementCollections.get(element);
+    if (!collections) {
+      collections = {};
+      specialElementCollections.set(element, collections);
+    }
+    return collections[name] || (collections[name] = create());
+  }
+
+  class HTMLMeterElement extends HTMLElement {
+    constructor(...args) { super(...specialElementConstructor(HTMLMeterElement, args)); }
+    get min() { return reflectedFiniteDouble(this, "min", 0); }
+    set min(value) { setReflectedFiniteDouble(this, "min", value); }
+    get max() { return Math.max(reflectedFiniteDouble(this, "max", 1), this.min); }
+    set max(value) { setReflectedFiniteDouble(this, "max", value); }
+    get value() {
+      return Math.min(Math.max(reflectedFiniteDouble(this, "value", 0), this.min), this.max);
+    }
+    set value(value) { setReflectedFiniteDouble(this, "value", value); }
+    get low() { return Math.min(Math.max(reflectedFiniteDouble(this, "low", this.min), this.min), this.max); }
+    set low(value) { setReflectedFiniteDouble(this, "low", value); }
+    get high() { return Math.min(Math.max(reflectedFiniteDouble(this, "high", this.max), this.low), this.max); }
+    set high(value) { setReflectedFiniteDouble(this, "high", value); }
+    get optimum() {
+      const fallback = this.min + (this.max - this.min) / 2;
+      return Math.min(Math.max(reflectedFiniteDouble(this, "optimum", fallback), this.min), this.max);
+    }
+    set optimum(value) { setReflectedFiniteDouble(this, "optimum", value); }
+    get labels() {
+      return specialElementCollection(this, "labels", () => makeLiveNodeList(() => labelsFor(this)));
+    }
+  }
+
+  class HTMLProgressElement extends HTMLElement {
+    constructor(...args) { super(...specialElementConstructor(HTMLProgressElement, args)); }
+    get max() {
+      const value = reflectedFiniteDouble(this, "max", 1);
+      return value > 0 ? value : 1;
+    }
+    set max(value) { setReflectedFiniteDouble(this, "max", value); }
+    get value() {
+      return Math.min(Math.max(reflectedFiniteDouble(this, "value", 0), 0), this.max);
+    }
+    set value(value) { setReflectedFiniteDouble(this, "value", value); }
+    get position() { return this.hasAttribute("value") ? this.value / this.max : -1; }
+    get labels() {
+      return specialElementCollection(this, "labels", () => makeLiveNodeList(() => labelsFor(this)));
+    }
+  }
+
+  class HTMLPictureElement extends HTMLElement {
+    constructor(...args) { super(...specialElementConstructor(HTMLPictureElement, args)); }
+  }
+
+  class HTMLSourceElement extends HTMLElement {
+    constructor(...args) { super(...specialElementConstructor(HTMLSourceElement, args)); }
+    get src() { return reflectedUrl(this, "src"); }
+    set src(value) { this.setAttribute("src", scalarValueString(value)); }
+    get type() { return this.getAttribute("type") || ""; }
+    set type(value) { this.setAttribute("type", String(value)); }
+    get srcset() { return this.getAttribute("srcset") || ""; }
+    set srcset(value) { this.setAttribute("srcset", scalarValueString(value)); }
+    get sizes() { return this.getAttribute("sizes") || ""; }
+    set sizes(value) { this.setAttribute("sizes", String(value)); }
+    get media() { return this.getAttribute("media") || ""; }
+    set media(value) { this.setAttribute("media", String(value)); }
+    get width() { return reflectedUnsignedLong(this, "width"); }
+    set width(value) { setReflectedUnsignedLong(this, "width", value); }
+    get height() { return reflectedUnsignedLong(this, "height"); }
+    set height(value) { setReflectedUnsignedLong(this, "height", value); }
+  }
+
+  class HTMLTrackElement extends HTMLElement {
+    constructor(...args) { super(...specialElementConstructor(HTMLTrackElement, args)); }
+    get kind() {
+      const value = this.getAttribute("kind");
+      if (value === null) return "subtitles";
+      const keyword = asciiLowercase(value);
+      return ["subtitles", "captions", "descriptions", "chapters", "metadata"].includes(keyword)
+        ? keyword : "metadata";
+    }
+    set kind(value) { this.setAttribute("kind", String(value)); }
+    get src() { return reflectedUrl(this, "src"); }
+    set src(value) { this.setAttribute("src", scalarValueString(value)); }
+    get srclang() { return this.getAttribute("srclang") || ""; }
+    set srclang(value) { this.setAttribute("srclang", String(value)); }
+    get label() { return this.getAttribute("label") || ""; }
+    set label(value) { this.setAttribute("label", String(value)); }
+    get default() { return this.hasAttribute("default"); }
+    set default(value) { value ? this.setAttribute("default", "") : this.removeAttribute("default"); }
+    get readyState() { return HTMLTrackElement.NONE; }
+    get track() { return null; }
+  }
+  for (const [name, value] of [["NONE", 0], ["LOADING", 1], ["LOADED", 2], ["ERROR", 3]]) {
+    Object.defineProperty(HTMLTrackElement, name, { enumerable: true, value });
+    Object.defineProperty(HTMLTrackElement.prototype, name, { enumerable: true, value });
+  }
+
+  class HTMLDataListElement extends HTMLElement {
+    constructor(...args) { super(...specialElementConstructor(HTMLDataListElement, args)); }
+    get options() {
+      return specialElementCollection(this, "options", () => makeHTMLCollection(() =>
+        collectElements(this, element =>
+          element.namespaceURI === HTML_NAMESPACE && element.localName === "option")));
+    }
+  }
+
+  class HTMLMapElement extends HTMLElement {
+    constructor(...args) { super(...specialElementConstructor(HTMLMapElement, args)); }
+    get name() { return this.getAttribute("name") || ""; }
+    set name(value) { this.setAttribute("name", String(value)); }
+    get areas() {
+      return specialElementCollection(this, "areas", () => makeHTMLCollection(() =>
+        collectElements(this, element =>
+          element.namespaceURI === HTML_NAMESPACE && element.localName === "area")));
+    }
+  }
+
+  class HTMLEmbedElement extends HTMLElement {
+    constructor(...args) { super(...specialElementConstructor(HTMLEmbedElement, args)); }
+    get src() { return reflectedUrl(this, "src"); }
+    set src(value) { this.setAttribute("src", scalarValueString(value)); }
+    get type() { return this.getAttribute("type") || ""; }
+    set type(value) { this.setAttribute("type", String(value)); }
+    get width() { return this.getAttribute("width") || ""; }
+    set width(value) { this.setAttribute("width", String(value)); }
+    get height() { return this.getAttribute("height") || ""; }
+    set height(value) { this.setAttribute("height", String(value)); }
+    get align() { return this.getAttribute("align") || ""; }
+    set align(value) { this.setAttribute("align", String(value)); }
+    get name() { return this.getAttribute("name") || ""; }
+    set name(value) { this.setAttribute("name", String(value)); }
+    getSVGDocument() { return null; }
+  }
+
+  class MathMLElement extends Element {
+    constructor(id = undefined) {
+      super(id);
+      if (id === undefined) throw new TypeError("Illegal constructor");
+    }
+    get nonce() { return this.getAttribute("nonce") || ""; }
+    set nonce(value) { this.setAttribute("nonce", String(value)); }
+    get autofocus() { return this.hasAttribute("autofocus"); }
+    set autofocus(value) {
+      if (value) this.setAttribute("autofocus", "");
+      else this.removeAttribute("autofocus");
+    }
+  }
+
+  class MathMLAnchorElement extends MathMLElement {
+    get href() { return reflectedUrl(this, "href"); }
+    set href(value) { this.setAttribute("href", scalarValueString(value)); }
+    get target() { return this.getAttribute("target") || ""; }
+    set target(value) { this.setAttribute("target", String(value)); }
+  }
+
+  for (const name of ["focus", "blur", "tabIndex"]) {
+    Object.defineProperty(MathMLElement.prototype, name,
+      Object.getOwnPropertyDescriptor(HTMLElement.prototype, name));
+  }
+
+  for (const [ctor, names] of [
+    [HTMLMeterElement, ["value", "min", "max", "low", "high", "optimum", "labels"]],
+    [HTMLProgressElement, ["value", "max", "position", "labels"]],
+    [HTMLSourceElement, ["src", "type", "srcset", "sizes", "media", "width", "height"]],
+    [HTMLTrackElement, ["kind", "src", "srclang", "label", "default", "readyState", "track"]],
+    [HTMLDataListElement, ["options"]],
+    [HTMLMapElement, ["name", "areas"]],
+    [HTMLEmbedElement, ["src", "type", "width", "height", "getSVGDocument", "align", "name"]],
+    [MathMLElement, ["nonce", "autofocus", "focus", "blur", "tabIndex"]],
+    [MathMLAnchorElement, ["href", "target"]],
+  ]) {
+    for (const name of names) {
+      const descriptor = Object.getOwnPropertyDescriptor(ctor.prototype, name);
+      const requireReceiver = receiver => {
+        if (!(receiver instanceof ctor)) throw new TypeError("Illegal invocation");
+      };
+      const exposed = { ...descriptor, enumerable: true };
+      if (descriptor.get) {
+        exposed.get = function() {
+          requireReceiver(this);
+          return descriptor.get.call(this);
+        };
+        Object.defineProperty(exposed.get, "name", {
+          configurable: true, value: "get " + name,
+        });
+      }
+      if (descriptor.set) {
+        exposed.set = function(value) {
+          requireReceiver(this);
+          return descriptor.set.call(this, value);
+        };
+        Object.defineProperty(exposed.set, "name", {
+          configurable: true, value: "set " + name,
+        });
+      }
+      if (typeof descriptor.value === "function") {
+        exposed.value = function(...args) {
+          requireReceiver(this);
+          return descriptor.value.apply(this, args);
+        };
+        Object.defineProperty(exposed.value, "name", {
+          configurable: true, value: name,
+        });
+      }
+      Object.defineProperty(ctor.prototype, name, exposed);
+    }
+    Object.defineProperty(ctor.prototype, Symbol.toStringTag, {
+      configurable: true, value: ctor.name,
+    });
+  }
+  Object.defineProperty(HTMLPictureElement.prototype, Symbol.toStringTag, {
+    configurable: true, value: "HTMLPictureElement",
+  });
+
   for (const [name, value] of [
     ["HAVE_NOTHING", MEDIA_HAVE_NOTHING], ["HAVE_METADATA", MEDIA_HAVE_METADATA],
     ["HAVE_CURRENT_DATA", MEDIA_HAVE_CURRENT_DATA], ["HAVE_FUTURE_DATA", MEDIA_HAVE_FUTURE_DATA],
@@ -17666,9 +17942,25 @@ export const __omoikane_service_worker_lifecycle = {};
 
   // HTMLOrSVGElement and ElementCSSInlineStyle are shared by HTML and SVG
   // elements, but not by arbitrary Node objects.
-  distributePrototypeMembers(Node.prototype, [HTMLElement.prototype, SVGElement.prototype], [
+  distributePrototypeMembers(Node.prototype, [
+    HTMLElement.prototype, SVGElement.prototype, MathMLElement.prototype,
+  ], [
     "dataset", "style",
   ]);
+  const mathStyleDescriptor = Object.getOwnPropertyDescriptor(MathMLElement.prototype, "style");
+  const mathStyleCache = new WeakMap();
+  Object.defineProperty(MathMLElement.prototype, "style", {
+    configurable: mathStyleDescriptor.configurable,
+    enumerable: true,
+    get() {
+      if (!mathStyleCache.has(this)) mathStyleCache.set(this, mathStyleDescriptor.get.call(this));
+      return mathStyleCache.get(this);
+    },
+    set: mathStyleDescriptor.set,
+  });
+  Object.defineProperty(MathMLElement.prototype, "dataset", {
+    ...Object.getOwnPropertyDescriptor(MathMLElement.prototype, "dataset"), enumerable: true,
+  });
 
   // Form-control state belongs to the corresponding HTML interfaces. Keep the
   // existing implementation descriptors while removing them from Node.
@@ -17719,6 +18011,8 @@ export const __omoikane_service_worker_lifecycle = {};
     textpath: SVGTextPathElement,
   };
 
+  const MATHML_ELEMENT_CTORS = { a: MathMLAnchorElement };
+
   // Tag-name → constructor table consulted by wrapNode() for element nodes.
   const ELEMENT_CTORS = {
     html: HTMLHtmlElement,
@@ -17761,6 +18055,14 @@ export const __omoikane_service_worker_lifecycle = {};
     slot: HTMLSlotElement,
     dialog: HTMLDialogElement,
     details: HTMLDetailsElement,
+    meter: HTMLMeterElement,
+    progress: HTMLProgressElement,
+    picture: HTMLPictureElement,
+    source: HTMLSourceElement,
+    track: HTMLTrackElement,
+    datalist: HTMLDataListElement,
+    map: HTMLMapElement,
+    embed: HTMLEmbedElement,
   };
 
   // HTML elements with an HTMLElement-derived interface, including obsolete
@@ -18633,6 +18935,18 @@ export const __omoikane_service_worker_lifecycle = {};
   globalThis.HTMLStyleElement = HTMLStyleElement;
   globalThis.HTMLTemplateElement = HTMLTemplateElement;
   globalThis.HTMLSlotElement = HTMLSlotElement;
+  for (const [name, ctor] of [
+    ["HTMLMeterElement", HTMLMeterElement], ["HTMLProgressElement", HTMLProgressElement],
+    ["HTMLPictureElement", HTMLPictureElement], ["HTMLSourceElement", HTMLSourceElement],
+    ["HTMLTrackElement", HTMLTrackElement], ["HTMLDataListElement", HTMLDataListElement],
+    ["HTMLMapElement", HTMLMapElement], ["HTMLEmbedElement", HTMLEmbedElement],
+    ["MathMLElement", MathMLElement],
+    ["MathMLAnchorElement", MathMLAnchorElement],
+  ]) {
+    Object.defineProperty(globalThis, name, {
+      configurable: true, writable: true, value: ctor,
+    });
+  }
   globalThis.CharacterData = CharacterData;
   globalThis.Text = Text;
   globalThis.CDATASection = CDATASection;

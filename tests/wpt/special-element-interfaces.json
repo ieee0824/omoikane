@@ -1,0 +1,10 @@
+{
+  "tests": [
+    {
+      "path": "html/dom/idlharness.https.html?include=(HTMLMeterElement|HTMLProgressElement|HTMLPictureElement|HTMLSourceElement|HTMLTrackElement|HTMLDataListElement|HTMLMapElement|HTMLEmbedElement|MathMLElement)"
+    },
+    {
+      "path": "mathml/idlharness.window.js"
+    }
+  ]
+}
