@@ -461,6 +461,8 @@ pub struct Element {
     shadow_root: Option<NodeHandle>,
     /// Whether this element is an open HTML popover.
     popover_open: bool,
+    /// Whether this form control currently presents its picker UI.
+    picker_open: bool,
     /// Whether this element is an open modal dialog.
     modal_dialog: bool,
     /// Whether this element participates in the active fullscreen chain.
@@ -553,6 +555,7 @@ impl Element {
             template_content,
             shadow_root: None,
             popover_open: false,
+            picker_open: false,
             modal_dialog: false,
             fullscreen: false,
             top_layer_order: None,
@@ -607,6 +610,7 @@ impl Element {
             template_content,
             shadow_root: None,
             popover_open: false,
+            picker_open: false,
             modal_dialog: false,
             fullscreen: false,
             top_layer_order: None,
@@ -2183,6 +2187,29 @@ impl NodeHandle {
         matches!(&self.0.borrow().data, NodeData::Element(element) if element.popover_open)
     }
 
+    /// Returns whether this form control currently presents its picker UI.
+    pub(crate) fn is_picker_open(&self) -> bool {
+        matches!(&self.0.borrow().data, NodeData::Element(element) if element.picker_open)
+    }
+
+    /// Updates picker presentation state for HTML input and select controls.
+    /// The caller invalidates dependent styles when the state changes.
+    pub(crate) fn set_picker_open(&self, open: bool) -> bool {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut inner.data else {
+            return false;
+        };
+        if !(element.html
+            || element.namespace_uri.as_deref() == Some("http://www.w3.org/1999/xhtml"))
+            || !matches!(element.local_name(), "input" | "select")
+            || element.picker_open == open
+        {
+            return false;
+        }
+        element.picker_open = open;
+        true
+    }
+
     /// Returns whether this element is an open modal dialog.
     pub(crate) fn is_modal_dialog(&self) -> bool {
         matches!(&self.0.borrow().data, NodeData::Element(element) if element.modal_dialog)
@@ -2967,6 +2994,7 @@ fn clear_scroll_offsets(node: &NodeHandle) {
 /// Removes a detached subtree from the top layer.
 fn clear_top_layer_state(node: &NodeHandle) {
     node.set_popover_open(false);
+    node.set_picker_open(false);
     node.set_modal_dialog(false);
     node.set_fullscreen(false);
     if let Some(content) = node.template_content() {

@@ -313,6 +313,7 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         | "fullscreen"
                         | "popover-open"
                         | "modal"
+                        | "open"
                         | "before"
                         | "after"
                 );
@@ -1382,6 +1383,7 @@ impl Parser {
             || name.eq_ignore_ascii_case("in-range")
             || name.eq_ignore_ascii_case("out-of-range")
             || name.eq_ignore_ascii_case("defined")
+            || name.eq_ignore_ascii_case("open")
         {
             return Err(CssParseError::InvalidSelector);
         }
