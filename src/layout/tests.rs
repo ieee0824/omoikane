@@ -3501,6 +3501,22 @@ fn form_control_fragments(container: &LayoutBox) -> Vec<(Rect, String)> {
     fragments
 }
 
+fn value_indicator_fragments(container: &LayoutBox) -> Vec<(Rect, ValueIndicatorPaintState)> {
+    let mut fragments: Vec<_> = container
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .filter_map(|fragment| match fragment.content {
+            InlineFragmentContent::ValueIndicator(_, state) => Some((fragment.rect, state)),
+            _ => None,
+        })
+        .collect();
+    for child in &container.children {
+        fragments.extend(value_indicator_fragments(child));
+    }
+    fragments
+}
+
 fn layout_single_control_container(body: &NodeHandle) -> LayoutBox {
     let mut resolver = StyleResolver::new();
     layout_control_container(body, &mut resolver)
@@ -3811,8 +3827,17 @@ fn picture_skips_unsupported_types_and_selects_density_candidates() {
 }
 
 #[test]
-fn progress_and_meter_create_placeholder_fragments() {
-    for tag in ["progress", "meter"] {
+fn progress_and_meter_create_native_indicator_fragments() {
+    for (tag, expected) in [
+        ("progress", ValueIndicatorPaintState::Progress(None)),
+        (
+            "meter",
+            ValueIndicatorPaintState::Meter {
+                fraction: 0.0,
+                region: MeterRegion::Optimum,
+            },
+        ),
+    ] {
         let body = NodeHandle::element("body");
         let container = NodeHandle::element("div");
         let indicator = NodeHandle::element(tag);
@@ -3820,12 +3845,49 @@ fn progress_and_meter_create_placeholder_fragments() {
         body.append_child(container);
 
         let layout = layout_single_control_container(&body);
-        let fragments = form_control_fragments(&layout);
-        assert_eq!(fragments.len(), 1, "{tag} should create one placeholder");
+        let fragments = value_indicator_fragments(&layout);
+        assert_eq!(fragments.len(), 1, "{tag} should create one indicator");
         assert_eq!(fragments[0].0.width, 162.0);
         assert_eq!(fragments[0].0.height, 18.0);
-        assert!(fragments[0].1.is_empty());
+        assert_eq!(fragments[0].1, expected);
     }
+}
+
+#[test]
+fn value_indicators_normalize_attributes_for_native_paint() {
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let progress = NodeHandle::element("progress");
+    progress.set_attribute("max", "8");
+    progress.set_attribute("value", "3");
+    let meter = NodeHandle::element("meter");
+    for (name, value) in [
+        ("min", "0"),
+        ("max", "10"),
+        ("low", "3"),
+        ("high", "7"),
+        ("optimum", "1"),
+        ("value", "9"),
+    ] {
+        meter.set_attribute(name, value);
+    }
+    container.append_child(progress);
+    container.append_child(meter);
+    body.append_child(container);
+
+    let fragments = value_indicator_fragments(&layout_single_control_container(&body));
+    assert_eq!(fragments.len(), 2);
+    assert_eq!(
+        fragments[0].1,
+        ValueIndicatorPaintState::Progress(Some(0.375))
+    );
+    assert_eq!(
+        fragments[1].1,
+        ValueIndicatorPaintState::Meter {
+            fraction: 0.9,
+            region: MeterRegion::EvenLessGood,
+        }
+    );
 }
 
 #[test]

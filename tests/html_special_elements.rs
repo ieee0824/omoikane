@@ -88,6 +88,8 @@ fn meter_and_progress_normalize_reflected_numeric_state_and_labels() {
             meter.labels !== meter.labels || meter.labels[0] !== label) return false;
         meter.setAttribute('max', '');
         if (meter.max !== 1) return false;
+        meter.setAttribute('value', '+0.25');
+        if (meter.value !== 0.25) return false;
         meter.min = 10; meter.max = 20; meter.value = 30;
         meter.low = 8; meter.high = 14; meter.optimum = 25;
         if (meter.value !== 20 || meter.low !== 10 || meter.high !== 14 ||
@@ -100,6 +102,10 @@ fn meter_and_progress_normalize_reflected_numeric_state_and_labels() {
             progress.labels !== progress.labels || progress.labels[0] !== progressLabel) return false;
         progress.max = 4; progress.value = 5;
         if (progress.value !== 4 || progress.position !== 1) return false;
+        progress.max = 0;
+        if (progress.max !== 4 || progress.getAttribute('max') !== '4') return false;
+        progress.max = -1;
+        if (progress.max !== 4 || progress.getAttribute('max') !== '4') return false;
         progress.removeAttribute('value');
         return progress.position === -1;
       })()"#,

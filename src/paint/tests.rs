@@ -16,6 +16,80 @@ use crate::test_support::http_fixture::{
     read_request_headers,
 };
 
+fn render_value_indicator(markup: &str) -> (Canvas, Rect) {
+    let html = format!(
+        "<style>html,body{{margin:0}} progress,meter{{width:90px;height:10px;padding:0;border:0}}</style>{markup}"
+    );
+    let document = TreeBuilder::parse(&html).document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 120.0,
+        height: 40.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    fn indicator_rect(layout: &crate::layout::LayoutBox) -> Option<Rect> {
+        layout
+            .lines
+            .iter()
+            .flat_map(|line| &line.fragments)
+            .find_map(|fragment| {
+                matches!(
+                    fragment.content,
+                    crate::layout::InlineFragmentContent::ValueIndicator(..)
+                )
+                .then_some(fragment.rect)
+            })
+            .or_else(|| layout.children.iter().find_map(indicator_rect))
+    }
+    let rect = indicator_rect(&layout).expect("value indicator fragment");
+    (paint_layout(&layout, &mut resolver, viewport), rect)
+}
+
+#[test]
+fn native_progress_paints_determinate_and_indeterminate_states() {
+    let (determinate, rect) = render_value_indicator("<progress max=4 value=2></progress>");
+    let y = (rect.y + rect.height / 2.0) as u32;
+    assert_eq!(
+        determinate.pixel((rect.x + 10.0) as u32, y),
+        Some(Color::rgb(0, 117, 255))
+    );
+    assert_eq!(
+        determinate.pixel((rect.x + 80.0) as u32, y),
+        Some(Color::rgb(190, 190, 190))
+    );
+
+    let (indeterminate, rect) = render_value_indicator("<progress></progress>");
+    let y = (rect.y + rect.height / 2.0) as u32;
+    assert_eq!(
+        indeterminate.pixel((rect.x + 45.0) as u32, y),
+        Some(Color::rgb(0, 117, 255))
+    );
+    assert_eq!(
+        indeterminate.pixel((rect.x + 10.0) as u32, y),
+        Some(Color::rgb(190, 190, 190))
+    );
+}
+
+#[test]
+fn native_meter_paints_qualitative_regions() {
+    for (value, expected) in [
+        (1, Color::rgb(0, 160, 70)),
+        (5, Color::rgb(235, 170, 0)),
+        (9, Color::rgb(210, 55, 45)),
+    ] {
+        let markup = format!("<meter min=0 max=10 low=3 high=7 optimum=1 value={value}></meter>");
+        let (canvas, rect) = render_value_indicator(&markup);
+        let x = (rect.x + (value as f32 * 4.0).max(3.0)) as u32;
+        let y = (rect.y + rect.height / 2.0) as u32;
+        assert_eq!(canvas.pixel(x, y), Some(expected), "value={value}");
+    }
+}
+
 #[test]
 fn opaque_fill_repeats_only_the_clipped_rows_and_columns() {
     let mut canvas = Canvas::new(7, 4);
