@@ -467,6 +467,8 @@ pub struct Element {
     modal_dialog: bool,
     /// Whether this element participates in the active fullscreen chain.
     fullscreen: bool,
+    /// Dynamic HTML media state exposed to CSS pseudo-class matching.
+    media_selector_state: Option<u8>,
     /// Stable ordering among elements currently rendered in the top layer.
     top_layer_order: Option<u64>,
 }
@@ -480,6 +482,11 @@ struct ParserFormOwner {
     owner_id: usize,
     ancestry: Vec<(usize, u64)>,
     owner_ancestry: Vec<(usize, u64)>,
+}
+
+fn is_html_media_element(element: &Element) -> bool {
+    (element.html || element.namespace_uri.as_deref() == Some("http://www.w3.org/1999/xhtml"))
+        && matches!(element.local_name(), "audio" | "video")
 }
 
 impl PartialEq for ParserFormOwner {
@@ -525,6 +532,7 @@ impl Element {
     pub fn new(tag_name: impl Into<String>) -> Self {
         let tag_name = tag_name.into().to_ascii_lowercase();
         let template_content = (tag_name == "template").then(NodeHandle::document_fragment);
+        let media_selector_state = matches!(tag_name.as_str(), "audio" | "video").then_some(1);
         Self {
             tag_name,
             namespace_uri: None,
@@ -558,6 +566,7 @@ impl Element {
             picker_open: false,
             modal_dialog: false,
             fullscreen: false,
+            media_selector_state,
             top_layer_order: None,
         }
     }
@@ -580,6 +589,10 @@ impl Element {
     ) -> Self {
         let template_content = (html && local_name.eq_ignore_ascii_case("template"))
             .then(NodeHandle::document_fragment);
+        let media_selector_state = ((html
+            || namespace_uri.as_deref() == Some("http://www.w3.org/1999/xhtml"))
+            && matches!(local_name.as_str(), "audio" | "video"))
+        .then_some(1);
         Self {
             tag_name,
             namespace_uri,
@@ -613,6 +626,7 @@ impl Element {
             picker_open: false,
             modal_dialog: false,
             fullscreen: false,
+            media_selector_state,
             top_layer_order: None,
         }
     }
@@ -2207,6 +2221,46 @@ impl NodeHandle {
             return false;
         }
         element.picker_open = open;
+        true
+    }
+
+    /// Returns whether an HTML media element has the requested selector state.
+    pub(crate) fn has_media_selector_state(&self, name: &str) -> bool {
+        let bit = match name {
+            "paused" => 1,
+            "seeking" => 2,
+            "buffering" => 4,
+            "muted" => 8,
+            "volume-locked" => 16,
+            "picture-in-picture" => 32,
+            "playing" => {
+                return matches!(
+                    &self.0.borrow().data,
+                    NodeData::Element(element)
+                        if is_html_media_element(element)
+                            && element.media_selector_state.is_some_and(|state| state & 1 == 0)
+                );
+            }
+            _ => return false,
+        };
+        matches!(
+            &self.0.borrow().data,
+            NodeData::Element(element)
+                if is_html_media_element(element)
+                    && element.media_selector_state.is_some_and(|state| state & bit != 0)
+        )
+    }
+
+    /// Replaces the live media selector flags. The caller invalidates styles.
+    pub(crate) fn set_media_selector_state(&self, state: u8) -> bool {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut inner.data else {
+            return false;
+        };
+        if !is_html_media_element(element) || element.media_selector_state == Some(state) {
+            return false;
+        }
+        element.media_selector_state = Some(state);
         true
     }
 

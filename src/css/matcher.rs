@@ -841,6 +841,8 @@ fn matches_pseudo_class(
         "modal" => pseudo.is_none() && node.is_modal_dialog(),
         "fullscreen" => pseudo.is_none() && node.is_fullscreen(),
         "open" => pseudo.is_none() && matches_open_state(node),
+        "playing" | "paused" | "seeking" | "buffering" | "muted" | "volume-locked"
+        | "picture-in-picture" => pseudo.is_none() && node.has_media_selector_state(&name),
         "hover" | "active" | "focus" | "focus-visible" | "focus-within" => {
             pseudo.is_none() && node.has_user_action_state(&name)
         }
