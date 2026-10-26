@@ -64,6 +64,7 @@ mod console_trace;
 mod cssom_normalization;
 mod custom_states;
 mod dom_removal_trace;
+mod editability;
 mod frame_diagnostics;
 mod language;
 mod layout_structure;
@@ -17501,6 +17502,16 @@ fn register_host_bindings(
             js_string!("__omoikane_update_custom_state"),
             3,
             NativeFunction::from_copy_closure(custom_states::update_native),
+        ),
+        (
+            js_string!("__omoikane_editability"),
+            2,
+            NativeFunction::from_copy_closure(editability::query_native),
+        ),
+        (
+            js_string!("__omoikane_document_design_mode"),
+            2,
+            NativeFunction::from_copy_closure(editability::document_mode_native),
         ),
         (
             js_string!("__omoikane_set_custom_element_defined"),

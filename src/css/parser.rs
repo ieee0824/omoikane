@@ -298,6 +298,8 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         | "required"
                         | "optional"
                         | "placeholder-shown"
+                        | "read-only"
+                        | "read-write"
                         | "in-range"
                         | "out-of-range"
                         | "defined"
@@ -323,6 +325,8 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         "required"
                             | "optional"
                             | "placeholder-shown"
+                            | "read-only"
+                            | "read-write"
                             | "default"
                             | "indeterminate"
                             | "in-range"
@@ -1367,6 +1371,8 @@ impl Parser {
             || name.eq_ignore_ascii_case("required")
             || name.eq_ignore_ascii_case("optional")
             || name.eq_ignore_ascii_case("placeholder-shown")
+            || name.eq_ignore_ascii_case("read-only")
+            || name.eq_ignore_ascii_case("read-write")
             || name.eq_ignore_ascii_case("default")
             || name.eq_ignore_ascii_case("indeterminate")
             || name.eq_ignore_ascii_case("in-range")
@@ -2424,7 +2430,10 @@ fn validate_pseudo_element_placement(parts: &[SelectorPart]) -> Result<(), CssPa
     for (part_index, part) in parts.iter().enumerate() {
         let mut state_allowed = true;
         for (index, simple) in part.simples.iter().enumerate() {
-            if matches!(simple, SimpleSelector::CustomState(_)) && !state_allowed {
+            let element_state = matches!(simple, SimpleSelector::CustomState(_))
+                || matches!(simple, SimpleSelector::PseudoClass(name)
+                    if name.eq_ignore_ascii_case("read-only") || name.eq_ignore_ascii_case("read-write"));
+            if element_state && !state_allowed {
                 return Err(CssParseError::InvalidSelector);
             }
             if is_part_pseudo(simple) {

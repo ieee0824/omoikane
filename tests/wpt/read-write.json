@@ -1,0 +1,8 @@
+{
+  "tests": [
+    {"path": "html/semantics/selectors/pseudo-classes/readwrite-readonly.html"},
+    {"path": "html/semantics/selectors/pseudo-classes/readwrite-readonly-type-change.html"},
+    {"path": "html/editing/editing-0/contenteditable/contenteditable-enumerated-ascii-case-insensitive.html"},
+    {"path": "html/editing/editing-0/contenteditable/user-interaction-editing-contenteditable.html"}
+  ]
+}
