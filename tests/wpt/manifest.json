@@ -771,6 +771,10 @@
     {"path": "html/semantics/selectors/pseudo-classes/readwrite-readonly.html"},
     {"path": "html/semantics/selectors/pseudo-classes/readwrite-readonly-type-change.html"},
     {"path": "html/editing/editing-0/contenteditable/contenteditable-enumerated-ascii-case-insensitive.html"},
-    {"path": "html/editing/editing-0/contenteditable/user-interaction-editing-contenteditable.html"}
+    {"path": "html/editing/editing-0/contenteditable/user-interaction-editing-contenteditable.html"},
+    {"path": "css/selectors/user-invalid.html"},
+    {"path": "css/selectors/user-valid.html"},
+    {"path": "css/selectors/invalidation/user-valid-user-invalid.html"},
+    {"path": "css/selectors/user-valid-user-invalid-multifield-inputs.tentative.html"}
   ]
 }

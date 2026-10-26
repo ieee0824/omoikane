@@ -38,7 +38,9 @@ pub(super) fn selector_uses_validation(selectors: &[Selector]) -> bool {
         selector.parts.iter().any(|part| {
             part.simples.iter().any(|simple| match simple {
                 SimpleSelector::PseudoClass(name) => {
-                    name.eq_ignore_ascii_case("valid") || name.eq_ignore_ascii_case("invalid")
+                    ["valid", "invalid", "user-valid", "user-invalid"]
+                        .iter()
+                        .any(|candidate| name.eq_ignore_ascii_case(candidate))
                 }
                 SimpleSelector::Is(list)
                 | SimpleSelector::Where(list)
@@ -135,6 +137,26 @@ pub(super) fn flush(node_id: usize, context: &mut Context) -> JsResult<()> {
 
 pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) -> JsResult<()> {
     tree::register(context, bindings)?;
+    register_private_builtin_callable(
+        context,
+        bindings,
+        js_string!("__omoikane_set_user_validity"),
+        2,
+        NativeFunction::from_copy_closure(|_, args, context| {
+            let id = parse_node_id(args.first(), context)?;
+            ensure_same_origin_node(context, id)?;
+            let value = args.get(1).is_some_and(JsValue::to_boolean);
+            with_host_state(|host| {
+                let mut state = host.borrow_mut();
+                if let Some(node) = state.get_node(id) {
+                    if node.set_user_validity(value) {
+                        state.invalidate_style_cache_for_node(&node);
+                    }
+                }
+                Ok(JsValue::undefined())
+            })
+        }),
+    )?;
     register_private_builtin_callable(
         context,
         bindings,

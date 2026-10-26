@@ -292,6 +292,8 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         | "disabled"
                         | "valid"
                         | "invalid"
+                        | "user-valid"
+                        | "user-invalid"
                         | "checked"
                         | "default"
                         | "indeterminate"
@@ -1373,6 +1375,8 @@ impl Parser {
             || name.eq_ignore_ascii_case("placeholder-shown")
             || name.eq_ignore_ascii_case("read-only")
             || name.eq_ignore_ascii_case("read-write")
+            || name.eq_ignore_ascii_case("user-valid")
+            || name.eq_ignore_ascii_case("user-invalid")
             || name.eq_ignore_ascii_case("default")
             || name.eq_ignore_ascii_case("indeterminate")
             || name.eq_ignore_ascii_case("in-range")

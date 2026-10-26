@@ -434,6 +434,7 @@ pub struct Element {
     script_source_position: Option<(u32, u32)>,
     script_force_async: bool,
     css_validity: Option<bool>,
+    user_validity: bool,
     /// Emptiness of a dirty control value held by JavaScript; None uses DOM defaults.
     control_dirty_value_empty: Option<bool>,
     control_numeric_value: Option<input_range::NumericInputValue>,
@@ -542,6 +543,7 @@ impl Element {
             script_source_position: None,
             script_force_async: true,
             css_validity: None,
+            user_validity: false,
             control_dirty_value_empty: None,
             control_numeric_value: None,
             user_action_state: 0,
@@ -595,6 +597,7 @@ impl Element {
             script_source_position: None,
             script_force_async: true,
             css_validity: None,
+            user_validity: false,
             control_dirty_value_empty: None,
             control_numeric_value: None,
             user_action_state: 0,
@@ -2334,6 +2337,30 @@ impl NodeHandle {
             NodeData::Element(element) => element.css_validity,
             _ => None,
         }
+    }
+
+    /// Whether an HTML control has committed input or participated in submission.
+    /// This node-owned flag survives adoption, but fresh node copies start false.
+    pub(crate) fn user_validity(&self) -> bool {
+        matches!(&self.0.borrow().data, NodeData::Element(element) if element.user_validity)
+    }
+
+    /// Updates interaction history for HTML input, textarea and select elements.
+    /// The caller invalidates the owning document's cached styles when changed.
+    pub(crate) fn set_user_validity(&self, value: bool) -> bool {
+        let mut node = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut node.data else {
+            return false;
+        };
+        if !(element.html
+            || element.namespace_uri.as_deref() == Some("http://www.w3.org/1999/xhtml"))
+            || !matches!(element.local_name(), "input" | "textarea" | "select")
+            || element.user_validity == value
+        {
+            return false;
+        }
+        element.user_validity = value;
+        true
     }
 
     /// Returns dirty-value emptiness without copying the JavaScript UTF-16 value.

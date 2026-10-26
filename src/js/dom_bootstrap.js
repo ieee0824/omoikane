@@ -12488,6 +12488,8 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeRegisterValidation = globalThis.__omoikane_register_validation;
   const nativeFlushValidation = globalThis.__omoikane_flush_validation;
   const nativeInvalidateValidation = globalThis.__omoikane_invalidate_validation;
+  const nativeSetUserValidity = globalThis.__omoikane_set_user_validity;
+  delete globalThis.__omoikane_set_user_validity;
   const nativeSetControlValueEmpty = globalThis.__omoikane_set_control_value_empty;
   const nativeSanitizeInputValue = globalThis.__omoikane_sanitize_input_value;
   const nativeSanitizeRange = globalThis.__omoikane_sanitize_range;
@@ -12679,6 +12681,7 @@ export const __omoikane_service_worker_lifecycle = {};
     const element = snapshot.element, type = checkableType(element);
     if ((type !== "checkbox" && type !== "radio") || !internalIsConnected(element) ||
         (snapshot.type === "radio" && snapshot.checked)) return;
+    nativeSetUserValidity(internalNodeId(element), true);
     for (let i = 0; i < 2; i++) {
       if (!isLiveNode(element)) break;
       const event = new Event(i === 0 ? "input" : "change", { bubbles: true, composed: i === 0 });
@@ -13726,7 +13729,7 @@ export const __omoikane_service_worker_lifecycle = {};
       rangeOverflow: reversedTimeRange ? outsideReversedTimeRange :
         numericValue !== null && maximum !== null && numericValue > maximum,
       stepMismatch: htmlFormControlLocalName(control) === "input" && inputStepMismatch(control, type, numericValue),
-      badInput: false,
+      badInput: temporalInputBadInput(control),
       customError: String(control.__customValidityMessage || "") !== "",
     };
     flags.valid = !Object.values(flags).some(Boolean);
@@ -13998,6 +14001,9 @@ export const __omoikane_service_worker_lifecycle = {};
       submit(url, "POST", body, contentType, target, internalNodeId(this));
     }
     __submit(submitter) {
+      for (const control of this.__controls()) {
+        nativeSetUserValidity(internalNodeId(control), true);
+      }
       if (!this.noValidate && !(submitter && submitter.formNoValidate) && !this.__validate(true)) {
         return;
       }
@@ -14037,6 +14043,8 @@ export const __omoikane_service_worker_lifecycle = {};
       // Complete all built-in reset algorithms before invoking any custom
       // reactions, including when an output's text mutation changes the DOM.
       for (const control of this.__controls()) {
+        nativeSetUserValidity(internalNodeId(control), false);
+        safeWeakMapGet(nodeEventStates, control).userValidityEdited = false;
         if (isFormAssociatedElement(control)) reactions.push(customInternalsState(control));
         else if (hasCanonicalWrapperId(canonicalHtmlElementIds, control) && internalNodeLocalName(control) === "input") {
           control.value = control.defaultValue;
@@ -14050,10 +14058,14 @@ export const __omoikane_service_worker_lifecycle = {};
           control.__lastValueChangeWasUser = false;
         } else if (control.tagName === "SELECT") {
           for (const option of control.options) option.selected = option.defaultSelected;
+          safeWeakMapGet(nodeEventStates, control).selectFocusedOption = undefined;
         } else if (control.tagName === "OUTPUT") {
           const value = control.defaultValue;
           delete safeWeakMapGet(nodeEventStates, control).outputDefault;
           control.textContent = value;
+        }
+        if (["input", "textarea"].includes(htmlFormControlLocalName(control))) {
+          safeWeakMapGet(nodeEventStates, control).userValidityFocusValue = control.value;
         }
       }
       return reactions;
@@ -14161,18 +14173,40 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function beginTextControlFocus(control) {
+    if (temporalInputKind(control)) {
+      const state = temporalInputState(control);
+      state.index = 0;
+      state.replace = true;
+      state.edited = false;
+    }
     if (!isTextControl(control)) return;
     ensureTextControlSelection(control);
+    const history = safeWeakMapGet(nodeEventStates, control);
+    history.userValidityFocusValue = control.value;
+    history.userValidityEdited = false;
     control.__focusValue = control.value;
     control.__textEditChanged = false;
     syncTextControlNativeState(control, true);
   }
 
   function commitTextControlChange(control) {
+    if (temporalInputKind(control)) {
+      const state = temporalInputState(control);
+      if (state.edited) nativeSetUserValidity(internalNodeId(control), true);
+      state.edited = false;
+    }
     if (!isTextControl(control)) return;
-    if (control.__textEditChanged && control.value !== control.__focusValue) {
+    const history = safeWeakMapGet(nodeEventStates, control);
+    const edited = history.userValidityEdited;
+    if (edited) {
+      nativeSetUserValidity(internalNodeId(control), true);
+      history.userValidityEdited = false;
+    }
+    if (edited && control.value !== history.userValidityFocusValue) {
       control.dispatchEvent(new Event("change", { bubbles: true }));
     }
+    history.userValidityFocusValue = control.value;
+    history.userValidityEdited = false;
     control.__focusValue = control.value;
     control.__textEditChanged = false;
     syncTextControlNativeState(control, false);
@@ -14187,6 +14221,7 @@ export const __omoikane_service_worker_lifecycle = {};
     control.__lastValueChangeWasUser = true;
     setTextControlSelection(control, caret, caret, "none");
     control.__textEditChanged = true;
+    safeWeakMapGet(nodeEventStates, control).userValidityEdited = true;
     control.dispatchEvent(new InputEvent("input", {
       bubbles: true, composed: true, inputType, data, isComposing,
     }));
@@ -14367,6 +14402,136 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   // Explicit numeric input and UTC operations avoid clock/time-zone dependence.
+  function temporalInputKind(control) {
+    if (!hasCanonicalWrapperId(canonicalHtmlElementIds, control) ||
+        internalNodeLocalName(control) !== "input") return "";
+    const kind = nativeInputType(internalNodeId(control));
+    return ["date", "month", "week", "time", "datetime-local"].includes(kind) ? kind : "";
+  }
+
+  // Field order is a deterministic host UI policy, independent of the clock
+  // and locale. The DOM value is always the canonical HTML representation.
+  function temporalInputFields(kind, seconds) {
+    const date = kind === "month" ? ["month", "year"] :
+      kind === "week" ? ["week", "year"] : ["month", "day", "year"];
+    const time = seconds ? ["hour", "minute", "second", "period"] : ["hour", "minute", "period"];
+    return kind === "time" ? time : kind === "datetime-local" ? [...date, ...time] : date;
+  }
+
+  function temporalInputParts(kind, value) {
+    const parts = {};
+    const date = /^(\d{4,})-(\d{2})(?:-(\d{2}))?/.exec(value);
+    if (date) {
+      parts.year = date[1]; parts.month = String(Number(date[2]));
+      if (date[3]) parts.day = String(Number(date[3]));
+    }
+    const week = /^(\d{4,})-W(\d{2})$/.exec(value);
+    if (week) { parts.year = week[1]; parts.week = String(Number(week[2])); }
+    const time = /(?:^|T)(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?$/.exec(value);
+    if (time && (kind === "time" || kind === "datetime-local")) {
+      const hour = Number(time[1]);
+      parts.hour = String(hour % 12 || 12); parts.minute = String(Number(time[2]));
+      parts.period = hour < 12 ? "a" : "p";
+      if (time[3]) parts.second = String(Number(time[3]));
+      if (time[4]) parts.fraction = time[4];
+    }
+    return parts;
+  }
+
+  function temporalInputState(control) {
+    const history = safeWeakMapGet(nodeEventStates, control);
+    const kind = temporalInputKind(control), value = control.value;
+    const step = nativeAttribute(control, "step");
+    const numericStep = Number(step);
+    const seconds = /:\d{2}:/.test(value) || (numericStep > 0 && numericStep % 60 !== 0);
+    let state = history.temporalInput;
+    if (!state || state.kind !== kind || state.value !== value || state.step !== step) {
+      state = { kind, value, step, seconds, fields: temporalInputFields(kind, seconds),
+        parts: temporalInputParts(kind, value), index: 0, replace: true, edited: false };
+      history.temporalInput = state;
+    }
+    return state;
+  }
+
+  function temporalInputValue(state) {
+    const parts = state.parts, two = name => String(Number(parts[name])).padStart(2, "0");
+    if (state.fields.some(name => parts[name] === undefined || parts[name] === "")) return "";
+    const year = String(parts.year).replace(/^0+(?=\d)/, "").padStart(4, "0");
+    const date = state.kind === "week" ? year + "-W" + two("week") :
+      year + "-" + two("month") + (state.kind === "month" ? "" : "-" + two("day"));
+    const hour = Number(parts.hour);
+    if ((state.kind === "time" || state.kind === "datetime-local") && (hour < 1 || hour > 12)) return "";
+    const time = String(hour % 12 + (parts.period === "p" ? 12 : 0)).padStart(2, "0") + ":" + two("minute") +
+      (state.seconds ? ":" + two("second") + (parts.fraction ? "." + parts.fraction : "") : "");
+    const value = state.kind === "time" ? time : state.kind === "datetime-local" ? date + "T" + time : date;
+    return inputValueAsNumber(state.kind, value) === null ? "" : value;
+  }
+
+  function temporalInputBadInput(control) {
+    const kind = temporalInputKind(control);
+    if (!kind) return false;
+    const state = safeWeakMapGet(nodeEventStates, control).temporalInput;
+    return !!state && state.kind === kind && state.value === control.value &&
+      state.value === "" && Object.values(state.parts).some(value => value !== "");
+  }
+
+  function publishTemporalInput(control, state) {
+    const value = temporalInputValue(state), changed = value !== state.value;
+    control.value = value;
+    state.value = value;
+    state.edited = true;
+    safeWeakMapGet(nodeEventStates, control).temporalInput = state;
+    nativeInvalidateValidation(internalNodeId(control));
+    // Completing the component editor commits a value; partial edits retain
+    // their private fields without exposing an invalid string through value.
+    if (value !== "") nativeSetUserValidity(internalNodeId(control), true);
+    control.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    if (changed) control.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function performTemporalInputKeyDefault(control, init) {
+    if (!temporalInputKind(control) || control.readOnly || control.__isDisabledControl() ||
+        init.isComposing || init.ctrlKey || init.altKey || init.metaKey) return false;
+    const state = temporalInputState(control), key = String(init.key || "");
+    const field = state.fields[state.index];
+    if (key === "Tab" || key === "ArrowLeft" || key === "ArrowRight") {
+      const backward = key === "ArrowLeft" || (key === "Tab" && init.shiftKey);
+      const index = state.index + (backward ? -1 : 1);
+      if (index < 0 || index >= state.fields.length) return key !== "Tab";
+      state.index = index; state.replace = true;
+      return true;
+    }
+    if (key === "Backspace" || key === "Delete") {
+      if (!state.parts[field]) return true;
+      state.parts[field] = ""; state.replace = true;
+    } else if (key === "ArrowUp" || key === "ArrowDown") {
+      if (field === "period") state.parts.period = state.parts.period === "p" ? "a" : "p";
+      else {
+        const minimum = ["year", "month", "day", "week", "hour"].includes(field) ? 1 : 0;
+        const maximum = { month: 12, day: 31, week: 53, hour: 12, minute: 59, second: 59 }[field];
+        const current = Number(state.parts[field] || minimum);
+        let next = current + (key === "ArrowUp" ? 1 : -1);
+        if (maximum !== undefined) {
+          if (next > maximum) next = minimum;
+          else if (next < minimum) next = maximum;
+        } else next = Math.max(minimum, next);
+        state.parts[field] = String(next);
+      }
+      state.replace = true;
+    } else if (field === "period" && /^[ap]$/i.test(key)) {
+      state.parts.period = key.toLowerCase();
+    } else if (/^[0-9]$/.test(key) && field !== "period") {
+      const maximumLength = field === "year" ? Infinity : 2;
+      const previous = state.parts[field] || "";
+      state.parts[field] = state.replace || previous.length >= maximumLength ? key : previous + key;
+      state.replace = false;
+    } else {
+      return false;
+    }
+    publishTemporalInput(control, state);
+    return true;
+  }
+
   function inputNumberString(kind, value) {
     if (kind === "number" || kind === "range") return String(value);
     if (kind === "time") return inputNumberTimeString(value);
@@ -14411,6 +14576,7 @@ export const __omoikane_service_worker_lifecycle = {};
 
   function setInputNumericValue(control, id, kind, value) {
     const state = safeWeakMapGet(nodeEventStates, control);
+    state.temporalInput = undefined;
     state.__value = sanitizeInputControlValue(id, kind, value, false);
     state.__lastValueChangeWasUser = false;
     nativeSetControlValueEmpty(id, state.__value === "", state.__value);
@@ -14487,6 +14653,7 @@ export const __omoikane_service_worker_lifecycle = {};
         return;
       }
       const id = internalNodeId(this);
+      safeWeakMapGet(nodeEventStates, this).temporalInput = undefined;
       this.__value = sanitizeInputControlValue(internalNodeId(this), nativeAttributeValueNS(id, null, "type") || "",
         v == null ? "" : String(v), nativeAttributeValueNS(id, null, "multiple") !== null);
       this.__lastValueChangeWasUser = false;
@@ -14773,6 +14940,61 @@ export const __omoikane_service_worker_lifecycle = {};
       const option = this.options[index];
       if (option) this.removeChild(option);
     }
+  }
+
+  function notifySelectInput(control, option, toggle = false) {
+    if (!option || control.__isDisabledControl() || option.__isDisabledControl()) return;
+    const options = control.options;
+    const previous = options.map(candidate => candidate.selected);
+    if (control.multiple && toggle) option.selected = !option.selected;
+    else for (const candidate of options) candidate.selected = candidate === option;
+    safeWeakMapGet(nodeEventStates, control).selectFocusedOption = internalNodeId(option);
+    if (!options.some((candidate, index) => candidate.selected !== previous[index])) return;
+    nativeSetUserValidity(internalNodeId(control), true);
+    control.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    control.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function performSelectKeyDefault(control, init) {
+    if (htmlFormControlLocalName(control) !== "select" || control.__isDisabledControl() ||
+        init.isComposing || init.altKey || init.metaKey) return false;
+    const options = control.options.filter(option => !option.__isDisabledControl());
+    if (!options.length) return false;
+    const history = safeWeakMapGet(nodeEventStates, control);
+    let index = control.multiple
+      ? options.findIndex(option => internalNodeId(option) === history.selectFocusedOption) : -1;
+    if (index < 0) index = options.findIndex(option => option.selected);
+    const key = String(init.key || "");
+    if (key === "ArrowDown" || key === "ArrowUp") {
+      index = Math.max(0, Math.min(options.length - 1, index + (key === "ArrowDown" ? 1 : -1)));
+    } else if (key === "Home" || key === "End") {
+      index = key === "Home" ? 0 : options.length - 1;
+    } else if (key === "PageDown" || key === "PageUp") {
+      index = Math.max(0, Math.min(options.length - 1, index + (key === "PageDown" ? 10 : -10)));
+    } else if (key === " " && control.multiple && index >= 0) {
+      notifySelectInput(control, options[index], true);
+      return true;
+    } else if (key.length === 1 && !init.ctrlKey) {
+      const match = options.findIndex((_, offset) => {
+        const option = options[(Math.max(index, -1) + offset + 1) % options.length];
+        return (nativeAttribute(option, "label") ?? option.textContent).trimStart().toLowerCase().startsWith(key.toLowerCase());
+      });
+      if (match < 0) return false;
+      index = (Math.max(index, -1) + match + 1) % options.length;
+    } else return false;
+    history.selectFocusedOption = internalNodeId(options[index]);
+    if (!(control.multiple && init.ctrlKey)) notifySelectInput(control, options[index]);
+    return true;
+  }
+
+  function performSelectPointerDefault(target, init) {
+    if (htmlFormControlLocalName(target) !== "option") return;
+    let control = internalParentNode(target);
+    if (htmlFormControlLocalName(control) === "optgroup") control = internalParentNode(control);
+    if (htmlFormControlLocalName(control) !== "select") return;
+    if (control.__isDisabledControl() || target.__isDisabledControl()) return;
+    control.focus();
+    notifySelectInput(control, target, control.multiple && Boolean(init.ctrlKey || init.metaKey));
   }
 
   class HTMLFieldSetElement extends HTMLElement {
@@ -19054,6 +19276,7 @@ export const __omoikane_service_worker_lifecycle = {};
     const notCanceled = target.dispatchEvent(new MouseEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
     }));
+    if (notCanceled && type === "click" && !locked) performSelectPointerDefault(target, init || {});
     const targetDocument = isDocumentNode(target) ? target : (target.ownerDocument || document);
     if (locked) {
       lightDismissPointerDown = null;
@@ -19294,7 +19517,9 @@ export const __omoikane_service_worker_lifecycle = {};
       ...init, bubbles: true, cancelable: true, composed: true,
     }));
     if (notCanceled && type === "keydown") {
-      if (String(init && init.key || "") === "Escape" &&
+      if (performSelectKeyDefault(target, init || {}) || performTemporalInputKeyDefault(target, init || {})) {
+        // The component editor consumed this key before focus traversal.
+      } else if (String(init && init.key || "") === "Escape" &&
           performTopLayerEscapeDefault(focusedDocument)) {
         // The latest dismissible top-layer element consumes Escape.
       } else if (String(init && init.key || "") === "Tab") {

@@ -68,6 +68,34 @@ mod tests {
     }
 
     #[test]
+    fn send_keys_uses_host_defaults_and_resolves_after_input_ticks() {
+        let document = TreeBuilder::parse("<input required><button>Next</button>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.enable_test_automation().unwrap();
+        runtime
+            .eval("globalThis.test_driver_internal = {}")
+            .unwrap();
+        runtime.eval(VENDOR_SCRIPT).unwrap();
+        runtime
+            .eval(
+                r#"
+            var input = document.querySelector('input'); var completed = false; var changed = false;
+            input.addEventListener('change', () => { changed = input.matches(':user-valid'); });
+            test_driver_internal.send_keys(input, 'ab\uE003c\uE004').then(() => completed = true);
+            if (completed || input.value !== '') throw Error('send_keys must use the input pump');
+        "#,
+            )
+            .unwrap();
+        let mut errors = Vec::new();
+        for _ in 0..10 {
+            assert_eq!(drive_action_tick(&mut runtime, &mut errors), Some(0));
+            runtime.run_jobs().unwrap();
+        }
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(runtime.eval("completed && changed && input.value === 'ac' && document.activeElement === document.querySelector('button')").unwrap().as_boolean(), Some(true));
+    }
+
+    #[test]
     fn unsupported_sources_reject_without_synthesizing_events() {
         let mut runtime = JsRuntime::new().unwrap();
         runtime.enable_test_automation().unwrap();
@@ -75,7 +103,7 @@ mod tests {
             .eval("globalThis.test_driver_internal = {}")
             .unwrap();
         runtime.eval(VENDOR_SCRIPT).unwrap();
-        runtime.eval("var rejected=false; var seen=0; document.addEventListener('mousedown',()=>seen++); test_driver_internal.action_sequence([{type:'key',id:'keyboard',actions:[{type:'keyDown',value:'a'}]}]).catch(()=>rejected=true);").unwrap();
+        runtime.eval("var rejected=false; var seen=0; document.addEventListener('mousedown',()=>seen++); test_driver_internal.action_sequence([{type:'wheel',id:'wheel',actions:[{type:'scroll',x:0,y:0,deltaX:0,deltaY:1}]}]).catch(()=>rejected=true);").unwrap();
         let mut errors = Vec::new();
         assert_eq!(drive_action_tick(&mut runtime, &mut errors), Some(0));
         runtime.run_jobs().unwrap();
