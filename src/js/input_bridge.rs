@@ -27,6 +27,39 @@ impl State {
 }
 
 impl JsRuntime {
+    /// Supplies a value chosen by the browser's autofill UI to one HTML input.
+    ///
+    /// The operation runs in the input's owning Realm and does not expose a
+    /// script-callable autofill primitive. It returns `false` when `control`
+    /// is not a live HTML input in this browsing session.
+    pub fn autofill_input(&mut self, control: &NodeHandle, value: &str) -> JsResult<bool> {
+        let (node, document) = {
+            let state = self.host_state.borrow();
+            let Some(node) = state
+                .get_node(control.identity())
+                .filter(|node| node == control)
+            else {
+                return Ok(false);
+            };
+            if !node.is_html_element() || !node.has_tag_name("input") {
+                return Ok(false);
+            }
+            let Some(document) = owner_document_for_node(&node) else {
+                return Ok(false);
+            };
+            (node, document.identity())
+        };
+        self.dispatch_private_input_in_document_realm(
+            document,
+            "autofill",
+            &[
+                serde_json::Value::from(node.identity() as u64),
+                serde_json::Value::from(value),
+            ],
+        )
+        .map(|result| result.to_boolean())
+    }
+
     /// Calls the bootstrap-private input dispatcher for one live Document.
     ///
     /// The callback was captured before author script ran and is retained in

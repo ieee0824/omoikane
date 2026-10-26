@@ -16649,6 +16649,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_directionality_control_value_native),
         ),
         (
+            js_string!("__omoikane_set_autofilled"),
+            2,
+            NativeFunction::from_copy_closure(set_autofilled_native),
+        ),
+        (
             js_string!("__omoikane_set_modal_dialog"),
             2,
             NativeFunction::from_copy_closure(set_modal_dialog_native),
@@ -21283,6 +21288,25 @@ fn set_directionality_control_value_native(
             JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
         })?;
         if node.set_directionality_control_value(value) {
+            host.borrow_mut().invalidate_style_cache_for_node(&node);
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn set_autofilled_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let autofilled = args.get(1).is_some_and(JsValue::to_boolean);
+    with_render_mutation(|host| {
+        let node = host.borrow().get_node(node_id).ok_or_else(|| {
+            JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+        })?;
+        if node.set_autofilled(autofilled) {
             host.borrow_mut().invalidate_style_cache_for_node(&node);
         }
         Ok(JsValue::undefined())

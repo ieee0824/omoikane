@@ -229,6 +229,7 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeSetPickerOpen = globalThis.__omoikane_set_picker_open;
   const nativeSetMediaSelectorState = globalThis.__omoikane_set_media_selector_state;
   const nativeSetDirectionalityControlValue = globalThis.__omoikane_set_directionality_control_value;
+  const nativeSetAutofilled = globalThis.__omoikane_set_autofilled;
   const nativeSetModalDialog = globalThis.__omoikane_set_modal_dialog;
   const nativeFullscreenElement = globalThis.__omoikane_fullscreen_element;
   const nativeFullscreenEnabled = globalThis.__omoikane_fullscreen_enabled;
@@ -316,6 +317,7 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_set_picker_open;
   delete globalThis.__omoikane_set_media_selector_state;
   delete globalThis.__omoikane_set_directionality_control_value;
+  delete globalThis.__omoikane_set_autofilled;
   delete globalThis.__omoikane_set_modal_dialog;
   delete globalThis.__omoikane_fullscreen_element;
   delete globalThis.__omoikane_fullscreen_enabled;
@@ -12897,6 +12899,7 @@ export const __omoikane_service_worker_lifecycle = {};
     const element = snapshot.element, type = checkableType(element);
     if ((type !== "checkbox" && type !== "radio") || !internalIsConnected(element) ||
         (snapshot.type === "radio" && snapshot.checked)) return;
+    nativeSetAutofilled(internalNodeId(element), false);
     nativeSetUserValidity(internalNodeId(element), true);
     for (let i = 0; i < 2; i++) {
       if (!isLiveNode(element)) break;
@@ -14434,6 +14437,7 @@ export const __omoikane_service_worker_lifecycle = {};
     });
     if (!control.dispatchEvent(beforeInput)) return false;
     control.value = nextValue;
+    nativeSetAutofilled(internalNodeId(control), false);
     control.__lastValueChangeWasUser = true;
     setTextControlSelection(control, caret, caret, "none");
     control.__textEditChanged = true;
@@ -14694,6 +14698,7 @@ export const __omoikane_service_worker_lifecycle = {};
   function publishTemporalInput(control, state) {
     const value = temporalInputValue(state), changed = value !== state.value;
     control.value = value;
+    nativeSetAutofilled(internalNodeId(control), false);
     state.value = value;
     state.edited = true;
     safeWeakMapGet(nodeEventStates, control).temporalInput = state;
@@ -31276,6 +31281,14 @@ export const __omoikane_service_worker_lifecycle = {};
     keyboard: globalThis.__omoikane_dispatch_keyboard_input,
     composition: globalThis.__omoikane_dispatch_composition_input,
     capture: dispatchLostPointerCapture,
+    autofill: (id, value) => {
+      const control = wrapNode(id);
+      if (!control || !hasCanonicalWrapperId(canonicalHtmlElementIds, control) ||
+          internalNodeLocalName(control) !== "input") return false;
+      control.value = value;
+      nativeSetAutofilled(id, true);
+      return true;
+    },
   };
   nativeRegisterInputDispatcher((kind, args) => safeApply(inputDispatchers[kind], undefined, args));
   const windowNameDocument = internalNodeId(globalThis.document);

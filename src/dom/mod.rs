@@ -449,6 +449,8 @@ pub struct Element {
     text_control_state: Option<TextControlState>,
     /// Live form-control value used only by the HTML directionality algorithm.
     directionality_control_value: Option<String>,
+    /// Whether the user agent filled this HTML input and the user has not edited it.
+    autofilled: bool,
     /// Scroll offset of this element's scrolling box in CSS pixels, as set
     /// through `scrollTop` / `scrollLeft` and friends.
     ///
@@ -567,6 +569,7 @@ impl Element {
             parser_form_owner: None,
             text_control_state: None,
             directionality_control_value: None,
+            autofilled: false,
             scroll_offset: (0.0, 0.0),
             template_content,
             shadow_root: None,
@@ -628,6 +631,7 @@ impl Element {
             parser_form_owner: None,
             text_control_state: None,
             directionality_control_value: None,
+            autofilled: false,
             scroll_offset: (0.0, 0.0),
             template_content,
             shadow_root: None,
@@ -2734,6 +2738,25 @@ impl NodeHandle {
             NodeData::Element(element) => element.directionality_control_value.clone(),
             _ => None,
         }
+    }
+
+    /// Whether this HTML input currently has a user-agent-provided value.
+    pub(crate) fn is_autofilled(&self) -> bool {
+        matches!(&self.0.borrow().data,
+            NodeData::Element(element) if element.is_html_input() && element.autofilled)
+    }
+
+    /// Updates the user-agent autofill state. Fresh clones intentionally start false.
+    pub(crate) fn set_autofilled(&self, value: bool) -> bool {
+        let mut node = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut node.data else {
+            return false;
+        };
+        if !element.is_html_input() || element.autofilled == value {
+            return false;
+        }
+        element.autofilled = value;
+        true
     }
 
     /// Returns this element's stored scroll offset in CSS pixels, or
