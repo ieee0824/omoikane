@@ -67,6 +67,10 @@
     {
       "path": "html/dom/idlharness.https.html?include=(PopStateEvent|HashChangeEvent|PageTransitionEvent|BeforeUnloadEvent|SubmitEvent|FormDataEvent)"
     },
+    {
+      "path": "html/dom/idlharness.https.html?include=(HTMLMeterElement|HTMLProgressElement|HTMLPictureElement|HTMLSourceElement|HTMLTrackElement|HTMLDataListElement|HTMLMapElement|HTMLEmbedElement)"
+    },
+    { "path": "mathml/idlharness.window.js" },
     { "path": "dom/interface-objects.html" },
     { "path": "dom/ranges/StaticRange-constructor.html" },
     { "path": "dom/collections/HTMLCollection-supported-property-names.html" },
