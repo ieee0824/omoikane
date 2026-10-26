@@ -1,0 +1,7 @@
+{
+  "tests": [
+    {
+      "path": "css/css-view-transitions/document-active-view-transition.html"
+    }
+  ]
+}

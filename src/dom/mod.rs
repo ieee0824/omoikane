@@ -18,6 +18,7 @@ pub(crate) mod form_controls;
 pub(crate) mod input_range;
 pub(crate) mod input_value;
 mod string;
+mod view_transition;
 pub(crate) use string::DomString;
 
 /// Monotonic source of per-node identities. A fresh value is minted for every
@@ -381,6 +382,7 @@ struct DocumentMetadata {
     character_encoding: String,
     content_type: String,
     design_mode_enabled: bool,
+    active_view_transition: bool,
 }
 
 impl Default for DocumentMetadata {
@@ -389,6 +391,7 @@ impl Default for DocumentMetadata {
             character_encoding: "UTF-8".to_owned(),
             content_type: "text/html".to_owned(),
             design_mode_enabled: false,
+            active_view_transition: false,
         }
     }
 }

@@ -777,6 +777,7 @@
     {"path": "css/selectors/invalidation/user-valid-user-invalid.html"},
     {"path": "css/selectors/user-valid-user-invalid-multifield-inputs.tentative.html"},
     {"path": "css/selectors/open-pseudo.html"},
-    {"path": "css/selectors/invalidation/open-pseudo-class-in-has.html"}
+    {"path": "css/selectors/invalidation/open-pseudo-class-in-has.html"},
+    {"path": "css/css-view-transitions/document-active-view-transition.html"}
   ]
 }

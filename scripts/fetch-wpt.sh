@@ -422,6 +422,13 @@ collect_pattern \
 collect_pattern \
   "/css/selectors/open-pseudo.html" \
   "/css/selectors/invalidation/open-pseudo-class-in-has.html"
+collect_pattern \
+  "/css/css-view-transitions/active-view-transition-on-non-root.html" \
+  "/css/css-view-transitions/active-view-transition-pseudo-class-match.html" \
+  "/css/css-view-transitions/document-active-view-transition.html" \
+  "/css/css-view-transitions/view-transition-types-one-green-square-ref.html" \
+  "/common/reftest-wait.js" \
+  "/css/css-view-transitions/support/"
 # A pinned revision alone does not prove that newly requested WPT paths exist.
 if [[ "$current_revision" == "$revision" ]] &&
   diff -q <(printf '%s\n' "${patterns[@]}" | LC_ALL=C sort -u) \
