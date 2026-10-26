@@ -70,24 +70,14 @@ fn opentype_shaping_applies_arabic_context_and_ligatures() {
 
 #[test]
 fn fallback_selection_keeps_grapheme_clusters_in_one_font_run() {
-    let primary_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acid3/font.ttf");
-    let Ok(primary) = Font::load_from_file(&primary_path) else {
-        eprintln!("Skipping cluster fallback test: fixture font unavailable");
-        return;
-    };
+    let primary = load_acid3_fixture();
     let Some(fallback_path) = find_test_font() else {
         eprintln!("Skipping cluster fallback test: no system font available");
         return;
     };
     let fallback = Font::load_from_file(std::path::Path::new(&fallback_path)).unwrap();
-    let Some(primary_base) = ['A', 'e', 'a']
-        .into_iter()
-        .find(|ch| primary.has_glyph(*ch))
-    else {
-        eprintln!("Skipping cluster fallback test: fixture has no test base glyph");
-        return;
-    };
+    let primary_base = 'A';
+    assert!(primary.has_glyph(primary_base));
 
     // Pick a multi-scalar cluster using production's shaping-based support
     // check. A cmap-only mark probe does not model synthesized or attached
@@ -144,20 +134,15 @@ fn fallback_selection_keeps_grapheme_clusters_in_one_font_run() {
 
 #[test]
 fn fallback_shaping_keeps_primary_supported_text_in_one_run() {
-    let primary_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acid3/font.ttf");
-    let Ok(primary) = Font::load_from_file(&primary_path) else {
-        eprintln!("Skipping primary shaping test: fixture font unavailable");
-        return;
-    };
-    let Some(text) = ["abc", "ABC", "123"].into_iter().find(|text| {
+    let primary = load_acid3_fixture();
+    let text = "abc";
+    assert!(
         primary
             .shape_text(text, 24.0, ShapingDirection::LeftToRight)
-            .is_ok_and(|glyphs| glyphs.iter().all(|glyph| glyph.glyph_id != 0))
-    }) else {
-        eprintln!("Skipping primary shaping test: fixture has no supported sample");
-        return;
-    };
+            .unwrap()
+            .iter()
+            .all(|glyph| glyph.glyph_id != 0)
+    );
 
     let runs =
         shape_text_with_fallback(&[&primary], text, 24.0, ShapingDirection::LeftToRight).unwrap();
@@ -168,12 +153,7 @@ fn fallback_shaping_keeps_primary_supported_text_in_one_run() {
 
 #[test]
 fn fallback_runs_never_split_variation_or_zwj_graphemes() {
-    let primary_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acid3/font.ttf");
-    let Ok(primary) = Font::load_from_file(&primary_path) else {
-        eprintln!("Skipping cluster boundary test: fixture font unavailable");
-        return;
-    };
+    let primary = load_acid3_fixture();
     let mut fonts = vec![primary];
     if let Some(path) = find_test_font()
         && let Ok(fallback) = Font::load_from_file(std::path::Path::new(&path))
@@ -950,11 +930,12 @@ fn font_face_descriptor_ranges_are_normalized() {
 // WebFontRegistry tests
 // ============================================================================
 
-/// Build a minimal valid Font from disk bytes for use in registry tests.
-fn load_test_font_for_registry() -> Option<Font> {
-    let path = find_test_font()?;
-    let data = std::fs::read(&path).ok()?;
-    Font::load_from_bytes(data).ok()
+/// Loads the checked-in Acid3 font, which covers ASCII and Latin-1.
+fn load_acid3_fixture() -> Font {
+    Font::load_from_file(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acid3/font.ttf"),
+    )
+    .expect("checked-in Acid3 fixture font")
 }
 
 fn selection_fixture_bytes() -> Vec<u8> {
@@ -1154,10 +1135,7 @@ fn web_font_registry_exact_match_weight_400() {
 
 #[test]
 fn web_font_registry_selects_with_case_insensitive_family_key() {
-    let Some(font) = load_test_font_for_registry() else {
-        eprintln!("Skipping: no system font found");
-        return;
-    };
+    let font = Font::load_from_bytes(selection_fixture_bytes()).expect("fixed selection fixture");
     let mut registry = WebFontRegistry::new();
     registry.push("TwitterChirp", FontWeight(700), FontStyle::Italic, font);
 
@@ -1252,13 +1230,8 @@ fn web_font_registry_italic_selects_italic_over_normal() {
 
 #[test]
 fn web_font_registry_fallback_when_no_italic() {
-    let font_regular = match load_test_font_for_registry() {
-        Some(f) => f,
-        None => {
-            eprintln!("Skipping: no system font found");
-            return;
-        }
-    };
+    let font_regular =
+        Font::load_from_bytes(selection_fixture_bytes()).expect("fixed selection fixture");
 
     let mut registry = WebFontRegistry::new();
     registry.push(

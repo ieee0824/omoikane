@@ -85,7 +85,28 @@ jobs:
           OMOIKANE_JIT_GATE_REPORT_DIR: .artifacts/browser/acid3
         run: |
           set -o pipefail
-          cargo test --locked -- --include-ignored 2>&1 | tee .artifacts/browser/tests.log
+          # Ignored manual utilities are not regression tests: baseline refreshes
+          # are no-ops without OMOIKANE_REFRESH_BASELINE=1, and profiling/A-B
+          # fixtures only print measurements (run them explicitly in release mode).
+          manual_fixtures=(
+            refresh_acid2_baseline_png
+            refresh_fullscreen_top_layer_baseline_png
+            refresh_popover_top_layer_baseline_png
+            profile_inline_style_subtree_invalidation_against_full_cache_clear
+            profile_hidden_subtree_geometry_retention_against_full_rebuild
+            profile_static_document_shadow_frames
+            profile_repeated_and_distinct_frame_shadow_masks
+            profile_offcanvas_outer_shadow_fixed_fixture
+            profile_fixed_transform_property_lookup_hot_paths
+            manual_image_scaling_reference_ab
+            static_transition_sampling_microbenchmark
+            compound_scanline_microbenchmark
+          )
+          skip_args=()
+          for name in "${manual_fixtures[@]}"; do
+            skip_args+=(--skip "$name")
+          done
+          cargo test --locked -- --include-ignored "${skip_args[@]}" 2>&1 | tee .artifacts/browser/tests.log
       - name: Run Gate 2 differential harness
         run: cargo test --locked --features jit-differential --test jit_differential
 
