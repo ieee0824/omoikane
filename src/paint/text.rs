@@ -14,7 +14,10 @@ use crate::font::{
     is_zero_advance_character, load_default_text_fonts_shared, select_text_font,
     shape_text_with_fallback_candidates,
 };
-use crate::layout::{FragmentStyle, InlineFragmentContent, LayoutBox, LineBox, ListMarker, Rect};
+use crate::layout::{
+    FragmentStyle, InlineFragmentContent, LayoutBox, LineBox, ListMarker, MeterRegion, Rect,
+    ValueIndicatorPaintState,
+};
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_vo::{Orientation, char_orientation};
@@ -407,6 +410,19 @@ pub(super) fn paint_text_with_context(
                         _viewport,
                     );
                 }
+                InlineFragmentContent::ValueIndicator(style, state) => {
+                    let paint = fragment_box_paint_style(fragment, resolver);
+                    let style = paint.as_deref().unwrap_or(style);
+                    paint_form_control_background(
+                        canvas,
+                        layout,
+                        fragment,
+                        fragment_rect,
+                        style,
+                        clip,
+                    );
+                    paint_value_indicator(canvas, fragment_rect, style, *state, clip);
+                }
                 InlineFragmentContent::IconFormControl(style, image, width, height) => {
                     if let Some(background) = background_color(style) {
                         canvas.fill_rect_clipped(fragment_rect, background, clip);
@@ -427,6 +443,53 @@ pub(super) fn paint_text_with_context(
             }
         }
     }
+}
+
+fn paint_value_indicator(
+    canvas: &mut Canvas,
+    fragment_rect: Rect,
+    style: &ComputedStyle,
+    state: ValueIndicatorPaintState,
+    clip: Option<Rect>,
+) {
+    let border = EdgeSizesForPaint::from_style(style);
+    let rect = inline_fragment_content_rect(fragment_rect, style, border);
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return;
+    }
+    canvas.fill_rect_clipped(rect, Color::rgb(230, 230, 230), clip);
+    let inset = (rect.height * 0.2).clamp(1.0, 3.0);
+    let track = Rect {
+        x: rect.x + inset,
+        y: rect.y + inset,
+        width: (rect.width - inset * 2.0).max(0.0),
+        height: (rect.height - inset * 2.0).max(0.0),
+    };
+    canvas.fill_rect_clipped(track, Color::rgb(190, 190, 190), clip);
+    let (start, fraction, color) = match state {
+        ValueIndicatorPaintState::Progress(Some(fraction)) => {
+            (0.0, fraction, Color::rgb(0, 117, 255))
+        }
+        ValueIndicatorPaintState::Progress(None) => (1.0 / 3.0, 1.0 / 3.0, Color::rgb(0, 117, 255)),
+        ValueIndicatorPaintState::Meter { fraction, region } => {
+            let color = match region {
+                MeterRegion::Optimum => Color::rgb(0, 160, 70),
+                MeterRegion::Suboptimal => Color::rgb(235, 170, 0),
+                MeterRegion::EvenLessGood => Color::rgb(210, 55, 45),
+            };
+            (0.0, fraction, color)
+        }
+    };
+    canvas.fill_rect_clipped(
+        Rect {
+            x: track.x + track.width * start,
+            y: track.y,
+            width: track.width * fraction.clamp(0.0, 1.0),
+            height: track.height,
+        },
+        color,
+        clip,
+    );
 }
 
 /// A text fragment's originating box, keyed the same way as its captured

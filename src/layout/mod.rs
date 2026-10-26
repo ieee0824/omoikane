@@ -917,7 +917,27 @@ pub enum InlineFragmentContent {
     Image(Image, ComputedStyle),
     GeneratedBox(ComputedStyle),
     FormControl(ComputedStyle, String, Option<TextControlPaintState>),
+    ValueIndicator(ComputedStyle, ValueIndicatorPaintState),
     IconFormControl(ComputedStyle, Image, f32, f32),
+}
+
+/// Normalized native-paint state for a `<progress>` or `<meter>` element.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ValueIndicatorPaintState {
+    /// `None` represents an indeterminate progress bar.
+    Progress(Option<f32>),
+    Meter {
+        fraction: f32,
+        region: MeterRegion,
+    },
+}
+
+/// The qualitative region used by the native meter appearance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeterRegion {
+    Optimum,
+    Suboptimal,
+    EvenLessGood,
 }
 
 /// Selection/caret state carried from a live text control into paint.
@@ -5124,6 +5144,11 @@ fn intrinsic_width_inner_uncached(
                                 + border.right
                         }
                         InlineSegmentContent::FormControl(style, _, _, width, _) => {
+                            let padding = edge_sizes(&style, "padding");
+                            let border = edge_sizes(&style, "border");
+                            width + padding.left + padding.right + border.left + border.right
+                        }
+                        InlineSegmentContent::ValueIndicator(style, _, width, _) => {
                             let padding = edge_sizes(&style, "padding");
                             let border = edge_sizes(&style, "border");
                             width + padding.left + padding.right + border.left + border.right

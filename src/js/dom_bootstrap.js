@@ -12519,7 +12519,7 @@ export const __omoikane_service_worker_lifecycle = {};
   function reflectedFiniteDouble(element, name, fallback) {
     const raw = element.getAttribute(name);
     const token = raw === null ? "" : raw.trim();
-    if (!/^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(token)) return fallback;
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(token)) return fallback;
     const value = Number(token);
     return Number.isFinite(value) ? value : fallback;
   }
@@ -12607,7 +12607,11 @@ export const __omoikane_service_worker_lifecycle = {};
       const value = reflectedFiniteDouble(this, "max", 1);
       return value > 0 ? value : 1;
     }
-    set max(value) { setReflectedFiniteDouble(this, "max", value); }
+    set max(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) throw new TypeError("max must be a finite number");
+      if (number > 0) this.setAttribute("max", String(number));
+    }
     get value() {
       return Math.min(Math.max(reflectedFiniteDouble(this, "value", 0), 0), this.max);
     }

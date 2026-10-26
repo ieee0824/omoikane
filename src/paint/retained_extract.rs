@@ -2780,7 +2780,8 @@ fn scan_inline_fragment_styles(
                 InlineFragmentContent::Image(_, style)
                 | InlineFragmentContent::InlineBox(style)
                 | InlineFragmentContent::GeneratedBox(style)
-                | InlineFragmentContent::FormControl(style, ..) => Some(style),
+                | InlineFragmentContent::FormControl(style, ..)
+                | InlineFragmentContent::ValueIndicator(style, ..) => Some(style),
                 _ => None,
             };
             let Some(captured) = captured else {
@@ -2886,7 +2887,8 @@ fn inline_fragments_have_viewport_edge_filter(
                 InlineFragmentContent::Image(_, style)
                 | InlineFragmentContent::InlineBox(style)
                 | InlineFragmentContent::GeneratedBox(style)
-                | InlineFragmentContent::FormControl(style, ..) => Some(style),
+                | InlineFragmentContent::FormControl(style, ..)
+                | InlineFragmentContent::ValueIndicator(style, ..) => Some(style),
                 _ => None,
             };
             captured.is_some_and(|captured| {

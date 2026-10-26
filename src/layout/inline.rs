@@ -24,9 +24,9 @@ use crate::paint::{DataUri, Image, parse_data_uri};
 use super::{
     BoxDimensions, EdgeSizes, FontMetrics, FragmentStyle, HTTP_CLIENT, IMAGE_ANIMATION_CACHE,
     IMAGE_BASE_URL, IMAGE_CACHE, IMAGE_COOKIE_CONTEXT, InlineFragment, InlineFragmentContent,
-    InlineTextSource, LAYOUT_FONTS, LayoutBox, LineBox, Rect, TextControlPaintState,
-    TextOverflowPaint, VerticalAlign, border_box_adjust_length, edge_sizes, explicit_length,
-    is_border_box, is_non_rendered_html_element,
+    InlineTextSource, LAYOUT_FONTS, LayoutBox, LineBox, MeterRegion, Rect, TextControlPaintState,
+    TextOverflowPaint, ValueIndicatorPaintState, VerticalAlign, border_box_adjust_length,
+    edge_sizes, explicit_length, is_border_box, is_non_rendered_html_element,
 };
 
 mod boxes;
@@ -911,6 +911,7 @@ pub(super) enum InlineSegmentContent {
         f32,
         f32,
     ),
+    ValueIndicator(ComputedStyle, ValueIndicatorPaintState, f32, f32),
     IconFormControl(ComputedStyle, Image, f32, f32, f32, f32),
 }
 
@@ -1407,15 +1408,79 @@ fn collect_value_indicator_segment(
     let metrics = font_metrics(style);
     let content_width = explicit_length(style, "width").unwrap_or(160.0);
     let content_height = explicit_length(style, "height").unwrap_or(16.0);
-    push_form_control_segment(
-        node,
-        style,
-        String::new(),
-        content_width,
-        content_height,
+    let padding = edge_sizes(style, "padding");
+    let border = edge_sizes(style, "border");
+    let total_height = content_height + padding.top + padding.bottom + border.top + border.bottom;
+    out.push(InlineSegment {
+        node: node.clone(),
+        text_source: Vec::new(),
+        content: InlineSegmentContent::ValueIndicator(
+            style.clone(),
+            value_indicator_paint_state(node),
+            content_width,
+            content_height,
+        ),
         metrics,
-        out,
-    );
+        line_height: line_height(style).max(total_height),
+        vertical_align: vertical_align(style),
+        style: FragmentStyle::from_computed(style),
+        word_break: word_break(style),
+        overflow_wrap: overflow_wrap(style),
+        white_space_mode: white_space(style),
+    });
+}
+
+fn finite_attribute(node: &NodeHandle, name: &str, fallback: f32) -> f32 {
+    node.get_attribute(name)
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .unwrap_or(fallback)
+}
+
+fn value_indicator_paint_state(node: &NodeHandle) -> ValueIndicatorPaintState {
+    if node.has_tag_name("progress") {
+        if node.get_attribute("value").is_none() {
+            return ValueIndicatorPaintState::Progress(None);
+        }
+        let max = finite_attribute(node, "max", 1.0);
+        let max = if max > 0.0 { max } else { 1.0 };
+        let value = finite_attribute(node, "value", 0.0).clamp(0.0, max);
+        return ValueIndicatorPaintState::Progress(Some(value / max));
+    }
+
+    let min = finite_attribute(node, "min", 0.0);
+    let max = finite_attribute(node, "max", 1.0).max(min);
+    let value = finite_attribute(node, "value", 0.0).clamp(min, max);
+    let low = finite_attribute(node, "low", min).clamp(min, max);
+    let high = finite_attribute(node, "high", max).clamp(low, max);
+    let optimum = finite_attribute(node, "optimum", min + (max - min) / 2.0).clamp(min, max);
+    let region = if optimum < low {
+        if value <= low {
+            MeterRegion::Optimum
+        } else if value <= high {
+            MeterRegion::Suboptimal
+        } else {
+            MeterRegion::EvenLessGood
+        }
+    } else if optimum > high {
+        if value >= high {
+            MeterRegion::Optimum
+        } else if value >= low {
+            MeterRegion::Suboptimal
+        } else {
+            MeterRegion::EvenLessGood
+        }
+    } else if (low..=high).contains(&value) {
+        MeterRegion::Optimum
+    } else {
+        MeterRegion::Suboptimal
+    };
+    let fraction = if max > min {
+        (value - min) / (max - min)
+    } else {
+        0.0
+    };
+    ValueIndicatorPaintState::Meter { fraction, region }
 }
 
 /// Pushes a `FormControl` inline segment shared by all form control collectors.
@@ -3458,6 +3523,15 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
                 height: *content_height + padding.top + padding.bottom + border.top + border.bottom,
             }]
         }
+        InlineSegmentContent::ValueIndicator(style, state, content_width, content_height) => {
+            let padding = edge_sizes(style, "padding");
+            let border = edge_sizes(style, "border");
+            vec![InlinePiece::Fragment {
+                content: InlineFragmentContent::ValueIndicator(style.clone(), *state),
+                width: *content_width + padding.left + padding.right + border.left + border.right,
+                height: *content_height + padding.top + padding.bottom + border.top + border.bottom,
+            }]
+        }
         InlineSegmentContent::IconFormControl(
             style,
             image,
@@ -3795,7 +3869,9 @@ fn push_line(
     let initial_height = height;
     let fragment_ascent = |fragment: &InlineFragment| match &fragment.content {
         InlineFragmentContent::AtomicInline(baseline) => *baseline,
-        InlineFragmentContent::Image(_, _) | InlineFragmentContent::FormControl(_, _, _)
+        InlineFragmentContent::Image(_, _)
+        | InlineFragmentContent::FormControl(_, _, _)
+        | InlineFragmentContent::ValueIndicator(_, _)
             if fragment.rect.height >= initial_height =>
         {
             fragment.rect.height
@@ -3811,7 +3887,8 @@ fn push_line(
             }
             InlineFragmentContent::AtomicInline(_)
             | InlineFragmentContent::Image(_, _)
-            | InlineFragmentContent::FormControl(_, _, _) => {
+            | InlineFragmentContent::FormControl(_, _, _)
+            | InlineFragmentContent::ValueIndicator(_, _) => {
                 Some((ascent, fragment.rect.height - ascent))
             }
             InlineFragmentContent::InlineEdge(_, _)

@@ -5,6 +5,27 @@
     },
     {
       "path": "mathml/idlharness.window.js"
+    },
+    {
+      "path": "html/semantics/forms/the-meter-element/meter.html"
+    },
+    {
+      "path": "html/semantics/forms/the-meter-element/meter-leading-plus-sign.html"
+    },
+    {
+      "path": "html/semantics/forms/the-progress-element/progress.html"
+    },
+    {
+      "path": "html/semantics/forms/the-progress-element/progress-2.html"
+    },
+    {
+      "path": "html/semantics/forms/the-progress-element/progress-max-setting.html"
+    },
+    {
+      "path": "html/semantics/forms/the-progress-element/progress.window.js"
+    },
+    {
+      "path": "html/semantics/forms/the-progress-element/serialization-regression-test.html"
     }
   ]
 }
