@@ -4,7 +4,7 @@
 //! phases can share and mutate the same tree.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 mod children;
 pub(crate) mod custom_element;
 mod custom_state;
+pub(crate) mod directionality;
 pub(crate) mod editability;
 pub(crate) mod form_controls;
 pub(crate) mod input_range;
@@ -399,6 +400,10 @@ struct ShadowRoot {
     mode: ShadowRootMode,
     settings: ShadowRootSettings,
     assignments: Option<(u64, Rc<SlotAssignments>)>,
+    /// Script-selected slottables for roots whose assignment mode is manual.
+    /// Both the slot keys and values are non-owning so detached DOM subtrees
+    /// are not retained by their former shadow root.
+    manual_assignments: HashMap<usize, (WeakNodeHandle, Vec<WeakNodeHandle>)>,
 }
 
 /// A root owns its snapshot, but it must not keep removed slots or light
@@ -442,6 +447,8 @@ pub struct Element {
     user_action_state: u8,
     parser_form_owner: Option<ParserFormOwner>,
     text_control_state: Option<TextControlState>,
+    /// Live form-control value used only by the HTML directionality algorithm.
+    directionality_control_value: Option<String>,
     /// Scroll offset of this element's scrolling box in CSS pixels, as set
     /// through `scrollTop` / `scrollLeft` and friends.
     ///
@@ -559,6 +566,7 @@ impl Element {
             user_action_state: 0,
             parser_form_owner: None,
             text_control_state: None,
+            directionality_control_value: None,
             scroll_offset: (0.0, 0.0),
             template_content,
             shadow_root: None,
@@ -619,6 +627,7 @@ impl Element {
             user_action_state: 0,
             parser_form_owner: None,
             text_control_state: None,
+            directionality_control_value: None,
             scroll_offset: (0.0, 0.0),
             template_content,
             shadow_root: None,
@@ -1083,6 +1092,7 @@ impl NodeHandle {
             mode,
             settings: ShadowRootSettings::default(),
             assignments: None,
+            manual_assignments: HashMap::new(),
         }));
         element.shadow_root = Some(root.clone());
         Some(root)
@@ -1126,7 +1136,13 @@ impl NodeHandle {
         let NodeData::ShadowRoot(root) = &mut inner.data else {
             return false;
         };
+        let assignment_mode_changed =
+            root.settings.manual_slot_assignment != settings.manual_slot_assignment;
         root.settings = settings;
+        drop(inner);
+        if assignment_mode_changed {
+            invalidate_slot_assignments();
+        }
         true
     }
 
@@ -1189,6 +1205,46 @@ impl NodeHandle {
         let mut flattened = Vec::new();
         flatten_slotables(source, &mut flattened);
         flattened
+    }
+
+    /// Replaces the explicit assignment for this slot in a manual shadow root.
+    ///
+    /// Returns false when this is not a slot in a manual-assignment shadow
+    /// root. A slottable can belong to at most one slot in that root.
+    pub(crate) fn assign_slottables(&self, nodes: Vec<NodeHandle>) -> bool {
+        if !self.is_html_slot() || nodes.iter().any(|node| !node.is_slottable()) {
+            return false;
+        }
+        let Some(root) = self.containing_shadow_root() else {
+            return false;
+        };
+        let mut root_inner = root.0.borrow_mut();
+        let NodeData::ShadowRoot(data) = &mut root_inner.data else {
+            return false;
+        };
+        if !data.settings.manual_slot_assignment {
+            return false;
+        }
+
+        let assigned_ids: HashSet<_> = nodes.iter().map(NodeHandle::identity).collect();
+        for (_, assigned) in data.manual_assignments.values_mut() {
+            assigned.retain(|candidate| {
+                candidate
+                    .upgrade()
+                    .is_some_and(|candidate| !assigned_ids.contains(&candidate.identity()))
+            });
+        }
+        let mut seen = HashSet::new();
+        let assigned = nodes
+            .into_iter()
+            .filter(|node| seen.insert(node.identity()))
+            .map(|node| node.downgrade())
+            .collect();
+        data.manual_assignments
+            .insert(self.identity(), (self.downgrade(), assigned));
+        drop(root_inner);
+        invalidate_slot_assignments();
+        true
     }
 
     /// Returns children in the flat tree used for rendering.
@@ -2160,23 +2216,28 @@ impl NodeHandle {
         }
     }
 
-    /// Copies input flags to a clone without author accessors or retained borrows.
+    /// Copies form-control state to a clone without author accessors or retained borrows.
     pub(crate) fn copy_input_state_to(&self, target: &Self) {
-        let flags = match &self.0.borrow().data {
-            NodeData::Element(element) if element.is_html_input() => Some((
-                element.checked,
-                element.dirty_checkedness,
-                element.indeterminate,
-            )),
-            _ => None,
+        let (flags, directionality_control_value) = match &self.0.borrow().data {
+            NodeData::Element(element) => (
+                element.is_html_input().then_some((
+                    element.checked,
+                    element.dirty_checkedness,
+                    element.indeterminate,
+                )),
+                element.directionality_control_value.clone(),
+            ),
+            _ => (None, None),
         };
-        if let Some((checked, dirty_checkedness, indeterminate)) = flags
-            && let NodeData::Element(element) = &mut target.0.borrow_mut().data
-            && element.is_html_input()
-        {
-            element.checked = checked;
-            element.dirty_checkedness = dirty_checkedness;
-            element.indeterminate = indeterminate;
+        if let NodeData::Element(element) = &mut target.0.borrow_mut().data {
+            if let Some((checked, dirty_checkedness, indeterminate)) = flags
+                && element.is_html_input()
+            {
+                element.checked = checked;
+                element.dirty_checkedness = dirty_checkedness;
+                element.indeterminate = indeterminate;
+            }
+            element.directionality_control_value = directionality_control_value;
         }
     }
 
@@ -2649,6 +2710,32 @@ impl NodeHandle {
         }
     }
 
+    /// Publishes a dirty form-control value for `dir=auto` matching.
+    ///
+    /// The value is owned natively so selector matching never executes author
+    /// JavaScript. Clone creation copies this state together with the live value.
+    pub(crate) fn set_directionality_control_value(&self, value: Option<String>) -> bool {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut inner.data else {
+            return false;
+        };
+        if !(element.is_html_input()
+            || (element.has_html_namespace() && element.local_name() == "textarea"))
+            || element.directionality_control_value == value
+        {
+            return false;
+        }
+        element.directionality_control_value = value;
+        true
+    }
+
+    pub(crate) fn directionality_control_value(&self) -> Option<String> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) => element.directionality_control_value.clone(),
+            _ => None,
+        }
+    }
+
     /// Returns this element's stored scroll offset in CSS pixels, or
     /// `(0.0, 0.0)` for a node kind that has no scrolling box of its own.
     ///
@@ -3111,6 +3198,40 @@ fn slot_assignments(root: &NodeHandle) -> Option<Rc<SlotAssignments>> {
             .entry(slot.get_attribute("name").unwrap_or_default())
             .or_insert(slot);
         assignments.by_slot.insert(slot.identity(), Vec::new());
+    }
+    let manual_assignments = match &root.0.borrow().data {
+        NodeData::ShadowRoot(data) if data.settings.manual_slot_assignment => {
+            Some(data.manual_assignments.clone())
+        }
+        _ => None,
+    };
+    if let Some(manual_assignments) = manual_assignments {
+        for slot in slots {
+            let Some((stored_slot, nodes)) = manual_assignments.get(&slot.identity()) else {
+                continue;
+            };
+            if !stored_slot.upgrade().is_some_and(|stored| stored == slot) {
+                continue;
+            }
+            for node in nodes.iter().filter_map(WeakNodeHandle::upgrade) {
+                if node.parent_node().as_ref() != Some(&host) {
+                    continue;
+                }
+                assignments
+                    .by_slot
+                    .get_mut(&slot.identity())
+                    .expect("collected slot has an assignment entry")
+                    .push(node.downgrade());
+                assignments
+                    .by_node
+                    .insert(node.identity(), slot.downgrade());
+            }
+        }
+        let assignments = Rc::new(assignments);
+        if let NodeData::ShadowRoot(data) = &mut root.0.borrow_mut().data {
+            data.assignments = Some((epoch, assignments.clone()));
+        }
+        return Some(assignments);
     }
     for child in host.child_nodes() {
         #[cfg(test)]

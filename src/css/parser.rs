@@ -288,6 +288,7 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         | "nth-last-of-type"
                         | "empty"
                         | "lang"
+                        | "dir"
                         | "enabled"
                         | "disabled"
                         | "valid"
@@ -1372,7 +1373,7 @@ impl Parser {
         }
         let name = self.expect_ident()?;
         if !matches!(self.peek(), Some(CssToken::ParenOpen)) {
-            if name.eq_ignore_ascii_case("state") {
+            if name.eq_ignore_ascii_case("state") || name.eq_ignore_ascii_case("dir") {
                 return Err(CssParseError::InvalidSelector);
             }
             return Ok(SimpleSelector::PseudoClass(name));
@@ -1403,6 +1404,19 @@ impl Parser {
         }
         self.next(); // consume ParenOpen
         let argument_tokens = self.collect_parenthesized_tokens()?;
+        if name.eq_ignore_ascii_case("dir") {
+            let significant: Vec<_> = argument_tokens
+                .iter()
+                .filter(|token| **token != CssToken::Whitespace)
+                .collect();
+            let [CssToken::Ident(value)] = significant.as_slice() else {
+                return Err(CssParseError::InvalidSelector);
+            };
+            return Ok(SimpleSelector::PseudoClass(format!(
+                "{name}({})",
+                value.to_ascii_lowercase()
+            )));
+        }
         if name.eq_ignore_ascii_case("state") {
             let significant: Vec<_> = argument_tokens
                 .iter()

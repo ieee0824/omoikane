@@ -16644,6 +16644,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_media_selector_state_native),
         ),
         (
+            js_string!("__omoikane_set_directionality_control_value"),
+            2,
+            NativeFunction::from_copy_closure(set_directionality_control_value_native),
+        ),
+        (
             js_string!("__omoikane_set_modal_dialog"),
             2,
             NativeFunction::from_copy_closure(set_modal_dialog_native),
@@ -17432,6 +17437,11 @@ fn register_host_bindings(
             js_string!("__omoikane_assigned_nodes"),
             2,
             NativeFunction::from_copy_closure(assigned_nodes_native),
+        ),
+        (
+            js_string!("__omoikane_assign_slot"),
+            1,
+            NativeFunction::from_copy_closure(assign_slot_native),
         ),
         (
             js_string!("__omoikane_create_document"),
@@ -21249,6 +21259,30 @@ fn set_media_selector_state_native(
             JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
         })?;
         if node.set_media_selector_state(state) {
+            host.borrow_mut().invalidate_style_cache_for_node(&node);
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn set_directionality_control_value_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let value = match args.get(1) {
+        Some(value) if !value.is_undefined() => {
+            Some(value.to_string(context)?.to_std_string_escaped())
+        }
+        _ => None,
+    };
+    with_render_mutation(|host| {
+        let node = host.borrow().get_node(node_id).ok_or_else(|| {
+            JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+        })?;
+        if node.set_directionality_control_value(value) {
             host.borrow_mut().invalidate_style_cache_for_node(&node);
         }
         Ok(JsValue::undefined())
@@ -27178,6 +27212,39 @@ fn assigned_nodes_native(
         Ok(JsValue::from(
             boa_engine::object::builtins::JsArray::from_iter(ids, context),
         ))
+    })
+}
+
+fn assign_slot_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let slot_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, slot_id)?;
+    let mut node_ids = Vec::with_capacity(args.len().saturating_sub(1));
+    for value in args.iter().skip(1) {
+        let id = parse_node_id(Some(value), context)?;
+        ensure_same_origin_node(context, id)?;
+        node_ids.push(id);
+    }
+    with_render_mutation(|state| {
+        let slot = state
+            .borrow()
+            .get_node(slot_id)
+            .ok_or_else(|| JsNativeError::reference().with_message("slot not found"))?;
+        let nodes = {
+            let state = state.borrow();
+            node_ids
+                .iter()
+                .map(|id| {
+                    state
+                        .get_node(*id)
+                        .ok_or_else(|| JsNativeError::reference().with_message("node not found"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if !slot.assign_slottables(nodes) {
+            return Ok(JsValue::from(false));
+        }
+        state.borrow_mut().invalidate_style_cache_for_node(&slot);
+        Ok(JsValue::from(true))
     })
 }
 

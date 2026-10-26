@@ -1,0 +1,13 @@
+{
+  "tests": [
+    {"path": "html/dom/elements/global-attributes/cdata-dir_auto.html"},
+    {"path": "html/dom/elements/global-attributes/dir-assorted.window.js"},
+    {"path": "html/dom/elements/global-attributes/dir-auto-div-append-child.html"},
+    {"path": "html/dom/elements/global-attributes/dir-auto-dynamic-changes.window.js"},
+    {"path": "html/dom/elements/global-attributes/dir-auto-form-associated.window.js"},
+    {"path": "html/dom/elements/global-attributes/dir-bdi-script.html"},
+    {"path": "html/dom/elements/global-attributes/dir-not-changed-text-input-typing.html"},
+    {"path": "html/dom/elements/global-attributes/dir-slots-directionality.html"},
+    {"path": "html/dom/elements/global-attributes/document-dir.html"}
+  ]
+}
