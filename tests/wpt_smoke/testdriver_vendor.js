@@ -28,6 +28,14 @@ test_driver_internal.set_window_rect = () => new Promise(resolve => {
 });
 globalThis.__wpt_action_commands = [];
 const wptMouseSources = new Map();
+const wptKeySources = new Map();
+const wptSpecialKeys = new Map([
+  ['\uE003', 'Backspace'], ['\uE004', 'Tab'], ['\uE006', 'Enter'], ['\uE007', 'Enter'],
+  ['\uE008', 'Shift'], ['\uE009', 'Control'], ['\uE00A', 'Alt'], ['\uE03D', 'Meta'],
+  ['\uE00C', 'Escape'], ['\uE00D', ' '], ['\uE010', 'End'], ['\uE011', 'Home'],
+  ['\uE012', 'ArrowLeft'], ['\uE013', 'ArrowUp'], ['\uE014', 'ArrowRight'],
+  ['\uE015', 'ArrowDown'], ['\uE017', 'Delete'],
+]);
 test_driver_internal.action_sequence = (sources, context = null) => new Promise((resolve, reject) => {
   if (context !== null && context !== globalThis) {
     reject(new Error('Actions in another browsing context are unsupported'));
@@ -47,6 +55,17 @@ test_driver_internal.click = (element, coords) => {
       {type: 'pointerUp', button: 0},
     ],
   }]);
+};
+test_driver_internal.send_keys = (element, keys) => {
+  if (!(element instanceof Element) || !element.isConnected || element.ownerDocument !== document) {
+    return Promise.reject(new Error('Stale element or unsupported browsing context'));
+  }
+  const actions = [];
+  for (const value of Array.from(keys)) {
+    actions.push({type: 'keyDown', value}, {type: 'keyUp', value});
+  }
+  element.focus();
+  return test_driver_internal.action_sequence([{type: 'key', id: 'testdriver-keyboard', actions}]);
 };
 test_driver_internal.set_permission = async (params, context = null) => {
   if (context !== null && context !== globalThis) throw new Error('Permission context is unsupported');
@@ -143,9 +162,12 @@ function wptPrepareActions(command) {
       throw new Error('Invalid or duplicate action source');
     }
     ids.add(input.id);
-    if (input.type !== 'none' &&
+    if (input.type !== 'none' && input.type !== 'key' &&
         (input.type !== 'pointer' || (input.parameters?.pointerType ?? 'mouse') !== 'mouse')) {
       throw new Error('Unsupported action source: ' + input.type);
+    }
+    if (input.type === 'key' && !wptKeySources.has(input.id)) {
+      wptKeySources.set(input.id, new Set());
     }
     if (input.type === 'pointer' && !wptMouseSources.has(input.id)) {
       wptMouseSources.set(input.id, {
@@ -154,6 +176,25 @@ function wptPrepareActions(command) {
     }
   }
   command.prepared = true;
+}
+
+function wptPerformKeyAction(action, pressed) {
+  if (!['keyDown', 'keyUp'].includes(action.type) ||
+      typeof action.value !== 'string' || Array.from(action.value).length !== 1) {
+    throw new Error('Invalid keyboard action');
+  }
+  const key = wptSpecialKeys.get(action.value) ?? action.value;
+  if (key.codePointAt(0) >= 0xE000 && key.codePointAt(0) <= 0xF8FF) {
+    throw new Error('Unsupported WebDriver key');
+  }
+  const down = action.type === 'keyDown';
+  const repeat = down && pressed.has(key);
+  if (down) pressed.add(key); else pressed.delete(key);
+  __omoikane_dispatch_keyboard_input(down ? 'keydown' : 'keyup', {
+    key, text: Array.from(key).length === 1 ? key : '', repeat,
+    shiftKey: pressed.has('Shift'), ctrlKey: pressed.has('Control'),
+    altKey: pressed.has('Alt'), metaKey: pressed.has('Meta'),
+  });
 }
 
 globalThis.__wpt_advance_action_tick = function() {
@@ -168,7 +209,8 @@ globalThis.__wpt_advance_action_tick = function() {
       duration = Math.max(duration, wptActionDuration(action));
       if (action.type === 'pause') continue;
       if (input.type === 'none') throw new Error('A none source only accepts pause');
-      wptPerformMouseAction(action, wptMouseSources.get(input.id));
+      if (input.type === 'key') wptPerformKeyAction(action, wptKeySources.get(input.id));
+      else wptPerformMouseAction(action, wptMouseSources.get(input.id));
     }
     command.tick++;
     if (command.sources.every(input => command.tick >= input.actions.length)) {
@@ -189,8 +231,10 @@ if (typeof __omoikane_automation_register_driver === 'function') {
     if (execute) return __wpt_advance_action_tick();
     return Array.isArray(command.sources) && command.sources.some(input => {
       const action = input.actions?.[command.tick];
-      return input.type === 'pointer' &&
-        (action?.type === 'pointerDown' || action?.type === 'pointerUp');
+      return (input.type === 'pointer' &&
+        (action?.type === 'pointerDown' || action?.type === 'pointerUp')) ||
+        (input.type === 'key' && action?.type === 'keyDown' &&
+         !['\uE008', '\uE009', '\uE00A', '\uE00C', '\uE03D'].includes(action.value));
     });
   });
 }

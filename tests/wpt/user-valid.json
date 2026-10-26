@@ -1,0 +1,16 @@
+{
+  "tests": [
+    {
+      "path": "css/selectors/user-invalid.html"
+    },
+    {
+      "path": "css/selectors/user-valid.html"
+    },
+    {
+      "path": "css/selectors/invalidation/user-valid-user-invalid.html"
+    },
+    {
+      "path": "css/selectors/user-valid-user-invalid-multifield-inputs.tentative.html"
+    }
+  ]
+}

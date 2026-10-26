@@ -472,11 +472,20 @@ fn matches_compound(
     scope_root: Option<&NodeHandle>,
     allow_scope_ancestor_escape: bool,
 ) -> bool {
+    // Conditions before a pseudo-element select its originating element.
+    // Only the suffix after that boundary observes the pseudo-element itself.
+    let mut subject_pseudo = None;
     part.simples.iter().all(|simple| {
+        if matches!(simple, SimpleSelector::PseudoElement(_))
+            || matches!(simple, SimpleSelector::PseudoClass(name)
+                if matches!(name.as_str(), "before" | "after" | "first-letter" | "first-line"))
+        {
+            subject_pseudo = pseudo;
+        }
         matches_simple_selector(
             node,
             simple,
-            pseudo,
+            subject_pseudo,
             cache,
             scope_root,
             allow_scope_ancestor_escape,
@@ -865,6 +874,12 @@ fn matches_pseudo_class(
         "out-of-range" => form_state::range_state(node) == Some(true),
         "valid" => pseudo.is_none() && node.css_validity() == Some(true),
         "invalid" => pseudo.is_none() && node.css_validity() == Some(false),
+        "user-valid" => {
+            pseudo.is_none() && node.user_validity() && node.css_validity() == Some(true)
+        }
+        "user-invalid" => {
+            pseudo.is_none() && node.user_validity() && node.css_validity() == Some(false)
+        }
         "any-link" => is_html_hyperlink(node),
         "link" => is_html_hyperlink(node) && !cache.is_visited_subject(node),
         "visited" => is_html_hyperlink(node) && cache.is_visited_subject(node),
@@ -1563,6 +1578,34 @@ mod tests {
                 elements: 2,
             }
         );
+    }
+
+    #[test]
+    fn origin_state_conditions_precede_the_generated_pseudo_element_boundary() {
+        let input = NodeHandle::element("input");
+        input.set_css_validity(Some(false));
+        assert!(input.set_user_validity(true));
+        input.set_user_action_state("hover", true);
+        for rule in [
+            "input:user-invalid::before {}",
+            "input:is(:user-invalid)::before {}",
+            "input:not(:user-valid)::before {}",
+            "input:invalid::before {}",
+            "input:hover::before {}",
+            "input:hover:before {}",
+        ] {
+            assert!(
+                matches_selector_with_pseudo(&input, &selector(rule), Some(PseudoElement::Before)),
+                "{rule}"
+            );
+        }
+        let mut suffix = selector("input:user-invalid::before {}");
+        suffix.parts.last_mut().unwrap().simples.swap(1, 2);
+        assert!(!matches_selector_with_pseudo(
+            &input,
+            &suffix,
+            Some(PseudoElement::Before)
+        ));
     }
 
     #[test]
