@@ -3762,6 +3762,55 @@ fn video_poster_and_picture_img_use_image_fallback() {
 }
 
 #[test]
+fn picture_selects_first_matching_source_and_srcset_candidate() {
+    let selected = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEUlEQVR42mP4/58BCv7/ZwAAHfAD/abwPj4AAAAASUVORK5CYII=";
+    let fallback = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    let picture = NodeHandle::element("picture");
+    let rejected = NodeHandle::element("source");
+    rejected.set_attribute("media", "(min-width: 900px)");
+    rejected.set_attribute("srcset", fallback);
+    let source = NodeHandle::element("source");
+    source.set_attribute("media", "(max-width: 800px)");
+    source.set_attribute("sizes", "50vw");
+    source.set_attribute("srcset", &format!("{fallback} 300w, {selected} 400w"));
+    let img = NodeHandle::element("img");
+    img.set_attribute("src", fallback);
+    picture.append_child(rejected);
+    picture.append_child(source);
+    picture.append_child(img.clone());
+
+    let (image_node, image) = super::with_image_selection_environment(800.0, 600.0, 1.0, || {
+        super::element_inline_image(&picture).expect("selected picture image")
+    });
+    assert_eq!(image_node.identity(), img.identity());
+    assert_eq!((image.width(), image.height()), (2, 2));
+}
+
+#[test]
+fn picture_skips_unsupported_types_and_selects_density_candidates() {
+    let one = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    let two = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEUlEQVR42mP4/58BCv7/ZwAAHfAD/abwPj4AAAAASUVORK5CYII=";
+    let picture = NodeHandle::element("picture");
+    let unsupported = NodeHandle::element("source");
+    unsupported.set_attribute("type", "image/avif");
+    unsupported.set_attribute("srcset", two);
+    let source = NodeHandle::element("source");
+    source.set_attribute("srcset", &format!("{one} 1x, {two} 2x"));
+    let img = NodeHandle::element("img");
+    img.set_attribute("src", one);
+    picture.append_child(unsupported);
+    picture.append_child(source);
+    picture.append_child(img);
+
+    let image = super::with_image_selection_environment(800.0, 600.0, 1.5, || {
+        super::element_inline_image(&picture)
+            .expect("selected density candidate")
+            .1
+    });
+    assert_eq!((image.width(), image.height()), (2, 2));
+}
+
+#[test]
 fn progress_and_meter_create_placeholder_fragments() {
     for tag in ["progress", "meter"] {
         let body = NodeHandle::element("body");

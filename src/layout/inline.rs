@@ -7,7 +7,10 @@ use std::sync::Arc;
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::css::{ComputedStyle, ComputedValue, PseudoElement, StyleResolver, Value};
+use crate::css::{
+    ComputedStyle, ComputedValue, PseudoElement, StyleResolver, Value, evaluate_media_query,
+    parse_media_query_list,
+};
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
     Font, FontFallbackCandidate, FontFamilyKey, FontStyle, FontVariantKey, FontWeight,
@@ -1831,18 +1834,21 @@ fn element_inline_image_with_current_color(
     let tag_name = node.tag_name()?;
     match tag_name.as_str() {
         "canvas" => crate::canvas::image(node.identity()).map(|image| (node.clone(), image)),
-        "img" => {
-            let src = node.get_attribute("src")?;
-            decode_or_fetch_image(&src).map(|image| (node.clone(), image))
-        }
+        "img" => selected_image_url(node, None)
+            .and_then(|src| decode_or_fetch_image(&src))
+            .map(|image| (node.clone(), image)),
         "video" => {
             let poster = node.get_attribute("poster")?;
             decode_or_fetch_image(&poster).map(|image| (node.clone(), image))
         }
-        "picture" => node
-            .layout_child_nodes()
-            .into_iter()
-            .find_map(|child| element_inline_image_with_current_color(&child, current_color)),
+        "picture" => picture_image(node).and_then(|(image_node, src)| {
+            decode_or_fetch_image(&src)
+                .or_else(|| {
+                    selected_image_url(&image_node, None)
+                        .and_then(|fallback| decode_or_fetch_image(&fallback))
+                })
+                .map(|image| (image_node, image))
+        }),
         "svg" => {
             let image = crate::svg::render_svg_to_image_with_current_color(
                 node,
@@ -1868,6 +1874,217 @@ fn element_inline_image_with_current_color(
         }
         _ => None,
     }
+}
+
+#[derive(Clone, Copy)]
+enum SourceDescriptor {
+    Density(f32),
+    Width(f32),
+}
+
+fn picture_image(picture: &NodeHandle) -> Option<(NodeHandle, String)> {
+    let children = picture.layout_child_nodes();
+    let image = children
+        .iter()
+        .find(|child| child.tag_name().as_deref() == Some("img"))?;
+    for source in children
+        .iter()
+        .take_while(|child| child.identity() != image.identity())
+    {
+        if source.tag_name().as_deref() != Some("source") || !source_type_supported(source) {
+            continue;
+        }
+        let media = source.get_attribute("media").unwrap_or_default();
+        if !source_media_matches(&media) {
+            continue;
+        }
+        if let Some(url) = selected_image_url(source, Some(image)) {
+            return Some((image.clone(), url));
+        }
+    }
+    selected_image_url(image, None).map(|url| (image.clone(), url))
+}
+
+fn source_type_supported(source: &NodeHandle) -> bool {
+    let Some(kind) = source.get_attribute("type") else {
+        return true;
+    };
+    matches!(
+        kind.split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "" | "image/png"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/gif"
+            | "image/webp"
+            | "image/svg+xml"
+    )
+}
+
+fn source_media_matches(media: &str) -> bool {
+    if media.trim().is_empty() {
+        return true;
+    }
+    let (width, height, _) = super::current_image_selection_environment();
+    parse_media_query_list(media).is_some_and(|queries| {
+        queries
+            .iter()
+            .any(|query| evaluate_media_query(query, width, height, false))
+    })
+}
+
+fn selected_image_url(node: &NodeHandle, fallback_sizes: Option<&NodeHandle>) -> Option<String> {
+    let srcset = node.get_attribute("srcset").unwrap_or_default();
+    let candidates = parse_srcset(&srcset);
+    if candidates.is_empty() {
+        return node
+            .get_attribute("src")
+            .filter(|src| !src.trim().is_empty());
+    }
+    let sizes = node
+        .get_attribute("sizes")
+        .or_else(|| fallback_sizes.and_then(|image| image.get_attribute("sizes")))
+        .unwrap_or_default();
+    select_source_candidate(&candidates, &sizes).map(|(url, _)| url.clone())
+}
+
+fn parse_srcset(input: &str) -> Vec<(String, SourceDescriptor)> {
+    let mut rest = input.trim();
+    let mut candidates = Vec::new();
+    while !rest.is_empty() {
+        rest = rest.trim_start_matches(|ch: char| ch.is_ascii_whitespace() || ch == ',');
+        if rest.is_empty() {
+            break;
+        }
+        let url_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let mut url = &rest[..url_end];
+        rest = &rest[url_end..];
+        let trailing_separator = url.ends_with(',');
+        url = url.trim_end_matches(',');
+        let descriptor_end = rest.find(',').unwrap_or(rest.len());
+        let descriptor = if trailing_separator {
+            ""
+        } else {
+            rest[..descriptor_end].trim()
+        };
+        rest = if trailing_separator {
+            rest
+        } else {
+            &rest[descriptor_end..]
+        };
+        let parsed = if descriptor.is_empty() {
+            Some(SourceDescriptor::Density(1.0))
+        } else if let Some(value) = descriptor.strip_suffix('x') {
+            value
+                .parse()
+                .ok()
+                .filter(|value: &f32| value.is_finite() && *value > 0.0)
+                .map(SourceDescriptor::Density)
+        } else if let Some(value) = descriptor.strip_suffix('w') {
+            value
+                .parse()
+                .ok()
+                .filter(|value: &f32| value.is_finite() && *value > 0.0)
+                .map(SourceDescriptor::Width)
+        } else {
+            None
+        };
+        if !url.is_empty()
+            && let Some(descriptor) = parsed
+        {
+            candidates.push((url.to_string(), descriptor));
+        }
+    }
+    candidates
+}
+
+fn select_source_candidate<'a>(
+    candidates: &'a [(String, SourceDescriptor)],
+    sizes: &str,
+) -> Option<&'a (String, SourceDescriptor)> {
+    let (viewport_width, viewport_height, dpr) = super::current_image_selection_environment();
+    let width_descriptors = candidates
+        .iter()
+        .all(|(_, descriptor)| matches!(descriptor, SourceDescriptor::Width(_)));
+    let density_descriptors = candidates
+        .iter()
+        .all(|(_, descriptor)| matches!(descriptor, SourceDescriptor::Density(_)));
+    if !width_descriptors && !density_descriptors {
+        return None;
+    }
+    let target = if width_descriptors {
+        source_size(sizes, viewport_width, viewport_height) * dpr
+    } else {
+        dpr
+    };
+    candidates
+        .iter()
+        .filter_map(|candidate| {
+            let value = match candidate.1 {
+                SourceDescriptor::Density(value) | SourceDescriptor::Width(value) => value,
+            };
+            (value >= target).then_some((value, candidate))
+        })
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, candidate)| candidate)
+        .or_else(|| {
+            candidates.iter().max_by(|left, right| {
+                let value = |descriptor| match descriptor {
+                    SourceDescriptor::Density(value) | SourceDescriptor::Width(value) => value,
+                };
+                value(left.1).total_cmp(&value(right.1))
+            })
+        })
+}
+
+fn source_size(sizes: &str, viewport_width: f32, viewport_height: f32) -> f32 {
+    for component in sizes.split(',') {
+        let component = component.trim();
+        let Some((condition, length)) = component.rsplit_once(char::is_whitespace) else {
+            if let Some(length) = source_size_length(component, viewport_width) {
+                return length;
+            }
+            continue;
+        };
+        if source_media_matches_with_viewport(condition, viewport_width, viewport_height)
+            && let Some(length) = source_size_length(length, viewport_width)
+        {
+            return length;
+        }
+    }
+    viewport_width
+}
+
+fn source_media_matches_with_viewport(media: &str, width: f32, height: f32) -> bool {
+    parse_media_query_list(media).is_some_and(|queries| {
+        queries
+            .iter()
+            .any(|query| evaluate_media_query(query, width, height, false))
+    })
+}
+
+fn source_size_length(length: &str, viewport_width: f32) -> Option<f32> {
+    let length = length.trim().to_ascii_lowercase();
+    if let Some(value) = length.strip_suffix("px") {
+        return value
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|value| *value >= 0.0);
+    }
+    if let Some(value) = length.strip_suffix("vw") {
+        return value
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|value| *value >= 0.0)
+            .map(|value| value * viewport_width / 100.0);
+    }
+    None
 }
 
 /// Decode an image from a data: URI (PNG, JPEG, GIF, WebP, or SVG).
