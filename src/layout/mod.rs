@@ -96,6 +96,7 @@ thread_local! {
     static HTTP_CLIENT: RefCell<Client> = RefCell::new(Client::new());
     static LAYOUT_FONTS: RefCell<Option<LayoutFontContext>> = const { RefCell::new(None) };
     static IMAGE_BASE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
+    static IMAGE_SELECTION_ENVIRONMENT: Cell<(f32, f32, f32)> = const { Cell::new((800.0, 600.0, 1.0)) };
     static IMAGE_COOKIE_CONTEXT: RefCell<Option<ImageRequestContext>> = const { RefCell::new(None) };
     static IMAGE_CACHE_OWNER: RefCell<Option<ImageCacheOwner>> = const { RefCell::new(None) };
     static HTML_TAG_SQLITE_CONNECTIONS: RefCell<HashMap<String, Connection>> = RefCell::new(HashMap::new());
@@ -509,6 +510,35 @@ pub fn with_image_base_url<T>(base_url: Option<Url>, f: impl FnOnce() -> T) -> T
 /// Captures the current image base URL at an effect boundary for explicit URL resolution.
 pub(crate) fn current_image_base_url() -> Option<Url> {
     IMAGE_BASE_URL.with(|cell| cell.borrow().clone())
+}
+
+fn with_image_selection_environment<T>(
+    viewport_width: f32,
+    viewport_height: f32,
+    device_pixel_ratio: f32,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Restore((f32, f32, f32));
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            IMAGE_SELECTION_ENVIRONMENT.with(|cell| cell.set(self.0));
+        }
+    }
+
+    IMAGE_SELECTION_ENVIRONMENT.with(|cell| {
+        let previous = cell.replace((
+            viewport_width.max(0.0),
+            viewport_height.max(0.0),
+            device_pixel_ratio.max(f32::EPSILON),
+        ));
+        let _restore = Restore(previous);
+        f()
+    })
+}
+
+fn current_image_selection_environment() -> (f32, f32, f32) {
+    IMAGE_SELECTION_ENVIRONMENT.with(Cell::get)
 }
 
 /// Runs image resolution with the browsing session's Cookie store and site.
@@ -1455,6 +1485,17 @@ pub fn layout_tree(
 
 /// Lays out a tree while tracking content-visibility decisions for the runtime.
 pub(crate) fn layout_tree_with_content_visibility(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    containing_block: Rect,
+    input: ContentVisibilityLayoutInput,
+) -> (Option<LayoutBox>, ContentVisibilityLayoutReport) {
+    with_image_selection_environment(containing_block.width, containing_block.height, 1.0, || {
+        layout_tree_with_content_visibility_inner(node, resolver, containing_block, input)
+    })
+}
+
+fn layout_tree_with_content_visibility_inner(
     node: &NodeHandle,
     resolver: &mut StyleResolver,
     containing_block: Rect,
