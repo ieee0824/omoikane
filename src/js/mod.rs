@@ -16629,6 +16629,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_popover_open_native),
         ),
         (
+            js_string!("__omoikane_get_picker_open"),
+            1,
+            NativeFunction::from_copy_closure(get_picker_open_native),
+        ),
+        (
+            js_string!("__omoikane_set_picker_open"),
+            2,
+            NativeFunction::from_copy_closure(set_picker_open_native),
+        ),
+        (
             js_string!("__omoikane_set_modal_dialog"),
             2,
             NativeFunction::from_copy_closure(set_modal_dialog_native),
@@ -21179,6 +21189,41 @@ fn set_popover_open_native(
         let order = node.set_popover_open(open);
         state.borrow_mut().invalidate_style_cache_for_node(&node);
         Ok(JsValue::from(order.map_or(-1.0, |value| value as f64)))
+    })
+}
+
+fn get_picker_open_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    with_host_state(|state| {
+        let open = state
+            .borrow()
+            .get_node(node_id)
+            .is_some_and(|node| node.is_picker_open());
+        Ok(JsValue::from(open))
+    })
+}
+
+fn set_picker_open_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let open = args.get(1).is_some_and(JsValue::to_boolean);
+    with_render_mutation(|state| {
+        let node = state.borrow().get_node(node_id).ok_or_else(|| {
+            JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+        })?;
+        if node.set_picker_open(open) {
+            state.borrow_mut().invalidate_style_cache_for_node(&node);
+        }
+        Ok(JsValue::undefined())
     })
 }
 

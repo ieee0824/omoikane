@@ -419,6 +419,9 @@ collect_pattern \
   "/dom/ranges/StaticRange-constructor.html" \
   "/dom/interface-objects.html" \
   "/selection/shadow-dom/tentative/"
+collect_pattern \
+  "/css/selectors/open-pseudo.html" \
+  "/css/selectors/invalidation/open-pseudo-class-in-has.html"
 # A pinned revision alone does not prove that newly requested WPT paths exist.
 if [[ "$current_revision" == "$revision" ]] &&
   diff -q <(printf '%s\n' "${patterns[@]}" | LC_ALL=C sort -u) \

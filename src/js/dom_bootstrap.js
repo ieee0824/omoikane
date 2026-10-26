@@ -223,6 +223,8 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeNodeHasSlotAncestor = globalThis.__omoikane_node_has_slot_ancestor;
   const nativeGetPopoverOpen = globalThis.__omoikane_get_popover_open;
   const nativeSetPopoverOpen = globalThis.__omoikane_set_popover_open;
+  const nativeGetPickerOpen = globalThis.__omoikane_get_picker_open;
+  const nativeSetPickerOpen = globalThis.__omoikane_set_picker_open;
   const nativeSetModalDialog = globalThis.__omoikane_set_modal_dialog;
   const nativeFullscreenElement = globalThis.__omoikane_fullscreen_element;
   const nativeFullscreenEnabled = globalThis.__omoikane_fullscreen_enabled;
@@ -306,6 +308,8 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_node_has_slot_ancestor;
   delete globalThis.__omoikane_get_popover_open;
   delete globalThis.__omoikane_set_popover_open;
+  delete globalThis.__omoikane_get_picker_open;
+  delete globalThis.__omoikane_set_picker_open;
   delete globalThis.__omoikane_set_modal_dialog;
   delete globalThis.__omoikane_fullscreen_element;
   delete globalThis.__omoikane_fullscreen_enabled;
@@ -2893,6 +2897,7 @@ export const __omoikane_service_worker_lifecycle = {};
             tag === "LABEL" || tag === "BUTTON" || tag === "INPUT") {
           return current;
         }
+        if (tag === "SUMMARY") return current;
       }
     }
     const target = path[0]?.node;
@@ -3434,6 +3439,10 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     if (browsingInput.removalMayAffectTopLayer) {
       popoverSubtreeWillBeRemoved(child);
+    }
+    const activePicker = wrapNode(browsingInput.activeSelectPickerId);
+    if (activePicker && (activePicker === child || child.contains(activePicker))) {
+      setSelectPickerOpen(activePicker, false);
     }
     preRemove(parent, child);
     const wasConnected = child.isConnected;
@@ -5125,6 +5134,14 @@ export const __omoikane_service_worker_lifecycle = {};
       // directly through dispatchEvent.
       if (this.__isDisabledControl()) return;
       const tag = this.nodeName;
+      if (tag === "SUMMARY") {
+        const details = internalParentNode(this);
+        if (!(details instanceof HTMLDetailsElement)) return;
+        const firstSummary = Array.from(details.children).find(
+          child => internalNodeLocalName(child) === "summary");
+        if (firstSummary === this) details.open = !details.open;
+        return;
+      }
       if (tag === "LABEL") {
         const control = labelControl(this);
         const state = safeWeakMapGet(nodeEventStates, this);
@@ -6473,7 +6490,15 @@ export const __omoikane_service_worker_lifecycle = {};
     get open() { return this.hasAttribute("open"); }
     set open(value) {
       if (value) this.setAttribute("open", "");
-      else this.removeAttribute("open");
+      else {
+        this.removeAttribute("open");
+        const stack = modalDialogStack(this.ownerDocument);
+        const index = stack.indexOf(this);
+        if (index >= 0) stack.splice(index, 1);
+        nativeSetModalDialog(this.__id, false);
+        this.__dialogModal = false;
+        this.__dialogTopLayerOrder = -1;
+      }
     }
     get returnValue() {
       return Object.prototype.hasOwnProperty.call(this, "__dialogReturnValue")
@@ -6533,6 +6558,14 @@ export const __omoikane_service_worker_lifecycle = {};
       }
       this.dispatchEvent(new Event("close"));
     }
+    requestClose(result) {
+      if (!this.open) return;
+      const notCanceled = this.dispatchEvent(new Event("cancel", { cancelable: true }));
+      if (notCanceled) {
+        if (arguments.length > 0) this.close(result);
+        else this.close();
+      }
+    }
   }
 
   const pendingDetailsToggles = new WeakMap();
@@ -6541,6 +6574,15 @@ export const __omoikane_service_worker_lifecycle = {};
     const oldState = oldValue === null ? "closed" : "open";
     const newState = newValue === null ? "closed" : "open";
     if (oldState === newState) return;
+    const groupName = newState === "open" ? nativeAttribute(element, "name") : null;
+    if (groupName) {
+      const root = element.getRootNode();
+      for (const candidate of root.querySelectorAll("details[open][name]")) {
+        if (candidate !== element && nativeAttribute(candidate, "name") === groupName) {
+          candidate.removeAttribute("open");
+        }
+      }
+    }
     const previous = safeWeakMapGet(pendingDetailsToggles, element);
     if (previous) {
       previous.newState = newState;
@@ -14937,8 +14979,23 @@ export const __omoikane_service_worker_lifecycle = {};
       }
     }
     remove(index) {
+      if (arguments.length === 0) {
+        removeChildNode.call(this);
+        return;
+      }
       const option = this.options[index];
       if (option) this.removeChild(option);
+    }
+    showPicker() {
+      if (this.__isDisabledControl()) {
+        throw new DOMException("The select is not mutable", "InvalidStateError");
+      }
+      if (!fullscreenTransientActivation) {
+        throw new DOMException("A user activation is required", "NotAllowedError");
+      }
+      fullscreenTransientActivation = false;
+      this.focus();
+      setSelectPickerOpen(this, true);
     }
   }
 
@@ -14955,16 +15012,65 @@ export const __omoikane_service_worker_lifecycle = {};
     control.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
+  function selectUsesPicker(control) {
+    return htmlFormControlLocalName(control) === "select" && !control.multiple &&
+      control.size <= 1 && !control.__isDisabledControl();
+  }
+
+  function setSelectPickerOpen(control, open) {
+    if (!selectUsesPicker(control) && open) return false;
+    if (open) {
+      const previous = wrapNode(browsingInput.activeSelectPickerId);
+      if (previous && previous !== control) {
+        nativeSetPickerOpen(internalNodeId(previous), false);
+        safeWeakMapGet(nodeEventStates, previous).selectPickerOption = null;
+      }
+      browsingInput.activeSelectPickerId = internalNodeId(control);
+    } else if (browsingInput.activeSelectPickerId === internalNodeId(control)) {
+      browsingInput.activeSelectPickerId = null;
+    }
+    nativeSetPickerOpen(internalNodeId(control), open);
+    const history = safeWeakMapGet(nodeEventStates, control);
+    if (open) {
+      const option = control.options.find(candidate => candidate.selected) ||
+        control.options.find(candidate => !candidate.__isDisabledControl());
+      history.selectPickerOption = option ? internalNodeId(option) : null;
+    } else {
+      history.selectPickerOption = null;
+    }
+    return open;
+  }
+
+  function closeSelectPicker(control, commit) {
+    if (!nativeGetPickerOpen(internalNodeId(control))) return false;
+    const history = safeWeakMapGet(nodeEventStates, control);
+    const optionId = history.selectPickerOption;
+    const option = commit
+      ? control.options.find(candidate => internalNodeId(candidate) === optionId)
+      : null;
+    setSelectPickerOpen(control, false);
+    if (option) notifySelectInput(control, option);
+    return true;
+  }
+
   function performSelectKeyDefault(control, init) {
     if (htmlFormControlLocalName(control) !== "select" || control.__isDisabledControl() ||
         init.isComposing || init.altKey || init.metaKey) return false;
     const options = control.options.filter(option => !option.__isDisabledControl());
     if (!options.length) return false;
     const history = safeWeakMapGet(nodeEventStates, control);
+    const pickerOpen = nativeGetPickerOpen(internalNodeId(control));
     let index = control.multiple
       ? options.findIndex(option => internalNodeId(option) === history.selectFocusedOption) : -1;
+    if (pickerOpen) {
+      index = options.findIndex(option => internalNodeId(option) === history.selectPickerOption);
+    }
     if (index < 0) index = options.findIndex(option => option.selected);
     const key = String(init.key || "");
+    if (pickerOpen && key === "Escape") return closeSelectPicker(control, false);
+    if (pickerOpen && (key === "Enter" || key === " ")) {
+      return closeSelectPicker(control, true);
+    }
     if (key === "ArrowDown" || key === "ArrowUp") {
       index = Math.max(0, Math.min(options.length - 1, index + (key === "ArrowDown" ? 1 : -1)));
     } else if (key === "Home" || key === "End") {
@@ -14982,18 +15088,30 @@ export const __omoikane_service_worker_lifecycle = {};
       if (match < 0) return false;
       index = (Math.max(index, -1) + match + 1) % options.length;
     } else return false;
+    if (pickerOpen) {
+      history.selectPickerOption = internalNodeId(options[index]);
+      return true;
+    }
     history.selectFocusedOption = internalNodeId(options[index]);
     if (!(control.multiple && init.ctrlKey)) notifySelectInput(control, options[index]);
     return true;
   }
 
   function performSelectPointerDefault(target, init) {
+    if (htmlFormControlLocalName(target) === "select") {
+      if (!selectUsesPicker(target)) return;
+      fullscreenTransientActivation = false;
+      target.focus();
+      setSelectPickerOpen(target, true);
+      return;
+    }
     if (htmlFormControlLocalName(target) !== "option") return;
     let control = internalParentNode(target);
     if (htmlFormControlLocalName(control) === "optgroup") control = internalParentNode(control);
     if (htmlFormControlLocalName(control) !== "select") return;
     if (control.__isDisabledControl() || target.__isDisabledControl()) return;
     control.focus();
+    if (nativeGetPickerOpen(internalNodeId(control))) setSelectPickerOpen(control, false);
     notifySelectInput(control, target, control.multiple && Boolean(init.ctrlKey || init.metaKey));
   }
 
@@ -19276,7 +19394,13 @@ export const __omoikane_service_worker_lifecycle = {};
     const notCanceled = target.dispatchEvent(new MouseEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
     }));
-    if (notCanceled && type === "click" && !locked) performSelectPointerDefault(target, init || {});
+    if (notCanceled && type === "click" && !locked) {
+      const activePicker = wrapNode(browsingInput.activeSelectPickerId);
+      if (activePicker && target !== activePicker && !activePicker.contains(target)) {
+        closeSelectPicker(activePicker, false);
+      }
+      performSelectPointerDefault(target, init || {});
+    }
     const targetDocument = isDocumentNode(target) ? target : (target.ownerDocument || document);
     if (locked) {
       lightDismissPointerDown = null;

@@ -840,6 +840,7 @@ fn matches_pseudo_class(
         "popover-open" => pseudo.is_none() && node.is_popover_open(),
         "modal" => pseudo.is_none() && node.is_modal_dialog(),
         "fullscreen" => pseudo.is_none() && node.is_fullscreen(),
+        "open" => pseudo.is_none() && matches_open_state(node),
         "hover" | "active" | "focus" | "focus-visible" | "focus-within" => {
             pseudo.is_none() && node.has_user_action_state(&name)
         }
@@ -893,6 +894,24 @@ fn matches_pseudo_class(
             }),
         _ => false,
     }
+}
+
+fn matches_open_state(node: &NodeHandle) -> bool {
+    if !node.is_html_element() {
+        return false;
+    }
+    if node.has_tag_name("dialog") || node.has_tag_name("details") {
+        return node.has_attribute("open");
+    }
+    if node.has_tag_name("input") {
+        return node.is_picker_open();
+    }
+    if !node.has_tag_name("select") || node.has_attribute("multiple") || !node.is_picker_open() {
+        return false;
+    }
+    node.get_attribute("size")
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_none_or(|size| size <= 1)
 }
 
 fn is_html_hyperlink(node: &NodeHandle) -> bool {
