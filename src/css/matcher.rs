@@ -871,6 +871,7 @@ fn matches_pseudo_class(
         "required" => form_state::requiredness(node) == Some(true),
         "optional" => form_state::requiredness(node) == Some(false),
         "placeholder-shown" => form_state::placeholder_shown(node),
+        "autofill" | "-webkit-autofill" => pseudo.is_none() && node.is_autofilled(),
         "read-write" => crate::dom::editability::read_write(node) == Some(true),
         "read-only" => crate::dom::editability::read_write(node) == Some(false),
         "defined" => node.is_defined_element(),

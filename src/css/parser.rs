@@ -301,6 +301,8 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         | "required"
                         | "optional"
                         | "placeholder-shown"
+                        | "autofill"
+                        | "-webkit-autofill"
                         | "read-only"
                         | "read-write"
                         | "in-range"
@@ -336,6 +338,8 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         "required"
                             | "optional"
                             | "placeholder-shown"
+                            | "autofill"
+                            | "-webkit-autofill"
                             | "read-only"
                             | "read-write"
                             | "default"
@@ -1382,6 +1386,8 @@ impl Parser {
             || name.eq_ignore_ascii_case("required")
             || name.eq_ignore_ascii_case("optional")
             || name.eq_ignore_ascii_case("placeholder-shown")
+            || name.eq_ignore_ascii_case("autofill")
+            || name.eq_ignore_ascii_case("-webkit-autofill")
             || name.eq_ignore_ascii_case("read-only")
             || name.eq_ignore_ascii_case("read-write")
             || name.eq_ignore_ascii_case("user-valid")
