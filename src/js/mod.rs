@@ -76,6 +76,7 @@ pub mod native_scroll;
 mod navigation_transport;
 mod retained_scroll;
 mod tree_style_invalidation;
+mod view_transition;
 use child_document::{FetchedChildResource, LoadedChildDocument, NavigationRedirect};
 use cross_origin_isolation::{
     Disposition, GroupSwitchDecision, IsolationPolicy, OpenerPolicy, OpenerPolicyValue,
@@ -17542,6 +17543,11 @@ fn register_host_bindings(
             js_string!("__omoikane_document_design_mode"),
             2,
             NativeFunction::from_copy_closure(editability::document_mode_native),
+        ),
+        (
+            js_string!("__omoikane_document_view_transition"),
+            2,
+            NativeFunction::from_copy_closure(view_transition::document_state_native),
         ),
         (
             js_string!("__omoikane_set_custom_element_defined"),

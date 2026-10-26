@@ -371,8 +371,10 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeDocumentContentType = globalThis.__omoikane_document_content_type;
   const nativeEditability = globalThis.__omoikane_editability;
   const nativeDocumentDesignMode = globalThis.__omoikane_document_design_mode;
+  const nativeDocumentViewTransition = globalThis.__omoikane_document_view_transition;
   delete globalThis.__omoikane_editability;
   delete globalThis.__omoikane_document_design_mode;
+  delete globalThis.__omoikane_document_view_transition;
   const nativeSetDocumentContentType = globalThis.__omoikane_set_document_content_type;
   delete globalThis.__omoikane_document_content_type;
   delete globalThis.__omoikane_set_document_content_type;
@@ -8344,6 +8346,107 @@ export const __omoikane_service_worker_lifecycle = {};
   globalThis.PermissionsPolicy = PermissionsPolicy;
   globalThis.FeaturePolicy = PermissionsPolicy;
 
+  const viewTransitionStates = new WeakMap();
+  const activeDocumentTransitions = new WeakMap();
+  const VIEW_TRANSITION_CONSTRUCTION = {};
+
+  class ViewTransition {
+    constructor(...args) {
+      const [construction, state] = args;
+      if (construction !== VIEW_TRANSITION_CONSTRUCTION) {
+        throw new TypeError("Illegal constructor");
+      }
+      viewTransitionStates.set(this, state);
+    }
+
+    get updateCallbackDone() {
+      const state = viewTransitionStates.get(this);
+      if (!state) throw new TypeError("Illegal invocation");
+      return state.updateCallbackDone;
+    }
+
+    get ready() {
+      const state = viewTransitionStates.get(this);
+      if (!state) throw new TypeError("Illegal invocation");
+      return state.ready;
+    }
+
+    get finished() {
+      const state = viewTransitionStates.get(this);
+      if (!state) throw new TypeError("Illegal invocation");
+      return state.finished;
+    }
+
+    skipTransition() {
+      const state = viewTransitionStates.get(this);
+      if (!state) throw new TypeError("Illegal invocation");
+      state.skip();
+    }
+
+    get [Symbol.toStringTag]() { return "ViewTransition"; }
+  }
+
+  function startDocumentViewTransition(document, callbackOptions) {
+    if (!isDocumentNode(document)) throw new TypeError("Illegal invocation");
+    const previous = activeDocumentTransitions.get(document);
+    if (previous) previous.skip();
+
+    let update = callbackOptions;
+    if (callbackOptions !== undefined && typeof callbackOptions !== "function") {
+      if (callbackOptions === null || (typeof callbackOptions !== "object" &&
+          typeof callbackOptions !== "function")) {
+        throw new TypeError("View transition options must be an object or callback");
+      }
+      update = callbackOptions.update;
+    }
+    if (update !== undefined && typeof update !== "function") {
+      throw new TypeError("View transition update callback must be callable");
+    }
+
+    let completed = false;
+    let resolveReady, rejectReady, resolveFinished, rejectFinished;
+    const updateCallbackDone = Promise.resolve().then(() => update ? update() : undefined);
+    const ready = new Promise((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    const finished = new Promise((resolve, reject) => {
+      resolveFinished = resolve;
+      rejectFinished = reject;
+    });
+    const state = {
+      updateCallbackDone, ready, finished,
+      complete(skipped) {
+        if (completed) return;
+        completed = true;
+        if (activeDocumentTransitions.get(document) === state) {
+          activeDocumentTransitions.delete(document);
+          nativeDocumentViewTransition(internalNodeId(document), false);
+        }
+        if (skipped) rejectReady(new DOMException("View transition skipped", "AbortError"));
+        updateCallbackDone.then(
+          () => {
+            if (!skipped) resolveReady(undefined);
+            resolveFinished(undefined);
+          },
+          error => {
+            if (!skipped) rejectReady(error);
+            rejectFinished(error);
+          }
+        );
+      },
+      skip() { state.complete(true); },
+    };
+    const transition = new ViewTransition(VIEW_TRANSITION_CONSTRUCTION, state);
+    state.transition = transition;
+    activeDocumentTransitions.set(document, state);
+    nativeDocumentViewTransition(internalNodeId(document), true);
+    updateCallbackDone.then(() => state.complete(false), () => state.complete(false));
+    return transition;
+  }
+
+  globalThis.ViewTransition = ViewTransition;
+
   class Document extends Node {
     get customElementRegistry() {
       if (!isDocumentNode(this)) throw new TypeError("Document required");
@@ -8364,6 +8467,16 @@ export const __omoikane_service_worker_lifecycle = {};
     get visibilityState() {
       if (browsingInput.visibilityHiddenDocumentIds.has(this.__id)) return "hidden";
       return __omoikane_document_visibility_state(this.__id);
+    }
+
+    startViewTransition(...args) {
+      return startDocumentViewTransition(this, args[0]);
+    }
+
+    get activeViewTransition() {
+      if (!isDocumentNode(this)) throw new TypeError("Illegal invocation");
+      const state = activeDocumentTransitions.get(this);
+      return state ? state.transition : null;
     }
 
     get hidden() {
@@ -8984,6 +9097,16 @@ export const __omoikane_service_worker_lifecycle = {};
   Object.defineProperty(Document.prototype, "designMode", {
     ...Object.getOwnPropertyDescriptor(Document.prototype, "designMode"), enumerable: true,
   });
+  for (const name of ["updateCallbackDone", "ready", "finished", "skipTransition"]) {
+    Object.defineProperty(ViewTransition.prototype, name, {
+      ...Object.getOwnPropertyDescriptor(ViewTransition.prototype, name), enumerable: true,
+    });
+  }
+  for (const name of ["startViewTransition", "activeViewTransition"]) {
+    Object.defineProperty(Document.prototype, name, {
+      ...Object.getOwnPropertyDescriptor(Document.prototype, name), enumerable: true,
+    });
+  }
 
   class DocumentFragment extends Node {
     constructor(id, construction) {
@@ -31315,7 +31438,7 @@ export const __omoikane_service_worker_lifecycle = {};
     "Event", "CustomEvent", "EventTarget", "AbortController", "AbortSignal", "Node", "Document",
     "DOMImplementation", "DocumentFragment", "ProcessingInstruction", "DocumentType", "Element", "Attr",
     "CharacterData", "Text", "Comment", "NodeIterator", "TreeWalker", "NodeFilter", "NodeList",
-    "HTMLCollection", "DOMTokenList",
+    "HTMLCollection", "DOMTokenList", "ViewTransition",
   ]) {
     if (Object.hasOwn(globalThis, name)) Object.defineProperty(globalThis, name, { enumerable: false });
   }

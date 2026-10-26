@@ -324,6 +324,7 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         | "muted"
                         | "volume-locked"
                         | "picture-in-picture"
+                        | "active-view-transition"
                         | "before"
                         | "after"
                 );

@@ -841,6 +841,12 @@ fn matches_pseudo_class(
         "popover-open" => pseudo.is_none() && node.is_popover_open(),
         "modal" => pseudo.is_none() && node.is_modal_dialog(),
         "fullscreen" => pseudo.is_none() && node.is_fullscreen(),
+        "active-view-transition" => {
+            pseudo.is_none()
+                && node.parent_node().is_some_and(|document| {
+                    document.document_has_active_view_transition() == Some(true)
+                })
+        }
         "open" => pseudo.is_none() && matches_open_state(node),
         "playing" | "paused" | "seeking" | "buffering" | "muted" | "volume-locked"
         | "picture-in-picture" => pseudo.is_none() && node.has_media_selector_state(&name),
@@ -1186,6 +1192,21 @@ mod tests {
             !matches_selector(&lead, &selector(":FIRST-CHILD {}")),
             "case-insensitive names must not loosen matching itself"
         );
+    }
+
+    #[test]
+    fn active_view_transition_matches_only_the_active_document_element() {
+        let (document, html, body, ..) = sample_tree();
+        let active = selector(":active-view-transition {}");
+
+        assert!(!matches_selector(&html, &active));
+        assert!(!matches_selector(&body, &active));
+        assert!(document.set_document_active_view_transition(true));
+        assert!(matches_selector(&html, &active));
+        assert!(!matches_selector(&body, &active));
+        assert!(!document.set_document_active_view_transition(true));
+        assert!(document.set_document_active_view_transition(false));
+        assert!(!matches_selector(&html, &active));
     }
 
     #[test]
