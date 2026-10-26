@@ -36,6 +36,15 @@ Example set:
 3. Re-run the comparison test and confirm pass.
 4. Commit baseline update with a short rationale in PR.
 
+## Manual ignored fixtures
+
+CI runs `cargo test -- --include-ignored`, so an `#[ignore]` test is normally a
+regression test that CI still executes. Manual utilities that do not verify
+behavior on their own — baseline refreshes gated by `OMOIKANE_REFRESH_BASELINE=1`
+and profiling or A/B timing fixtures — must be added to the `manual_fixtures`
+skip list in [ci.yml](../.github/workflows/ci.yml) so CI does not report them as
+passing tests. Keep their correctness assertions in a separate, non-ignored test.
+
 ## Sanitization Rules
 
 - Remove or anonymize site-identifying text and URL strings before check-in.
