@@ -62,6 +62,7 @@ mod child_document;
 mod child_document_tests;
 mod console_trace;
 mod cssom_normalization;
+mod custom_states;
 mod dom_removal_trace;
 mod frame_diagnostics;
 mod language;
@@ -17497,6 +17498,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(custom_element_is_native),
         ),
         (
+            js_string!("__omoikane_update_custom_state"),
+            3,
+            NativeFunction::from_copy_closure(custom_states::update_native),
+        ),
+        (
             js_string!("__omoikane_set_custom_element_defined"),
             2,
             NativeFunction::from_copy_closure(set_custom_element_defined_native),
@@ -17605,6 +17611,11 @@ fn register_host_bindings(
             js_string!("__omoikane_imported_stylesheet"),
             2,
             NativeFunction::from_copy_closure(imported_stylesheet_native),
+        ),
+        (
+            js_string!("__omoikane_css_selector_text"),
+            1,
+            NativeFunction::from_copy_closure(css_selector_text_native),
         ),
         (
             js_string!("__omoikane_css_rule_sources"),
@@ -21345,7 +21356,7 @@ fn query_selector_native(
         .cloned()
         .unwrap_or_default()
         .to_string(context)?
-        .to_std_string_escaped();
+        .to_std_string_lossy();
     let selectors = parse_dom_selector_list(&selector)?;
     if form_validation::selector_uses_validation(&selectors) {
         form_validation::flush(node_id, context)?;
@@ -22168,7 +22179,7 @@ fn css_rule_count_native(
         .cloned()
         .unwrap_or_default()
         .to_string(context)?
-        .to_std_string_escaped();
+        .to_std_string_lossy();
     let sheet = crate::css::parse_stylesheet(&css)
         .map_err(|error| JsError::from(JsNativeError::syntax().with_message(error.to_string())))?;
     Ok(JsValue::from(sheet.rules.len() as f64))
@@ -22248,6 +22259,22 @@ fn imported_stylesheet_native(
     })
 }
 
+/// Canonicalizes state selector arguments after CSS input conversion.
+fn css_selector_text_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let selector = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_lossy();
+    let canonical = crate::css::canonical_state_selector_text(&selector).unwrap_or(selector);
+    Ok(js_string!(canonical.as_str()).into())
+}
+
 /// Parses CSS forgivingly and returns each accepted top-level rule as an
 /// original source slice.
 fn css_rule_sources_native(
@@ -22260,7 +22287,7 @@ fn css_rule_sources_native(
         .cloned()
         .unwrap_or_default()
         .to_string(context)?
-        .to_std_string_escaped();
+        .to_std_string_lossy();
     let rules = font_descriptors::accepted_rule_sources(&css);
     let rules = serde_json::to_string(&rules)
         .map_err(|error| JsError::from(JsNativeError::error().with_message(error.to_string())))?;
@@ -22421,7 +22448,7 @@ fn css_scope_rules_valid_native(
         .cloned()
         .unwrap_or_default()
         .to_string(context)?
-        .to_std_string_escaped();
+        .to_std_string_lossy();
     // CSSOM mutation validation is concerned with @scope preludes.  Keep the
     // rest of the stylesheet forgiving so an unrelated malformed rule does
     // not get reported as an invalid scope prelude.
@@ -22651,7 +22678,7 @@ fn css_supports_condition_native(
         .cloned()
         .unwrap_or_default()
         .to_string(context)?
-        .to_std_string_escaped();
+        .to_std_string_lossy();
     Ok(JsValue::from(crate::css::supports_condition_matches(
         &condition,
     )))
@@ -26202,7 +26229,7 @@ fn query_selector_all_native(
         .cloned()
         .unwrap_or_default()
         .to_string(context)?
-        .to_std_string_escaped();
+        .to_std_string_lossy();
     let selectors = parse_dom_selector_list(&selector)?;
     if form_validation::selector_uses_validation(&selectors) {
         form_validation::flush(parent_id, context)?;
@@ -26276,7 +26303,7 @@ fn matches_selector_native(
         .cloned()
         .unwrap_or_default()
         .to_string(context)?
-        .to_std_string_escaped();
+        .to_std_string_lossy();
     let selectors = parse_dom_selector_list(&selector)?;
     if form_validation::selector_uses_validation(&selectors) {
         form_validation::flush(node_id, context)?;

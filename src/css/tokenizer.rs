@@ -2,9 +2,29 @@
 
 use super::{CssParseError, CssToken};
 
+/// Filters source code points before tokenization, preserving escaped values.
+fn preprocess_input(input: &str) -> Vec<char> {
+    let mut source = input.chars().peekable();
+    let mut filtered = Vec::with_capacity(input.len());
+    while let Some(ch) = source.next() {
+        filtered.push(match ch {
+            '\r' => {
+                if source.peek() == Some(&'\n') {
+                    source.next();
+                }
+                '\n'
+            }
+            '\u{c}' => '\n',
+            '\0' => '\u{fffd}',
+            _ => ch,
+        });
+    }
+    filtered
+}
+
 /// Tokenizes a CSS string.
 pub fn tokenize(input: &str) -> Result<Vec<CssToken>, CssParseError> {
-    let chars: Vec<char> = input.chars().collect();
+    let chars = preprocess_input(input);
     let mut index = 0;
     let mut tokens = Vec::new();
 
@@ -45,14 +65,14 @@ pub fn tokenize(input: &str) -> Result<Vec<CssToken>, CssParseError> {
                 if chars.get(index) == Some(&'%') {
                     index += 1;
                     tokens.push(CssToken::Percentage(number));
-                } else if chars.get(index).is_some_and(|c| is_ident_start(*c)) {
+                } else if starts_ident_sequence(&chars, index) {
                     let unit = consume_ident(&chars, &mut index);
                     tokens.push(CssToken::Dimension(number, unit));
                 } else {
                     tokens.push(CssToken::Number(number));
                 }
             }
-            c if is_ident_start(c) || c == '-' || c == '\\' => {
+            _ if starts_ident_sequence(&chars, index) => {
                 let ident = consume_ident(&chars, &mut index);
                 if ident.eq_ignore_ascii_case("url") && chars.get(index) == Some(&'(') {
                     let mut start = index + 1;
@@ -114,7 +134,28 @@ pub fn tokenize(input: &str) -> Result<Vec<CssToken>, CssParseError> {
 }
 
 pub(super) fn is_ident_start(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_' || ch == '-'
+    ch.is_ascii_alphabetic() || ch == '_' || ch >= '\u{80}'
+}
+
+fn valid_escape(chars: &[char], index: usize) -> bool {
+    chars.get(index) == Some(&'\\')
+        && !chars
+            .get(index + 1)
+            .is_some_and(|ch| matches!(ch, '\n' | '\r' | '\u{c}'))
+}
+
+fn starts_ident_sequence(chars: &[char], index: usize) -> bool {
+    match chars.get(index) {
+        Some('-') => {
+            chars
+                .get(index + 1)
+                .is_some_and(|ch| is_ident_start(*ch) || *ch == '-')
+                || valid_escape(chars, index + 1)
+        }
+        Some('\\') => valid_escape(chars, index),
+        Some(ch) => is_ident_start(*ch),
+        None => false,
+    }
 }
 
 // Preserve URL payload bytes: numeric tokenization would turn `/0012` into
@@ -161,7 +202,7 @@ fn consume_unquoted_url(chars: &[char], index: &mut usize) -> Result<String, Css
 }
 
 pub(super) fn is_ident_char(ch: char) -> bool {
-    is_ident_start(ch) || ch.is_ascii_digit()
+    is_ident_start(ch) || ch == '-' || ch.is_ascii_digit()
 }
 
 fn is_number_start(chars: &[char], index: usize) -> bool {
@@ -182,7 +223,10 @@ fn consume_css_escape(chars: &[char], index: &mut usize) -> Option<char> {
     if chars.get(start) != Some(&'\\') {
         return None;
     }
-    let next = chars.get(start + 1)?;
+    let Some(next) = chars.get(start + 1) else {
+        *index += 1;
+        return Some('\u{fffd}');
+    };
     if next.is_ascii_hexdigit() {
         let mut hex = String::new();
         let mut i = start + 1;
@@ -195,7 +239,13 @@ fn consume_css_escape(chars: &[char], index: &mut usize) -> Option<char> {
             i += 1;
         }
         *index = i;
-        u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+        Some(
+            u32::from_str_radix(&hex, 16)
+                .ok()
+                .filter(|code| *code != 0)
+                .and_then(char::from_u32)
+                .unwrap_or('\u{fffd}'),
+        )
     } else {
         *index = start + 2;
         Some(*next)
@@ -206,6 +256,9 @@ pub(super) fn consume_ident(chars: &[char], index: &mut usize) -> String {
     let mut ident = String::new();
     while let Some(&ch) = chars.get(*index) {
         if ch == '\\' {
+            if !valid_escape(chars, *index) {
+                break;
+            }
             if let Some(escaped) = consume_css_escape(chars, index) {
                 ident.push(escaped);
             } else {

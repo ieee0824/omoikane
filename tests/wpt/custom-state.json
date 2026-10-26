@@ -1,0 +1,25 @@
+{
+  "tests": [
+    {
+      "path": "custom-elements/state/ElementInternals-states.html"
+    },
+    {
+      "path": "custom-elements/state/custom-state-set-strong-ref.html"
+    },
+    {
+      "path": "custom-elements/state/state-css-selector-nth-of.html"
+    },
+    {
+      "path": "custom-elements/state/state-css-selector-shadow-dom.html"
+    },
+    {
+      "path": "custom-elements/state/state-css-selector.html"
+    },
+    {
+      "path": "custom-elements/state/state-pseudo-class.html"
+    },
+    {
+      "path": "css/selectors/parsing/parse-state.html"
+    }
+  ]
+}

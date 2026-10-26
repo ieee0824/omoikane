@@ -361,21 +361,21 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                     && (name.eq_ignore_ascii_case("before")
                         || name.eq_ignore_ascii_case("after")
                         || name.eq_ignore_ascii_case("backdrop")
-                        || (context.style_query
-                            && (matches!(
-                                name.to_ascii_lowercase().as_str(),
-                                "marker"
-                                    | "first-letter"
-                                    | "first-line"
-                                    | "placeholder"
-                                    | "selection"
-                                    | "file-selector-button"
-                            ) || name.split_once('(').is_some_and(|(function, rest)| {
-                                let argument = rest.strip_suffix(')').unwrap_or("");
-                                function.eq_ignore_ascii_case("part")
-                                    || (function.eq_ignore_ascii_case("slotted")
-                                        && supported_compound_selector(argument, context))
-                            }))))
+                        || matches!(
+                            name.to_ascii_lowercase().as_str(),
+                            "marker"
+                                | "first-letter"
+                                | "first-line"
+                                | "placeholder"
+                                | "selection"
+                                | "file-selector-button"
+                        )
+                        || name.split_once('(').is_some_and(|(function, rest)| {
+                            let argument = rest.strip_suffix(')').unwrap_or("");
+                            function.eq_ignore_ascii_case("part")
+                                || (function.eq_ignore_ascii_case("slotted")
+                                    && supported_compound_selector(argument, context))
+                        }))
             }
             // :is() and :where() use forgiving selector lists. Unsupported
             // branches remain non-matching but do not invalidate the outer
@@ -1212,38 +1212,7 @@ impl Parser {
             return Err(CssParseError::InvalidSelector);
         }
 
-        let mut pseudo_element_count = 0;
-        let mut part_location = None;
-        for (part_index, part) in parts.iter().enumerate() {
-            for (simple_index, simple) in part.simples.iter().enumerate() {
-                match simple {
-                    SimpleSelector::PseudoElement(name) => {
-                        pseudo_element_count += 1;
-                        if name
-                            .split_once('(')
-                            .is_some_and(|(function, _)| function.eq_ignore_ascii_case("part"))
-                            && part_location.is_none()
-                        {
-                            part_location = Some((part_index, simple_index));
-                        }
-                    }
-                    SimpleSelector::PseudoClass(name)
-                        if name.eq_ignore_ascii_case("before")
-                            || name.eq_ignore_ascii_case("after") =>
-                    {
-                        pseudo_element_count += 1;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if let Some((part_index, simple_index)) = part_location
-            && (part_index + 1 != parts.len()
-                || simple_index + 1 != parts[part_index].simples.len()
-                || pseudo_element_count != 1)
-        {
-            return Err(CssParseError::InvalidSelector);
-        }
+        validate_pseudo_element_placement(&parts)?;
 
         Ok(Selector { parts })
     }
@@ -1389,6 +1358,9 @@ impl Parser {
         }
         let name = self.expect_ident()?;
         if !matches!(self.peek(), Some(CssToken::ParenOpen)) {
+            if name.eq_ignore_ascii_case("state") {
+                return Err(CssParseError::InvalidSelector);
+            }
             return Ok(SimpleSelector::PseudoClass(name));
         }
         if is_location_pseudo_class(&name)
@@ -1405,6 +1377,16 @@ impl Parser {
         }
         self.next(); // consume ParenOpen
         let argument_tokens = self.collect_parenthesized_tokens()?;
+        if name.eq_ignore_ascii_case("state") {
+            let significant: Vec<_> = argument_tokens
+                .iter()
+                .filter(|token| **token != CssToken::Whitespace)
+                .collect();
+            let [CssToken::Ident(value)] = significant.as_slice() else {
+                return Err(CssParseError::InvalidSelector);
+            };
+            return Ok(SimpleSelector::CustomState(value.encode_utf16().collect()));
+        }
         if name.to_ascii_lowercase().starts_with("nth-") {
             return parse_nth_selector(&name, &argument_tokens);
         }
@@ -1842,11 +1824,71 @@ fn render_nth_argument(tokens: &[CssToken]) -> String {
     rendered.trim().to_string()
 }
 
+/// Serialize decoded selector identifiers without changing their token identity.
+fn serialize_selector_ident(value: &str) -> String {
+    use std::fmt::Write;
+    let mut result = String::new();
+    let first = value.chars().next();
+    for (index, ch) in value.chars().enumerate() {
+        if ch == '\0' {
+            result.push('\u{fffd}');
+        } else if ch.is_ascii_control()
+            || (ch.is_ascii_digit() && (index == 0 || (index == 1 && first == Some('-'))))
+        {
+            write!(result, "\\{:x} ", ch as u32).expect("writing to a string");
+        } else if ch == '-' && value == "-" {
+            result.push_str("\\-");
+        } else if ch >= '\u{80}' || ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            result.push(ch);
+        } else {
+            result.push('\\');
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Canonicalize state arguments while retaining nesting tokens in CSSOM input.
+pub(crate) fn canonical_state_selector_text(input: &str) -> Option<String> {
+    let tokens = tokenize(input).ok()?;
+    if !tokens.windows(3).any(|tokens| {
+        matches!(&tokens[0], CssToken::Colon)
+            && matches!(&tokens[1], CssToken::Ident(name) if name.eq_ignore_ascii_case("state"))
+            && matches!(&tokens[2], CssToken::ParenOpen)
+    }) {
+        return None;
+    }
+    Some(render_selector_tokens(&tokens).trim().to_string())
+}
+
 /// Keep folded An+B signs when rendering selectors nested inside `of`/`:not`.
 pub(super) fn render_selector_tokens(tokens: &[CssToken]) -> String {
     let mut rendered = String::new();
     let mut index = 0;
     while index < tokens.len() {
+        if matches!(tokens.get(index), Some(CssToken::Colon))
+            && matches!(tokens.get(index + 1), Some(CssToken::Ident(name)) if name.eq_ignore_ascii_case("state"))
+            && matches!(tokens.get(index + 2), Some(CssToken::ParenOpen))
+        {
+            let mut end = index + 3;
+            while matches!(tokens.get(end), Some(CssToken::Whitespace)) {
+                end += 1;
+            }
+            if let Some(CssToken::Ident(name)) = tokens.get(end) {
+                let name = name.clone();
+                end += 1;
+                while matches!(tokens.get(end), Some(CssToken::Whitespace)) {
+                    end += 1;
+                }
+                if matches!(tokens.get(end), Some(CssToken::ParenClose)) {
+                    rendered.push_str(":state(");
+                    rendered.push_str(&serialize_selector_ident(&name));
+                    rendered.push(')');
+                    index = end + 1;
+                    continue;
+                }
+            }
+        }
         if matches!(tokens.get(index), Some(CssToken::Colon))
             && matches!(tokens.get(index + 1), Some(CssToken::Ident(name)) if name.to_ascii_lowercase().starts_with("nth-"))
             && matches!(tokens.get(index + 2), Some(CssToken::ParenOpen))
@@ -1873,7 +1915,31 @@ pub(super) fn render_selector_tokens(tokens: &[CssToken]) -> String {
                 continue;
             }
         }
-        rendered.push_str(&render_tokens(&tokens[index..index + 1]));
+        match &tokens[index] {
+            CssToken::Whitespace => rendered.push(' '),
+            CssToken::Ident(value) => rendered.push_str(&serialize_selector_ident(value)),
+            CssToken::Hash(value) => {
+                rendered.push('#');
+                rendered.push_str(&serialize_selector_ident(value));
+            }
+            CssToken::String(value) => {
+                rendered.push('"');
+                for ch in value.chars() {
+                    match ch {
+                        '"' | '\\' => {
+                            rendered.push('\\');
+                            rendered.push(ch);
+                        }
+                        '\n' => rendered.push_str("\\a "),
+                        '\r' => rendered.push_str("\\d "),
+                        '\u{c}' => rendered.push_str("\\c "),
+                        _ => rendered.push(ch),
+                    }
+                }
+                rendered.push('"');
+            }
+            _ => rendered.push_str(&render_tokens(&tokens[index..index + 1])),
+        }
         index += 1;
     }
     rendered
@@ -2305,6 +2371,92 @@ fn sanitize_has_argument(selector: &mut Selector) -> bool {
             _ => true,
         })
     })
+}
+
+fn is_generated_pseudo(simple: &SimpleSelector) -> bool {
+    match simple {
+        SimpleSelector::PseudoElement(name) | SimpleSelector::PseudoClass(name) => {
+            name.eq_ignore_ascii_case("before") || name.eq_ignore_ascii_case("after")
+        }
+        _ => false,
+    }
+}
+
+fn is_part_pseudo(simple: &SimpleSelector) -> bool {
+    matches!(simple, SimpleSelector::PseudoElement(name)
+        if name.split_once('(').is_some_and(|(function, _)| function.eq_ignore_ascii_case("part")))
+}
+
+fn valid_part_suffix(simples: &[SimpleSelector]) -> bool {
+    let pseudo_start = simples
+        .iter()
+        .position(|simple| {
+            matches!(simple, SimpleSelector::PseudoElement(_)) || is_generated_pseudo(simple)
+        })
+        .unwrap_or(simples.len());
+    if !simples[..pseudo_start].iter().all(|simple| {
+        matches!(
+            simple,
+            SimpleSelector::CustomState(_)
+                | SimpleSelector::PseudoClass(_)
+                | SimpleSelector::Is(_)
+                | SimpleSelector::Where(_)
+                | SimpleSelector::Not(_)
+                | SimpleSelector::Has(_)
+                | SimpleSelector::NthChild { .. }
+        )
+    }) {
+        return false;
+    }
+    match &simples[pseudo_start..] {
+        [] | [SimpleSelector::PseudoElement(_)] => true,
+        [simple] => is_generated_pseudo(simple),
+        [first, SimpleSelector::PseudoElement(name)] => {
+            is_generated_pseudo(first) && name.eq_ignore_ascii_case("marker")
+        }
+        _ => false,
+    }
+}
+
+fn validate_pseudo_element_placement(parts: &[SelectorPart]) -> Result<(), CssParseError> {
+    let mut part_location = None;
+    let mut pseudo_count = 0;
+    for (part_index, part) in parts.iter().enumerate() {
+        let mut state_allowed = true;
+        for (index, simple) in part.simples.iter().enumerate() {
+            if matches!(simple, SimpleSelector::CustomState(_)) && !state_allowed {
+                return Err(CssParseError::InvalidSelector);
+            }
+            if is_part_pseudo(simple) {
+                pseudo_count += 1;
+                if part_location.is_none() {
+                    part_location = Some((part_index, index));
+                }
+                state_allowed = true;
+            } else if matches!(simple, SimpleSelector::PseudoElement(_))
+                || is_generated_pseudo(simple)
+            {
+                pseudo_count += 1;
+                state_allowed = false;
+            }
+        }
+    }
+    if let Some((part_index, index)) = part_location {
+        let tail = &parts[part_index].simples[index + 1..];
+        let allowed_pseudos = 1 + tail
+            .iter()
+            .filter(|simple| {
+                matches!(simple, SimpleSelector::PseudoElement(_)) || is_generated_pseudo(simple)
+            })
+            .count();
+        if part_index + 1 != parts.len()
+            || !valid_part_suffix(tail)
+            || pseudo_count != allowed_pseudos
+        {
+            return Err(CssParseError::InvalidSelector);
+        }
+    }
+    Ok(())
 }
 
 fn parse_single_nested_selector(tokens: &[CssToken]) -> Option<Selector> {
