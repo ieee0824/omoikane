@@ -16639,6 +16639,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_picker_open_native),
         ),
         (
+            js_string!("__omoikane_set_media_selector_state"),
+            2,
+            NativeFunction::from_copy_closure(set_media_selector_state_native),
+        ),
+        (
             js_string!("__omoikane_set_modal_dialog"),
             2,
             NativeFunction::from_copy_closure(set_modal_dialog_native),
@@ -21222,6 +21227,29 @@ fn set_picker_open_native(
         })?;
         if node.set_picker_open(open) {
             state.borrow_mut().invalidate_style_cache_for_node(&node);
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn set_media_selector_state_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let state = args
+        .get(1)
+        .map(|value| value.to_u32(context))
+        .transpose()?
+        .unwrap_or_default() as u8;
+    with_render_mutation(|host| {
+        let node = host.borrow().get_node(node_id).ok_or_else(|| {
+            JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+        })?;
+        if node.set_media_selector_state(state) {
+            host.borrow_mut().invalidate_style_cache_for_node(&node);
         }
         Ok(JsValue::undefined())
     })

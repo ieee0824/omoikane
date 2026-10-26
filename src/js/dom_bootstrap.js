@@ -225,6 +225,7 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeSetPopoverOpen = globalThis.__omoikane_set_popover_open;
   const nativeGetPickerOpen = globalThis.__omoikane_get_picker_open;
   const nativeSetPickerOpen = globalThis.__omoikane_set_picker_open;
+  const nativeSetMediaSelectorState = globalThis.__omoikane_set_media_selector_state;
   const nativeSetModalDialog = globalThis.__omoikane_set_modal_dialog;
   const nativeFullscreenElement = globalThis.__omoikane_fullscreen_element;
   const nativeFullscreenEnabled = globalThis.__omoikane_fullscreen_enabled;
@@ -310,6 +311,7 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_set_popover_open;
   delete globalThis.__omoikane_get_picker_open;
   delete globalThis.__omoikane_set_picker_open;
+  delete globalThis.__omoikane_set_media_selector_state;
   delete globalThis.__omoikane_set_modal_dialog;
   delete globalThis.__omoikane_fullscreen_element;
   delete globalThis.__omoikane_fullscreen_enabled;
@@ -3386,6 +3388,10 @@ export const __omoikane_service_worker_lifecycle = {};
       if (browsingInput.removalMayAffectPointerLock && id !== undefined) {
         nativePointerLockRemoving(id);
       }
+      const pictureInPicture = pictureInPictureElementForDocument(nodeDocument(parent));
+      if (pictureInPicture && isInclusiveDescendant(pictureInPicture, removed)) {
+        exitPictureInPictureElement(nodeDocument(parent));
+      }
       customFormSubtreeRemoving(removed);
     }
     if (!browsingInput.removalMayAffectTraversal) return;
@@ -6350,6 +6356,7 @@ export const __omoikane_service_worker_lifecycle = {};
 
   let fullscreenTransientActivation = false;
   let fullscreenActivationGeneration = 0;
+  const pictureInPictureElementIds = new WeakMap();
   const scheduleFullscreenActivationExpiry = globalThis.setTimeout.bind(globalThis);
 
   function grantFullscreenTransientActivation() {
@@ -6383,6 +6390,36 @@ export const __omoikane_service_worker_lifecycle = {};
   function fullscreenElementForDocument(doc) {
     const element = rawFullscreenElementForDocument(doc);
     return element ? retargetNode(element, doc) : null;
+  }
+
+  function pictureInPictureElementForDocument(doc) {
+    if (!isDocumentNode(doc)) return null;
+    const id = safeWeakMapGet(pictureInPictureElementIds, doc);
+    const element = id === undefined ? null : wrapNode(id);
+    return element && internalOwnerDocument(element) === doc ? element : null;
+  }
+
+  function pictureInPictureEvent(type, window) {
+    return new PictureInPictureEvent(type, { pictureInPictureWindow: window });
+  }
+
+  function exitPictureInPictureElement(doc) {
+    const element = pictureInPictureElementForDocument(doc);
+    if (!element) return false;
+    safeWeakMapDelete(pictureInPictureElementIds, doc);
+    element.__mediaPictureInPicture = false;
+    element.__mediaSyncSelectorState();
+    const window = element.__pictureInPictureWindow;
+    element.dispatchEvent(pictureInPictureEvent("leavepictureinpicture", window));
+    element.__pictureInPictureWindow = null;
+    return true;
+  }
+
+  function leavePictureInPicture(doc) {
+    if (!exitPictureInPictureElement(doc)) {
+      return Promise.reject(new DOMException("No element is in Picture-in-Picture", "InvalidStateError"));
+    }
+    return Promise.resolve(undefined);
   }
 
   function dispatchFullscreenEvent(type, target, doc) {
@@ -8555,6 +8592,15 @@ export const __omoikane_service_worker_lifecycle = {};
       return documentId !== undefined && Boolean(nativeFullscreenEnabled(documentId));
     }
 
+    get pictureInPictureEnabled() {
+      if (!isDocumentNode(this)) throw new TypeError("Illegal invocation");
+      return true;
+    }
+
+    get pictureInPictureElement() {
+      return pictureInPictureElementForDocument(this);
+    }
+
     get permissionsPolicy() {
       if (internalNodeType(this) !== 9) throw new TypeError("Illegal invocation");
       let policy = safeWeakMapGet(nodePolicyObjects, this);
@@ -8569,6 +8615,10 @@ export const __omoikane_service_worker_lifecycle = {};
 
     exitFullscreen() {
       return exitFullscreenDocument(this);
+    }
+
+    exitPictureInPicture() {
+      return leavePictureInPicture(this);
     }
 
     get adoptedStyleSheets() {
@@ -11846,11 +11896,17 @@ export const __omoikane_service_worker_lifecycle = {};
       this.__mediaCurrentTime = 0;
       this.__mediaDuration = NaN;
       this.__mediaPaused = true;
+      this.__mediaSeeking = false;
       this.__mediaEnded = false;
       this.__mediaReadyState = MEDIA_HAVE_NOTHING;
       this.__mediaNetworkState = MEDIA_NETWORK_EMPTY;
       this.__mediaVolume = 1;
+      this.__mediaMuted = this.hasAttribute("muted");
+      this.__mediaMutedDirty = false;
+      this.__mediaVolumeLocked = false;
+      this.__mediaPictureInPicture = false;
       this.__mediaError = null;
+      this.__mediaSyncSelectorState();
     }
 
     get src() {
@@ -11865,6 +11921,10 @@ export const __omoikane_service_worker_lifecycle = {};
       const attr = String(name).toLowerCase();
       super.setAttribute(name, value);
       if (attr === "src") this.load();
+      if (attr === "muted" && !this.__mediaMutedDirty && !this.__mediaMuted) {
+        this.__mediaMuted = true;
+        this.__mediaSyncSelectorState();
+      }
     }
     get currentSrc() { return this.__mediaCurrentSrc; }
     get currentTime() { return this.__mediaCurrentTime; }
@@ -11886,9 +11946,17 @@ export const __omoikane_service_worker_lifecycle = {};
         this.__mediaCancelPlayback();
       }
       if (changed) {
+        this.__mediaSeeking = true;
+        this.__mediaSyncSelectorState();
         this.__mediaQueueEvent("seeking");
         this.__mediaQueueEvent("timeupdate");
-        this.__mediaQueueEvent("seeked");
+        const loadId = this.__mediaLoadId;
+        queueMediaTask(() => {
+          if (loadId !== this.__mediaLoadId) return;
+          this.__mediaSeeking = false;
+          this.__mediaSyncSelectorState();
+          fireRealtimeEvent(this, new Event("seeked"));
+        });
         if (reachedEnd && wasPlaying) this.__mediaQueueEvent("ended");
         if (!this.__mediaPaused && !this.__mediaEnded) this.__mediaScheduleEnd();
       }
@@ -11898,6 +11966,7 @@ export const __omoikane_service_worker_lifecycle = {};
     get ended() { return this.__mediaEnded; }
     get readyState() { return this.__mediaReadyState; }
     get networkState() { return this.__mediaNetworkState; }
+    get seeking() { return this.__mediaSeeking; }
     get volume() { return this.__mediaVolume; }
     set volume(value) {
       const next = Number(value);
@@ -11908,12 +11977,13 @@ export const __omoikane_service_worker_lifecycle = {};
       this.__mediaVolume = next;
       this.__mediaQueueEvent("volumechange");
     }
-    get muted() { return this.hasAttribute("muted"); }
+    get muted() { return this.__mediaMuted; }
     set muted(value) {
       const next = Boolean(value);
-      if (next === this.hasAttribute("muted")) return;
-      if (next) this.setAttribute("muted", "");
-      else this.removeAttribute("muted");
+      this.__mediaMutedDirty = true;
+      if (next === this.__mediaMuted) return;
+      this.__mediaMuted = next;
+      this.__mediaSyncSelectorState();
       this.__mediaQueueEvent("volumechange");
     }
     get defaultMuted() { return this.hasAttribute("muted"); }
@@ -11961,6 +12031,17 @@ export const __omoikane_service_worker_lifecycle = {};
         ? "probably" : "maybe";
     }
 
+    __mediaSyncSelectorState() {
+      let state = this.__mediaPaused ? 1 : 0;
+      if (this.__mediaSeeking) state |= 2;
+      if (!this.__mediaPaused && this.__mediaNetworkState === MEDIA_NETWORK_LOADING &&
+          this.__mediaReadyState <= MEDIA_HAVE_CURRENT_DATA) state |= 4;
+      if (this.__mediaMuted) state |= 8;
+      if (this.__mediaVolumeLocked) state |= 16;
+      if (this.__mediaPictureInPicture) state |= 32;
+      nativeSetMediaSelectorState(internalNodeId(this), state);
+    }
+
     __mediaQueueEvent(type, loadId = this.__mediaLoadId) {
       queueMediaTask(() => {
         if (loadId !== this.__mediaLoadId) return;
@@ -11974,8 +12055,10 @@ export const __omoikane_service_worker_lifecycle = {};
       queueMediaTask(() => {
         if (loadId !== this.__mediaLoadId) return;
         this.__mediaReadyState = readyState;
+        this.__mediaSyncSelectorState();
         fireRealtimeEvent(this, new Event(type));
         this.__mediaReadyState = finalState;
+        this.__mediaSyncSelectorState();
       });
     }
 
@@ -11999,6 +12082,8 @@ export const __omoikane_service_worker_lifecycle = {};
       if (loadId !== this.__mediaLoadId) return;
       this.__mediaReadyState = MEDIA_HAVE_NOTHING;
       this.__mediaNetworkState = MEDIA_NETWORK_NO_SOURCE;
+      this.__mediaSeeking = false;
+      this.__mediaSyncSelectorState();
       this.__mediaError = new MediaError(mediaErrorConstructionToken, code, message);
       const error = new DOMException(message, name);
       const waiters = this.__mediaPlayWaiters.splice(0);
@@ -12028,6 +12113,7 @@ export const __omoikane_service_worker_lifecycle = {};
       this.__mediaDuration = mediaDurationFromSource(this.__mediaCurrentSrc);
       this.__mediaCurrentTime = 0;
       this.__mediaEnded = false;
+      this.__mediaSyncSelectorState();
       const waiters = this.__mediaPlayWaiters.splice(0);
       this.__mediaQueueReadyEvent("durationchange", MEDIA_HAVE_METADATA, loadId);
       this.__mediaQueueReadyEvent("loadedmetadata", MEDIA_HAVE_METADATA, loadId);
@@ -12087,10 +12173,12 @@ export const __omoikane_service_worker_lifecycle = {};
       this.__mediaCurrentTime = 0;
       this.__mediaDuration = NaN;
       this.__mediaPaused = true;
+      this.__mediaSeeking = false;
       this.__mediaEnded = false;
       this.__mediaReadyState = MEDIA_HAVE_NOTHING;
       this.__mediaNetworkState = this.__mediaCurrentSrc ? MEDIA_NETWORK_LOADING : MEDIA_NETWORK_NO_SOURCE;
       this.__mediaError = null;
+      this.__mediaSyncSelectorState();
       this.__mediaQueueEvent("loadstart", loadId);
       queueMediaTask(() => this.__mediaBeginLoad(loadId, this.__mediaCurrentSrc));
       return loadId;
@@ -12138,6 +12226,7 @@ export const __omoikane_service_worker_lifecycle = {};
       const wasPlaying = !this.__mediaPaused;
       this.__mediaPaused = true;
       this.__mediaCancelPlayback();
+      this.__mediaSyncSelectorState();
       this.__mediaRejectWaiters(new DOMException("The play() request was interrupted.", "AbortError"));
       if (wasPlaying) this.__mediaQueueEvent("pause");
     }
@@ -12152,6 +12241,7 @@ export const __omoikane_service_worker_lifecycle = {};
       }
       this.__mediaPaused = false;
       this.__mediaEnded = false;
+      this.__mediaSyncSelectorState();
       const playbackId = ++this.__mediaPlaybackId;
       this.__mediaScheduledPlayWaiters = waiters;
       queueMediaTask(() => {
@@ -12175,6 +12265,7 @@ export const __omoikane_service_worker_lifecycle = {};
         this.__mediaCurrentTime = Number.isFinite(this.__mediaDuration) ? this.__mediaDuration : 1;
         this.__mediaEnded = true;
         this.__mediaPaused = true;
+        this.__mediaSyncSelectorState();
         queueMediaTask(() => {
           if (playbackId !== this.__mediaPlaybackId) return;
           fireRealtimeEvent(this, new Event("timeupdate"));
@@ -12187,6 +12278,10 @@ export const __omoikane_service_worker_lifecycle = {};
       const attr = String(name).toLowerCase();
       super.removeAttribute(name);
       if (attr === "src") this.load();
+      if (attr === "muted" && !this.__mediaMutedDirty && this.__mediaMuted) {
+        this.__mediaMuted = false;
+        this.__mediaSyncSelectorState();
+      }
     }
   }
 
@@ -12206,6 +12301,42 @@ export const __omoikane_service_worker_lifecycle = {};
     set width(value) { this.setAttribute("width", String(Math.max(0, Math.trunc(Number(value) || 0)))); }
     get height() { return Math.max(0, Math.trunc(Number(this.getAttribute("height")) || 0)); }
     set height(value) { this.setAttribute("height", String(Math.max(0, Math.trunc(Number(value) || 0)))); }
+    get disablePictureInPicture() { return this.hasAttribute("disablepictureinpicture"); }
+    set disablePictureInPicture(value) {
+      if (value) this.setAttribute("disablepictureinpicture", "");
+      else this.removeAttribute("disablepictureinpicture");
+    }
+    requestPictureInPicture() {
+      const doc = internalOwnerDocument(this);
+      if (!doc || !internalIsConnected(this) || this.disablePictureInPicture ||
+          this.__mediaReadyState === MEDIA_HAVE_NOTHING) {
+        return Promise.reject(new DOMException("Picture-in-Picture is not available", "InvalidStateError"));
+      }
+      if (!fullscreenTransientActivation) {
+        return Promise.reject(new DOMException("A user activation is required", "NotAllowedError"));
+      }
+      fullscreenTransientActivation = false;
+      nativePointerLockActivation(false, 0);
+      const previous = pictureInPictureElementForDocument(doc);
+      if (previous && previous !== this) {
+        safeWeakMapDelete(pictureInPictureElementIds, doc);
+        previous.__mediaPictureInPicture = false;
+        previous.__mediaSyncSelectorState();
+        previous.dispatchEvent(pictureInPictureEvent(
+          "leavepictureinpicture",
+          previous.__pictureInPictureWindow,
+        ));
+        previous.__pictureInPictureWindow = null;
+      }
+      const window = this.__pictureInPictureWindow ||
+        new PictureInPictureWindow(pictureInPictureWindowConstructionToken, this.width, this.height);
+      this.__pictureInPictureWindow = window;
+      safeWeakMapSet(pictureInPictureElementIds, doc, internalNodeId(this));
+      this.__mediaPictureInPicture = true;
+      this.__mediaSyncSelectorState();
+      this.dispatchEvent(pictureInPictureEvent("enterpictureinpicture", window));
+      return Promise.resolve(window);
+    }
   }
 
   for (const [name, value] of [
@@ -24070,6 +24201,32 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
+  const pictureInPictureWindowConstructionToken = {};
+  class PictureInPictureWindow extends EventTarget {
+    constructor(token, width = 0, height = 0) {
+      super();
+      if (token !== pictureInPictureWindowConstructionToken) throw new TypeError("Illegal constructor");
+      this.__width = Math.max(0, Math.trunc(Number(width) || 0));
+      this.__height = Math.max(0, Math.trunc(Number(height) || 0));
+    }
+    get width() { return this.__width; }
+    get height() { return this.__height; }
+  }
+
+  class PictureInPictureEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      const window = init && init.pictureInPictureWindow;
+      if (!(window instanceof PictureInPictureWindow)) {
+        throw new TypeError("pictureInPictureWindow is required");
+      }
+      Object.defineProperty(this, "pictureInPictureWindow", {
+        value: window,
+        enumerable: true,
+      });
+    }
+  }
+
   const dispatchWorkerErrorEvent = EventTarget.prototype.dispatchEvent;
   dispatchReportedWorkerError = (owner, event) => {
     if (!owner.__terminated) safeApply(dispatchWorkerErrorEvent, owner, [event]);
@@ -25228,6 +25385,8 @@ export const __omoikane_service_worker_lifecycle = {};
     if (visualScroll) visualViewport.dispatchEvent(new Event("scroll"));
   };
   globalThis.EventTarget = EventTarget;
+  globalThis.PictureInPictureWindow = PictureInPictureWindow;
+  globalThis.PictureInPictureEvent = PictureInPictureEvent;
   const dispatchCspGlobalEvent = EventTarget.prototype.dispatchEvent;
   // DOM nodes and the Window inherit the EventTarget interface. Their own
   // listener operations retain the document-backed event dispatch state.

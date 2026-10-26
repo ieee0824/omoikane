@@ -314,6 +314,13 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         | "popover-open"
                         | "modal"
                         | "open"
+                        | "playing"
+                        | "paused"
+                        | "seeking"
+                        | "buffering"
+                        | "muted"
+                        | "volume-locked"
+                        | "picture-in-picture"
                         | "before"
                         | "after"
                 );
@@ -1384,6 +1391,13 @@ impl Parser {
             || name.eq_ignore_ascii_case("out-of-range")
             || name.eq_ignore_ascii_case("defined")
             || name.eq_ignore_ascii_case("open")
+            || name.eq_ignore_ascii_case("playing")
+            || name.eq_ignore_ascii_case("paused")
+            || name.eq_ignore_ascii_case("seeking")
+            || name.eq_ignore_ascii_case("buffering")
+            || name.eq_ignore_ascii_case("muted")
+            || name.eq_ignore_ascii_case("volume-locked")
+            || name.eq_ignore_ascii_case("picture-in-picture")
         {
             return Err(CssParseError::InvalidSelector);
         }
