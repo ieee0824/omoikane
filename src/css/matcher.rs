@@ -821,6 +821,7 @@ fn matches_pseudo_class(
                 parse_an_plus_b(argument).is_some_and(|formula| formula.matches(total - index + 1))
             }),
             "lang" => matches_language(node, argument),
+            "dir" => pseudo.is_none() && node.matches_directionality(argument),
             _ => false,
         };
     }

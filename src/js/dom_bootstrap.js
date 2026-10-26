@@ -193,6 +193,8 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_first_child;
   delete globalThis.__omoikane_last_child;
   const nativeMoveBefore = globalThis.__omoikane_move_before;
+  const nativeAssignSlot = globalThis.__omoikane_assign_slot;
+  delete globalThis.__omoikane_assign_slot;
   const nativeShadowRoot = globalThis.__omoikane_shadow_root;
   const nativeParseUnsafeFragment = globalThis.__omoikane_parse_unsafe_fragment;
   const nativeParseUnsafeDocument = globalThis.__omoikane_parse_unsafe_document;
@@ -226,6 +228,7 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeGetPickerOpen = globalThis.__omoikane_get_picker_open;
   const nativeSetPickerOpen = globalThis.__omoikane_set_picker_open;
   const nativeSetMediaSelectorState = globalThis.__omoikane_set_media_selector_state;
+  const nativeSetDirectionalityControlValue = globalThis.__omoikane_set_directionality_control_value;
   const nativeSetModalDialog = globalThis.__omoikane_set_modal_dialog;
   const nativeFullscreenElement = globalThis.__omoikane_fullscreen_element;
   const nativeFullscreenEnabled = globalThis.__omoikane_fullscreen_enabled;
@@ -312,6 +315,7 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_get_picker_open;
   delete globalThis.__omoikane_set_picker_open;
   delete globalThis.__omoikane_set_media_selector_state;
+  delete globalThis.__omoikane_set_directionality_control_value;
   delete globalThis.__omoikane_set_modal_dialog;
   delete globalThis.__omoikane_fullscreen_element;
   delete globalThis.__omoikane_fullscreen_enabled;
@@ -5880,6 +5884,16 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     get isContentEditable() { return nativeEditability(editingHtmlId(this), false); }
 
+    get dir() {
+      editingHtmlId(this);
+      const value = asciiLowercase(nativeAttributeValueNS(internalNodeId(this), null, "dir") || "");
+      return value === "ltr" || value === "rtl" || value === "auto" ? value : "";
+    }
+    set dir(value) {
+      editingHtmlId(this);
+      setAttributeValueNS(this, null, "dir", "dir", toDOMString(value), false);
+    }
+
     attachInternals() {
       if (!hasCanonicalWrapperId(canonicalHtmlElementIds, this)) {
         throw new TypeError("Illegal invocation");
@@ -5927,7 +5941,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
-  for (const name of ["contentEditable", "isContentEditable"]) {
+  for (const name of ["contentEditable", "isContentEditable", "dir"]) {
     Object.defineProperty(HTMLElement.prototype, name, {
       ...Object.getOwnPropertyDescriptor(HTMLElement.prototype, name), enumerable: true,
     });
@@ -6724,6 +6738,25 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     assignedElements(options = {}) {
       return this.assignedNodes(options).filter(node => node.nodeType === 1);
+    }
+    assign(...nodes) {
+      const slotId = canonicalNodeId(this);
+      if (slotId === undefined || internalNodeType(this) !== 1 || internalNodeLocalName(this) !== "slot") {
+        throw new TypeError("Illegal invocation");
+      }
+      const ids = nodes.map(node => {
+        const id = canonicalNodeId(node);
+        if (id === undefined || ![1, 3, 4].includes(internalNodeType(node))) {
+          throw new TypeError("HTMLSlotElement.assign accepts only Element or Text nodes");
+        }
+        return id;
+      });
+      if (!nativeAssignSlot(slotId, ...ids)) {
+        throw new DOMException(
+          "The slot's shadow root does not use manual assignment.",
+          "NotAllowedError"
+        );
+      }
     }
   }
 
@@ -8748,6 +8781,16 @@ export const __omoikane_service_worker_lifecycle = {};
         if (child.nodeType === 1) return child;
       }
       return null;
+    }
+
+    get dir() {
+      if (!isDocumentNode(this)) throw new TypeError("Illegal invocation");
+      return this.documentElement instanceof HTMLElement ? this.documentElement.dir : "";
+    }
+    set dir(value) {
+      if (!isDocumentNode(this)) throw new TypeError("Illegal invocation");
+      const root = this.documentElement;
+      if (root instanceof HTMLElement) root.setAttribute("dir", toDOMString(value));
     }
 
     get doctype() {
@@ -14751,6 +14794,7 @@ export const __omoikane_service_worker_lifecycle = {};
     const state = safeWeakMapGet(nodeEventStates, control);
     state.temporalInput = undefined;
     state.__value = sanitizeInputControlValue(id, kind, value, false);
+    nativeSetDirectionalityControlValue(id, state.__value);
     state.__lastValueChangeWasUser = false;
     nativeSetControlValueEmpty(id, state.__value === "", state.__value);
     setTextControlSelection(control, state.__value.length, state.__value.length, "none");
@@ -14829,6 +14873,7 @@ export const __omoikane_service_worker_lifecycle = {};
       safeWeakMapGet(nodeEventStates, this).temporalInput = undefined;
       this.__value = sanitizeInputControlValue(internalNodeId(this), nativeAttributeValueNS(id, null, "type") || "",
         v == null ? "" : String(v), nativeAttributeValueNS(id, null, "multiple") !== null);
+      nativeSetDirectionalityControlValue(id, this.__value);
       this.__lastValueChangeWasUser = false;
       setTextControlSelection(this, this.__value.length, this.__value.length, "none");
     }
@@ -14928,6 +14973,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     set value(value) {
       this.__value = normalizeTextAreaValue(value == null ? "" : value);
+      nativeSetDirectionalityControlValue(internalNodeId(this), this.__value);
       this.__lastValueChangeWasUser = false;
       setTextControlSelection(this, this.__value.length, this.__value.length, "none");
     }
@@ -18344,6 +18390,7 @@ export const __omoikane_service_worker_lifecycle = {};
         const changed = state[name] !== value;
         state[name] = value;
         if (changed && name === "__value") {
+          nativeSetDirectionalityControlValue(internalNodeId(this), value);
           nativeSetControlValueEmpty(internalNodeId(this), value === undefined ? undefined : value === "", value);
         } else if (changed && ["__customValidityMessage", "__lastValueChangeWasUser", "__files"].includes(name)) {
           nativeInvalidateValidation(internalNodeId(this));

@@ -11647,6 +11647,18 @@ fn apply_presentational_hints(
         return;
     }
 
+    // HTML defines directionality independently of the CSS `direction`
+    // property. Its rendering rule behaves like a low-priority
+    // presentational hint and remains overridable by author declarations.
+    if !properties.contains_key(&PropertyId::Direction)
+        && let Some(direction) = node.directionality_presentational_hint()
+    {
+        properties.insert(
+            PropertyId::Direction,
+            ComputedValue::Keyword(direction.to_owned()),
+        );
+    }
+
     node.with_attributes(|attributes| {
         if let Some(attributes) = attributes {
             apply_presentational_hints_from_attributes(node, attributes, properties);

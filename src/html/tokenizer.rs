@@ -179,6 +179,7 @@ enum State {
     Comment,
     CommentEndDash,
     CommentEnd,
+    BogusComment,
     Doctype,
     BeforeDoctypeName,
     DoctypeName,
@@ -809,12 +810,12 @@ impl IncrementalTokenizer {
                                 errors.push(HtmlParseError::InvalidDoctype);
                             }
                             current_comment = lookahead_data;
-                            state = State::Comment;
+                            state = State::BogusComment;
                         }
                     } else {
                         current_comment.clear();
                         current_comment.push_code_point(cursor.consumed_code_point().unwrap());
-                        state = State::Comment;
+                        state = State::BogusComment;
                     }
                 }
                 State::CommentStart => match ch {
@@ -863,6 +864,13 @@ impl IncrementalTokenizer {
                         current_comment.push_code_point(cursor.consumed_code_point().unwrap());
                         state = State::Comment;
                     }
+                },
+                State::BogusComment => match ch {
+                    '>' => {
+                        tokens.push(comment_token(std::mem::take(&mut current_comment)));
+                        state = State::Data;
+                    }
+                    _ => current_comment.push_code_point(cursor.consumed_code_point().unwrap()),
                 },
                 // DOCTYPE construct (§13.2.5.51–13.2.5.67): the thirteen states
                 // from `Doctype` through `BogusDoctype` form one contiguous run
@@ -1289,6 +1297,9 @@ impl IncrementalTokenizer {
         }
         if eof_state_needs_unexpected_eof_error(state) {
             errors.push(HtmlParseError::UnexpectedEof);
+        }
+        if state == State::BogusComment {
+            tokens.push(comment_token(std::mem::take(&mut self.current_comment)));
         }
 
         tokens.push(Token::Eof);
@@ -2178,6 +2189,29 @@ mod tests {
     fn tokenizes_comment() {
         let tokens = Tokenizer::new("<!--note-->").tokenize();
         assert_eq!(tokens, vec![Token::Comment("note".to_string()), Token::Eof]);
+    }
+
+    #[test]
+    fn bogus_markup_declaration_ends_at_first_greater_than_sign() {
+        assert_eq!(
+            Tokenizer::new("<![CDATA[foo]]><iframe></iframe>").tokenize(),
+            vec![
+                Token::Comment("[CDATA[foo]]".to_string()),
+                Token::StartTag {
+                    name: "iframe".to_string(),
+                    attributes: vec![],
+                    self_closing: false,
+                },
+                Token::EndTag {
+                    name: "iframe".to_string(),
+                },
+                Token::Eof,
+            ]
+        );
+        assert_eq!(
+            Tokenizer::new("<!unfinished").tokenize(),
+            vec![Token::Comment("unfinished".to_string()), Token::Eof]
+        );
     }
 
     #[test]
