@@ -789,6 +789,7 @@
     {"path": "css/selectors/user-valid-user-invalid-multifield-inputs.tentative.html"},
     {"path": "css/selectors/open-pseudo.html"},
     {"path": "css/selectors/invalidation/open-pseudo-class-in-has.html"},
-    {"path": "css/css-view-transitions/document-active-view-transition.html"}
+    {"path": "css/css-view-transitions/document-active-view-transition.html"},
+    {"path": "html/dom/elements/the-innertext-and-outertext-properties/outertext-setter.html"}
   ]
 }

@@ -5818,6 +5818,7 @@ export const __omoikane_service_worker_lifecycle = {};
 
   const htmlConstructorInterfaceToken = {};
   const editingRemoveAttributeNS = Element.prototype.removeAttributeNS;
+  const elementInnerTextGetter = Object.getOwnPropertyDescriptor(Node.prototype, "innerText").get;
 
   function editingHtmlId(element) {
     if (!hasCanonicalWrapperId(canonicalHtmlElementIds, element)) {
@@ -5832,6 +5833,42 @@ export const __omoikane_service_worker_lifecycle = {};
     if (keyword === "") return "true";
     return keyword === "true" || keyword === "false" || keyword === "plaintext-only"
       ? keyword : "inherit";
+  }
+
+  function outerTextReplacement(element, text) {
+    const parent = internalParentNode(element);
+    if (!parent) {
+      throw new DOMException("The element has no parent", "NoModificationAllowedError");
+    }
+    const document = nodeDocument(element);
+    const normalized = text.replace(/\r\n|\r/g, "\n");
+    const nodes = [];
+    const lines = normalized.split("\n");
+    for (let index = 0; index < lines.length; index++) {
+      if (lines[index] !== "" || lines.length === 1) {
+        nodes.push(Document.prototype.createTextNode.call(document, lines[index]));
+      }
+      if (index + 1 < lines.length) {
+        nodes.push(Document.prototype.createElement.call(document, "br"));
+      }
+    }
+
+    const previous = internalPreviousSibling(element);
+    const following = internalNextSibling(element);
+    mutateSibling(element, nodes, "replaceWith");
+
+    let first = previous ? internalNextSibling(previous) : internalChildNodes(parent)[0] || null;
+    const parentChildren = internalChildNodes(parent);
+    let last = following ? internalPreviousSibling(following) : parentChildren[parentChildren.length - 1] || null;
+    if (previous && internalNodeType(previous) === 3 && first && internalNodeType(first) === 3) {
+      previous.data += first.data;
+      if (last === first) last = previous;
+      removeChildInternal(parent, first);
+    }
+    if (following && internalNodeType(following) === 3 && last && internalNodeType(last) === 3) {
+      last.data += following.data;
+      removeChildInternal(parent, following);
+    }
   }
 
   class HTMLElement extends Element {
@@ -5890,6 +5927,15 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     get isContentEditable() { return nativeEditability(editingHtmlId(this), false); }
 
+    get outerText() {
+      editingHtmlId(this);
+      return safeApply(elementInnerTextGetter, this, []);
+    }
+    set outerText(value) {
+      editingHtmlId(this);
+      outerTextReplacement(this, value === null ? "" : toDOMString(value));
+    }
+
     get dir() {
       editingHtmlId(this);
       const value = asciiLowercase(nativeAttributeValueNS(internalNodeId(this), null, "dir") || "");
@@ -5947,7 +5993,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
-  for (const name of ["contentEditable", "isContentEditable", "dir"]) {
+  for (const name of ["contentEditable", "isContentEditable", "outerText", "dir"]) {
     Object.defineProperty(HTMLElement.prototype, name, {
       ...Object.getOwnPropertyDescriptor(HTMLElement.prototype, name), enumerable: true,
     });
