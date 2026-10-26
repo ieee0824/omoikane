@@ -858,6 +858,8 @@ fn matches_pseudo_class(
         "required" => form_state::requiredness(node) == Some(true),
         "optional" => form_state::requiredness(node) == Some(false),
         "placeholder-shown" => form_state::placeholder_shown(node),
+        "read-write" => crate::dom::editability::read_write(node) == Some(true),
+        "read-only" => crate::dom::editability::read_write(node) == Some(false),
         "defined" => node.is_defined_element(),
         "in-range" => form_state::range_state(node) == Some(false),
         "out-of-range" => form_state::range_state(node) == Some(true),

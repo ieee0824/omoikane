@@ -357,6 +357,10 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeDocumentEncoding = globalThis.__omoikane_document_encoding;
   delete globalThis.__omoikane_document_encoding;
   const nativeDocumentContentType = globalThis.__omoikane_document_content_type;
+  const nativeEditability = globalThis.__omoikane_editability;
+  const nativeDocumentDesignMode = globalThis.__omoikane_document_design_mode;
+  delete globalThis.__omoikane_editability;
+  delete globalThis.__omoikane_document_design_mode;
   const nativeSetDocumentContentType = globalThis.__omoikane_set_document_content_type;
   delete globalThis.__omoikane_document_content_type;
   delete globalThis.__omoikane_set_document_content_type;
@@ -2918,8 +2922,7 @@ export const __omoikane_service_worker_lifecycle = {};
 
   // An editing host is focusable; nodes merely *inside* one are not.
   function isEditingHost(element) {
-    const value = element.getAttribute("contenteditable");
-    return value !== null && (value === "" || value.toLowerCase() === "true");
+    return nativeEditability(internalNodeId(element), true);
   }
 
   // Elements that are focusable without a tabindex attribute. Verified against
@@ -3137,6 +3140,7 @@ export const __omoikane_service_worker_lifecycle = {};
       }
     },
     focusWindow() { focusWindowAcrossDocuments(); },
+    enableEditing() { enableDocumentEditing(focusDocument); },
     commit(id, previousId, previousVisible, preventScroll) {
       const node = wrapNode(id);
       if (internalOwnerDocument(node) !== focusDocument || !canBeFocused(node)) return;
@@ -5780,6 +5784,22 @@ export const __omoikane_service_worker_lifecycle = {};
   ]);
 
   const htmlConstructorInterfaceToken = {};
+  const editingRemoveAttributeNS = Element.prototype.removeAttributeNS;
+
+  function editingHtmlId(element) {
+    if (!hasCanonicalWrapperId(canonicalHtmlElementIds, element)) {
+      throw new IntrinsicTypeError("Illegal HTMLElement invocation");
+    }
+    return internalNodeId(element);
+  }
+
+  function contentEditableKeyword(raw) {
+    if (raw === null) return "inherit";
+    const keyword = asciiLowercase(raw);
+    if (keyword === "") return "true";
+    return keyword === "true" || keyword === "false" || keyword === "plaintext-only"
+      ? keyword : "inherit";
+  }
 
   class HTMLElement extends Element {
     constructor(id = undefined, interfaceToken, constructorInterface) {
@@ -5820,6 +5840,22 @@ export const __omoikane_service_worker_lifecycle = {};
       super(id);
       throw new TypeError("Illegal constructor");
     }
+
+    get contentEditable() {
+      return contentEditableKeyword(nativeAttributeValueNS(editingHtmlId(this), null, "contenteditable"));
+    }
+    set contentEditable(value) {
+      editingHtmlId(this);
+      const keyword = asciiLowercase(toDOMString(value));
+      if (keyword === "inherit") {
+        safeApply(editingRemoveAttributeNS, this, [null, "contenteditable"]);
+      } else if (keyword === "true" || keyword === "false" || keyword === "plaintext-only") {
+        setAttributeValueNS(this, null, "contenteditable", "contenteditable", keyword, false);
+      } else {
+        throw new DOMException("Invalid contentEditable value", "SyntaxError");
+      }
+    }
+    get isContentEditable() { return nativeEditability(editingHtmlId(this), false); }
 
     attachInternals() {
       if (!hasCanonicalWrapperId(canonicalHtmlElementIds, this)) {
@@ -5866,6 +5902,12 @@ export const __omoikane_service_worker_lifecycle = {};
     togglePopover(options = {}) {
       return togglePopoverElement(this, options);
     }
+  }
+
+  for (const name of ["contentEditable", "isContentEditable"]) {
+    Object.defineProperty(HTMLElement.prototype, name, {
+      ...Object.getOwnPropertyDescriptor(HTMLElement.prototype, name), enumerable: true,
+    });
   }
 
   class HTMLUnknownElement extends HTMLElement {
@@ -7968,6 +8010,33 @@ export const __omoikane_service_worker_lifecycle = {};
     return selection;
   }
 
+  // HTML designMode resets the existing active range before focusing the root.
+  // Calling private helpers avoids author replacements of Selection/Range APIs.
+  function enableDocumentEditing(doc) {
+    const id = internalNodeId(doc);
+    if (!documentFocusChain(id)) return;
+    if (id !== __omoikane_document_id) {
+      focusDocumentCommand(id, "enableEditing");
+      return;
+    }
+    const selection = safeWeakMapGet(selectionByDocument, doc);
+    const range = selection && selectionState(selection).range;
+    if (range) {
+      releaseComposedRange(selection);
+      setRangeBoundary(range, doc, 0, true);
+      setRangeBoundary(range, doc, 0, false);
+      selectionState(selection).direction = "forward";
+      setComposedRange(selection, range);
+      queueSelectionChange(doc);
+    }
+    for (let child = wrapNode(nativeFirstChild(internalNodeId(doc))); child; child = internalNextSibling(child)) {
+      if (internalNodeType(child) === 1) {
+        focusElementAcrossDocuments(child, false);
+        return;
+      }
+    }
+  }
+
   const mouseSelectionByDocument = new WeakMap();
   const userSelectionSetBaseAndExtent = Selection.prototype.setBaseAndExtent;
   const userSelectionDispatchEvent = Node.prototype.dispatchEvent;
@@ -8516,6 +8585,19 @@ export const __omoikane_service_worker_lifecycle = {};
 
     getSelection() { return selectionForDocument(this); }
 
+    get designMode() {
+      if (!isDocumentNode(this)) throw new IntrinsicTypeError("Illegal Document invocation");
+      return nativeDocumentDesignMode(internalNodeId(this)) ? "on" : "off";
+    }
+    set designMode(value) {
+      if (!isDocumentNode(this)) throw new IntrinsicTypeError("Illegal Document invocation");
+      const keyword = asciiLowercase(toDOMString(value));
+      if (keyword !== "on" && keyword !== "off") return;
+      if (nativeDocumentDesignMode(internalNodeId(this), keyword === "on") && keyword === "on") {
+        enableDocumentEditing(this);
+      }
+    }
+
     createEvent(type) {
       const t = String(type);
       let evt;
@@ -8761,6 +8843,10 @@ export const __omoikane_service_worker_lifecycle = {};
     // Finish the stream; incomplete input is only treated as EOF here.
     close() { __omoikane_document_close(this.__id); }
   }
+
+  Object.defineProperty(Document.prototype, "designMode", {
+    ...Object.getOwnPropertyDescriptor(Document.prototype, "designMode"), enumerable: true,
+  });
 
   class DocumentFragment extends Node {
     constructor(id, construction) {

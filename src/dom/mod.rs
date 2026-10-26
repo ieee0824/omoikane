@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 mod children;
 pub(crate) mod custom_element;
 mod custom_state;
+pub(crate) mod editability;
 pub(crate) mod form_controls;
 pub(crate) mod input_range;
 pub(crate) mod input_value;
@@ -373,11 +374,12 @@ pub trait Node {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Document;
 
-/// Parser-selected properties owned by one document, independent of its tree.
+/// Parser and runtime properties owned by one document, independent of its tree.
 #[derive(Debug, Clone)]
 struct DocumentMetadata {
     character_encoding: String,
     content_type: String,
+    design_mode_enabled: bool,
 }
 
 impl Default for DocumentMetadata {
@@ -385,6 +387,7 @@ impl Default for DocumentMetadata {
         Self {
             character_encoding: "UTF-8".to_owned(),
             content_type: "text/html".to_owned(),
+            design_mode_enabled: false,
         }
     }
 }
