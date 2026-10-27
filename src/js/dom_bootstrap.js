@@ -2641,6 +2641,8 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
+  const inputEventRanges = browsingInput.inputEventRanges ||
+    (browsingInput.inputEventRanges = new WeakMap());
   class InputEvent extends UIEvent {
     constructor(type, init = {}) {
       init = init ?? {};
@@ -2648,8 +2650,32 @@ export const __omoikane_service_worker_lifecycle = {};
       this.data = init.data === undefined ? null : init.data;
       this.inputType = String(init.inputType ?? "");
       this.isComposing = Boolean(init.isComposing);
+      const suppliedRanges = init.targetRanges;
+      if (suppliedRanges !== undefined &&
+          (suppliedRanges === null ||
+           (typeof suppliedRanges !== "object" && typeof suppliedRanges !== "function"))) {
+        throw new TypeError("InputEvent targetRanges must be iterable");
+      }
+      const ranges = [];
+      if (suppliedRanges !== undefined) {
+        for (const range of suppliedRanges) {
+          if (!domInterfaces.isStaticRange(range)) {
+            throw new TypeError("InputEvent targetRanges must contain StaticRange objects");
+          }
+          ranges.push(range);
+        }
+      }
+      safeWeakMapSet(inputEventRanges, this, ranges);
+    }
+    getTargetRanges() {
+      const ranges = safeWeakMapGet(inputEventRanges, this);
+      if (!ranges) throw new TypeError("Illegal invocation");
+      return ranges.slice();
     }
   }
+  Object.defineProperty(InputEvent.prototype, "getTargetRanges", {
+    ...Object.getOwnPropertyDescriptor(InputEvent.prototype, "getTargetRanges"), enumerable: true,
+  });
 
   class CompositionEvent extends UIEvent {
     constructor(type, init = {}) {
@@ -2891,6 +2917,7 @@ export const __omoikane_service_worker_lifecycle = {};
       }
     } finally {
       event.__dispatching = false;
+      if (safeWeakMapGet(inputEventRanges, event)) safeWeakMapSet(inputEventRanges, event, []);
       event.currentTarget = null;
       event.eventPhase = 0;
       const finalEntry = path[path.length - 1];
