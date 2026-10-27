@@ -10,6 +10,13 @@
   };
   let isNodeIntrinsic, nodeTypeIntrinsic, DOMExceptionIntrinsic;
   const ranges = new WeakMap(), collections = new WeakMap();
+  // StaticRange objects can be passed between same-origin realms. Share the
+  // private brand with their browsing context rather than using instanceof.
+  const inputState = globalThis.__omoikane_input_state();
+  const staticRangeBrands = inputState.staticRangeBrands ||
+    (inputState.staticRangeBrands = new WeakSet());
+  const addStaticRangeBrand = Function.prototype.call.bind(WeakSet.prototype.add);
+  const hasStaticRangeBrand = Function.prototype.call.bind(WeakSet.prototype.has);
   const implementations = new WeakMap(), metrics = new WeakMap();
   const datasetCache = new WeakMap();
   const weakGet = Function.prototype.call.bind(WeakMap.prototype.get);
@@ -52,6 +59,7 @@
       }
       const boundaries = [start, startOffset, end, endOffset];
       weakSet(ranges, this, () => boundaries);
+      addStaticRangeBrand(staticRangeBrands, this);
     }
   }
 
@@ -239,6 +247,7 @@
     bindNode: (isNode, nodeType, exception) => { isNodeIntrinsic = isNode; nodeTypeIntrinsic = nodeType; DOMExceptionIntrinsic = exception; },
     rangeToken: token,
     registerRange: (range, boundaries) => weakSet(ranges, range, boundaries),
+    isStaticRange: value => hasStaticRangeBrand(staticRangeBrands, value),
     registerCollectionAlias: (alias, collection) => weakSet(collections, alias, read(collections, collection)),
     makeCollection, makeDataset,
     makeImplementation: operations => new DOMImplementation(token, operations),

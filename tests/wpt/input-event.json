@@ -1,0 +1,5 @@
+{
+  "tests": [
+    {"path": "uievents/constructors/inputevent-constructor.html"}
+  ]
+}
