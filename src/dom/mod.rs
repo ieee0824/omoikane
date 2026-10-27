@@ -65,6 +65,11 @@ thread_local! {
     /// scrolled. A released element does not decrement the count, which only
     /// costs an avoidable pass.
     static SCROLLED_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Number of elements on this thread that currently have the modal-dialog
+    /// flag. Most documents never open a modal, so inertness checks can avoid
+    /// searching their flat-tree root entirely. A released open dialog can
+    /// leave this conservatively non-zero; that only costs an avoidable search.
+    static MODAL_DIALOG_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn invalidate_slot_assignments() {
@@ -1209,6 +1214,10 @@ impl NodeHandle {
                 break;
             }
             current = node.flat_tree_parent();
+        }
+
+        if MODAL_DIALOG_ELEMENTS.with(|count| count.get() == 0) {
+            return false;
         }
 
         let mut root = self.clone();
@@ -2426,6 +2435,15 @@ impl NodeHandle {
         let NodeData::Element(element) = &mut inner.data else {
             return None;
         };
+        if element.modal_dialog != modal {
+            MODAL_DIALOG_ELEMENTS.with(|count| {
+                count.set(if modal {
+                    count.get().saturating_add(1)
+                } else {
+                    count.get().saturating_sub(1)
+                });
+            });
+        }
         element.modal_dialog = modal;
         if modal && element.top_layer_order.is_none() {
             element.top_layer_order = Some(NEXT_TOP_LAYER_ORDER.fetch_add(1, Ordering::Relaxed));
