@@ -1,0 +1,7 @@
+{
+  "tests": [
+    {
+      "path": "html/dom/elements/the-innertext-and-outertext-properties/outertext-setter.html"
+    }
+  ]
+}
