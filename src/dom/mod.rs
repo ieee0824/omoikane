@@ -1182,6 +1182,61 @@ impl NodeHandle {
             .upgrade()
     }
 
+    /// Returns this node's parent in the flat, shadow-including tree.
+    pub(crate) fn flat_tree_parent(&self) -> Option<NodeHandle> {
+        self.assigned_slot().or_else(|| {
+            self.parent_node().and_then(|parent| {
+                if parent.node_type() == NodeType::DocumentFragment {
+                    parent.shadow_host()
+                } else {
+                    Some(parent)
+                }
+            })
+        })
+    }
+
+    /// Returns whether this node is inert in the flat tree.
+    ///
+    /// An open modal dialog checks its own `inert` attribute, then escapes
+    /// inertness inherited from ancestors as required by HTML.
+    pub(crate) fn is_inert(&self) -> bool {
+        let mut current = Some(self.clone());
+        while let Some(node) = current {
+            if node.is_html_element() && node.has_attribute("inert") {
+                return true;
+            }
+            if node.is_modal_dialog() {
+                break;
+            }
+            current = node.flat_tree_parent();
+        }
+
+        let mut root = self.clone();
+        while let Some(parent) = root.flat_tree_parent() {
+            root = parent;
+        }
+        let Some(modal) = find_topmost_modal_dialog(&root) else {
+            return false;
+        };
+        let mut current = Some(self.clone());
+        while let Some(node) = current {
+            if node == modal {
+                return false;
+            }
+            current = node.flat_tree_parent();
+        }
+        true
+    }
+
+    /// Returns the topmost modal dialog in this node's flat-tree root.
+    pub(crate) fn topmost_modal_dialog(&self) -> Option<NodeHandle> {
+        let mut root = self.clone();
+        while let Some(parent) = root.flat_tree_parent() {
+            root = parent;
+        }
+        find_topmost_modal_dialog(&root)
+    }
+
     /// Returns the directly assigned slottables for an HTML `<slot>` element.
     /// With `flatten`, nested slot elements are recursively replaced by their
     /// assigned nodes, or by their fallback children when unassigned.
@@ -3156,6 +3211,26 @@ fn clear_scroll_offsets(node: &NodeHandle) {
     for child in node.child_nodes() {
         clear_scroll_offsets(&child);
     }
+}
+
+/// Finds the last-opened modal dialog below `root`.
+fn find_topmost_modal_dialog(root: &NodeHandle) -> Option<NodeHandle> {
+    let mut topmost = None;
+    let mut stack = vec![root.clone()];
+    while let Some(node) = stack.pop() {
+        if node.is_modal_dialog()
+            && topmost.as_ref().is_none_or(|current: &NodeHandle| {
+                node.top_layer_order() > current.top_layer_order()
+            })
+        {
+            topmost = Some(node.clone());
+        }
+        if let Some(shadow_root) = node.shadow_root() {
+            stack.push(shadow_root);
+        }
+        stack.extend(node.child_nodes());
+    }
+    topmost
 }
 
 /// Removes a detached subtree from the top layer.

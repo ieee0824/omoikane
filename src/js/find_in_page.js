@@ -1,5 +1,7 @@
 // Browser-owned find state. This runs after the DOM bootstrap in each Realm.
 (() => {
+  const nativeIsInert = globalThis.__omoikane_is_inert;
+  delete globalThis.__omoikane_is_inert;
   let query = "";
   let matches = [];
   let active = -1;
@@ -71,7 +73,7 @@
         boundary = (tag === "iframe" || tag === "frame") || tag === "br" ||
           (style.display !== "inline" && style.display !== "contents");
       } else if (node.nodeType === 3 && node.data) {
-        if (visible) result.push(node);
+        if (visible && !nativeIsInert(node.__id)) result.push(node);
         continue;
       } else if (node.nodeType === 11 && node.host) {
         boundary = true;
@@ -79,7 +81,9 @@
       if (boundary) result.push(null);
       const children = childrenInOrder(node);
       if (boundary) stack.push({ endBoundary: true });
-      for (let i = children.length - 1; i >= 0; i--) stack.push({ node: children[i], visible });
+      for (let i = children.length - 1; i >= 0; i--) {
+        stack.push({ node: children[i], visible });
+      }
     }
     return result;
   }

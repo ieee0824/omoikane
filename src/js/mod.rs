@@ -17500,6 +17500,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(is_rendered_for_focus_native),
         ),
         (
+            js_string!("__omoikane_is_inert"),
+            1,
+            NativeFunction::from_copy_closure(is_inert_native),
+        ),
+        (
             js_string!("__omoikane_set_content_visibility_focus"),
             1,
             NativeFunction::from_copy_closure(set_content_visibility_focus_native),
@@ -20130,6 +20135,20 @@ fn is_rendered_for_focus_native(
             )
         });
         Ok(JsValue::from(visible))
+    })
+}
+
+/// `__omoikane_is_inert(nodeId)` applies HTML's shared flat-tree inertness
+/// rules, including the topmost modal-dialog exception.
+fn is_inert_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    with_host_state(|state| {
+        let inert = state
+            .borrow()
+            .get_node(node_id)
+            .is_some_and(|node| node.is_inert());
+        Ok(JsValue::from(inert))
     })
 }
 

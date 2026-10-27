@@ -1,0 +1,10 @@
+{
+  "tests": [
+    {"path": "inert/nested-inert-unfocusable.html"},
+    {"path": "inert/inert-in-shadow-dom.html"},
+    {"path": "inert/inert-on-slots.html"},
+    {"path": "inert/inert-with-modal-dialog-001.html"},
+    {"path": "inert/inert-with-modal-dialog-002.html"},
+    {"path": "inert/inert-does-not-match-disabled-selector.html"}
+  ]
+}

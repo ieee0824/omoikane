@@ -316,6 +316,14 @@ where
                 children.push(child);
             }
         }
+        if let Some(modal) = document.topmost_modal_dialog()
+            && !children
+                .iter()
+                .any(|child| contains_ax_identity(child, modal.identity()))
+            && let Some(modal) = self.build_node(&modal, None)
+        {
+            children.push(modal);
+        }
         let mut root = AccessibilityNode {
             node_id: ax_node_id(document, self.document_generation),
             dom_node: document.clone(),
@@ -419,7 +427,7 @@ where
                 }) {
                     return Some(HiddenCause::AriaSubtree);
                 }
-                if ancestor.has_attribute("inert") {
+                if ancestor.is_inert() {
                     return Some(HiddenCause::InertSubtree);
                 }
                 let tag = ancestor.tag_name().unwrap_or_default();
@@ -517,7 +525,7 @@ where
         let aria_hidden = node.with_attribute("aria-hidden", |value| {
             value.is_some_and(|value| value.eq_ignore_ascii_case("true"))
         });
-        let inert = node.has_attribute("inert");
+        let inert = node.is_inert();
         let html_hidden = node.has_attribute("hidden")
             || (tag == "input"
                 && node.with_attribute("type", |value| {
@@ -643,7 +651,7 @@ where
         }) {
             return Some(HiddenCause::AriaElement);
         }
-        if node.has_attribute("inert") {
+        if node.is_inert() {
             return Some(HiddenCause::InertElement);
         }
         if node.has_attribute("hidden")
@@ -1027,15 +1035,7 @@ fn ax_node_id(node: &NodeHandle, document_generation: u64) -> String {
 }
 
 fn composed_parent(node: &NodeHandle) -> Option<NodeHandle> {
-    node.assigned_slot().or_else(|| {
-        node.parent_node().and_then(|parent| {
-            if parent.node_type() == NodeType::DocumentFragment {
-                parent.shadow_host()
-            } else {
-                Some(parent)
-            }
-        })
-    })
+    node.flat_tree_parent()
 }
 
 fn dom_contains_identity(root: &NodeHandle, identity: usize) -> bool {
@@ -1773,6 +1773,34 @@ mod tests {
                 }
             },
         )
+    }
+
+    #[test]
+    fn inertness_uses_flat_tree_and_topmost_modal_dialog_state() {
+        let document = HtmlTreeBuilder::parse(
+            "<html><body><button id='outside'>outside</button><dialog id='modal'><button id='inside'>inside</button></dialog></body></html>",
+        )
+        .document();
+        let modal = document.query_selector("#modal").unwrap();
+        modal.set_modal_dialog(true);
+        let tree = AccessibilityTree::build(
+            &document,
+            "Example",
+            1,
+            None,
+            &AccessibilitySnapshotState::default(),
+            |_| AccessibilityRenderState::Rendered,
+        );
+        let outside = document.query_selector("#outside").unwrap();
+        let inside = document.query_selector("#inside").unwrap();
+        assert!(
+            tree.find_by_dom_identity(outside.identity())
+                .is_none_or(|node| node.ignored)
+        );
+        assert!(
+            tree.find_by_dom_identity(inside.identity())
+                .is_some_and(|node| !node.ignored)
+        );
     }
 
     #[test]
