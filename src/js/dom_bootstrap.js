@@ -248,6 +248,10 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeCaretHitTest = globalThis.__omoikane_caret_hit_test;
   delete globalThis.__omoikane_caret_hit_test;
   const nativeIsInert = globalThis.__omoikane_is_inert;
+  const nativeGetAriaElementReferences = globalThis.__omoikane_get_aria_element_references;
+  const nativeSetAriaElementReferences = globalThis.__omoikane_set_aria_element_references;
+  delete globalThis.__omoikane_get_aria_element_references;
+  delete globalThis.__omoikane_set_aria_element_references;
   const nativeSetUserActionTarget = globalThis.__omoikane_set_user_action_target;
   const nativeRegisterInputDispatcher = globalThis.__omoikane_register_input_dispatcher;
   const browsingInput = globalThis.__omoikane_input_state();
@@ -857,7 +861,7 @@ export const __omoikane_service_worker_lifecycle = {};
     };
   }
 
-  function setAttributeWithApprovedString(element, name, value, approvedValue, guard = null) {
+  function setAttributeWithApprovedString(element, name, value, approvedValue, guard = null, afterMutation = null) {
     let attr = String(name);
     if (!isValidAttributeLocalName(attr)) {
       throw new DOMException(
@@ -898,6 +902,7 @@ export const __omoikane_service_worker_lifecycle = {};
       callbackName = current[2];
       callbackNamespace = current[1];
     }
+    if (afterMutation) afterMutation();
     queueMutation(element, "attributes", {
       attributeName: callbackName,
       attributeNamespace: callbackNamespace,
@@ -5783,6 +5788,136 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
+  const ariaStringReflections = {
+    role: "role",
+    ariaAtomic: "aria-atomic",
+    ariaAutoComplete: "aria-autocomplete",
+    ariaBrailleLabel: "aria-braillelabel",
+    ariaBrailleRoleDescription: "aria-brailleroledescription",
+    ariaBusy: "aria-busy",
+    ariaChecked: "aria-checked",
+    ariaColCount: "aria-colcount",
+    ariaColIndex: "aria-colindex",
+    ariaColIndexText: "aria-colindextext",
+    ariaColSpan: "aria-colspan",
+    ariaCurrent: "aria-current",
+    ariaDescription: "aria-description",
+    ariaDisabled: "aria-disabled",
+    ariaExpanded: "aria-expanded",
+    ariaHasPopup: "aria-haspopup",
+    ariaHidden: "aria-hidden",
+    ariaInvalid: "aria-invalid",
+    ariaKeyShortcuts: "aria-keyshortcuts",
+    ariaLabel: "aria-label",
+    ariaLevel: "aria-level",
+    ariaLive: "aria-live",
+    ariaModal: "aria-modal",
+    ariaMultiLine: "aria-multiline",
+    ariaMultiSelectable: "aria-multiselectable",
+    ariaOrientation: "aria-orientation",
+    ariaPlaceholder: "aria-placeholder",
+    ariaPosInSet: "aria-posinset",
+    ariaPressed: "aria-pressed",
+    ariaReadOnly: "aria-readonly",
+    ariaRelevant: "aria-relevant",
+    ariaRequired: "aria-required",
+    ariaRoleDescription: "aria-roledescription",
+    ariaRowCount: "aria-rowcount",
+    ariaRowIndex: "aria-rowindex",
+    ariaRowIndexText: "aria-rowindextext",
+    ariaRowSpan: "aria-rowspan",
+    ariaSelected: "aria-selected",
+    ariaSetSize: "aria-setsize",
+    ariaSort: "aria-sort",
+    ariaValueMax: "aria-valuemax",
+    ariaValueMin: "aria-valuemin",
+    ariaValueNow: "aria-valuenow",
+    ariaValueText: "aria-valuetext",
+  };
+  for (const [property, attribute] of Object.entries(ariaStringReflections)) {
+    Object.defineProperty(Element.prototype, property, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        requireCanonicalElement(this, "Element required");
+        return safeApply(ariaGetAttribute, this, [attribute]);
+      },
+      set(value) {
+        requireCanonicalElement(this, "Element required");
+        if (value === null || value === undefined) safeApply(ariaRemoveAttribute, this, [attribute]);
+        else setAttributeWithApprovedString(this, attribute, toDOMString(value));
+      },
+    });
+  }
+
+  const ariaReferenceArrayCache = new WeakMap();
+  function reflectedAriaTargets(element, attribute) {
+    const ids = nativeGetAriaElementReferences(internalNodeId(element), attribute);
+    if (ids === null) return null;
+    const signature = ids.join(",");
+    let attributes = ariaReferenceArrayCache.get(element);
+    const cached = attributes?.get(attribute);
+    if (cached?.signature === signature) return cached.value;
+    const value = Object.freeze(ids.map(wrapNode));
+    if (!attributes) {
+      attributes = new Map();
+      ariaReferenceArrayCache.set(element, attributes);
+    }
+    attributes.set(attribute, { signature, value });
+    return value;
+  }
+
+  function setReflectedAriaTargets(element, attribute, value, single) {
+    requireCanonicalElement(element, "Element required");
+    if (value === null || value === undefined) {
+      safeApply(ariaRemoveAttribute, element, [attribute]);
+      ariaReferenceArrayCache.get(element)?.delete(attribute);
+      return;
+    }
+    if (!single && (typeof value !== "object" && typeof value !== "function" ||
+        typeof value[Symbol.iterator] !== "function")) {
+      throw new TypeError("ARIA element-reference list must be iterable");
+    }
+    const targets = single ? [value] : Array.from(value);
+    for (const target of targets) {
+      requireCanonicalElement(target, "ARIA element reference requires an Element");
+    }
+    const targetIds = targets.map(internalNodeId);
+    setAttributeWithApprovedString(element, attribute, "", "", null, () => {
+      nativeSetAriaElementReferences(internalNodeId(element), attribute, true, ...targetIds);
+    });
+    ariaReferenceArrayCache.get(element)?.delete(attribute);
+  }
+
+  Object.defineProperty(Element.prototype, "ariaActiveDescendantElement", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      requireCanonicalElement(this, "Element required");
+      return reflectedAriaTargets(this, "aria-activedescendant")?.[0] ?? null;
+    },
+    set(value) { setReflectedAriaTargets(this, "aria-activedescendant", value, true); },
+  });
+  for (const [property, attribute] of [
+    ["ariaControlsElements", "aria-controls"],
+    ["ariaDescribedByElements", "aria-describedby"],
+    ["ariaDetailsElements", "aria-details"],
+    ["ariaErrorMessageElements", "aria-errormessage"],
+    ["ariaFlowToElements", "aria-flowto"],
+    ["ariaLabelledByElements", "aria-labelledby"],
+    ["ariaOwnsElements", "aria-owns"],
+  ]) {
+    Object.defineProperty(Element.prototype, property, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        requireCanonicalElement(this, "Element required");
+        return reflectedAriaTargets(this, attribute);
+      },
+      set(value) { setReflectedAriaTargets(this, attribute, value, false); },
+    });
+  }
+
   // The bootstrap originally implemented every DOM wrapper through one large
   // Node class. Keep the implementation bodies together for now, but expose
   // Element's WebIDL surface from the correct prototype. Moving the complete
@@ -5812,6 +5947,9 @@ export const __omoikane_service_worker_lifecycle = {};
     "scroll", "scrollTo", "scrollBy",
     "__scrollOffset", "__applyScroll", "__isViewportScrollingElement",
   ]);
+
+  const ariaGetAttribute = Element.prototype.getAttribute;
+  const ariaRemoveAttribute = Element.prototype.removeAttribute;
 
   const htmlConstructorInterfaceToken = {};
   const editingRemoveAttributeNS = Element.prototype.removeAttributeNS;

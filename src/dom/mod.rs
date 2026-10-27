@@ -252,6 +252,10 @@ struct NodeInner {
     /// Root/detached nodes use zero and have no parent to query.
     parent_slot: usize,
     children: children::Children,
+    /// Explicit element-reference reflection values keyed by ARIA content
+    /// attribute. Weak handles preserve identity without retaining detached
+    /// subtrees; direct content-attribute mutation clears the matching entry.
+    aria_element_references: HashMap<String, Vec<WeakNodeHandle>>,
     data: NodeData,
 }
 
@@ -1037,6 +1041,7 @@ impl NodeHandle {
             mutation_revision: 0,
             parent_slot: 0,
             children: children::Children::default(),
+            aria_element_references: HashMap::new(),
             data,
         })))
     }
@@ -1198,6 +1203,74 @@ impl NodeHandle {
                 }
             })
         })
+    }
+
+    fn tree_root(&self) -> NodeHandle {
+        let mut root = self.clone();
+        while let Some(parent) = root.parent_node() {
+            root = parent;
+        }
+        root
+    }
+
+    fn aria_reference_is_in_scope(&self, target: &NodeHandle) -> bool {
+        let target_root = target.tree_root();
+        let mut scope = self.tree_root();
+        loop {
+            if scope == target_root {
+                return true;
+            }
+            let Some(host) = scope.shadow_host() else {
+                return false;
+            };
+            scope = host.tree_root();
+        }
+    }
+
+    /// Replaces an ARIA reflected element-reference value. The caller has
+    /// already validated that every target is an Element in the same origin.
+    pub(crate) fn set_aria_element_references(&self, attribute: &str, targets: &[NodeHandle]) {
+        self.set_attribute(attribute, "");
+        self.0.borrow_mut().aria_element_references.insert(
+            attribute.to_string(),
+            targets.iter().map(NodeHandle::downgrade).collect(),
+        );
+    }
+
+    /// Removes both the reflected content attribute and its explicit targets.
+    pub(crate) fn clear_aria_element_references(&self, attribute: &str) {
+        self.remove_attribute(attribute);
+    }
+
+    /// Resolves an ARIA reflected element-reference value in its tree scope.
+    /// `None` means the content attribute is absent; an empty vector is a
+    /// present attribute whose references currently resolve to no Elements.
+    pub(crate) fn aria_element_references(&self, attribute: &str) -> Option<Vec<NodeHandle>> {
+        if let Some(explicit) = self
+            .0
+            .borrow()
+            .aria_element_references
+            .get(attribute)
+            .cloned()
+        {
+            return Some(
+                explicit
+                    .into_iter()
+                    .filter_map(|target| target.upgrade())
+                    .filter(|target| {
+                        target.node_type() == NodeType::Element
+                            && self.aria_reference_is_in_scope(target)
+                    })
+                    .collect(),
+            );
+        }
+        let raw = self.get_attribute(attribute)?;
+        let root = self.tree_root();
+        Some(
+            raw.split_ascii_whitespace()
+                .filter_map(|id| find_element_with_id(&root, id))
+                .collect(),
+        )
     }
 
     /// Returns whether this node is inert in the flat tree.
@@ -1907,12 +1980,15 @@ impl NodeHandle {
     }
 
     fn set_attribute_internal(&self, name: String, value: String, utf16: Option<Vec<u16>>) {
-        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
-            let name = if element.html {
-                name.to_ascii_lowercase()
-            } else {
-                name
-            };
+        let mut inner = self.0.borrow_mut();
+        let html = matches!(&inner.data, NodeData::Element(element) if element.html);
+        let name = if html {
+            name.to_ascii_lowercase()
+        } else {
+            name
+        };
+        inner.aria_element_references.remove(&name);
+        if let NodeData::Element(element) = &mut inner.data {
             if matches!(name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
             } else {
@@ -2026,7 +2102,11 @@ impl NodeHandle {
         utf16: Option<Vec<u16>>,
         replace_qualified_name: bool,
     ) {
-        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+        let mut inner = self.0.borrow_mut();
+        if namespace_uri.is_none() {
+            inner.aria_element_references.remove(&qualified_name);
+        }
+        if let NodeData::Element(element) = &mut inner.data {
             if namespace_uri.is_none() && local_name == "async" {
                 element.script_force_async = false;
             }
@@ -2109,12 +2189,15 @@ impl NodeHandle {
 
     /// Removes an attribute from an element node. No-op for other node kinds.
     pub fn remove_attribute(&self, name: &str) {
-        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
-            let name = if element.html {
-                name.to_ascii_lowercase()
-            } else {
-                name.to_string()
-            };
+        let mut inner = self.0.borrow_mut();
+        let html = matches!(&inner.data, NodeData::Element(element) if element.html);
+        let name = if html {
+            name.to_ascii_lowercase()
+        } else {
+            name.to_string()
+        };
+        inner.aria_element_references.remove(&name);
+        if let NodeData::Element(element) = &mut inner.data {
             if matches!(name.as_str(), "slot" | "name") {
                 invalidate_slot_assignments();
             } else {
@@ -2145,7 +2228,9 @@ impl NodeHandle {
 
     /// Removes an exactly-qualified XML/namespaced attribute.
     pub fn remove_xml_attribute(&self, qualified_name: &str) {
-        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+        let mut inner = self.0.borrow_mut();
+        inner.aria_element_references.remove(qualified_name);
+        if let NodeData::Element(element) = &mut inner.data {
             if matches!(qualified_name, "slot" | "name") {
                 invalidate_slot_assignments();
             } else {
@@ -2177,7 +2262,11 @@ impl NodeHandle {
 
     /// Removes an XML/namespaced attribute by namespace and local name.
     pub fn remove_xml_attribute_ns(&self, namespace_uri: Option<&str>, local_name: &str) {
-        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+        let mut inner = self.0.borrow_mut();
+        if namespace_uri.is_none() {
+            inner.aria_element_references.remove(local_name);
+        }
+        if let NodeData::Element(element) = &mut inner.data {
             let Some(index) = element.attribute_records.iter().position(|attribute| {
                 attribute.namespace_uri.as_deref() == namespace_uri
                     && attribute.local_name == local_name
@@ -3249,6 +3338,18 @@ fn find_topmost_modal_dialog(root: &NodeHandle) -> Option<NodeHandle> {
         stack.extend(node.child_nodes());
     }
     topmost
+}
+
+fn find_element_with_id(root: &NodeHandle, id: &str) -> Option<NodeHandle> {
+    let mut stack = vec![root.clone()];
+    while let Some(node) = stack.pop() {
+        if node.node_type() == NodeType::Element && node.attribute_eq("id", id) {
+            return Some(node);
+        }
+        let children = node.child_nodes();
+        stack.extend(children.into_iter().rev());
+    }
+    None
 }
 
 /// Removes a detached subtree from the top layer.
