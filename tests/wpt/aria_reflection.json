@@ -1,0 +1,7 @@
+{
+  "tests": [
+    {"path": "html/dom/aria-attribute-reflection.html"},
+    {"path": "html/dom/aria-element-reflection.html"},
+    {"path": "html/dom/aria-element-reflection-disconnected.html"}
+  ]
+}

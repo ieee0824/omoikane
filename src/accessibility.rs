@@ -277,7 +277,6 @@ struct TreeBuilder<'a, F> {
     focused_identity: Option<usize>,
     snapshot_state: &'a AccessibilitySnapshotState,
     render_state: &'a mut F,
-    ids: HashMap<usize, HashMap<String, NodeHandle>>,
     labels: HashMap<usize, Vec<NodeHandle>>,
     retain_pruned_descendants: bool,
 }
@@ -294,16 +293,14 @@ where
         render_state: &'a mut F,
     ) -> Self {
         let document_identity = document.identity();
-        let mut ids = HashMap::new();
         let mut labels = HashMap::new();
-        index_dom(document, document_identity, &mut ids, &mut labels);
+        index_dom(document, document_identity, &mut labels);
         Self {
             document_identity,
             document_generation,
             focused_identity,
             snapshot_state,
             render_state,
-            ids,
             labels,
             retain_pruned_descendants: false,
         }
@@ -349,18 +346,15 @@ where
             .unwrap_or(self.document_identity)
     }
 
-    fn id_target(&self, node: &NodeHandle, id: &str) -> Option<NodeHandle> {
-        self.ids
-            .get(&self.tree_scope_id(node))
-            .and_then(|ids| ids.get(id))
-            .cloned()
-    }
-
     fn labels_for(&self, node: &NodeHandle) -> Vec<NodeHandle> {
         self.labels
             .get(&self.tree_scope_id(node))
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn aria_targets(&self, node: &NodeHandle, attribute: &str) -> Option<Vec<NodeHandle>> {
+        node.aria_element_references(attribute)
     }
 
     fn apply_aria_owns(&mut self, root: &mut AccessibilityNode) {
@@ -371,13 +365,11 @@ where
             if !allows_aria_ownership(&owner) {
                 continue;
             }
-            let Some(idrefs) = owner.get_attribute("aria-owns") else {
+            let Some(targets) = self.aria_targets(&owner, "aria-owns") else {
                 continue;
             };
-            for idref in idrefs.split_ascii_whitespace() {
-                if let Some(target) = self.id_target(&owner, idref) {
-                    ownership.push((owner.clone(), target));
-                }
+            for target in targets {
+                ownership.push((owner.clone(), target));
             }
         }
 
@@ -560,11 +552,9 @@ where
             }
         });
         let retained_aria_owner = allows_aria_ownership(node)
-            && node.get_attribute("aria-owns").is_some_and(|idrefs| {
-                idrefs
-                    .split_ascii_whitespace()
-                    .any(|idref| self.id_target(node, idref).is_some())
-            });
+            && self
+                .aria_targets(node, "aria-owns")
+                .is_some_and(|targets| !targets.is_empty());
         if hidden_cause == Some(HiddenCause::NotRendered)
             && !self.retain_pruned_descendants
             && !retained_aria_owner
@@ -813,13 +803,11 @@ where
             return String::new();
         }
 
-        if !in_labelledby_traversal && let Some(references) = node.get_attribute("aria-labelledby")
+        if !in_labelledby_traversal
+            && let Some(references) = self.aria_targets(node, "aria-labelledby")
         {
             let mut names = Vec::new();
-            for id in references.split_ascii_whitespace() {
-                let Some(label) = self.id_target(node, id) else {
-                    continue;
-                };
+            for label in references {
                 let label_role = computed_role(&label).0;
                 let mut branch_visited = visited.clone();
                 let include_hidden = self.node_hidden_for_name(&label);
@@ -948,11 +936,7 @@ where
     }
 
     fn accessible_description(&mut self, node: &NodeHandle, name: &str) -> String {
-        if let Some(references) = node.get_attribute("aria-describedby") {
-            let targets = references
-                .split_ascii_whitespace()
-                .filter_map(|id| self.id_target(node, id))
-                .collect::<Vec<_>>();
+        if let Some(targets) = self.aria_targets(node, "aria-describedby") {
             let mut descriptions = Vec::new();
             for target in targets {
                 let text = self.text_alternative(&target, &mut HashSet::new(), true);
@@ -984,18 +968,12 @@ where
             ("aria-labelledby", "labelledby", false),
             ("aria-owns", "owns", false),
         ] {
-            let Some(raw_value) = node.get_attribute(attribute) else {
+            let Some(targets) = self.aria_targets(node, attribute) else {
                 continue;
             };
-            let targets = raw_value
-                .split_ascii_whitespace()
-                .filter_map(|idref| {
-                    self.id_target(node, idref)
-                        .map(|target| (idref.to_string(), target))
-                })
-                .collect::<Vec<_>>();
             let mut references = Vec::new();
-            for (idref, target) in targets {
+            for target in targets {
+                let idref = target.get_attribute("id").unwrap_or_default();
                 references.push(AccessibilityRelatedNode {
                     dom_node: target.clone(),
                     idref,
@@ -1081,30 +1059,17 @@ fn allows_aria_ownership(node: &NodeHandle) -> bool {
     )
 }
 
-fn index_dom(
-    node: &NodeHandle,
-    scope_id: usize,
-    ids: &mut HashMap<usize, HashMap<String, NodeHandle>>,
-    labels: &mut HashMap<usize, Vec<NodeHandle>>,
-) {
+fn index_dom(node: &NodeHandle, scope_id: usize, labels: &mut HashMap<usize, Vec<NodeHandle>>) {
     if node.node_type() == NodeType::Element {
-        if let Some(id) = node.get_attribute("id")
-            && !id.is_empty()
-        {
-            ids.entry(scope_id)
-                .or_default()
-                .entry(id)
-                .or_insert_with(|| node.clone());
-        }
         if node.tag_name().as_deref() == Some("label") {
             labels.entry(scope_id).or_default().push(node.clone());
         }
         if let Some(root) = node.shadow_root() {
-            index_dom(&root, root.identity(), ids, labels);
+            index_dom(&root, root.identity(), labels);
         }
     }
     for child in node.child_nodes() {
-        index_dom(&child, scope_id, ids, labels);
+        index_dom(&child, scope_id, labels);
     }
 }
 
@@ -1801,6 +1766,38 @@ mod tests {
             tree.find_by_dom_identity(inside.identity())
                 .is_some_and(|node| !node.ignored)
         );
+    }
+
+    #[test]
+    fn explicit_aria_element_references_feed_names_and_relationships() {
+        let document = HtmlTreeBuilder::parse(
+            "<html><body><button id='button'></button><span id='label'>Explicit label</span><div id='owned'>Owned</div></body></html>",
+        )
+        .document();
+        let button = document.query_selector("#button").unwrap();
+        let label = document.query_selector("#label").unwrap();
+        let owned = document.query_selector("#owned").unwrap();
+        button.set_aria_element_references("aria-labelledby", std::slice::from_ref(&label));
+        button.set_aria_element_references("aria-controls", std::slice::from_ref(&owned));
+        let tree = AccessibilityTree::build(
+            &document,
+            "Example",
+            1,
+            None,
+            &AccessibilitySnapshotState::default(),
+            |_| AccessibilityRenderState::Rendered,
+        );
+        let node = tree.find_by_dom_identity(button.identity()).unwrap();
+        assert_eq!(node.name, "Explicit label");
+        assert!(node.properties.iter().any(|property| {
+            property.name == "controls"
+                && matches!(
+                    &property.value,
+                    AccessibilityValue::IdRefList { related_nodes, .. }
+                        if related_nodes.len() == 1
+                            && related_nodes[0].dom_node == owned
+                )
+        }));
     }
 
     #[test]

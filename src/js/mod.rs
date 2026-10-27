@@ -17505,6 +17505,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(is_inert_native),
         ),
         (
+            js_string!("__omoikane_get_aria_element_references"),
+            2,
+            NativeFunction::from_copy_closure(get_aria_element_references_native),
+        ),
+        (
+            js_string!("__omoikane_set_aria_element_references"),
+            2,
+            NativeFunction::from_copy_closure(set_aria_element_references_native),
+        ),
+        (
             js_string!("__omoikane_set_content_visibility_focus"),
             1,
             NativeFunction::from_copy_closure(set_content_visibility_focus_native),
@@ -20149,6 +20159,105 @@ fn is_inert_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
             .get_node(node_id)
             .is_some_and(|node| node.is_inert());
         Ok(JsValue::from(inert))
+    })
+}
+
+fn aria_element_reference_attribute(
+    value: Option<&JsValue>,
+    context: &mut Context,
+) -> JsResult<String> {
+    let attribute = value
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    if matches!(
+        attribute.as_str(),
+        "aria-activedescendant"
+            | "aria-controls"
+            | "aria-describedby"
+            | "aria-details"
+            | "aria-errormessage"
+            | "aria-flowto"
+            | "aria-labelledby"
+            | "aria-owns"
+    ) {
+        Ok(attribute)
+    } else {
+        Err(JsError::from(JsNativeError::typ().with_message(
+            "unsupported ARIA element-reference attribute",
+        )))
+    }
+}
+
+fn get_aria_element_references_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let attribute = aria_element_reference_attribute(args.get(1), context)?;
+    with_host_state(|state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        let Some(targets) = node.aria_element_references(&attribute) else {
+            return Ok(JsValue::null());
+        };
+        let ids = targets
+            .into_iter()
+            .map(|target| JsValue::from(target.identity() as f64));
+        Ok(boa_engine::object::builtins::JsArray::from_iter(ids, context).into())
+    })
+}
+
+fn set_aria_element_references_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let attribute = aria_element_reference_attribute(args.get(1), context)?;
+    let clear = args.get(2).is_none_or(JsValue::is_null);
+    let target_ids = if clear {
+        Vec::new()
+    } else {
+        args[3..]
+            .iter()
+            .map(|value| parse_node_id(Some(value), context))
+            .collect::<JsResult<Vec<_>>>()?
+    };
+    for target_id in &target_ids {
+        ensure_same_origin_node(context, *target_id)?;
+    }
+    with_host_state(|state| {
+        let state = state.borrow();
+        let node = state
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        if clear {
+            node.clear_aria_element_references(&attribute);
+            return Ok(JsValue::undefined());
+        }
+        let targets = target_ids
+            .into_iter()
+            .map(|target_id| {
+                state
+                    .get_node(target_id)
+                    .filter(|target| target.node_type() == NodeType::Element)
+                    .ok_or_else(|| {
+                        JsError::from(
+                            JsNativeError::typ()
+                                .with_message("ARIA reference target is not an Element"),
+                        )
+                    })
+            })
+            .collect::<JsResult<Vec<_>>>()?;
+        node.set_aria_element_references(&attribute, &targets);
+        Ok(JsValue::undefined())
     })
 }
 
