@@ -102,6 +102,48 @@ fn reused_mask_preserves_color_alpha_clip_and_rgba_exactly() {
 }
 
 #[test]
+fn cached_alpha_row_spans_composite_matches_full_surface_scan() {
+    let expected = paint_pair(None);
+    let cache = FrameShadowMaskCache::new(true);
+    let actual = paint_pair(Some(&cache));
+    assert_eq!(actual.pixels(), expected.pixels());
+
+    let (key, rgba_bytes) =
+        cache_entry_for(border_at(8.25, 12.5), 6.0, 1.25, Some((1.0, 4.0, 7.0, 2.5)));
+    let (canvas, spans) = cache.lookup(&key, rgba_bytes).unwrap();
+    let spans = spans.expect("this bounded test mask has a usable row-span index");
+    assert_eq!(spans.row_count(), canvas.height() as usize);
+    assert!((0..spans.row_count()).all(|row| {
+        spans
+            .row_spans(row)
+            .iter()
+            .all(|span| span.start < span.end)
+    }));
+}
+
+#[test]
+fn alpha_row_spans_index_nonzero_runs_and_fall_back_when_too_many() {
+    let mut canvas = Canvas::new(7, 1);
+    let alpha = Color::rgba(255, 0, 0, 255);
+    for column in 0..3 {
+        canvas.fill_rect(
+            Rect {
+                x: column as f32 * 3.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            alpha,
+        );
+    }
+    let spans = canvas.alpha_row_spans(3).unwrap();
+    assert_eq!(spans.row_count(), 1);
+    assert_eq!(spans.row_spans(0).len(), 3);
+    assert!(spans.row_spans(0).iter().all(|span| span.start < span.end));
+    assert!(canvas.alpha_row_spans(2).is_none());
+}
+
+#[test]
 fn zero_gaussian_and_box_blur_hits_match_uncached_rgba_exactly() {
     for (blur, radii) in [
         (0.0, Some((1.0, 4.0, 7.0, 2.5))),
