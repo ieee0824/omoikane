@@ -247,6 +247,7 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_focus_chain;
   const nativeCaretHitTest = globalThis.__omoikane_caret_hit_test;
   delete globalThis.__omoikane_caret_hit_test;
+  const nativeIsInert = globalThis.__omoikane_is_inert;
   const nativeSetUserActionTarget = globalThis.__omoikane_set_user_action_target;
   const nativeRegisterInputDispatcher = globalThis.__omoikane_register_input_dispatcher;
   const browsingInput = globalThis.__omoikane_input_state();
@@ -3026,11 +3027,7 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function isRenderedForFocus(node) {
-    for (let ancestor = node; ancestor; ancestor = ancestor.assignedSlot || internalHostIncludingParent(ancestor)) {
-      if (internalNodeType(ancestor) === 1 && ancestor.hasAttribute("inert")) return false;
-      // Modal dialogs escape inertness inherited from their ancestors.
-      if (ancestor instanceof HTMLDialogElement && ancestor.__dialogModal) break;
-    }
+    if (nativeIsInert(internalNodeId(node))) return false;
     return !!__omoikane_is_rendered_for_focus(node.__id);
   }
 
@@ -5927,6 +5924,16 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     get isContentEditable() { return nativeEditability(editingHtmlId(this), false); }
 
+    get inert() {
+      editingHtmlId(this);
+      return this.hasAttribute("inert");
+    }
+    set inert(value) {
+      editingHtmlId(this);
+      if (value) this.setAttribute("inert", "");
+      else this.removeAttribute("inert");
+    }
+
     get outerText() {
       editingHtmlId(this);
       return safeApply(elementInnerTextGetter, this, []);
@@ -5993,7 +6000,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
   }
 
-  for (const name of ["contentEditable", "isContentEditable", "outerText", "dir"]) {
+  for (const name of ["contentEditable", "isContentEditable", "inert", "outerText", "dir"]) {
     Object.defineProperty(HTMLElement.prototype, name, {
       ...Object.getOwnPropertyDescriptor(HTMLElement.prototype, name), enumerable: true,
     });
@@ -7797,6 +7804,26 @@ export const __omoikane_service_worker_lifecycle = {};
   Range.START_TO_START=0; Range.START_TO_END=1; Range.END_TO_END=2; Range.END_TO_START=3;
   Range.prototype.START_TO_START=0; Range.prototype.START_TO_END=1; Range.prototype.END_TO_END=2; Range.prototype.END_TO_START=3;
 
+  function selectionText(range) {
+    if (range.collapsed) return "";
+    let result = "";
+    const visit = node => {
+      if (internalNodeType(node) === 3) {
+        if (nativeIsInert(internalNodeId(node))) return;
+        let from = 0, to = node.length;
+        if (node === range.__startContainer) from = range.__startOffset;
+        if (node === range.__endContainer) to = range.__endOffset;
+        if (node === range.__startContainer || node === range.__endContainer || range.__nodeRelation(node)) {
+          result += node.data.slice(from, to);
+        }
+        return;
+      }
+      for (const child of node.childNodes) visit(child);
+    };
+    visit(range.commonAncestorContainer);
+    return result.replace(/[ \t\r\n\f]+/g, " ");
+  }
+
   // A Selection is maintained per wrapped Document. The native DOM already
   // keeps Range boundary points live through tree mutations; Selection only
   // owns the currently exposed range and derives its anchor/focus from that
@@ -8161,7 +8188,10 @@ export const __omoikane_service_worker_lifecycle = {};
       const [endContainer, endOffset] = rescope(composed.__endContainer, composed.__endOffset, true);
       return [new PlatformStaticRange({ startContainer, startOffset, endContainer, endOffset })];
     }
-    toString() { return selectionState(this).range ? selectionState(this).range.toString() : ""; }
+    toString() {
+      const range = selectionState(this).range;
+      return range ? selectionText(range) : "";
+    }
   }
 
   function selectionForDocument(doc) {

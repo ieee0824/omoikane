@@ -3816,7 +3816,8 @@ fn hit_test_line_fragments(
 ) -> Option<bool> {
     for line in layout.lines.iter().rev() {
         for fragment in line.fragments.iter().rev() {
-            if fragment.style.visibility == Visibility::Hidden
+            if fragment.node.is_inert()
+                || fragment.style.visibility == Visibility::Hidden
                 || matches!(
                     fragment.content,
                     InlineFragmentContent::AtomicInline(_)
@@ -3854,7 +3855,7 @@ fn hit_test_line_fragments(
                             svg_box.height,
                             &mut computed_pointer_events,
                         ) {
-                            if hits.record(target, None) {
+                            if !target.is_inert() && hits.record(target, None) {
                                 return Some(true);
                             }
                         }
@@ -3888,6 +3889,9 @@ fn hit_test_box(
     include_descendants: bool,
     phase_cache: &mut HitTestPhaseCache,
 ) -> bool {
+    if layout.node.is_inert() {
+        return false;
+    }
     let Some(HitTestGeometry {
         transform,
         local_point,

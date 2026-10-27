@@ -222,6 +222,9 @@ fn collect_candidates(
     scope: Option<&NodeHandle>,
     best: &mut Option<Candidate>,
 ) {
+    if layout.node.is_inert() {
+        return;
+    }
     let Some(geometry) = hit_test_box_geometry(
         layout, resolver, transform, clip, viewport, point.0, point.1,
     ) else {
@@ -236,7 +239,8 @@ fn collect_candidates(
             .as_ref()
             .map_or(&line.fragments, |paint| &paint.fragments);
         for fragment in fragments {
-            if fragment.style.visibility == Visibility::Hidden
+            if fragment.node.is_inert()
+                || fragment.style.visibility == Visibility::Hidden
                 || fragment.text_source.is_empty()
                 || geometry.clip.is_some_and(|clip| {
                     intersect(
