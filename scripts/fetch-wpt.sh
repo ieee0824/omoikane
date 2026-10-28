@@ -367,7 +367,10 @@ collect_pattern \
   "/css/css-sizing/contain-intrinsic-size/parsing/"
 collect_pattern \
   "/css/css-lists/parsing/counter-reset-invalid.html" \
-  "/css/css-lists/parsing/counter-increment-invalid.html"
+  "/css/css-lists/parsing/counter-increment-invalid.html" \
+  "/css/css-lists/parsing/counter-set-valid.html" \
+  "/css/css-lists/parsing/counter-set-invalid.html" \
+  "/css/css-lists/parsing/counter-set-computed.html"
 collect_pattern \
   "/css/css-shapes/parsing/shape-margin-valid.html" \
   "/css/css-shapes/parsing/shape-margin-invalid.html" \

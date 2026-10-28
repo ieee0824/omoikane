@@ -3024,6 +3024,145 @@ fn generated_css_counters_follow_element_and_pseudo_order() {
 }
 
 #[test]
+fn counter_set_updates_existing_and_implicit_counters_after_increment() {
+    let body = NodeHandle::element("body");
+    let first = NodeHandle::element("div");
+    let second = NodeHandle::element("div");
+    first.set_attribute("id", "first");
+    second.set_attribute("id", "second");
+    body.append_child(first.clone());
+    body.append_child(second.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { counter-reset: n 2; } \
+             div { display: inline; } \
+             div::before { content: counter(n) ':' counter(fresh); } \
+             #first { counter-set: n 10; counter-increment: n 3; } \
+             #second { counter-set: fresh 7; counter-increment: fresh 2; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(generated_text_for_node(&layout, &first), "10:0");
+    assert_eq!(generated_text_for_node(&layout, &second), "10:7");
+}
+
+#[test]
+fn counter_set_container_math_reaches_generated_content() {
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let target = NodeHandle::element("span");
+    target.set_attribute("id", "target");
+    body.append_child(container.clone());
+    container.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { container-type: inline-size; width: 100px; } \
+             #target { counter-set: n calc(10 + (sign(2cqw - 10px) * 5)); } \
+             #target::before { content: counter(n); }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(generated_text_for_node(&layout, &target), "5");
+}
+
+#[test]
+fn generated_quotes_follow_document_depth_custom_pairs_and_no_quote_tokens() {
+    let body = NodeHandle::element("body");
+    let outer = NodeHandle::element("span");
+    let inner = NodeHandle::element("span");
+    let silent = NodeHandle::element("span");
+    outer.set_attribute("id", "outer");
+    inner.set_attribute("id", "inner");
+    silent.set_attribute("id", "silent");
+    body.append_child(outer.clone());
+    outer.append_child(inner.clone());
+    body.append_child(silent.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { quotes: '[' ']' '{' '}'; } \
+             #outer::before, #inner::before { content: open-quote; } \
+             #outer::after, #inner::after { content: close-quote; } \
+             #silent::before { content: no-open-quote open-quote close-quote no-close-quote; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(generated_text_for_node(&layout, &outer), "[]");
+    assert_eq!(generated_text_for_node(&layout, &inner), "{}");
+    assert_eq!(generated_text_for_node(&layout, &silent), "{}");
+}
+
+#[test]
+fn q_elements_use_language_sensitive_automatic_quotes() {
+    let body = NodeHandle::element("body");
+    body.set_attribute("lang", "ja");
+    let outer = NodeHandle::element("q");
+    let inner = NodeHandle::element("q");
+    body.append_child(outer.clone());
+    outer.append_child(inner.clone());
+
+    let mut resolver = StyleResolver::new();
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(generated_text_for_node(&layout, &outer), "「」");
+    assert_eq!(generated_text_for_node(&layout, &inner), "『』");
+}
+
+#[test]
 fn ordinary_list_needs_no_generated_counter_snapshots() {
     let list = NodeHandle::element("ol");
     let item = NodeHandle::element("li");

@@ -715,7 +715,7 @@ struct ResolutionContext {
     root_line_height: f32,
     /// Font-table and glyph measures for the font-relative length units.
     font_metrics: CssRelativeFontMetrics,
-    /// Nearest query container dimensions for color-component CSS math.
+    /// Nearest query container dimensions for CSS math using container units.
     color_container_size: Option<[f32; 2]>,
     /// Viewport width in px (used for `vw`, `vmin`, `vmax`).
     viewport_width: f32,
@@ -831,6 +831,7 @@ pub struct StyleResolver {
     cache: style_cache::StyleCache<usize>,
     pseudo_cache: style_cache::StyleCache<(usize, PseudoElement)>,
     counter_values: HashMap<(usize, Option<PseudoElement>), HashMap<String, Vec<i32>>>,
+    quote_values: HashMap<(usize, Option<PseudoElement>), Vec<String>>,
     selector_match_cache: SelectorMatchCache,
     /// Furthest reach of a registered selector that observes the raw `style` attribute.
     style_attribute_selector_dependency: StyleAttributeSelectorDependency,
@@ -2422,6 +2423,23 @@ impl StyleResolver {
             .get(name)
             .map(Vec::as_slice)
     }
+
+    pub(crate) fn replace_quote_values(
+        &mut self,
+        values: HashMap<(usize, Option<PseudoElement>), Vec<String>>,
+    ) {
+        self.quote_values = values;
+    }
+
+    pub(crate) fn quote_values(
+        &self,
+        node: &NodeHandle,
+        pseudo: PseudoElement,
+    ) -> Option<&[String]> {
+        self.quote_values
+            .get(&(node.identity(), Some(pseudo)))
+            .map(Vec::as_slice)
+    }
     /// Creates a new style resolver.
     pub fn new() -> Self {
         Self::default()
@@ -2541,7 +2559,7 @@ impl StyleResolver {
                         style
                             .component_values
                             .values()
-                            .any(color_uses_container_units)
+                            .any(value_uses_container_units)
                     })
                     || self
                         .stylesheets
@@ -4586,7 +4604,7 @@ fn record_component_value(
     let name = property_name.to_ascii_lowercase();
     if matches!(
         name.as_str(),
-        "content" | "counter-reset" | "counter-increment" | "color"
+        "content" | "counter-reset" | "counter-increment" | "counter-set" | "quotes" | "color"
     ) || color_uses_container_units(value)
     {
         values.insert(name, value.clone());
@@ -4597,30 +4615,35 @@ fn record_component_value(
 
 /// Retains only color expressions that need a layout-provided container size.
 fn color_uses_container_units(value: &Value) -> bool {
-    fn contains_unit(value: &Value) -> bool {
-        match value {
-            Value::Length(_, unit) => matches!(
-                unit.to_ascii_lowercase().as_str(),
-                "cqw" | "cqh" | "cqi" | "cqb"
-            ),
-            Value::Function {
-                arguments: args, ..
-            }
-            | Value::List(args)
-            | Value::CommaList(args) => args.iter().any(contains_unit),
-            _ => false,
-        }
-    }
     matches!(value, Value::Function { name, .. }
         if matches!(name.to_ascii_lowercase().as_str(), "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color")
-            && contains_unit(value))
+            && value_uses_container_units(value))
+}
+
+fn value_uses_container_units(value: &Value) -> bool {
+    match value {
+        Value::Length(_, unit) => matches!(
+            unit.to_ascii_lowercase().as_str(),
+            "cqw" | "cqh" | "cqi" | "cqb"
+        ),
+        Value::Function { arguments, .. }
+        | Value::List(arguments)
+        | Value::CommaList(arguments) => arguments.iter().any(value_uses_container_units),
+        _ => false,
+    }
 }
 
 fn resolve_component_css_wide_keywords(
     values: &mut BTreeMap<String, Value>,
     parent_style: Option<&ComputedStyle>,
 ) {
-    for name in ["content", "counter-reset", "counter-increment"] {
+    for name in [
+        "content",
+        "counter-reset",
+        "counter-increment",
+        "counter-set",
+        "quotes",
+    ] {
         let Some(Value::Keyword(keyword)) = values.get(name) else {
             continue;
         };
@@ -4631,12 +4654,22 @@ fn resolve_component_css_wide_keywords(
                 values.remove(name);
             }
         } else if is_css_wide_keyword(&keyword.to_ascii_lowercase()) {
-            // These three properties are not inherited. `initial` and `unset`
-            // therefore resolve to their initial keyword, which needs no
-            // structured representation. Revert candidates were already
-            // removed during cascade selection.
-            values.remove(name);
+            if name == "quotes" && keyword.eq_ignore_ascii_case("unset") {
+                if let Some(inherited) = parent_style.and_then(|style| style.component_value(name))
+                {
+                    values.insert(name.to_string(), inherited.clone());
+                } else {
+                    values.remove(name);
+                }
+            } else {
+                values.remove(name);
+            }
         }
+    }
+    if !values.contains_key("quotes")
+        && let Some(inherited) = parent_style.and_then(|style| style.component_value("quotes"))
+    {
+        values.insert("quotes".to_string(), inherited.clone());
     }
 }
 
@@ -5763,17 +5796,26 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if let Some(validation) = validate_logical_box_declaration(name, value) {
         return validation;
     }
-    if name.eq_ignore_ascii_case("counter-reset") || name.eq_ignore_ascii_case("counter-increment")
+    if name.eq_ignore_ascii_case("counter-reset")
+        || name.eq_ignore_ascii_case("counter-increment")
+        || name.eq_ignore_ascii_case("counter-set")
     {
         if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
         {
             return DeclarationValidation::Unvalidated;
         }
-        let default = if name.eq_ignore_ascii_case("counter-reset") {
-            0
-        } else {
+        let default = if name.eq_ignore_ascii_case("counter-increment") {
             1
+        } else {
+            0
         };
+        if counter_value_contains_calc(value) {
+            return if counter_pair_syntax_is_valid(value) {
+                DeclarationValidation::Unvalidated
+            } else {
+                DeclarationValidation::Invalid
+            };
+        }
         return match counter_pairs(value, default) {
             Some(pairs) if pairs.is_empty() => {
                 DeclarationValidation::Valid(ComputedValue::Keyword("none".to_string()))
@@ -5786,6 +5828,28 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
                     .join(" "),
             )),
             None => DeclarationValidation::Invalid,
+        };
+    }
+    if name.eq_ignore_ascii_case("quotes") {
+        if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+        {
+            return DeclarationValidation::Unvalidated;
+        }
+        let valid = match value {
+            Value::Keyword(keyword) => {
+                matches!(keyword.to_ascii_lowercase().as_str(), "auto" | "none")
+            }
+            Value::List(values) => {
+                values.len() >= 2
+                    && values.len() % 2 == 0
+                    && values.iter().all(|value| matches!(value, Value::String(_)))
+            }
+            _ => false,
+        };
+        return if valid {
+            DeclarationValidation::Valid(ComputedValue::Keyword(render_content_value(value)))
+        } else {
+            DeclarationValidation::Invalid
         };
     }
     if let Some(validation) = validate_multicol_declaration(name, value) {
@@ -9716,6 +9780,12 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
     if property.is_empty() || value.is_empty() || contains_top_level_semicolon(value) {
         return false;
     }
+    if matches!(
+        property.to_ascii_lowercase().as_str(),
+        "counter-reset" | "counter-increment" | "counter-set"
+    ) {
+        return normalize_counter_specified(property, value).is_some();
+    }
     if (property.starts_with("inset")
         || property.starts_with("margin-")
         || property.starts_with("padding-")
@@ -9757,6 +9827,68 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
             }
         }
     })
+}
+
+pub(crate) fn normalize_counter_specified(property: &str, text: &str) -> Option<String> {
+    let property = property.to_ascii_lowercase();
+    let default = if property == "counter-increment" {
+        1
+    } else {
+        0
+    };
+    if !matches!(
+        property.as_str(),
+        "counter-reset" | "counter-increment" | "counter-set"
+    ) || super::split_top_level_commas(text).len() != 1
+    {
+        return None;
+    }
+    let declarations = super::parse_style_attribute(&format!("{property}: {text}"));
+    let declaration = declarations
+        .as_slice()
+        .first()
+        .filter(|_| declarations.len() == 1)?;
+    if let Value::Keyword(keyword) = &declaration.value
+        && (keyword.eq_ignore_ascii_case("none")
+            || is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+    {
+        return Some(keyword.to_ascii_lowercase());
+    }
+    let values = match &declaration.value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let mut output = Vec::new();
+    let mut index = 0;
+    while index < values.len() {
+        let Value::Keyword(name) = &values[index] else {
+            return None;
+        };
+        let lower = name.to_ascii_lowercase();
+        if is_css_wide_keyword(&lower) || matches!(lower.as_str(), "none" | "default") {
+            return None;
+        }
+        output.push(name.clone());
+        index += 1;
+        match values.get(index) {
+            Some(Value::Number(number)) if number.is_finite() && number.fract() == 0.0 => {
+                output.push((*number as i64).to_string());
+                index += 1;
+            }
+            Some(Value::Function { name, .. }) if name.eq_ignore_ascii_case("calc") => {
+                counter_integer_with_context(&values[index], ResolutionContext::default())?;
+                output.push(render_value(&values[index]));
+                index += 1;
+            }
+            Some(Value::Number(_)) | Some(Value::Function { .. }) => return None,
+            _ => output.push(default.to_string()),
+        }
+    }
+    if text.contains('\\') || text.to_ascii_lowercase().contains("calc(") {
+        Some(text.trim().to_owned())
+    } else {
+        Some(output.join(" "))
+    }
 }
 
 /// Canonicalizes a logical border width assigned through CSSOM.
@@ -10170,6 +10302,29 @@ fn compute_standalone_numeric_math(
 }
 
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
+    if matches!(
+        property_name,
+        "counter-reset" | "counter-increment" | "counter-set"
+    ) {
+        let default = if property_name == "counter-increment" {
+            1
+        } else {
+            0
+        };
+        if let Some(pairs) = counter_pairs_with_context(value, default, ctx) {
+            return if pairs.is_empty() {
+                ComputedValue::Keyword("none".to_string())
+            } else {
+                ComputedValue::Keyword(
+                    pairs
+                        .iter()
+                        .map(|(name, value)| format!("{name} {value}"))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                )
+            };
+        }
+    }
     if property_name.eq_ignore_ascii_case("font-size")
         && matches!(value, Value::Number(number) if *number == 0.0)
     {
@@ -10513,6 +10668,14 @@ fn render_content_value(value: &Value) -> String {
 }
 
 pub(crate) fn counter_pairs(value: &Value, default: i32) -> Option<Vec<(String, i32)>> {
+    counter_pairs_with_context(value, default, ResolutionContext::default())
+}
+
+fn counter_pairs_with_context(
+    value: &Value,
+    default: i32,
+    ctx: ResolutionContext,
+) -> Option<Vec<(String, i32)>> {
     if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none")) {
         return Some(Vec::new());
     }
@@ -10531,7 +10694,10 @@ pub(crate) fn counter_pairs(value: &Value, default: i32) -> Option<Vec<(String, 
             return None;
         }
         index += 1;
-        let amount = match values.get(index).and_then(counter_integer) {
+        let amount = match values
+            .get(index)
+            .and_then(|value| counter_integer_with_context(value, ctx))
+        {
             Some(amount) => {
                 index += 1;
                 amount
@@ -10543,15 +10709,54 @@ pub(crate) fn counter_pairs(value: &Value, default: i32) -> Option<Vec<(String, 
     Some(result)
 }
 
-fn counter_integer(value: &Value) -> Option<i32> {
+fn counter_value_contains_calc(value: &Value) -> bool {
+    match value {
+        Value::Function { name, .. } => name.eq_ignore_ascii_case("calc"),
+        Value::List(values) => values.iter().any(counter_value_contains_calc),
+        _ => false,
+    }
+}
+
+fn counter_pair_syntax_is_valid(value: &Value) -> bool {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let mut index = 0;
+    while index < values.len() {
+        let Some(Value::Keyword(name)) = values.get(index) else {
+            return false;
+        };
+        let lower = name.to_ascii_lowercase();
+        if is_css_wide_keyword(&lower) || matches!(lower.as_str(), "none" | "default") {
+            return false;
+        }
+        index += 1;
+        match values.get(index) {
+            Some(Value::Number(number)) if number.is_finite() && number.fract() == 0.0 => {
+                index += 1
+            }
+            Some(value @ Value::Function { name, .. }) if name.eq_ignore_ascii_case("calc") => {
+                if counter_integer_with_context(value, ResolutionContext::default()).is_none() {
+                    return false;
+                }
+                index += 1;
+            }
+            Some(Value::Number(_)) | Some(Value::Function { .. }) => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+fn counter_integer_with_context(value: &Value, ctx: ResolutionContext) -> Option<i32> {
     let number = match value {
         Value::Number(number) if number.is_finite() && number.fract() == 0.0 => *number,
-        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
-            let quantity = evaluate_calc(arguments, ResolutionContext::default())?;
-            if quantity.unit != CalcUnit::Unitless || !quantity.value.is_finite() {
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("calc") => {
+            let LengthMathValue::Number(number) = evaluate_length_math_value(value, ctx)? else {
                 return None;
-            }
-            quantity.value.round()
+            };
+            round_css_integer(number)
         }
         _ => return None,
     };
@@ -11515,6 +11720,20 @@ fn resolve_length_to_px(number: f32, unit: &str, ctx: ResolutionContext) -> Opti
         "svh" | "lvh" | "dvh" => number * ctx.viewport_height / 100.0,
         "vi" | "svi" | "lvi" | "dvi" => number * ctx.viewport_width / 100.0,
         "vb" | "svb" | "lvb" | "dvb" => number * ctx.viewport_height / 100.0,
+        "cqw" | "cqi" => {
+            number
+                * ctx
+                    .color_container_size
+                    .unwrap_or([ctx.viewport_width, ctx.viewport_height])[0]
+                / 100.0
+        }
+        "cqh" | "cqb" => {
+            number
+                * ctx
+                    .color_container_size
+                    .unwrap_or([ctx.viewport_width, ctx.viewport_height])[1]
+                / 100.0
+        }
         "vmin" => number * ctx.viewport_width.min(ctx.viewport_height) / 100.0,
         "vmax" => number * ctx.viewport_width.max(ctx.viewport_height) / 100.0,
         "mm" => number * (96.0 / 25.4),
@@ -12479,7 +12698,32 @@ fn collect_builtin_ua_candidates(
         || node.is_html_element(),
         |namespace| namespace == "http://www.w3.org/1999/xhtml",
     );
-    if pseudo.is_some() || !html_namespace {
+    if !html_namespace {
+        return;
+    }
+    if let Some(pseudo) = pseudo {
+        if node.local_name().as_deref() == Some("q") {
+            let keyword = match pseudo {
+                PseudoElement::Before => Some("open-quote"),
+                PseudoElement::After => Some("close-quote"),
+                _ => None,
+            };
+            if let Some(keyword) = keyword {
+                let rule_order = *source_order;
+                push_builtin_ua_candidate(
+                    "content".to_owned(),
+                    Value::Keyword(keyword.to_owned()),
+                    Specificity {
+                        ids: 0,
+                        classes: 0,
+                        elements: 2,
+                    },
+                    rule_order,
+                    source_order,
+                    candidates,
+                );
+            }
+        }
         return;
     }
     if let Some(hidden) = node.get_attribute("hidden") {
@@ -12611,6 +12855,8 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::GridAutoColumns, InitialValue::Keyword("auto")),
     (PropertyId::GridAutoRows, InitialValue::Keyword("auto")),
     (PropertyId::CounterReset, InitialValue::Keyword("none")),
+    (PropertyId::CounterSet, InitialValue::Keyword("none")),
+    (PropertyId::Quotes, InitialValue::Keyword("auto")),
     (PropertyId::CounterIncrement, InitialValue::Keyword("none")),
     (PropertyId::ShapeOutside, InitialValue::Keyword("none")),
     (PropertyId::ShapeMargin, InitialValue::Px(0.0)),
@@ -13068,6 +13314,7 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::OverflowWrap,
     PropertyId::Orphans,
     PropertyId::PointerEvents,
+    PropertyId::Quotes,
     PropertyId::TextAlign,
     PropertyId::TextIndent,
     PropertyId::TextShadow,

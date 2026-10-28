@@ -8164,6 +8164,11 @@ fn style_counter_properties_ignore_invalid_assignments() {
                 target.style.counterReset = "none chapter";
                 target.style.setProperty("counter-increment", "chapter 3");
                 target.style.setProperty("counter-increment", "3 chapter");
+                target.style.counterSet = "chapter 7";
+                target.style.counterSet = "none chapter";
+                target.style.counterSet = "chapter calc(1px)";
+                target.style.quotes = "'[' ']'";
+                target.style.quotes = "'unpaired'";
                 "#,
         )
         .unwrap();
@@ -8178,6 +8183,20 @@ fn style_counter_properties_ignore_invalid_assignments() {
     assert!(
         !runtime
             .eval("CSS.supports('counter-reset', 'none chapter')")
+            .unwrap()
+            .as_boolean()
+            .unwrap()
+    );
+    assert_eq!(
+        eval_str(&mut runtime, "target.style.counterSet"),
+        "chapter 7"
+    );
+    assert_eq!(eval_str(&mut runtime, "target.style.quotes"), "'[' ']'");
+    assert!(
+        runtime
+            .eval(
+                "CSS.supports('counter-set', 'chapter 7') && !CSS.supports('counter-set', 'chapter calc(1px)') && CSS.supports('quotes', '\"[\" \" ]\"')"
+            )
             .unwrap()
             .as_boolean()
             .unwrap()

@@ -1,4 +1,4 @@
-//! Conservative test for whether generated content can read CSS counters.
+//! Conservative test for whether generated content needs document-order state.
 
 use super::{Declaration, Rule, StyleResolver, Value};
 
@@ -74,7 +74,13 @@ fn value_may_read_counters(value: &Value) -> bool {
         // The cascade can replace these with a counter-reading declaration.
         Value::Keyword(keyword) => matches!(
             keyword.to_ascii_lowercase().as_str(),
-            "inherit" | "revert" | "revert-layer"
+            "inherit"
+                | "revert"
+                | "revert-layer"
+                | "open-quote"
+                | "close-quote"
+                | "no-open-quote"
+                | "no-close-quote"
         ),
         // A quoted `counter(x)` is literal text, not a function call.
         Value::String(_)
