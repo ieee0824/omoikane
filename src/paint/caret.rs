@@ -487,14 +487,14 @@ fn collect_candidates(
             .as_ref()
             .map_or(&line.fragments, |paint| &paint.fragments);
         for fragment in fragments {
+            let control = include_controls
+                && matches!(
+                    fragment.content,
+                    crate::layout::InlineFragmentContent::FormControl(..)
+                );
             if fragment.node.is_inert()
                 || fragment.style.visibility == Visibility::Hidden
-                || (fragment.text_source.is_empty()
-                    && !(include_controls
-                        && matches!(
-                            fragment.content,
-                            crate::layout::InlineFragmentContent::FormControl(..)
-                        )))
+                || (fragment.text_source.is_empty() && !control)
                 || geometry.clip.is_some_and(|clip| {
                     intersect(
                         transformed_rect_bounds(fragment.rect, geometry.transform),
@@ -507,6 +507,7 @@ fn collect_candidates(
                         .text_source
                         .iter()
                         .any(|source| descendant_of(&source.node, scope))
+                        && !(control && descendant_of(&fragment.node, scope))
                 })
             {
                 continue;

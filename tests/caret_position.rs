@@ -34,6 +34,62 @@ fn caret_positions_resolve_utf16_boundaries_and_current_geometry() {
 }
 
 #[test]
+fn caret_positions_resolve_empty_editing_hosts_without_using_nearby_text() {
+    check(
+        r#"(() => {
+      for (const prefix of ['', '<p>nearby text</p>']) {
+        document.body.innerHTML = prefix + '<div contenteditable style="width:200px;height:100px"></div>';
+        const editor = document.body.lastChild, box = editor.getBoundingClientRect();
+        const caret = document.caretPositionFromPoint(box.left + 10, box.top + 10);
+        if (!caret || caret.offsetNode !== editor || caret.offset !== 0) return false;
+      }
+      return true;
+    })()"#,
+    );
+}
+
+#[test]
+fn caret_positions_resolve_empty_rendered_elements_and_nested_boundaries() {
+    check(
+        r#"(() => {
+      for (const prefix of ['', '<p>nearby text</p>']) {
+        for (const markup of [
+          '<div class="target"></div>', '<button class="target"></button>',
+          '<img class="target">', '<canvas class="target"></canvas>',
+          '<hr class="target">', '<input type="checkbox" class="target">',
+          '<iframe class="target"></iframe>', '<div class="target"><br></div>',
+          '<div contenteditable><span class="target"></span></div>',
+        ]) {
+          document.body.innerHTML = prefix + markup;
+          const target = document.querySelector('.target');
+          target.style.cssText = 'display:block;width:200px;height:100px';
+          const box = target.getBoundingClientRect();
+          const caret = document.caretPositionFromPoint(box.left + 10, box.top + 10);
+          if (!caret || caret.offsetNode !== target || caret.offset !== 0) return false;
+        }
+      }
+      return true;
+    })()"#,
+    );
+}
+
+#[test]
+fn empty_shadow_editors_preserve_explicit_root_access_and_rescoping() {
+    check(
+        r#"(() => {
+      document.body.innerHTML = '<div></div>';
+      const host = document.body.firstChild, root = host.attachShadow({mode:'closed'});
+      root.innerHTML = '<div contenteditable style="width:200px;height:100px"></div>';
+      const editor = root.firstChild, box = editor.getBoundingClientRect();
+      const outer = document.caretPositionFromPoint(box.left + 10, box.top + 10);
+      const inner = document.caretPositionFromPoint(box.left + 10, box.top + 10, {shadowRoots:[root]});
+      return outer && outer.offsetNode === document.body && outer.offset === 0 &&
+        inner && inner.offsetNode === editor && inner.offset === 0;
+    })()"#,
+    );
+}
+
+#[test]
 fn caret_positions_validate_arguments_and_ignore_inactive_documents() {
     check(
         r#"(() => {
@@ -80,6 +136,8 @@ fn caret_positions_use_text_control_value_and_wrapped_lines() {
       const inputBox = input.getBoundingClientRect();
       const first = document.caretPositionFromPoint(inputBox.left, inputBox.top + 20);
       if (!first || first.offsetNode !== input || first.offset !== 0 || !first.getClientRect()) return false;
+      const last = document.caretPositionFromPoint(inputBox.right - 1, inputBox.top + 20);
+      if (!last || last.offsetNode !== input || last.offset !== input.value.length) return false;
       const box = area.getBoundingClientRect();
       const second = document.caretPositionFromPoint(box.left, box.top + 60);
       if (!second || second.offsetNode !== area || second.offset !== 4) return false;

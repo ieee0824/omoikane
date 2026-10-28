@@ -30,7 +30,7 @@ Geometry の辞書は規定の順にメンバーを読み、各メンバーを�
 
 ### CaretPosition と Range の矩形
 
-`Document.caretPositionFromPoint(x, y, {shadowRoots})` は、現在のレイアウトと描画用の文字整形から UTF-16 の挿入境界を返す。通常テキストと input/textarea を対象にし、許可されていない author shadow tree 内の端点は host の親へ移す。`CaretPosition` のノードと offset は snapshot で、`getClientRect()` は呼び出し時のレイアウトから新しい `DOMRect` を計算する。
+`Document.caretPositionFromPoint(x, y, {shadowRoots})` は、現在のレイアウトと描画用の文字整形から UTF-16 の挿入境界を返す。通常テキスト、input/textarea、空の描画要素を対象にし、許可されていない author shadow tree 内の端点は host の親へ移す。空要素ではその要素の offset 0 を返し、近くの別要素のテキストへ移動しない。`CaretPosition` のノードと offset は snapshot で、`getClientRect()` は呼び出し時のレイアウトから新しい `DOMRect` を計算する。
 
 `Range.getClientRects()` は選択された要素とテキスト片の矩形を返し、`getBoundingClientRect()` はその境界を返す。折り返したテキストは行ごとに測定し、CSS transform を適用する。通常の collapsed Range と CaretPosition は同じテキスト境界の計算を使う。これらの位置取得は contenteditable の編集操作の実装を意味しない。編集処理は [#1288](https://github.com/ieee0824/omoikane/issues/1288) で継続する。
 

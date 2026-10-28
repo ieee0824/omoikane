@@ -8495,6 +8495,11 @@ export const __omoikane_service_worker_lifecycle = {};
     } else if (hit && ["audio", "video"].includes(nativeNodeLocalName(internalNodeId(hit)))) {
       const parent = internalParentNode(hit);
       point = parent ? [internalNodeId(parent), nativeNodeIndex(internalNodeId(hit))] : null;
+    } else if (hit && nativeGetTextContent(internalNodeId(hit)) === "") {
+      const id = internalNodeId(hit);
+      // Empty rendered elements still provide a DOM insertion boundary. Keep
+      // text-control values and rendered shadow text within this hit target.
+      point = nativeCaretHitTest(documentId, x, y, id, true) ?? [id, 0];
     } else {
       point = nativeCaretHitTest(documentId, x, y, null, true);
     }
