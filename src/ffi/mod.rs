@@ -39,8 +39,34 @@ impl OmoikaneBrowserHandle {
         })
     }
 
+    /// Records the message returned by [`omoikane_last_error`].
+    ///
+    /// Messages can quote page-controlled text such as exception messages.
+    /// `char *` cannot carry `U+0000`, so it is replaced with `U+FFFD`.
     fn set_error(&self, message: impl Into<String>) {
-        *self.last_error.borrow_mut() = Some(message.into());
+        let mut message = message.into();
+        if message.contains('\0') {
+            message = message.replace('\0', "\u{FFFD}");
+        }
+        *self.last_error.borrow_mut() = Some(message);
+    }
+
+    /// Hands `value` to the C caller and clears the last error, or records an
+    /// error and returns null when `value` contains `U+0000`.
+    fn return_string(&self, value: String, what: &str) -> *mut c_char {
+        match into_c_string(value) {
+            Ok(value) => {
+                self.clear_error();
+                value
+            }
+            Err(error) => {
+                self.set_error(format!(
+                    "{what} contains a NUL character at byte {} and cannot be returned as a C string",
+                    error.nul_position()
+                ));
+                std::ptr::null_mut()
+            }
+        }
     }
 
     fn clear_error(&self) {
@@ -212,10 +238,7 @@ pub unsafe extern "C" fn omoikane_evaluate(
             message: error.to_string(),
         })
     }) {
-        Ok(serialized) => {
-            browser.clear_error();
-            into_c_string(serialized)
-        }
+        Ok(serialized) => browser.return_string(serialized, "evaluation result"),
         Err(error) => {
             browser.set_error(error.message);
             std::ptr::null_mut()
@@ -275,10 +298,7 @@ pub unsafe extern "C" fn omoikane_find_in_page(
                 message: error.to_string(),
             })
         }) {
-        Ok(payload) => {
-            browser.clear_error();
-            into_c_string(payload)
-        }
+        Ok(payload) => browser.return_string(payload, "find-in-page result"),
         Err(error) => {
             browser.set_error(error.message);
             std::ptr::null_mut()
@@ -288,6 +308,10 @@ pub unsafe extern "C" fn omoikane_find_in_page(
 
 /// Returns the current document serialized as HTML.
 /// Release a non-null result with [`omoikane_string_free`].
+///
+/// A C string cannot contain `U+0000`. When the document holds it in text,
+/// comments or attributes, this returns null without altering the content and
+/// [`omoikane_last_error`] describes the failure.
 ///
 /// # Safety
 ///
@@ -325,10 +349,7 @@ pub unsafe extern "C" fn omoikane_get_content(browser: *mut OmoikaneBrowser) -> 
     };
 
     match html {
-        Some(html) => {
-            browser.clear_error();
-            into_c_string(html)
-        }
+        Some(html) => browser.return_string(html, "document HTML"),
         None => {
             browser.set_error("DOM.getOuterHTML did not return outerHTML");
             std::ptr::null_mut()
@@ -407,8 +428,7 @@ pub unsafe extern "C" fn omoikane_screenshot_png_with_viewport(
     match rendered {
         Ok(png) => {
             let encoded = base64::engine::general_purpose::STANDARD.encode(png);
-            browser.clear_error();
-            into_c_string(encoded)
+            browser.return_string(encoded, "screenshot")
         }
         Err(error) => {
             browser.set_error(format!("failed to render screenshot: {error}"));
@@ -432,7 +452,8 @@ pub unsafe extern "C" fn omoikane_last_error(browser: *const OmoikaneBrowser) ->
     };
 
     match browser.last_error.borrow().clone() {
-        Some(error) => into_c_string(error),
+        // `set_error` removes NUL, so conversion only fails if that invariant breaks.
+        Some(error) => into_c_string(error).unwrap_or(std::ptr::null_mut()),
         None => std::ptr::null_mut(),
     }
 }
@@ -502,10 +523,9 @@ unsafe fn string_from_ptr(value: *const c_char) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn into_c_string(value: String) -> *mut c_char {
-    CString::new(value)
-        .expect("FFI strings must not contain interior NUL bytes")
-        .into_raw()
+/// Converts `value` into a caller-owned C string, failing on interior NUL.
+fn into_c_string(value: String) -> Result<*mut c_char, std::ffi::NulError> {
+    CString::new(value).map(CString::into_raw)
 }
 
 #[cfg(test)]
@@ -679,6 +699,70 @@ mod tests {
 
         // SAFETY: This live handle came from init and is freed only once after test use.
         unsafe { omoikane_free(browser) };
+    }
+
+    #[test]
+    fn ffi_get_content_rejects_page_controlled_nul_without_panicking() {
+        // SAFETY: Initialization has no pointer inputs; the test owns the returned handle.
+        let browser = unsafe { omoikane_init() };
+        assert!(!browser.is_null());
+        let url = to_c_string("data:text/html,<body><p id=\"p\">ok</p></body>");
+        // SAFETY: The handle is live and the URL CString remains readable during this call.
+        assert!(unsafe { omoikane_navigate(browser, url.as_ptr()) });
+
+        for (inject, restore) in [
+            (
+                "document.body.textContent = String.fromCharCode(0)",
+                "document.body.innerHTML = '<p id=\"p\">ok</p>'",
+            ),
+            (
+                "document.body.appendChild(document.createComment('a' + String.fromCharCode(0)))",
+                "document.body.lastChild.remove()",
+            ),
+            (
+                "document.getElementById('p').setAttribute('title', String.fromCharCode(0))",
+                "document.getElementById('p').removeAttribute('title')",
+            ),
+        ] {
+            let inject = to_c_string(inject);
+            // SAFETY: The handle is live and the expression CString remains readable.
+            let evaluated = unsafe { omoikane_evaluate(browser, inject.as_ptr()) };
+            // SAFETY: This non-null FFI result is owned and consumed only once.
+            unsafe { take_string(evaluated) };
+
+            // SAFETY: The handle is live and this test uses it on one thread.
+            let content = unsafe { omoikane_get_content(browser) };
+            assert!(content.is_null(), "{inject:?}");
+            // SAFETY: The handle is live; the returned error string is non-null and owned.
+            let message = unsafe { take_string(omoikane_last_error(browser)) };
+            assert!(message.contains("NUL"), "{message}");
+
+            let restore = to_c_string(restore);
+            // SAFETY: The handle is live and the expression CString remains readable.
+            let evaluated = unsafe { omoikane_evaluate(browser, restore.as_ptr()) };
+            // SAFETY: This non-null FFI result is owned and consumed only once.
+            unsafe { take_string(evaluated) };
+            // SAFETY: The handle is live and this test uses it on one thread.
+            let content = unsafe { omoikane_get_content(browser) };
+            // SAFETY: This non-null FFI result is owned and consumed only once.
+            let html = unsafe { take_string(content) };
+            assert!(html.contains("<p id=\"p\">ok</p>"), "{html}");
+            // SAFETY: The handle is live and this test uses it on one thread.
+            assert!(unsafe { omoikane_last_error(browser) }.is_null());
+        }
+
+        // SAFETY: This live handle came from init and is freed only once after test use.
+        unsafe { omoikane_free(browser) };
+    }
+
+    #[test]
+    fn ffi_last_error_replaces_nul_in_messages_without_panicking() {
+        let handle = OmoikaneBrowserHandle::new().unwrap();
+        handle.set_error("before\0after");
+        let browser = &handle as *const OmoikaneBrowserHandle as *const OmoikaneBrowser;
+        // SAFETY: `handle` is alive on this thread for the whole call.
+        let message = unsafe { take_string(omoikane_last_error(browser)) };
+        assert_eq!(message, "before\u{FFFD}after");
     }
 
     #[test]
