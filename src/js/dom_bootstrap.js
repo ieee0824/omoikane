@@ -22888,6 +22888,13 @@ export const __omoikane_service_worker_lifecycle = {};
     delete globalThis.__omoikane_install_font_mutation_hook;
   };
 
+  function subtreeHasFontSource(node) {
+    if (internalNodeType(node) !== 1) return false;
+    const name = internalNodeLocalName(node);
+    if (name === "style" || name === "link") return true;
+    return internalChildNodes(node).some(subtreeHasFontSource);
+  }
+
   function fontSourceChangedByMutation(target, type, init) {
     if (type === "characterData") {
       const parent = internalParentNode(target);
@@ -22897,10 +22904,7 @@ export const __omoikane_service_worker_lifecycle = {};
     const targetName = internalNodeLocalName(target);
     if (targetName === "style" || targetName === "link") return true;
     const nodes = (init.addedNodes || []).concat(init.removedNodes || []);
-    return nodes.some(node => {
-      const name = internalNodeLocalName(node);
-      return name === "style" || name === "link";
-    });
+    return nodes.some(subtreeHasFontSource);
   }
 
   function notifyFontMutation(target, type, init) {
