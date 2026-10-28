@@ -22888,6 +22888,21 @@ export const __omoikane_service_worker_lifecycle = {};
     delete globalThis.__omoikane_install_font_mutation_hook;
   };
 
+  function fontSourceChangedByMutation(target, type, init) {
+    if (type === "characterData") {
+      const parent = internalParentNode(target);
+      return internalNodeLocalName(parent) === "style";
+    }
+    if (type !== "childList") return false;
+    const targetName = internalNodeLocalName(target);
+    if (targetName === "style" || targetName === "link") return true;
+    const nodes = (init.addedNodes || []).concat(init.removedNodes || []);
+    return nodes.some(node => {
+      const name = internalNodeLocalName(node);
+      return name === "style" || name === "link";
+    });
+  }
+
   function notifyFontMutation(target, type, init) {
     if (!fontMutationDocument) return;
     if (type !== "childList" && type !== "characterData" && type !== "attributes") return;
@@ -22895,9 +22910,10 @@ export const __omoikane_service_worker_lifecycle = {};
     if (!doc || (target !== doc && !isInclusiveDescendant(target, doc))) return;
     const hook = safeWeakMapGet(fontMutationHooks, doc);
     if (!hook) return;
-    const sourceChanged = type !== "attributes" || init.attributeName === "href" ||
-        init.attributeName === "rel" || init.attributeName === "media" ||
-        init.attributeName === "disabled";
+    const sourceChanged = type === "attributes" ? (
+      init.attributeName === "href" || init.attributeName === "rel" ||
+      init.attributeName === "media" || init.attributeName === "disabled"
+    ) : fontSourceChangedByMutation(target, type, init);
     // Do not retain a retired Realm in a promise merely because one of its
     // surviving nodes changed an attribute. Selection-only mutations with no
     // unloaded faces do not need a maintenance notification either.

@@ -741,6 +741,49 @@ fn text_mutation_requests_fonts_without_using_public_observer_methods() {
 }
 
 #[test]
+fn unrelated_child_list_keeps_css_faces_but_still_syncs_style_child_lists() {
+    let mut runtime = runtime();
+    runtime
+        .eval(&format!(
+            "globalThis.sheet=document.createElement('style');\
+             sheet.textContent='@font-face{{font-family:MutationFont;src:url({})}}';\
+             document.head.appendChild(sheet);\
+             globalThis.face=Array.from(document.fonts)[0];",
+            font_url()
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_json(&mut runtime, "face.status"), "loaded");
+    runtime
+        .eval("document.getElementById('sample').appendChild(document.createElement('div'));")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "[document.fonts.size,Array.from(document.fonts)[0]===face,face.status]"
+        ),
+        json!([1, true, "loaded"])
+    );
+    runtime
+        .eval(&format!(
+            "globalThis.addedSheet=document.createElement('style');\
+             addedSheet.textContent='@font-face{{font-family:AddedFont;src:url({})}}';\
+             document.head.appendChild(addedSheet);",
+            font_url()
+        ))
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "[document.fonts.size,Array.from(document.fonts).map(face=>face.family)]"
+        ),
+        json!([2, ["MutationFont", "AddedFont"]])
+    );
+}
+
+#[test]
 fn automatic_font_loading_uses_the_computed_stretch() {
     let document = TreeBuilder::parse(
         "<!doctype html><style>#sample{font-family:AutoStretch;font-stretch:75%;font-size:20px}</style><span id=sample>A</span>",
