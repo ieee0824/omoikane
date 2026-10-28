@@ -975,6 +975,8 @@ pub struct FontMetrics {
     pub average_advance: f32,
     /// Extra spacing to add between each character (CSS `letter-spacing`).
     pub letter_spacing: f32,
+    /// Extra advance applied to each collapsible word separator (CSS `word-spacing`).
+    pub word_spacing: f32,
     pub(crate) font_family: Option<FontFamilyKey>,
     pub(crate) font_scope_root: Option<usize>,
     pub(crate) font_weight: FontWeight,
@@ -993,6 +995,7 @@ impl FontMetrics {
             line_gap: font_size * 0.2,
             average_advance: font_size * 0.6,
             letter_spacing: 0.0,
+            word_spacing: 0.0,
             font_family: None,
             font_scope_root: None,
             font_weight: FontWeight::default(),

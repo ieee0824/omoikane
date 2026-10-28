@@ -1072,6 +1072,7 @@ export const __omoikane_service_worker_lifecycle = {};
     "scroll-padding-block-start", "scroll-padding-block-end",
     "scroll-margin-inline-start", "scroll-margin-inline-end",
     "scroll-margin-block-start", "scroll-margin-block-end",
+    "text-indent", "word-spacing",
   ]);
   // A conservative fast path: every declaration must be an independent,
   // unaliased longhand. Logical properties, shorthands and vendor aliases keep
@@ -4200,14 +4201,15 @@ export const __omoikane_service_worker_lifecycle = {};
       const normalizeDecls = (declarations) => {
         const normalized = [];
         for (const declaration of declarations) {
-          if (!declaration.name.startsWith("--") &&
-              !nativeStyleSupports(declaration.name, declaration.value)) continue;
           if (needsStyleValueNormalization(declaration.name, declaration.value)) {
             const value = __omoikane_normalize_style_value(
               declaration.name, declaration.value
             );
             if (value === null) continue;
             declaration.value = value;
+          } else if (!declaration.name.startsWith("--") &&
+                     !nativeStyleSupports(declaration.name, declaration.value)) {
+            continue;
           }
           if (logicalBoxStyleProperties.has(declaration.name) &&
               styleShorthandLonghands[declaration.name]) {
@@ -4302,11 +4304,12 @@ export const __omoikane_service_worker_lifecycle = {};
       // retains remove/append precedence for logical and shorthand groups.
       const setValue = (kebab, value, priority) => {
         value = String(value);
-        if (!kebab.startsWith("--") && !nativeStyleSupports(kebab, value)) return;
         if (needsStyleValueNormalization(kebab, value)) {
           const normalized = __omoikane_normalize_style_value(kebab, value);
           if (normalized === null) return;
           value = normalized;
+        } else if (!kebab.startsWith("--") && !nativeStyleSupports(kebab, value)) {
+          return;
         }
         const decls = parseDecls();
         const longhands = styleShorthandLonghands[kebab];
@@ -9853,12 +9856,12 @@ export const __omoikane_service_worker_lifecycle = {};
       const key = propertyName(name);
       value = String(value);
       if (!key || value === "") return removeValue(key);
-      if (!accepts(key, value)) return;
       if (needsStyleValueNormalization(key, value)) {
         const normalized = __omoikane_normalize_style_value(key, value);
         if (normalized === null) return;
         value = normalized;
       }
+      if (!accepts(key, value)) return;
       const longhands = styleShorthandLonghands[key];
       if (longhands) {
         const expanded = JSON.parse(__omoikane_expand_style_shorthand(key, value));

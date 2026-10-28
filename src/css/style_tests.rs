@@ -6751,10 +6751,62 @@ fn inherits_text_indent_from_parent() {
     );
     let style = resolver.computed_style(&child);
     assert_eq!(
-        style.get("text-indent"),
-        Some(&ComputedValue::Px(24.0)),
+        style.get("text-indent").map(ComputedValue::css_text),
+        Some("24px".to_string()),
         "text-indent should inherit from parent"
     );
+}
+
+#[test]
+fn text_indent_and_word_spacing_validate_and_compute_full_grammar() {
+    for value in [
+        "10px",
+        "20%",
+        "-30px",
+        "10px hanging",
+        "20% each-line",
+        "each-line hanging calc(2em + 3ex)",
+    ] {
+        assert!(supports_declaration("text-indent", value), "{value}");
+    }
+    for value in [
+        "auto",
+        "hanging",
+        "each-line",
+        "10",
+        "10px hanging 20px",
+        "hanging 20% hanging",
+        "each-line each-line",
+    ] {
+        assert!(!supports_declaration("text-indent", value), "{value}");
+    }
+    for value in ["normal", "0", "10px", "-20px", "120%", "-10%"] {
+        assert!(supports_declaration("word-spacing", value), "{value}");
+    }
+    assert!(supports_declaration(
+        "word-spacing",
+        "calc(10px - (5% + 10%)"
+    ));
+    for value in ["auto", "normal 10px", "10% 10px"] {
+        assert!(!supports_declaration("word-spacing", value), "{value}");
+    }
+
+    let target = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { font-size: 40px; text-indent: each-line hanging calc(10px + .5em); \
+             word-spacing: normal; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&target);
+    assert_eq!(
+        style.get("text-indent").map(ComputedValue::css_text),
+        Some("30px hanging each-line".to_string())
+    );
+    assert_eq!(style.get("word-spacing"), Some(&ComputedValue::Px(0.0)));
 }
 
 #[test]
@@ -6780,6 +6832,57 @@ fn text_decoration_longhands_do_not_inherit_from_parent() {
     assert_eq!(
         style.get("text-decoration-thickness"),
         Some(&ComputedValue::Keyword("auto".to_string()))
+    );
+}
+
+#[test]
+fn text_decoration_style_validates_and_skip_ink_inherits() {
+    for value in ["solid", "double", "dotted", "dashed", "wavy"] {
+        assert!(
+            supports_declaration("text-decoration-style", value),
+            "{value}"
+        );
+    }
+    for value in ["none", "auto", "solid dashed", "1px"] {
+        assert!(
+            !supports_declaration("text-decoration-style", value),
+            "{value}"
+        );
+    }
+    for value in ["auto", "all", "none"] {
+        assert!(
+            supports_declaration("text-decoration-skip-ink", value),
+            "{value}"
+        );
+    }
+    for value in ["skip", "auto none", "1px"] {
+        assert!(
+            !supports_declaration("text-decoration-skip-ink", value),
+            "{value}"
+        );
+    }
+
+    let document = NodeHandle::document();
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    document.append_child(parent.clone());
+    parent.append_child(child.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { text-decoration-style: dashed; text-decoration-skip-ink: none; }")
+            .unwrap(),
+    );
+    let child_style = resolver.computed_style(&child);
+    assert_eq!(
+        child_style.get("text-decoration-style"),
+        Some(&ComputedValue::Keyword("solid".into())),
+        "text-decoration-style is not inherited"
+    );
+    assert_eq!(
+        child_style.get("text-decoration-skip-ink"),
+        Some(&ComputedValue::Keyword("none".into())),
+        "text-decoration-skip-ink is inherited"
     );
 }
 
@@ -6934,7 +7037,8 @@ fn text_decorations_propagate_with_the_originating_box_appearance() {
         Origin::Author,
         parse_stylesheet(
             "body { font-family: 'Origin Face'; font-weight: 700; font-style: italic; \
-                    text-decoration: underline 7px red; } \
+                    text-decoration: underline 7px red; text-decoration-style: dashed; \
+                    text-decoration-skip-ink: none; } \
              #passive { color: blue; font-family: 'Child Face'; font-weight: 100; \
                         font-style: normal; text-decoration-thickness: 1px; } \
              #own { text-decoration: line-through 2px blue; } \
@@ -6952,6 +7056,8 @@ fn text_decorations_propagate_with_the_originating_box_appearance() {
     ));
     assert_eq!(passive_style.text_decorations().len(), 1);
     assert_eq!(passive_style.text_decorations()[0].color, "red");
+    assert_eq!(passive_style.text_decorations()[0].style, "dashed");
+    assert_eq!(passive_style.text_decorations()[0].skip_ink, "none");
     assert_eq!(
         passive_style.text_decorations()[0].thickness,
         ComputedValue::Px(7.0)

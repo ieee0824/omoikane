@@ -524,6 +524,7 @@ impl Clone for Canvas {
 #[derive(Debug, Clone, Default)]
 struct InkBoundsProbe {
     bounds: Option<Rect>,
+    rects: Vec<Rect>,
 }
 
 // Equality compares dimensions and pixels, excluding playback metadata.
@@ -626,6 +627,12 @@ impl Canvas {
         self.ink_probe.as_ref().and_then(|probe| probe.bounds)
     }
 
+    fn probed_ink_rects(&self) -> &[Rect] {
+        self.ink_probe
+            .as_ref()
+            .map_or(&[], |probe| probe.rects.as_slice())
+    }
+
     fn record_text_ink(&mut self, rect: Rect, color: Color, clip: Option<Rect>) -> bool {
         let Some(probe) = &mut self.ink_probe else {
             return false;
@@ -639,6 +646,7 @@ impl Canvas {
             };
             if let Some(area) = area {
                 probe.bounds = Some(probe.bounds.map_or(area, |old| union_rect(old, area)));
+                probe.rects.push(area);
             }
         }
         true
@@ -6269,6 +6277,7 @@ fn computed_style_layer_text(value: Option<&ComputedValue>, index: usize) -> Opt
         Some(value @ ComputedValue::LengthPercentage(_)) => {
             return Some(value.css_text());
         }
+        Some(value @ ComputedValue::TextIndent { .. }) => return Some(value.css_text()),
         Some(value @ ComputedValue::Position { .. }) => return Some(value.css_text()),
         None => return None,
     };

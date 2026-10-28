@@ -146,6 +146,7 @@ pub(super) fn slice(
 mod tests {
     use super::*;
     use crate::css::{Origin, StyleResolver, parse_stylesheet};
+    use crate::layout::inline::TextIndent;
     use crate::layout::{InlineFragment, LayoutBox, Rect, layout_tree};
 
     fn style(css: &str) -> ComputedStyle {
@@ -286,6 +287,7 @@ mod tests {
             16.,
             None,
             false,
+            TextIndent::default(),
             None,
         );
         assert_eq!(lines.len(), 2);
@@ -327,6 +329,7 @@ mod tests {
             16.,
             None,
             false,
+            TextIndent::default(),
             None,
         );
         assert_eq!(lines.len(), 2);

@@ -137,6 +137,8 @@ pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
     }
     if property == "text-shadow" {
         crate::css::style::text_shadow::normalize_specified(value)
+    } else if matches!(property, "text-indent" | "word-spacing") {
+        crate::css::style::normalize_text_spacing_value(property, value)
     } else if matches!(
         property,
         "text-underline-position" | "text-underline-offset"

@@ -8243,6 +8243,118 @@ fn placeholder_letter_spacing_shifts_pixels_right() {
 }
 
 #[test]
+fn text_decoration_styles_produce_distinct_horizontal_and_vertical_strokes() {
+    let color = Color::rgb(20, 40, 80);
+    let painted = |style: &str, vertical: bool| {
+        let mut canvas = Canvas::new(40, 40);
+        let rect = if vertical {
+            Rect {
+                x: 12.0,
+                y: 2.0,
+                width: 6.0,
+                height: 32.0,
+            }
+        } else {
+            Rect {
+                x: 2.0,
+                y: 12.0,
+                width: 32.0,
+                height: 6.0,
+            }
+        };
+        crate::paint::text::paint_decoration_stroke(
+            &mut canvas,
+            rect,
+            style,
+            color,
+            None,
+            vertical,
+        );
+        canvas
+    };
+    let count = |canvas: &Canvas| {
+        (0..40)
+            .flat_map(|x| (0..40).map(move |y| (x, y)))
+            .filter(|&(x, y)| canvas.pixel(x, y) == Some(color))
+            .count()
+    };
+
+    for vertical in [false, true] {
+        let solid = painted("solid", vertical);
+        let double = painted("double", vertical);
+        let dotted = painted("dotted", vertical);
+        let dashed = painted("dashed", vertical);
+        let wavy = painted("wavy", vertical);
+        assert!(count(&solid) > count(&double));
+        assert!(count(&double) > 0);
+        assert!(count(&dotted) > 0 && count(&dotted) < count(&solid));
+        assert!(count(&dashed) > 0 && count(&dashed) < count(&solid));
+        assert!(count(&wavy) > 0);
+        assert_ne!(wavy.pixels(), solid.pixels());
+    }
+}
+
+#[test]
+fn text_decoration_skip_ink_splits_horizontal_and_vertical_strokes() {
+    let color = Color::rgb(20, 40, 80);
+    for vertical in [false, true] {
+        let mut canvas = Canvas::new(40, 40);
+        let (line, ink, before, overlap, after) = if vertical {
+            (
+                Rect {
+                    x: 10.0,
+                    y: 2.0,
+                    width: 2.0,
+                    height: 30.0,
+                },
+                Rect {
+                    x: 9.0,
+                    y: 12.0,
+                    width: 5.0,
+                    height: 4.0,
+                },
+                (10, 5),
+                (10, 13),
+                (10, 20),
+            )
+        } else {
+            (
+                Rect {
+                    x: 2.0,
+                    y: 10.0,
+                    width: 30.0,
+                    height: 2.0,
+                },
+                Rect {
+                    x: 12.0,
+                    y: 9.0,
+                    width: 4.0,
+                    height: 5.0,
+                },
+                (5, 10),
+                (13, 10),
+                (20, 10),
+            )
+        };
+        crate::paint::text::paint_decoration_stroke_skipping_ink(
+            &mut canvas,
+            line,
+            "solid",
+            &[ink],
+            color,
+            None,
+            vertical,
+        );
+        assert_eq!(canvas.pixel(before.0, before.1), Some(color));
+        assert_eq!(
+            canvas.pixel(overlap.0, overlap.1),
+            Some(Color::rgba(0, 0, 0, 0))
+        );
+        assert_eq!(canvas.pixel(after.0, after.1), Some(color));
+    }
+}
+
+#[test]
 fn vertical_placeholder_respects_inline_direction_and_column_geometry() {
     let color = Color::rgb(0, 0, 0);
     let rect = Rect {

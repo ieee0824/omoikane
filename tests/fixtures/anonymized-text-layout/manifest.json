@@ -1,0 +1,9 @@
+[
+  {
+    "name": "text-layout-fixed",
+    "path": "fixed.html",
+    "width": 640,
+    "height": 440,
+    "fixture_sha256": "739a172d1124b34b251161d5094bd00b39b01ebcab79752c325dd7e16b855817"
+  }
+]

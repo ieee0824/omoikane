@@ -104,6 +104,41 @@ fn adjacent_text_nodes_and_comments_form_one_anonymous_item() {
 }
 
 #[test]
+fn anonymous_flex_text_applies_indent_and_word_spacing_across_fragments() {
+    fn fragment_x(layout: &LayoutBox, text: &str) -> f32 {
+        layout.lines[0]
+            .fragments
+            .iter()
+            .find(|fragment| fragment.text() == Some(text))
+            .unwrap_or_else(|| panic!("missing {text:?} fragment"))
+            .rect
+            .x
+    }
+
+    let ordinary = render("<div id='row' class='row'>a b</div>", CSS);
+    let styled = render(
+        "<div id='row' class='row'>a b</div>",
+        &format!("{CSS}#row{{text-indent:10px;word-spacing:12px}}"),
+    );
+    let ordinary_text = &by_id(&ordinary, "row").children[0];
+    let styled_text = &by_id(&styled, "row").children[0];
+
+    assert_eq!(ordinary_text.node.node_type(), NodeType::Text);
+    assert_eq!(styled_text.node.node_type(), NodeType::Text);
+    assert_eq!(styled_text.lines[0].fragments.len(), 3);
+    let first_delta = fragment_x(styled_text, "a") - fragment_x(ordinary_text, "a");
+    let second_delta = fragment_x(styled_text, "b") - fragment_x(ordinary_text, "b");
+    assert!(
+        (first_delta - 10.0).abs() < 0.01,
+        "first delta={first_delta}"
+    );
+    assert!(
+        (second_delta - 22.0).abs() < 0.01,
+        "second delta={second_delta}"
+    );
+}
+
+#[test]
 fn whitespace_only_runs_do_not_add_flex_items_but_nbsp_does() {
     let root = render(
         "<div id='bare' class='row'> \n<div class='icon'></div> \t<div class='icon'></div> </div><div id='nbsp' class='row'>&nbsp;</div>",

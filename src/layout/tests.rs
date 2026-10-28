@@ -9704,6 +9704,151 @@ fn letter_spacing_increases_text_width() {
 }
 
 #[test]
+fn word_spacing_moves_following_text_in_wrapping_and_nowrap_layout() {
+    fn following_word_x(css: &str) -> f32 {
+        let document = NodeHandle::document();
+        let html = NodeHandle::element("html");
+        let body = NodeHandle::element("body");
+        let p = NodeHandle::element("p");
+        document.append_child(html.clone());
+        html.append_child(body.clone());
+        body.append_child(p.clone());
+        p.append_child(NodeHandle::text("a b"));
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "html, body, p {{ margin: 0; }} p {{ font-size: 16px; {css} }}"
+            ))
+            .unwrap(),
+        );
+        let layout = layout_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 500.0,
+                height: 100.0,
+            },
+        )
+        .unwrap();
+        fn find(layout: &LayoutBox) -> Option<f32> {
+            for line in &layout.lines {
+                if let Some(fragment) = line
+                    .fragments
+                    .iter()
+                    .find(|fragment| fragment.text() == Some("b"))
+                {
+                    return Some(fragment.rect.x);
+                }
+            }
+            layout.children.iter().find_map(find)
+        }
+        find(&layout).expect("following word fragment")
+    }
+
+    for white_space in ["normal", "nowrap", "pre"] {
+        let ordinary = following_word_x(&format!("white-space: {white_space};"));
+        let spaced = following_word_x(&format!("white-space: {white_space}; word-spacing: 12px;"));
+        assert!(
+            (spaced - ordinary - 12.0).abs() < 0.01,
+            "{white_space}: expected 12px shift, ordinary={ordinary}, spaced={spaced}"
+        );
+    }
+    let ordinary = following_word_x("");
+    let percentage = following_word_x("word-spacing: 50%;");
+    assert!((percentage - ordinary - 8.0).abs() < 0.01);
+}
+
+#[test]
+fn text_indent_applies_to_only_the_first_logical_line() {
+    fn fragment_rects(extra: &str) -> (Rect, Rect) {
+        let document = crate::html::TreeBuilder::parse(&format!(
+            "<style>html,body,p{{margin:0}}p{{width:100px;height:100px;font:16px/20px sans-serif;text-indent:10px;{extra}}}</style><p>a<br>b</p>"
+        ))
+        .document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in crate::paint::extract_author_stylesheets(&document, None).unwrap() {
+            resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
+        }
+        let layout = layout_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        fn find(layout: &LayoutBox, text: &str) -> Option<Rect> {
+            layout
+                .lines
+                .iter()
+                .flat_map(|line| &line.fragments)
+                .find(|fragment| fragment.text() == Some(text))
+                .map(|fragment| fragment.rect)
+                .or_else(|| layout.children.iter().find_map(|child| find(child, text)))
+        }
+        (
+            find(&layout, "a").expect("first line text"),
+            find(&layout, "b").expect("second line text"),
+        )
+    }
+
+    let (first_ltr, second_ltr) = fragment_rects("");
+    assert!((first_ltr.x - second_ltr.x - 10.0).abs() < 0.01);
+
+    let (first_rtl, second_rtl) = fragment_rects("direction:rtl");
+    assert!((second_rtl.x + second_rtl.width - first_rtl.x - first_rtl.width - 10.0).abs() < 0.01);
+
+    let (first_vertical, second_vertical) = fragment_rects("writing-mode:vertical-rl");
+    assert!((first_vertical.y - second_vertical.y - 10.0).abs() < 0.01);
+}
+
+#[test]
+fn text_indent_hanging_and_each_line_select_forced_and_soft_lines() {
+    fn line_starts(value: &str) -> [f32; 3] {
+        let document = crate::html::TreeBuilder::parse(&format!(
+            "<style>html,body,p{{margin:0}}p{{width:60px;font:16px/20px sans-serif;text-indent:{value}}}</style><p><span>a</span><br><span>b</span> <span>cccccccc</span></p>"
+        ))
+        .document();
+        let mut resolver = StyleResolver::new();
+        for stylesheet in crate::paint::extract_author_stylesheets(&document, None).unwrap() {
+            resolver.add_stylesheet(Origin::Author, parse_stylesheet(&stylesheet).unwrap());
+        }
+        let layout = layout_tree(
+            &document,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        fn find(layout: &LayoutBox, text: &str) -> Option<f32> {
+            layout
+                .lines
+                .iter()
+                .flat_map(|line| &line.fragments)
+                .find(|fragment| fragment.text() == Some(text))
+                .map(|fragment| fragment.rect.x)
+                .or_else(|| layout.children.iter().find_map(|child| find(child, text)))
+        }
+        ["a", "b", "cccccccc"].map(|text| find(&layout, text).expect("text fragment"))
+    }
+
+    assert_eq!(line_starts("10px"), [10.0, 0.0, 0.0]);
+    assert_eq!(line_starts("10px each-line"), [10.0, 10.0, 0.0]);
+    assert_eq!(line_starts("10px hanging"), [0.0, 10.0, 10.0]);
+    assert_eq!(line_starts("10px hanging each-line"), [0.0, 0.0, 10.0]);
+}
+
+#[test]
 fn zero_width_shaping_controls_do_not_change_inline_advance() {
     let mut metrics = FontMetrics::from_font_size(16.0);
     metrics.letter_spacing = 2.0;
