@@ -47,7 +47,10 @@ jobs:
     needs: prepare
     name: Gate 5 (${{ matrix.target }}, ${{ matrix.kind }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # The macOS full suite now approaches one hour even when every test passes.
+    # Keep the per-evaluation 5s sandbox limit unchanged while allowing report
+    # collection and the explicitly serialized timeout-sensitive tests to finish.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

@@ -32,8 +32,32 @@ ENGINE_NOTICES = {
     "boa-LICENSE-UNLICENSE": Path("engine/boa/LICENSE-UNLICENSE"),
     "boa-origin.json": Path("engine/boa-origin.json"),
 }
-SUITE_COMMAND = ["cargo", "test", "--locked", "--features", "baseline-jit,jit-differential",
-                 "--", "--include-ignored", "--nocapture"]
+SUITE_BASE_COMMAND = ["cargo", "test", "--locked", "--features",
+                      "baseline-jit,jit-differential", "--no-fail-fast"]
+SENSITIVE_TESTS = (
+    ("p1-media", ["--test", "p1_media"],
+     "media_changes_visit_nested_shadow_frames_and_skip_detached_documents"),
+    ("node-lifetime", ["--lib"],
+     "js::node_lifetime_tests::old_document_generations_are_kept_by_references_without_an_eviction_limit"),
+    ("service-worker-scope", ["--lib"],
+     "js::service_worker_tests::service_worker_checks_response_allowed_scope_and_mime_after_fetch"),
+    ("service-worker-trusted-types", ["--lib"],
+     "js::service_worker_tests::service_worker_trusted_type_failure_precedes_fetch_and_script_failure"),
+    ("iframe-history", ["--lib"],
+     "js::tests::iframe_history_rebinds_state_entries_and_reload_uses_current_url"),
+    ("acid3", ["--test", "acid3_harness"],
+     "runner_matches_selectors4_expectation_in_both_drive_modes"),
+    ("iframe-recovery", ["--test", "iframe_policy_introspection"],
+     "caught_script_errors_do_not_poison_later_iframe_realm_initialization"),
+)
+SUITE_COMMAND = [*SUITE_BASE_COMMAND, "--", "--include-ignored", "--nocapture",
+                 *(argument for _, _, test in SENSITIVE_TESTS
+                   for argument in ("--skip", test))]
+SERIAL_SUITE_COMMANDS = [
+    (f"sensitive-{label}", [*SUITE_BASE_COMMAND, *selector, "--", test, "--exact",
+                            "--include-ignored", "--nocapture", "--test-threads=1"])
+    for label, selector, test in SENSITIVE_TESTS
+]
 
 
 def output(*args):
@@ -124,7 +148,7 @@ def run_target(kind, target, root):
     report = {"identity": identity(), "kind": kind, "steps": [], "status": "running"}
     env = dict(os.environ)
 
-    def run(label, command):
+    def run(label, command, required=True):
         start = time.monotonic()
         print(f"[{target}/{kind}] {label}: start", flush=True)
         with (folder / f"{label}.log").open("w") as log:
@@ -132,8 +156,9 @@ def run_target(kind, target, root):
         report["steps"].append({"name": label, "command": command, "exit": code,
                                 "seconds": time.monotonic() - start})
         write(folder / "result.json", report)
-        if code:
+        if code and required:
             raise RuntimeError(f"{label} failed ({code}); {folder / f'{label}.log'}")
+        return code
 
     try:
         assert report["identity"]["target"] == target, report["identity"]
@@ -150,10 +175,15 @@ def run_target(kind, target, root):
                     ("WPT_ROOT", "WPT_REQUIRED", "WPT_MANIFEST", "WPT_REPORT", "WPT_JUNIT",
                      "OMOIKANE_JIT_GATE_REPORT_DIR", "OMOIKANE_WEB_API_REPORT", "RUST_TEST_THREADS", "CI")})
             run("fetch-wpt", ["bash", "scripts/fetch-wpt.sh"])
-            run("full-suite", SUITE_COMMAND)
+            suite_steps = [("full-suite", SUITE_COMMAND), *SERIAL_SUITE_COMMANDS]
+            failed_steps = [label for label, command in suite_steps
+                            if run(label, command, required=False)]
             report["test_results"] = re.findall(
                 r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored",
-                (folder / "full-suite.log").read_text(errors="replace"))
+                "\n".join((folder / f"{label}.log").read_text(errors="replace")
+                          for label, _ in suite_steps))
+            if failed_steps:
+                raise RuntimeError(f"suite steps failed: {', '.join(failed_steps)}")
             assert report["test_results"] and sum(int(row[0]) for row in report["test_results"]) > 0
             assert all(f == i == "0" for _, f, i in report["test_results"])
             shutil.copyfile(".artifacts/jit-native/native-report.json", folder / "native.json")
@@ -233,7 +263,8 @@ def aggregate(root, jobs_result):
             and r["identity"].get("target") == target and not r["identity"].get("source_dirty", True)
             and [s.get("name") for s in r.get("steps", [])] == steps
             and all(s.get("exit") == 0 for s in r["steps"])
-            for r, steps in ((suite, ["fetch-wpt", "full-suite"]),
+            for r, steps in ((suite, ["fetch-wpt", "full-suite",
+                                      *(label for label, _ in SERIAL_SUITE_COMMANDS)]),
                              (package, ["default-library", "jit-probe-build", "ffi-smoke", "jit-smoke"])))
         acid = read(base / "suite/acid3.json")
         wpt = read(base / "suite/wpt.json")
@@ -241,10 +272,12 @@ def aggregate(root, jobs_result):
         ffi = read(base / "package/ffi.json")
         probe = read(base / "package/probe/probe.json")
         native = read(base / "suite/native.json")
-        checks[target + ":full-suite"] = isinstance(suite, dict) and bool(suite.get("test_results")) and (
-            sum(int(row[0]) for row in suite["test_results"]) > 0
+        checks[target + ":full-suite"] = isinstance(suite, dict) and (
+            len(suite.get("test_results", [])) >= 1 + len(SERIAL_SUITE_COMMANDS)
+            and sum(int(row[0]) for row in suite["test_results"]) > 0
             and all(f == i == "0" for _, f, i in suite["test_results"])
-            and any(s.get("name") == "full-suite" and s.get("command") == SUITE_COMMAND for s in suite.get("steps", [])))
+            and [(s.get("name"), s.get("command")) for s in suite.get("steps", [])[1:]]
+            == [("full-suite", SUITE_COMMAND), *SERIAL_SUITE_COMMANDS])
         checks[target + ":native-contracts"] = isinstance(native, dict) and (
             native.get("status") == "passed" and native.get("jit_policy") == "execution-confirmed"
             and native.get("architecture") == target.split("-")[0]

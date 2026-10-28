@@ -6,6 +6,7 @@ import io
 from pathlib import Path
 import tempfile
 import tarfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -45,9 +46,13 @@ class GateTests(unittest.TestCase):
         for target, (library, archive) in gate.TARGETS.items():
             identity = dict(self.identity, target=target)
             self.save(f"{target}/suite/result.json", {
-                "identity": identity, "status": "passed", "test_results": [["100", "0", "0"]],
+                "identity": identity, "status": "passed",
+                "test_results": [["100", "0", "0"],
+                                 *[["1", "0", "0"] for _ in gate.SERIAL_SUITE_COMMANDS]],
                 "steps": [{"name": "fetch-wpt", "exit": 0},
-                          {"name": "full-suite", "exit": 0, "command": gate.SUITE_COMMAND}]})
+                          {"name": "full-suite", "exit": 0, "command": gate.SUITE_COMMAND},
+                          *[{"name": name, "exit": 0, "command": command}
+                            for name, command in gate.SERIAL_SUITE_COMMANDS]]})
             manifest = {"identity": identity, "default_library_features": [],
                         "diagnostic_features": ["baseline-jit"], "files": {
                             name: {"sha256": "c" * 64, "bytes": 10}
@@ -85,6 +90,36 @@ class GateTests(unittest.TestCase):
     def test_full_suite_uses_the_test_harness_default_parallelism(self):
         self.assertNotIn("--test-threads=1", gate.SUITE_COMMAND)
         self.assertIn("--include-ignored", gate.SUITE_COMMAND)
+        self.assertIn("--no-fail-fast", gate.SUITE_COMMAND)
+        skips = [gate.SUITE_COMMAND[index + 1] for index, argument in
+                 enumerate(gate.SUITE_COMMAND[:-1]) if argument == "--skip"]
+        self.assertEqual(skips, [test for _, _, test in gate.SENSITIVE_TESTS])
+        self.assertEqual(len(gate.SERIAL_SUITE_COMMANDS), len(gate.SENSITIVE_TESTS))
+        for (suffix, selector, test), (label, command) in zip(
+                gate.SENSITIVE_TESTS, gate.SERIAL_SUITE_COMMANDS, strict=True):
+            self.assertEqual(label, "sensitive-" + suffix)
+            self.assertIn("--no-fail-fast", command)
+            self.assertIn("--test-threads=1", command)
+            self.assertIn("--exact", command)
+            self.assertIn(test, command)
+            for argument in selector:
+                self.assertIn(argument, command)
+
+    def test_missing_or_changed_sensitive_execution_never_passes(self):
+        path = self.root / next(iter(gate.TARGETS)) / "suite/result.json"
+        original = gate.read(path)
+        for change in ("missing", "parallel", "command"):
+            with self.subTest(change=change):
+                result = copy.deepcopy(original)
+                if change == "missing":
+                    result["steps"].pop()
+                elif change == "parallel":
+                    result["steps"][-1]["command"].remove("--test-threads=1")
+                else:
+                    result["steps"][-1]["command"][-1] = "changed"
+                gate.write(path, result)
+                self.assertFalse(self.decision())
+        gate.write(path, original)
 
     def test_missing_or_changed_engine_notices_reject_the_archive(self):
         path = self.root / next(iter(gate.TARGETS)) / "package/result.json"
@@ -133,6 +168,30 @@ class GateTests(unittest.TestCase):
         result = gate.read(folder / target / "package/result.json")
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error"], "TypeError: unsupported API")
+
+    def test_parallel_failure_still_runs_every_sensitive_test(self):
+        target = next(iter(gate.TARGETS))
+        folder = self.root / "suite-failure-evidence"
+        suite_identity = dict(self.identity, target=target)
+        self.save("suite-failure-evidence/inputs/identity.json", suite_identity)
+        calls = []
+
+        def execute(command, **_kwargs):
+            calls.append(command)
+            failed = command == gate.SUITE_COMMAND or command == gate.SERIAL_SUITE_COMMANDS[-1][1]
+            return SimpleNamespace(returncode=int(failed))
+
+        with patch.object(gate, "identity", return_value=suite_identity), \
+                patch.object(gate.subprocess, "run", side_effect=execute), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertFalse(gate.run_target("suite", target, folder))
+        result = gate.read(folder / target / "suite/result.json")
+        self.assertEqual([step["name"] for step in result["steps"]],
+                         ["fetch-wpt", "full-suite",
+                          *[name for name, _ in gate.SERIAL_SUITE_COMMANDS]])
+        self.assertEqual(len(calls), 2 + len(gate.SERIAL_SUITE_COMMANDS))
+        self.assertIn("full-suite", result["error"])
+        self.assertIn(gate.SERIAL_SUITE_COMMANDS[-1][0], result["error"])
 
     def test_every_target_and_report_is_required(self):
         for target in gate.TARGETS:
