@@ -429,7 +429,7 @@ fn paint_textarea_selection(
     );
 }
 
-fn measure_textarea_text_width(
+pub(super) fn measure_textarea_text_width(
     text: &str,
     font_size: f32,
     fonts: &[FontFallbackCandidate<'_>],
@@ -472,7 +472,7 @@ fn measure_textarea_text_width(
     measure_form_control_text_width_with_candidates(text, font_size, fonts, letter_spacing)
 }
 
-fn textarea_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
+pub(super) fn textarea_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     match style.get("line-height") {
         Some(ComputedValue::Px(value)) => *value,
         Some(ComputedValue::Number(value)) => *value * font_size,
@@ -484,7 +484,7 @@ fn textarea_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     }
 }
 
-fn text_align_offset(style: &ComputedStyle, available: f32, width: f32) -> f32 {
+pub(super) fn text_align_offset(style: &ComputedStyle, available: f32, width: f32) -> f32 {
     let direction_rtl = matches!(
         style.get("direction"),
         Some(ComputedValue::Keyword(direction)) if direction.eq_ignore_ascii_case("rtl")

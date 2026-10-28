@@ -28,6 +28,16 @@ Geometry の辞書は規定の順にメンバーを読み、各メンバーを�
 
 ## 固定 WPT と参考ブラウザ
 
+### CaretPosition と Range の矩形
+
+`Document.caretPositionFromPoint(x, y, {shadowRoots})` は、現在のレイアウトと描画用の文字整形から UTF-16 の挿入境界を返す。通常テキスト、input/textarea、空の描画要素を対象にし、許可されていない author shadow tree 内の端点は host の親へ移す。空要素ではその要素の offset 0 を返し、近くの別要素のテキストへ移動しない。`CaretPosition` のノードと offset は snapshot で、`getClientRect()` は呼び出し時のレイアウトから新しい `DOMRect` を計算する。
+
+`Range.getClientRects()` は選択された要素とテキスト片の矩形を返し、`getBoundingClientRect()` はその境界を返す。折り返したテキストは行ごとに測定し、CSS transform を適用する。通常の collapsed Range と CaretPosition は同じテキスト境界の計算を使う。contenteditable/designModeのキー編集とClipboard処理はこのDocument Selectionを共有する。
+
+回帰テストは `tests/caret_position.rs`、固定 WPT は `tests/wpt/caret-position.json` と `tests/wpt/range-geometry.json`。revision は `tests/wpt/revision.txt` を参照する。
+
+### DOM・Selection の初期検証記録
+
 WPT revision は `dc97e7bed3096ac9e0e591ab5fa22e7fb8844ead`。DOM・Geometry 20 ファイルと Selection 6 ファイルを対象にする。固定 revision に `dom/interfaces.html` はなく、`dom/interface-objects.html` を実行する。
 
 Selection の tentative テストには、shadow tree 内の通常 Range や公開 anchor を返す旧挙動への期待がある。同じ revision の range-update の最初のサブテストは逆に `getRangeAt()` の例外を期待しており、すべてをそのまま満たす公開境界にはならない。Firefox 157.0.1 は collapsed の旧期待には成功するが、range-update の例外期待には失敗する。ブラウザとの一致のみを仕様適合の証明には使わない。

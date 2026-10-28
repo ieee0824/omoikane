@@ -58,6 +58,8 @@ mod async_realm;
 mod broadcast_channel;
 mod cache_storage;
 mod child_document;
+mod clipboard_store;
+use clipboard_store::{HostClipboard, WireRepresentation};
 #[cfg(test)]
 mod child_document_tests;
 mod console_trace;
@@ -388,7 +390,7 @@ thread_local! {
 }
 
 /// Host clipboard storage shared by all page runtimes in this process.
-/// `HostState` and Boa values remain thread-affine, but the text snapshot is
+/// `HostState` and Boa values remain thread-affine, but owned representations are
 /// intentionally synchronized so runtimes hosted on different threads still
 /// observe the same clipboard.
 static HOST_CLIPBOARD: OnceLock<HostClipboard> = OnceLock::new();
@@ -625,6 +627,8 @@ const DOM_BOOTSTRAP: &str = concat!(
     include_str!("dom_bootstrap.js"),
     "\n",
     include_str!("event_interfaces.js"),
+    "\n",
+    include_str!("clipboard_items.js"),
     "\n",
     include_str!("security_reporting.js"),
     "\n",
@@ -2730,25 +2734,6 @@ unsafe impl Trace for HostState {
     }
 
     fn run_finalizer(&self) {}
-}
-
-#[derive(Clone, Debug, Default)]
-struct HostClipboard(Arc<Mutex<String>>);
-
-impl HostClipboard {
-    fn read_text(&self) -> String {
-        match self.0.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
-    }
-
-    fn write_text(&self, text: String) {
-        match self.0.lock() {
-            Ok(mut guard) => *guard = text,
-            Err(poisoned) => *poisoned.into_inner() = text,
-        }
-    }
 }
 
 fn host_clipboard() -> HostClipboard {
@@ -10990,7 +10975,20 @@ impl JsRuntime {
         generation: u64,
         error: PageTaskError,
     ) -> CompletedPageTask {
-        let _ = self.eval("__omoikane_set_current_script(null)");
+        let clear_current_script = self.with_active_host(|context| {
+            let document = context
+                .global_object()
+                .get(js_string!("document"), context)?
+                .to_object(context)?;
+            document.set(
+                js_string!("__currentScript"),
+                JsValue::null(),
+                true,
+                context,
+            )?;
+            Ok::<_, JsError>(())
+        });
+        self.record_error_from("current script cleanup", clear_current_script);
         self.host_state.borrow_mut().write_insertion_ref = None;
         self.host_state.borrow_mut().pending_javascript_dialog = None;
         let cleanup_result = self.clear_posted_message_values();
@@ -16330,6 +16328,7 @@ fn register_host_bindings(
     font_loading::register(context, host_state, &mut bindings)?;
     pointer_lock::register(context, &mut bindings)?;
     input_bridge::register(context, &mut bindings)?;
+    text_selection::register(context, &mut bindings)?;
     let automation_enabled = host_state.borrow().input_bridge.automation.enabled();
     automation::register(context, automation_enabled)?;
     media_environment::register(context, host_state, &mut bindings)?;
@@ -16500,6 +16499,26 @@ fn register_host_bindings(
             js_string!("__omoikane_clipboard_write_text"),
             1,
             NativeFunction::from_copy_closure(clipboard_write_text_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_read"),
+            0,
+            NativeFunction::from_copy_closure(clipboard_read_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_write"),
+            1,
+            NativeFunction::from_copy_closure(clipboard_write_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_event_read"),
+            0,
+            NativeFunction::from_copy_closure(clipboard_event_read_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_event_write"),
+            1,
+            NativeFunction::from_copy_closure(clipboard_event_write_native),
         ),
         (
             js_string!("__omoikane_clipboard_permission"),
@@ -17627,11 +17646,6 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(hit_test_point_native),
         ),
         (
-            js_string!("__omoikane_caret_hit_test"),
-            4,
-            NativeFunction::from_copy_closure(text_selection::caret_hit_test_native),
-        ),
-        (
             js_string!("__omoikane_element_scroll_offset"),
             1,
             NativeFunction::from_copy_closure(element_scroll_offset_native),
@@ -18413,10 +18427,39 @@ fn document_is_secure_context(state: &HostState, document_id: usize) -> bool {
             .is_some_and(is_secure_context_parsed_url)
 }
 
-fn is_secure_context_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+fn realm_document_id(context: &Context) -> Option<usize> {
+    context
+        .realm()
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .map(|document| document.0)
+}
+
+fn realm_is_secure_context(state: &HostState, document_id: Option<usize>) -> bool {
+    let Some(document_id) = document_id else {
+        return host_is_secure_context(state);
+    };
+    if let Some(entry) = state
+        .auxiliary_contexts
+        .values()
+        .find(|entry| entry.document.identity() == document_id)
+    {
+        return state
+            .secure_context_override
+            .unwrap_or_else(|| is_secure_context_url(&entry.document_url));
+    }
+    document_is_secure_context(state, document_id)
+}
+
+fn is_secure_context_native(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = realm_document_id(context);
     with_host_state(|state| {
         let state = state.borrow();
-        Ok(JsValue::from(host_is_secure_context(&state)))
+        Ok(JsValue::from(realm_is_secure_context(&state, document_id)))
     })
 }
 
@@ -18443,10 +18486,15 @@ fn cross_origin_isolated_native(
     })
 }
 
-fn clipboard_read_text_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+fn clipboard_read_text_native(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = realm_document_id(context);
     with_host_state(|state| {
         let state = state.borrow();
-        if !host_is_secure_context(&state) || !state.clipboard_permission_granted {
+        if !realm_is_secure_context(&state, document_id) || !state.clipboard_permission_granted {
             return Ok(JsValue::null());
         }
         Ok(JsValue::from(js_string!(state.clipboard.read_text())))
@@ -18463,13 +18511,91 @@ fn clipboard_write_text_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let text = string_argument(args.first(), "", context)?;
+    let document_id = realm_document_id(context);
     with_host_state(|state| {
         let state = state.borrow();
-        if !host_is_secure_context(&state) || !state.clipboard_permission_granted {
+        if !realm_is_secure_context(&state, document_id) || !state.clipboard_permission_granted {
             return Ok(JsValue::from(false));
         }
-        state.clipboard.write_text(text);
+        state
+            .clipboard
+            .write_text(text)
+            .map_err(|error| JsNativeError::range().with_message(error.to_string()))?;
         Ok(JsValue::from(true))
+    })
+}
+
+fn clipboard_read_native(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let document_id = realm_document_id(context);
+    with_host_state(|state| {
+        let state = state.borrow();
+        if !realm_is_secure_context(&state, document_id) || !state.clipboard_permission_granted {
+            return Ok(JsValue::null());
+        }
+        let encoded = serde_json::to_string(&state.clipboard.snapshot_wire()).map_err(|error| {
+            JsNativeError::error().with_message(format!("failed to encode clipboard data: {error}"))
+        })?;
+        Ok(JsValue::from(js_string!(encoded)))
+    })
+}
+
+fn clipboard_write_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let encoded = string_argument(args.first(), "[]", context)?;
+    let document_id = realm_document_id(context);
+    let representations: Vec<WireRepresentation> =
+        serde_json::from_str(&encoded).map_err(|error| {
+            JsNativeError::typ().with_message(format!("invalid clipboard data: {error}"))
+        })?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        if !realm_is_secure_context(&state, document_id) || !state.clipboard_permission_granted {
+            return Ok(JsValue::from(false));
+        }
+        state
+            .clipboard
+            .replace_wire(representations)
+            .map_err(|error| JsNativeError::range().with_message(error.to_string()))?;
+        Ok(JsValue::from(true))
+    })
+}
+
+/// Returns the browser clipboard snapshot for a trusted clipboard event.
+///
+/// Unlike the async Clipboard API this is a browser default action, so it is
+/// not gated by the page's secure-context or async-clipboard permission.
+fn clipboard_event_read_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let encoded =
+            serde_json::to_string(&state.borrow().clipboard.snapshot_wire()).map_err(|error| {
+                JsNativeError::error()
+                    .with_message(format!("failed to encode clipboard event data: {error}"))
+            })?;
+        Ok(JsValue::from(js_string!(encoded)))
+    })
+}
+
+/// Atomically commits the data selected by a trusted copy or cut default.
+fn clipboard_event_write_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let encoded = string_argument(args.first(), "[]", context)?;
+    let representations: Vec<WireRepresentation> =
+        serde_json::from_str(&encoded).map_err(|error| {
+            JsNativeError::typ().with_message(format!("invalid clipboard event data: {error}"))
+        })?;
+    with_host_state(|state| {
+        state
+            .borrow()
+            .clipboard
+            .replace_wire(representations)
+            .map_err(|error| JsNativeError::range().with_message(error.to_string()))?;
+        Ok(JsValue::undefined())
     })
 }
 
@@ -24446,9 +24572,17 @@ struct PreparedDedicatedWorker {
     url: String,
     csp_requested_url: String,
     source: Option<String>,
-    content_type: Option<String>,
-    service_worker_allowed: Option<String>,
     runtime: JsRuntime,
+}
+
+/// Owned source and creator settings, independent of the worker's JS runtime.
+struct FetchedDedicatedWorker {
+    creator: DedicatedWorkerCreator,
+    initial_url: String,
+    worker_url: String,
+    loaded: Option<worker_loading::LoadedWorkerScript>,
+    worker_isolation: IsolationPolicy,
+    is_data_worker: bool,
 }
 
 /// An owned creator snapshot; constructing a Worker never retains a host borrow.
@@ -24553,14 +24687,14 @@ fn load_dedicated_worker_for_creator(
     Ok(result.loaded)
 }
 
-/// Fetches the source and initializes the private global before author code runs.
-fn prepare_dedicated_worker(
+/// Fetches source and reports policy checks without allocating a JS runtime.
+fn fetch_dedicated_worker(
     owner_state: &Rc<RefCell<HostState>>,
     requested_url: &str,
     owner_document_id: usize,
     source: Option<&security_reporting::CspSourceLocation>,
     service_worker: bool,
-) -> JsResult<PreparedDedicatedWorker> {
+) -> JsResult<FetchedDedicatedWorker> {
     let creator = dedicated_worker_creator(&mut owner_state.borrow_mut(), Some(owner_document_id));
     let initial_url = resolve_worker_url(
         requested_url,
@@ -24616,6 +24750,29 @@ fn prepare_dedicated_worker(
             );
         }
     }
+    Ok(FetchedDedicatedWorker {
+        creator,
+        initial_url,
+        worker_url,
+        loaded: loaded.filter(|_| !inheritance.blocked),
+        worker_isolation,
+        is_data_worker,
+    })
+}
+
+/// Allocates and configures the private runtime from an owned fetch result.
+fn initialize_dedicated_worker(
+    owner_state: &Rc<RefCell<HostState>>,
+    fetched: FetchedDedicatedWorker,
+) -> JsResult<PreparedDedicatedWorker> {
+    let FetchedDedicatedWorker {
+        creator,
+        initial_url,
+        worker_url,
+        loaded,
+        worker_isolation,
+        is_data_worker,
+    } = fetched;
     // A data URL worker retains the creator's tuple origin during bootstrap;
     // its own WorkerLocation still exposes the data URL after initialization.
     let bootstrap_url = if is_data_worker
@@ -24637,7 +24794,7 @@ fn prepare_dedicated_worker(
     {
         let owner = owner_state.borrow();
         let mut state = worker_runtime.host_state.borrow_mut();
-        state.inherit_worker_cookie_session(&owner, owner_document_id);
+        state.inherit_worker_cookie_session(&owner, creator.document_id);
         state.inherit_resource_loading(&owner);
         let document_id = state.document.identity();
         state.document_origins.insert(document_id, creator.origin);
@@ -24683,9 +24840,7 @@ fn prepare_dedicated_worker(
         // private URL snapshot even when worker installation replaces globals.
         worker_runtime.eval(&format!("__omoikane_set_location({worker_url:?})"))?;
     }
-    if !inheritance.blocked
-        && let Some(loaded) = loaded.as_ref()
-    {
+    if let Some(loaded) = loaded.as_ref() {
         worker_runtime.install_worker_security_metadata(loaded, &creator.policy);
     }
     worker_runtime.eval(&format!(
@@ -24697,15 +24852,7 @@ fn prepare_dedicated_worker(
         // Boa uses the script path to resolve dynamic imports as well.
         url: worker_url,
         csp_requested_url: initial_url,
-        content_type: loaded
-            .as_ref()
-            .and_then(|script| script.content_type.clone()),
-        service_worker_allowed: loaded
-            .as_ref()
-            .and_then(|script| script.service_worker_allowed.clone()),
-        source: loaded
-            .filter(|_| !inheritance.blocked)
-            .map(|script| script.source),
+        source: loaded.map(|script| script.source),
         runtime: worker_runtime,
     })
 }
@@ -24716,21 +24863,20 @@ fn create_worker_for_owner_state(
     owner_document_id: usize,
     csp_source: Option<&security_reporting::CspSourceLocation>,
 ) -> JsResult<u64> {
-    let PreparedDedicatedWorker {
-        id: worker_id,
-        url: worker_url,
-        csp_requested_url,
-        source,
-        content_type: _,
-        service_worker_allowed: _,
-        runtime: worker_runtime,
-    } = prepare_dedicated_worker(
+    let fetched = fetch_dedicated_worker(
         &owner_state,
         requested_url,
         owner_document_id,
         csp_source,
         false,
     )?;
+    let PreparedDedicatedWorker {
+        id: worker_id,
+        url: worker_url,
+        csp_requested_url,
+        source,
+        runtime: worker_runtime,
+    } = initialize_dedicated_worker(&owner_state, fetched)?;
     let entry = Rc::new(RefCell::new(WorkerRuntime {
         runtime: worker_runtime,
         owner_state: Rc::clone(&owner_state),
@@ -28442,6 +28588,9 @@ mod timed_future_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod clipboard_context_tests;
 
 #[cfg(test)]
 mod individual_transform_tests;

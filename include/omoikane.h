@@ -128,6 +128,10 @@ char *omoikane_find_in_page(struct OmoikaneBrowser *browser, const char *action,
  * Returns the current document serialized as HTML.
  * Release a non-null result with [`omoikane_string_free`].
  *
+ * A C string cannot contain `U+0000`. When the document holds it in text,
+ * comments or attributes, this returns null without altering the content and
+ * [`omoikane_last_error`] describes the failure.
+ *
  * # Safety
  *
  * A non-null `browser` must be a live handle from [`omoikane_init`], used on

@@ -790,6 +790,21 @@
     {"path": "css/selectors/open-pseudo.html"},
     {"path": "css/selectors/invalidation/open-pseudo-class-in-has.html"},
     {"path": "css/css-view-transitions/document-active-view-transition.html"},
-    {"path": "html/dom/elements/the-innertext-and-outertext-properties/outertext-setter.html"}
+    {"path": "html/dom/elements/the-innertext-and-outertext-properties/outertext-setter.html"},
+    {"path": "css/cssom/caretPositionFromPoint.html"},
+    {"path": "css/cssom/caretPositionFromPoint-textarea.html"},
+    {"path": "css/cssom/caretPositionFromPoint-with-transformation.html"},
+    {"path": "css/cssom/caretPositionFromPoint-in-flex-container.html"},
+    {"path": "css/cssom/caretPositionFromPoint-audioVideo.html"},
+    {"path": "shadow-dom/Document-caretPositionFromPoint.tentative.html"},
+    {"path": "css/cssom-view/range-client-rects-surrogate-indexing.html"},
+    {"path": "css/cssom-view/range-bounding-client-rect-rtl-ligature-split.html"},
+    {"path": "css/cssom-view/range-bounding-client-rect-with-display-contents.html"},
+    {"path": "css/cssom-view/range-bounding-client-rect-with-nested-text.html"},
+    {"path": "css/cssom-view/range-bounding-client-rect-with-shadow-dom.html"},
+    {"path": "uievents/constructors/inputevent-constructor.html"},
+    {"path": "clipboard-apis/clipboard-events-synthetic.html"},
+    {"path": "clipboard-apis/clipboard-item.https.html"},
+    {"path": "clipboard-apis/events/copy-event.html"}
   ]
 }
