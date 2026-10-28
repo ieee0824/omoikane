@@ -740,6 +740,68 @@ fn text_mutation_requests_fonts_without_using_public_observer_methods() {
     assert_eq!(eval_json(&mut runtime, "mutationFace.status"), "loaded");
 }
 
+fn font_sync_calls(runtime: &mut JsRuntime, script: &str) -> u64 {
+    runtime
+        .eval(
+            "globalThis.__originalFontSync = globalThis.__omoikane_flush_stylesheets; \
+             globalThis.__fontSyncCalls = 0; \
+             globalThis.__omoikane_flush_stylesheets = () => { \
+                 globalThis.__fontSyncCalls++; \
+                 return globalThis.__originalFontSync(); \
+             };",
+        )
+        .unwrap();
+    runtime.eval(script).unwrap();
+    runtime.run_until_idle().unwrap();
+    let value = eval_json(runtime, "__fontSyncCalls");
+    runtime
+        .eval(
+            "globalThis.__omoikane_flush_stylesheets = globalThis.__originalFontSync; \
+             delete globalThis.__originalFontSync;",
+        )
+        .unwrap();
+    value.as_u64().unwrap()
+}
+
+#[test]
+fn unrelated_child_list_and_text_do_not_request_stylesheet_sync() {
+    let mut runtime = runtime();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        font_sync_calls(
+            &mut runtime,
+            "document.getElementById('sample').appendChild(document.createElement('div'));"
+        ),
+        0
+    );
+    assert_eq!(
+        font_sync_calls(
+            &mut runtime,
+            "document.getElementById('sample').textContent='after';"
+        ),
+        0
+    );
+}
+
+#[test]
+fn direct_and_nested_style_insertion_request_stylesheet_sync() {
+    let mut runtime = runtime();
+    assert!(
+        font_sync_calls(
+            &mut runtime,
+            "document.head.appendChild(document.createElement('style'));"
+        ) > 0
+    );
+    assert!(
+        font_sync_calls(
+            &mut runtime,
+            "globalThis.wrapper=document.createElement('div');\
+             wrapper.innerHTML='<style>@font-face{font-family:Nested;src:url(https://example.test/nested.ttf)}</style>';\
+             document.head.appendChild(wrapper);"
+        ) > 0
+    );
+}
+
 #[test]
 fn unrelated_child_list_keeps_css_faces_but_still_syncs_style_child_lists() {
     let mut runtime = runtime();
