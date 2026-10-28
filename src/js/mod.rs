@@ -58,6 +58,8 @@ mod async_realm;
 mod broadcast_channel;
 mod cache_storage;
 mod child_document;
+mod clipboard_store;
+use clipboard_store::{HostClipboard, WireRepresentation};
 #[cfg(test)]
 mod child_document_tests;
 mod console_trace;
@@ -388,7 +390,7 @@ thread_local! {
 }
 
 /// Host clipboard storage shared by all page runtimes in this process.
-/// `HostState` and Boa values remain thread-affine, but the text snapshot is
+/// `HostState` and Boa values remain thread-affine, but owned representations are
 /// intentionally synchronized so runtimes hosted on different threads still
 /// observe the same clipboard.
 static HOST_CLIPBOARD: OnceLock<HostClipboard> = OnceLock::new();
@@ -625,6 +627,8 @@ const DOM_BOOTSTRAP: &str = concat!(
     include_str!("dom_bootstrap.js"),
     "\n",
     include_str!("event_interfaces.js"),
+    "\n",
+    include_str!("clipboard_items.js"),
     "\n",
     include_str!("security_reporting.js"),
     "\n",
@@ -2730,25 +2734,6 @@ unsafe impl Trace for HostState {
     }
 
     fn run_finalizer(&self) {}
-}
-
-#[derive(Clone, Debug, Default)]
-struct HostClipboard(Arc<Mutex<String>>);
-
-impl HostClipboard {
-    fn read_text(&self) -> String {
-        match self.0.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
-    }
-
-    fn write_text(&self, text: String) {
-        match self.0.lock() {
-            Ok(mut guard) => *guard = text,
-            Err(poisoned) => *poisoned.into_inner() = text,
-        }
-    }
 }
 
 fn host_clipboard() -> HostClipboard {
@@ -10990,7 +10975,20 @@ impl JsRuntime {
         generation: u64,
         error: PageTaskError,
     ) -> CompletedPageTask {
-        let _ = self.eval("__omoikane_set_current_script(null)");
+        let clear_current_script = self.with_active_host(|context| {
+            let document = context
+                .global_object()
+                .get(js_string!("document"), context)?
+                .to_object(context)?;
+            document.set(
+                js_string!("__currentScript"),
+                JsValue::null(),
+                true,
+                context,
+            )?;
+            Ok::<_, JsError>(())
+        });
+        self.record_error_from("current script cleanup", clear_current_script);
         self.host_state.borrow_mut().write_insertion_ref = None;
         self.host_state.borrow_mut().pending_javascript_dialog = None;
         let cleanup_result = self.clear_posted_message_values();
@@ -16503,6 +16501,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(clipboard_write_text_native),
         ),
         (
+            js_string!("__omoikane_clipboard_read"),
+            0,
+            NativeFunction::from_copy_closure(clipboard_read_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_write"),
+            1,
+            NativeFunction::from_copy_closure(clipboard_write_native),
+        ),
+        (
             js_string!("__omoikane_clipboard_permission"),
             0,
             NativeFunction::from_copy_closure(clipboard_permission_native),
@@ -18409,10 +18417,39 @@ fn document_is_secure_context(state: &HostState, document_id: usize) -> bool {
             .is_some_and(is_secure_context_parsed_url)
 }
 
-fn is_secure_context_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+fn realm_document_id(context: &Context) -> Option<usize> {
+    context
+        .realm()
+        .host_defined()
+        .get::<ModuleDocumentId>()
+        .map(|document| document.0)
+}
+
+fn realm_is_secure_context(state: &HostState, document_id: Option<usize>) -> bool {
+    let Some(document_id) = document_id else {
+        return host_is_secure_context(state);
+    };
+    if let Some(entry) = state
+        .auxiliary_contexts
+        .values()
+        .find(|entry| entry.document.identity() == document_id)
+    {
+        return state
+            .secure_context_override
+            .unwrap_or_else(|| is_secure_context_url(&entry.document_url));
+    }
+    document_is_secure_context(state, document_id)
+}
+
+fn is_secure_context_native(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = realm_document_id(context);
     with_host_state(|state| {
         let state = state.borrow();
-        Ok(JsValue::from(host_is_secure_context(&state)))
+        Ok(JsValue::from(realm_is_secure_context(&state, document_id)))
     })
 }
 
@@ -18439,10 +18476,15 @@ fn cross_origin_isolated_native(
     })
 }
 
-fn clipboard_read_text_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+fn clipboard_read_text_native(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = realm_document_id(context);
     with_host_state(|state| {
         let state = state.borrow();
-        if !host_is_secure_context(&state) || !state.clipboard_permission_granted {
+        if !realm_is_secure_context(&state, document_id) || !state.clipboard_permission_granted {
             return Ok(JsValue::null());
         }
         Ok(JsValue::from(js_string!(state.clipboard.read_text())))
@@ -18459,12 +18501,54 @@ fn clipboard_write_text_native(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let text = string_argument(args.first(), "", context)?;
+    let document_id = realm_document_id(context);
     with_host_state(|state| {
         let state = state.borrow();
-        if !host_is_secure_context(&state) || !state.clipboard_permission_granted {
+        if !realm_is_secure_context(&state, document_id) || !state.clipboard_permission_granted {
             return Ok(JsValue::from(false));
         }
-        state.clipboard.write_text(text);
+        state
+            .clipboard
+            .write_text(text)
+            .map_err(|error| JsNativeError::range().with_message(error.to_string()))?;
+        Ok(JsValue::from(true))
+    })
+}
+
+fn clipboard_read_native(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let document_id = realm_document_id(context);
+    with_host_state(|state| {
+        let state = state.borrow();
+        if !realm_is_secure_context(&state, document_id) || !state.clipboard_permission_granted {
+            return Ok(JsValue::null());
+        }
+        let encoded = serde_json::to_string(&state.clipboard.snapshot_wire()).map_err(|error| {
+            JsNativeError::error().with_message(format!("failed to encode clipboard data: {error}"))
+        })?;
+        Ok(JsValue::from(js_string!(encoded)))
+    })
+}
+
+fn clipboard_write_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let encoded = string_argument(args.first(), "[]", context)?;
+    let document_id = realm_document_id(context);
+    let representations: Vec<WireRepresentation> =
+        serde_json::from_str(&encoded).map_err(|error| {
+            JsNativeError::typ().with_message(format!("invalid clipboard data: {error}"))
+        })?;
+    with_host_state(|state| {
+        let state = state.borrow();
+        if !realm_is_secure_context(&state, document_id) || !state.clipboard_permission_granted {
+            return Ok(JsValue::from(false));
+        }
+        state
+            .clipboard
+            .replace_wire(representations)
+            .map_err(|error| JsNativeError::range().with_message(error.to_string()))?;
         Ok(JsValue::from(true))
     })
 }
@@ -28458,6 +28542,9 @@ mod timed_future_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod clipboard_context_tests;
 
 #[cfg(test)]
 mod individual_transform_tests;

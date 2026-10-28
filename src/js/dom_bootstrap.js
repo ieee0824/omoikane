@@ -141,6 +141,8 @@ export const __omoikane_service_worker_lifecycle = {};
   // and permission checks are applied consistently.
   const nativeClipboardReadText = globalThis.__omoikane_clipboard_read_text;
   const nativeClipboardWriteText = globalThis.__omoikane_clipboard_write_text;
+  const nativeClipboardRead = globalThis.__omoikane_clipboard_read;
+  const nativeClipboardWrite = globalThis.__omoikane_clipboard_write;
   const nativeClipboardPermission = globalThis.__omoikane_clipboard_permission;
   const nativeGeolocationPermission = globalThis.__omoikane_geolocation_permission;
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
@@ -394,6 +396,8 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeDocumentBaseURL = globalThis.__omoikane_document_base_url;
   delete globalThis.__omoikane_clipboard_read_text;
   delete globalThis.__omoikane_clipboard_write_text;
+  delete globalThis.__omoikane_clipboard_read;
+  delete globalThis.__omoikane_clipboard_write;
   delete globalThis.__omoikane_clipboard_permission;
   delete globalThis.__omoikane_geolocation_permission;
   delete globalThis.__omoikane_is_secure_context;
@@ -21212,38 +21216,6 @@ export const __omoikane_service_worker_lifecycle = {};
     *[Symbol.iterator]() {}
     get [Symbol.toStringTag]() { return "MimeTypeArray"; }
   }
-  const clipboardConstructionToken = {};
-  class Clipboard {
-    constructor(token) {
-      if (token !== clipboardConstructionToken) throw new TypeError("Illegal constructor");
-    }
-    readText() {
-      return Promise.resolve().then(() => {
-        if (!nativeIsSecureContext()) {
-          throw new DOMException("Clipboard access requires a secure context.", "NotAllowedError");
-        }
-        const text = nativeClipboardReadText();
-        if (text === null) {
-          throw new DOMException("Clipboard permission was denied.", "NotAllowedError");
-        }
-        return String(text);
-      });
-    }
-    writeText(value) {
-      if (arguments.length < 1) {
-        throw new TypeError("Clipboard.writeText requires one argument");
-      }
-      return Promise.resolve().then(() => {
-        if (!nativeIsSecureContext()) {
-          throw new DOMException("Clipboard access requires a secure context.", "NotAllowedError");
-        }
-        if (!nativeClipboardWriteText(String(value))) {
-          throw new DOMException("Clipboard permission was denied.", "NotAllowedError");
-        }
-      });
-    }
-    get [Symbol.toStringTag]() { return "Clipboard"; }
-  }
   const geolocationConstructionToken = {};
   const nativeGeolocationRequest = globalThis.__omoikane_geolocation_request;
   const nativeGeolocationClearWatch = globalThis.__omoikane_geolocation_clear_watch;
@@ -22533,7 +22505,6 @@ export const __omoikane_service_worker_lifecycle = {};
       this.onLine = true;
       this.plugins = new PluginArray(navigatorConstructionToken);
       this.mimeTypes = new MimeTypeArray(navigatorConstructionToken);
-      this.clipboard = new Clipboard(clipboardConstructionToken);
       this.geolocation = new Geolocation(geolocationConstructionToken);
       this.serviceWorker = new ServiceWorkerContainer(serviceWorkerContainerConstructionToken);
       // The Permissions object is installed after EventTarget is defined
@@ -22555,7 +22526,6 @@ export const __omoikane_service_worker_lifecycle = {};
   globalThis.PluginArray = PluginArray;
   globalThis.MimeTypeArray = MimeTypeArray;
   globalThis.Navigator = Navigator;
-  globalThis.Clipboard = Clipboard;
   globalThis.Geolocation = Geolocation;
   globalThis.GeolocationCoordinates = GeolocationCoordinates;
   globalThis.GeolocationPosition = GeolocationPosition;
@@ -25060,6 +25030,132 @@ export const __omoikane_service_worker_lifecycle = {};
       }
       return !event.defaultPrevented;
     }
+  }
+
+  const clipboardConstructionToken = {};
+  const clipboardStates = browsingInput.clipboardStates || (browsingInput.clipboardStates = new WeakMap());
+  const navigatorClipboards = browsingInput.navigatorClipboards || (browsingInput.navigatorClipboards = new WeakMap());
+  const clipboardResolve = Promise.resolve.bind(Promise), clipboardReject = Promise.reject.bind(Promise);
+  const clipboardAll = Promise.all.bind(Promise);
+  const clipboardThen = Function.prototype.call.bind(Promise.prototype.then);
+  const clipboardString = String, ClipboardDOMException = DOMException;
+  const clipboardParse = JSON.parse.bind(JSON), clipboardSerialize = JSON.stringify.bind(JSON);
+  const clipboardCreate = Object.create;
+  const ClipboardUint8Array = Uint8Array;
+  let clipboardItemConstructor = null;
+  let clipboardItemBrand = () => false;
+  let clipboardItemTypes = null;
+  let clipboardItemGetType = null;
+  function clipboardState(receiver) {
+    const state = safeWeakMapGet(clipboardStates, receiver);
+    if (!state) throw new IntrinsicTypeError("Illegal invocation");
+    return state;
+  }
+  function clipboardDenied(message) {
+    return new ClipboardDOMException(message, "NotAllowedError");
+  }
+  class Clipboard extends EventTarget {
+    constructor(token) {
+      super();
+      if (token !== clipboardConstructionToken) throw new IntrinsicTypeError("Illegal constructor");
+      // Calls borrowed across same-origin realms keep the receiver's owning
+      // Window bindings, including its native permission/security checks.
+      safeWeakMapSet(clipboardStates, this, {
+        secure: () => nativeIsSecureContext(),
+        readText: () => nativeClipboardReadText(),
+        writeText: text => nativeClipboardWriteText(text),
+        read: () => nativeClipboardRead(),
+        write: value => nativeClipboardWrite(value),
+      });
+    }
+    read() {
+      try {
+        const state = clipboardState(this);
+        return clipboardThen(clipboardResolve(), () => {
+          if (!state.secure()) throw clipboardDenied("Clipboard access requires a secure context.");
+          const encoded = state.read();
+          if (encoded === null) throw clipboardDenied("Clipboard permission was denied.");
+          const representations = clipboardParse(encoded);
+          if (!representations.length) return [];
+          const items = clipboardCreate(null);
+          for (const representation of representations) {
+            const type = representation.format.startsWith("web ")
+              ? representation.format.slice(4) : representation.format;
+            items[representation.format] = new Blob([new ClipboardUint8Array(representation.bytes)], {type});
+          }
+          return [new clipboardItemConstructor(items)];
+        });
+      } catch (error) { return clipboardReject(error); }
+    }
+    write(items) {
+      try {
+        const state = clipboardState(this);
+        if (!arguments.length) throw new IntrinsicTypeError("Clipboard.write requires one argument");
+        const sequence = [];
+        for (const item of items) sequence[sequence.length] = item;
+        if (sequence.length !== 1) {
+          return clipboardReject(new ClipboardDOMException("Clipboard.write requires exactly one item.", "NotAllowedError"));
+        }
+        const item = sequence[0];
+        if (!clipboardItemBrand(item)) throw new IntrinsicTypeError("Clipboard.write requires a ClipboardItem");
+        const pending = [];
+        for (const type of clipboardItemTypes(item)) {
+          pending[pending.length] = clipboardThen(clipboardItemGetType(item, type), blob => {
+            if (!safeWeakSetHas(blobInstances, blob)) throw new IntrinsicTypeError("Clipboard representation must be a Blob");
+            const bytes = [];
+            for (const byte of blob.__bytes) bytes[bytes.length] = byte;
+            return {format:type, bytes};
+          });
+        }
+        return clipboardThen(clipboardAll(pending), representations => {
+          if (!state.secure()) throw clipboardDenied("Clipboard access requires a secure context.");
+          if (!state.write(clipboardSerialize(representations))) {
+            throw clipboardDenied("Clipboard permission was denied.");
+          }
+        });
+      } catch (error) { return clipboardReject(error); }
+    }
+    readText() {
+      try {
+        const state = clipboardState(this);
+        return clipboardThen(clipboardResolve(), () => {
+          if (!state.secure()) throw clipboardDenied("Clipboard access requires a secure context.");
+          const text = state.readText();
+          if (text === null) throw clipboardDenied("Clipboard permission was denied.");
+          return text;
+        });
+      } catch (error) { return clipboardReject(error); }
+    }
+    writeText(value) {
+      try {
+        const state = clipboardState(this);
+        if (!arguments.length) throw new IntrinsicTypeError("Clipboard.writeText requires one argument");
+        if (typeof value === "symbol") throw new IntrinsicTypeError("Cannot convert a Symbol to a string");
+        const text = clipboardString(value);
+        return clipboardThen(clipboardResolve(), () => {
+          if (!state.secure()) throw clipboardDenied("Clipboard access requires a secure context.");
+          if (!state.writeText(text)) throw clipboardDenied("Clipboard permission was denied.");
+        });
+      } catch (error) { return clipboardReject(error); }
+    }
+  }
+  Object.defineProperty(Clipboard, "length", {value:0});
+  Object.defineProperty(Clipboard.prototype, Symbol.toStringTag, {value:"Clipboard", configurable:true});
+  for (const name of ["read", "readText", "write", "writeText"]) {
+    Object.defineProperty(Clipboard.prototype, name, {...Object.getOwnPropertyDescriptor(Clipboard.prototype, name), enumerable:true});
+  }
+  safeWeakMapSet(navigatorClipboards, globalThis.navigator, new Clipboard(clipboardConstructionToken));
+  if (nativeIsSecureContext()) {
+    Object.defineProperty(globalThis, "Clipboard", {value:Clipboard, writable:true, configurable:true});
+    Object.defineProperty(Navigator.prototype, "clipboard", {
+      get() {
+        if (!safeWeakMapHas(navigatorClipboards, this)) throw new IntrinsicTypeError("Illegal invocation");
+        return safeWeakMapGet(navigatorClipboards, this);
+      },
+      enumerable:true, configurable:true,
+    });
+    Object.defineProperty(Object.getOwnPropertyDescriptor(Navigator.prototype, "clipboard").get,
+      "name", {value:"get clipboard", configurable:true});
   }
 
   const pictureInPictureWindowConstructionToken = {};
@@ -28951,8 +29047,8 @@ export const __omoikane_service_worker_lifecycle = {};
       "GainNode", "OscillatorNode",
       "Geolocation", "GeolocationCoordinates", "GeolocationPosition",
       "GeolocationPositionError",
-      "Notification",
-      "PopStateEvent", "HashChangeEvent", "PageTransitionEvent", "BeforeUnloadEvent", "SubmitEvent", "FormDataEvent",
+      "Notification", "ClipboardItem",
+      "PopStateEvent", "HashChangeEvent", "PageTransitionEvent", "BeforeUnloadEvent", "SubmitEvent", "FormDataEvent", "ClipboardEvent",
       "Touch", "TouchList", "TouchEvent", "ContentVisibilityAutoStateChangeEvent", "DeviceOrientationEvent", "DeviceMotionEvent",
       "DeviceMotionEventAcceleration", "DeviceMotionEventRotationRate", "HTMLFrameSetElement", "event",
     ]) {
@@ -28971,6 +29067,7 @@ export const __omoikane_service_worker_lifecycle = {};
     // worker navigator object, but do not expose a page clipboard handle from
     // a DedicatedWorkerGlobalScope.
     try { if (globalThis.navigator) delete globalThis.navigator.clipboard; } catch (_) {}
+    try { delete Navigator.prototype.clipboard; } catch (_) {}
     try { if (globalThis.navigator) delete globalThis.navigator.geolocation; } catch (_) {}
     try { if (globalThis.StorageManager) delete globalThis.StorageManager.prototype.persist; } catch (_) {}
     try { delete globalThis.Clipboard; } catch (_) { globalThis.Clipboard = undefined; }
@@ -29702,6 +29799,7 @@ export const __omoikane_service_worker_lifecycle = {};
     return offset < 0 ? Math.max(size + offset, 0) : Math.min(offset, size);
   }
 
+  const blobInstances = browsingInput.blobInstances || (browsingInput.blobInstances = new WeakSet());
   class Blob {
     constructor(parts = undefined, options = undefined) {
       const bytes = blobPartsToBytes(blobPartSequence(parts));
@@ -29711,6 +29809,7 @@ export const __omoikane_service_worker_lifecycle = {};
       Object.defineProperty(this, "__type", {
         value: normalizeBlobType((options ?? {}).type ?? ""),
       });
+      safeWeakSetAdd(blobInstances, this);
     }
     get size() { return this.__bytes.length; }
     get type() { return this.__type; }
@@ -29859,8 +29958,11 @@ export const __omoikane_service_worker_lifecycle = {};
     get [Symbol.toStringTag]() { return "DataTransferItemList"; }
   }
 
+  const dataTransferInstances = browsingInput.dataTransferInstances || (browsingInput.dataTransferInstances = new WeakSet());
+  const clipboardEventStates = browsingInput.clipboardEventStates || (browsingInput.clipboardEventStates = new WeakMap());
   class DataTransfer {
     constructor() {
+      safeWeakSetAdd(dataTransferInstances, this);
       this.dropEffect = "none";
       this.effectAllowed = "none";
       this.__files = new FileList();
@@ -32144,6 +32246,8 @@ export const __omoikane_service_worker_lifecycle = {};
       isFormData: value => safeWeakMapHas(formDataObjects, value),
       isEventTarget: value => nativePlatformInterfaceBrand(value, "EventTarget"),
       isPromise: nativeIsPromise,
+      isDataTransfer: value => safeWeakSetHas(dataTransferInstances, value),
+      clipboardEventStates,
     });
     nativeRegisterPlatformEventFactory(makePlatformWindowEvent, (value, name) => {
       if (name === "EventTarget") {
@@ -32156,6 +32260,20 @@ export const __omoikane_service_worker_lifecycle = {};
       }
       return false;
     });
+  };
+  globalThis.__omoikane_install_clipboard_items = factory => {
+    const states = browsingInput.clipboardItemStates || (browsingInput.clipboardItemStates = new WeakMap());
+    const installed = factory({
+      secure: nativeIsSecureContext(), states, Blob,
+      isBlob: value => safeWeakSetHas(blobInstances, value),
+    });
+    if (installed) {
+      clipboardItemConstructor = installed.constructor;
+      clipboardItemBrand = installed.isItem;
+      clipboardItemTypes = installed.types;
+      clipboardItemGetType = installed.getType;
+      Object.defineProperty(globalThis, "ClipboardItem", {value:installed.constructor, writable:true, configurable:true});
+    }
   };
   globalThis.__omoikane_install_security_reporting = factory => {
     Object.assign(platformEventInterfaces, factory({ queueTask: __omoikane_queue_networking_task }));

@@ -397,6 +397,7 @@ collect_pattern \
 collect_pattern "/interfaces/" "/html/dom/" "/mathml/idlharness.window.js" "/html/semantics/forms/the-meter-element/meter.html" "/html/semantics/forms/the-meter-element/meter-leading-plus-sign.html" "/html/semantics/forms/the-progress-element/progress.html" "/html/semantics/forms/the-progress-element/progress-2.html" "/html/semantics/forms/the-progress-element/progress-max-setting.html" "/html/semantics/forms/the-progress-element/progress.window.js" "/html/semantics/forms/the-progress-element/serialization-regression-test.html" "/html/semantics/forms/form-submission-0/SubmitEvent.window.js" "/html/semantics/forms/form-submission-0/FormDataEvent.window.js" "/touch-events/" "/dom/events/Body-FrameSet-Event-Handlers.html" "/dom/events/event-global-set-before-handleEvent-lookup.window.js" "/dom/events/window-event-restored-after-throwing-onerror.html" "/dom/events/event-handler-attribute-replace-preserves-passive.html" "/dom/events/Event-dispatch-handlers-changed.html" "/common/utils.js"
 collect_pattern "/inert/"
 collect_pattern "/uievents/constructors/inputevent-constructor.html"
+collect_pattern "/clipboard-apis/clipboard-events-synthetic.html" "/clipboard-apis/clipboard-item.https.html"
 collect_pattern "/common/subset-tests-by-key.js" "/common/get-host-info.sub.js"
 collect_pattern "/common/redirect.py"
 collect_pattern "/common/dispatcher/" "/html/cross-origin-opener-policy/"
