@@ -1060,7 +1060,7 @@ export const __omoikane_service_worker_lifecycle = {};
     "content-visibility", "contain-intrinsic-size", "contain-intrinsic-width",
     "contain-intrinsic-height", "contain-intrinsic-inline-size",
     "contain-intrinsic-block-size",
-    "counter-reset", "counter-increment",
+    "counter-reset", "counter-increment", "counter-set", "quotes",
     "scroll-behavior", "overscroll-behavior", "overscroll-behavior-x",
     "overscroll-behavior-y", "overscroll-behavior-inline", "overscroll-behavior-block",
     "scroll-snap-type", "scroll-snap-align",

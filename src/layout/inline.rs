@@ -1755,6 +1755,16 @@ fn generated_content_value(
     {
         return Some(GeneratedContent::Text(text));
     }
+    if components.is_none()
+        && matches!(value, ComputedValue::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "open-quote" | "close-quote" | "no-open-quote" | "no-close-quote"))
+    {
+        let text = resolver
+            .quote_values(node, pseudo)
+            .and_then(|values| values.first())
+            .cloned()
+            .unwrap_or_default();
+        return Some(GeneratedContent::Text(text));
+    }
     match value {
         ComputedValue::String(text) => Some(GeneratedContent::Text(text.clone())),
         ComputedValue::Keyword(keyword)
@@ -1778,6 +1788,10 @@ fn generated_counter_text(
         value => std::slice::from_ref(value),
     };
     let mut output = String::new();
+    let mut quote_values = resolver
+        .quote_values(node, pseudo)
+        .unwrap_or_default()
+        .iter();
     for value in values {
         match value {
             Value::String(text) => output.push_str(text),
@@ -1828,6 +1842,19 @@ fn generated_counter_text(
                     .join(separator);
                 output.push_str(&formatted);
             }
+            Value::Keyword(keyword)
+                if matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "open-quote" | "close-quote"
+                ) =>
+            {
+                output.push_str(quote_values.next().map(String::as_str).unwrap_or(""));
+            }
+            Value::Keyword(keyword)
+                if matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "no-open-quote" | "no-close-quote"
+                ) => {}
             _ => return None,
         }
     }

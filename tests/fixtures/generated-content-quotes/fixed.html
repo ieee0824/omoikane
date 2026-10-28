@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Generated quotes and counter-set comparison fixture</title>
+<style>
+  @font-face {
+    font-family: GeneratedContentFixture;
+    src: url("../acid2/LiberationSans-Regular.ttf") format("truetype");
+  }
+  html, body {
+    margin: 0;
+    width: 620px;
+    height: 260px;
+    overflow: hidden;
+    background: #fff;
+    color: #111;
+    font: 20px/1.5 GeneratedContentFixture, sans-serif;
+  }
+  .row {
+    box-sizing: border-box;
+    height: 52px;
+    padding: 10px 14px;
+    border-bottom: 1px solid #ddd;
+    white-space: nowrap;
+  }
+  .custom { quotes: "[" "]" "{" "}"; }
+  .custom .quoted::before { content: open-quote; color: #075985; }
+  .custom .quoted::after { content: close-quote; color: #075985; }
+  .silent { quotes: "<" ">"; }
+  .silent .quoted::before { content: no-open-quote open-quote; color: #7c2d12; }
+  .silent .quoted::after { content: close-quote no-close-quote; color: #7c2d12; }
+  .counter { counter-reset: chapter 2; }
+  .counter .item { counter-set: chapter 10; counter-increment: chapter 3; }
+  .counter .item::before { content: "Chapter " counter(chapter) ": "; color: #166534; }
+  q { color: #5b21b6; }
+</style>
+<div class="row custom" id="custom" data-probe><span class="quoted">outer <span class="quoted">inner</span></span></div>
+<div class="row silent" id="silent" data-probe><span class="quoted">depth-only</span><span class="quoted"> next</span></div>
+<div class="row" id="automatic" data-probe lang="ja"><q>日本語 <q>内側</q></q></div>
+<div class="row counter" id="counter" data-probe><span class="item">set after increment</span></div>

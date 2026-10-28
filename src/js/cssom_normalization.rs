@@ -94,6 +94,8 @@ const VALIDATED_PROPERTIES: &[&str] = &[
     "widows",
     "counter-reset",
     "counter-increment",
+    "counter-set",
+    "quotes",
     "scroll-behavior",
     "overscroll-behavior",
     "overscroll-behavior-x",
@@ -103,6 +105,12 @@ const VALIDATED_PROPERTIES: &[&str] = &[
 ];
 
 pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
+    if matches!(
+        property,
+        "counter-reset" | "counter-increment" | "counter-set"
+    ) {
+        return crate::css::style::normalize_counter_specified(property, value);
+    }
     if (value
         .as_bytes()
         .windows(3)

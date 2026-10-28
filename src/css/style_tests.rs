@@ -3510,7 +3510,7 @@ fn computes_and_validates_css_counter_properties() {
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
-            "body { counter-reset: chapter section 4; counter-increment: chapter 2 section; }",
+            "body { counter-reset: chapter section 4; counter-increment: chapter 2 section; counter-set: chapter 9 marker; }",
         )
         .unwrap(),
     );
@@ -3524,14 +3524,46 @@ fn computes_and_validates_css_counter_properties() {
         style.get("counter-increment"),
         Some(&ComputedValue::Keyword("chapter 2 section 1".to_string()))
     );
+    assert_eq!(
+        style.get("counter-set"),
+        Some(&ComputedValue::Keyword("chapter 9 marker 0".to_string()))
+    );
     assert!(supports_declaration("counter-reset", "chapter 3 section"));
     assert!(supports_declaration("counter-increment", "chapter -2"));
+    assert!(supports_declaration("counter-set", "chapter -2 marker"));
     assert!(!supports_declaration("counter-reset", "chapter 1.5"));
     assert!(!supports_declaration("counter-increment", "none chapter"));
+    assert!(!supports_declaration("counter-set", "none chapter"));
     assert!(!supports_declaration(
         "counter-reset",
         "chapter 1, section 2"
     ));
+}
+
+#[test]
+fn computes_validates_and_inherits_quotes() {
+    let (_document, body, title, _html) = sample_tree();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { quotes: '[' ']' '{' '}'; }").unwrap(),
+    );
+
+    assert_eq!(
+        resolver.computed_style(&body).get("quotes"),
+        Some(&ComputedValue::Keyword(
+            "\"[\" \"\u{5d}\" \"{\" \"}\"".to_string()
+        ))
+    );
+    assert_eq!(
+        resolver.computed_style(&title).get("quotes"),
+        resolver.computed_style(&body).get("quotes")
+    );
+    assert!(supports_declaration("quotes", "auto"));
+    assert!(supports_declaration("quotes", "none"));
+    assert!(supports_declaration("quotes", "'[' ']' '{' '}'"));
+    assert!(!supports_declaration("quotes", "'['"));
+    assert!(!supports_declaration("quotes", "'[' ']' '{'"));
 }
 
 #[test]
