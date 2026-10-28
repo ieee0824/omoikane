@@ -10975,7 +10975,20 @@ impl JsRuntime {
         generation: u64,
         error: PageTaskError,
     ) -> CompletedPageTask {
-        let _ = self.eval("__omoikane_set_current_script(null)");
+        let clear_current_script = self.with_active_host(|context| {
+            let document = context
+                .global_object()
+                .get(js_string!("document"), context)?
+                .to_object(context)?;
+            document.set(
+                js_string!("__currentScript"),
+                JsValue::null(),
+                true,
+                context,
+            )?;
+            Ok::<_, JsError>(())
+        });
+        self.record_error_from("current script cleanup", clear_current_script);
         self.host_state.borrow_mut().write_insertion_ref = None;
         self.host_state.borrow_mut().pending_javascript_dialog = None;
         let cleanup_result = self.clear_posted_message_values();
