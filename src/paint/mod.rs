@@ -458,6 +458,38 @@ pub(crate) enum BorderRegion {
     BottomLeftCorner,
 }
 
+/// Sorted, non-overlapping source-column ranges containing non-zero alpha.
+///
+/// This is an optional auxiliary view for composite callers that repeatedly
+/// draw the same mostly-transparent mask. It does not own pixels and must be
+/// regenerated whenever a canvas changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AlphaRowSpans {
+    spans: Vec<AlphaSpan>,
+    /// One offset per source row plus a terminal offset.
+    row_offsets: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AlphaSpan {
+    /// Inclusive first source column.
+    start: usize,
+    /// Exclusive end source column.
+    end: usize,
+}
+
+impl AlphaRowSpans {
+    pub(crate) fn row_count(&self) -> usize {
+        self.row_offsets.len().saturating_sub(1)
+    }
+
+    pub(crate) fn row_spans(&self, row: usize) -> &[AlphaSpan] {
+        let start = self.row_offsets.get(row).copied().unwrap_or_default();
+        let end = self.row_offsets.get(row + 1).copied().unwrap_or(start);
+        self.spans.get(start..end).unwrap_or(&[])
+    }
+}
+
 /// A simple RGBA bitmap canvas.
 #[derive(Debug)]
 pub struct Canvas {
@@ -515,6 +547,46 @@ impl Canvas {
             animation_regions: self.animation_regions,
             animated_pixels: None,
         }
+    }
+
+    /// Builds a bounded non-zero-alpha row-span index for `self`.
+    ///
+    /// Returns `None` when any row would need more than `max_spans_per_row`
+    /// spans; callers then fall back to the exact full-surface scan.
+    pub(crate) fn alpha_row_spans(&self, max_spans_per_row: usize) -> Option<AlphaRowSpans> {
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let mut spans = Vec::new();
+        let mut row_offsets = Vec::with_capacity(height + 1);
+        row_offsets.push(0usize);
+        for row in 0..height {
+            let row_pixels = &self.pixels[row * width * 4..(row + 1) * width * 4];
+            let mut row_spans = Vec::new();
+            let mut start = None;
+            for (column, pixel) in row_pixels.chunks_exact(4).enumerate() {
+                let non_zero = pixel[3] != 0;
+                match (start, non_zero) {
+                    (None, true) => start = Some(column),
+                    (Some(opened), false) => {
+                        row_spans.push(AlphaSpan {
+                            start: opened,
+                            end: column,
+                        });
+                        start = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(start) = start {
+                row_spans.push(AlphaSpan { start, end: width });
+            }
+            if row_spans.len() > max_spans_per_row {
+                return None;
+            }
+            spans.append(&mut row_spans);
+            row_offsets.push(spans.len());
+        }
+        Some(AlphaRowSpans { spans, row_offsets })
     }
 
     /// Creates a transparent canvas with the given dimensions.
@@ -1461,21 +1533,31 @@ pub fn paint_layout_with_web_fonts(
     if let Some(background) = viewport_background.color {
         canvas.fill_rect(viewport, background);
     }
-    let shadow_masks = border::FrameShadowMaskCache::new(false);
-    text::with_render_glyph_cache(|| {
-        paint_box(
-            &mut canvas,
-            layout,
-            resolver,
-            None,
-            viewport,
-            &fonts,
-            web_fonts,
-            viewport_background.propagated_node,
-            &shadow_masks,
-        );
+    DIRECT_PAINT_SHADOW_MASKS.with(|shadow_masks| {
+        let shadow_masks = shadow_masks.borrow();
+        text::with_render_glyph_cache(|| {
+            paint_box(
+                &mut canvas,
+                layout,
+                resolver,
+                None,
+                viewport,
+                &fonts,
+                web_fonts,
+                viewport_background.propagated_node,
+                &shadow_masks,
+            );
+        });
     });
     canvas
+}
+
+thread_local! {
+    /// Direct `paint_layout` callers do not have a document-raster owner. A
+    /// bounded per-thread cache gives the same mask reuse across repeated calls
+    /// without retaining DOM; masks are keyed by geometry, blur, and radii only.
+    static DIRECT_PAINT_SHADOW_MASKS: RefCell<border::FrameShadowMaskCache> =
+        RefCell::new(border::FrameShadowMaskCache::new(false));
 }
 
 /// Owned counters returned only by the opt-in document-raster attribution path.
@@ -8877,6 +8959,111 @@ impl Canvas {
                 let color = Color { r, g, b, a: src_a };
                 let dst_idx = (dy * dst_w + dx) as usize * 4;
                 blend_pixel(&mut self.pixels[dst_idx..dst_idx + 4], color);
+            }
+        }
+    }
+
+    /// Composites a source canvas using a cached non-zero-alpha row-span view.
+    ///
+    /// The traversal order is identical to [`Self::composite_canvas_clipped`];
+    /// only source pixels whose raw alpha is zero are skipped earlier. Callers
+    /// must keep the span view bound to the exact source pixels.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn composite_canvas_clipped_with_spans(
+        &mut self,
+        src: &Canvas,
+        spans: &AlphaRowSpans,
+        offset_x: i32,
+        offset_y: i32,
+        r: u8,
+        g: u8,
+        b: u8,
+        alpha_scale: f32,
+        clip: Option<Rect>,
+    ) {
+        let destination = Rect {
+            x: offset_x as f32,
+            y: offset_y as f32,
+            width: src.width as f32,
+            height: src.height as f32,
+        };
+        if self.with_retained_operation(
+            retained_layers::RetainedPrimitiveKind::ShadowComposite,
+            destination,
+            |canvas| {
+                canvas.composite_canvas_clipped_with_spans(
+                    src,
+                    spans,
+                    offset_x,
+                    offset_y,
+                    r,
+                    g,
+                    b,
+                    alpha_scale,
+                    clip,
+                );
+            },
+        ) {
+            return;
+        }
+        let dst_w = self.width as i32;
+        let dst_h = self.height as i32;
+        let src_w = src.width as i32;
+        let src_h = src.height as i32;
+        let alpha_scale = alpha_scale.clamp(0.0, 1.0);
+        let scale_alpha = alpha_scale < 1.0;
+        let clip_area = clip.and_then(normalize_rect);
+
+        // Convert pixel-center clip checks to exclusive integer source bounds.
+        // This preserves the same centers that the full scan would visit.
+        let destination_x_min = clip_area.map_or(0, |area| ((area.x - 0.5).ceil() as i32).max(0));
+        let destination_x_max = clip_area.map_or(dst_w, |area| {
+            ((area.x + area.width - 0.5).ceil() as i32).min(dst_w)
+        });
+        let destination_y_min = clip_area.map_or(0, |area| ((area.y - 0.5).ceil() as i32).max(0));
+        let destination_y_max = clip_area.map_or(dst_h, |area| {
+            ((area.y + area.height - 0.5).ceil() as i32).min(dst_h)
+        });
+        let source_x_min = (i64::from(destination_x_min) - i64::from(offset_x))
+            .clamp(0, i64::from(src_w)) as usize;
+        let source_x_max = (i64::from(destination_x_max) - i64::from(offset_x))
+            .clamp(0, i64::from(src_w)) as usize;
+        let source_y_min = (i64::from(destination_y_min) - i64::from(offset_y))
+            .clamp(0, i64::from(src_h)) as usize;
+        let source_y_max = (i64::from(destination_y_max) - i64::from(offset_y))
+            .clamp(0, i64::from(src_h)) as usize;
+
+        debug_assert_eq!(spans.row_count(), src.height as usize);
+        for sy in 0..source_y_max {
+            if !(source_y_min..source_y_max).contains(&sy) {
+                continue;
+            }
+            for span in spans.row_spans(sy) {
+                let sx_start = span.start.max(source_x_min);
+                let sx_end = span.end.min(source_x_max);
+                if sx_start >= sx_end {
+                    continue;
+                }
+                let dy = offset_y + sy as i32;
+                let dst_row = (dy as usize * dst_w as usize) * 4;
+                for sx in sx_start..sx_end {
+                    let src_idx = (sy * src_w as usize + sx) * 4;
+                    let raw_alpha = src.pixels[src_idx + 3];
+                    if raw_alpha == 0 {
+                        continue;
+                    }
+                    let src_a = if scale_alpha {
+                        (raw_alpha as f32 * alpha_scale).round() as u8
+                    } else {
+                        raw_alpha
+                    };
+                    let dx = offset_x + sx as i32;
+                    let dst_idx = dst_row + (dx as usize * 4);
+                    blend_pixel(
+                        &mut self.pixels[dst_idx..dst_idx + 4],
+                        Color { r, g, b, a: src_a },
+                    );
+                }
             }
         }
     }

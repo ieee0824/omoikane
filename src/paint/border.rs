@@ -887,20 +887,35 @@ fn render_shadow_mask(spec: &ShadowMaskSpec) -> Canvas {
 fn composite_shadow_mask(
     canvas: &mut Canvas,
     mask: &Canvas,
+    alpha_spans: Option<&std::rc::Rc<crate::paint::AlphaRowSpans>>,
     spec: &ShadowMaskSpec,
     color: Color,
     clip: Option<Rect>,
 ) {
-    canvas.composite_canvas_clipped(
-        mask,
-        spec.buf_x,
-        spec.buf_y,
-        color.r,
-        color.g,
-        color.b,
-        color.a as f32 / 255.0,
-        clip,
-    );
+    if let Some(alpha_spans) = alpha_spans {
+        canvas.composite_canvas_clipped_with_spans(
+            mask,
+            alpha_spans,
+            spec.buf_x,
+            spec.buf_y,
+            color.r,
+            color.g,
+            color.b,
+            color.a as f32 / 255.0,
+            clip,
+        );
+    } else {
+        canvas.composite_canvas_clipped(
+            mask,
+            spec.buf_x,
+            spec.buf_y,
+            color.r,
+            color.g,
+            color.b,
+            color.a as f32 / 255.0,
+            clip,
+        );
+    }
 }
 
 fn paint_shadow_mask(
@@ -918,8 +933,8 @@ fn paint_shadow_mask(
                 cache.record_generation(ShadowMaskGeneration::Oversize);
             }
             Some((key, rgba_bytes)) => {
-                if let Some(mask) = cache.lookup(&key, rgba_bytes) {
-                    composite_shadow_mask(canvas, &mask, &spec, color, clip);
+                if let Some((mask, alpha_spans)) = cache.lookup(&key, rgba_bytes) {
+                    composite_shadow_mask(canvas, &mask, alpha_spans.as_ref(), &spec, color, clip);
                     return;
                 }
                 cache.record_generation(ShadowMaskGeneration::Eligible);
@@ -932,10 +947,10 @@ fn paint_shadow_mask(
         debug_assert_eq!(mask.pixels.len(), expected_rgba_bytes);
         let rgba_capacity = mask.pixels.capacity();
         let mask = Rc::new(mask);
-        cache.retain(key, rgba_capacity, Rc::clone(&mask));
-        composite_shadow_mask(canvas, &mask, &spec, color, clip);
+        composite_shadow_mask(canvas, &mask, None, &spec, color, clip);
+        cache.retain_with_spans(key, rgba_capacity, Rc::clone(&mask), None);
     } else {
-        composite_shadow_mask(canvas, &mask, &spec, color, clip);
+        composite_shadow_mask(canvas, &mask, None, &spec, color, clip);
     }
 }
 

@@ -6,11 +6,12 @@ use std::rc::Rc;
 
 use crate::layout::Rect;
 
-use super::super::Canvas;
+use super::super::{AlphaRowSpans, Canvas};
 
 pub(super) const MAX_FRAME_SHADOW_MASK_ENTRIES: usize = 128;
 pub(super) const MAX_FRAME_SHADOW_MASK_RGBA_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const MAX_FRAME_SHADOW_MASK_ENTRY_RGBA_BYTES: usize = 2 * 1024 * 1024;
+pub(super) const MAX_SHADOW_MASK_ALPHA_SPANS_PER_ROW: usize = 64;
 
 /// Owned aggregate for one document raster over a bounded shadow-mask cache.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -118,6 +119,8 @@ struct FrameShadowMaskCacheState {
 
 struct CachedShadowMask {
     canvas: Rc<Canvas>,
+    alpha_spans: Option<Rc<AlphaRowSpans>>,
+    uses_since_retain: u32,
 }
 
 struct RasterMeasurement {
@@ -202,9 +205,27 @@ impl FrameShadowMaskCache {
         state.measurement = None;
     }
 
-    pub(super) fn lookup(&self, key: &ShadowMaskKey, rgba_bytes: usize) -> Option<Rc<Canvas>> {
+    pub(super) fn lookup(
+        &self,
+        key: &ShadowMaskKey,
+        rgba_bytes: usize,
+    ) -> Option<(Rc<Canvas>, Option<Rc<AlphaRowSpans>>)> {
         let mut state = self.state.borrow_mut();
-        let mask = state.entries.get(key).map(|entry| Rc::clone(&entry.canvas));
+        let (mask, alpha_spans) = match state.entries.get_mut(key) {
+            Some(entry) => {
+                entry.uses_since_retain = entry.uses_since_retain.saturating_add(1);
+                // Building a span index costs a full alpha scan. Pay it only
+                // after a mask has already proven reusable within this raster.
+                if entry.uses_since_retain >= 2 && entry.alpha_spans.is_none() {
+                    entry.alpha_spans = entry
+                        .canvas
+                        .alpha_row_spans(MAX_SHADOW_MASK_ALPHA_SPANS_PER_ROW)
+                        .map(Rc::new);
+                }
+                (Some(Rc::clone(&entry.canvas)), entry.alpha_spans.clone())
+            }
+            None => (None, None),
+        };
         let same_raster = mask.is_some()
             && state
                 .measurement
@@ -225,7 +246,7 @@ impl FrameShadowMaskCache {
                     .saturating_add(rgba_bytes);
             }
         }
-        mask
+        mask.map(|mask| (mask, alpha_spans))
     }
 
     pub(super) fn record_generation(&self, kind: ShadowMaskGeneration) {
@@ -246,7 +267,21 @@ impl FrameShadowMaskCache {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn retain(&self, key: ShadowMaskKey, rgba_capacity: usize, mask: Rc<Canvas>) {
+        let alpha_spans = mask
+            .alpha_row_spans(MAX_SHADOW_MASK_ALPHA_SPANS_PER_ROW)
+            .map(Rc::new);
+        self.retain_with_spans(key, rgba_capacity, mask, alpha_spans);
+    }
+
+    pub(super) fn retain_with_spans(
+        &self,
+        key: ShadowMaskKey,
+        rgba_capacity: usize,
+        mask: Rc<Canvas>,
+        alpha_spans: Option<Rc<AlphaRowSpans>>,
+    ) {
         let mut state = self.state.borrow_mut();
         if state.entries.contains_key(&key) {
             return;
@@ -285,7 +320,14 @@ impl FrameShadowMaskCache {
         }
         if state
             .entries
-            .insert(key, CachedShadowMask { canvas: mask })
+            .insert(
+                key,
+                CachedShadowMask {
+                    canvas: mask,
+                    alpha_spans,
+                    uses_since_retain: 0,
+                },
+            )
             .is_none()
         {
             state.retained_rgba_bytes = next_bytes;

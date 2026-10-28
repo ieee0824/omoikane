@@ -31,7 +31,7 @@ use boa_engine::realm::Realm;
 use boa_engine::string::Utf16JsStringBuilder;
 use boa_engine::value::TryIntoJs;
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsValue, Script, Source, js_string};
-use boa_gc::{Finalize, RootProvider, Trace, Tracer};
+use boa_gc::{Finalize, RootProvider, Rooted, Trace, Tracer};
 
 use crate::accessibility::{AccessibilityRenderState, AccessibilitySnapshotState};
 use crate::css::style::StyleClockEffects;
@@ -10561,12 +10561,20 @@ impl JsRuntime {
         function_source: &str,
         value: JsValue,
     ) -> JsResult<JsValue> {
+        // `context.eval` can collect before the callable receives its argument.
+        // The value is owned by native code during that interval, so keep it in
+        // Boa's explicit root set instead of relying on a bare `JsValue` local.
+        let value = Rooted::new(value);
         let result = self.with_active_host_value(|context| {
             let function = context.eval(Source::from_bytes(function_source))?;
             let callable = function.as_callable().ok_or_else(|| {
                 JsError::from(JsNativeError::typ().with_message("CDP serializer is not callable"))
             })?;
-            callable.call(&JsValue::undefined(), &[value], context)
+            callable.call(
+                &JsValue::undefined(),
+                std::slice::from_ref(&*value),
+                context,
+            )
         });
         // This helper is a synchronous execution boundary. If a serializer
         // getter/toJSON attempts to open a modal dialog, Boa rejects the
@@ -10584,6 +10592,10 @@ impl JsRuntime {
         this_value: JsValue,
         arguments: Vec<JsValue>,
     ) -> JsResult<JsValue> {
+        // Compiling the page-provided declaration can collect before `call`.
+        // Both containers are native owners until the VM stack takes them.
+        let this_value = Rooted::new(this_value);
+        let arguments = Rooted::new(arguments);
         let result = self.with_active_host(|context| {
             let function_source = format!("({function_source})");
             let function = context.eval(Source::from_bytes(&function_source))?;

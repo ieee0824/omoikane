@@ -29,17 +29,18 @@ impl CdpSession {
         if let Some(object_id) = object_id {
             self.validate_remote_object(object_id)?;
         }
-        let this_value = match params.get("objectId").and_then(Value::as_str) {
-            Some(object_id) => {
-                self.runtime
-                    .remote_object(object_id)
-                    .ok_or_else(|| JsonRpcError {
-                        code: -32000,
-                        message: format!("Cannot find remote object: {object_id}"),
-                    })?
-            }
-            None => JsValue::undefined(),
-        };
+        let this_value =
+            boa_gc::Rooted::new(match params.get("objectId").and_then(Value::as_str) {
+                Some(object_id) => {
+                    self.runtime
+                        .remote_object(object_id)
+                        .ok_or_else(|| JsonRpcError {
+                            code: -32000,
+                            message: format!("Cannot find remote object: {object_id}"),
+                        })?
+                }
+                None => JsValue::undefined(),
+            });
 
         let mut arguments = Vec::new();
         for argument in params
@@ -50,18 +51,22 @@ impl CdpSession {
         {
             if let Some(object_id) = argument.get("objectId").and_then(Value::as_str) {
                 self.validate_remote_object(object_id)?;
-                arguments.push(self.runtime.remote_object(object_id).ok_or_else(|| {
-                    JsonRpcError {
-                        code: -32000,
-                        message: format!("Cannot find remote object: {object_id}"),
-                    }
-                })?);
+                arguments.push(boa_gc::Rooted::new(
+                    self.runtime
+                        .remote_object(object_id)
+                        .ok_or_else(|| JsonRpcError {
+                            code: -32000,
+                            message: format!("Cannot find remote object: {object_id}"),
+                        })?,
+                ));
             } else if let Some(value) = argument.get("value") {
                 // The value came from serde_json, so its textual form is a
                 // data literal rather than page-provided source. Parentheses
                 // keep object literals from being parsed as statement blocks.
                 let source = format!("({value})");
-                arguments.push(self.runtime.eval(&source).map_err(js_error)?);
+                arguments.push(boa_gc::Rooted::new(
+                    self.runtime.eval(&source).map_err(js_error)?,
+                ));
             } else {
                 return Err(invalid_params(
                     "Each Runtime.callFunctionOn argument must include value or objectId"
@@ -71,10 +76,15 @@ impl CdpSession {
         }
         let value = self
             .runtime
-            .call_function_with_arguments(&function_declaration, this_value, arguments)
+            .call_function_with_arguments(
+                &function_declaration,
+                (*this_value).clone(),
+                arguments.iter().map(|value| (**value).clone()).collect(),
+            )
             .map_err(js_error)?;
+        let value = boa_gc::Rooted::new(value);
         self.runtime.run_until_idle().map_err(js_error)?;
-        let result = self.serialize_evaluation_value(value, return_by_value)?;
+        let result = self.serialize_evaluation_value((*value).clone(), return_by_value)?;
         self.drive_navigation_requests()?;
         Ok(result)
     }
@@ -106,12 +116,12 @@ impl CdpSession {
         expression: &str,
         return_by_value: bool,
     ) -> Result<Value, JsonRpcError> {
-        let value = self.runtime.eval(expression).map_err(js_error)?;
+        let value = boa_gc::Rooted::new(self.runtime.eval(expression).map_err(js_error)?);
         // Runtime.evaluate is itself a user-agent task. Complete its
         // microtask checkpoint and make any host tasks (such as navigation)
         // ready before the protocol method commits them.
         self.runtime.run_until_idle().map_err(js_error)?;
-        self.serialize_evaluation_value(value, return_by_value)
+        self.serialize_evaluation_value((*value).clone(), return_by_value)
     }
 
     pub(super) fn serialize_evaluation_value(
@@ -119,6 +129,10 @@ impl CdpSession {
         value: JsValue,
         return_by_value: bool,
     ) -> Result<Value, JsonRpcError> {
+        // Serialization evaluates JavaScript and then performs a microtask
+        // checkpoint. Keep both the input and serialized payload rooted while
+        // native code owns them across those collection points.
+        let value = boa_gc::Rooted::new(value);
         let object_id = if return_by_value {
             None
         } else {
@@ -126,7 +140,7 @@ impl CdpSession {
             self.next_object_id += 1;
             Some(object_id)
         };
-        let retained_value = object_id.as_ref().map(|_| value.clone());
+        let retained_value = object_id.as_ref().map(|_| (*value).clone());
         let serialization_function = if return_by_value {
             "value => JSON.stringify({ result: __cdpSerializeValue(value) })".to_string()
         } else {
@@ -139,8 +153,9 @@ impl CdpSession {
         };
         let raw = self
             .runtime
-            .call_function_with_value(&serialization_function, value)
+            .call_function_with_value(&serialization_function, (*value).clone())
             .map_err(js_error)?;
+        let raw = boa_gc::Rooted::new(raw);
         // Match the synchronous Runtime.evaluate task boundary: serializer
         // getters/toJSON may enqueue microtasks that must settle before the
         // protocol response and any resulting navigation are committed.
