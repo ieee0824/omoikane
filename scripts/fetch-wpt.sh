@@ -400,6 +400,9 @@ collect_pattern "/uievents/constructors/inputevent-constructor.html"
 collect_pattern "/common/subset-tests-by-key.js" "/common/get-host-info.sub.js"
 collect_pattern "/common/redirect.py"
 collect_pattern "/common/dispatcher/" "/html/cross-origin-opener-policy/"
+collect_pattern "/css/cssom/caretPositionFromPoint*.html" "/shadow-dom/Document-caretPositionFromPoint.tentative.html"
+collect_pattern "/css/cssom-view/range-client-rects-surrogate-indexing.html" "/css/cssom-view/range-bounding-client-rect*.html"
+collect_pattern "/fonts/noto/NotoNaskhArabic-regular.woff2"
 current_revision="$(git_wpt rev-parse HEAD 2>/dev/null || true)"
 collect_pattern \
   "/css/css-flexbox/parsing/order-valid.html" \

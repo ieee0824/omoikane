@@ -1,0 +1,10 @@
+{
+  "tests": [
+    {"path": "css/cssom/caretPositionFromPoint.html"},
+    {"path": "css/cssom/caretPositionFromPoint-textarea.html"},
+    {"path": "css/cssom/caretPositionFromPoint-with-transformation.html"},
+    {"path": "css/cssom/caretPositionFromPoint-in-flex-container.html"},
+    {"path": "css/cssom/caretPositionFromPoint-audioVideo.html"},
+    {"path": "shadow-dom/Document-caretPositionFromPoint.tentative.html"}
+  ]
+}

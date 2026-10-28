@@ -195,12 +195,16 @@ pub(super) struct ServiceWorkerFixture {
 
 impl ServiceWorkerFixture {
     pub(super) fn new() -> Self {
+        Self::with_request_timeout(ACCEPT_TIMEOUT)
+    }
+
+    fn with_request_timeout(request_timeout: Duration) -> Self {
         let listener = bind_loopback().unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_stopped = Arc::clone(&stopped);
         let worker = FixtureWorker::spawn(move || {
-            let deadline = Instant::now() + ACCEPT_TIMEOUT;
+            let mut deadline = Instant::now() + request_timeout;
             let mut requests = Vec::new();
             while !worker_stopped.load(Ordering::Acquire) {
                 assert!(Instant::now() < deadline, "ServiceWorker fixture timed out");
@@ -227,6 +231,9 @@ impl ServiceWorkerFixture {
                     .filter(|request| request.path == path)
                     .count();
                 respond_service_worker_fixture(&mut stream, &path, version);
+                // Bound waiting for the next request, not the total duration
+                // of all worker registrations performed by the owning test.
+                deadline = Instant::now() + request_timeout;
             }
             requests
         });
@@ -248,6 +255,37 @@ impl ServiceWorkerFixture {
         self.stopped.store(true, Ordering::Release);
         self.worker.take().unwrap().join()
     }
+}
+
+#[test]
+fn service_worker_fixture_still_times_out_without_request_progress() {
+    let mut fixture = ServiceWorkerFixture::with_request_timeout(Duration::from_millis(30));
+    let worker = fixture.worker.take().unwrap();
+    // Do not send the owner's stop notification before observing the worker's
+    // own deadline; scheduling delays must not turn this into a stop test.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| worker.join()));
+    assert!(result.is_err(), "an idle fixture must retain its timeout");
+}
+
+#[test]
+fn service_worker_fixture_allows_progress_beyond_one_request_timeout() {
+    use std::io::Read;
+    use std::net::TcpStream;
+
+    let fixture = ServiceWorkerFixture::with_request_timeout(Duration::from_millis(300));
+    let address = fixture.origin.strip_prefix("http://").unwrap();
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(120));
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+        stream
+            .write_all(b"GET /plain.js HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+    }
+    assert_eq!(fixture.finish(), vec!["/plain.js"; 3]);
 }
 
 fn respond_service_worker_fixture(stream: &mut std::net::TcpStream, path: &str, version: usize) {
