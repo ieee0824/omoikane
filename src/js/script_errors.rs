@@ -1,7 +1,6 @@
 //! Private, Realm-scoped delivery of Boa promise rejection tracker changes.
 use super::*;
 mod exception_trace;
-#[cfg(test)]
 use boa_gc::Rooted;
 
 /// Owned UTF-16 error fields that can cross a Worker runtime boundary without
@@ -738,6 +737,10 @@ fn dispatch_exception_report(
     {
         return Err(error.clone());
     }
+    // Reporting can run author code and collect. A muted report passes null
+    // instead of the thrown value, so the callback's VM arguments cannot keep
+    // the original exception alive for the caller's later diagnostics.
+    let error = Rooted::new(error.clone());
     let reporter = with_host_state(|host| {
         let state = host.borrow();
         Ok(state
@@ -778,7 +781,7 @@ fn dispatch_exception_report(
         )?;
         let report = decode_exception_report(report, context)?;
         if let Some(report) = &report {
-            exception_trace::record(document, report, muted, error, (&source, line, column));
+            exception_trace::record(document, report, muted, &error, (&source, line, column));
         }
         return Ok(report);
     }
@@ -822,6 +825,67 @@ fn decode_exception_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn muted_exception_keeps_original_error_alive_during_reporter_collection() {
+        #[derive(boa_gc::Trace, boa_engine::JsData)]
+        struct Marker {
+            #[unsafe_ignore_trace]
+            finalized: Rc<Cell<bool>>,
+        }
+        impl boa_gc::Finalize for Marker {
+            fn finalize(&self) {
+                self.finalized.set(true);
+            }
+        }
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .with_active_host(|context| {
+                context.register_global_builtin_callable(
+                    js_string!("forceMutedReportCollection"),
+                    0,
+                    NativeFunction::from_fn_ptr(|_, _, _| {
+                        boa_gc::force_collect();
+                        Ok(JsValue::undefined())
+                    }),
+                )?;
+                context.eval(Source::from_bytes(
+                    "addEventListener('error', event => {\
+                       if (event.error !== null) throw new Error('muted error leaked');\
+                       forceMutedReportCollection(); event.preventDefault();\
+                     });",
+                ))?;
+                Ok(())
+            })
+            .unwrap();
+        let document = runtime.document().identity();
+        let finalized = Rc::new(Cell::new(false));
+        runtime
+            .with_active_host(|context| {
+                let marker = JsObject::from_proto_and_data(
+                    None,
+                    Marker {
+                        finalized: Rc::clone(&finalized),
+                    },
+                );
+                let error: JsError = JsNativeError::error()
+                    .with_message("retained muted exception")
+                    .with_cause(JsError::from_opaque(marker.into()))
+                    .into();
+                assert!(!report_exception_with_muting(
+                    context, &error, document, true
+                )?);
+                assert!(
+                    !finalized.get(),
+                    "muting must not allow a reporter GC to collect the original error"
+                );
+                drop(error);
+                boa_gc::force_collect();
+                assert!(finalized.get(), "reporting must release its temporary root");
+                Ok(())
+            })
+            .unwrap();
+    }
 
     #[test]
     fn handled_cutoff_suppresses_only_earlier_rejections() {
