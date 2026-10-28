@@ -247,6 +247,10 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_focus_chain;
   const nativeCaretHitTest = globalThis.__omoikane_caret_hit_test;
   delete globalThis.__omoikane_caret_hit_test;
+  const nativeCaretRect = globalThis.__omoikane_caret_rect;
+  delete globalThis.__omoikane_caret_rect;
+  const nativeTextRangeRects = globalThis.__omoikane_text_range_rects;
+  delete globalThis.__omoikane_text_range_rects;
   const nativeIsInert = globalThis.__omoikane_is_inert;
   const nativeGetAriaElementReferences = globalThis.__omoikane_get_aria_element_references;
   const nativeSetAriaElementReferences = globalThis.__omoikane_set_aria_element_references;
@@ -7712,6 +7716,35 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   const rangeInstances = browsingInput.rangeInstances || (browsingInput.rangeInstances = new WeakSet());
+  const rangeElementClientRects = Element.prototype.getClientRects;
+
+  function rangeClientRects(range) {
+    if (!safeWeakSetHas(rangeInstances, range)) throw new IntrinsicTypeError("Illegal invocation");
+    flushStyleSheets();
+    const result = [];
+    const pending = [commonAncestor(range.__startContainer, range.__endContainer)];
+    const selectedElements = new Set();
+    while (pending.length) {
+      const node = pending.pop();
+      const type = internalNodeType(node);
+      const relation = safeApply(rangeNodeRelation, range, [node]);
+      if (type === 1 && relation === 2) {
+        if (!selectedElements.has(internalParentNode(node))) {
+          for (const rect of safeApply(rangeElementClientRects, node, [])) result.push(rect);
+        }
+        selectedElements.add(node);
+      } else if (type === 3 || type === 4) {
+        if (node === range.__startContainer || node === range.__endContainer || relation) {
+          const from = node === range.__startContainer ? range.__startOffset : 0;
+          const to = node === range.__endContainer ? range.__endOffset : nodeLength(node);
+          for (const rect of nativeTextRangeRects(internalNodeId(node), from, to)) result.push(new PlatformDOMRect(...rect));
+        }
+      }
+      const children = internalChildNodes(node);
+      for (let i = children.length - 1; i >= 0; i--) pending.push(children[i]);
+    }
+    return result;
+  }
 
   class Range extends globalThis.AbstractRange {
     constructor(doc = globalThis.document) {
@@ -7726,6 +7759,19 @@ export const __omoikane_service_worker_lifecycle = {};
       registerTraversal(doc, "ranges", this);
     }
     get commonAncestorContainer() { return commonAncestor(this.__startContainer, this.__endContainer); }
+    getClientRects() { return makeRectList(rangeClientRects(this)); }
+    getBoundingClientRect() {
+      const rects = rangeClientRects(this);
+      if (!rects.length) return new PlatformDOMRect();
+      const nonzero = rects.filter(rect => rect.width !== 0 && rect.height !== 0);
+      if (!nonzero.length) return new PlatformDOMRect(rects[0].x, rects[0].y, rects[0].width, rects[0].height);
+      let left = nonzero[0].left, right = nonzero[0].right, top = nonzero[0].top, bottom = nonzero[0].bottom;
+      for (const rect of nonzero) {
+        left = Math.min(left, rect.left); right = Math.max(right, rect.right);
+        top = Math.min(top, rect.top); bottom = Math.max(bottom, rect.bottom);
+      }
+      return new PlatformDOMRect(left, top, right - left, bottom - top);
+    }
     __validate(node, offset) { return validateRangeBoundary(node, offset); }
     setStart(node, offset) { setRangeBoundary(this, node, offset, true); }
     setEnd(node, offset) { setRangeBoundary(this, node, offset, false); }
@@ -7966,7 +8012,11 @@ export const __omoikane_service_worker_lifecycle = {};
       selectionRangeMutated(this, "native");
     }
   }
+  const rangeNodeRelation = Range.prototype.__nodeRelation;
   Range.START_TO_START=0; Range.START_TO_END=1; Range.END_TO_END=2; Range.END_TO_START=3;
+  for (const name of ["getClientRects", "getBoundingClientRect"]) {
+    Object.defineProperty(Range.prototype, name, {...Object.getOwnPropertyDescriptor(Range.prototype, name), enumerable: true});
+  }
   Range.prototype.START_TO_START=0; Range.prototype.START_TO_END=1; Range.prototype.END_TO_END=2; Range.prototype.END_TO_START=3;
 
   function selectionText(range) {
@@ -8397,6 +8447,74 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   const mouseSelectionByDocument = new WeakMap();
+  const caretPositions = browsingInput.caretPositions || (browsingInput.caretPositions = new WeakMap());
+  const finiteCaretCoordinate = Number.isFinite;
+  const caretPositionToken = {};
+  function caretPositionState(value) {
+    const state = safeWeakMapGet(caretPositions, value);
+    if (!state) throw new IntrinsicTypeError("Illegal invocation");
+    return state;
+  }
+  class CaretPosition {
+    constructor(token, node, offset) {
+      if (token !== caretPositionToken) throw new IntrinsicTypeError("Illegal constructor");
+      safeWeakMapSet(caretPositions, this, {node, offset});
+    }
+    get offsetNode() { return caretPositionState(this).node; }
+    get offset() { return caretPositionState(this).offset; }
+    getClientRect() {
+      const state = caretPositionState(this);
+      flushStyleSheets();
+      const rect = nativeCaretRect(internalNodeId(state.node), state.offset);
+      return rect === null ? new PlatformDOMRect() : new PlatformDOMRect(...rect);
+    }
+  }
+  for (const name of ["offsetNode", "offset", "getClientRect"]) {
+    Object.defineProperty(CaretPosition.prototype, name, {
+      ...Object.getOwnPropertyDescriptor(CaretPosition.prototype, name), enumerable: true,
+    });
+  }
+  Object.defineProperty(CaretPosition, "length", {value: 0});
+  Object.defineProperty(CaretPosition.prototype, Symbol.toStringTag, {value: "CaretPosition", configurable: true});
+  function caretPositionFromPoint(x, y, options = {}) {
+    if (arguments.length < 2) throw new IntrinsicTypeError("caretPositionFromPoint requires 2 arguments");
+    const documentId = canonicalNodeId(this);
+    if (documentId === undefined || internalNodeType(this) !== 9) throw new IntrinsicTypeError("Illegal invocation");
+    x = +x; y = +y;
+    if (!finiteCaretCoordinate(x) || !finiteCaretCoordinate(y)) throw new IntrinsicTypeError("Coordinates must be finite");
+    if (options !== null && typeof options !== "object" && typeof options !== "function") {
+      throw new IntrinsicTypeError("Expected a dictionary");
+    }
+    const roots = serializedShadowRootIds(options == null ? undefined : options.shadowRoots).map(wrapNode);
+    flushStyleSheets();
+    const hits = __omoikane_hit_test_point(documentId, x, y, false);
+    const hit = hits === null || hits.length === 0 ? null : wrapNode(hits[0]);
+    let point;
+    if (hit && nativeNodeNamespaceURI(internalNodeId(hit)) === SVG_NAMESPACE && nativeNodeLocalName(internalNodeId(hit)) !== "text") {
+      point = [internalNodeId(hit), 0];
+    } else if (hit && ["audio", "video"].includes(nativeNodeLocalName(internalNodeId(hit)))) {
+      const parent = internalParentNode(hit);
+      point = parent ? [internalNodeId(parent), nativeNodeIndex(internalNodeId(hit))] : null;
+    } else {
+      point = nativeCaretHitTest(documentId, x, y, null, true);
+    }
+    if (point === null) return null;
+    let node = wrapNode(point[0]), offset = point[1];
+    const includesRoot = root => roots.some(allowed => {
+      for (let current = allowed; current; current = shadowIncludingParent(current)) {
+        if (current === root) return true;
+      }
+      return false;
+    });
+    let root = selectionTreeRoot(node), host;
+    while ((host = selectionShadowHost(root)) && !includesRoot(root)) {
+      offset = nativeNodeIndex(internalNodeId(host));
+      node = wrapNode(nativeParentNode(internalNodeId(host)));
+      if (node === null) return null;
+      root = selectionTreeRoot(node);
+    }
+    return new CaretPosition(caretPositionToken, node, offset);
+  }
   const userSelectionSetBaseAndExtent = Selection.prototype.setBaseAndExtent;
   const userSelectionDispatchEvent = Node.prototype.dispatchEvent;
   function allowPointerSelection(selection, anchor, focus) {
@@ -19614,6 +19732,10 @@ export const __omoikane_service_worker_lifecycle = {};
   globalThis.TreeWalker = TreeWalker;
   globalThis.Range = Range;
   globalThis.Selection = Selection;
+  globalThis.CaretPosition = CaretPosition;
+  Object.defineProperty(Document.prototype, "caretPositionFromPoint", {
+    value: caretPositionFromPoint, writable: true, enumerable: true, configurable: true,
+  });
   globalThis.getSelection = function getSelection() {
     return selectionForDocument(globalThis.document);
   };
@@ -28813,7 +28935,7 @@ export const __omoikane_service_worker_lifecycle = {};
     for (const domName of [
       "Window", "Node", "Element", "HTMLElement", "Document", "DocumentFragment", "Text",
       "CharacterData", "Attr", "ShadowRoot", "HTMLCollection", "NodeList", "Range",
-      "AbstractRange", "StaticRange", "DOMImplementation", "DOMStringMap", "DOMRectList",
+      "AbstractRange", "StaticRange", "CaretPosition", "DOMImplementation", "DOMStringMap", "DOMRectList",
       "MutationObserver", "ResizeObserver", "IntersectionObserver", "CustomElementRegistry",
       "HTMLDivElement", "HTMLSpanElement", "HTMLBodyElement", "HTMLCanvasElement",
       "HTMLImageElement", "HTMLIFrameElement", "HTMLFrameElement", "HTMLScriptElement", "SVGElement",

@@ -4,7 +4,9 @@ pub(crate) mod animation;
 pub(crate) mod border;
 mod caret;
 mod effect_source_cache;
-pub(crate) use caret::{TextCaretPoint, hit_test_caret_layout};
+pub(crate) use caret::{
+    TextCaretPoint, hit_test_caret_layout, text_caret_rect_layout, text_range_rects_layout,
+};
 pub(crate) use effect_source_cache::{EffectSourceCache, EffectSourceCacheSummary};
 pub(crate) mod color;
 pub(crate) mod color4;

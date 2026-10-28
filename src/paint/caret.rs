@@ -10,7 +10,10 @@ use crate::layout::{FragmentStyle, InlineFragment, InlineTextSource};
 use unicode_bidi::{BidiInfo, Level};
 use unicode_segmentation::UnicodeSegmentation;
 
-/// A document Text boundary selected at a painted insertion position.
+#[path = "caret_controls.rs"]
+mod controls;
+
+/// A DOM boundary selected at a painted text insertion position.
 pub(crate) struct TextCaretPoint {
     pub(crate) node: NodeHandle,
     pub(crate) offset: usize,
@@ -31,6 +34,7 @@ pub(crate) fn hit_test_caret_layout(
     point: (f32, f32),
     scope: Option<&NodeHandle>,
     web_fonts: Option<&WebFontRegistry>,
+    include_controls: bool,
 ) -> Option<TextCaretPoint> {
     let mut candidate = None;
     collect_candidates(
@@ -41,11 +45,76 @@ pub(crate) fn hit_test_caret_layout(
         viewport,
         point,
         scope,
+        include_controls,
         &mut candidate,
     );
     let candidate = candidate?;
     let fragment = &candidate.fragment;
+    if let crate::layout::InlineFragmentContent::FormControl(style, _, _) = &fragment.content {
+        let points = controls::insertion_points(fragment, style, web_fonts);
+        let (offset, _) = points.into_iter().min_by(|a, b| {
+            let distance = |rect: Rect| {
+                (
+                    distance_to_range(candidate.point.1, rect.y, rect.height),
+                    (candidate.point.0 - rect.x).abs(),
+                )
+            };
+            let a = distance(a.1);
+            let b = distance(b.1);
+            a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
+        })?;
+        return Some(TextCaretPoint {
+            node: fragment.node.clone(),
+            offset,
+        });
+    }
     let text = fragment.text()?;
+    let carets = fragment_carets(fragment, web_fonts);
+    let query = if is_vertical(&fragment.style) {
+        candidate.point.1 - fragment.rect.y
+    } else {
+        candidate.point.0 - fragment.rect.x
+    };
+    let (byte, _) = carets
+        .into_iter()
+        .min_by(|a, b| (a.1 - query).abs().total_cmp(&(b.1 - query).abs()))?;
+    dom_boundary(&fragment.text_source, text, byte)
+}
+
+fn fragment_carets(
+    fragment: &InlineFragment,
+    web_fonts: Option<&WebFontRegistry>,
+) -> Vec<(usize, f32)> {
+    let Some(text) = fragment.text() else {
+        return Vec::new();
+    };
+    with_fragment_fonts(fragment, web_fonts, |candidates| {
+        let vertical = is_vertical(&fragment.style);
+        let can_shape = fragment.style.resolved_bidi_level.is_some()
+            || matches!(
+                text::bidi_visual_text(text, &fragment.style),
+                std::borrow::Cow::Borrowed(_)
+            );
+        (!vertical && can_shape)
+            .then(|| {
+                shaped_carets(
+                    text,
+                    fragment.metrics.font_size,
+                    fragment.metrics.letter_spacing,
+                    &fragment.style,
+                    candidates,
+                )
+            })
+            .flatten()
+            .unwrap_or_else(|| scalar_carets(text, fragment, candidates, vertical))
+    })
+}
+
+fn with_fragment_fonts<R>(
+    fragment: &InlineFragment,
+    web_fonts: Option<&WebFontRegistry>,
+    calculate: impl FnOnce(&[FontFallbackCandidate<'_>]) -> R,
+) -> R {
     let fonts = text::load_text_fonts();
     let selected = text::select_fragment_font(web_fonts, fragment, &fonts);
     let web = text::select_fragment_web_fonts(web_fonts, fragment);
@@ -67,33 +136,211 @@ pub(crate) fn hit_test_caret_layout(
             .map(Arc::as_ref)
             .map(FontFallbackCandidate::unrestricted),
     );
-    let vertical = is_vertical(&fragment.style);
-    let can_shape = fragment.style.resolved_bidi_level.is_some()
-        || matches!(
-            text::bidi_visual_text(text, &fragment.style),
-            std::borrow::Cow::Borrowed(_)
-        );
-    let carets = (!vertical && can_shape)
-        .then(|| {
-            shaped_carets(
-                text,
-                fragment.metrics.font_size,
-                fragment.metrics.letter_spacing,
-                &fragment.style,
-                &candidates,
-            )
-        })
-        .flatten()
-        .unwrap_or_else(|| scalar_carets(text, fragment, &candidates, vertical));
-    let query = if vertical {
-        candidate.point.1 - fragment.rect.y
+    calculate(&candidates)
+}
+
+fn caret_rect(fragment: &InlineFragment, transform: AffineTransform, advance: f32) -> Rect {
+    let font_extent = fragment.metrics.ascent + fragment.metrics.descent;
+    let rect = if is_vertical(&fragment.style) {
+        Rect {
+            x: fragment.rect.x,
+            y: fragment.rect.y + advance,
+            width: font_extent,
+            height: 0.0,
+        }
     } else {
-        candidate.point.0 - fragment.rect.x
+        Rect {
+            x: fragment.rect.x + advance,
+            y: fragment.rect.y,
+            width: 0.0,
+            height: font_extent,
+        }
     };
-    let (byte, _) = carets
+    transformed_rect_bounds(rect, transform)
+}
+
+/// Resolves a retained DOM Text boundary against the current shaped layout.
+pub(crate) fn text_caret_rect_layout(
+    layout: &LayoutBox,
+    node: &NodeHandle,
+    offset: usize,
+    transform: AffineTransform,
+    web_fonts: Option<&WebFontRegistry>,
+) -> Option<Rect> {
+    if layout.content_visibility_contents_skipped {
+        return None;
+    }
+    let transform = transform.multiply(layout.transform);
+    for line in &layout.lines {
+        for fragment in &line.fragments {
+            if fragment.node == *node
+                && let crate::layout::InlineFragmentContent::FormControl(style, value, _) =
+                    &fragment.content
+            {
+                if offset > value.encode_utf16().count() {
+                    return None;
+                }
+                return controls::insertion_points(fragment, style, web_fonts)
+                    .into_iter()
+                    // The painter places a shared soft-wrap offset on the
+                    // following visual line, rather than the preceding end.
+                    .rev()
+                    .min_by_key(|(position, _)| position.abs_diff(offset))
+                    .map(|(_, rect)| transformed_rect_bounds(rect, transform));
+            }
+            if !fragment.text_source.iter().any(|span| {
+                span.node == *node && span.dom_range.start <= offset && offset <= span.dom_range.end
+            }) {
+                continue;
+            }
+            let mut best = None;
+            for (position, advance) in fragment_dom_carets(fragment, node, web_fonts) {
+                let rect = caret_rect(fragment, transform, advance);
+                let distance = position.abs_diff(offset);
+                if best.as_ref().is_none_or(|(old, _)| distance < *old) {
+                    best = Some((distance, rect));
+                }
+            }
+            if let Some((_, rect)) = best {
+                return Some(rect);
+            }
+        }
+    }
+    layout
+        .children
+        .iter()
+        .find_map(|child| text_caret_rect_layout(child, node, offset, transform, web_fonts))
+}
+
+fn fragment_dom_carets(
+    fragment: &InlineFragment,
+    node: &NodeHandle,
+    web_fonts: Option<&WebFontRegistry>,
+) -> Vec<(usize, f32)> {
+    let Some(text) = fragment.text() else {
+        return Vec::new();
+    };
+    let mut units = std::collections::HashMap::new();
+    let mut count = 0;
+    for (byte, ch) in text.char_indices() {
+        units.insert(byte, count);
+        count += ch.len_utf16();
+    }
+    units.insert(text.len(), count);
+    fragment_carets(fragment, web_fonts)
         .into_iter()
-        .min_by(|a, b| (a.1 - query).abs().total_cmp(&(b.1 - query).abs()))?;
-    dom_boundary(&fragment.text_source, text, byte)
+        .filter_map(|(byte, advance)| {
+            let span = fragment.text_source.iter().find(|span| {
+                span.node == *node && span.text_range.start <= byte && byte <= span.text_range.end
+            })?;
+            if !span.direct && byte != span.text_range.start && byte != span.text_range.end {
+                return None;
+            }
+            let offset = if span.direct {
+                span.dom_range.start + units[&byte] - units[&span.text_range.start]
+            } else if byte == span.text_range.start {
+                span.dom_range.start
+            } else {
+                span.dom_range.end
+            };
+            Some((offset, advance))
+        })
+        .collect()
+}
+
+/// Returns the painted rectangles for a UTF-16 interval within one Text node.
+pub(crate) fn text_range_rects_layout(
+    layout: &LayoutBox,
+    node: &NodeHandle,
+    start: usize,
+    end: usize,
+    transform: AffineTransform,
+    web_fonts: Option<&WebFontRegistry>,
+    result: &mut Vec<Rect>,
+) {
+    if layout.content_visibility_contents_skipped {
+        return;
+    }
+    let transform = transform.multiply(layout.transform);
+    for line in &layout.lines {
+        let mut line_rects = Vec::new();
+        for fragment in &line.fragments {
+            if !fragment.text_source.iter().any(|span| {
+                span.node == *node && span.dom_range.start < end && start < span.dom_range.end
+            }) {
+                continue;
+            }
+            let positions = fragment_dom_carets(fragment, node, web_fonts);
+            let Some(first) = positions
+                .iter()
+                .filter(|(offset, _)| *offset <= start)
+                .max_by_key(|(offset, _)| *offset)
+                .or_else(|| positions.iter().min_by_key(|(offset, _)| *offset))
+            else {
+                continue;
+            };
+            let Some(last) = positions
+                .iter()
+                .filter(|(offset, _)| *offset >= end)
+                .min_by_key(|(offset, _)| *offset)
+                .or_else(|| positions.iter().max_by_key(|(offset, _)| *offset))
+            else {
+                continue;
+            };
+            let low = first.1.min(last.1);
+            let high = first.1.max(last.1);
+            let mut rect = caret_rect(fragment, AffineTransform::identity(), low);
+            if is_vertical(&fragment.style) {
+                rect.height = high - low;
+            } else {
+                rect.width = high - low;
+            }
+            push_line_text_rect(&mut line_rects, rect, is_vertical(&fragment.style));
+        }
+        result.extend(
+            line_rects
+                .into_iter()
+                .map(|rect| transformed_rect_bounds(rect, transform)),
+        );
+    }
+    for child in &layout.children {
+        text_range_rects_layout(child, node, start, end, transform, web_fonts, result);
+    }
+}
+
+fn push_line_text_rect(rects: &mut Vec<Rect>, rect: Rect, vertical: bool) {
+    if let Some(last) = rects.last_mut() {
+        let (a, b, cross_equal) = if vertical {
+            (
+                (last.y, last.height),
+                (rect.y, rect.height),
+                last.x == rect.x && last.width == rect.width,
+            )
+        } else {
+            (
+                (last.x, last.width),
+                (rect.x, rect.width),
+                last.y == rect.y && last.height == rect.height,
+            )
+        };
+        // Fragment edges share layout coordinates; allow only float rounding.
+        let rounding = f32::EPSILON * a.0.abs().max(b.0.abs()).max(1.0) * 4.0;
+        if cross_equal
+            && ((a.0 + a.1 - b.0).abs() <= rounding || (b.0 + b.1 - a.0).abs() <= rounding)
+        {
+            let start = a.0.min(b.0);
+            let length = (a.0 + a.1).max(b.0 + b.1) - start;
+            if vertical {
+                last.y = start;
+                last.height = length;
+            } else {
+                last.x = start;
+                last.width = length;
+            }
+            return;
+        }
+    }
+    rects.push(rect);
 }
 
 fn descendant_of(node: &NodeHandle, ancestor: &NodeHandle) -> bool {
@@ -220,6 +467,7 @@ fn collect_candidates(
     viewport: Rect,
     point: (f32, f32),
     scope: Option<&NodeHandle>,
+    include_controls: bool,
     best: &mut Option<Candidate>,
 ) {
     if layout.node.is_inert() {
@@ -241,7 +489,12 @@ fn collect_candidates(
         for fragment in fragments {
             if fragment.node.is_inert()
                 || fragment.style.visibility == Visibility::Hidden
-                || fragment.text_source.is_empty()
+                || (fragment.text_source.is_empty()
+                    && !(include_controls
+                        && matches!(
+                            fragment.content,
+                            crate::layout::InlineFragmentContent::FormControl(..)
+                        )))
                 || geometry.clip.is_some_and(|clip| {
                     intersect(
                         transformed_rect_bounds(fragment.rect, geometry.transform),
@@ -297,6 +550,7 @@ fn collect_candidates(
             viewport,
             geometry.query_point,
             scope,
+            include_controls,
             best,
         );
     }

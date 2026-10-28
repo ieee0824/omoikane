@@ -16318,6 +16318,7 @@ fn register_host_bindings(
     font_loading::register(context, host_state, &mut bindings)?;
     pointer_lock::register(context, &mut bindings)?;
     input_bridge::register(context, &mut bindings)?;
+    text_selection::register(context, &mut bindings)?;
     let automation_enabled = host_state.borrow().input_bridge.automation.enabled();
     automation::register(context, automation_enabled)?;
     media_environment::register(context, host_state, &mut bindings)?;
@@ -17613,11 +17614,6 @@ fn register_host_bindings(
             js_string!("__omoikane_hit_test_point"),
             4,
             NativeFunction::from_copy_closure(hit_test_point_native),
-        ),
-        (
-            js_string!("__omoikane_caret_hit_test"),
-            4,
-            NativeFunction::from_copy_closure(text_selection::caret_hit_test_native),
         ),
         (
             js_string!("__omoikane_element_scroll_offset"),

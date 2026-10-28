@@ -1,0 +1,9 @@
+{
+  "tests": [
+    {"path": "css/cssom-view/range-client-rects-surrogate-indexing.html"},
+    {"path": "css/cssom-view/range-bounding-client-rect-rtl-ligature-split.html"},
+    {"path": "css/cssom-view/range-bounding-client-rect-with-display-contents.html"},
+    {"path": "css/cssom-view/range-bounding-client-rect-with-nested-text.html"},
+    {"path": "css/cssom-view/range-bounding-client-rect-with-shadow-dom.html"}
+  ]
+}
