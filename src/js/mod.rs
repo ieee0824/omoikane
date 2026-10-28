@@ -24442,9 +24442,17 @@ struct PreparedDedicatedWorker {
     url: String,
     csp_requested_url: String,
     source: Option<String>,
-    content_type: Option<String>,
-    service_worker_allowed: Option<String>,
     runtime: JsRuntime,
+}
+
+/// Owned source and creator settings, independent of the worker's JS runtime.
+struct FetchedDedicatedWorker {
+    creator: DedicatedWorkerCreator,
+    initial_url: String,
+    worker_url: String,
+    loaded: Option<worker_loading::LoadedWorkerScript>,
+    worker_isolation: IsolationPolicy,
+    is_data_worker: bool,
 }
 
 /// An owned creator snapshot; constructing a Worker never retains a host borrow.
@@ -24549,14 +24557,14 @@ fn load_dedicated_worker_for_creator(
     Ok(result.loaded)
 }
 
-/// Fetches the source and initializes the private global before author code runs.
-fn prepare_dedicated_worker(
+/// Fetches source and reports policy checks without allocating a JS runtime.
+fn fetch_dedicated_worker(
     owner_state: &Rc<RefCell<HostState>>,
     requested_url: &str,
     owner_document_id: usize,
     source: Option<&security_reporting::CspSourceLocation>,
     service_worker: bool,
-) -> JsResult<PreparedDedicatedWorker> {
+) -> JsResult<FetchedDedicatedWorker> {
     let creator = dedicated_worker_creator(&mut owner_state.borrow_mut(), Some(owner_document_id));
     let initial_url = resolve_worker_url(
         requested_url,
@@ -24612,6 +24620,29 @@ fn prepare_dedicated_worker(
             );
         }
     }
+    Ok(FetchedDedicatedWorker {
+        creator,
+        initial_url,
+        worker_url,
+        loaded: loaded.filter(|_| !inheritance.blocked),
+        worker_isolation,
+        is_data_worker,
+    })
+}
+
+/// Allocates and configures the private runtime from an owned fetch result.
+fn initialize_dedicated_worker(
+    owner_state: &Rc<RefCell<HostState>>,
+    fetched: FetchedDedicatedWorker,
+) -> JsResult<PreparedDedicatedWorker> {
+    let FetchedDedicatedWorker {
+        creator,
+        initial_url,
+        worker_url,
+        loaded,
+        worker_isolation,
+        is_data_worker,
+    } = fetched;
     // A data URL worker retains the creator's tuple origin during bootstrap;
     // its own WorkerLocation still exposes the data URL after initialization.
     let bootstrap_url = if is_data_worker
@@ -24633,7 +24664,7 @@ fn prepare_dedicated_worker(
     {
         let owner = owner_state.borrow();
         let mut state = worker_runtime.host_state.borrow_mut();
-        state.inherit_worker_cookie_session(&owner, owner_document_id);
+        state.inherit_worker_cookie_session(&owner, creator.document_id);
         state.inherit_resource_loading(&owner);
         let document_id = state.document.identity();
         state.document_origins.insert(document_id, creator.origin);
@@ -24679,9 +24710,7 @@ fn prepare_dedicated_worker(
         // private URL snapshot even when worker installation replaces globals.
         worker_runtime.eval(&format!("__omoikane_set_location({worker_url:?})"))?;
     }
-    if !inheritance.blocked
-        && let Some(loaded) = loaded.as_ref()
-    {
+    if let Some(loaded) = loaded.as_ref() {
         worker_runtime.install_worker_security_metadata(loaded, &creator.policy);
     }
     worker_runtime.eval(&format!(
@@ -24693,15 +24722,7 @@ fn prepare_dedicated_worker(
         // Boa uses the script path to resolve dynamic imports as well.
         url: worker_url,
         csp_requested_url: initial_url,
-        content_type: loaded
-            .as_ref()
-            .and_then(|script| script.content_type.clone()),
-        service_worker_allowed: loaded
-            .as_ref()
-            .and_then(|script| script.service_worker_allowed.clone()),
-        source: loaded
-            .filter(|_| !inheritance.blocked)
-            .map(|script| script.source),
+        source: loaded.map(|script| script.source),
         runtime: worker_runtime,
     })
 }
@@ -24712,21 +24733,20 @@ fn create_worker_for_owner_state(
     owner_document_id: usize,
     csp_source: Option<&security_reporting::CspSourceLocation>,
 ) -> JsResult<u64> {
-    let PreparedDedicatedWorker {
-        id: worker_id,
-        url: worker_url,
-        csp_requested_url,
-        source,
-        content_type: _,
-        service_worker_allowed: _,
-        runtime: worker_runtime,
-    } = prepare_dedicated_worker(
+    let fetched = fetch_dedicated_worker(
         &owner_state,
         requested_url,
         owner_document_id,
         csp_source,
         false,
     )?;
+    let PreparedDedicatedWorker {
+        id: worker_id,
+        url: worker_url,
+        csp_requested_url,
+        source,
+        runtime: worker_runtime,
+    } = initialize_dedicated_worker(&owner_state, fetched)?;
     let entry = Rc::new(RefCell::new(WorkerRuntime {
         runtime: worker_runtime,
         owner_state: Rc::clone(&owner_state),

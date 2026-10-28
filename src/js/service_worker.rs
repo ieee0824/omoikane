@@ -154,35 +154,39 @@ fn start_service_worker(
     source: Option<&security_reporting::CspSourceLocation>,
     previous: Option<u64>,
 ) -> JsResult<ServiceWorkerStartResult> {
-    let PreparedDedicatedWorker {
-        id,
-        url: effective_url,
-        csp_requested_url,
-        source,
-        content_type,
-        service_worker_allowed,
-        mut runtime,
-    } = prepare_dedicated_worker(&owner, url, document_id, source, true)?;
-    let Some(source) = source else {
+    let fetched = fetch_dedicated_worker(&owner, url, document_id, source, true)?;
+    let Some(script) = fetched.loaded.as_ref() else {
         return Ok(ServiceWorkerStartResult::LoadFailure);
     };
     // The ServiceWorker loader rejects redirects before fetching their target.
     // Keep this identity check as a guard against future loader changes.
-    if effective_url != csp_requested_url {
+    if fetched.worker_url != fetched.initial_url {
         return Ok(ServiceWorkerStartResult::LoadFailure);
     }
-    if !content_type
+    if !script
+        .content_type
         .as_deref()
         .and_then(|value| value.split(';').next())
         .is_some_and(is_javascript_mime_type)
     {
         return Ok(ServiceWorkerStartResult::SecurityFailure);
     }
-    if let Err(error) =
-        check_service_worker_scope(&effective_url, scope, service_worker_allowed.as_deref())
-    {
+    if let Err(error) = check_service_worker_scope(
+        &fetched.worker_url,
+        scope,
+        script.service_worker_allowed.as_deref(),
+    ) {
         return Ok(error);
     }
+
+    let PreparedDedicatedWorker {
+        id,
+        url: effective_url,
+        csp_requested_url,
+        source,
+        mut runtime,
+    } = initialize_dedicated_worker(&owner, fetched)?;
+    let source = source.expect("accepted ServiceWorker fetch retains its script source");
 
     if let Some(previous) = previous {
         match prepare_update_imports(&owner, previous, &source, &mut runtime) {
