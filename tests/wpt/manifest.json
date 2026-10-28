@@ -802,6 +802,8 @@
     {"path": "css/cssom-view/range-bounding-client-rect-with-display-contents.html"},
     {"path": "css/cssom-view/range-bounding-client-rect-with-nested-text.html"},
     {"path": "css/cssom-view/range-bounding-client-rect-with-shadow-dom.html"},
-    {"path": "uievents/constructors/inputevent-constructor.html"}
+    {"path": "uievents/constructors/inputevent-constructor.html"},
+    {"path": "clipboard-apis/clipboard-events-synthetic.html"},
+    {"path": "clipboard-apis/clipboard-item.https.html"}
   ]
 }

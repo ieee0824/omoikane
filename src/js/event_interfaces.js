@@ -88,6 +88,26 @@
       ContentVisibilityAutoStateChangeEvent: payloadEvent(Event, "ContentVisibilityAutoStateChangeEvent", [["skipped", Boolean, false]]),
     };
   }
+  function clipboardEvents(context) {
+    const { Event } = context, state = context.clipboardEventStates;
+    class ClipboardEvent extends Event {
+      constructor(type, init = {}) {
+        if (!arguments.length) throw new TypeErrorIntrinsic("Missing required argument");
+        const convertedType = string(type), source = dictionary(init);
+        // Read the inherited and own dictionary members together in IDL order.
+        const bubbles = !!source.bubbles, cancelable = !!source.cancelable;
+        const value = source.clipboardData;
+        const clipboardData = value === undefined || value === null ? null : value;
+        if (clipboardData !== null && !context.isDataTransfer(clipboardData)) {
+          throw new TypeErrorIntrinsic("clipboardData must be a DataTransfer");
+        }
+        const composed = !!source.composed;
+        super(convertedType, {bubbles, cancelable, composed});
+        weakSet(state, this, {clipboardData});
+      }
+    }
+    return { ClipboardEvent: expose(ClipboardEvent, ["clipboardData"], state) };
+  }
   function securityEvents(Event) {
     const usvString = value => string(value).toWellFormed();
     return {
@@ -160,6 +180,6 @@
   }
   const install = globalThis.__omoikane_install_event_interfaces;
   delete globalThis.__omoikane_install_event_interfaces;
-  install(context => ({ ...navigationEvents(context), ...securityEvents(context.Event),
+  install(context => ({ ...navigationEvents(context), ...clipboardEvents(context), ...securityEvents(context.Event),
     ...beforeUnloadInterface(context.Event), ...touchInterfaces(context) }));
 })();

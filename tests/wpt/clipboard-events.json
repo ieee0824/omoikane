@@ -1,0 +1,6 @@
+{
+  "tests": [
+    {"path": "clipboard-apis/clipboard-events-synthetic.html"},
+    {"path": "clipboard-apis/clipboard-item.https.html"}
+  ]
+}

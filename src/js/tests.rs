@@ -4308,7 +4308,7 @@ fn navigator_clipboard_shares_utf8_text_and_enforces_permissions() {
     struct ClipboardResetGuard;
     impl Drop for ClipboardResetGuard {
         fn drop(&mut self) {
-            host_clipboard().write_text(String::new());
+            host_clipboard().write_text(String::new()).unwrap();
         }
     }
     let _clipboard_reset_guard = ClipboardResetGuard;
@@ -4327,10 +4327,12 @@ fn navigator_clipboard_shares_utf8_text_and_enforces_permissions() {
     writer
         .eval(
             r#"globalThis.missingWriteArgument = false;
-                   try { navigator.clipboard.writeText(); }
-                   catch (error) { missingWriteArgument = error instanceof TypeError; }"#,
+                   navigator.clipboard.writeText().catch(error => {
+                     missingWriteArgument = error instanceof TypeError;
+                   });"#,
         )
         .unwrap();
+    writer.run_jobs().unwrap();
     assert_eq!(
         eval_str(&mut writer, "String(missingWriteArgument)"),
         "true"
@@ -4446,16 +4448,12 @@ fn navigator_clipboard_shares_utf8_text_and_enforces_permissions() {
         "http://clipboard.example.test/insecure",
     )
     .unwrap();
-    insecure
-        .eval(
-            r#"globalThis.denied = '';
-                   navigator.clipboard.writeText('blocked').catch(error => { denied = error.name; });"#,
-        )
-        .unwrap();
-    insecure.run_jobs().unwrap();
     assert_eq!(
-        eval_str(&mut insecure, "[isSecureContext, denied].join('|')"),
-        "false|NotAllowedError"
+        eval_str(
+            &mut insecure,
+            "[isSecureContext, typeof Clipboard, 'clipboard' in navigator].join('|')"
+        ),
+        "false|undefined|false"
     );
     let mut loopback =
         JsRuntime::with_document_and_url(default_document(), "http://127.0.0.2/loopback").unwrap();
