@@ -1,8 +1,7 @@
 # Clipboard のイベントとデータ表現
 
-`ClipboardEvent` と `ClipboardItem` は、ページが構築するイベントとデータ表現を提供する。
-編集ホストのネイティブな copy/cut/paste と contenteditable の既定編集処理は
-[#1288](https://github.com/ieee0824/omoikane/issues/1288) で継続する。
+`ClipboardEvent` と `ClipboardItem` は、ページが構築するイベントとデータ表現に加え、
+ブラウザー入力による copy/cut/paste の既定動作を提供する。
 Async Clipboard の `read()` / `write()` / `readText()` / `writeText()` は、
 プロセス内の共有ストレージを使う。
 
@@ -33,6 +32,29 @@ EventInit と ClipboardEventInit のメンバーは WebIDL の順序で一度ず
 合成イベントは untrusted であり、dispatch しても入力値や共有クリップボードを変更しない。
 `bubbles`、`cancelable`、`composed` は明示した値を反映し、既定値は false となる。
 
+ブラウザーの Ctrl/Cmd+C/X/V と `execCommand("copy" | "cut")` は trusted かつ
+bubbling/cancelable/composed なイベントを、現在の text control または編集ホストへ送る。
+copy/cut のDataTransferはイベント中だけread/writeで、pasteはreadonly、dispatch後はprotectedとなる。
+既定copy/cutは選択範囲の `text/plain` を保存し、リッチ編集範囲では `text/html` も保存する。
+handlerがcopy/cutをcancelした場合はhandlerが書いた形式を一括commitし、cut対象は削除しない。
+
+既定cutは `beforeinput(deleteByCut)`、DOM更新、`input(deleteByCut)` の順に処理する。
+既定pasteのtext controlではInputEvent.dataにplain textを設定し、DataTransferはnullとする。
+contenteditable/designModeではdataをnullとし、readonly DataTransferのplain/HTML表現を
+beforeinput/inputへ同じ寿命で渡す。beforeinputのcancelはDOM更新を止めるがclipboardは変更しない。
+
+## 編集ホストとコマンド
+
+contenteditableとdesignModeはDocument Selectionを編集範囲として共有する。文字入力、改行、
+Backspace/Delete、左右/Home/Endのcaret移動とShift選択は、text controlと同じtrusted
+beforeinput/input経路を使う。beforeinputのtarget rangeは変更前のStaticRange snapshotである。
+
+`execCommand()` は基本セットの `insertText`、`delete`、`forwardDelete`、`bold`、`copy`、`cut` を扱う。
+コマンド名はASCII case-insensitiveで、再入呼び出しは拒否する。`queryCommandSupported()`、
+`queryCommandEnabled()`、`queryCommandState()`、`queryCommandValue()` は同じcommand分類と
+現在の編集ホスト・選択を参照する。execCommandによる編集はtrusted `input` のみを送り、
+ブラウザーのキー既定動作と異なり `beforeinput` は送らない。
+
 ## ClipboardItem
 
 ClipboardItem は secure context の Window に公開し、Worker には公開しない。
@@ -59,7 +81,10 @@ Promise が返す内部レコードは null prototype とし、author の `Objec
 
 - `tests/clipboard_events.rs`: readonly payload、WebIDL の読み取り順、別realm、Worker、合成イベントの既定動作抑止。
 - `tests/clipboard_items.rs`: MIME 正規化・重複、metadata snapshot、Promise、公開範囲、別realm、内部 thenable の露出抑止。
-- 固定 WPT: `tests/wpt/clipboard-events.json` の2ファイル。revision は `tests/wpt/revision.txt` に従う。原本と期待値を変更しない。
+- `tests/clipboard_native_events.rs`: trusted native event、DataTransferのmode/lifetime、cut/paste順序、HTML表現、editing hostのcaret/selection/designMode。
+- `tests/editing_commands.rs`: 基本コマンド、query、text control/編集ホスト、再入拒否。
+- 固定 WPT: manifestのClipboard synthetic/ClipboardItem/copy-eventと既存editing/InputEventケース。
+  revision は `tests/wpt/revision.txt` に従い、原本と期待値を変更しない。
 
 Firefox 158.0.1 の loopback secure context で、正規化、重複拒否、PresentationStyle、
 getType の Promise エラー、文字列変換のタイミング、未読データの Promise rejection を比較した。

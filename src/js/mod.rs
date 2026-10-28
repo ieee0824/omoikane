@@ -16511,6 +16511,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(clipboard_write_native),
         ),
         (
+            js_string!("__omoikane_clipboard_event_read"),
+            0,
+            NativeFunction::from_copy_closure(clipboard_event_read_native),
+        ),
+        (
+            js_string!("__omoikane_clipboard_event_write"),
+            1,
+            NativeFunction::from_copy_closure(clipboard_event_write_native),
+        ),
+        (
             js_string!("__omoikane_clipboard_permission"),
             0,
             NativeFunction::from_copy_closure(clipboard_permission_native),
@@ -18550,6 +18560,42 @@ fn clipboard_write_native(
             .replace_wire(representations)
             .map_err(|error| JsNativeError::range().with_message(error.to_string()))?;
         Ok(JsValue::from(true))
+    })
+}
+
+/// Returns the browser clipboard snapshot for a trusted clipboard event.
+///
+/// Unlike the async Clipboard API this is a browser default action, so it is
+/// not gated by the page's secure-context or async-clipboard permission.
+fn clipboard_event_read_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    with_host_state(|state| {
+        let encoded =
+            serde_json::to_string(&state.borrow().clipboard.snapshot_wire()).map_err(|error| {
+                JsNativeError::error()
+                    .with_message(format!("failed to encode clipboard event data: {error}"))
+            })?;
+        Ok(JsValue::from(js_string!(encoded)))
+    })
+}
+
+/// Atomically commits the data selected by a trusted copy or cut default.
+fn clipboard_event_write_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let encoded = string_argument(args.first(), "[]", context)?;
+    let representations: Vec<WireRepresentation> =
+        serde_json::from_str(&encoded).map_err(|error| {
+            JsNativeError::typ().with_message(format!("invalid clipboard event data: {error}"))
+        })?;
+    with_host_state(|state| {
+        state
+            .borrow()
+            .clipboard
+            .replace_wire(representations)
+            .map_err(|error| JsNativeError::range().with_message(error.to_string()))?;
+        Ok(JsValue::undefined())
     })
 }
 
