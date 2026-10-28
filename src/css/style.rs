@@ -9876,6 +9876,7 @@ pub(crate) fn normalize_counter_specified(property: &str, text: &str) -> Option<
                 index += 1;
             }
             Some(Value::Function { name, .. }) if name.eq_ignore_ascii_case("calc") => {
+                counter_integer_with_context(&values[index], ResolutionContext::default())?;
                 output.push(render_value(&values[index]));
                 index += 1;
             }
@@ -10735,7 +10736,12 @@ fn counter_pair_syntax_is_valid(value: &Value) -> bool {
             Some(Value::Number(number)) if number.is_finite() && number.fract() == 0.0 => {
                 index += 1
             }
-            Some(Value::Function { name, .. }) if name.eq_ignore_ascii_case("calc") => index += 1,
+            Some(value @ Value::Function { name, .. }) if name.eq_ignore_ascii_case("calc") => {
+                if counter_integer_with_context(value, ResolutionContext::default()).is_none() {
+                    return false;
+                }
+                index += 1;
+            }
             Some(Value::Number(_)) | Some(Value::Function { .. }) => return false,
             _ => {}
         }
