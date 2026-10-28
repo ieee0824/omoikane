@@ -143,6 +143,8 @@ export const __omoikane_service_worker_lifecycle = {};
   const nativeClipboardWriteText = globalThis.__omoikane_clipboard_write_text;
   const nativeClipboardRead = globalThis.__omoikane_clipboard_read;
   const nativeClipboardWrite = globalThis.__omoikane_clipboard_write;
+  const nativeClipboardEventRead = globalThis.__omoikane_clipboard_event_read;
+  const nativeClipboardEventWrite = globalThis.__omoikane_clipboard_event_write;
   const nativeClipboardPermission = globalThis.__omoikane_clipboard_permission;
   const nativeGeolocationPermission = globalThis.__omoikane_geolocation_permission;
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
@@ -398,6 +400,8 @@ export const __omoikane_service_worker_lifecycle = {};
   delete globalThis.__omoikane_clipboard_write_text;
   delete globalThis.__omoikane_clipboard_read;
   delete globalThis.__omoikane_clipboard_write;
+  delete globalThis.__omoikane_clipboard_event_read;
+  delete globalThis.__omoikane_clipboard_event_write;
   delete globalThis.__omoikane_clipboard_permission;
   delete globalThis.__omoikane_geolocation_permission;
   delete globalThis.__omoikane_is_secure_context;
@@ -2656,6 +2660,7 @@ export const __omoikane_service_worker_lifecycle = {};
       init = init ?? {};
       super(type, init);
       this.data = init.data === undefined ? null : init.data;
+      this.dataTransfer = init.dataTransfer === undefined ? null : init.dataTransfer;
       this.inputType = String(init.inputType ?? "");
       this.isComposing = Boolean(init.isComposing);
       const suppliedRanges = init.targetRanges;
@@ -9208,6 +9213,35 @@ export const __omoikane_service_worker_lifecycle = {};
       }
     }
 
+    execCommand(commandId, showUI = false, value = "") {
+      if (!isDocumentNode(this)) throw new IntrinsicTypeError("Illegal Document invocation");
+      const command = normalizeEditingCommand(commandId);
+      void Boolean(showUI);
+      const convertedValue = toDOMString(value);
+      return executeEditingCommand(this, command, convertedValue);
+    }
+
+    queryCommandSupported(commandId) {
+      if (!isDocumentNode(this)) throw new IntrinsicTypeError("Illegal Document invocation");
+      return supportedEditingCommands.has(normalizeEditingCommand(commandId));
+    }
+
+    queryCommandEnabled(commandId) {
+      if (!isDocumentNode(this)) throw new IntrinsicTypeError("Illegal Document invocation");
+      return editingCommandEnabled(this, normalizeEditingCommand(commandId));
+    }
+
+    queryCommandState(commandId) {
+      if (!isDocumentNode(this)) throw new IntrinsicTypeError("Illegal Document invocation");
+      return editingCommandState(this, normalizeEditingCommand(commandId));
+    }
+
+    queryCommandValue(commandId) {
+      if (!isDocumentNode(this)) throw new IntrinsicTypeError("Illegal Document invocation");
+      const command = normalizeEditingCommand(commandId);
+      return command === "bold" ? String(editingCommandState(this, command)) : "";
+    }
+
     createEvent(type) {
       const t = String(type);
       let evt;
@@ -9464,9 +9498,12 @@ export const __omoikane_service_worker_lifecycle = {};
     close() { __omoikane_document_close(this.__id); }
   }
 
-  Object.defineProperty(Document.prototype, "designMode", {
-    ...Object.getOwnPropertyDescriptor(Document.prototype, "designMode"), enumerable: true,
-  });
+  for (const name of ["designMode", "execCommand", "queryCommandSupported",
+      "queryCommandEnabled", "queryCommandState", "queryCommandValue"]) {
+    Object.defineProperty(Document.prototype, name, {
+      ...Object.getOwnPropertyDescriptor(Document.prototype, name), enumerable: true,
+    });
+  }
   for (const name of ["updateCallbackDone", "ready", "finished", "skipTransition"]) {
     Object.defineProperty(ViewTransition.prototype, name, {
       ...Object.getOwnPropertyDescriptor(ViewTransition.prototype, name), enumerable: true,
@@ -15202,21 +15239,432 @@ export const __omoikane_service_worker_lifecycle = {};
     syncTextControlNativeState(control, false);
   }
 
-  function dispatchTextControlInput(control, inputType, data, nextValue, caret, isComposing = false) {
-    const beforeInput = new InputEvent("beforeinput", {
-      bubbles: true, cancelable: true, composed: true, inputType, data, isComposing,
-    });
-    if (!control.dispatchEvent(beforeInput)) return false;
+  function commitTextControlInput(control, inputType, data, nextValue, caret, isComposing) {
     control.value = nextValue;
     nativeSetAutofilled(internalNodeId(control), false);
     control.__lastValueChangeWasUser = true;
     setTextControlSelection(control, caret, caret, "none");
     control.__textEditChanged = true;
     safeWeakMapGet(nodeEventStates, control).userValidityEdited = true;
-    control.dispatchEvent(new InputEvent("input", {
+    const input = new InputEvent("input", {
       bubbles: true, composed: true, inputType, data, isComposing,
-    }));
+    });
+    input.isTrusted = true;
+    control.dispatchEvent(input);
     return true;
+  }
+
+  function dispatchTextControlInput(control, inputType, data, nextValue, caret, isComposing = false) {
+    const beforeInput = new InputEvent("beforeinput", {
+      bubbles: true, cancelable: true, composed: true, inputType, data, isComposing,
+    });
+    beforeInput.isTrusted = true;
+    if (!control.dispatchEvent(beforeInput)) return false;
+    return commitTextControlInput(control, inputType, data, nextValue, caret, isComposing);
+  }
+
+  function dispatchTextControlCommandInput(control, inputType, data, nextValue, caret) {
+    return commitTextControlInput(control, inputType, data, nextValue, caret, false);
+  }
+
+  function editingHostForTarget(target) {
+    let host = null;
+    for (let current = target; current && current instanceof Element; current = internalParentNode(current)) {
+      if (!current.isContentEditable) break;
+      host = current;
+    }
+    return host;
+  }
+
+  function editingSelectionRange(host, create = false) {
+    const doc = internalOwnerDocument(host);
+    const selection = selectionForDocument(doc);
+    let range = selectionRange(selection);
+    const inside = range && isInclusiveDescendant(range.__startContainer, host) &&
+      isInclusiveDescendant(range.__endContainer, host);
+    if (inside) return [selection, range];
+    if (!create) return [selection, null];
+    range = new Range(doc);
+    range.selectNodeContents(host);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return [selection, range];
+  }
+
+  function staticTargetRange(range) {
+    return new PlatformStaticRange({
+      startContainer:range.__startContainer,
+      startOffset:range.__startOffset,
+      endContainer:range.__endContainer,
+      endOffset:range.__endOffset,
+    });
+  }
+
+  function dispatchEditingHostInput(host, inputType, data, edit, dataTransfer = null) {
+    const [selection, range] = editingSelectionRange(host, true);
+    const beforeInput = new InputEvent("beforeinput", {
+      bubbles:true, cancelable:true, composed:true, inputType, data, dataTransfer,
+      targetRanges:[staticTargetRange(range)],
+    });
+    beforeInput.isTrusted = true;
+    if (!host.dispatchEvent(beforeInput)) return false;
+    edit(selection, range);
+    const input = new InputEvent("input", {
+      bubbles:true, composed:true, inputType, data, dataTransfer,
+    });
+    input.isTrusted = true;
+    host.dispatchEvent(input);
+    return true;
+  }
+
+  function dispatchEditingHostCommand(host, inputType, data, edit) {
+    const [selection, range] = editingSelectionRange(host, true);
+    edit(selection, range);
+    const input = new InputEvent("input", {
+      bubbles:true, composed:true, inputType, data,
+    });
+    input.isTrusted = true;
+    host.dispatchEvent(input);
+    return true;
+  }
+
+  function insertIntoEditingHost(
+    host, inputType, text, command = false, dataTransfer = null, eventData = undefined,
+  ) {
+    const dispatch = command ? dispatchEditingHostCommand : dispatchEditingHostInput;
+    const inputData = eventData === undefined ? (dataTransfer ? null : text) : eventData;
+    return dispatch(host, inputType, inputData, (selection, range) => {
+      const container = range.__startContainer, offset = range.__startOffset;
+      range.deleteContents();
+      if (isInclusiveDescendant(container, host)) {
+        selection.collapse(container, Math.min(offset, nodeLength(container)));
+        range = selectionRange(selection);
+      }
+      const inserted = internalOwnerDocument(host).createTextNode(text);
+      range.insertNode(inserted);
+      selection.collapse(inserted, inserted.length);
+    }, dataTransfer);
+  }
+
+  function editingTextNodes(host) {
+    const nodes = [];
+    const visit = node => {
+      if (node.nodeType === 3) nodes.push(node);
+      else for (const child of internalChildNodes(node)) visit(child);
+    };
+    visit(host);
+    return nodes;
+  }
+
+  function adjacentEditingPosition(host, node, offset, forward) {
+    const nodes = editingTextNodes(host);
+    if (node.nodeType === 3) {
+      if (forward && offset < node.length) return [node, offset + 1];
+      if (!forward && offset > 0) return [node, offset - 1];
+      const index = nodes.indexOf(node);
+      const adjacent = nodes[index + (forward ? 1 : -1)];
+      return adjacent ? [adjacent, forward ? 0 : adjacent.length] : null;
+    }
+    const children = internalChildNodes(node);
+    const candidate = forward ? children[offset] : children[offset - 1];
+    if (candidate) {
+      const descendants = editingTextNodes(candidate);
+      const text = forward ? descendants[0] : descendants[descendants.length - 1];
+      if (text) return [text, forward ? 0 : text.length];
+    }
+    const boundary = forward ? nodes[0] : nodes[nodes.length - 1];
+    return boundary ? [boundary, forward ? 0 : boundary.length] : null;
+  }
+
+  function deleteFromEditingHost(host, inputType, command = false) {
+    const dispatch = command ? dispatchEditingHostCommand : dispatchEditingHostInput;
+    return dispatch(host, inputType, null, (selection, range) => {
+      if (range.collapsed) {
+        const forward = inputType === "deleteContentForward";
+        let adjacent = adjacentEditingPosition(
+          host, range.__startContainer, range.__startOffset, forward,
+        );
+        if (!adjacent) return;
+        if (adjacent[0] !== range.__startContainer) {
+          adjacent = adjacentEditingPosition(host, adjacent[0], adjacent[1], forward);
+          if (!adjacent) return;
+        }
+        if (forward) range.setEnd(adjacent[0], adjacent[1]);
+        else range.setStart(adjacent[0], adjacent[1]);
+      }
+      const container = range.__startContainer, offset = range.__startOffset;
+      range.deleteContents();
+      if (isInclusiveDescendant(container, host)) {
+        selection.collapse(container, Math.min(offset, nodeLength(container)));
+      } else {
+        selection.collapse(range.__startContainer, range.__startOffset);
+      }
+    });
+  }
+
+  function moveEditingHostCaret(host, key, extend) {
+    const [selection, range] = editingSelectionRange(host, true);
+    const forward = key === "ArrowRight" || key === "End";
+    if (!extend && !range.collapsed) {
+      if (forward) selection.collapse(range.__endContainer, range.__endOffset);
+      else selection.collapse(range.__startContainer, range.__startOffset);
+      return true;
+    }
+    const nodes = editingTextNodes(host);
+    let position;
+    if (key === "Home" || key === "End") {
+      const boundary = forward ? nodes[nodes.length - 1] : nodes[0];
+      position = boundary ? [boundary, forward ? boundary.length : 0] : null;
+    } else {
+      position = adjacentEditingPosition(host, selection.focusNode, selection.focusOffset, forward);
+    }
+    if (!position) return false;
+    if (extend) selection.extend(position[0], position[1]);
+    else selection.collapse(position[0], position[1]);
+    return true;
+  }
+
+  function selectedEditingText(target) {
+    if (isTextControl(target)) {
+      ensureTextControlSelection(target);
+      return target.value.slice(target.selectionStart, target.selectionEnd);
+    }
+    const host = editingHostForTarget(target);
+    if (!host) return "";
+    const [, range] = editingSelectionRange(host, false);
+    return range ? range.toString() : "";
+  }
+
+  function selectedClipboardRepresentations(target) {
+    const text = selectedEditingText(target);
+    if (!text) return [];
+    const representations = [{
+      format:"text/plain", bytes:Array.from(blobTextEncoder.encode(text)),
+    }];
+    if (!isTextControl(target)) {
+      const host = editingHostForTarget(target);
+      const [, range] = host ? editingSelectionRange(host, false) : [null, null];
+      if (range) {
+        const container = internalOwnerDocument(host).createElement("div");
+        container.appendChild(range.cloneContents());
+        representations.push({
+          format:"text/html", bytes:Array.from(blobTextEncoder.encode(container.innerHTML)),
+        });
+      }
+    }
+    return representations;
+  }
+
+  function deleteClipboardSelection(target, command = false) {
+    if (isTextControl(target)) {
+      if (target.readOnly || target.__isDisabledControl()) return false;
+      ensureTextControlSelection(target);
+      const start = target.selectionStart, end = target.selectionEnd;
+      if (start === end) return false;
+      const dispatch = command ? dispatchTextControlCommandInput : dispatchTextControlInput;
+      return dispatch(
+        target, "deleteByCut", null,
+        target.value.slice(0, start) + target.value.slice(end), start,
+      );
+    }
+    const host = editingHostForTarget(target);
+    if (!host) return false;
+    const [, range] = editingSelectionRange(host, false);
+    return range && !range.collapsed ? deleteFromEditingHost(host, "deleteByCut", command) : false;
+  }
+
+  function pasteClipboardText(target, text, transfer) {
+    if (isTextControl(target)) {
+      if (target.readOnly || target.__isDisabledControl()) return false;
+      ensureTextControlSelection(target);
+      let inserted = text;
+      if (target.maxLength >= 0) {
+        const available = Math.max(
+          target.maxLength - (target.value.length - (target.selectionEnd - target.selectionStart)), 0,
+        );
+        inserted = inserted.slice(0, available);
+      }
+      if (!inserted) return false;
+      const start = target.selectionStart, end = target.selectionEnd;
+      return dispatchTextControlInput(
+        target, "insertFromPaste", inserted,
+        target.value.slice(0, start) + inserted + target.value.slice(end),
+        start + inserted.length,
+      );
+    }
+    const host = editingHostForTarget(target);
+    return host ? insertIntoEditingHost(host, "insertFromPaste", text, false, transfer) : false;
+  }
+
+  function dispatchTrustedClipboardEvent(target, type, command = false) {
+    const paste = type === "paste";
+    const representations = paste ? clipboardParse(nativeClipboardEventRead()) : [];
+    const transfer = nativeClipboardData(paste ? "readonly" : "readwrite", representations);
+    const event = new platformEventInterfaces.ClipboardEvent(type, {
+      clipboardData:transfer, bubbles:true, cancelable:true, composed:true,
+    });
+    event.isTrusted = true;
+    let notCanceled;
+    try {
+      notCanceled = target.dispatchEvent(event);
+      if (paste) {
+        if (notCanceled) pasteClipboardText(target, transfer.getData("text/plain"), transfer);
+      } else if (!notCanceled) {
+        if (transfer.items.length) nativeClipboardEventWrite(serializeClipboardData(transfer));
+      } else {
+        const selected = selectedClipboardRepresentations(target);
+        if (selected.length) {
+          nativeClipboardEventWrite(clipboardSerialize(selected));
+          if (type === "cut") deleteClipboardSelection(target, command);
+        }
+      }
+    } finally {
+      protectClipboardData(transfer);
+    }
+    return notCanceled;
+  }
+
+  function performClipboardKeyDefault(target, init) {
+    if (!(init.ctrlKey || init.metaKey) || init.altKey) return false;
+    const key = String(init.key || "").toLowerCase();
+    const type = key === "c" ? "copy" : key === "x" ? "cut" : key === "v" ? "paste" : null;
+    if (!type) return false;
+    dispatchTrustedClipboardEvent(target, type);
+    return true;
+  }
+
+  const supportedEditingCommands = new Set([
+    "bold", "copy", "cut", "delete", "forwarddelete", "inserttext",
+  ]);
+  const executingEditingCommands = browsingInput.executingEditingCommands ||
+    (browsingInput.executingEditingCommands = new WeakSet());
+
+  function normalizeEditingCommand(value) {
+    return asciiLowercase(toDOMString(value));
+  }
+
+  function editingCommandTarget(doc) {
+    return focusedElementOf(doc) || doc.body || doc.documentElement;
+  }
+
+  function editingRangeForDocument(doc) {
+    const selection = selectionForDocument(doc);
+    return selectionRange(selection);
+  }
+
+  function editingCommandEnabled(doc, command) {
+    if (!supportedEditingCommands.has(command) || doc.contentType !== "text/html") return false;
+    const target = editingCommandTarget(doc);
+    if (!target) return false;
+    if (command === "copy" || command === "cut") {
+      const selected = selectedEditingText(target);
+      if (!selected) return false;
+      return command === "copy" || !isTextControl(target) ||
+        (!target.readOnly && !target.__isDisabledControl());
+    }
+    if (isTextControl(target)) {
+      if (command === "bold") return false;
+      return !target.readOnly && !target.__isDisabledControl();
+    }
+    const host = editingHostForTarget(target);
+    if (!host) return false;
+    const range = editingRangeForDocument(doc);
+    return !!range && isInclusiveDescendant(range.__startContainer, host) &&
+      isInclusiveDescendant(range.__endContainer, host);
+  }
+
+  function editingCommandState(doc, command) {
+    if (command !== "bold" || !editingCommandEnabled(doc, command)) return false;
+    const range = editingRangeForDocument(doc);
+    const host = editingHostForTarget(editingCommandTarget(doc));
+    for (let current = range.__startContainer.nodeType === 1
+        ? range.__startContainer : internalParentNode(range.__startContainer);
+        current && current instanceof Element;
+        current = internalParentNode(current)) {
+      const name = internalNodeLocalName(current);
+      if (name === "b" || name === "strong") return true;
+      const weight = current.style?.fontWeight;
+      if (weight === "bold" || Number(weight) >= 600) return true;
+      if (current === host) break;
+    }
+    return false;
+  }
+
+  function executeTextControlCommand(control, command, value) {
+    ensureTextControlSelection(control);
+    if (command === "inserttext") {
+      const start = control.selectionStart, end = control.selectionEnd;
+      let text = value;
+      if (control.maxLength >= 0) {
+        const available = Math.max(
+          control.maxLength - (control.value.length - (end - start)), 0,
+        );
+        text = text.slice(0, available);
+      }
+      return dispatchTextControlCommandInput(
+        control, "insertText", text,
+        control.value.slice(0, start) + text + control.value.slice(end),
+        start + text.length,
+      );
+    }
+    let start = control.selectionStart, end = control.selectionEnd;
+    if (start === end) {
+      if (command === "delete" && start > 0) start--;
+      else if (command === "forwarddelete" && end < control.value.length) end++;
+      else return true;
+    }
+    return dispatchTextControlCommandInput(
+      control,
+      command === "delete" ? "deleteContentBackward" : "deleteContentForward",
+      null,
+      control.value.slice(0, start) + control.value.slice(end),
+      start,
+    );
+  }
+
+  function executeBoldCommand(host) {
+    return dispatchEditingHostCommand(host, "formatBold", null, (selection, range) => {
+      const container = range.__startContainer, offset = range.__startOffset;
+      const fragment = range.extractContents();
+      if (isInclusiveDescendant(container, host)) {
+        selection.collapse(container, Math.min(offset, nodeLength(container)));
+        range = selectionRange(selection);
+      }
+      const wrapper = internalOwnerDocument(host).createElement("b");
+      wrapper.appendChild(fragment);
+      range.insertNode(wrapper);
+      selection.selectAllChildren(wrapper);
+    });
+  }
+
+  function executeEditingCommand(doc, command, value) {
+    if (!supportedEditingCommands.has(command) || doc.contentType !== "text/html" ||
+        safeWeakSetHas(executingEditingCommands, doc)) return false;
+    const target = editingCommandTarget(doc);
+    if (!target) return false;
+    safeWeakSetAdd(executingEditingCommands, doc);
+    try {
+      if (command === "copy" || command === "cut") {
+        dispatchTrustedClipboardEvent(target, command, true);
+        return true;
+      }
+      if (!editingCommandEnabled(doc, command)) return false;
+      if (isTextControl(target)) return executeTextControlCommand(target, command, value);
+      const host = editingHostForTarget(target);
+      if (command === "inserttext") return insertIntoEditingHost(host, "insertText", value, true);
+      if (command === "delete" || command === "forwarddelete") {
+        return deleteFromEditingHost(
+          host,
+          command === "delete" ? "deleteContentBackward" : "deleteContentForward",
+          true,
+        );
+      }
+      if (command === "bold") return executeBoldCommand(host);
+      return false;
+    } finally {
+      safeWeakSetDelete(executingEditingCommands, doc);
+    }
   }
 
   function moveTextControlCaret(control, destination, extend) {
@@ -15238,8 +15686,40 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   function performTextControlKeyDefault(control, init) {
-    if (!isTextControl(control) || control.readOnly || control.__isDisabledControl()) return;
+    const editingHost = editingHostForTarget(control);
+    if (!isTextControl(control) && !editingHost) return;
     if (init.isComposing) return;
+    if (performClipboardKeyDefault(control, init)) return;
+    if (isTextControl(control) && (control.readOnly || control.__isDisabledControl())) return;
+    if (editingHost) {
+      const key = String(init.key || "");
+      if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(key)) {
+        moveEditingHostCaret(editingHost, key, Boolean(init.shiftKey));
+        return;
+      }
+      if (key === "Backspace" || key === "Delete") {
+        deleteFromEditingHost(
+          editingHost,
+          key === "Backspace" ? "deleteContentBackward" : "deleteContentForward",
+        );
+        return;
+      }
+      if (key === "Enter") {
+        insertIntoEditingHost(
+          editingHost,
+          init.shiftKey ? "insertLineBreak" : "insertParagraph",
+          "\n",
+          false,
+          null,
+          null,
+        );
+        return;
+      }
+      if (init.ctrlKey || init.metaKey || init.altKey) return;
+      const text = init.text ? String(init.text) : (Array.from(key).length === 1 ? key : "");
+      if (text) insertIntoEditingHost(editingHost, "insertText", text);
+      return;
+    }
     ensureTextControlSelection(control);
     const value = control.value;
     const start = control.selectionStart;
@@ -29921,6 +30401,7 @@ export const __omoikane_service_worker_lifecycle = {};
       return this.__items[Math.trunc(number)] ?? null;
     }
     add(data, type = undefined) {
+      if (!dataTransferWritable(this.__owner)) return null;
       let item;
       if (data instanceof File) {
         if (type !== undefined) throw new TypeError("A File item does not accept a type argument");
@@ -29940,6 +30421,9 @@ export const __omoikane_service_worker_lifecycle = {};
       return item;
     }
     remove(index) {
+      if (!dataTransferWritable(this.__owner)) {
+        throw new DOMException("The data store is not writable.", "InvalidStateError");
+      }
       const number = Number(index);
       const position = Math.trunc(number);
       if (!Number.isFinite(number) || position < 0 || position >= this.__items.length) {
@@ -29950,6 +30434,9 @@ export const __omoikane_service_worker_lifecycle = {};
       this.__owner.__syncFiles();
     }
     clear() {
+      if (!dataTransferWritable(this.__owner)) {
+        throw new DOMException("The data store is not writable.", "InvalidStateError");
+      }
       this.__items.length = 0;
       this.__syncIndices();
       this.__owner.__syncFiles();
@@ -29959,10 +30446,24 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   const dataTransferInstances = browsingInput.dataTransferInstances || (browsingInput.dataTransferInstances = new WeakSet());
+  const dataTransferStates = browsingInput.dataTransferStates || (browsingInput.dataTransferStates = new WeakMap());
   const clipboardEventStates = browsingInput.clipboardEventStates || (browsingInput.clipboardEventStates = new WeakMap());
+  function dataTransferState(value) {
+    return safeWeakMapGet(dataTransferStates, value);
+  }
+  function dataTransferWritable(value) {
+    return dataTransferState(value)?.mode === "readwrite";
+  }
+  function normalizeDataTransferFormat(value) {
+    const type = String(value).toLowerCase();
+    if (type === "text") return "text/plain";
+    if (type === "url") return "text/uri-list";
+    return type;
+  }
   class DataTransfer {
     constructor() {
       safeWeakSetAdd(dataTransferInstances, this);
+      safeWeakMapSet(dataTransferStates, this, {mode:"readwrite"});
       this.dropEffect = "none";
       this.effectAllowed = "none";
       this.__files = new FileList();
@@ -29975,6 +30476,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     get files() { return this.__files; }
     get types() {
+      if (dataTransferState(this)?.mode === "protected") return [];
       const types = [];
       for (const item of this.items) {
         if (item.kind === "string" && !types.includes(item.type)) types.push(item.type);
@@ -29983,20 +30485,23 @@ export const __omoikane_service_worker_lifecycle = {};
       return types;
     }
     setData(format, data) {
-      const type = String(format).toLowerCase();
+      if (!dataTransferWritable(this)) return;
+      const type = normalizeDataTransferFormat(format);
       const existing = this.items.__items.find(item => item.kind === "string" && item.type === type);
       if (existing) existing.__value = String(data);
       else this.items.add(String(data), type);
     }
     getData(format) {
-      const type = String(format).toLowerCase();
+      if (dataTransferState(this)?.mode === "protected") return "";
+      const type = normalizeDataTransferFormat(format);
       return this.items.__items.find(item => item.kind === "string" && item.type === type)?.__value || "";
     }
     clearData(format = undefined) {
+      if (!dataTransferWritable(this)) return;
       if (format === undefined) {
         this.items.__items = this.items.__items.filter(item => item.kind !== "string");
       } else {
-        const type = String(format).toLowerCase();
+        const type = normalizeDataTransferFormat(format);
         this.items.__items = this.items.__items.filter(item => !(item.kind === "string" && item.type === type));
       }
       this.items.__syncIndices();
@@ -30004,6 +30509,35 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     setDragImage(_element, _x, _y) {}
     get [Symbol.toStringTag]() { return "DataTransfer"; }
+  }
+
+  function nativeClipboardData(mode, representations = []) {
+    const transfer = new DataTransfer();
+    for (const representation of representations) {
+      transfer.setData(
+        representation.format,
+        blobTextDecoder.decode(new Uint8Array(representation.bytes || [])),
+      );
+    }
+    dataTransferState(transfer).mode = mode;
+    return transfer;
+  }
+
+  function serializeClipboardData(transfer) {
+    const representations = [];
+    for (const item of transfer.items.__items) {
+      if (item.kind !== "string") continue;
+      representations.push({
+        format:item.type,
+        bytes:Array.from(blobTextEncoder.encode(item.__value)),
+      });
+    }
+    return clipboardSerialize(representations);
+  }
+
+  function protectClipboardData(transfer) {
+    const state = dataTransferState(transfer);
+    if (state) state.mode = "protected";
   }
 
   class ProgressEvent extends Event {

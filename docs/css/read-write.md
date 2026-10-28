@@ -51,5 +51,5 @@ designModeの契約はactive range、編集継承の契約はフォームのisCo
 複合契約は最初の不一致で停止するため、残りの副アサーションの一致を意味しない。
 これらの差に合わせてHTML・editableの明示的な定義を弱めない。
 
-これは状態照合とIDL反映の実装であり、実際の編集UI、inert、execCommandなど
-#1287・#1288の残る機能の完了を示すものではない。#1278の他のselector familyも引き続き扱う。
+これは状態照合とIDL反映の説明である。編集UI、Clipboard、execCommandの実装詳細は
+[`docs/dom/clipboard.md`](../dom/clipboard.md)に記録する。#1278の他のselector familyも引き続き扱う。

@@ -804,6 +804,7 @@
     {"path": "css/cssom-view/range-bounding-client-rect-with-shadow-dom.html"},
     {"path": "uievents/constructors/inputevent-constructor.html"},
     {"path": "clipboard-apis/clipboard-events-synthetic.html"},
-    {"path": "clipboard-apis/clipboard-item.https.html"}
+    {"path": "clipboard-apis/clipboard-item.https.html"},
+    {"path": "clipboard-apis/events/copy-event.html"}
   ]
 }
