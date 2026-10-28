@@ -8,7 +8,7 @@ language-sensitive automatic quotes on nested `<q>` elements, and the required
 The visible strings in Firefox 158.0.1 are:
 
 - `[outer {inner}]`
-- `<depth-only> next`
+- `<depth-only>< next>`
 - `「日本語 『内側』」`
 - `Chapter 10: set after increment`
 
