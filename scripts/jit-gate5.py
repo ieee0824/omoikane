@@ -49,6 +49,8 @@ SENSITIVE_TESTS = (
      "runner_matches_selectors4_expectation_in_both_drive_modes"),
     ("iframe-recovery", ["--test", "iframe_policy_introspection"],
      "caught_script_errors_do_not_poison_later_iframe_realm_initialization"),
+    ("wpt-custom-elements-adoption", ["--test", "wpt_smoke"],
+     "selected_wpt_testharness_cases_match_expectations"),
 )
 SUITE_COMMAND = [*SUITE_BASE_COMMAND, "--", "--include-ignored", "--nocapture",
                  *(argument for _, _, test in SENSITIVE_TESTS
