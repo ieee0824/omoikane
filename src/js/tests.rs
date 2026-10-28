@@ -2992,6 +2992,70 @@ fn synchronous_serializer_callbacks_do_not_leak_dialog_state() {
 }
 
 #[test]
+fn host_function_calls_root_inputs_during_function_compilation() {
+    #[derive(boa_gc::Trace, boa_engine::JsData)]
+    struct Marker {
+        #[unsafe_ignore_trace]
+        finalized: Rc<Cell<bool>>,
+    }
+    impl boa_gc::Finalize for Marker {
+        fn finalize(&self) {
+            self.finalized.set(true);
+        }
+    }
+
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .context
+        .register_global_builtin_callable(
+            js_string!("forceHostFunctionCollection"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, _| {
+                boa_gc::force_collect();
+                Ok(JsValue::undefined())
+            }),
+        )
+        .unwrap();
+
+    let finalized_value = Rc::new(Cell::new(false));
+    let value = JsObject::from_proto_and_data(
+        None,
+        Marker {
+            finalized: Rc::clone(&finalized_value),
+        },
+    );
+    let returned = runtime
+        .call_function_with_value(
+            "(forceHostFunctionCollection(), value => value)",
+            value.into(),
+        )
+        .unwrap();
+    assert!(!finalized_value.get());
+    drop(returned);
+    boa_gc::force_collect();
+    assert!(finalized_value.get());
+
+    let finalized_argument = Rc::new(Cell::new(false));
+    let argument = JsObject::from_proto_and_data(
+        None,
+        Marker {
+            finalized: Rc::clone(&finalized_argument),
+        },
+    );
+    let result = runtime
+        .call_function_with_arguments(
+            "(forceHostFunctionCollection(), function(other) { return this === other; })",
+            argument.clone().into(),
+            vec![argument.into()],
+        )
+        .unwrap();
+    assert_eq!(result.as_boolean(), Some(true));
+    assert!(!finalized_argument.get());
+    boa_gc::force_collect();
+    assert!(finalized_argument.get());
+}
+
+#[test]
 fn dialog_arguments_follow_alert_overload_and_web_idl_defaults() {
     let mut runtime = JsRuntime::new().unwrap();
     let controller = runtime.javascript_dialog_controller();
