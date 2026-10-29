@@ -2568,6 +2568,78 @@ fn whitespace_longhands_drive_normalization_and_wrapping() {
 }
 
 #[test]
+fn text_wrap_style_balances_lines_and_preserves_container_alignment() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    for id in ["auto", "balance", "pretty", "stable"] {
+        let paragraph = NodeHandle::element("p");
+        paragraph.set_attribute("id", id);
+        paragraph.append_child(NodeHandle::text("alpha beta gamma delta"));
+        body.append_child(paragraph);
+    }
+    document.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin:0 } p { margin:0; width:100px; font:10px monospace; \
+             line-height:10px; text-align:center } #balance { text-wrap-style:balance } \
+             #pretty { text-wrap-style:pretty } #stable { text-wrap-style:stable }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let auto = &layout.children[0].lines;
+    let balance = &layout.children[1].lines;
+    let pretty = &layout.children[2].lines;
+    let stable = &layout.children[3].lines;
+    let spread = |lines: &[LineBox]| {
+        let widths = lines.iter().map(|line| line.rect.width).collect::<Vec<_>>();
+        widths.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            - widths.iter().copied().fold(f32::INFINITY, f32::min)
+    };
+
+    assert_eq!(auto.len(), 2);
+    assert_eq!(balance.len(), auto.len());
+    assert_eq!(pretty.len(), auto.len());
+    let widths = |lines: &[LineBox]| lines.iter().map(|line| line.rect.width).collect::<Vec<_>>();
+    assert!(
+        spread(balance) < spread(auto),
+        "auto={:?}, balance={:?}",
+        widths(auto),
+        widths(balance)
+    );
+    assert!(
+        spread(pretty) < spread(auto),
+        "auto={:?}, pretty={:?}",
+        widths(auto),
+        widths(pretty)
+    );
+    assert_eq!(
+        stable
+            .iter()
+            .map(|line| line.rect.width)
+            .collect::<Vec<_>>(),
+        auto.iter().map(|line| line.rect.width).collect::<Vec<_>>()
+    );
+    for line in balance.iter().chain(pretty) {
+        assert!((line.rect.x + line.rect.width / 2.0 - 50.0).abs() < 0.01);
+    }
+}
+
+#[test]
 fn tab_size_advances_to_cursor_relative_stops() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

@@ -349,7 +349,34 @@ fn layout_inline_nodes_impl(
         direction_rtl,
         first_line_indent,
         line_constraints,
+        None,
     );
+    // Balancing against a changing float exclusion would need a two-dimensional
+    // search. Keep those lines on the ordinary greedy path; the common no-float
+    // constraint is constant and can safely be optimized below.
+    let uniform_constraints = line_constraints.is_none_or(|constraints| {
+        lines.iter().all(|line| {
+            let (constrained_x, constrained_width) = constraints(line.rect.y, strut_line_height);
+            (constrained_x - line_start_x).abs() < 0.01
+                && (constrained_width - line_available_width).abs() < 0.01
+        })
+    });
+    if uniform_constraints {
+        lines = optimize_text_wrap_style(
+            &segments,
+            source_start_token,
+            line_start_x,
+            start_y,
+            line_available_width,
+            align,
+            strut_line_height,
+            strut_metrics,
+            direction_rtl,
+            first_line_indent,
+            line_constraints,
+            lines,
+        );
+    }
     boxes::finish(&mut lines, nodes, resolver, strut_line_height);
     if let Some(style) = text_overflow_style {
         apply_text_overflow(
@@ -469,6 +496,7 @@ pub(super) fn layout_vertical_inline_nodes(
         false,
         first_line_indent,
         local_constraints,
+        None,
     );
 
     boxes::finish(&mut horizontal_lines, nodes, resolver, strut_line_height);
@@ -1796,6 +1824,7 @@ pub(super) fn layout_block_pseudo_content(
         Some(font_metrics(style)),
         super::direction_is_rtl(style),
         text_indent(style, available_width),
+        None,
         None,
     )
 }
@@ -3211,8 +3240,11 @@ struct InlineCursor {
     line_height: f32,
     start_x: f32,
     available_width: f32,
+    line_box_width: f32,
     unindented_start_x: f32,
     unindented_available_width: f32,
+    unindented_line_box_width: f32,
+    maximum_wrap_width: Option<f32>,
     strut_line_height: f32,
     strut_metrics: Option<FontMetrics>,
     direction_rtl: bool,
@@ -3230,21 +3262,26 @@ impl InlineCursor {
         start_x: f32,
         start_y: f32,
         available_width: f32,
+        wrap_width: Option<f32>,
         strut_line_height: f32,
         strut_metrics: Option<FontMetrics>,
         direction_rtl: bool,
         indent: TextIndent,
     ) -> Self {
         let unindented_start_x = start_x;
-        let unindented_available_width = available_width;
+        let maximum_wrap_width = wrap_width.map(|width| width.min(available_width));
+        let wrap_width = maximum_wrap_width.unwrap_or(available_width);
         let mut cursor = Self {
             x: start_x,
             y: start_y,
             line_height: strut_line_height,
             start_x,
-            available_width,
+            available_width: wrap_width,
+            line_box_width: available_width,
             unindented_start_x,
-            unindented_available_width,
+            unindented_available_width: wrap_width,
+            unindented_line_box_width: available_width,
+            maximum_wrap_width,
             strut_line_height,
             strut_metrics,
             direction_rtl,
@@ -3266,6 +3303,7 @@ impl InlineCursor {
             self.unindented_start_x + amount
         };
         self.available_width = (self.unindented_available_width - amount).max(0.0);
+        self.line_box_width = (self.unindented_line_box_width - amount).max(0.0);
         self.x = self.start_x;
     }
 
@@ -3286,7 +3324,7 @@ impl InlineCursor {
             self.y,
             self.x - self.start_x,
             effective_height,
-            self.available_width,
+            self.line_box_width,
             align,
             self.direction_rtl,
             self.strut_line_height,
@@ -3294,8 +3332,12 @@ impl InlineCursor {
         );
         self.y += used_height;
         if let Some(constraints) = line_constraints {
-            (self.unindented_start_x, self.unindented_available_width) =
-                constraints(self.y, self.strut_line_height);
+            let (start_x, line_box_width) = constraints(self.y, self.strut_line_height);
+            self.unindented_start_x = start_x;
+            self.unindented_line_box_width = line_box_width;
+            self.unindented_available_width = self
+                .maximum_wrap_width
+                .map_or(line_box_width, |maximum| line_box_width.min(maximum));
         }
         self.apply_line_indent(
             matches!(break_kind, LineBreakKind::Forced) && self.indent.each_line,
@@ -3327,7 +3369,7 @@ impl InlineCursor {
                 self.y,
                 self.x - self.start_x,
                 final_height,
-                self.available_width,
+                self.line_box_width,
                 align,
                 self.direction_rtl,
                 self.strut_line_height,
@@ -3803,6 +3845,7 @@ fn layout_inline_segments(
     direction_rtl: bool,
     first_line_indent: TextIndent,
     line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
+    wrap_width: Option<f32>,
 ) -> Vec<LineBox> {
     let mut lines = Vec::new();
     let mut current_fragments = Vec::new();
@@ -3810,6 +3853,7 @@ fn layout_inline_segments(
         start_x,
         start_y,
         available_width,
+        wrap_width,
         strut_line_height,
         strut_metrics,
         direction_rtl,
@@ -3871,6 +3915,85 @@ fn layout_inline_segments(
     cursor.finish_line(&mut lines, &mut current_fragments, align);
 
     lines
+}
+
+#[allow(clippy::too_many_arguments)]
+fn optimize_text_wrap_style(
+    segments: &[InlineSegment],
+    source_start_token: usize,
+    start_x: f32,
+    start_y: f32,
+    available_width: f32,
+    align: TextAlign,
+    strut_line_height: f32,
+    strut_metrics: Option<FontMetrics>,
+    direction_rtl: bool,
+    first_line_indent: TextIndent,
+    line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
+    lines: Vec<LineBox>,
+) -> Vec<LineBox> {
+    let style = segments
+        .first()
+        .map(|segment| segment.style.text_wrap_style)
+        .unwrap_or_default();
+    let has_forced_break = segments.iter().any(|segment| {
+        matches!(&segment.content, InlineSegmentContent::Text(text) if text.contains('\n') && segment.white_space_mode.preserves_newlines())
+    });
+    let should_optimize = match style {
+        // CSS Text permits a UA line-count limit for balancing. Keep this
+        // implementation bounded to the short headings the value targets.
+        super::TextWrapStyle::Balance => (2..=6).contains(&lines.len()),
+        super::TextWrapStyle::Pretty => {
+            lines.len() >= 2
+                && lines.last().is_some_and(|last| {
+                    let previous = &lines[lines.len() - 2];
+                    last.rect.width * 2.0 < previous.rect.width
+                })
+        }
+        // `stable` only changes line selection while a line is actively being
+        // edited. Omoikane currently has no editing-line layout context, so its
+        // non-editing behavior is the ordinary greedy algorithm.
+        super::TextWrapStyle::Auto | super::TextWrapStyle::Stable => false,
+    };
+    if !should_optimize || has_forced_break || available_width <= 0.0 {
+        return lines;
+    }
+
+    let target_line_count = lines.len();
+    let mut lower = lines
+        .iter()
+        .map(|line| line.rect.width)
+        .fold(0.0_f32, f32::max)
+        / target_line_count as f32;
+    let mut upper = available_width;
+    let mut best = lines;
+    // Find the narrowest soft-wrap measure that preserves the original line
+    // count. Alignment still uses `available_width`, so centered/right-aligned
+    // text remains positioned in the original containing block.
+    for _ in 0..12 {
+        let candidate_width = (lower + upper) / 2.0;
+        let candidate = layout_inline_segments(
+            segments,
+            source_start_token,
+            start_x,
+            start_y,
+            available_width,
+            align,
+            strut_line_height,
+            strut_metrics,
+            direction_rtl,
+            first_line_indent,
+            line_constraints,
+            Some(candidate_width),
+        );
+        if candidate.len() > target_line_count {
+            lower = candidate_width;
+        } else {
+            upper = candidate_width;
+            best = candidate;
+        }
+    }
+    best
 }
 
 enum InlinePiece {

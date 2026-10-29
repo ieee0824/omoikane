@@ -302,6 +302,7 @@ mod tests {
             false,
             TextIndent::default(),
             None,
+            None,
         );
         assert_eq!(lines.len(), 2);
         let first = &lines[0].fragments[0];
@@ -343,6 +344,7 @@ mod tests {
             None,
             false,
             TextIndent::default(),
+            None,
             None,
         );
         assert_eq!(lines.len(), 2);
