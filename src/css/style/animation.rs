@@ -394,7 +394,14 @@ impl StyleResolver {
         let timing = properties
             .get("animation-timing-function")
             .map_or_else(|| "ease".into(), ComputedValue::css_text);
-        self.interpolate_live_keyframes(&steps, progress, &timing, None, properties, important);
+        self.interpolate_live_keyframes(
+            &steps,
+            progress,
+            &timing,
+            [None, None],
+            properties,
+            important,
+        );
     }
 
     pub(super) fn apply_animation_effect(
@@ -769,7 +776,7 @@ impl StyleResolver {
                 &steps,
                 progress,
                 &spec.timing,
-                self.color_container_size(node),
+                self.container_size(node),
                 properties,
                 important,
             );
@@ -790,7 +797,7 @@ impl StyleResolver {
         steps: &[KeyframeStep],
         progress: f32,
         timing: &str,
-        color_container_size: Option<[f32; 2]>,
+        container_size: [Option<f32>; 2],
         properties: &mut PropertyMap,
         important: &HashSet<String>,
     ) {
@@ -806,7 +813,8 @@ impl StyleResolver {
             font_metrics: CssRelativeFontMetrics::fallback(font_size, false),
             viewport_width: self.viewport_width,
             viewport_height: self.viewport_height,
-            color_container_size,
+            container_size,
+            vertical_writing: logical_flow_from_properties(properties).is_vertical(),
         };
         let custom: BTreeMap<_, _> = properties
             .iter()

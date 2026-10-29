@@ -41,6 +41,10 @@ impl LogicalFlow {
         }
     }
 
+    pub(super) fn is_vertical(self) -> bool {
+        self.inline_dimension == "height"
+    }
+
     fn side(self, logical: &str) -> Option<&'static str> {
         match logical {
             "block-start" => Some(self.block_start),

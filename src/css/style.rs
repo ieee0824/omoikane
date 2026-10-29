@@ -835,8 +835,10 @@ struct ResolutionContext {
     root_line_height: f32,
     /// Font-table and glyph measures for the font-relative length units.
     font_metrics: CssRelativeFontMetrics,
-    /// Nearest query container dimensions for CSS math using container units.
-    color_container_size: Option<[f32; 2]>,
+    /// Nearest eligible query-container dimension for each physical axis.
+    container_size: [Option<f32>; 2],
+    /// Whether the styled element's inline axis is vertical.
+    vertical_writing: bool,
     /// Viewport width in px (used for `vw`, `vmin`, `vmax`).
     viewport_width: f32,
     /// Viewport height in px (used for `vh`, `vmin`, `vmax`).
@@ -853,7 +855,8 @@ impl Default for ResolutionContext {
             font_metrics: CssRelativeFontMetrics::fallback(16.0, false),
             viewport_width: 0.0,
             viewport_height: 0.0,
-            color_container_size: None,
+            container_size: [None, None],
+            vertical_writing: false,
         }
     }
 }
@@ -1628,6 +1631,8 @@ fn is_css_length_unit(unit: &str) -> bool {
             | "cqh"
             | "cqi"
             | "cqb"
+            | "cqmin"
+            | "cqmax"
     )
 }
 
@@ -1897,6 +1902,8 @@ pub(crate) struct ContainerContext {
     pub width: f32,
     pub height: f32,
     pub container_type: String,
+    pub eligible: bool,
+    pub vertical_writing: bool,
     pub names: Vec<String>,
     pub units: super::ContainerUnitContext,
     pub style: ContainerStyleSnapshot,
@@ -2612,15 +2619,39 @@ impl StyleResolver {
         }
     }
 
-    fn color_container_size(&self, node: &NodeHandle) -> Option<[f32; 2]> {
-        let mut ancestor = node.parent_node();
+    fn container_size(&self, node: &NodeHandle) -> [Option<f32>; 2] {
+        let mut result = [None, None];
+        let mut ancestor = node.flat_tree_parent();
         while let Some(node) = ancestor {
-            if let Some(context) = self.container_contexts.get(&node.identity()) {
-                return Some([context.width, context.height]);
+            if let Some(context) = self.container_contexts.get(&node.identity())
+                && context.eligible
+            {
+                let inline_axis = usize::from(context.vertical_writing);
+                let supports_inline =
+                    matches!(context.container_type.as_str(), "inline-size" | "size");
+                let supports_block = context.container_type == "size";
+                if supports_inline && result[inline_axis].is_none() {
+                    result[inline_axis] = Some(if inline_axis == 0 {
+                        context.width
+                    } else {
+                        context.height
+                    });
+                }
+                let block_axis = 1 - inline_axis;
+                if supports_block && result[block_axis].is_none() {
+                    result[block_axis] = Some(if block_axis == 0 {
+                        context.width
+                    } else {
+                        context.height
+                    });
+                }
+                if result.iter().all(Option::is_some) {
+                    break;
+                }
             }
-            ancestor = node.parent_node();
+            ancestor = node.flat_tree_parent();
         }
-        None
+        result
     }
 
     fn css_font_metrics(
@@ -4104,7 +4135,8 @@ impl StyleResolver {
             font_metrics: parent_font_metrics,
             viewport_width: self.viewport_width,
             viewport_height: self.viewport_height,
-            color_container_size: None,
+            container_size: [None, None],
+            vertical_writing: false,
         };
         custom_properties = resolve_font_numeric_custom_properties(
             custom_properties,
@@ -4184,7 +4216,8 @@ impl StyleResolver {
                 font_metrics: element_font_metrics,
                 viewport_width: self.viewport_width,
                 viewport_height: self.viewport_height,
-                color_container_size: None,
+                container_size: [None, None],
+                vertical_writing: false,
             };
             properties.insert(
                 PropertyId::LineHeight,
@@ -4205,6 +4238,8 @@ impl StyleResolver {
         } else {
             root_line_height
         };
+        let element_flow =
+            logical_flow_from_candidates(&candidates, &custom_properties, parent_style);
         let custom_ctx = ResolutionContext {
             parent_font_size: element_font_size,
             root_font_size,
@@ -4213,7 +4248,8 @@ impl StyleResolver {
             font_metrics: element_font_metrics,
             viewport_width: self.viewport_width,
             viewport_height: self.viewport_height,
-            color_container_size: self.color_container_size(node),
+            container_size: self.container_size(node),
+            vertical_writing: element_flow.is_vertical(),
         };
         for (name, value) in &specified_custom_properties {
             record_component_value(&mut component_values, name, value);
@@ -4298,7 +4334,8 @@ impl StyleResolver {
                 font_metrics: element_font_metrics,
                 viewport_width: self.viewport_width,
                 viewport_height: self.viewport_height,
-                color_container_size: self.color_container_size(node),
+                container_size: self.container_size(node),
+                vertical_writing: logical_flow.is_vertical(),
             };
             if candidate.name == "gap" || candidate.name == "grid-gap" {
                 if let Some((row_gap, column_gap)) = compute_gap_shorthand(&resolved_value, ctx) {
@@ -4593,7 +4630,8 @@ impl StyleResolver {
             font_metrics: CssRelativeFontMetrics::fallback(element_font_size, false),
             viewport_width: self.viewport_width,
             viewport_height: self.viewport_height,
-            color_container_size: None,
+            container_size: [None, None],
+            vertical_writing: false,
         };
         let standard_properties: HashSet<&str> = declarations
             .iter()
@@ -4829,7 +4867,7 @@ fn value_uses_container_units(value: &Value) -> bool {
     match value {
         Value::Length(_, unit) => matches!(
             unit.to_ascii_lowercase().as_str(),
-            "cqw" | "cqh" | "cqi" | "cqb"
+            "cqw" | "cqh" | "cqi" | "cqb" | "cqmin" | "cqmax"
         ),
         Value::Function { arguments, .. }
         | Value::List(arguments)
@@ -11569,10 +11607,11 @@ fn compute_color4_value(value: &Value, ctx: ResolutionContext) -> ComputedValue 
             f64::from(ctx.viewport_width),
             f64::from(ctx.viewport_height),
         ],
-        container: ctx
-            .color_container_size
-            .unwrap_or([ctx.viewport_width, ctx.viewport_height])
-            .map(f64::from),
+        container: [
+            ctx.container_size[0].unwrap_or(ctx.viewport_width),
+            ctx.container_size[1].unwrap_or(ctx.viewport_height),
+        ]
+        .map(f64::from),
     };
     crate::paint::color4::CssColor::parse_with_context(&text, Some(context))
         .map(|color| ComputedValue::Color(color.serialize_computed()))
@@ -13304,7 +13343,8 @@ fn calc_unitless_number(arguments: &[Value]) -> Option<f32> {
         font_metrics: CssRelativeFontMetrics::fallback(16.0, false),
         viewport_width: 0.0,
         viewport_height: 0.0,
-        color_container_size: None,
+        container_size: [None, None],
+        vertical_writing: false,
     };
     match evaluate_calc(arguments, placeholder) {
         Some(quantity) if quantity.unit == CalcUnit::Unitless => Some(quantity.value),
@@ -13987,18 +14027,34 @@ fn resolve_length_to_px(number: f32, unit: &str, ctx: ResolutionContext) -> Opti
         "svh" | "lvh" | "dvh" => number * ctx.viewport_height / 100.0,
         "vi" | "svi" | "lvi" | "dvi" => number * ctx.viewport_width / 100.0,
         "vb" | "svb" | "lvb" | "dvb" => number * ctx.viewport_height / 100.0,
-        "cqw" | "cqi" => {
+        "cqw" => number * ctx.container_size[0].unwrap_or(ctx.viewport_width) / 100.0,
+        "cqh" => number * ctx.container_size[1].unwrap_or(ctx.viewport_height) / 100.0,
+        "cqi" => {
+            let axis = usize::from(ctx.vertical_writing);
             number
-                * ctx
-                    .color_container_size
-                    .unwrap_or([ctx.viewport_width, ctx.viewport_height])[0]
+                * ctx.container_size[axis]
+                    .unwrap_or([ctx.viewport_width, ctx.viewport_height][axis])
                 / 100.0
         }
-        "cqh" | "cqb" => {
+        "cqb" => {
+            let axis = 1 - usize::from(ctx.vertical_writing);
             number
-                * ctx
-                    .color_container_size
-                    .unwrap_or([ctx.viewport_width, ctx.viewport_height])[1]
+                * ctx.container_size[axis]
+                    .unwrap_or([ctx.viewport_width, ctx.viewport_height][axis])
+                / 100.0
+        }
+        "cqmin" | "cqmax" => {
+            let inline_axis = usize::from(ctx.vertical_writing);
+            let block_axis = 1 - inline_axis;
+            let viewport = [ctx.viewport_width, ctx.viewport_height];
+            let inline = ctx.container_size[inline_axis].unwrap_or(viewport[inline_axis]);
+            let block = ctx.container_size[block_axis].unwrap_or(viewport[block_axis]);
+            number
+                * if unit.eq_ignore_ascii_case("cqmin") {
+                    inline.min(block)
+                } else {
+                    inline.max(block)
+                }
                 / 100.0
         }
         "vmin" => number * ctx.viewport_width.min(ctx.viewport_height) / 100.0,

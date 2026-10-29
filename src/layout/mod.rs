@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::css::style::PropertyId;
 use crate::css::{
-    AffineTransform, ComputedDirection, ComputedFloat, ComputedPosition, ComputedStyle,
-    ComputedValue, ComputedWritingMode, ContainerContext, CssToken, Matrix4, PseudoElement,
-    StyleResolver, TransformReferenceBox, parse_composed_transform, parse_perspective_matrix,
-    tokenize,
+    AffineTransform, ComputedDirection, ComputedDisplay, ComputedFloat, ComputedPosition,
+    ComputedStyle, ComputedValue, ComputedWritingMode, ContainerContext, CssToken, Matrix4,
+    PseudoElement, StyleResolver, TransformReferenceBox, parse_composed_transform,
+    parse_perspective_matrix, tokenize,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::error_reporting::{
@@ -2569,6 +2569,27 @@ fn collect_container_contexts(
                 width: layout.dimensions.content.width,
                 height: layout.dimensions.content.height,
                 container_type,
+                eligible: !matches!(
+                    style.display(),
+                    Some(
+                        ComputedDisplay::None
+                            | ComputedDisplay::Contents
+                            | ComputedDisplay::Inline
+                            | ComputedDisplay::Table
+                            | ComputedDisplay::InlineTable
+                            | ComputedDisplay::TableRow
+                            | ComputedDisplay::TableCell
+                    )
+                ),
+                vertical_writing: matches!(
+                    style.writing_mode(),
+                    Some(
+                        ComputedWritingMode::VerticalRl
+                            | ComputedWritingMode::VerticalLr
+                            | ComputedWritingMode::SidewaysRl
+                            | ComputedWritingMode::SidewaysLr
+                    )
+                ),
                 names,
                 units: resolver.container_unit_context(&style),
                 style: resolver.container_style_snapshot(&style),
