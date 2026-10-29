@@ -11048,29 +11048,7 @@ pub(crate) fn transform_length_math(
 /// Runtime values and units requiring font or layout inputs are rejected.
 pub(crate) fn font_feature_integer_values(text: &str) -> Option<Vec<u32>> {
     let declarations = super::parse_style_attribute(&format!("--feature: {text}"));
-    let value = &declarations.first()?.value;
-    let components = match value {
-        Value::List(values) => values.as_slice(),
-        value => std::slice::from_ref(value),
-    };
-    if components.is_empty() {
-        return None;
-    }
-    components
-        .iter()
-        .map(|value| {
-            if matches!(value, Value::Number(number) if number.fract() != 0.0)
-                || matches!(value, Value::Keyword(_))
-            {
-                return None;
-            }
-            let number = individual_transform::fixed_number_expression(value)?;
-            if number < 0.0 || f64::from(number) > f64::from(u32::MAX) {
-                return None;
-            }
-            Some(number.round() as u32)
-        })
-        .collect()
+    font_feature_value_numbers(&declarations.first()?.value)
 }
 
 /// Reports element-dependent tree counts, including nested component values.
@@ -11657,16 +11635,15 @@ fn font_feature_value_numbers(value: &Value) -> Option<Vec<u32>> {
         .then(|| {
             values
                 .iter()
-                .map(|value| match value {
-                    Value::Number(number)
-                        if number.is_finite()
-                            && *number >= 0.0
-                            && number.fract() == 0.0
-                            && *number <= u32::MAX as f32 =>
+                .map(|value| {
+                    if matches!(value, Value::Number(number) if number.fract() != 0.0)
+                        || matches!(value, Value::Keyword(_))
                     {
-                        Some(*number as u32)
+                        return None;
                     }
-                    _ => None,
+                    let number = individual_transform::fixed_number_expression(value)?;
+                    (number >= 0.0 && f64::from(number) <= f64::from(u32::MAX))
+                        .then_some(number.round() as u32)
                 })
                 .collect()
         })

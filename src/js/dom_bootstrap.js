@@ -10659,8 +10659,10 @@ export const __omoikane_service_worker_lifecycle = {};
         if (/^["'?]/.test(rawName)) continue;
         const name = cssIdentifierValue(rawName);
         const value = raw.slice(colon + 1).trim();
-        if (name === null || /^\d/.test(name) || !/^\d+(?:\s+\d+)*$/.test(value)) continue;
-        const values = value.split(/\s+/).map(Number);
+        if (name === null || /^\d/.test(name)) continue;
+        const encodedValues = __omoikane_css_feature_values(value);
+        if (encodedValues === null) continue;
+        const values = JSON.parse(encodedValues);
         declarations.push({
           name,
           values,
