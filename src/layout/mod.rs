@@ -808,6 +808,9 @@ pub struct FragmentStyle {
     /// inherited value on the fragment lets paint use the same flow direction
     /// as layout even when a nested inline overrides its ancestor.
     pub writing_mode: Option<String>,
+    /// Typed CSS `text-orientation`, validated by the style system and
+    /// converted once when the fragment crosses into layout and paint.
+    pub(crate) text_orientation: TextOrientation,
     /// Resolved inline base direction (`ltr` or `rtl`).
     pub direction: Option<String>,
     /// Resolved CSS bidi mode used while constructing the line paragraph.
@@ -872,6 +875,11 @@ impl FragmentStyle {
             font_synthesis: style.font_synthesis(),
             font_palette: Arc::clone(style.font_palette()),
             writing_mode: normalize_lower(PropertyId::WritingMode),
+            text_orientation: match normalize_lower(PropertyId::TextOrientation).as_deref() {
+                Some("upright") => TextOrientation::Upright,
+                Some("sideways") => TextOrientation::Sideways,
+                _ => TextOrientation::Mixed,
+            },
             direction: normalize_lower(PropertyId::Direction),
             unicode_bidi: normalize_lower(PropertyId::UnicodeBidi),
             hyphens: match normalize_lower(PropertyId::Hyphens).as_deref() {
@@ -899,6 +907,15 @@ impl FragmentStyle {
             resolved_bidi_level: None,
         }
     }
+}
+
+/// Glyph orientation requested inside vertical writing modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TextOrientation {
+    #[default]
+    Mixed,
+    Upright,
+    Sideways,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

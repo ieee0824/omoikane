@@ -7225,6 +7225,10 @@ fn cjk_vertical_and_ruby_properties_compute_canonically_and_inherit() {
             Some(expected.into())
         );
     }
+    assert_eq!(
+        crate::layout::FragmentStyle::from_computed(&style).text_orientation,
+        crate::layout::TextOrientation::Upright
+    );
 }
 
 #[test]

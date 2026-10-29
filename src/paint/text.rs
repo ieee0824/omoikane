@@ -16,7 +16,7 @@ use crate::font::{
 };
 use crate::layout::{
     FragmentStyle, InlineFragmentContent, LayoutBox, LineBox, ListMarker, MeterRegion, Rect,
-    ValueIndicatorPaintState,
+    TextOrientation, ValueIndicatorPaintState,
 };
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
@@ -1874,6 +1874,7 @@ pub(crate) fn paint_text_with_font_refs(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VerticalGlyphMode {
     Mixed,
+    Upright,
     SidewaysClockwise,
     SidewaysCounterClockwise,
 }
@@ -1899,7 +1900,11 @@ enum GlyphRotation {
 fn vertical_paint_mode(style: &FragmentStyle) -> Option<VerticalPaintMode> {
     let writing_mode = style.writing_mode.as_deref()?;
     let glyphs = match writing_mode {
-        "vertical-rl" | "vertical-lr" => VerticalGlyphMode::Mixed,
+        "vertical-rl" | "vertical-lr" => match style.text_orientation {
+            TextOrientation::Mixed => VerticalGlyphMode::Mixed,
+            TextOrientation::Upright => VerticalGlyphMode::Upright,
+            TextOrientation::Sideways => VerticalGlyphMode::SidewaysClockwise,
+        },
         "sideways-rl" => VerticalGlyphMode::SidewaysClockwise,
         "sideways-lr" => VerticalGlyphMode::SidewaysCounterClockwise,
         _ => return None,
@@ -1921,6 +1926,7 @@ fn vertical_glyph_rotation(
     match mode {
         VerticalGlyphMode::SidewaysClockwise => GlyphRotation::Clockwise,
         VerticalGlyphMode::SidewaysCounterClockwise => GlyphRotation::CounterClockwise,
+        VerticalGlyphMode::Upright => GlyphRotation::Upright,
         VerticalGlyphMode::Mixed => match char_orientation(ch) {
             Orientation::Rotated | Orientation::TransformedOrRotated => GlyphRotation::Clockwise,
             Orientation::Upright | Orientation::TransformedOrUpright => GlyphRotation::Upright,
@@ -3306,6 +3312,7 @@ mod bidi_tests {
         vertical_glyph_rotation, vertical_paint_characters,
     };
     use crate::font::{Font, FontFallbackCandidate, UnicodeRangeSet};
+    use crate::layout::TextOrientation;
 
     #[test]
     fn mixed_ltr_text_is_reordered_into_visual_runs() {
@@ -3510,6 +3517,62 @@ mod bidi_tests {
                 vertical_glyph_rotation(mode.glyphs, 'A', None),
                 GlyphRotation::Clockwise
             );
+        }
+    }
+
+    #[test]
+    fn text_orientation_overrides_vertical_glyph_rotation() {
+        for (text_orientation, expected_mode, expected_rotation) in [
+            (
+                TextOrientation::Upright,
+                VerticalGlyphMode::Upright,
+                GlyphRotation::Upright,
+            ),
+            (
+                TextOrientation::Sideways,
+                VerticalGlyphMode::SidewaysClockwise,
+                GlyphRotation::Clockwise,
+            ),
+        ] {
+            for writing_mode in ["vertical-rl", "vertical-lr"] {
+                let style = FragmentStyle {
+                    writing_mode: Some(writing_mode.to_string()),
+                    text_orientation,
+                    ..FragmentStyle::default()
+                };
+                let mode = super::vertical_paint_mode(&style).unwrap();
+                assert_eq!(mode.glyphs, expected_mode);
+                assert_eq!(
+                    vertical_glyph_rotation(mode.glyphs, 'A', None),
+                    expected_rotation
+                );
+                assert_eq!(
+                    vertical_glyph_rotation(mode.glyphs, '本', None),
+                    expected_rotation
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sideways_writing_modes_ignore_text_orientation() {
+        for (writing_mode, expected) in [
+            ("sideways-rl", GlyphRotation::Clockwise),
+            ("sideways-lr", GlyphRotation::CounterClockwise),
+        ] {
+            for text_orientation in [
+                TextOrientation::Mixed,
+                TextOrientation::Upright,
+                TextOrientation::Sideways,
+            ] {
+                let style = FragmentStyle {
+                    writing_mode: Some(writing_mode.to_string()),
+                    text_orientation,
+                    ..FragmentStyle::default()
+                };
+                let mode = super::vertical_paint_mode(&style).unwrap();
+                assert_eq!(vertical_glyph_rotation(mode.glyphs, '本', None), expected);
+            }
         }
     }
 
