@@ -4293,6 +4293,11 @@ impl StyleResolver {
             &self.media_environment,
         );
         apply_initial_values(&mut properties);
+        resolve_text_emphasis_style(&mut properties);
+        properties.insert(
+            "text-emphasis".to_string(),
+            ComputedValue::Keyword(String::new()),
+        );
         if pseudo.is_none() && node.node_type() == NodeType::Element {
             // The initial display value applies to elements without a more
             // specific UA or author declaration, including custom elements.
@@ -5432,11 +5437,31 @@ fn validate_text_emphasis_style(value: &Value) -> DeclarationValidation {
         }
         _ => None,
     });
-    DeclarationValidation::Valid(ComputedValue::Keyword(format!(
-        "{} {}",
-        fill.as_deref().unwrap_or("filled"),
-        shape.as_deref().unwrap_or("dot")
-    )))
+    let canonical = match (fill.as_deref(), shape.as_deref()) {
+        (Some("open"), Some(shape)) => format!("open {shape}"),
+        (_, Some(shape)) => shape.to_string(),
+        (Some(fill), None) => fill.to_string(),
+        (None, None) => return DeclarationValidation::Invalid,
+    };
+    DeclarationValidation::Valid(ComputedValue::Keyword(canonical))
+}
+
+fn resolve_text_emphasis_style(properties: &mut PropertyMap) {
+    let vertical = matches!(
+        properties.get(&PropertyId::WritingMode),
+        Some(ComputedValue::Keyword(mode)) if mode != "horizontal-tb"
+    );
+    let resolved = match properties.get(&PropertyId::TextEmphasisStyle) {
+        Some(ComputedValue::Keyword(style)) if style == "filled" && vertical => "sesame",
+        Some(ComputedValue::Keyword(style)) if style == "filled" => "circle",
+        Some(ComputedValue::Keyword(style)) if style == "open" && vertical => "open sesame",
+        Some(ComputedValue::Keyword(style)) if style == "open" => "open circle",
+        _ => return,
+    };
+    properties.insert(
+        PropertyId::TextEmphasisStyle,
+        ComputedValue::Keyword(resolved.into()),
+    );
 }
 
 fn keyword_components(value: &Value) -> Option<Vec<String>> {
@@ -6604,14 +6629,12 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         return validate_text_emphasis_style(value);
     }
     if key == "text-emphasis-position" {
-        return validate_keyword_groups(value, &[&["over", "under"], &["right", "left"]], &[])
-            .map_keyword(|value| {
-                if value == "over" || value == "under" {
-                    format!("{value} right")
-                } else {
-                    value
-                }
-            });
+        return validate_keyword_groups(
+            value,
+            &[&["over", "under"], &["right", "left"]],
+            &["auto"],
+        )
+        .map_keyword(|value| value.strip_suffix(" right").unwrap_or(&value).to_string());
     }
     if key == "ruby-position" {
         return validate_keyword_groups(
@@ -6645,6 +6668,12 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         );
     }
     if key == "text-spacing-trim" {
+        let keywords = keyword_components(value).unwrap_or_default();
+        if (keywords.len() == 1 && keywords[0] == "allow-end")
+            || (keywords.len() > 1 && keywords.iter().any(|value| value == "space-first"))
+        {
+            return DeclarationValidation::Invalid;
+        }
         return validate_keyword_groups(
             value,
             &[
@@ -7254,6 +7283,20 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+pub(crate) fn normalize_cjk_specified(property: &str, value: &str) -> Option<String> {
+    let declarations = crate::css::parse_style_attribute(&format!("{property}:{value}"));
+    let declaration = declarations
+        .iter()
+        .find(|declaration| declaration.name.eq_ignore_ascii_case(property))?;
+    match validate_declaration(property, &declaration.value) {
+        DeclarationValidation::Valid(value) => Some(value.css_text()),
+        DeclarationValidation::Unvalidated if supports_declaration(property, value) => {
+            Some(value.trim().to_ascii_lowercase())
+        }
+        DeclarationValidation::Invalid | DeclarationValidation::Unvalidated => None,
+    }
 }
 
 pub(crate) fn normalize_initial_letter_specified(value: &Value) -> Option<String> {
@@ -14908,7 +14951,7 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::TextEmphasisStyle, InitialValue::Keyword("none")),
     (
         PropertyId::TextEmphasisPosition,
-        InitialValue::Keyword("over right"),
+        InitialValue::Keyword("over"),
     ),
     (PropertyId::TextEmphasisColor, InitialValue::CurrentColor),
     (PropertyId::TextTransform, InitialValue::Keyword("none")),

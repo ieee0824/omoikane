@@ -7192,7 +7192,7 @@ fn cjk_vertical_and_ruby_properties_validate_their_full_grammars() {
         ("ruby-position", "inter-character"),
         ("ruby-align", "space-between"),
         ("text-autospace", "ideograph-alpha punctuation replace"),
-        ("text-spacing-trim", "space-first trim-adjacent allow-end"),
+        ("text-spacing-trim", "trim-start trim-adjacent allow-end"),
         ("text-spacing-trim", "trim-all"),
         ("text-emphasis-style", "open sesame"),
         ("text-emphasis-style", "'※'"),
@@ -7253,7 +7253,7 @@ fn cjk_vertical_and_ruby_properties_compute_canonically_and_inherit() {
         ("text-spacing-trim", "trim-start allow-end"),
         ("text-emphasis-style", "open sesame"),
         ("text-emphasis-color", "#010203"),
-        ("text-emphasis-position", "under right"),
+        ("text-emphasis-position", "under"),
     ] {
         assert_eq!(
             style.get(property).map(ComputedValue::css_text),

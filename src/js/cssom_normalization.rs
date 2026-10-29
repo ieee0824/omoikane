@@ -105,6 +105,12 @@ const VALIDATED_PROPERTIES: &[&str] = &[
 ];
 
 pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
+    if matches!(
+        property,
+        "text-emphasis-position" | "text-autospace" | "text-spacing-trim"
+    ) {
+        return crate::css::style::normalize_cjk_specified(property, value);
+    }
     if matches!(property, "initial-letter" | "text-box-edge") {
         if !crate::css::style::supports_declaration(property, value) {
             return None;
