@@ -6018,6 +6018,10 @@ fn apply_text_transform_none_returns_none() {
 
 /// Helper: build a canvas rendering "Hi" with the given text-decoration CSS value.
 fn render_text_with_decoration(decoration: &str) -> Canvas {
+    render_text_with_decoration_and_extra_style(decoration, "")
+}
+
+fn render_text_with_decoration_and_extra_style(decoration: &str, extra_style: &str) -> Canvas {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
     let body = NodeHandle::element("body");
@@ -6033,8 +6037,8 @@ fn render_text_with_decoration(decoration: &str) -> Canvas {
         Origin::Author,
         parse_stylesheet(&format!(
             "body {{ margin: 0; }} \
-             p {{ margin-top: 12px; text-decoration: {}; color: #ff0000; font-size: 20px; }}",
-            decoration
+             p {{ margin-top: 12px; text-decoration: {}; color: #ff0000; font-size: 20px; {} }}",
+            decoration, extra_style
         ))
         .unwrap(),
     );
@@ -6202,7 +6206,12 @@ fn text_decoration_length_changes_the_painted_line_thickness() {
 #[test]
 fn text_decoration_thickness_applies_to_every_line_position() {
     for line in ["underline", "overline", "line-through"] {
-        let canvas = render_text_with_decoration(&format!("{line} 6px blue"));
+        // This test isolates authored thickness from glyph-dependent ink
+        // skipping. System fonts can cover the complete line-through band.
+        let canvas = render_text_with_decoration_and_extra_style(
+            &format!("{line} 6px blue"),
+            "text-decoration-skip-ink: none;",
+        );
         let blue_rows = (0..canvas.height())
             .filter(|&y| {
                 (0..canvas.width()).any(|x| {
