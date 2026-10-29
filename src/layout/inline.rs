@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use hypher::{Lang, hyphenate};
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -888,6 +889,55 @@ pub(super) fn overflow_wrap(style: &ComputedStyle) -> OverflowWrap {
         }
         _ => OverflowWrap::Normal,
     }
+}
+
+fn inherited_hyphenation_language(node: &NodeHandle) -> Option<Lang> {
+    let mut current = Some(node.clone());
+    while let Some(node) = current {
+        if let Some(language) = node.get_attribute("lang") {
+            let primary = language.split('-').next().unwrap_or_default();
+            let bytes = primary.as_bytes();
+            if bytes.len() == 2 && bytes.iter().all(u8::is_ascii_alphabetic) {
+                return Lang::from_iso([
+                    bytes[0].to_ascii_lowercase(),
+                    bytes[1].to_ascii_lowercase(),
+                ]);
+            }
+            return None;
+        }
+        current = node.parent_node();
+    }
+    None
+}
+
+fn hyphenation_opportunities(
+    text: &str,
+    mode: super::Hyphens,
+    language: Option<Lang>,
+) -> Vec<usize> {
+    if mode == super::Hyphens::None {
+        return Vec::new();
+    }
+    let mut opportunities = text
+        .char_indices()
+        .filter_map(|(offset, ch)| (ch == '\u{00ad}').then_some(offset + ch.len_utf8()))
+        .collect::<Vec<_>>();
+    if mode == super::Hyphens::Auto
+        && let Some(language) = language
+        && !text.contains('\u{00ad}')
+    {
+        let mut offset = 0;
+        let mut syllables = hyphenate(text, language).peekable();
+        while let Some(syllable) = syllables.next() {
+            offset += syllable.len();
+            if syllables.peek().is_some() {
+                opportunities.push(offset);
+            }
+        }
+    }
+    opportunities.sort_unstable();
+    opportunities.dedup();
+    opportunities
 }
 
 #[derive(Debug, Clone)]
@@ -3370,6 +3420,164 @@ fn break_text_by_characters(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn layout_hyphenated_text(
+    text: &str,
+    segment: &InlineSegment,
+    source_start_token: usize,
+    text_source: &[InlineTextSource],
+    height: f32,
+    cursor: &mut InlineCursor,
+    lines: &mut Vec<LineBox>,
+    fragments: &mut Vec<InlineFragment>,
+    align: TextAlign,
+    line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
+) -> bool {
+    let language = inherited_hyphenation_language(&segment.node);
+    if hyphenation_opportunities(text, segment.style.hyphens, language).is_empty() {
+        return false;
+    }
+    let hyphen = match &segment.style.hyphenate_character {
+        super::HyphenateCharacter::String(value) => value.clone(),
+        super::HyphenateCharacter::Auto => {
+            if language.is_some_and(|language| language.hyphenation_character().is_none()) {
+                String::new()
+            } else {
+                "‐".to_string()
+            }
+        }
+    };
+    if hyphen.is_empty() {
+        return false;
+    }
+    let hyphen_width = measure_text_width(&hyphen, segment.metrics);
+    let mut byte_start = 0;
+    let mut broke = false;
+
+    while byte_start < text.len() {
+        let remaining = &text[byte_start..];
+        let remaining_width = measure_text_width(remaining, segment.metrics);
+        let used = cursor.x - cursor.start_x;
+        if !exceeds_available_inline_width(used + remaining_width, cursor.available_width) {
+            if broke {
+                push_hyphenated_fragment(
+                    segment,
+                    remaining.to_string(),
+                    text_source::slice(text_source, text, byte_start..text.len()),
+                    remaining_width,
+                    height,
+                    source_start_token + text[..byte_start].graphemes(true).count(),
+                    cursor,
+                    fragments,
+                );
+            }
+            return broke;
+        }
+
+        let opportunities = hyphenation_opportunities(remaining, segment.style.hyphens, language);
+        let fitting = opportunities.into_iter().rev().find(|offset| {
+            *offset < remaining.len()
+                && !exceeds_available_inline_width(
+                    used + measure_text_width(&remaining[..*offset], segment.metrics)
+                        + hyphen_width,
+                    cursor.available_width,
+                )
+        });
+        if let Some(offset) = fitting {
+            let byte_end = byte_start + offset;
+            let prefix = &text[byte_start..byte_end];
+            let token_end = source_start_token + text[..byte_end].graphemes(true).count();
+            push_hyphenated_fragment(
+                segment,
+                prefix.to_string(),
+                text_source::slice(text_source, text, byte_start..byte_end),
+                measure_text_width(prefix, segment.metrics),
+                height,
+                token_end,
+                cursor,
+                fragments,
+            );
+            push_hyphenated_fragment(
+                segment,
+                hyphen.clone(),
+                Vec::new(),
+                hyphen_width,
+                height,
+                token_end,
+                cursor,
+                fragments,
+            );
+            cursor.wrap_line(
+                lines,
+                fragments,
+                height,
+                align,
+                line_constraints,
+                LineBreakKind::Soft,
+            );
+            byte_start = byte_end;
+            broke = true;
+            continue;
+        }
+
+        if cursor.x > cursor.start_x {
+            cursor.wrap_line(
+                lines,
+                fragments,
+                height,
+                align,
+                line_constraints,
+                LineBreakKind::Soft,
+            );
+            continue;
+        }
+        if broke {
+            push_hyphenated_fragment(
+                segment,
+                remaining.to_string(),
+                text_source::slice(text_source, text, byte_start..text.len()),
+                remaining_width,
+                height,
+                source_start_token + text.graphemes(true).count(),
+                cursor,
+                fragments,
+            );
+        }
+        return broke;
+    }
+    broke
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_hyphenated_fragment(
+    segment: &InlineSegment,
+    text: String,
+    text_source: Vec<InlineTextSource>,
+    width: f32,
+    height: f32,
+    source_end_token: usize,
+    cursor: &mut InlineCursor,
+    fragments: &mut Vec<InlineFragment>,
+) {
+    fragments.push(InlineFragment {
+        node: segment.node.clone(),
+        text_source,
+        content: InlineFragmentContent::Text(text),
+        rect: Rect {
+            x: cursor.x,
+            y: cursor.y,
+            width,
+            height,
+        },
+        metrics: segment.metrics,
+        vertical_align: segment.vertical_align,
+        source_end_token,
+        style: segment.style.clone(),
+    });
+    cursor.x += width;
+    cursor.line_height = cursor.line_height.max(segment.line_height.max(height));
+}
+
 /// A prepared inline piece with independent DOM and pagination positions.
 struct InlineFragmentInput {
     content: InlineFragmentContent,
@@ -3453,6 +3661,24 @@ fn layout_inline_fragment(
         allows_wrapping
     };
     *is_first_piece_in_segment = false;
+
+    if can_wrap
+        && let InlineFragmentContent::Text(text) = &content
+        && layout_hyphenated_text(
+            text,
+            segment,
+            piece_start_token,
+            &piece_source,
+            height,
+            cursor,
+            lines,
+            fragments,
+            align,
+            line_constraints,
+        )
+    {
+        return;
+    }
 
     if can_wrap
         && !matches!(
@@ -3698,6 +3924,7 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
             segment.metrics,
             segment.line_height,
             segment.word_break,
+            segment.style.line_break,
             segment.white_space_mode,
         ),
         InlineSegmentContent::InlineEdge(style, start) => {
@@ -3810,17 +4037,14 @@ fn split_text_segment(
     metrics: FontMetrics,
     line_height: f32,
     wb: WordBreak,
+    line_break: super::LineBreak,
     ws_mode: WhiteSpaceMode,
 ) -> Vec<InlinePiece> {
     // `word-break: break-word` is a non-standard value treated identically to
     // `word-break: normal` for segment-level splitting; the actual emergency
     // break behaviour is handled in the line-building loop (same as
     // `overflow-wrap: break-word`).
-    let split_fn: fn(&str) -> Vec<String> = match wb {
-        WordBreak::BreakAll => split_chars,
-        WordBreak::KeepAll => split_words_no_cjk_break,
-        WordBreak::Normal | WordBreak::BreakWord => split_words_preserving_spaces_cjk,
-    };
+    let split = |text| split_for_break_style(text, wb, line_break);
 
     // A tab advances to a cursor-relative stop, so it cannot be measured with
     // the surrounding shaped text. Keep it as an independent piece whose used
@@ -3831,7 +4055,14 @@ fn split_text_segment(
         let mut pieces = Vec::new();
         for (index, part) in parts.iter().enumerate() {
             if !part.is_empty() {
-                pieces.extend(split_text_segment(part, metrics, line_height, wb, ws_mode));
+                pieces.extend(split_text_segment(
+                    part,
+                    metrics,
+                    line_height,
+                    wb,
+                    line_break,
+                    ws_mode,
+                ));
             }
             if index + 1 < parts.len() {
                 pieces.push(InlinePiece::Fragment {
@@ -3863,7 +4094,7 @@ fn split_text_segment(
             }
             return pieces;
         }
-        return split_fn(text)
+        return split(text)
             .into_iter()
             .map(|piece| InlinePiece::Fragment {
                 width: measure_text_width(&piece, metrics),
@@ -3878,15 +4109,11 @@ fn split_text_segment(
         let line_count = text.split('\n').count();
         for (index, part) in text.split('\n').enumerate() {
             if !part.is_empty() {
-                pieces.extend(
-                    split_fn(part)
-                        .into_iter()
-                        .map(|piece| InlinePiece::Fragment {
-                            width: measure_text_width(&piece, metrics),
-                            height: line_height,
-                            content: InlineFragmentContent::Text(piece),
-                        }),
-                );
+                pieces.extend(split(part).into_iter().map(|piece| InlinePiece::Fragment {
+                    width: measure_text_width(&piece, metrics),
+                    height: line_height,
+                    content: InlineFragmentContent::Text(piece),
+                }));
             }
             if index + 1 < line_count {
                 pieces.push(InlinePiece::Newline);
@@ -3899,15 +4126,11 @@ fn split_text_segment(
         let line_count = text.split('\n').count();
         for (index, part) in text.split('\n').enumerate() {
             if !part.is_empty() {
-                pieces.extend(
-                    split_fn(part)
-                        .into_iter()
-                        .map(|piece| InlinePiece::Fragment {
-                            width: measure_text_width(&piece, metrics),
-                            height: line_height,
-                            content: InlineFragmentContent::Text(piece),
-                        }),
-                );
+                pieces.extend(split(part).into_iter().map(|piece| InlinePiece::Fragment {
+                    width: measure_text_width(&piece, metrics),
+                    height: line_height,
+                    content: InlineFragmentContent::Text(piece),
+                }));
             }
             if index + 1 < line_count {
                 pieces.push(InlinePiece::Newline);
@@ -3915,7 +4138,7 @@ fn split_text_segment(
         }
         pieces
     } else {
-        split_fn(text)
+        split(text)
             .into_iter()
             .map(|piece| InlinePiece::Fragment {
                 width: measure_text_width(&piece, metrics),
@@ -3924,6 +4147,20 @@ fn split_text_segment(
             })
             .collect()
     }
+}
+
+fn split_for_break_style(
+    text: &str,
+    word_break: WordBreak,
+    line_break: super::LineBreak,
+) -> Vec<String> {
+    if line_break == super::LineBreak::Anywhere || word_break == WordBreak::BreakAll {
+        return split_chars(text);
+    }
+    if word_break == WordBreak::KeepAll {
+        return split_words_no_cjk_break(text);
+    }
+    split_words_preserving_spaces_cjk_with_mode(text, line_break)
 }
 
 /// Split text into extended grapheme clusters for `word-break: break-all`.
@@ -3986,24 +4223,33 @@ fn is_cjk_char(ch: char) -> bool {
 
 /// Characters that must not appear at the start of a line (line-start prohibited).
 /// These are typically closing punctuation and certain symbols.
-fn is_line_start_prohibited(ch: char) -> bool {
-    matches!(
+fn is_line_start_prohibited(ch: char, line_break: super::LineBreak) -> bool {
+    let common = matches!(
         ch,
         // Japanese punctuation
         '\u{3002}' | '\u{3001}' | '\u{FF0C}' | '\u{FF0E}' | '\u{30FB}' | '\u{FF1A}' | '\u{FF1B}' | '\u{FF01}' | '\u{FF1F}' |
         // Closing brackets
         '\u{FF09}' | '\u{300D}' | '\u{300F}' | '\u{3011}' | '\u{3015}' | '\u{FF5D}' | '\u{FF3D}' |
-        // Other
-        '\u{30FC}' | '\u{FF5E}' | '\u{2026}' | '\u{2025}' |
+        // Other punctuation
+        '\u{FF5E}' | '\u{2026}' | '\u{2025}'
+    );
+    let normal = matches!(
+        ch,
+        // Prolonged sound and iteration marks
+        '\u{30FC}' | '\u{3005}' | '\u{303B}' | '\u{309D}' | '\u{309E}' | '\u{30FD}' | '\u{30FE}' |
         // Small kana
         '\u{3041}' | '\u{3043}' | '\u{3045}' | '\u{3047}' | '\u{3049}' | '\u{3063}' | '\u{3083}' | '\u{3085}' | '\u{3087}' | '\u{308E}' |
         '\u{30A1}' | '\u{30A3}' | '\u{30A5}' | '\u{30A7}' | '\u{30A9}' | '\u{30C3}' | '\u{30E3}' | '\u{30E5}' | '\u{30E7}' | '\u{30EE}'
-    )
+    );
+    let strict = matches!(ch, '\u{2010}' | '\u{2013}' | '\u{301C}' | '\u{30A0}');
+    common
+        || (!matches!(line_break, super::LineBreak::Loose) && normal)
+        || (matches!(line_break, super::LineBreak::Strict) && strict)
 }
 
 /// Characters that must not appear at the end of a line (line-end prohibited).
 /// These are typically opening punctuation.
-fn is_line_end_prohibited(ch: char) -> bool {
+fn is_line_end_prohibited(ch: char, _line_break: super::LineBreak) -> bool {
     matches!(
         ch,
         // Opening brackets
@@ -4014,15 +4260,29 @@ fn is_line_end_prohibited(ch: char) -> bool {
 /// Split text into pieces that can be laid out, with CJK-aware breaking.
 /// This allows line breaks between CJK characters while respecting kinsoku rules.
 pub(crate) fn split_words_preserving_spaces_cjk(text: &str) -> Vec<String> {
+    split_words_preserving_spaces_cjk_with_mode(text, super::LineBreak::Normal)
+}
+
+pub(super) fn split_words_preserving_spaces_cjk_with_mode(
+    text: &str,
+    line_break: super::LineBreak,
+) -> Vec<String> {
     let mut pieces = Vec::new();
-    for_each_word_preserving_spaces_cjk(text, |piece| pieces.push(piece.to_string()));
+    for_each_word_preserving_spaces_cjk_with_mode(text, line_break, |piece| {
+        pieces.push(piece.to_string())
+    });
     pieces
 }
 
 /// Visits the same CJK-aware pieces as [`split_words_preserving_spaces_cjk`]
 /// without allocating owned strings.
-pub(super) fn for_each_word_preserving_spaces_cjk<'a>(
+pub(super) fn for_each_word_preserving_spaces_cjk<'a>(text: &'a str, visit: impl FnMut(&'a str)) {
+    for_each_word_preserving_spaces_cjk_with_mode(text, super::LineBreak::Normal, visit);
+}
+
+fn for_each_word_preserving_spaces_cjk_with_mode<'a>(
     text: &'a str,
+    line_break: super::LineBreak,
     mut visit: impl FnMut(&'a str),
 ) {
     let mut piece_start = 0;
@@ -4050,7 +4310,8 @@ pub(super) fn for_each_word_preserving_spaces_cjk<'a>(
                 // Between two CJK characters: check kinsoku rules
                 // Don't break if current char is line-start prohibited
                 // Don't break if previous char is line-end prohibited
-                !is_line_start_prohibited(ch) && !is_line_end_prohibited(prev_char)
+                !is_line_start_prohibited(ch, line_break)
+                    && !is_line_end_prohibited(prev_char, line_break)
             } else {
                 // Transition from non-CJK to CJK
                 true
@@ -4065,7 +4326,7 @@ pub(super) fn for_each_word_preserving_spaces_cjk<'a>(
                 true
             } else if prev_is_cjk {
                 // Transition from CJK to non-CJK: allow break unless kinsoku
-                !is_line_start_prohibited(ch)
+                !is_line_start_prohibited(ch, line_break)
             } else {
                 false
             }

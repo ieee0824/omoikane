@@ -2628,6 +2628,76 @@ fn tab_size_advances_to_cursor_relative_stops() {
 }
 
 #[test]
+fn hyphens_manual_none_and_auto_control_line_breaks() {
+    fn paragraph(css: &str, text: &str, language: Option<&str>) -> LayoutBox {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        if let Some(language) = language {
+            paragraph.set_attribute("lang", language);
+        }
+        paragraph.append_child(NodeHandle::text(text));
+        document.append_child(body.clone());
+        body.append_child(paragraph);
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "p {{ margin: 0; font: 20px monospace; width: 110px; {css} }}"
+            ))
+            .unwrap(),
+        );
+        layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 110.0,
+                height: 0.0,
+            },
+        )
+        .unwrap()
+        .children
+        .remove(0)
+    }
+
+    let manual = paragraph(
+        "hyphens: manual; hyphenate-character: \"*\";",
+        "encyclo\u{ad}pedia",
+        None,
+    );
+    assert_eq!(manual.lines.len(), 2);
+    let inserted = manual.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("*"))
+        .expect("manual soft hyphen should use the authored character");
+    assert!(inserted.text_source.is_empty());
+
+    let none = paragraph(
+        "hyphens: none; hyphenate-character: \"*\";",
+        "encyclo\u{ad}pedia",
+        None,
+    );
+    assert_eq!(none.lines.len(), 1);
+    assert!(
+        none.lines[0]
+            .fragments
+            .iter()
+            .all(|fragment| fragment.text() != Some("*"))
+    );
+
+    let automatic = paragraph("hyphens: auto;", "demonstration", Some("en-US"));
+    assert!(automatic.lines.len() >= 2);
+    assert!(automatic.lines.iter().any(|line| {
+        line.fragments
+            .iter()
+            .any(|fragment| fragment.text() == Some("‐") && fragment.text_source.is_empty())
+    }));
+}
+
+#[test]
 fn pre_white_space_preserves_spaces_and_newlines() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -9708,6 +9778,63 @@ fn cjk_small_kana_stays_with_previous() {
     assert_eq!(pieces[0], "日");
     assert_eq!(pieces[1], "本っ");
     assert_eq!(pieces[2], "語");
+}
+
+#[test]
+fn line_break_loose_and_strict_adjust_cjk_kinsoku_candidates() {
+    let loose = super::inline::split_words_preserving_spaces_cjk_with_mode(
+        "日っ語",
+        super::LineBreak::Loose,
+    );
+    assert_eq!(loose, ["日", "っ", "語"]);
+
+    let normal = super::inline::split_words_preserving_spaces_cjk_with_mode(
+        "日‐語",
+        super::LineBreak::Normal,
+    );
+    let strict = super::inline::split_words_preserving_spaces_cjk_with_mode(
+        "日‐語",
+        super::LineBreak::Strict,
+    );
+    assert_eq!(normal, ["日", "‐", "語"]);
+    assert_eq!(strict, ["日‐", "語"]);
+}
+
+#[test]
+fn line_break_anywhere_creates_non_cjk_wrap_opportunities() {
+    fn line_count(line_break: &str) -> usize {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        paragraph.append_child(NodeHandle::text("abcdef"));
+        document.append_child(body.clone());
+        body.append_child(paragraph);
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "p {{ margin:0; width:25px; font:20px monospace; line-break:{line_break}; }}"
+            ))
+            .unwrap(),
+        );
+        layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 25.0,
+                height: 0.0,
+            },
+        )
+        .unwrap()
+        .children[0]
+            .lines
+            .len()
+    }
+
+    assert_eq!(line_count("normal"), 1);
+    assert!(line_count("anywhere") > 1);
 }
 
 #[test]
