@@ -7233,6 +7233,11 @@ fn cjk_vertical_and_ruby_properties_compute_canonically_and_inherit() {
         crate::layout::FragmentStyle::from_computed(&style).text_combine_upright,
         crate::layout::TextCombineUpright::Digits(2)
     );
+    let emphasis = crate::layout::FragmentStyle::from_computed(&style);
+    assert_eq!(emphasis.text_emphasis.mark.as_deref(), Some("\u{fe46}"));
+    assert!(!emphasis.text_emphasis.over);
+    assert!(emphasis.text_emphasis.right);
+    assert_eq!(emphasis.text_emphasis_color.as_deref(), Some("#010203"));
     let spacing_trim = crate::layout::FragmentStyle::from_computed(&style).text_spacing_trim;
     assert_eq!(
         spacing_trim.start,

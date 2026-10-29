@@ -51,6 +51,89 @@ fn render_value_indicator(markup: &str) -> (Canvas, Rect) {
 }
 
 #[test]
+fn text_emphasis_paints_on_horizontal_and_vertical_logical_sides() {
+    let document = TreeBuilder::parse(
+        "<style>html,body{margin:0;background:transparent} \
+         #h{margin:30px;font:20px/20px sans-serif;text-emphasis:'*' red; \
+            text-emphasis-position:over left} \
+         #v{margin:30px;writing-mode:vertical-rl;font:20px/20px sans-serif; \
+            text-emphasis:'*' blue;text-emphasis-position:under right}</style> \
+         <div id=h>AB</div><div id=v>CD</div>",
+    )
+    .document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 180.0,
+        height: 180.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    fn text_rect(layout: &crate::layout::LayoutBox, expected: &str) -> Option<Rect> {
+        layout
+            .lines
+            .iter()
+            .flat_map(|line| &line.fragments)
+            .find_map(|fragment| (fragment.text() == Some(expected)).then_some(fragment.rect))
+            .or_else(|| {
+                layout
+                    .children
+                    .iter()
+                    .find_map(|child| text_rect(child, expected))
+            })
+    }
+    let horizontal = text_rect(&layout, "AB").expect("horizontal text fragment");
+    let vertical = text_rect(&layout, "CD").expect("vertical text fragment");
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+    let colored_pixels = |region: Rect, red: bool| {
+        let x0 = region.x.max(0.0).floor() as u32;
+        let y0 = region.y.max(0.0).floor() as u32;
+        let x1 = (region.x + region.width).min(viewport.width).ceil() as u32;
+        let y1 = (region.y + region.height).min(viewport.height).ceil() as u32;
+        (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                canvas.pixel(*x, *y).is_some_and(|color| {
+                    color.a > 0
+                        && if red {
+                            color.r > color.g && color.r > color.b
+                        } else {
+                            color.b > color.r && color.b > color.g
+                        }
+                })
+            })
+            .count()
+    };
+    assert!(
+        colored_pixels(
+            Rect {
+                x: horizontal.x,
+                y: horizontal.y - 12.0,
+                width: horizontal.width,
+                height: 12.0,
+            },
+            true,
+        ) > 0,
+        "horizontal emphasis must paint above the text"
+    );
+    assert!(
+        colored_pixels(
+            Rect {
+                x: vertical.x + vertical.width,
+                y: vertical.y,
+                width: 12.0,
+                height: vertical.height,
+            },
+            false,
+        ) > 0,
+        "vertical emphasis must paint on the right side"
+    );
+}
+
+#[test]
 fn native_progress_paints_determinate_and_indeterminate_states() {
     let (determinate, rect) = render_value_indicator("<progress max=4 value=2></progress>");
     let y = (rect.y + rect.height / 2.0) as u32;

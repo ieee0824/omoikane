@@ -820,6 +820,9 @@ pub struct FragmentStyle {
     pub(crate) text_autospace: TextAutospace,
     /// Typed CSS `text-spacing-trim` controls for contextual CJK punctuation.
     pub(crate) text_spacing_trim: TextSpacingTrim,
+    /// Typed CSS emphasis mark and placement consumed directly by paint.
+    pub(crate) text_emphasis: TextEmphasis,
+    pub(crate) text_emphasis_color: Option<String>,
     /// Whether the inherited document language is French. Resolved once from
     /// the DOM language boundary for language-specific `text-autospace` rules.
     pub(crate) french_content_language: bool,
@@ -907,6 +910,11 @@ impl FragmentStyle {
             text_spacing_trim: TextSpacingTrim::from_computed(
                 normalize_lower(PropertyId::TextSpacingTrim).as_deref(),
             ),
+            text_emphasis: TextEmphasis::from_computed(
+                extract_str(PropertyId::TextEmphasisStyle).as_deref(),
+                normalize_lower(PropertyId::TextEmphasisPosition).as_deref(),
+            ),
+            text_emphasis_color: extract_str(PropertyId::TextEmphasisColor),
             french_content_language: false,
             direction: normalize_lower(PropertyId::Direction),
             unicode_bidi: normalize_lower(PropertyId::UnicodeBidi),
@@ -933,6 +941,53 @@ impl FragmentStyle {
                 _ => TextWrapStyle::Auto,
             },
             resolved_bidi_level: None,
+        }
+    }
+}
+
+/// Paint-ready CSS `text-emphasis` value. Unknown strings are normalized at
+/// the computed-style boundary so paint never reparses CSS tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TextEmphasis {
+    pub(crate) mark: Option<String>,
+    pub(crate) over: bool,
+    pub(crate) right: bool,
+}
+
+impl Default for TextEmphasis {
+    fn default() -> Self {
+        Self {
+            mark: None,
+            over: true,
+            right: true,
+        }
+    }
+}
+
+impl TextEmphasis {
+    fn from_computed(style: Option<&str>, position: Option<&str>) -> Self {
+        let style = style.unwrap_or("none");
+        let mark = match style {
+            "none" => None,
+            "filled dot" => Some("\u{2022}".into()),
+            "open dot" => Some("\u{25e6}".into()),
+            "filled circle" => Some("\u{25cf}".into()),
+            "open circle" => Some("\u{25cb}".into()),
+            "filled double-circle" => Some("\u{25c9}".into()),
+            "open double-circle" => Some("\u{25ce}".into()),
+            "filled triangle" => Some("\u{25b2}".into()),
+            "open triangle" => Some("\u{25b3}".into()),
+            "filled sesame" => Some("\u{fe45}".into()),
+            "open sesame" => Some("\u{fe46}".into()),
+            custom => Some(custom.into()),
+        };
+        let position = position.unwrap_or("over right");
+        Self {
+            mark,
+            over: !position
+                .split_ascii_whitespace()
+                .any(|part| part == "under"),
+            right: !position.split_ascii_whitespace().any(|part| part == "left"),
         }
     }
 }

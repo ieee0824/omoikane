@@ -439,6 +439,18 @@ pub(super) fn paint_text_with_context(
                         clip,
                         None,
                     );
+                    paint_text_fragment_emphasis(
+                        canvas,
+                        fragment,
+                        fragment_rect,
+                        text,
+                        resolver,
+                        frag_color,
+                        fonts,
+                        web_fonts,
+                        clip,
+                        vertical_mode,
+                    );
                     paint_text_fragment_decorations(
                         canvas,
                         fragment,
@@ -554,6 +566,173 @@ pub(super) fn paint_text_with_context(
                 }
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_text_fragment_emphasis(
+    canvas: &mut Canvas,
+    fragment: &crate::layout::InlineFragment,
+    rect: Rect,
+    text: &str,
+    resolver: &mut crate::css::StyleResolver,
+    text_color: Color,
+    fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+    clip: Option<Rect>,
+    vertical_mode: Option<VerticalPaintMode>,
+) {
+    let Some(mark) = fragment.style.text_emphasis.mark.as_deref() else {
+        return;
+    };
+    let graphemes = text.graphemes(true).collect::<Vec<_>>();
+    if graphemes.is_empty() {
+        return;
+    }
+    let color = fragment_box_paint_style(fragment, resolver)
+        .as_deref()
+        .and_then(|style| {
+            super::resolve_color_value(style.get_by_id(PropertyId::TextEmphasisColor), style)
+        })
+        .or_else(|| {
+            fragment
+                .style
+                .text_emphasis_color
+                .as_deref()
+                .filter(|value| !value.eq_ignore_ascii_case("currentcolor"))
+                .and_then(parse_color)
+        })
+        .unwrap_or(text_color);
+    let selected = select_fragment_font(web_fonts, fragment, fonts);
+    let web_candidates = select_fragment_web_fonts(web_fonts, fragment);
+    let mut candidates = web_candidates
+        .iter()
+        .map(|candidate| FontFallbackCandidate {
+            font: candidate.font,
+            unicode_range: Some(candidate.unicode_range),
+            weight: candidate.weight,
+            style: candidate.style,
+        })
+        .collect::<Vec<_>>();
+    if web_candidates.is_empty()
+        && let Some(font) = selected.as_ref().map(AsRef::as_ref)
+    {
+        candidates.push(FontFallbackCandidate::unrestricted(font));
+    }
+    candidates.extend(
+        fonts
+            .iter()
+            .map(Arc::as_ref)
+            .map(FontFallbackCandidate::unrestricted),
+    );
+    if candidates.is_empty() {
+        return;
+    }
+    let mut mark_style = fragment.style.clone();
+    let mut mark_options = (*mark_style.shaping_options).clone();
+    mark_options
+        .features
+        .push(crate::font::OpenTypeFeature::new(*b"ruby", 1));
+    mark_style.shaping_options = Arc::new(mark_options);
+
+    let mark_size = (fragment.metrics.font_size * 0.5).max(1.0);
+    let vertical = vertical_mode.is_some();
+    let reversed = vertical_mode
+        .map(|mode| mode.direction_rtl)
+        .unwrap_or_else(|| {
+            fragment
+                .style
+                .resolved_bidi_level
+                .is_some_and(|level| level % 2 == 1)
+        });
+    let advances = graphemes
+        .iter()
+        .map(|grapheme| {
+            if vertical {
+                fragment.metrics.font_size
+            } else {
+                shaped_text_advance_with_candidates(
+                    grapheme,
+                    fragment.metrics.font_size,
+                    &candidates,
+                    &fragment.style,
+                    0.0,
+                )
+                .unwrap_or(fragment.metrics.font_size)
+            }
+        })
+        .collect::<Vec<_>>();
+    let natural_extent = advances.iter().sum::<f32>().max(1.0);
+    let physical_extent = if vertical { rect.height } else { rect.width };
+    let scale = physical_extent / natural_extent;
+    let mut cursor = if reversed { physical_extent } else { 0.0 };
+    for (grapheme, advance) in graphemes.into_iter().zip(advances) {
+        let extent = advance * scale;
+        let start = if reversed {
+            cursor -= extent;
+            cursor
+        } else {
+            let start = cursor;
+            cursor += extent;
+            start
+        };
+        if grapheme.chars().all(|character| {
+            character.is_whitespace()
+                || character.is_control()
+                || is_zero_advance_character(character)
+        }) {
+            continue;
+        }
+        let cell = if vertical {
+            Rect {
+                x: rect.x,
+                y: rect.y + start,
+                width: rect.width,
+                height: extent,
+            }
+        } else {
+            Rect {
+                x: rect.x + start,
+                y: rect.y,
+                width: extent,
+                height: rect.height,
+            }
+        };
+        let mark_rect = if vertical {
+            Rect {
+                x: if fragment.style.text_emphasis.right {
+                    cell.x + cell.width
+                } else {
+                    cell.x - mark_size
+                },
+                y: cell.y + (cell.height - mark_size) / 2.0,
+                width: mark_size,
+                height: mark_size,
+            }
+        } else {
+            Rect {
+                x: cell.x + (cell.width - mark_size) / 2.0,
+                y: if fragment.style.text_emphasis.over {
+                    cell.y - mark_size
+                } else {
+                    cell.y + cell.height
+                },
+                width: mark_size,
+                height: mark_size,
+            }
+        };
+        paint_text_with_candidates(
+            canvas,
+            mark_rect,
+            mark,
+            mark_size,
+            mark_size * 0.8,
+            &candidates,
+            &mark_style,
+            color,
+            clip,
+            0.0,
+        );
     }
 }
 
