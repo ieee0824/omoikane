@@ -5956,6 +5956,207 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if key == "text-wrap-style" {
         return validate_keyword_value(value, &["auto", "balance", "stable", "pretty"]);
     }
+    if key == "text-align-last" {
+        return validate_keyword_value(
+            value,
+            &[
+                "auto",
+                "start",
+                "end",
+                "left",
+                "right",
+                "center",
+                "justify",
+                "match-parent",
+            ],
+        );
+    }
+    if key == "text-justify" {
+        if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("distribute")) {
+            return DeclarationValidation::Valid(ComputedValue::Keyword(
+                "inter-character".to_string(),
+            ));
+        }
+        return validate_keyword_value(value, &["auto", "none", "inter-word", "inter-character"]);
+    }
+    if key == "block-ellipsis" {
+        return match value {
+            Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()) => {
+                DeclarationValidation::Valid(ComputedValue::Keyword(keyword.to_ascii_lowercase()))
+            }
+            Value::Keyword(keyword)
+                if matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "no-ellipsis" | "ellipsis"
+                ) =>
+            {
+                DeclarationValidation::Valid(ComputedValue::Keyword(keyword.to_ascii_lowercase()))
+            }
+            Value::String(_) => {
+                DeclarationValidation::Valid(ComputedValue::Keyword(render_content_value(value)))
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if key == "continue" {
+        return validate_keyword_value(value, &["normal", "discard", "collapse", "-webkit-legacy"]);
+    }
+    if key == "max-lines" {
+        if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+        {
+            return DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)));
+        }
+        let values = match value {
+            Value::List(values) => values.as_slice(),
+            value => std::slice::from_ref(value),
+        };
+        let mut auto = false;
+        let mut integer = None;
+        for value in values {
+            match value {
+                Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto") && !auto => {
+                    auto = true;
+                }
+                Value::Number(number)
+                    if number.is_finite()
+                        && *number >= 1.0
+                        && number.fract() == 0.0
+                        && integer.is_none() =>
+                {
+                    integer = Some(*number);
+                }
+                _ => return DeclarationValidation::Invalid,
+            }
+        }
+        return if auto || integer.is_some() {
+            let computed = match (auto, integer) {
+                (true, Some(integer)) => {
+                    format!("auto {}", super::tokenizer::trimmed_number(integer))
+                }
+                (true, None) => "auto".to_string(),
+                (false, Some(integer)) => super::tokenizer::trimmed_number(integer),
+                (false, None) => unreachable!("max-lines requires a component"),
+            };
+            DeclarationValidation::Valid(ComputedValue::Keyword(computed))
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
+    if key == "initial-letter" {
+        if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("normal") || is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+        {
+            return DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)));
+        }
+        let values = match value {
+            Value::List(values) => values.as_slice(),
+            value => std::slice::from_ref(value),
+        };
+        let computed = match values {
+            [Value::Number(size)] if size.is_finite() && *size >= 1.0 => {
+                Some(format!("{}", super::tokenizer::trimmed_number(*size)))
+            }
+            [Value::Number(size), Value::Number(sink)] => (size.is_finite()
+                && *size >= 1.0
+                && sink.is_finite()
+                && *sink >= 1.0
+                && sink.fract() == 0.0)
+                .then(|| {
+                    format!(
+                        "{} {}",
+                        super::tokenizer::trimmed_number(*size),
+                        super::tokenizer::trimmed_number(*sink)
+                    )
+                }),
+            [Value::Number(size), Value::Function { name, arguments }]
+                if name.eq_ignore_ascii_case("calc") && size.is_finite() && *size >= 1.0 =>
+            {
+                calc_unitless_number(arguments).and_then(|sink| {
+                    (sink.is_finite() && sink >= 1.0).then(|| {
+                        format!(
+                            "{} {}",
+                            super::tokenizer::trimmed_number(*size),
+                            super::tokenizer::trimmed_number(sink.round())
+                        )
+                    })
+                })
+            }
+            [Value::Number(size), Value::Keyword(position)]
+            | [Value::Keyword(position), Value::Number(size)] => (size.is_finite()
+                && *size >= 1.0
+                && matches!(position.to_ascii_lowercase().as_str(), "drop" | "raise"))
+            .then(|| {
+                format!(
+                    "{} {}",
+                    super::tokenizer::trimmed_number(*size),
+                    position.to_ascii_lowercase()
+                )
+            }),
+            _ => None,
+        };
+        return if let Some(computed) = computed {
+            DeclarationValidation::Valid(ComputedValue::Keyword(computed))
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
+    if key == "text-box-trim" {
+        return validate_keyword_value(value, &["none", "trim-start", "trim-end", "trim-both"]);
+    }
+    if key == "text-box-edge" {
+        if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+        {
+            return DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)));
+        }
+        let values = match value {
+            Value::List(values) => values.as_slice(),
+            value => std::slice::from_ref(value),
+        };
+        return if let Some(computed) = super::shorthand::canonical_text_box_edge(values) {
+            DeclarationValidation::Valid(ComputedValue::Keyword(computed))
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
+    if key == "hanging-punctuation" {
+        if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none") || is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+        {
+            return DeclarationValidation::Unvalidated;
+        }
+        let values = match value {
+            Value::List(values) => values.as_slice(),
+            value => std::slice::from_ref(value),
+        };
+        let mut first = false;
+        let mut end = None;
+        let mut last = false;
+        for value in values {
+            let Value::Keyword(keyword) = value else {
+                return DeclarationValidation::Invalid;
+            };
+            match keyword.to_ascii_lowercase().as_str() {
+                "first" if !first => first = true,
+                "force-end" | "allow-end" if end.is_none() => {
+                    end = Some(keyword.to_ascii_lowercase())
+                }
+                "last" if !last => last = true,
+                _ => return DeclarationValidation::Invalid,
+            }
+        }
+        if !first && end.is_none() && !last {
+            return DeclarationValidation::Invalid;
+        }
+        let mut canonical = Vec::new();
+        if first {
+            canonical.push("first".to_string());
+        }
+        if let Some(end) = end {
+            canonical.push(end);
+        }
+        if last {
+            canonical.push("last".to_string());
+        }
+        return DeclarationValidation::Valid(ComputedValue::Keyword(canonical.join(" ")));
+    }
     if key == "line-break" {
         return validate_keyword_value(value, &["auto", "loose", "normal", "strict", "anywhere"]);
     }
@@ -6335,6 +6536,46 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+pub(crate) fn normalize_initial_letter_specified(value: &Value) -> Option<String> {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    match values {
+        [Value::Keyword(keyword)] if keyword.eq_ignore_ascii_case("normal") => {
+            Some("normal".to_string())
+        }
+        [Value::Number(size)] if size.is_finite() && *size >= 1.0 => {
+            Some(super::tokenizer::trimmed_number(*size))
+        }
+        [Value::Number(size), second] if size.is_finite() && *size >= 1.0 => Some(format!(
+            "{} {}",
+            super::tokenizer::trimmed_number(*size),
+            render_value(second)
+        )),
+        [Value::Keyword(position), Value::Number(size)]
+            if matches!(position.to_ascii_lowercase().as_str(), "drop" | "raise")
+                && size.is_finite()
+                && *size >= 1.0 =>
+        {
+            Some(format!(
+                "{} {}",
+                super::tokenizer::trimmed_number(*size),
+                position.to_ascii_lowercase()
+            ))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn normalize_text_box_edge_specified(value: &Value) -> Option<String> {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    super::shorthand::canonical_text_box_edge(values)
 }
 
 fn text_indent_components(value: &Value) -> Option<(&Value, bool, bool)> {
@@ -13136,10 +13377,25 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::LineBreak, InitialValue::Keyword("auto")),
     (PropertyId::Hyphens, InitialValue::Keyword("manual")),
     (
+        PropertyId::HangingPunctuation,
+        InitialValue::Keyword("none"),
+    ),
+    (
         PropertyId::HyphenateCharacter,
         InitialValue::Keyword("auto"),
     ),
     (PropertyId::TabSize, InitialValue::Number(8.0)),
+    (PropertyId::TextAlignLast, InitialValue::Keyword("auto")),
+    (PropertyId::TextJustify, InitialValue::Keyword("auto")),
+    (
+        PropertyId::BlockEllipsis,
+        InitialValue::Keyword("no-ellipsis"),
+    ),
+    (PropertyId::Continue, InitialValue::Keyword("normal")),
+    (PropertyId::MaxLines, InitialValue::Keyword("auto")),
+    (PropertyId::InitialLetter, InitialValue::Keyword("normal")),
+    (PropertyId::TextBoxTrim, InitialValue::Keyword("none")),
+    (PropertyId::TextBoxEdge, InitialValue::Keyword("auto")),
     (PropertyId::TextOverflow, InitialValue::Keyword("clip")),
     (PropertyId::OverflowX, InitialValue::Keyword("visible")),
     (PropertyId::OverflowY, InitialValue::Keyword("visible")),
@@ -13578,8 +13834,11 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::PointerEvents,
     PropertyId::Quotes,
     PropertyId::TextAlign,
+    PropertyId::TextAlignLast,
+    PropertyId::TextBoxEdge,
     PropertyId::TextDecorationSkipInk,
     PropertyId::TextIndent,
+    PropertyId::TextJustify,
     PropertyId::TextWrapMode,
     PropertyId::TextWrapStyle,
     PropertyId::TextShadow,
@@ -13595,6 +13854,7 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::Widows,
     PropertyId::HyphenateCharacter,
     PropertyId::Hyphens,
+    PropertyId::HangingPunctuation,
     PropertyId::TabSize,
 ];
 

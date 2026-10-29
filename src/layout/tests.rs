@@ -3152,6 +3152,618 @@ fn inline_content_honors_text_align_right() {
 }
 
 #[test]
+fn text_align_last_applies_to_final_and_forced_lines() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let wrapped = NodeHandle::element("p");
+    wrapped.set_attribute("id", "wrapped");
+    wrapped.append_child(NodeHandle::text("alpha beta gamma"));
+    let forced = NodeHandle::element("p");
+    forced.set_attribute("id", "forced");
+    forced.append_child(NodeHandle::text("a\nb"));
+    document.append_child(body.clone());
+    body.append_child(wrapped.clone());
+    body.append_child(forced.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { margin:0; width:60px; font:10px monospace; line-height:10px; \
+                  text-align:right; text-align-last:center } \
+             #forced { white-space-collapse:preserve-breaks }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 60.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let wrapped_lines = &find_layout_box(&layout, &wrapped).unwrap().lines;
+    assert_eq!(wrapped_lines.len(), 2);
+    assert!(wrapped_lines[1].rect.x > wrapped_lines[0].rect.x);
+    assert!((wrapped_lines[1].rect.x - 15.0).abs() < 1.0);
+
+    let forced_lines = &find_layout_box(&layout, &forced).unwrap().lines;
+    assert_eq!(forced_lines.len(), 2);
+    assert!(
+        forced_lines
+            .iter()
+            .all(|line| (line.rect.x - 27.0).abs() < 1.0)
+    );
+}
+
+#[test]
+fn text_align_last_match_parent_uses_the_parent_physical_direction() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("p");
+    child.append_child(NodeHandle::text("text"));
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(child.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { width:100px; direction:rtl; text-align-last:start } \
+             p { margin:0; direction:ltr; text-align-last:match-parent; \
+                 font:10px monospace; line-height:10px }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let line = &find_layout_box(&layout, &child).unwrap().lines[0];
+    assert!(line.rect.x > 60.0);
+}
+
+#[test]
+fn inter_word_justification_expands_only_selected_lines() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let automatic = NodeHandle::element("p");
+    automatic.set_attribute("id", "automatic");
+    automatic.append_child(NodeHandle::text("aa bb cc dd"));
+    let disabled = NodeHandle::element("p");
+    disabled.set_attribute("id", "disabled");
+    disabled.append_child(NodeHandle::text("aa bb cc dd"));
+    let final_line = NodeHandle::element("p");
+    final_line.set_attribute("id", "final-line");
+    final_line.append_child(NodeHandle::text("aa bb"));
+    document.append_child(body.clone());
+    body.append_child(automatic.clone());
+    body.append_child(disabled.clone());
+    body.append_child(final_line.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { margin:0; width:50px; font:10px monospace; line-height:10px; \
+                  text-align:justify } \
+             #disabled { text-justify:none } \
+             #final-line { text-align-last:justify }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 50.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let automatic_lines = &find_layout_box(&layout, &automatic).unwrap().lines;
+    assert_eq!(automatic_lines.len(), 2);
+    assert!((automatic_lines[0].rect.width - 50.0).abs() < 0.01);
+    assert!(automatic_lines[1].rect.width < 50.0);
+    assert_eq!(automatic_lines[1].rect.x, 0.0);
+
+    let disabled_lines = &find_layout_box(&layout, &disabled).unwrap().lines;
+    assert_eq!(disabled_lines.len(), 2);
+    assert!(disabled_lines[0].rect.width < 50.0);
+
+    let final_lines = &find_layout_box(&layout, &final_line).unwrap().lines;
+    assert_eq!(final_lines.len(), 1);
+    assert!((final_lines[0].rect.width - 50.0).abs() < 0.01);
+    let final_space = final_lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some(" "))
+        .expect("inter-word justification must retain a space fragment");
+    assert!(final_space.rect.width > 10.0);
+}
+
+#[test]
+fn inter_character_justification_distributes_between_graphemes() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    paragraph.append_child(NodeHandle::text("aé👩‍🔬"));
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { margin:0; width:100px; font:10px monospace; line-height:10px; \
+                  text-align:justify; text-align-last:justify; \
+                  text-justify:inter-character }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let line = &find_layout_box(&layout, &paragraph).unwrap().lines[0];
+    let text_fragments = line
+        .fragments
+        .iter()
+        .filter(|fragment| fragment.text().is_some())
+        .collect::<Vec<_>>();
+
+    assert_eq!(line.rect.width, 100.0);
+    assert_eq!(text_fragments.len(), 3);
+    assert_eq!(text_fragments[0].text(), Some("a"));
+    assert_eq!(text_fragments[1].text(), Some("é"));
+    assert_eq!(text_fragments[2].text(), Some("👩‍🔬"));
+    assert!(text_fragments[1].rect.x > text_fragments[0].rect.x + 10.0);
+    assert!(text_fragments[2].rect.x > text_fragments[1].rect.x + 10.0);
+}
+
+#[test]
+fn line_clamp_limits_direct_and_descendant_line_boxes() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let direct = NodeHandle::element("div");
+    direct.set_attribute("id", "direct");
+    direct.append_child(NodeHandle::text("aa bb cc dd"));
+    let nested = NodeHandle::element("div");
+    nested.set_attribute("id", "nested");
+    for text in ["first", "second", "third"] {
+        let paragraph = NodeHandle::element("p");
+        paragraph.append_child(NodeHandle::text(text));
+        nested.append_child(paragraph);
+    }
+    let exact = NodeHandle::element("div");
+    exact.set_attribute("id", "exact");
+    for text in ["first", "second"] {
+        let paragraph = NodeHandle::element("p");
+        paragraph.append_child(NodeHandle::text(text));
+        exact.append_child(paragraph);
+    }
+    let legacy = NodeHandle::element("div");
+    legacy.set_attribute("id", "legacy");
+    legacy.append_child(NodeHandle::text("aa bb cc dd"));
+    let vertical = NodeHandle::element("div");
+    vertical.set_attribute("id", "vertical-clamp");
+    vertical.append_child(NodeHandle::text("aa bb cc dd"));
+    document.append_child(body.clone());
+    body.append_child(direct.clone());
+    body.append_child(nested.clone());
+    body.append_child(exact.clone());
+    body.append_child(legacy.clone());
+    body.append_child(vertical.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div, p { margin:0; font:10px monospace; line-height:10px } \
+             #direct { width:50px; line-clamp:1 \"MORE\" } \
+             #nested, #exact { line-clamp:2 } \
+             #legacy { width:50px; -webkit-line-clamp:1 } \
+             #vertical-clamp { width:40px; height:50px; writing-mode:vertical-lr; \
+                               line-clamp:1 } \
+             #nested p:first-child { position:relative; top:30px } \
+             #nested p:nth-child(2) { block-ellipsis:\"INNER\" }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let direct_box = find_layout_box(&layout, &direct).unwrap();
+    assert_eq!(direct_box.lines.len(), 2);
+    assert!((direct_box.dimensions.content.height - 10.0).abs() < 0.01);
+    assert_eq!(direct_box.overflow, Overflow::Clip);
+    assert_eq!(
+        direct_box.lines[0]
+            .text_overflow
+            .as_ref()
+            .and_then(|paint| paint.fragments.last())
+            .and_then(InlineFragment::text),
+        Some("MORE")
+    );
+
+    let nested_box = find_layout_box(&layout, &nested).unwrap();
+    assert!(nested_box.lines.is_empty());
+    assert!((nested_box.dimensions.content.height - 20.0).abs() < 0.01);
+    assert_eq!(nested_box.overflow, Overflow::Clip);
+    assert_eq!(
+        nested_box.children[1].lines[0]
+            .text_overflow
+            .as_ref()
+            .and_then(|paint| paint.fragments.last())
+            .and_then(InlineFragment::text),
+        Some("INNER")
+    );
+
+    let exact_box = find_layout_box(&layout, &exact).unwrap();
+    assert!((exact_box.dimensions.content.height - 20.0).abs() < 0.01);
+    assert_eq!(exact_box.overflow, Overflow::Visible);
+
+    let legacy_box = find_layout_box(&layout, &legacy).unwrap();
+    assert!((legacy_box.dimensions.content.height - 10.0).abs() < 0.01);
+    assert_eq!(legacy_box.overflow, Overflow::Clip);
+    assert_eq!(
+        legacy_box.lines[0]
+            .text_overflow
+            .as_ref()
+            .and_then(|paint| paint.fragments.last())
+            .and_then(InlineFragment::text),
+        Some("…")
+    );
+
+    let vertical_box = find_layout_box(&layout, &vertical).unwrap();
+    assert!(vertical_box.lines.len() > 1);
+    assert_eq!(vertical_box.overflow, Overflow::Clip);
+    let marker = vertical_box
+        .lines
+        .iter()
+        .find_map(|line| line.text_overflow.as_ref())
+        .and_then(|paint| paint.fragments.last())
+        .expect("vertical clamp must paint an ellipsis on the retained column");
+    assert_eq!(marker.text(), Some("…"));
+    assert!(marker.rect.height > 0.0);
+    assert!(
+        (marker.rect.y + marker.rect.height
+            - vertical_box.dimensions.content.y
+            - vertical_box.dimensions.content.height)
+            .abs()
+            < 0.01
+    );
+}
+
+#[test]
+fn text_box_trim_removes_outer_leading_in_horizontal_and_vertical_flow() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let normal = NodeHandle::element("div");
+    normal.set_attribute("id", "normal");
+    normal.append_child(NodeHandle::text("A\nB"));
+    let trimmed = NodeHandle::element("div");
+    trimmed.set_attribute("id", "trimmed");
+    trimmed.append_child(NodeHandle::text("A\nB"));
+    let vertical = NodeHandle::element("div");
+    vertical.set_attribute("id", "vertical");
+    vertical.append_child(NodeHandle::text("A\nB"));
+    document.append_child(body.clone());
+    body.append_child(normal.clone());
+    body.append_child(trimmed.clone());
+    body.append_child(vertical.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { margin:0; width:100px; height:auto; font:10px monospace; \
+                   line-height:20px; white-space:pre } \
+             #trimmed { text-box:trim-both text } \
+             #vertical { writing-mode:vertical-lr; height:100px; \
+                         text-box:trim-both text }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+
+    let normal = find_layout_box(&layout, &normal).unwrap();
+    let trimmed = find_layout_box(&layout, &trimmed).unwrap();
+    assert!((normal.dimensions.content.height - 40.0).abs() < 0.01);
+    assert!((trimmed.dimensions.content.height - 30.0).abs() < 0.01);
+    assert!((trimmed.lines[0].rect.height - 15.0).abs() < 0.01);
+    assert!((trimmed.lines[1].rect.y - trimmed.dimensions.content.y - 15.0).abs() < 0.01);
+    assert!((trimmed.lines[1].rect.height - 15.0).abs() < 0.01);
+
+    let vertical = find_layout_box(&layout, &vertical).unwrap();
+    assert_eq!(vertical.lines.len(), 2);
+    assert!(
+        vertical
+            .lines
+            .iter()
+            .all(|line| (line.rect.width - 15.0).abs() < 0.01)
+    );
+    assert!((vertical.lines[1].rect.x - vertical.lines[0].rect.x - 15.0).abs() < 0.01);
+}
+
+#[test]
+fn hanging_punctuation_moves_first_and_last_graphemes_outside_the_line() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    paragraph.append_child(NodeHandle::text("“text”"));
+    let forced = NodeHandle::element("p");
+    forced.set_attribute("id", "forced");
+    forced.append_child(NodeHandle::text("one.\ntwo."));
+    let allowed = NodeHandle::element("p");
+    allowed.set_attribute("id", "allowed");
+    allowed.append_child(NodeHandle::text("abcd."));
+    let fitting = NodeHandle::element("p");
+    fitting.set_attribute("id", "fitting");
+    fitting.append_child(NodeHandle::text("abc."));
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+    body.append_child(forced.clone());
+    body.append_child(allowed.clone());
+    body.append_child(fitting.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { margin:0; width:100px; font:10px monospace; line-height:10px; \
+                  hanging-punctuation:first last } \
+             #forced { white-space:pre; hanging-punctuation:force-end } \
+             #allowed, #fitting { width:25px; white-space:nowrap; \
+                                  hanging-punctuation:allow-end }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let line = &find_layout_box(&layout, &paragraph).unwrap().lines[0];
+    let opening = line
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("“"))
+        .unwrap();
+    let closing = line
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("”"))
+        .unwrap();
+    assert!(opening.rect.x < line.rect.x);
+    assert!(closing.rect.x >= line.rect.x + line.rect.width - 0.01);
+
+    let forced = find_layout_box(&layout, &forced).unwrap();
+    assert_eq!(forced.lines.len(), 2);
+    for line in &forced.lines {
+        let punctuation = line
+            .fragments
+            .iter()
+            .find(|fragment| fragment.text() == Some("."))
+            .unwrap_or_else(|| {
+                panic!(
+                    "force-end fragments: {:?}",
+                    line.fragments
+                        .iter()
+                        .filter_map(InlineFragment::text)
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert!(punctuation.rect.x >= line.rect.x + line.rect.width - 0.01);
+    }
+
+    let allowed = &find_layout_box(&layout, &allowed).unwrap().lines[0];
+    let allowed_punctuation = allowed
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("."))
+        .unwrap();
+    assert!(allowed.rect.width <= 25.01);
+    assert!(allowed_punctuation.rect.x >= allowed.rect.x + allowed.rect.width - 0.01);
+
+    let fitting = &find_layout_box(&layout, &fitting).unwrap().lines[0];
+    assert!(fitting.rect.width <= 25.01);
+    assert!(
+        fitting
+            .fragments
+            .iter()
+            .all(|fragment| fragment.text() != Some("."))
+    );
+}
+
+#[test]
+fn initial_letter_sinks_and_excludes_following_lines() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    paragraph.append_child(NodeHandle::text(
+        "A one two three four five six seven eight nine ten eleven twelve",
+    ));
+    let vertical = NodeHandle::element("p");
+    vertical.set_attribute("id", "vertical-initial");
+    vertical.append_child(NodeHandle::text(
+        "A one two three four five six seven eight nine ten eleven twelve",
+    ));
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+    body.append_child(vertical.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { margin:0; width:80px; font:10px monospace; line-height:10px } \
+             p::first-letter { initial-letter:3 2 } \
+             #vertical-initial { writing-mode:vertical-lr; height:80px }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 80.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let paragraph = find_layout_box(&layout, &paragraph).unwrap();
+    assert!(paragraph.lines.len() >= 3);
+    let initial = paragraph.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .expect("first-letter pseudo must create an owned initial fragment");
+    assert!((initial.rect.height - 30.0).abs() < 0.01);
+    assert!((initial.rect.y - paragraph.dimensions.content.y + 10.0).abs() < 0.01);
+    let initial_end = initial.rect.x + initial.rect.width;
+    for line in &paragraph.lines[..2] {
+        assert!(
+            line.fragments
+                .iter()
+                .filter(|fragment| fragment.text() != Some("A"))
+                .all(|fragment| fragment.rect.x >= initial_end - 0.01)
+        );
+    }
+    assert!(paragraph.lines[2].rect.x < initial_end - 0.01);
+
+    let vertical = find_layout_box(&layout, &vertical).unwrap();
+    assert!(vertical.lines.len() >= 3);
+    let initial = vertical.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .unwrap();
+    assert!((initial.rect.width - 30.0).abs() < 0.01);
+    assert!((initial.rect.x - vertical.dimensions.content.x + 10.0).abs() < 0.01);
+    let initial_end = initial.rect.y + initial.rect.height;
+    for line in &vertical.lines[..2] {
+        assert!(
+            line.fragments
+                .iter()
+                .filter(|fragment| fragment.text() != Some("A"))
+                .all(|fragment| fragment.rect.y >= initial_end - 0.01)
+        );
+    }
+    assert!(vertical.lines[2].rect.y < initial_end - 0.01);
+}
+
+#[test]
+fn initial_letter_raise_includes_opening_punctuation_and_uses_rtl_start() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    paragraph.append_child(NodeHandle::text(
+        "“A one two three four five six seven eight nine ten",
+    ));
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { margin:0; width:100px; font:10px monospace; line-height:10px; direction:rtl } \
+             p::first-letter { initial-letter:3 raise }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 20.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let paragraph = find_layout_box(&layout, &paragraph).unwrap();
+    let initial = paragraph.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("“A"))
+        .expect("opening punctuation must stay with the raised first letter");
+    assert!((initial.rect.height - 30.0).abs() < 0.01);
+    assert!((initial.rect.y - paragraph.dimensions.content.y + 20.0).abs() < 0.01);
+    assert!(
+        (initial.rect.x + initial.rect.width
+            - paragraph.dimensions.content.x
+            - paragraph.dimensions.content.width)
+            .abs()
+            < 0.01
+    );
+    assert!(
+        paragraph.lines[0]
+            .fragments
+            .iter()
+            .filter(|fragment| fragment.text() != Some("“A"))
+            .all(|fragment| fragment.rect.x + fragment.rect.width <= initial.rect.x + 0.01)
+    );
+}
+
+#[test]
 fn horizontal_rtl_inline_geometry_uses_logical_start_and_end() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

@@ -8204,6 +8204,61 @@ fn style_counter_properties_ignore_invalid_assignments() {
 }
 
 #[test]
+fn css_supports_line_clamp_and_inline_metric_grammars() {
+    let mut runtime = JsRuntime::new().unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            r#"(() => {
+                const unsupported = [
+                    ["line-clamp", "3 \"more\""],
+                    ["line-clamp", "auto -webkit-legacy"],
+                    ["-webkit-line-clamp", "2"],
+                    ["max-lines", "4 auto"],
+                    ["block-ellipsis", "\"continued\""],
+                    ["continue", "collapse"],
+                    ["initial-letter", "drop 2.5"],
+                    ["text-box", "cap alphabetic trim-end"],
+                    ["text-box-trim", "trim-both"],
+                    ["text-box-edge", "cap alphabetic"],
+                ].filter(([name, value]) => !CSS.supports(name, value));
+                if (unsupported.length) return "unsupported:" + JSON.stringify(unsupported);
+                if (
+                    CSS.supports("line-clamp", "0") ||
+                    CSS.supports("-webkit-line-clamp", "2 ellipsis") ||
+                    CSS.supports("initial-letter", "0") ||
+                    CSS.supports("text-box-edge", "leading")) return "accepted-invalid";
+                const style = document.body.appendChild(document.createElement("div")).style;
+                style.setProperty("line-clamp", "3 \"more\"");
+                if (style.getPropertyValue("line-clamp") !== '3 "more"' ||
+                    style.getPropertyValue("max-lines") !== "3" ||
+                    style.getPropertyValue("block-ellipsis") !== '"more"' ||
+                    style.getPropertyValue("continue") !== "collapse") {
+                    return "line-clamp:" + JSON.stringify([
+                        style.getPropertyValue("line-clamp"),
+                        style.getPropertyValue("max-lines"),
+                        style.getPropertyValue("block-ellipsis"),
+                        style.getPropertyValue("continue")]);
+                }
+                style.setProperty("text-box", "cap alphabetic trim-end");
+                if (style.getPropertyValue("text-box") !== "trim-end cap alphabetic") {
+                    return "text-box:" + style.getPropertyValue("text-box");
+                }
+                style.setProperty("-webkit-line-clamp", "2");
+                if (style.getPropertyValue("-webkit-line-clamp") !== "2" ||
+                    style.getPropertyValue("line-clamp") !== "2 -webkit-legacy") {
+                    return "webkit:" + JSON.stringify([
+                        style.getPropertyValue("-webkit-line-clamp"),
+                        style.getPropertyValue("line-clamp")]);
+                }
+                return "ok";
+            })()"#,
+        ),
+        "ok"
+    );
+}
+
+#[test]
 fn style_text_overflow_accepts_one_value_and_ignores_invalid_assignments() {
     let doc = NodeHandle::document();
     let div = NodeHandle::element("div");

@@ -9,8 +9,8 @@ use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::css::{
-    ComputedStyle, ComputedValue, PseudoElement, StyleResolver, Value, evaluate_media_query,
-    parse_media_query_list,
+    ComputedStyle, ComputedValue, ComputedWritingMode, PseudoElement, StyleResolver, Value,
+    evaluate_media_query, parse_media_query_list,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
@@ -137,6 +137,8 @@ pub(super) enum TextAlign {
     Left,
     Right,
     Center,
+    JustifyInterWord,
+    JustifyInterCharacter,
 }
 
 pub(super) fn text_align(style: &ComputedStyle) -> TextAlign {
@@ -156,11 +158,245 @@ pub(super) fn text_align(style: &ComputedStyle) -> TextAlign {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center") => {
             TextAlign::Center
         }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("justify") => {
+            match style.get("text-justify") {
+                Some(ComputedValue::Keyword(method)) if method.eq_ignore_ascii_case("none") => {
+                    TextAlign::Start
+                }
+                Some(ComputedValue::Keyword(method))
+                    if method.eq_ignore_ascii_case("inter-character") =>
+                {
+                    TextAlign::JustifyInterCharacter
+                }
+                _ => TextAlign::JustifyInterWord,
+            }
+        }
         // `start` is the CSS initial value.  Keeping it logical means that a
         // block with `direction: rtl` naturally starts at its right edge even
         // when no explicit text-align declaration is present.
         _ => TextAlign::Start,
     }
+}
+
+fn text_align_last(
+    style: Option<&ComputedStyle>,
+    align: TextAlign,
+    match_parent: Option<TextAlign>,
+) -> TextAlign {
+    let automatic = match align {
+        TextAlign::JustifyInterWord | TextAlign::JustifyInterCharacter => TextAlign::Start,
+        align => align,
+    };
+    let Some(ComputedValue::Keyword(keyword)) =
+        style.and_then(|style| style.get("text-align-last"))
+    else {
+        return automatic;
+    };
+    match keyword.to_ascii_lowercase().as_str() {
+        "start" => TextAlign::Start,
+        "end" => TextAlign::End,
+        "left" => TextAlign::Left,
+        "right" => TextAlign::Right,
+        "center" => TextAlign::Center,
+        "justify" => match style.and_then(|style| style.get("text-justify")) {
+            Some(ComputedValue::Keyword(method)) if method.eq_ignore_ascii_case("none") => {
+                TextAlign::Start
+            }
+            Some(ComputedValue::Keyword(method))
+                if method.eq_ignore_ascii_case("inter-character") =>
+            {
+                TextAlign::JustifyInterCharacter
+            }
+            _ => TextAlign::JustifyInterWord,
+        },
+        "match-parent" => match_parent.unwrap_or(TextAlign::Start),
+        _ => automatic,
+    }
+}
+
+fn resolved_text_align_last(
+    owner: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    align: TextAlign,
+) -> TextAlign {
+    let parent_align = owner.parent_node().map(|parent| {
+        let parent_style = resolver.computed_style(&parent);
+        let align = text_align(&parent_style);
+        resolved_text_align_last(&parent, resolver, &parent_style, align)
+    });
+    let resolved = text_align_last(Some(style), align, parent_align);
+    match resolved {
+        TextAlign::Start if super::direction_is_rtl(style) => TextAlign::Right,
+        TextAlign::Start => TextAlign::Left,
+        TextAlign::End if super::direction_is_rtl(style) => TextAlign::Left,
+        TextAlign::End => TextAlign::Right,
+        resolved => resolved,
+    }
+}
+
+struct InitialLetterLayout {
+    node: NodeHandle,
+    text_source: Vec<InlineTextSource>,
+    text: String,
+    metrics: FontMetrics,
+    style: FragmentStyle,
+    width: f32,
+    height: f32,
+    sink: usize,
+    size: f32,
+    source_units: usize,
+}
+
+fn initial_letter_style(
+    owner: &NodeHandle,
+    resolver: &mut StyleResolver,
+    container_style: &ComputedStyle,
+) -> Option<(ComputedStyle, f32, usize)> {
+    let pseudo = resolver.computed_pseudo_style(owner, PseudoElement::FirstLetter);
+    let style = pseudo.as_ref().unwrap_or(container_style);
+    let Some(ComputedValue::Keyword(value)) = style.get("initial-letter") else {
+        return None;
+    };
+    if value.eq_ignore_ascii_case("normal") {
+        return None;
+    }
+    let mut components = value.split_ascii_whitespace();
+    let size = components.next()?.parse::<f32>().ok()?;
+    let sink = match components.next() {
+        None | Some("drop") => size.floor() as usize,
+        Some("raise") => 1,
+        Some(value) => value.parse::<usize>().ok()?,
+    };
+    (size >= 1.0 && sink >= 1).then(|| (style.clone(), size, sink))
+}
+
+fn take_initial_letter(
+    segments: &mut Vec<InlineSegment>,
+    style: &ComputedStyle,
+    size: f32,
+    sink: usize,
+    strut_line_height: f32,
+) -> Option<InitialLetterLayout> {
+    let index = segments.iter().position(
+        |segment| matches!(&segment.content, InlineSegmentContent::Text(text) if !text.trim().is_empty()),
+    )?;
+    let segment = &mut segments[index];
+    let node = segment.node.clone();
+    let InlineSegmentContent::Text(text) = &segment.content else {
+        return None;
+    };
+    let mut start = None;
+    let mut end = 0;
+    let mut found_letter = false;
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        let Some(ch) = grapheme.chars().next() else {
+            continue;
+        };
+        if start.is_none() && ch.is_whitespace() {
+            end = offset + grapheme.len();
+            continue;
+        }
+        start.get_or_insert(offset);
+        end = offset + grapheme.len();
+        if !is_opening_hanging_punctuation(ch) {
+            found_letter = true;
+            break;
+        }
+    }
+    let start = start?;
+    if !found_letter {
+        return None;
+    }
+    let initial_text = text[start..end].to_string();
+    let source_units = text[..end].graphemes(true).count();
+    let initial_source = text_source::slice(&segment.text_source, text, start..end);
+    let remainder_source = text_source::slice(&segment.text_source, text, end..text.len());
+    let remainder = text[end..].to_string();
+    segment.text_source = remainder_source;
+    segment.content = InlineSegmentContent::Text(remainder);
+    if matches!(&segment.content, InlineSegmentContent::Text(text) if text.is_empty()) {
+        segments.remove(index);
+    }
+
+    let mut metrics = font_metrics(style);
+    let target_height = (size * strut_line_height).max(strut_line_height);
+    let scale = target_height / (metrics.ascent + metrics.descent).max(0.01);
+    metrics.font_size *= scale;
+    metrics.ascent *= scale;
+    metrics.descent *= scale;
+    metrics.line_gap *= scale;
+    metrics.average_advance *= scale;
+    metrics.letter_spacing *= scale;
+    metrics.word_spacing *= scale;
+    let width = measure_text_width(&initial_text, metrics).max(0.0);
+    Some(InitialLetterLayout {
+        node,
+        text_source: initial_source,
+        text: initial_text,
+        metrics,
+        style: FragmentStyle::from_computed(style),
+        width,
+        height: target_height,
+        sink,
+        size,
+        source_units,
+    })
+}
+
+fn attach_initial_letter(
+    lines: &mut Vec<LineBox>,
+    initial: InitialLetterLayout,
+    start_x: f32,
+    start_y: f32,
+    available_width: f32,
+    strut_line_height: f32,
+    direction_rtl: bool,
+) {
+    if lines.is_empty() {
+        lines.push(LineBox {
+            rect: Rect {
+                x: start_x,
+                y: start_y,
+                width: 0.0,
+                height: strut_line_height,
+            },
+            baseline: start_y + strut_line_height * 0.8,
+            fragments: Vec::new(),
+            text_overflow: None,
+        });
+    }
+    let line = &mut lines[0];
+    let x = if direction_rtl {
+        start_x + available_width - initial.width
+    } else {
+        start_x
+    };
+    let y = start_y + (initial.sink as f32 - initial.size) * strut_line_height;
+    let mut style = initial.style;
+    style.resolved_bidi_level = Some(if direction_rtl { 1 } else { 0 });
+    line.fragments.insert(
+        0,
+        InlineFragment {
+            node: initial.node,
+            text_source: initial.text_source,
+            content: InlineFragmentContent::Text(initial.text),
+            rect: Rect {
+                x,
+                y,
+                width: initial.width,
+                height: initial.height,
+            },
+            metrics: initial.metrics,
+            vertical_align: VerticalAlign::Baseline,
+            source_end_token: initial.source_units,
+            style,
+        },
+    );
+    let left = line.rect.x.min(x);
+    let right = (line.rect.x + line.rect.width).max(x + initial.width);
+    line.rect.x = left;
+    line.rect.width = right - left;
 }
 
 // ── Inline layout entry point ───────────────────────────────────────────────
@@ -323,38 +559,77 @@ fn layout_inline_nodes_impl(
     if source_start_token > 0 {
         skip_inline_prefix(&mut segments, source_start_token);
     }
-    let strut_metrics = nodes
-        .first()
-        .and_then(NodeHandle::parent_node)
-        .map(|parent| font_metrics(&resolver.computed_style(&parent)));
-    let mut first_line_indent = nodes
-        .first()
-        .and_then(NodeHandle::parent_node)
-        .map(|parent| text_indent(&resolver.computed_style(&parent), available_width))
+    let container_owner = generated_owner
+        .cloned()
+        .or_else(|| nodes.first().and_then(NodeHandle::parent_node));
+    let container_style = container_owner
+        .as_ref()
+        .map(|container| resolver.computed_style(container));
+    let mut initial_letter = (source_start_token == 0)
+        .then(|| {
+            container_owner
+                .as_ref()
+                .zip(container_style.as_ref())
+                .and_then(|(owner, style)| initial_letter_style(owner, resolver, style))
+                .and_then(|(style, size, sink)| {
+                    take_initial_letter(&mut segments, &style, size, sink, strut_line_height)
+                })
+        })
+        .flatten();
+    let initial_source_units = initial_letter
+        .as_ref()
+        .map_or(0, |initial| initial.source_units);
+    let strut_metrics = container_style.as_ref().map(font_metrics);
+    let mut first_line_indent = container_style
+        .as_ref()
+        .map(|style| text_indent(style, available_width))
         .unwrap_or_default();
     first_line_indent.initial_affected = source_start_token == 0;
+    let last_align = container_owner
+        .as_ref()
+        .zip(container_style.as_ref())
+        .map_or(align, |(owner, style)| {
+            resolved_text_align_last(owner, resolver, style, align)
+        });
 
-    let (line_start_x, line_available_width) = line_constraints
+    let combined_constraints = |line_y: f32, line_height: f32| {
+        let (mut x, mut width) = line_constraints
+            .map(|constraints| constraints(line_y, line_height))
+            .unwrap_or((start_x, available_width));
+        if let Some(initial) = initial_letter.as_ref()
+            && line_y < start_y + initial.sink as f32 * strut_line_height - 0.01
+        {
+            width = (width - initial.width).max(0.0);
+            if !direction_rtl {
+                x += initial.width;
+            }
+        }
+        (x, width)
+    };
+    let effective_constraints = (line_constraints.is_some() || initial_letter.is_some())
+        .then_some(&combined_constraints as &dyn Fn(f32, f32) -> (f32, f32));
+    let (line_start_x, line_available_width) = effective_constraints
         .map(|constraints| constraints(start_y, strut_line_height))
         .unwrap_or((start_x, available_width));
     let mut lines = layout_inline_segments(
         &segments,
-        source_start_token,
+        source_start_token + initial_source_units,
         line_start_x,
         start_y,
         line_available_width,
         align,
+        last_align,
         strut_line_height,
         strut_metrics,
         direction_rtl,
         first_line_indent,
-        line_constraints,
+        effective_constraints,
         None,
     );
     // Balancing against a changing float exclusion would need a two-dimensional
     // search. Keep those lines on the ordinary greedy path; the common no-float
     // constraint is constant and can safely be optimized below.
-    let uniform_constraints = line_constraints.is_none_or(|constraints| {
+    let uniform_constraints = effective_constraints.is_none_or(|constraints| {
         lines.iter().all(|line| {
             let (constrained_x, constrained_width) = constraints(line.rect.y, strut_line_height);
             (constrained_x - line_start_x).abs() < 0.01
@@ -364,20 +639,36 @@ fn layout_inline_nodes_impl(
     if uniform_constraints {
         lines = optimize_text_wrap_style(
             &segments,
-            source_start_token,
+            source_start_token + initial_source_units,
             line_start_x,
             start_y,
             line_available_width,
             align,
+            last_align,
             strut_line_height,
             strut_metrics,
             direction_rtl,
             first_line_indent,
-            line_constraints,
+            effective_constraints,
             lines,
         );
     }
     boxes::finish(&mut lines, nodes, resolver, strut_line_height);
+    if let Some(initial) = initial_letter.take() {
+        attach_initial_letter(
+            &mut lines,
+            initial,
+            start_x,
+            start_y,
+            available_width,
+            strut_line_height,
+            direction_rtl,
+        );
+    }
+    if let Some(style) = container_style.as_ref() {
+        apply_hanging_punctuation(&mut lines, style, direction_rtl, available_width);
+        apply_text_box_trim(&mut lines, style);
+    }
     if let Some(style) = text_overflow_style {
         apply_text_overflow(
             &mut lines,
@@ -471,35 +762,93 @@ pub(super) fn layout_vertical_inline_nodes(
     };
     let local_constraints =
         column_constraints.map(|_| &local_constraints as &dyn Fn(f32, f32) -> (f32, f32));
-    let (line_start, line_height) = local_constraints
-        .map(|constraints| constraints(0.0, strut_line_height))
-        .unwrap_or((0.0, available_height.max(0.0)));
     let layout_align = match (align, direction_rtl) {
         (TextAlign::Start, true) => TextAlign::Right,
         (TextAlign::End, true) => TextAlign::Left,
         (align, _) => align,
     };
-    let first_line_indent = generated_owner
+    let container_owner = generated_owner
         .cloned()
-        .or_else(|| nodes.first().and_then(NodeHandle::parent_node))
-        .map(|owner| text_indent(&resolver.computed_style(&owner), available_height))
+        .or_else(|| nodes.first().and_then(NodeHandle::parent_node));
+    let container_style = container_owner
+        .as_ref()
+        .map(|owner| resolver.computed_style(owner));
+    let mut initial_letter = container_owner
+        .as_ref()
+        .zip(container_style.as_ref())
+        .and_then(|(owner, style)| initial_letter_style(owner, resolver, style))
+        .and_then(|(style, size, sink)| {
+            take_initial_letter(&mut segments, &style, size, sink, strut_line_height)
+        });
+    let initial_source_units = initial_letter
+        .as_ref()
+        .map_or(0, |initial| initial.source_units);
+    let combined_constraints = |line_y: f32, line_width: f32| {
+        let (mut start, mut width) = local_constraints
+            .map(|constraints| constraints(line_y, line_width))
+            .unwrap_or((0.0, available_height.max(0.0)));
+        if let Some(initial) = initial_letter.as_ref()
+            && line_y < initial.sink as f32 * strut_line_height - 0.01
+        {
+            width = (width - initial.width).max(0.0);
+            if !direction_rtl {
+                start += initial.width;
+            }
+        }
+        (start, width)
+    };
+    let effective_constraints = (local_constraints.is_some() || initial_letter.is_some())
+        .then_some(&combined_constraints as &dyn Fn(f32, f32) -> (f32, f32));
+    let (line_start, line_height) = effective_constraints
+        .map(|constraints| constraints(0.0, strut_line_height))
+        .unwrap_or((0.0, available_height.max(0.0)));
+    let first_line_indent = container_style
+        .as_ref()
+        .map(|style| text_indent(style, available_height))
         .unwrap_or_default();
+    let layout_last_align = container_owner
+        .as_ref()
+        .zip(container_style.as_ref())
+        .map_or(layout_align, |(owner, style)| {
+            resolved_text_align_last(owner, resolver, style, layout_align)
+        });
     let mut horizontal_lines = layout_inline_segments(
         &segments,
-        0,
+        initial_source_units,
         line_start,
         0.0,
         line_height,
         layout_align,
+        layout_last_align,
         strut_line_height,
         None,
         false,
         first_line_indent,
-        local_constraints,
+        effective_constraints,
         None,
     );
 
     boxes::finish(&mut horizontal_lines, nodes, resolver, strut_line_height);
+    if let Some(initial) = initial_letter.take() {
+        attach_initial_letter(
+            &mut horizontal_lines,
+            initial,
+            0.0,
+            0.0,
+            available_height,
+            strut_line_height,
+            direction_rtl,
+        );
+    }
+    if let Some(style) = container_style.as_ref() {
+        apply_hanging_punctuation(
+            &mut horizontal_lines,
+            style,
+            direction_rtl,
+            available_height,
+        );
+        apply_text_box_trim(&mut horizontal_lines, style);
+    }
     if let Some(style) = text_overflow_style {
         apply_text_overflow(
             &mut horizontal_lines,
@@ -600,138 +949,503 @@ fn apply_text_overflow(
     let Some(marker_node) = nodes.first().cloned() else {
         return;
     };
-    let available_width = available_width.max(0.0);
-    let marker_metrics = font_metrics(style);
-    let marker_width = measure_text_width("…", marker_metrics).max(0.0);
-
     for line in lines {
         if !exceeds_available_inline_width(line.rect.width, available_width) {
             continue;
         }
-        let content_budget = (available_width - marker_width).max(0.0);
-        let content_start = if direction_rtl {
-            start + marker_width
-        } else {
-            start
-        };
-        let content_end = if direction_rtl {
-            start + available_width
-        } else {
-            start + content_budget
-        };
-        let mut decorations = line
-            .fragments
-            .iter()
-            .filter(|fragment| matches!(fragment.content, InlineFragmentContent::InlineBox(_)))
-            .filter_map(|fragment| {
-                let left = fragment.rect.x.max(content_start);
-                let right = (fragment.rect.x + fragment.rect.width).min(content_end);
-                (right > left).then(|| {
-                    let mut clipped = fragment.clone();
-                    clipped.rect.x = left;
-                    clipped.rect.width = right - left;
-                    clipped
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut candidates = line
-            .fragments
-            .iter()
-            .filter(|fragment| !matches!(fragment.content, InlineFragmentContent::InlineBox(_)))
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
-        if direction_rtl {
-            candidates.reverse();
-        }
-        let first_unit_width = candidates
-            .iter()
-            .find_map(|fragment| match &fragment.content {
-                InlineFragmentContent::Text(text) => {
-                    let odd_level = fragment
-                        .style
-                        .resolved_bidi_level
-                        .map_or(direction_rtl, |level| level % 2 == 1);
-                    let keep_prefix = direction_rtl == odd_level;
-                    let mut graphemes = text.graphemes(true);
-                    let grapheme = if keep_prefix {
-                        graphemes.next()
-                    } else {
-                        graphemes.next_back()
-                    }?;
-                    Some(measure_text_width(grapheme, fragment.metrics))
-                }
-                _ => Some(fragment.rect.width.max(0.0)),
-            });
-        // The inline-start unit must be clipped rather than removed to make
-        // room for an ellipsis. Leaving the original fragments in place lets
-        // the container's overflow clip expose the fitting part of that unit.
-        if first_unit_width
-            .is_some_and(|width| exceeds_available_inline_width(width, content_budget))
-        {
-            continue;
-        }
+        apply_overflow_marker(
+            line,
+            &marker_node,
+            start,
+            available_width,
+            direction_rtl,
+            style,
+            "…",
+            false,
+        );
+    }
+}
 
-        let mut remaining = content_budget;
-        let mut cursor = if direction_rtl {
-            start + available_width
+fn apply_text_box_trim(lines: &mut [LineBox], style: &ComputedStyle) {
+    let Some(ComputedValue::Keyword(trim)) = style.get("text-box-trim") else {
+        return;
+    };
+    let (trim_start, trim_end) = match trim.to_ascii_lowercase().as_str() {
+        "trim-start" => (true, false),
+        "trim-end" => (false, true),
+        "trim-both" => (true, true),
+        _ => return,
+    };
+    let Some(first) = lines.first() else {
+        return;
+    };
+    let metrics = font_metrics(style);
+    let (over, under) = text_box_edges(style, metrics);
+    let start_amount = if trim_start {
+        (first.baseline - over - first.rect.y).clamp(0.0, first.rect.height)
+    } else {
+        0.0
+    };
+    if start_amount > 0.0 {
+        for (index, line) in lines.iter_mut().enumerate() {
+            if index == 0 {
+                line.rect.height = (line.rect.height - start_amount).max(0.0);
+            } else {
+                line.rect.y -= start_amount;
+            }
+            line.baseline -= start_amount;
+            for fragment in &mut line.fragments {
+                fragment.rect.y -= start_amount;
+            }
+        }
+    }
+    if trim_end {
+        let last = lines.last_mut().expect("non-empty line slice");
+        let edge = last.baseline + under;
+        let amount = (last.rect.y + last.rect.height - edge).clamp(0.0, last.rect.height);
+        last.rect.height = (last.rect.height - amount).max(0.0);
+    }
+}
+
+fn apply_hanging_punctuation(
+    lines: &mut [LineBox],
+    style: &ComputedStyle,
+    direction_rtl: bool,
+    available_width: f32,
+) {
+    let Some(ComputedValue::Keyword(value)) = style.get("hanging-punctuation") else {
+        return;
+    };
+    let values = value
+        .split_ascii_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<HashSet<_>>();
+    if values.contains("first")
+        && let Some(first) = lines.first_mut()
+    {
+        hang_punctuation(first, true, direction_rtl, is_opening_hanging_punctuation);
+    }
+    if values.contains("force-end") {
+        for line in lines.iter_mut() {
+            hang_punctuation(line, false, direction_rtl, is_closing_hanging_punctuation);
+        }
+    } else if values.contains("allow-end")
+        && !matches!(style.get("text-align"), Some(ComputedValue::Keyword(align)) if align.eq_ignore_ascii_case("justify"))
+    {
+        for line in lines.iter_mut() {
+            let forced_break = line
+                .fragments
+                .iter()
+                .any(|fragment| fragment.rect.width == 0.0 && fragment.text() == Some(""));
+            if forced_break || line.rect.width <= available_width + 0.01 {
+                continue;
+            }
+            let original = line.clone();
+            hang_punctuation(line, false, direction_rtl, is_closing_hanging_punctuation);
+            if line.rect.width > available_width + 0.01
+                || (line.rect.width - original.rect.width).abs() < 0.01
+            {
+                *line = original;
+            }
+        }
+    } else if values.contains("last")
+        && let Some(last) = lines.last_mut()
+    {
+        hang_punctuation(last, false, direction_rtl, is_closing_hanging_punctuation);
+    }
+}
+
+fn hang_punctuation(
+    line: &mut LineBox,
+    inline_start: bool,
+    direction_rtl: bool,
+    eligible: fn(char) -> bool,
+) {
+    let Some((index, width)) = isolate_edge_grapheme(line, inline_start, direction_rtl, eligible)
+    else {
+        return;
+    };
+    if inline_start {
+        if direction_rtl {
+            for (candidate, fragment) in line.fragments.iter_mut().enumerate() {
+                if candidate != index {
+                    fragment.rect.x += width;
+                }
+            }
+            line.fragments[index].rect.x += width;
+            line.rect.x += width;
         } else {
-            start
-        };
-        let mut visible = Vec::new();
-        for fragment in candidates {
-            let mut painted = fragment.clone();
-            let width = fragment.rect.width.max(0.0);
-            if width > remaining + 0.01 {
-                let InlineFragmentContent::Text(text) = &fragment.content else {
-                    break;
-                };
+            for (candidate, fragment) in line.fragments.iter_mut().enumerate() {
+                if candidate != index {
+                    fragment.rect.x -= width;
+                }
+            }
+            line.fragments[index].rect.x -= width;
+        }
+    } else if direction_rtl {
+        line.rect.x += width;
+    }
+    line.rect.width = (line.rect.width - width).max(0.0);
+}
+
+fn isolate_edge_grapheme(
+    line: &mut LineBox,
+    inline_start: bool,
+    direction_rtl: bool,
+    eligible: fn(char) -> bool,
+) -> Option<(usize, f32)> {
+    let index = line
+        .fragments
+        .iter()
+        .enumerate()
+        .filter(|(_, fragment)| {
+            fragment.rect.width > 0.0 && fragment.text().is_some_and(|text| !text.is_empty())
+        })
+        .min_by(|(_, left), (_, right)| {
+            let ordering = left.rect.x.total_cmp(&right.rect.x);
+            if direction_rtl == inline_start {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        })?
+        .0;
+    let fragment = line.fragments[index].clone();
+    let text = fragment.text()?.to_string();
+    let odd_level = fragment
+        .style
+        .resolved_bidi_level
+        .is_some_and(|level| level % 2 == 1);
+    let keep_prefix = if inline_start {
+        direction_rtl == odd_level
+    } else {
+        direction_rtl != odd_level
+    };
+    let mut graphemes = text.grapheme_indices(true);
+    let (start, grapheme) = if keep_prefix {
+        graphemes.next()?
+    } else {
+        graphemes.next_back()?
+    };
+    if !grapheme.chars().next().is_some_and(eligible) {
+        return None;
+    }
+    let width = measure_text_width(grapheme, fragment.metrics).min(fragment.rect.width);
+    if grapheme.len() == text.len() {
+        return Some((index, width));
+    }
+
+    let end = start + grapheme.len();
+    let mut punctuation = fragment.clone();
+    punctuation.content = InlineFragmentContent::Text(grapheme.to_string());
+    punctuation.text_source = text_source::slice(&fragment.text_source, &text, start..end);
+    punctuation.rect.width = width;
+    let punctuation_at_left = keep_prefix != odd_level;
+    punctuation.rect.x = if punctuation_at_left {
+        fragment.rect.x
+    } else {
+        fragment.rect.x + fragment.rect.width - width
+    };
+
+    let remainder_range = if keep_prefix {
+        end..text.len()
+    } else {
+        0..start
+    };
+    let mut remainder = fragment;
+    let remainder_text = text[remainder_range.clone()].to_string();
+    remainder.text_source = text_source::slice(&remainder.text_source, &text, remainder_range);
+    remainder.content = InlineFragmentContent::Text(remainder_text);
+    remainder.rect.width = (remainder.rect.width - width).max(0.0);
+    if punctuation_at_left {
+        remainder.rect.x += width;
+    }
+
+    line.fragments.remove(index);
+    if keep_prefix {
+        line.fragments.insert(index, punctuation);
+        line.fragments.insert(index + 1, remainder);
+        Some((index, width))
+    } else {
+        line.fragments.insert(index, remainder);
+        line.fragments.insert(index + 1, punctuation);
+        Some((index + 1, width))
+    }
+}
+
+fn is_opening_hanging_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '"' | '\'' | '(' | '[' | '{' | '\u{2018}' | '\u{201C}' | '\u{00AB}'
+    ) || is_line_end_prohibited(ch, super::LineBreak::Normal)
+}
+
+fn is_closing_hanging_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '"' | '\''
+            | ')'
+            | ']'
+            | '}'
+            | ','
+            | '.'
+            | ':'
+            | ';'
+            | '!'
+            | '?'
+            | '\u{2019}'
+            | '\u{201D}'
+            | '\u{00BB}'
+    ) || is_line_start_prohibited(ch, super::LineBreak::Normal)
+}
+
+fn text_box_edges(style: &ComputedStyle, metrics: FontMetrics) -> (f32, f32) {
+    let edge = match style.get("text-box-edge") {
+        Some(ComputedValue::Keyword(edge)) => edge.as_str(),
+        _ => "auto",
+    };
+    let mut components = edge.split_ascii_whitespace();
+    let over = components.next().unwrap_or("auto");
+    let under = components.next().unwrap_or(over);
+    let over = match over.to_ascii_lowercase().as_str() {
+        "cap" => metrics.font_size * 0.7,
+        "ex" => metrics.font_size * 0.5,
+        _ => metrics.ascent,
+    };
+    let under = match under.to_ascii_lowercase().as_str() {
+        "alphabetic" => 0.0,
+        _ => metrics.descent,
+    };
+    (over, under)
+}
+
+pub(super) fn apply_block_ellipsis(
+    line: &mut LineBox,
+    marker_node: &NodeHandle,
+    start: f32,
+    available_width: f32,
+    direction_rtl: bool,
+    style: &ComputedStyle,
+    marker: &str,
+) {
+    apply_overflow_marker(
+        line,
+        marker_node,
+        start,
+        available_width,
+        direction_rtl,
+        style,
+        marker,
+        matches!(
+            style.writing_mode(),
+            Some(
+                ComputedWritingMode::VerticalRl
+                    | ComputedWritingMode::VerticalLr
+                    | ComputedWritingMode::SidewaysRl
+                    | ComputedWritingMode::SidewaysLr
+            )
+        ),
+    );
+}
+
+fn apply_overflow_marker(
+    line: &mut LineBox,
+    marker_node: &NodeHandle,
+    start: f32,
+    available_width: f32,
+    direction_rtl: bool,
+    style: &ComputedStyle,
+    marker_text: &str,
+    vertical: bool,
+) {
+    let available_width = available_width.max(0.0);
+    let marker_metrics = font_metrics(style);
+    let marker_width = measure_text_width(marker_text, marker_metrics).max(0.0);
+    let content_budget = (available_width - marker_width).max(0.0);
+    let content_start = if direction_rtl {
+        start + marker_width
+    } else {
+        start
+    };
+    let content_end = if direction_rtl {
+        start + available_width
+    } else {
+        start + content_budget
+    };
+    let mut decorations = line
+        .fragments
+        .iter()
+        .filter(|fragment| matches!(fragment.content, InlineFragmentContent::InlineBox(_)))
+        .filter_map(|fragment| {
+            let fragment_start = if vertical {
+                fragment.rect.y
+            } else {
+                fragment.rect.x
+            };
+            let fragment_size = if vertical {
+                fragment.rect.height
+            } else {
+                fragment.rect.width
+            };
+            let clipped_start = fragment_start.max(content_start);
+            let clipped_end = (fragment_start + fragment_size).min(content_end);
+            (clipped_end > clipped_start).then(|| {
+                let mut clipped = fragment.clone();
+                if vertical {
+                    clipped.rect.y = clipped_start;
+                    clipped.rect.height = clipped_end - clipped_start;
+                } else {
+                    clipped.rect.x = clipped_start;
+                    clipped.rect.width = clipped_end - clipped_start;
+                }
+                clipped
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut candidates = line
+        .fragments
+        .iter()
+        .filter(|fragment| !matches!(fragment.content, InlineFragmentContent::InlineBox(_)))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        let left = if vertical { left.rect.y } else { left.rect.x };
+        let right = if vertical { right.rect.y } else { right.rect.x };
+        left.total_cmp(&right)
+    });
+    if direction_rtl {
+        candidates.reverse();
+    }
+    let first_unit_width = candidates
+        .iter()
+        .find_map(|fragment| match &fragment.content {
+            InlineFragmentContent::Text(text) => {
                 let odd_level = fragment
                     .style
                     .resolved_bidi_level
                     .map_or(direction_rtl, |level| level % 2 == 1);
                 let keep_prefix = direction_rtl == odd_level;
-                let Some((text, width)) =
-                    text_fitting_graphemes(text, fragment.metrics, remaining, keep_prefix)
-                else {
-                    break;
-                };
-                let original = match &fragment.content {
-                    InlineFragmentContent::Text(text) => text,
-                    _ => unreachable!(),
-                };
-                let start = if keep_prefix {
-                    0
+                let mut graphemes = text.graphemes(true);
+                let grapheme = if keep_prefix {
+                    graphemes.next()
                 } else {
-                    original.len() - text.len()
-                };
-                painted.text_source =
-                    text_source::slice(&fragment.text_source, original, start..start + text.len());
-                painted.content = InlineFragmentContent::Text(text);
-                painted.rect.width = width;
+                    graphemes.next_back()
+                }?;
+                Some(measure_text_width(grapheme, fragment.metrics))
             }
+            _ => Some(
+                if vertical {
+                    fragment.rect.height
+                } else {
+                    fragment.rect.width
+                }
+                .max(0.0),
+            ),
+        });
+    // The inline-start unit must be clipped rather than removed to make
+    // room for an ellipsis. Leaving the original fragments in place lets
+    // the container's overflow clip expose the fitting part of that unit.
+    if first_unit_width.is_some_and(|width| exceeds_available_inline_width(width, content_budget)) {
+        return;
+    }
 
-            let painted_width = painted.rect.width.max(0.0);
-            if direction_rtl {
-                cursor -= painted_width;
-                painted.rect.x = cursor;
-            } else {
-                painted.rect.x = cursor;
-                cursor += painted_width;
-            }
-            remaining = (remaining - painted_width).max(0.0);
-            visible.push(painted);
-            if width > remaining + painted_width + 0.01 {
+    let mut remaining = content_budget;
+    let mut cursor = if direction_rtl {
+        start + available_width
+    } else {
+        start
+    };
+    let mut visible = Vec::new();
+    for fragment in candidates {
+        let mut painted = fragment.clone();
+        let width = if vertical {
+            fragment.rect.height
+        } else {
+            fragment.rect.width
+        }
+        .max(0.0);
+        if width > remaining + 0.01 {
+            let InlineFragmentContent::Text(text) = &fragment.content else {
                 break;
+            };
+            let odd_level = fragment
+                .style
+                .resolved_bidi_level
+                .map_or(direction_rtl, |level| level % 2 == 1);
+            let keep_prefix = direction_rtl == odd_level;
+            let Some((text, width)) =
+                text_fitting_graphemes(text, fragment.metrics, remaining, keep_prefix)
+            else {
+                break;
+            };
+            let original = match &fragment.content {
+                InlineFragmentContent::Text(text) => text,
+                _ => unreachable!(),
+            };
+            let start = if keep_prefix {
+                0
+            } else {
+                original.len() - text.len()
+            };
+            painted.text_source =
+                text_source::slice(&fragment.text_source, original, start..start + text.len());
+            painted.content = InlineFragmentContent::Text(text);
+            if vertical {
+                painted.rect.height = width;
+            } else {
+                painted.rect.width = width;
             }
         }
 
-        let mut marker_style = FragmentStyle::from_computed(style);
-        marker_style.resolved_bidi_level = Some(if direction_rtl { 1 } else { 0 });
-        let marker = InlineFragment {
-            node: marker_node.clone(),
-            text_source: Vec::new(),
-            content: InlineFragmentContent::Text("…".to_string()),
-            rect: Rect {
+        let painted_width = if vertical {
+            painted.rect.height
+        } else {
+            painted.rect.width
+        }
+        .max(0.0);
+        if direction_rtl {
+            cursor -= painted_width;
+            if vertical {
+                painted.rect.y = cursor;
+            } else {
+                painted.rect.x = cursor;
+            }
+        } else {
+            if vertical {
+                painted.rect.y = cursor;
+            } else {
+                painted.rect.x = cursor;
+            }
+            cursor += painted_width;
+        }
+        remaining = (remaining - painted_width).max(0.0);
+        visible.push(painted);
+        if width > remaining + painted_width + 0.01 {
+            break;
+        }
+    }
+
+    let mut marker_style = FragmentStyle::from_computed(style);
+    marker_style.resolved_bidi_level = Some(if direction_rtl { 1 } else { 0 });
+    let marker = InlineFragment {
+        node: marker_node.clone(),
+        text_source: Vec::new(),
+        content: InlineFragmentContent::Text(marker_text.to_string()),
+        rect: if vertical {
+            Rect {
+                x: line
+                    .fragments
+                    .first()
+                    .map_or(line.rect.x, |fragment| fragment.rect.x),
+                y: if direction_rtl {
+                    start
+                } else {
+                    start + (available_width - marker_width).max(0.0)
+                },
+                width: marker_metrics.ascent + marker_metrics.descent,
+                height: marker_width,
+            }
+        } else {
+            Rect {
                 x: if direction_rtl {
                     start
                 } else {
@@ -740,19 +1454,23 @@ fn apply_text_overflow(
                 y: line.baseline - marker_metrics.ascent,
                 width: marker_width,
                 height: marker_metrics.ascent + marker_metrics.descent,
-            },
-            metrics: marker_metrics,
-            vertical_align: VerticalAlign::Baseline,
-            source_end_token: 0,
-            style: marker_style,
-        };
-        visible.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
-        decorations.extend(visible);
-        decorations.push(marker);
-        line.text_overflow = Some(TextOverflowPaint {
-            fragments: decorations,
-        });
-    }
+            }
+        },
+        metrics: marker_metrics,
+        vertical_align: VerticalAlign::Baseline,
+        source_end_token: 0,
+        style: marker_style,
+    };
+    visible.sort_by(|left, right| {
+        let left = if vertical { left.rect.y } else { left.rect.x };
+        let right = if vertical { right.rect.y } else { right.rect.x };
+        left.total_cmp(&right)
+    });
+    decorations.extend(visible);
+    decorations.push(marker);
+    line.text_overflow = Some(TextOverflowPaint {
+        fragments: decorations,
+    });
 }
 
 fn text_fitting_graphemes(
@@ -1820,6 +2538,7 @@ pub(super) fn layout_block_pseudo_content(
         start_y,
         available_width,
         text_align(style),
+        resolved_text_align_last(node, resolver, style, text_align(style)),
         line_height(style),
         Some(font_metrics(style)),
         super::direction_is_rtl(style),
@@ -3249,6 +3968,7 @@ struct InlineCursor {
     strut_metrics: Option<FontMetrics>,
     direction_rtl: bool,
     indent: TextIndent,
+    last_align: TextAlign,
 }
 
 #[derive(Clone, Copy)]
@@ -3267,6 +3987,7 @@ impl InlineCursor {
         strut_metrics: Option<FontMetrics>,
         direction_rtl: bool,
         indent: TextIndent,
+        last_align: TextAlign,
     ) -> Self {
         let unindented_start_x = start_x;
         let maximum_wrap_width = wrap_width.map(|width| width.min(available_width));
@@ -3286,6 +4007,7 @@ impl InlineCursor {
             strut_metrics,
             direction_rtl,
             indent,
+            last_align,
         };
         cursor.apply_line_indent(indent.initial_affected);
         cursor
@@ -3317,6 +4039,11 @@ impl InlineCursor {
         break_kind: LineBreakKind,
     ) {
         let effective_height = self.line_height.max(segment_line_height);
+        let line_align = if matches!(break_kind, LineBreakKind::Forced) {
+            self.last_align
+        } else {
+            align
+        };
         let used_height = push_line(
             lines,
             fragments,
@@ -3325,7 +4052,7 @@ impl InlineCursor {
             self.x - self.start_x,
             effective_height,
             self.line_box_width,
-            align,
+            line_align,
             self.direction_rtl,
             self.strut_line_height,
             self.strut_metrics,
@@ -3348,7 +4075,7 @@ impl InlineCursor {
         &self,
         lines: &mut Vec<LineBox>,
         fragments: &mut Vec<InlineFragment>,
-        align: TextAlign,
+        _align: TextAlign,
     ) {
         if !fragments.is_empty() {
             let final_height = if fragments.iter().all(|fragment| {
@@ -3370,7 +4097,7 @@ impl InlineCursor {
                 self.x - self.start_x,
                 final_height,
                 self.line_box_width,
-                align,
+                self.last_align,
                 self.direction_rtl,
                 self.strut_line_height,
                 self.strut_metrics,
@@ -3840,6 +4567,7 @@ fn layout_inline_segments(
     start_y: f32,
     available_width: f32,
     align: TextAlign,
+    last_align: TextAlign,
     strut_line_height: f32,
     strut_metrics: Option<FontMetrics>,
     direction_rtl: bool,
@@ -3858,6 +4586,7 @@ fn layout_inline_segments(
         strut_metrics,
         direction_rtl,
         first_line_indent,
+        last_align,
     );
 
     let mut prev_segment_allows_wrapping = true;
@@ -3925,6 +4654,7 @@ fn optimize_text_wrap_style(
     start_y: f32,
     available_width: f32,
     align: TextAlign,
+    last_align: TextAlign,
     strut_line_height: f32,
     strut_metrics: Option<FontMetrics>,
     direction_rtl: bool,
@@ -3979,6 +4709,7 @@ fn optimize_text_wrap_style(
             start_y,
             available_width,
             align,
+            last_align,
             strut_line_height,
             strut_metrics,
             direction_rtl,
@@ -4474,7 +5205,7 @@ fn push_line(
     fragments: &mut Vec<InlineFragment>,
     x: f32,
     y: f32,
-    width: f32,
+    mut width: f32,
     mut height: f32,
     available_width: f32,
     align: TextAlign,
@@ -4489,10 +5220,16 @@ fn push_line(
         TextAlign::End => TextAlign::Right,
         other => other,
     };
+    if physical_align == TextAlign::JustifyInterWord {
+        width = justify_inter_word(fragments, width, available_width);
+    } else if physical_align == TextAlign::JustifyInterCharacter {
+        width = justify_inter_character(fragments, width, available_width);
+    }
     let offset_x = match physical_align {
         TextAlign::Left => 0.0,
         TextAlign::Right => (available_width - width).max(0.0),
         TextAlign::Center => (available_width - width).max(0.0) / 2.0,
+        TextAlign::JustifyInterWord | TextAlign::JustifyInterCharacter => 0.0,
         TextAlign::Start | TextAlign::End => unreachable!("logical alignment must be resolved"),
     };
     for fragment in fragments.iter_mut() {
@@ -4617,6 +5354,107 @@ fn push_line(
         text_overflow: None,
     });
     height
+}
+
+fn justify_inter_word(
+    fragments: &mut [InlineFragment],
+    used_width: f32,
+    available_width: f32,
+) -> f32 {
+    let extra = available_width - used_width;
+    if extra <= 0.0 {
+        return used_width;
+    }
+    let opportunities = fragments
+        .iter()
+        .filter(|fragment| {
+            matches!(&fragment.content, InlineFragmentContent::Text(text)
+                if !text.is_empty() && text.chars().all(char::is_whitespace))
+        })
+        .count();
+    if opportunities == 0 {
+        return used_width;
+    }
+    let expansion = extra / opportunities as f32;
+    let mut shift = 0.0;
+    for fragment in fragments {
+        fragment.rect.x += shift;
+        if matches!(&fragment.content, InlineFragmentContent::Text(text)
+            if !text.is_empty() && text.chars().all(char::is_whitespace))
+        {
+            fragment.rect.width += expansion;
+            shift += expansion;
+        }
+    }
+    available_width
+}
+
+fn justify_inter_character(
+    fragments: &mut Vec<InlineFragment>,
+    used_width: f32,
+    available_width: f32,
+) -> f32 {
+    let extra = available_width - used_width;
+    if extra <= 0.0 {
+        return used_width;
+    }
+
+    let grapheme_count = fragments
+        .iter()
+        .filter_map(InlineFragment::text)
+        .map(|text| text.graphemes(true).count())
+        .sum::<usize>();
+    let opportunities = grapheme_count.saturating_sub(1);
+    if opportunities == 0 {
+        return used_width;
+    }
+
+    let mut split = Vec::with_capacity(fragments.len() + opportunities);
+    for fragment in std::mem::take(fragments) {
+        let Some(text) = fragment.text() else {
+            split.push(fragment);
+            continue;
+        };
+        let measured = text
+            .grapheme_indices(true)
+            .map(|(_, grapheme)| measure_text_width(grapheme, fragment.metrics))
+            .collect::<Vec<_>>();
+        let measured_total = measured.iter().sum::<f32>();
+        let scale = if measured_total > 0.0 {
+            fragment.rect.width / measured_total
+        } else {
+            1.0
+        };
+        let mut x = fragment.rect.x;
+        for ((start, grapheme), measured_width) in
+            text.grapheme_indices(true).zip(measured.into_iter())
+        {
+            let mut unit = fragment.clone();
+            let end = start + grapheme.len();
+            unit.content = InlineFragmentContent::Text(grapheme.to_string());
+            unit.text_source = text_source::slice(&fragment.text_source, text, start..end);
+            unit.rect.x = x;
+            unit.rect.width = measured_width * scale;
+            x += unit.rect.width;
+            split.push(unit);
+        }
+    }
+
+    let expansion = extra / opportunities as f32;
+    let mut remaining_text_units = grapheme_count;
+    let mut shift = 0.0;
+    for fragment in &mut split {
+        fragment.rect.x += shift;
+        if fragment.text().is_some() {
+            remaining_text_units -= 1;
+            if remaining_text_units > 0 {
+                fragment.rect.width += expansion;
+                shift += expansion;
+            }
+        }
+    }
+    *fragments = split;
+    available_width
 }
 
 /// Resolves adjacent inline fragments as one UAX#9 line while retaining the

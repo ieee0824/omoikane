@@ -23013,10 +23013,13 @@ fn expand_style_shorthand_native(
     let rows = declarations
         .into_iter()
         .map(|declaration| {
-            [
-                declaration.name,
-                crate::css::serialize_specified_value(&declaration.value),
-            ]
+            let value = match (&*declaration.name, &declaration.value) {
+                ("block-ellipsis", crate::css::Value::String(value)) => {
+                    cssom_normalization::serialize_css_string(value)
+                }
+                _ => crate::css::serialize_specified_value(&declaration.value),
+            };
+            [declaration.name, value]
         })
         .collect::<Vec<_>>();
     let encoded = serde_json::to_string(&rows)

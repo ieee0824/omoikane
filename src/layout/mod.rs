@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::css::style::PropertyId;
 use crate::css::{
     AffineTransform, ComputedDirection, ComputedFloat, ComputedPosition, ComputedStyle,
-    ComputedValue, ComputedWritingMode, ContainerContext, Matrix4, PseudoElement, StyleResolver,
-    TransformReferenceBox, parse_composed_transform, parse_perspective_matrix,
+    ComputedValue, ComputedWritingMode, ContainerContext, CssToken, Matrix4, PseudoElement,
+    StyleResolver, TransformReferenceBox, parse_composed_transform, parse_perspective_matrix,
+    tokenize,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::error_reporting::{
@@ -3019,7 +3020,7 @@ fn layout_element_with_cell(
         );
     }
 
-    let (dimensions, children, lines, multicol) = layout_block_cell_body(
+    let (dimensions, children, lines, multicol, line_clamped) = layout_block_cell_body(
         node,
         resolver,
         &style,
@@ -3035,7 +3036,11 @@ fn layout_element_with_cell(
         pseudo: None,
         dimensions,
         visibility: visibility(&style),
-        overflow: overflow(&style),
+        overflow: if line_clamped {
+            Overflow::Clip
+        } else {
+            overflow(&style)
+        },
         position_scheme: position_scheme(&style),
         fixed_containing_block: establishes_fixed_containing_block(&style),
         z_index: z_index(&style),
@@ -3545,6 +3550,7 @@ fn layout_block_cell_body(
     Vec<LayoutBox>,
     Vec<LineBox>,
     Option<MultiColumnLayout>,
+    bool,
 ) {
     let CellBoxMetrics {
         padding,
@@ -3610,7 +3616,45 @@ fn layout_block_cell_body(
         static_position.y += margin_delta;
     }
     let y = y + margin_delta;
-    let effective_cursor_y = cursor_y.max(float_bottom) + margin_delta;
+    let mut effective_cursor_y = cursor_y.max(float_bottom) + margin_delta;
+    let line_clamped =
+        line_clamp_point(node, style, &lines, &children, resolver).is_some_and(|point| {
+            effective_cursor_y = effective_cursor_y.min(point.block_end);
+            let paint = line_clamp_paint_context(
+                node,
+                style,
+                Rect {
+                    x,
+                    y,
+                    width,
+                    height: resolved_length(style, "height", containing_block.height)
+                        .map(|height| border_box_adjust_height(style, height, &padding, &border))
+                        .or_else(|| {
+                            used_height
+                                .map(|height| height.value)
+                                .filter(|height| *height > 0.0)
+                        })
+                        .unwrap_or(containing_block.height),
+                },
+                &children,
+                &point.target,
+                resolver,
+            );
+            if let Some(marker) = block_ellipsis_text(&paint.style)
+                && let Some(line) = line_clamp_target_mut(&mut lines, &mut children, &point.target)
+            {
+                inline::apply_block_ellipsis(
+                    line,
+                    &paint.owner,
+                    paint.start,
+                    paint.width,
+                    direction_is_rtl(&paint.style),
+                    &paint.style,
+                    &marker,
+                );
+            }
+            true
+        });
     let content_height = used_height.map(|height| height.value).unwrap_or_else(|| {
         resolve_content_height(
             node,
@@ -3661,7 +3705,253 @@ fn layout_block_cell_body(
     }
     sort_children_by_z_index_in_tree_order(node, &mut children);
 
-    (dimensions, children, lines, multicol)
+    (dimensions, children, lines, multicol, line_clamped)
+}
+
+fn line_clamp_point(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    lines: &[LineBox],
+    children: &[LayoutBox],
+    resolver: &mut StyleResolver,
+) -> Option<LineClampCandidate> {
+    let max_lines = line_clamp_max_lines(style)?;
+    let mut ranks = HashMap::new();
+    let mut next_rank = 0;
+    collect_descendant_ranks(node, &mut ranks, &mut next_rank);
+    let mut line_ends = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| line_clamp_candidate(line, node, &ranks, LineClampTarget::Root(index)))
+        .collect::<Vec<_>>();
+    for (index, child) in children.iter().enumerate() {
+        collect_in_flow_line_ends(child, resolver, &ranks, &mut vec![index], &mut line_ends);
+    }
+    line_ends.sort_by(|left, right| {
+        left.order
+            .cmp(&right.order)
+            .then_with(|| left.source_end.cmp(&right.source_end))
+    });
+    (line_ends.len() > max_lines).then(|| line_ends[max_lines - 1].clone())
+}
+
+#[derive(Clone)]
+struct LineClampCandidate {
+    order: usize,
+    source_end: usize,
+    block_end: f32,
+    target: LineClampTarget,
+}
+
+#[derive(Clone)]
+enum LineClampTarget {
+    Root(usize),
+    Descendant { path: Vec<usize>, line: usize },
+}
+
+fn collect_descendant_ranks(
+    node: &NodeHandle,
+    ranks: &mut HashMap<usize, usize>,
+    next: &mut usize,
+) {
+    ranks.insert(node.identity(), *next);
+    *next += 1;
+    for child in node.layout_child_nodes() {
+        collect_descendant_ranks(&child, ranks, next);
+    }
+}
+
+fn line_clamp_candidate(
+    line: &LineBox,
+    fallback_owner: &NodeHandle,
+    ranks: &HashMap<usize, usize>,
+    target: LineClampTarget,
+) -> LineClampCandidate {
+    let order = line
+        .fragments
+        .iter()
+        .flat_map(|fragment| {
+            fragment
+                .text_source
+                .iter()
+                .map(|source| &source.node)
+                .chain(std::iter::once(&fragment.node))
+        })
+        .filter_map(|node| ranks.get(&node.identity()).copied())
+        .min()
+        .or_else(|| ranks.get(&fallback_owner.identity()).copied())
+        .unwrap_or(usize::MAX);
+    LineClampCandidate {
+        order,
+        source_end: line
+            .fragments
+            .iter()
+            .map(|fragment| fragment.source_end_token)
+            .max()
+            .unwrap_or_default(),
+        block_end: line.rect.y + line.rect.height,
+        target,
+    }
+}
+
+fn line_clamp_max_lines(style: &ComputedStyle) -> Option<usize> {
+    let Some(ComputedValue::Keyword(continuation)) = style.get_by_id(PropertyId::Continue) else {
+        return None;
+    };
+    if !continuation.eq_ignore_ascii_case("collapse")
+        && !continuation.eq_ignore_ascii_case("-webkit-legacy")
+    {
+        return None;
+    }
+    let Some(ComputedValue::Keyword(max_lines)) = style.get_by_id(PropertyId::MaxLines) else {
+        return None;
+    };
+    max_lines
+        .split_ascii_whitespace()
+        .find_map(|component| component.parse::<usize>().ok())
+        .filter(|lines| *lines > 0)
+}
+
+fn block_ellipsis_text(style: &ComputedStyle) -> Option<String> {
+    let Some(ComputedValue::Keyword(value)) = style.get_by_id(PropertyId::BlockEllipsis) else {
+        return None;
+    };
+    if value.eq_ignore_ascii_case("no-ellipsis") {
+        return None;
+    }
+    if value.eq_ignore_ascii_case("ellipsis") {
+        return Some("…".to_string());
+    }
+    let tokens = tokenize(value).ok()?;
+    match tokens.as_slice() {
+        [CssToken::String(value)] => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn line_clamp_target_mut<'a>(
+    lines: &'a mut [LineBox],
+    children: &'a mut [LayoutBox],
+    target: &LineClampTarget,
+) -> Option<&'a mut LineBox> {
+    match target {
+        LineClampTarget::Root(index) => lines.get_mut(*index),
+        LineClampTarget::Descendant { path, line } => {
+            let mut layout = children.get_mut(*path.first()?)?;
+            for index in &path[1..] {
+                layout = layout.children.get_mut(*index)?;
+            }
+            layout.lines.get_mut(*line)
+        }
+    }
+}
+
+struct LineClampPaintContext {
+    owner: NodeHandle,
+    style: ComputedStyle,
+    start: f32,
+    width: f32,
+}
+
+fn line_clamp_paint_context(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    content: Rect,
+    children: &[LayoutBox],
+    target: &LineClampTarget,
+    resolver: &mut StyleResolver,
+) -> LineClampPaintContext {
+    let root_context = || {
+        let vertical = is_vertical_writing(style);
+        LineClampPaintContext {
+            owner: node.clone(),
+            style: style.clone(),
+            start: if vertical { content.y } else { content.x },
+            width: if vertical {
+                content.height
+            } else {
+                content.width
+            },
+        }
+    };
+    let LineClampTarget::Descendant { path, .. } = target else {
+        return root_context();
+    };
+    let Some(mut layout) = path.first().and_then(|index| children.get(*index)) else {
+        return root_context();
+    };
+    for index in &path[1..] {
+        let Some(child) = layout.children.get(*index) else {
+            return root_context();
+        };
+        layout = child;
+    }
+    let target_style = layout_box_style(layout, resolver);
+    let vertical = is_vertical_writing(&target_style);
+    LineClampPaintContext {
+        owner: layout.node.clone(),
+        style: target_style,
+        start: if vertical {
+            layout.dimensions.content.y
+        } else {
+            layout.dimensions.content.x
+        },
+        width: if vertical {
+            layout.dimensions.content.height
+        } else {
+            layout.dimensions.content.width
+        },
+    }
+}
+
+fn collect_in_flow_line_ends(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    ranks: &HashMap<usize, usize>,
+    path: &mut Vec<usize>,
+    line_ends: &mut Vec<LineClampCandidate>,
+) {
+    if matches!(
+        layout.position_scheme,
+        PositionScheme::Absolute | PositionScheme::Fixed
+    ) {
+        return;
+    }
+    let style = layout_box_style(layout, resolver);
+    if establishes_independent_line_formatting_context(&style) {
+        return;
+    }
+    line_ends.extend(layout.lines.iter().enumerate().map(|(index, line)| {
+        line_clamp_candidate(
+            line,
+            &layout.node,
+            ranks,
+            LineClampTarget::Descendant {
+                path: path.clone(),
+                line: index,
+            },
+        )
+    }));
+    for (index, child) in layout.children.iter().enumerate() {
+        path.push(index);
+        collect_in_flow_line_ends(child, resolver, ranks, path, line_ends);
+        path.pop();
+    }
+}
+
+fn establishes_independent_line_formatting_context(style: &ComputedStyle) -> bool {
+    float_side(style) != FloatSide::None
+        || is_out_of_flow_positioned(style)
+        || overflow(style) != Overflow::Visible
+        || is_flex_container(style)
+        || is_grid_container(style)
+        || has_containment(style, "layout")
+        || matches!(
+            computed_keyword(style, "display"),
+            Some(display) if display.eq_ignore_ascii_case("flow-root")
+                || display.eq_ignore_ascii_case("inline-block")
+                || display.eq_ignore_ascii_case("table")
+        )
 }
 
 struct BlockChildrenResult {
