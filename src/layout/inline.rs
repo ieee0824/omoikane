@@ -9,8 +9,8 @@ use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::css::{
-    ComputedStyle, ComputedValue, PseudoElement, StyleResolver, Value, evaluate_media_query,
-    parse_media_query_list,
+    ComputedStyle, ComputedValue, ComputedWritingMode, PseudoElement, StyleResolver, Value,
+    evaluate_media_query, parse_media_query_list,
 };
 use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
@@ -675,6 +675,7 @@ fn apply_text_overflow(
             direction_rtl,
             style,
             "…",
+            false,
         );
     }
 }
@@ -757,6 +758,15 @@ pub(super) fn apply_block_ellipsis(
         direction_rtl,
         style,
         marker,
+        matches!(
+            style.writing_mode(),
+            Some(
+                ComputedWritingMode::VerticalRl
+                    | ComputedWritingMode::VerticalLr
+                    | ComputedWritingMode::SidewaysRl
+                    | ComputedWritingMode::SidewaysLr
+            )
+        ),
     );
 }
 
@@ -768,6 +778,7 @@ fn apply_overflow_marker(
     direction_rtl: bool,
     style: &ComputedStyle,
     marker_text: &str,
+    vertical: bool,
 ) {
     let available_width = available_width.max(0.0);
     let marker_metrics = font_metrics(style);
@@ -788,12 +799,27 @@ fn apply_overflow_marker(
         .iter()
         .filter(|fragment| matches!(fragment.content, InlineFragmentContent::InlineBox(_)))
         .filter_map(|fragment| {
-            let left = fragment.rect.x.max(content_start);
-            let right = (fragment.rect.x + fragment.rect.width).min(content_end);
-            (right > left).then(|| {
+            let fragment_start = if vertical {
+                fragment.rect.y
+            } else {
+                fragment.rect.x
+            };
+            let fragment_size = if vertical {
+                fragment.rect.height
+            } else {
+                fragment.rect.width
+            };
+            let clipped_start = fragment_start.max(content_start);
+            let clipped_end = (fragment_start + fragment_size).min(content_end);
+            (clipped_end > clipped_start).then(|| {
                 let mut clipped = fragment.clone();
-                clipped.rect.x = left;
-                clipped.rect.width = right - left;
+                if vertical {
+                    clipped.rect.y = clipped_start;
+                    clipped.rect.height = clipped_end - clipped_start;
+                } else {
+                    clipped.rect.x = clipped_start;
+                    clipped.rect.width = clipped_end - clipped_start;
+                }
                 clipped
             })
         })
@@ -803,7 +829,11 @@ fn apply_overflow_marker(
         .iter()
         .filter(|fragment| !matches!(fragment.content, InlineFragmentContent::InlineBox(_)))
         .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
+    candidates.sort_by(|left, right| {
+        let left = if vertical { left.rect.y } else { left.rect.x };
+        let right = if vertical { right.rect.y } else { right.rect.x };
+        left.total_cmp(&right)
+    });
     if direction_rtl {
         candidates.reverse();
     }
@@ -824,7 +854,14 @@ fn apply_overflow_marker(
                 }?;
                 Some(measure_text_width(grapheme, fragment.metrics))
             }
-            _ => Some(fragment.rect.width.max(0.0)),
+            _ => Some(
+                if vertical {
+                    fragment.rect.height
+                } else {
+                    fragment.rect.width
+                }
+                .max(0.0),
+            ),
         });
     // The inline-start unit must be clipped rather than removed to make
     // room for an ellipsis. Leaving the original fragments in place lets
@@ -842,7 +879,12 @@ fn apply_overflow_marker(
     let mut visible = Vec::new();
     for fragment in candidates {
         let mut painted = fragment.clone();
-        let width = fragment.rect.width.max(0.0);
+        let width = if vertical {
+            fragment.rect.height
+        } else {
+            fragment.rect.width
+        }
+        .max(0.0);
         if width > remaining + 0.01 {
             let InlineFragmentContent::Text(text) = &fragment.content else {
                 break;
@@ -869,15 +911,32 @@ fn apply_overflow_marker(
             painted.text_source =
                 text_source::slice(&fragment.text_source, original, start..start + text.len());
             painted.content = InlineFragmentContent::Text(text);
-            painted.rect.width = width;
+            if vertical {
+                painted.rect.height = width;
+            } else {
+                painted.rect.width = width;
+            }
         }
 
-        let painted_width = painted.rect.width.max(0.0);
+        let painted_width = if vertical {
+            painted.rect.height
+        } else {
+            painted.rect.width
+        }
+        .max(0.0);
         if direction_rtl {
             cursor -= painted_width;
-            painted.rect.x = cursor;
+            if vertical {
+                painted.rect.y = cursor;
+            } else {
+                painted.rect.x = cursor;
+            }
         } else {
-            painted.rect.x = cursor;
+            if vertical {
+                painted.rect.y = cursor;
+            } else {
+                painted.rect.x = cursor;
+            }
             cursor += painted_width;
         }
         remaining = (remaining - painted_width).max(0.0);
@@ -893,22 +952,42 @@ fn apply_overflow_marker(
         node: marker_node.clone(),
         text_source: Vec::new(),
         content: InlineFragmentContent::Text(marker_text.to_string()),
-        rect: Rect {
-            x: if direction_rtl {
-                start
-            } else {
-                start + (available_width - marker_width).max(0.0)
-            },
-            y: line.baseline - marker_metrics.ascent,
-            width: marker_width,
-            height: marker_metrics.ascent + marker_metrics.descent,
+        rect: if vertical {
+            Rect {
+                x: line
+                    .fragments
+                    .first()
+                    .map_or(line.rect.x, |fragment| fragment.rect.x),
+                y: if direction_rtl {
+                    start
+                } else {
+                    start + (available_width - marker_width).max(0.0)
+                },
+                width: marker_metrics.ascent + marker_metrics.descent,
+                height: marker_width,
+            }
+        } else {
+            Rect {
+                x: if direction_rtl {
+                    start
+                } else {
+                    start + (available_width - marker_width).max(0.0)
+                },
+                y: line.baseline - marker_metrics.ascent,
+                width: marker_width,
+                height: marker_metrics.ascent + marker_metrics.descent,
+            }
         },
         metrics: marker_metrics,
         vertical_align: VerticalAlign::Baseline,
         source_end_token: 0,
         style: marker_style,
     };
-    visible.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
+    visible.sort_by(|left, right| {
+        let left = if vertical { left.rect.y } else { left.rect.x };
+        let right = if vertical { right.rect.y } else { right.rect.x };
+        left.total_cmp(&right)
+    });
     decorations.extend(visible);
     decorations.push(marker);
     line.text_overflow = Some(TextOverflowPaint {

@@ -3620,8 +3620,26 @@ fn layout_block_cell_body(
     let line_clamped =
         line_clamp_point(node, style, &lines, &children, resolver).is_some_and(|point| {
             effective_cursor_y = effective_cursor_y.min(point.block_end);
-            let paint =
-                line_clamp_paint_context(node, style, x, width, &children, &point.target, resolver);
+            let paint = line_clamp_paint_context(
+                node,
+                style,
+                Rect {
+                    x,
+                    y,
+                    width,
+                    height: resolved_length(style, "height", containing_block.height)
+                        .map(|height| border_box_adjust_height(style, height, &padding, &border))
+                        .or_else(|| {
+                            used_height
+                                .map(|height| height.value)
+                                .filter(|height| *height > 0.0)
+                        })
+                        .unwrap_or(containing_block.height),
+                },
+                &children,
+                &point.target,
+                resolver,
+            );
             if let Some(marker) = block_ellipsis_text(&paint.style)
                 && let Some(line) = line_clamp_target_mut(&mut lines, &mut children, &point.target)
             {
@@ -3838,44 +3856,51 @@ struct LineClampPaintContext {
 fn line_clamp_paint_context(
     node: &NodeHandle,
     style: &ComputedStyle,
-    start: f32,
-    width: f32,
+    content: Rect,
     children: &[LayoutBox],
     target: &LineClampTarget,
     resolver: &mut StyleResolver,
 ) -> LineClampPaintContext {
-    let LineClampTarget::Descendant { path, .. } = target else {
-        return LineClampPaintContext {
+    let root_context = || {
+        let vertical = is_vertical_writing(style);
+        LineClampPaintContext {
             owner: node.clone(),
             style: style.clone(),
-            start,
-            width,
-        };
+            start: if vertical { content.y } else { content.x },
+            width: if vertical {
+                content.height
+            } else {
+                content.width
+            },
+        }
+    };
+    let LineClampTarget::Descendant { path, .. } = target else {
+        return root_context();
     };
     let Some(mut layout) = path.first().and_then(|index| children.get(*index)) else {
-        return LineClampPaintContext {
-            owner: node.clone(),
-            style: style.clone(),
-            start,
-            width,
-        };
+        return root_context();
     };
     for index in &path[1..] {
         let Some(child) = layout.children.get(*index) else {
-            return LineClampPaintContext {
-                owner: node.clone(),
-                style: style.clone(),
-                start,
-                width,
-            };
+            return root_context();
         };
         layout = child;
     }
+    let target_style = layout_box_style(layout, resolver);
+    let vertical = is_vertical_writing(&target_style);
     LineClampPaintContext {
         owner: layout.node.clone(),
-        style: layout_box_style(layout, resolver),
-        start: layout.dimensions.content.x,
-        width: layout.dimensions.content.width,
+        style: target_style,
+        start: if vertical {
+            layout.dimensions.content.y
+        } else {
+            layout.dimensions.content.x
+        },
+        width: if vertical {
+            layout.dimensions.content.height
+        } else {
+            layout.dimensions.content.width
+        },
     }
 }
 

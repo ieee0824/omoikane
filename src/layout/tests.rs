@@ -3335,11 +3335,15 @@ fn line_clamp_limits_direct_and_descendant_line_boxes() {
     let legacy = NodeHandle::element("div");
     legacy.set_attribute("id", "legacy");
     legacy.append_child(NodeHandle::text("aa bb cc dd"));
+    let vertical = NodeHandle::element("div");
+    vertical.set_attribute("id", "vertical-clamp");
+    vertical.append_child(NodeHandle::text("aa bb cc dd"));
     document.append_child(body.clone());
     body.append_child(direct.clone());
     body.append_child(nested.clone());
     body.append_child(exact.clone());
     body.append_child(legacy.clone());
+    body.append_child(vertical.clone());
 
     let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
@@ -3349,6 +3353,8 @@ fn line_clamp_limits_direct_and_descendant_line_boxes() {
              #direct { width:50px; line-clamp:1 \"MORE\" } \
              #nested, #exact { line-clamp:2 } \
              #legacy { width:50px; -webkit-line-clamp:1 } \
+             #vertical-clamp { width:40px; height:50px; writing-mode:vertical-lr; \
+                               line-clamp:1 } \
              #nested p:first-child { position:relative; top:30px } \
              #nested p:nth-child(2) { block-ellipsis:\"INNER\" }",
         )
@@ -3407,6 +3413,25 @@ fn line_clamp_limits_direct_and_descendant_line_boxes() {
             .and_then(|paint| paint.fragments.last())
             .and_then(InlineFragment::text),
         Some("…")
+    );
+
+    let vertical_box = find_layout_box(&layout, &vertical).unwrap();
+    assert!(vertical_box.lines.len() > 1);
+    assert_eq!(vertical_box.overflow, Overflow::Clip);
+    let marker = vertical_box
+        .lines
+        .iter()
+        .find_map(|line| line.text_overflow.as_ref())
+        .and_then(|paint| paint.fragments.last())
+        .expect("vertical clamp must paint an ellipsis on the retained column");
+    assert_eq!(marker.text(), Some("…"));
+    assert!(marker.rect.height > 0.0);
+    assert!(
+        (marker.rect.y + marker.rect.height
+            - vertical_box.dimensions.content.y
+            - vertical_box.dimensions.content.height)
+            .abs()
+            < 0.01
     );
 }
 
