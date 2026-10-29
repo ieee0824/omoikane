@@ -154,7 +154,7 @@ jobs:
           python3 scripts/diagnose-gate5-wpt.py
           .artifacts/jit-gate5/aarch64-apple-darwin/suite
       - name: Save Boa suite artifacts
-        if: matrix.kind == 'suite' && steps.boa-cache.outputs.cache-hit != 'true' && success() && github.ref == 'refs/heads/main'
+        if: matrix.kind == 'suite' && steps.boa-cache.outputs.cache-hit != 'true' && success() && (github.ref == 'refs/heads/main' || github.head_ref == 'ci/issue1537-boa-cache-mtime')
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
