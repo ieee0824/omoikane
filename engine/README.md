@@ -446,3 +446,25 @@ The diagnostic maps and trace counters exist only in tests. These correctness
 checks do not establish general production duplicate frequency, crash causality,
 or CPU/RSS improvement. The imported source manifest remains unchanged; this
 collector change is tracked in Omoikane's commit history.
+
+## Reusing a parsed module across realms
+
+Every browsing-context Realm evaluates the same generated DOM bootstrap module
+(about 1.4 MB of source). Parsing it again for each iframe Realm took about
+half of the Realm's startup time, which accumulated past JavaScript wall-clock
+limits in tests that create many frames (#1522).
+
+`boa_parser::Parser::parse_module_without_scope_analysis` parses a module
+without binding it to a global scope, and `boa_parser::analyze_module_scope`
+runs the scope analysis separately. `boa_engine::module::ParsedModuleSource`
+keeps the tree before analysis. `Module::from_parsed_source_with_host_defined`
+clones that tree and analyzes it against the target Realm's global scope. The
+analyzer assigns fresh scopes to each clone, so the module is equivalent to
+parsing the source again for that Realm. Tagged template site objects stay
+per Realm because Boa keys them by Realm. The tree's identifiers are interned
+in the parsing `Context`, so a parsed source must only be used with the
+context that produced it. `Module::parse_with_host_defined` is unchanged.
+
+The browser keeps one parsed bootstrap module per runtime in `HostState` and
+creates each Realm's module from it. Verify with the nested Boa `module::`
+tests and Omoikane's iframe, WPT and full locked tests.

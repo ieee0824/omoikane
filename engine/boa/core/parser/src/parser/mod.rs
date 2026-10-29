@@ -236,15 +236,29 @@ impl<'a, R: ReadChar> Parser<'a, R> {
     where
         R: ReadChar,
     {
-        self.cursor.set_goal(InputElement::HashbangOrRegExp);
-        let (mut module, source) = ModuleParser.parse(&mut self.cursor, interner)?;
-        if let Err(reason) = module.analyze_scope(scope, interner) {
-            return Err(Error::general(
-                format!("invalid scope analysis: {reason}"),
-                Position::new(1, 1),
-            ));
-        }
+        let (mut module, source) = self.parse_module_without_scope_analysis(interner)?;
+        analyze_module_scope(&mut module, scope, interner)?;
         Ok((module, source))
+    }
+
+    /// Parses a module without binding it to a global scope.
+    ///
+    /// The result must be passed to [`analyze_module_scope`] before it is
+    /// compiled. Embedders that load the same source into several realms can
+    /// parse once, then clone and analyze the tree for each realm's scope.
+    ///
+    /// # Errors
+    ///
+    /// Will return `Err` on any parsing error, including invalid reads of the bytes being parsed.
+    pub fn parse_module_without_scope_analysis(
+        &mut self,
+        interner: &mut Interner,
+    ) -> ParseResult<ModuleParseOutput>
+    where
+        R: ReadChar,
+    {
+        self.cursor.set_goal(InputElement::HashbangOrRegExp);
+        ModuleParser.parse(&mut self.cursor, interner)
     }
 
     /// [`19.2.1.1 PerformEval ( x, strictCaller, direct )`][spec]
@@ -324,6 +338,29 @@ impl<R> Parser<'_, R> {
     {
         self.cursor.set_identifier(identifier);
     }
+}
+
+/// Runs scope analysis for a module parsed by
+/// [`Parser::parse_module_without_scope_analysis`] against `scope`.
+///
+/// Analysis assigns fresh scopes to the tree, so analyzing separate clones of
+/// one unanalyzed tree against different global scopes yields independent
+/// modules equivalent to parsing the source again for each scope.
+///
+/// # Errors
+///
+/// Returns an early error found by scope analysis.
+pub fn analyze_module_scope(
+    module: &mut boa_ast::Module,
+    scope: &Scope,
+    interner: &Interner,
+) -> ParseResult<()> {
+    module.analyze_scope(scope, interner).map_err(|reason| {
+        Error::general(
+            format!("invalid scope analysis: {reason}"),
+            Position::new(1, 1),
+        )
+    })
 }
 
 /// Parses a full script.
