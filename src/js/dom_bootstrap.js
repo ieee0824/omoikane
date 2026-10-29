@@ -1107,6 +1107,7 @@ export const __omoikane_service_worker_lifecycle = {};
   ]);
   const needsStyleValueNormalization = (name, value) =>
     name === "transition" || name.startsWith("transition-") ||
+    name === "hyphenate-character" ||
     logicalBoxStyleProperties.has(name) ||
     validatesSpecialStyleProperties.has(name) ||
     (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
@@ -1141,6 +1142,7 @@ export const __omoikane_service_worker_lifecycle = {};
     "contain-intrinsic-size": ["contain-intrinsic-width", "contain-intrinsic-height"],
     "overscroll-behavior": ["overscroll-behavior-x", "overscroll-behavior-y"],
     "overflow": ["overflow-x", "overflow-y"],
+    "text-wrap": ["text-wrap-mode", "text-wrap-style"],
     "scroll-padding": ["scroll-padding-top", "scroll-padding-right", "scroll-padding-bottom", "scroll-padding-left"],
     "scroll-margin": ["scroll-margin-top", "scroll-margin-right", "scroll-margin-bottom", "scroll-margin-left"],
     "scroll-padding-inline": ["scroll-padding-inline-start", "scroll-padding-inline-end"],
@@ -1179,6 +1181,17 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     if (pendingValue !== null) return pendingOverridden ? "" : pendingValue;
     const parts = longhands.map(name => values.get(name));
+    if (kebab === "text-wrap") {
+      const [mode, style] = parts;
+      if (!mode || !style) return "";
+      if (longhands.some(name => priorities.get(name) !== priorities.get(longhands[0]))) return "";
+      if (/^(initial|inherit|unset|revert|revert-layer)$/.test(mode) ||
+          /^(initial|inherit|unset|revert|revert-layer)$/.test(style)) {
+        return mode === style ? mode : "";
+      }
+      if (mode === "wrap") return style === "auto" ? "wrap" : style;
+      return style === "auto" ? "nowrap" : "nowrap " + style;
+    }
     if (logicalBoxStyleProperties.has(kebab)) {
       if (longhands.some(name => priorities.get(name) !== priorities.get(longhands[0]))) return "";
       if (parts.some(value => /^(initial|inherit|unset|revert|revert-layer)$/.test(value)) &&
@@ -4256,7 +4269,7 @@ export const __omoikane_service_worker_lifecycle = {};
       // Later declarations win, matching the inline cascade.
       const getValue = (kebab) => {
         const decls = parseDecls();
-        if (logicalBoxStyleProperties.has(kebab) ||
+        if (logicalBoxStyleProperties.has(kebab) || kebab === "text-wrap" ||
             kebab === "inset" || kebab.startsWith("inset-") ||
             kebab === "border-inline" || kebab.startsWith("border-inline-") ||
             kebab === "border-block" || kebab.startsWith("border-block-")) {
@@ -4286,7 +4299,8 @@ export const __omoikane_service_worker_lifecycle = {};
       };
       const getPriority = (kebab) => {
         const decls = parseDecls();
-        const longhands = logicalBoxStyleProperties.has(kebab) && styleShorthandLonghands[kebab];
+        const longhands = (logicalBoxStyleProperties.has(kebab) || kebab === "text-wrap") &&
+          styleShorthandLonghands[kebab];
         if (longhands) {
           if (!logicalShorthandValue(kebab, decls)) return "";
           for (let i = decls.length - 1; i >= 0; i--) {
@@ -4353,7 +4367,7 @@ export const __omoikane_service_worker_lifecycle = {};
         const remaining = decls.filter(d => !removed.has(d.name));
         if (remaining.length === decls.length) return "";
         let old = "";
-        if (logicalBoxStyleProperties.has(kebab) && longhands.length) {
+        if ((logicalBoxStyleProperties.has(kebab) || kebab === "text-wrap") && longhands.length) {
           old = logicalShorthandValue(kebab, decls) || "";
         }
         for (let i = decls.length - 1; i >= 0; i--) {

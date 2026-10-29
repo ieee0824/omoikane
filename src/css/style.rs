@@ -4630,7 +4630,7 @@ fn record_component_value(
     if matches!(
         name.as_str(),
         "content" | "counter-reset" | "counter-increment" | "counter-set" | "quotes" | "color"
-    ) || color_uses_container_units(value)
+    ) || value_uses_container_units(value)
     {
         values.insert(name, value.clone());
     } else {
@@ -4638,7 +4638,8 @@ fn record_component_value(
     }
 }
 
-/// Retains only color expressions that need a layout-provided container size.
+/// Recognizes color expressions whose computed value depends on a query
+/// container. Forced-colors handling uses this narrower classification.
 fn color_uses_container_units(value: &Value) -> bool {
     matches!(value, Value::Function { name, .. }
         if matches!(name.to_ascii_lowercase().as_str(), "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color")
@@ -7184,6 +7185,7 @@ fn is_non_negative_sizing_property(name: &str) -> bool {
             | "column-gap"
             | "column-rule-width"
             | "shape-margin"
+            | "tab-size"
     )
 }
 
@@ -10482,7 +10484,7 @@ fn normalize_numeric_property(name: &str, value: f32) -> f32 {
     };
     match name {
         "opacity" => value.clamp(0.0, 1.0),
-        "flex-grow" | "flex-shrink" => value.max(0.0),
+        "flex-grow" | "flex-shrink" | "tab-size" => value.max(0.0),
         "order" | "z-index" => round_css_integer(value),
         "column-count" | "orphans" | "widows" => round_css_integer(value).max(1.0),
         _ => value,

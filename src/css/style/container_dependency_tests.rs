@@ -27,3 +27,14 @@ fn container_dependency_queries_do_not_rescan_unchanged_style_caches() {
     assert!(resolver.needs_container_contexts());
     assert_eq!(resolver.container_context_scan_count(), before + 3);
 }
+
+#[test]
+fn non_color_container_units_request_container_contexts() {
+    let node = NodeHandle::element("div");
+    node.set_attribute("style", "tab-size: calc(10 + (sign(2cqw - 10px) * 5))");
+    let mut resolver = StyleResolver::new();
+
+    resolver.computed_style_shared(&node);
+
+    assert!(resolver.needs_container_contexts());
+}

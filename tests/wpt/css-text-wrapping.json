@@ -1,0 +1,28 @@
+{
+  "tests": [
+    { "path": "css/css-text/parsing/white-space-collapse-valid.html" },
+    { "path": "css/css-text/parsing/white-space-collapse-invalid.html" },
+    { "path": "css/css-text/parsing/white-space-collapse-computed.html" },
+    { "path": "css/css-text/parsing/text-wrap-valid.html" },
+    { "path": "css/css-text/parsing/text-wrap-invalid.html" },
+    { "path": "css/css-text/parsing/text-wrap-computed.html" },
+    { "path": "css/css-text/parsing/text-wrap-mode-valid.html" },
+    { "path": "css/css-text/parsing/text-wrap-mode-invalid.html" },
+    { "path": "css/css-text/parsing/text-wrap-mode-computed.html" },
+    { "path": "css/css-text/parsing/text-wrap-style-valid.html" },
+    { "path": "css/css-text/parsing/text-wrap-style-invalid.html" },
+    { "path": "css/css-text/parsing/text-wrap-style-computed.html" },
+    { "path": "css/css-text/parsing/line-break-valid.html" },
+    { "path": "css/css-text/parsing/line-break-invalid.html" },
+    { "path": "css/css-text/parsing/line-break-computed.html" },
+    { "path": "css/css-text/parsing/hyphens-valid.html" },
+    { "path": "css/css-text/parsing/hyphens-invalid.html" },
+    { "path": "css/css-text/parsing/hyphens-computed.html" },
+    { "path": "css/css-text/parsing/hyphenate-character-valid.html" },
+    { "path": "css/css-text/parsing/hyphenate-character-invalid.html" },
+    { "path": "css/css-text/parsing/hyphenate-character-computed.html" },
+    { "path": "css/css-text/parsing/tab-size-valid.html" },
+    { "path": "css/css-text/parsing/tab-size-invalid.html" },
+    { "path": "css/css-text/parsing/tab-size-computed.html" }
+  ]
+}

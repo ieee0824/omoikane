@@ -2700,6 +2700,46 @@ fn tab_size_advances_to_cursor_relative_stops() {
 }
 
 #[test]
+fn tab_size_resolves_container_units_after_container_layout() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    container.set_attribute("id", "container");
+    let target = NodeHandle::element("p");
+    target.set_attribute("id", "target");
+    target.append_child(NodeHandle::text("a\tb"));
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin:0 } #container { container-type:inline-size; width:100px } \
+             #target { white-space:pre; tab-size:calc(10 + (sign(2cqw - 10px) * 5)) }",
+        )
+        .unwrap(),
+    );
+    let _ = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        resolver.computed_style(&target).get("tab-size"),
+        Some(&ComputedValue::Number(5.0))
+    );
+}
+
+#[test]
 fn hyphens_manual_none_and_auto_control_line_breaks() {
     fn paragraph(css: &str, text: &str, language: Option<&str>) -> LayoutBox {
         let document = NodeHandle::document();

@@ -19170,6 +19170,9 @@ fn computed_value_to_css_string(property_name: &str, value: &ComputedValue) -> S
     match value {
         ComputedValue::Keyword(keyword) => keyword.clone(),
         ComputedValue::Color(color) => computed_color_to_css_string(color),
+        ComputedValue::String(string) if property_name == "hyphenate-character" => {
+            cssom_normalization::serialize_css_string(string)
+        }
         ComputedValue::String(string) => string.clone(),
         ComputedValue::Px(px) => format!("{}px", format_css_number(*px)),
         ComputedValue::Percentage(pct) => format!("{}%", format_css_number(*pct)),
@@ -19203,6 +19206,19 @@ fn computed_value_to_css_string(property_name: &str, value: &ComputedValue) -> S
         value @ ComputedValue::TextIndent { .. } => value.css_text(),
         value @ ComputedValue::Position { .. } => value.css_text(),
     }
+}
+
+fn computed_text_wrap(style: &ComputedStyle) -> Option<String> {
+    let mode = style.get("text-wrap-mode")?.css_text();
+    let wrap_style = style.get("text-wrap-style")?.css_text();
+    Some(match (mode.as_str(), wrap_style.as_str()) {
+        ("wrap", "auto") => "wrap".to_string(),
+        ("wrap", style) => style.to_string(),
+        ("nowrap", "auto") => "nowrap".to_string(),
+        ("nowrap", style) => format!("nowrap {style}"),
+        _ if mode == wrap_style => mode,
+        _ => return None,
+    })
 }
 
 /// Resolves property values that need the element's own context for CSSOM.
@@ -19910,6 +19926,11 @@ fn computed_style_native(
     // above, but avoid allocating the complete JavaScript property map.
     if let Some(name) = name {
         return Ok(style.as_ref().map_or_else(JsValue::undefined, |style| {
+            if name == "text-wrap" {
+                return computed_text_wrap(style).map_or_else(JsValue::undefined, |value| {
+                    js_string!(value.as_str()).into()
+                });
+            }
             style.get(&name).map_or_else(JsValue::undefined, |value| {
                 js_string!(computed_style_property_to_css_string(&name, value, style)).into()
             })
@@ -19942,7 +19963,14 @@ fn computed_style_native(
 fn cssom_property_uses_used_size(name: &str) -> bool {
     matches!(
         name,
-        "width" | "height" | "inline-size" | "block-size" | "transform" | "margin" | "padding"
+        "width"
+            | "height"
+            | "inline-size"
+            | "block-size"
+            | "transform"
+            | "margin"
+            | "padding"
+            | "tab-size"
     ) || name.starts_with("margin-")
         || name.starts_with("padding-")
 }

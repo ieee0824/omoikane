@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Text wrapping and whitespace fixed fixture</title>
+<style>
+  @font-face {
+    font-family: TextFixture;
+    src: url("../acid2/LiberationSans-Regular.ttf") format("truetype");
+  }
+  html, body {
+    margin: 0;
+    width: 640px;
+    height: 720px;
+    overflow: hidden;
+    background: white;
+    color: #202020;
+    font: 18px/24px TextFixture, sans-serif;
+  }
+  .row {
+    box-sizing: border-box;
+    min-height: 88px;
+    padding: 8px 16px;
+    border-bottom: 1px solid #ddd;
+  }
+  .sample { width: 286px; background: #f3f4f6; }
+  .preserve { white-space-collapse: preserve; text-wrap-mode: wrap; }
+  .break-spaces { white-space-collapse: break-spaces; text-wrap-mode: wrap; }
+  .balance { width: 430px; text-wrap: balance; }
+  .pretty { width: 430px; text-wrap: pretty; }
+  .stable { width: 430px; text-wrap: stable; }
+  .strict { width: 205px; line-break: strict; }
+  .manual { width: 205px; hyphens: manual; hyphenate-character: "→"; }
+  .auto { width: 205px; hyphens: auto; hyphenate-character: "~"; }
+  .tabs { width: 430px; white-space-collapse: preserve; tab-size: 6; }
+</style>
+<div class="row">
+  <div class="sample preserve" data-probe id="preserve">alpha   beta
+gamma delta epsilon</div>
+</div>
+<div class="row">
+  <div class="sample break-spaces" data-probe id="break-spaces">alpha        beta        gamma</div>
+</div>
+<div class="row balance" data-probe id="balance">Balanced wrapping keeps a short heading distributed across its available lines.</div>
+<div class="row pretty" data-probe id="pretty">Pretty wrapping avoids leaving an awkwardly short final line when another break is available.</div>
+<div class="row stable" data-probe id="stable">Stable wrapping keeps ordinary non-editing text deterministic across repeated layout.</div>
+<div class="row">
+  <div class="strict" lang="ja" data-probe id="strict">句読点を含む日本語の文章です。改行位置を確認します。</div>
+</div>
+<div class="row">
+  <div class="manual" lang="en" data-probe id="manual">extra&shy;ordinary demon&shy;stration</div>
+  <div class="auto" lang="en" data-probe id="auto">characteristically internationalization</div>
+</div>
+<div class="row tabs" data-probe id="tabs">A	B	C
+one	two	three</div>
