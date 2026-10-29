@@ -878,6 +878,99 @@ fn vertical_float_constrains_columns_on_the_inline_axis() {
 }
 
 #[test]
+fn vertical_text_combine_digits_uses_one_em_cells_without_splitting_unicode() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    document.append_child(body.clone());
+    body.append_child(NodeHandle::text("日12A12345語34"));
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin:0; writing-mode:vertical-rl; width:80px; height:240px; \
+             font-size:20px; line-height:24px; text-combine-upright:digits 2; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 80.0,
+            height: 240.0,
+        },
+    )
+    .unwrap();
+    let fragments = layout
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .filter_map(|fragment| fragment.text().map(|text| (text, fragment.rect.height)))
+        .collect::<Vec<_>>();
+
+    for digits in ["12", "34"] {
+        let (_, height) = fragments
+            .iter()
+            .find(|(text, _)| *text == digits)
+            .unwrap_or_else(|| panic!("missing combined {digits:?} in {fragments:?}"));
+        assert!((*height - 20.0).abs() < 0.01, "{digits}: {height}");
+    }
+    assert!(fragments.iter().any(|(text, _)| *text == "12345"));
+    assert!(fragments.iter().any(|(text, _)| text.contains('日')));
+    assert!(fragments.iter().any(|(text, _)| text.contains('語')));
+}
+
+#[test]
+fn text_combine_all_uses_one_vertical_em_and_has_no_horizontal_effect() {
+    let layout = |writing_mode: &str| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        document.append_child(body.clone());
+        body.append_child(NodeHandle::text("ABCD"));
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin:0; writing-mode:{writing_mode}; width:100px; height:240px; \
+                 font-size:20px; line-height:24px; text-combine-upright:all; }}"
+            ))
+            .unwrap(),
+        );
+        layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 240.0,
+            },
+        )
+        .unwrap()
+    };
+    let vertical = layout("vertical-lr");
+    let vertical_fragment = vertical
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .find(|fragment| fragment.text() == Some("ABCD"))
+        .unwrap();
+    assert!((vertical_fragment.rect.height - 20.0).abs() < 0.01);
+
+    let horizontal = layout("horizontal-tb");
+    let horizontal_fragment = horizontal
+        .lines
+        .iter()
+        .flat_map(|line| &line.fragments)
+        .find(|fragment| fragment.text() == Some("ABCD"))
+        .unwrap();
+    assert!(horizontal_fragment.rect.width > 20.0);
+}
+
+#[test]
 fn vertical_circle_shape_changes_the_exclusion_per_column() {
     let circle = vertical_lines_around_shape("circle(50%)", "left");
     let rectangle = vertical_lines_around_shape("none", "left");

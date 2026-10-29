@@ -4883,6 +4883,7 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
             segment.word_break,
             segment.style.line_break,
             segment.white_space_mode,
+            &segment.style,
         ),
         InlineSegmentContent::InlineEdge(style, start) => {
             let margin = inline_edge_size(style, edge_sizes(style, "margin"), *start);
@@ -4996,6 +4997,118 @@ fn split_text_segment(
     wb: WordBreak,
     line_break: super::LineBreak,
     ws_mode: WhiteSpaceMode,
+    style: &FragmentStyle,
+) -> Vec<InlinePiece> {
+    if vertical_text_combine_applies(style) {
+        match style.text_combine_upright {
+            super::TextCombineUpright::All => {
+                return split_all_combined_text(text, metrics, line_height, ws_mode);
+            }
+            super::TextCombineUpright::Digits(maximum) => {
+                return split_digit_combined_text(
+                    text,
+                    metrics,
+                    line_height,
+                    wb,
+                    line_break,
+                    ws_mode,
+                    style,
+                    maximum,
+                );
+            }
+            super::TextCombineUpright::None => {}
+        }
+    }
+    split_uncombined_text_segment(text, metrics, line_height, wb, line_break, ws_mode, style)
+}
+
+fn vertical_text_combine_applies(style: &FragmentStyle) -> bool {
+    matches!(
+        style.writing_mode.as_deref(),
+        Some("vertical-rl" | "vertical-lr" | "sideways-rl" | "sideways-lr")
+    )
+}
+
+fn combined_text_piece(text: &str, metrics: &FontMetrics, line_height: f32) -> InlinePiece {
+    InlinePiece::Fragment {
+        content: InlineFragmentContent::Text(text.to_string()),
+        width: metrics.font_size,
+        height: line_height,
+    }
+}
+
+fn split_all_combined_text(
+    text: &str,
+    metrics: &FontMetrics,
+    line_height: f32,
+    ws_mode: WhiteSpaceMode,
+) -> Vec<InlinePiece> {
+    if !ws_mode.preserves_newlines() || !text.contains('\n') {
+        return (!text.is_empty())
+            .then(|| combined_text_piece(text, metrics, line_height))
+            .into_iter()
+            .collect();
+    }
+    let mut pieces = Vec::new();
+    let line_count = text.split('\n').count();
+    for (index, part) in text.split('\n').enumerate() {
+        if !part.is_empty() {
+            pieces.push(combined_text_piece(part, metrics, line_height));
+        }
+        if index + 1 < line_count {
+            pieces.push(InlinePiece::Newline);
+        }
+    }
+    pieces
+}
+
+#[allow(clippy::too_many_arguments)]
+fn split_digit_combined_text(
+    text: &str,
+    metrics: &FontMetrics,
+    line_height: f32,
+    wb: WordBreak,
+    line_break: super::LineBreak,
+    ws_mode: WhiteSpaceMode,
+    style: &FragmentStyle,
+    maximum: u8,
+) -> Vec<InlinePiece> {
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut chars = text[start..].char_indices();
+        let (_, first) = chars.next().expect("start is a character boundary");
+        let digits = first.is_ascii_digit();
+        let end = chars
+            .find_map(|(offset, ch)| (ch.is_ascii_digit() != digits).then_some(start + offset))
+            .unwrap_or(text.len());
+        let run = &text[start..end];
+        if digits && (2..=maximum as usize).contains(&run.len()) {
+            pieces.push(combined_text_piece(run, metrics, line_height));
+        } else {
+            pieces.extend(split_uncombined_text_segment(
+                run,
+                metrics,
+                line_height,
+                wb,
+                line_break,
+                ws_mode,
+                style,
+            ));
+        }
+        start = end;
+    }
+    pieces
+}
+
+fn split_uncombined_text_segment(
+    text: &str,
+    metrics: &FontMetrics,
+    line_height: f32,
+    wb: WordBreak,
+    line_break: super::LineBreak,
+    ws_mode: WhiteSpaceMode,
+    style: &FragmentStyle,
 ) -> Vec<InlinePiece> {
     // `word-break: break-word` is a non-standard value treated identically to
     // `word-break: normal` for segment-level splitting; the actual emergency
@@ -5019,6 +5132,7 @@ fn split_text_segment(
                     wb,
                     line_break,
                     ws_mode,
+                    style,
                 ));
             }
             if index + 1 < parts.len() {

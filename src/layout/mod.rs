@@ -811,6 +811,8 @@ pub struct FragmentStyle {
     /// Typed CSS `text-orientation`, validated by the style system and
     /// converted once when the fragment crosses into layout and paint.
     pub(crate) text_orientation: TextOrientation,
+    /// Typed CSS `text-combine-upright` consumed by vertical inline layout.
+    pub(crate) text_combine_upright: TextCombineUpright,
     /// Resolved inline base direction (`ltr` or `rtl`).
     pub direction: Option<String>,
     /// Resolved CSS bidi mode used while constructing the line paragraph.
@@ -880,6 +882,15 @@ impl FragmentStyle {
                 Some("sideways") => TextOrientation::Sideways,
                 _ => TextOrientation::Mixed,
             },
+            text_combine_upright: match normalize_lower(PropertyId::TextCombineUpright).as_deref() {
+                Some("all") => TextCombineUpright::All,
+                Some(value) => value
+                    .strip_prefix("digits ")
+                    .and_then(|count| count.parse::<u8>().ok())
+                    .filter(|count| (2..=4).contains(count))
+                    .map_or(TextCombineUpright::None, TextCombineUpright::Digits),
+                _ => TextCombineUpright::None,
+            },
             direction: normalize_lower(PropertyId::Direction),
             unicode_bidi: normalize_lower(PropertyId::UnicodeBidi),
             hyphens: match normalize_lower(PropertyId::Hyphens).as_deref() {
@@ -916,6 +927,36 @@ pub(crate) enum TextOrientation {
     Mixed,
     Upright,
     Sideways,
+}
+
+/// Runs eligible for horizontal typesetting inside one vertical em cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TextCombineUpright {
+    #[default]
+    None,
+    All,
+    Digits(u8),
+}
+
+/// Returns whether a prepared fragment is one combined upright unit.
+pub(crate) fn text_is_combined_upright(text: &str, style: &FragmentStyle) -> bool {
+    if text.is_empty()
+        || !matches!(
+            style.writing_mode.as_deref(),
+            Some("vertical-rl" | "vertical-lr" | "sideways-rl" | "sideways-lr")
+        )
+    {
+        return false;
+    }
+    match style.text_combine_upright {
+        TextCombineUpright::None => false,
+        TextCombineUpright::All => !text.contains(['\n', '\r']),
+        TextCombineUpright::Digits(maximum) => {
+            let count = text.len();
+            (2..=maximum as usize).contains(&count)
+                && text.bytes().all(|byte| byte.is_ascii_digit())
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

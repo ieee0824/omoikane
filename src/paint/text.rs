@@ -16,7 +16,7 @@ use crate::font::{
 };
 use crate::layout::{
     FragmentStyle, InlineFragmentContent, LayoutBox, LineBox, ListMarker, MeterRegion, Rect,
-    TextOrientation, ValueIndicatorPaintState,
+    TextOrientation, ValueIndicatorPaintState, text_is_combined_upright,
 };
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
@@ -724,9 +724,8 @@ fn paint_text_fragment_glyphs(
                 .map(Arc::as_ref)
                 .map(FontFallbackCandidate::unrestricted),
         );
-        if vertical_mode.is_some()
-            || !can_shape_logical_text
-            || paint_shaped_horizontal_text_with_candidates(
+        let combined = vertical_mode.is_some()
+            && paint_combined_upright_with_candidates(
                 canvas,
                 fragment_rect,
                 transformed_text,
@@ -737,8 +736,23 @@ fn paint_text_fragment_glyphs(
                 frag_color,
                 clip,
                 fragment.metrics.letter_spacing,
-            )
-            .is_none()
+            );
+        if !combined
+            && (vertical_mode.is_some()
+                || !can_shape_logical_text
+                || paint_shaped_horizontal_text_with_candidates(
+                    canvas,
+                    fragment_rect,
+                    transformed_text,
+                    font_size,
+                    fragment.metrics.ascent,
+                    &shaping_fonts,
+                    &fragment.style,
+                    frag_color,
+                    clip,
+                    fragment.metrics.letter_spacing,
+                )
+                .is_none())
         {
             paint_fragment_text(
                 canvas,
@@ -755,12 +769,25 @@ fn paint_text_fragment_glyphs(
             );
         }
     } else if !fonts.is_empty() {
-        if let Some(vertical_mode) = vertical_mode {
-            let font_refs: Vec<FontFallbackCandidate<'_>> = fonts
-                .iter()
-                .map(Arc::as_ref)
-                .map(FontFallbackCandidate::unrestricted)
-                .collect();
+        let font_refs: Vec<FontFallbackCandidate<'_>> = fonts
+            .iter()
+            .map(Arc::as_ref)
+            .map(FontFallbackCandidate::unrestricted)
+            .collect();
+        let combined = vertical_mode.is_some()
+            && paint_combined_upright_with_candidates(
+                canvas,
+                fragment_rect,
+                transformed_text,
+                font_size,
+                fragment.metrics.ascent,
+                &font_refs,
+                &fragment.style,
+                frag_color,
+                clip,
+                fragment.metrics.letter_spacing,
+            );
+        if !combined && let Some(vertical_mode) = vertical_mode {
             paint_fragment_text(
                 canvas,
                 fragment_rect,
@@ -774,7 +801,7 @@ fn paint_text_fragment_glyphs(
                 fragment.metrics.letter_spacing,
                 Some(vertical_mode),
             );
-        } else {
+        } else if !combined {
             let font_refs: Vec<&Font> = fonts.iter().map(|font| font.as_ref()).collect();
             if !can_shape_logical_text
                 || paint_shaped_horizontal_text(
@@ -806,19 +833,159 @@ fn paint_text_fragment_glyphs(
         }
     } else {
         // Fallback: placeholder rectangles
+        let combined =
+            vertical_mode.is_some() && text_is_combined_upright(transformed_text, &fragment.style);
+        let (placeholder_rect, placeholder_size, placeholder_spacing, placeholder_vertical) =
+            if combined {
+                let graphemes = display_text.graphemes(true).count().max(1);
+                let natural_advance = font_size * 0.6 * graphemes as f32
+                    + fragment.metrics.letter_spacing * graphemes.saturating_sub(1) as f32;
+                let scale = if natural_advance > font_size {
+                    font_size / natural_advance
+                } else {
+                    1.0
+                };
+                let size = font_size * scale;
+                let advance = natural_advance * scale;
+                (
+                    Rect {
+                        x: fragment_rect.x + (fragment_rect.width - advance).max(0.0) / 2.0,
+                        y: fragment_rect.y + (fragment_rect.height - size).max(0.0) / 2.0,
+                        width: advance,
+                        height: size,
+                    },
+                    size,
+                    fragment.metrics.letter_spacing * scale,
+                    None,
+                )
+            } else {
+                (
+                    fragment_rect,
+                    font_size,
+                    fragment.metrics.letter_spacing,
+                    vertical_mode.map(|mode| mode.direction_rtl),
+                )
+            };
         paint_text_placeholder_with_mode(
             canvas,
-            fragment_rect,
+            placeholder_rect,
             display_text,
-            font_size,
+            placeholder_size,
             frag_color,
             clip,
-            fragment.metrics.letter_spacing,
-            vertical_mode.map(|mode| mode.direction_rtl),
+            placeholder_spacing,
+            placeholder_vertical,
         );
     }
 
     (frag_color, vertical_mode)
+}
+
+fn text_shaping_direction(text: &str, style: &FragmentStyle) -> ShapingDirection {
+    let rtl = style
+        .resolved_bidi_level
+        .is_some_and(|level| level % 2 == 1)
+        || style.resolved_bidi_level.is_none()
+            && (style.direction.as_deref() == Some("rtl")
+                || text.chars().any(|ch| {
+                    matches!(bidi_class(ch), BidiClass::R | BidiClass::AL | BidiClass::AN)
+                }));
+    if rtl {
+        ShapingDirection::RightToLeft
+    } else {
+        ShapingDirection::LeftToRight
+    }
+}
+
+fn shaped_text_advance_with_candidates(
+    text: &str,
+    font_size: f32,
+    fonts: &[FontFallbackCandidate<'_>],
+    style: &FragmentStyle,
+    letter_spacing: f32,
+) -> Option<f32> {
+    let runs = shape_text_with_fallback_candidates_and_options(
+        fonts,
+        text,
+        font_size,
+        text_shaping_direction(text, style),
+        &style.shaping_options,
+    )
+    .ok()?;
+    if runs.iter().all(|run| run.glyphs.is_empty()) && !text.is_empty() {
+        return None;
+    }
+    let advance = runs
+        .iter()
+        .flat_map(|run| &run.glyphs)
+        .map(|glyph| glyph.x_advance.abs())
+        .sum::<f32>();
+    let spacing = letter_spacing * text.graphemes(true).count().saturating_sub(1) as f32;
+    Some((advance + spacing).max(0.0))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_combined_upright_with_candidates(
+    canvas: &mut Canvas,
+    rect: Rect,
+    text: &str,
+    font_size: f32,
+    layout_ascent: f32,
+    fonts: &[FontFallbackCandidate<'_>],
+    style: &FragmentStyle,
+    color: Color,
+    clip: Option<Rect>,
+    letter_spacing: f32,
+) -> bool {
+    if !text_is_combined_upright(text, style) {
+        return false;
+    }
+    let Some(natural_advance) =
+        shaped_text_advance_with_candidates(text, font_size, fonts, style, letter_spacing)
+    else {
+        return false;
+    };
+    let scale = if natural_advance > font_size && natural_advance > 0.0 {
+        font_size / natural_advance
+    } else {
+        1.0
+    };
+    let paint_size = font_size * scale;
+    let paint_advance = natural_advance * scale;
+    let paint_rect = Rect {
+        x: rect.x + (rect.width - paint_advance).max(0.0) / 2.0,
+        y: rect.y + (rect.height - paint_size).max(0.0) / 2.0,
+        width: paint_advance,
+        height: paint_size,
+    };
+    if paint_shaped_horizontal_text_with_candidates(
+        canvas,
+        paint_rect,
+        text,
+        paint_size,
+        layout_ascent * scale,
+        fonts,
+        style,
+        color,
+        clip,
+        letter_spacing * scale,
+    )
+    .is_none()
+    {
+        paint_text_with_candidates(
+            canvas,
+            paint_rect,
+            text,
+            paint_size,
+            layout_ascent * scale,
+            fonts,
+            style,
+            color,
+            clip,
+            letter_spacing * scale,
+        );
+    }
+    true
 }
 
 /// Paints every text-decoration line captured at its originating box for one
@@ -2303,24 +2470,11 @@ pub(crate) fn paint_shaped_horizontal_text_with_candidates(
     clip: Option<Rect>,
     letter_spacing: f32,
 ) -> Option<f32> {
-    let rtl = style
-        .resolved_bidi_level
-        .is_some_and(|level| level % 2 == 1)
-        || style.resolved_bidi_level.is_none()
-            && (style.direction.as_deref() == Some("rtl")
-                || text.chars().any(|ch| {
-                    matches!(bidi_class(ch), BidiClass::R | BidiClass::AL | BidiClass::AN)
-                }));
-    let direction = if rtl {
-        ShapingDirection::RightToLeft
-    } else {
-        ShapingDirection::LeftToRight
-    };
     let Ok(runs) = shape_text_with_fallback_candidates_and_options(
         fonts,
         text,
         font_size,
-        direction,
+        text_shaping_direction(text, style),
         &style.shaping_options,
     ) else {
         return None;
@@ -3308,11 +3462,13 @@ mod bidi_tests {
     use super::{
         FragmentStyle, GlyphRotation, VerticalGlyphMode, VerticalPaintMode, bidi_visual_text,
         fallback_paint_characters, fragment_text_for_paint, horizontal_glyph_origin,
-        is_invisible_shaping_control, vertical_cursor_after, vertical_glyph_cell,
+        is_invisible_shaping_control, paint_combined_upright_with_candidates,
+        paint_text_vertical_with_candidates, vertical_cursor_after, vertical_glyph_cell,
         vertical_glyph_rotation, vertical_paint_characters,
     };
     use crate::font::{Font, FontFallbackCandidate, UnicodeRangeSet};
-    use crate::layout::TextOrientation;
+    use crate::layout::{TextCombineUpright, TextOrientation};
+    use crate::paint::{Canvas, Color};
 
     #[test]
     fn mixed_ltr_text_is_reordered_into_visual_runs() {
@@ -3574,6 +3730,60 @@ mod bidi_tests {
                 assert_eq!(vertical_glyph_rotation(mode.glyphs, '本', None), expected);
             }
         }
+    }
+
+    #[test]
+    fn combined_upright_digits_paint_as_one_horizontal_em_cell() {
+        let font = Font::load_from_bytes(
+            include_bytes!("../../tests/fixtures/anonymized-arabic-fallback/DejaVuSans.ttf")
+                .to_vec(),
+        )
+        .expect("fixed font fixture");
+        let fonts = [FontFallbackCandidate::unrestricted(&font)];
+        let style = FragmentStyle {
+            writing_mode: Some("vertical-rl".into()),
+            text_combine_upright: TextCombineUpright::Digits(2),
+            ..FragmentStyle::default()
+        };
+        let rect = crate::layout::Rect {
+            x: 20.0,
+            y: 20.0,
+            width: 24.0,
+            height: 20.0,
+        };
+        let mut combined = Canvas::new(80, 80);
+        assert!(paint_combined_upright_with_candidates(
+            &mut combined,
+            rect,
+            "12",
+            20.0,
+            16.0,
+            &fonts,
+            &style,
+            Color::rgb(0, 0, 0),
+            None,
+            0.0,
+        ));
+        assert!(combined.pixels().chunks_exact(4).any(|pixel| pixel[3] != 0));
+
+        let mut vertical = Canvas::new(80, 80);
+        paint_text_vertical_with_candidates(
+            &mut vertical,
+            rect,
+            "12",
+            20.0,
+            16.0,
+            &fonts,
+            &style,
+            Color::rgb(0, 0, 0),
+            None,
+            0.0,
+            VerticalPaintMode {
+                glyphs: VerticalGlyphMode::Mixed,
+                direction_rtl: false,
+            },
+        );
+        assert_ne!(combined.pixels(), vertical.pixels());
     }
 
     #[test]
