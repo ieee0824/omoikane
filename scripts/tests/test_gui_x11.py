@@ -54,6 +54,12 @@ class GuiFailureTests(unittest.TestCase):
                 self.assertTrue(all(p.poll() is not None for p in gui.processes))
                 for name in ('inputs.json', 'results.json', 'failure.original.png', 'failure.png'):
                     self.assertTrue((gui.out/name).is_file(), name)
+                # Threads of processes still running at the failure are kept.
+                evidence = json.loads((gui.out/'results.json').read_text())
+                snapshot = next(row['threads'] for row in evidence
+                                if row.get('pid') == owned.pid and 'threads' in row)
+                self.assertEqual(snapshot[0]['name'], 'sleep')
+                self.assertIn(snapshot[0]['state'], 'SRD')
             finally:
                 unrelated.terminate()
                 unrelated.wait(timeout=5)

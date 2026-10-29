@@ -34,6 +34,24 @@ def trace_records(path, kind):
             if line.startswith(prefix)]
 
 
+def thread_states(pid):
+    """Snapshot each thread's name, scheduler state and kernel wait channel.
+
+    A process that misses a deadline can then be told apart as busy, blocked
+    in the kernel or exiting. Threads that vanish while being read are skipped.
+    """
+    states = []
+    for task in sorted(Path(f'/proc/{pid}/task').glob('*'), key=lambda path: int(path.name)):
+        try:
+            stat = (task / 'stat').read_text()
+            states.append({'tid': int(task.name), 'name': (task / 'comm').read_text().strip(),
+                           'state': stat[stat.rindex(')') + 2],
+                           'wchan': (task / 'wchan').read_text().strip()})
+        except (OSError, ValueError):
+            continue
+    return states
+
+
 def wait_for(label, probe, predicate, seconds=20, evidence=None):
     """Observe a condition until its monotonic deadline, retaining the last value."""
     deadline = time.monotonic() + seconds
@@ -197,6 +215,9 @@ class GuiSession:
                     self.screenshot('failure')
                 except Exception as capture_error:
                     self.evidence.append({'capture_error': str(capture_error)})
+            for process in self.processes:
+                if process.poll() is None:
+                    self.evidence.append({'pid': process.pid, 'threads': thread_states(process.pid)})
         try:
             for process in reversed(self.processes):
                 if process.poll() is None:
