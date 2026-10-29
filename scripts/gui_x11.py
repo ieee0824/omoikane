@@ -190,6 +190,17 @@ class GuiSession:
             return result.stdout.splitlines()
         return self.wait_for('window created', probe, bool)[0]
 
+    def focus_state(self):
+        """Record which window the WM reports active and which holds X input focus."""
+        state = {}
+        for key, args in (('active', ['xprop', '-root', '_NET_ACTIVE_WINDOW']),
+                          ('input_focus', ['xdotool', 'getwindowfocus'])):
+            try:
+                state[key] = self.command(*args)
+            except (OSError, S.SubprocessError) as error:
+                state[key] = 'error: ' + str(error)
+        return state
+
     def screenshot(self, name):
         """Keep original and losslessly compressed PNGs with equal pixels and size."""
         im = ImageGrab.grab(xdisplay=self.env['DISPLAY']).convert('RGB')
@@ -215,6 +226,7 @@ class GuiSession:
                     self.screenshot('failure')
                 except Exception as capture_error:
                     self.evidence.append({'capture_error': str(capture_error)})
+                self.evidence.append({'focus': self.focus_state()})
             for process in self.processes:
                 if process.poll() is None:
                     self.evidence.append({'pid': process.pid, 'threads': thread_states(process.pid)})

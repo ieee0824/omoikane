@@ -60,6 +60,8 @@ class GuiFailureTests(unittest.TestCase):
                                 if row.get('pid') == owned.pid and 'threads' in row)
                 self.assertEqual(snapshot[0]['name'], 'sleep')
                 self.assertIn(snapshot[0]['state'], 'SRD')
+                focus = next(row['focus'] for row in evidence if 'focus' in row)
+                self.assertIn('_NET_ACTIVE_WINDOW', focus['active'])
             finally:
                 unrelated.terminate()
                 unrelated.wait(timeout=5)
