@@ -1073,6 +1073,7 @@ export const __omoikane_service_worker_lifecycle = {};
     "scroll-margin-inline-start", "scroll-margin-inline-end",
     "scroll-margin-block-start", "scroll-margin-block-end",
     "text-indent", "word-spacing",
+    "text-emphasis-position", "text-autospace", "text-spacing-trim",
     "font-feature-settings", "font-variation-settings", "font-synthesis",
     "font-variant-east-asian", "font-variant-alternates", "font-size-adjust",
   ]);

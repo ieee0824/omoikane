@@ -109,6 +109,7 @@ pub(crate) fn transition_cache_scope(property: &str) -> TransitionCacheScope {
             | PropertyId::ColumnRuleColor
             | PropertyId::OutlineColor
             | PropertyId::TextDecorationColor
+            | PropertyId::TextEmphasisColor
             | PropertyId::BackgroundAttachment
             | PropertyId::BackgroundClip
             | PropertyId::BackgroundColor
@@ -1944,6 +1945,7 @@ mod tests {
                 "opacity",
                 "outline-color",
                 "text-decoration-color",
+                "text-emphasis-color",
                 "transform",
             ],
             "adding another localized property requires a dependency audit and this contract update",
@@ -1973,7 +1975,6 @@ mod tests {
             "box-shadow",
             "--accent-color",
             "caret-color",
-            "text-emphasis-color",
             "-webkit-text-fill-color",
             "future-color",
             "background-future",

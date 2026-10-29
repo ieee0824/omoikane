@@ -29,6 +29,9 @@ use crate::http::cors::{CorpViolation, Origin as CorsOrigin};
 use crate::http::{Client, CookieJar, Url};
 use crate::paint::Image;
 use rusqlite::{Connection, params};
+use unicode_general_category::{GeneralCategory, get_general_category};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_vo::{Orientation, char_orientation};
 
 mod counters;
 mod flex;
@@ -808,6 +811,21 @@ pub struct FragmentStyle {
     /// inherited value on the fragment lets paint use the same flow direction
     /// as layout even when a nested inline overrides its ancestor.
     pub writing_mode: Option<String>,
+    /// Typed CSS `text-orientation`, validated by the style system and
+    /// converted once when the fragment crosses into layout and paint.
+    pub(crate) text_orientation: TextOrientation,
+    /// Typed CSS `text-combine-upright` consumed by vertical inline layout.
+    pub(crate) text_combine_upright: TextCombineUpright,
+    /// Typed CSS `text-autospace` controls shared by measurement and paint.
+    pub(crate) text_autospace: TextAutospace,
+    /// Typed CSS `text-spacing-trim` controls for contextual CJK punctuation.
+    pub(crate) text_spacing_trim: TextSpacingTrim,
+    /// Typed CSS emphasis mark and placement consumed directly by paint.
+    pub(crate) text_emphasis: TextEmphasis,
+    pub(crate) text_emphasis_color: Option<String>,
+    /// Whether the inherited document language is French. Resolved once from
+    /// the DOM language boundary for language-specific `text-autospace` rules.
+    pub(crate) french_content_language: bool,
     /// Resolved inline base direction (`ltr` or `rtl`).
     pub direction: Option<String>,
     /// Resolved CSS bidi mode used while constructing the line paragraph.
@@ -872,6 +890,32 @@ impl FragmentStyle {
             font_synthesis: style.font_synthesis(),
             font_palette: Arc::clone(style.font_palette()),
             writing_mode: normalize_lower(PropertyId::WritingMode),
+            text_orientation: match normalize_lower(PropertyId::TextOrientation).as_deref() {
+                Some("upright") => TextOrientation::Upright,
+                Some("sideways") => TextOrientation::Sideways,
+                _ => TextOrientation::Mixed,
+            },
+            text_combine_upright: match normalize_lower(PropertyId::TextCombineUpright).as_deref() {
+                Some("all") => TextCombineUpright::All,
+                Some(value) => value
+                    .strip_prefix("digits ")
+                    .and_then(|count| count.parse::<u8>().ok())
+                    .filter(|count| (2..=4).contains(count))
+                    .map_or(TextCombineUpright::None, TextCombineUpright::Digits),
+                _ => TextCombineUpright::None,
+            },
+            text_autospace: TextAutospace::from_computed(
+                normalize_lower(PropertyId::TextAutospace).as_deref(),
+            ),
+            text_spacing_trim: TextSpacingTrim::from_computed(
+                normalize_lower(PropertyId::TextSpacingTrim).as_deref(),
+            ),
+            text_emphasis: TextEmphasis::from_computed(
+                extract_str(PropertyId::TextEmphasisStyle).as_deref(),
+                normalize_lower(PropertyId::TextEmphasisPosition).as_deref(),
+            ),
+            text_emphasis_color: extract_str(PropertyId::TextEmphasisColor),
+            french_content_language: false,
             direction: normalize_lower(PropertyId::Direction),
             unicode_bidi: normalize_lower(PropertyId::UnicodeBidi),
             hyphens: match normalize_lower(PropertyId::Hyphens).as_deref() {
@@ -899,6 +943,676 @@ impl FragmentStyle {
             resolved_bidi_level: None,
         }
     }
+}
+
+/// Paint-ready CSS `text-emphasis` value. Unknown strings are normalized at
+/// the computed-style boundary so paint never reparses CSS tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TextEmphasis {
+    pub(crate) mark: Option<String>,
+    pub(crate) over: bool,
+    pub(crate) right: bool,
+}
+
+impl Default for TextEmphasis {
+    fn default() -> Self {
+        Self {
+            mark: None,
+            over: true,
+            right: true,
+        }
+    }
+}
+
+impl TextEmphasis {
+    fn from_computed(style: Option<&str>, position: Option<&str>) -> Self {
+        let style = style.unwrap_or("none");
+        let mark = match style {
+            "none" => None,
+            "dot" => Some("\u{2022}".into()),
+            "filled dot" => Some("\u{2022}".into()),
+            "open dot" => Some("\u{25e6}".into()),
+            "circle" => Some("\u{25cf}".into()),
+            "filled circle" => Some("\u{25cf}".into()),
+            "open circle" => Some("\u{25cb}".into()),
+            "double-circle" => Some("\u{25c9}".into()),
+            "filled double-circle" => Some("\u{25c9}".into()),
+            "open double-circle" => Some("\u{25ce}".into()),
+            "triangle" => Some("\u{25b2}".into()),
+            "filled triangle" => Some("\u{25b2}".into()),
+            "open triangle" => Some("\u{25b3}".into()),
+            "sesame" => Some("\u{fe45}".into()),
+            "filled sesame" => Some("\u{fe45}".into()),
+            "open sesame" => Some("\u{fe46}".into()),
+            custom => Some(custom.into()),
+        };
+        let position = position.unwrap_or("over right");
+        Self {
+            mark,
+            over: !position
+                .split_ascii_whitespace()
+                .any(|part| part == "under"),
+            right: !position.split_ascii_whitespace().any(|part| part == "left"),
+        }
+    }
+}
+
+/// Glyph orientation requested inside vertical writing modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TextOrientation {
+    #[default]
+    Mixed,
+    Upright,
+    Sideways,
+}
+
+/// Runs eligible for horizontal typesetting inside one vertical em cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TextCombineUpright {
+    #[default]
+    None,
+    All,
+    Digits(u8),
+}
+
+/// Character-class switches and whitespace handling for `text-autospace`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextAutospace {
+    pub(crate) ideograph_alpha: bool,
+    pub(crate) ideograph_numeric: bool,
+    pub(crate) punctuation: bool,
+    pub(crate) replace: bool,
+}
+
+impl Default for TextAutospace {
+    fn default() -> Self {
+        Self {
+            ideograph_alpha: true,
+            ideograph_numeric: true,
+            punctuation: false,
+            replace: false,
+        }
+    }
+}
+
+impl TextAutospace {
+    fn from_computed(value: Option<&str>) -> Self {
+        let Some(value) = value else {
+            return Self::default();
+        };
+        if value == "no-autospace" {
+            return Self {
+                ideograph_alpha: false,
+                ideograph_numeric: false,
+                punctuation: false,
+                replace: false,
+            };
+        }
+        if matches!(value, "normal" | "auto") {
+            return Self::default();
+        }
+        let has = |keyword| value.split_ascii_whitespace().any(|part| part == keyword);
+        let only_mode = matches!(value, "insert" | "replace");
+        Self {
+            ideograph_alpha: only_mode || has("ideograph-alpha"),
+            ideograph_numeric: only_mode || has("ideograph-numeric"),
+            punctuation: has("punctuation"),
+            replace: has("replace"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextSpacingTrim {
+    pub(crate) start: TextSpacingTrimStart,
+    pub(crate) adjacent: TextSpacingTrimAdjacent,
+    pub(crate) end: TextSpacingTrimEnd,
+    pub(crate) trim_all: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextSpacingTrimStart {
+    Trim,
+    Space,
+    SpaceFirst,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextSpacingTrimAdjacent {
+    Trim,
+    Space,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextSpacingTrimEnd {
+    Trim,
+    Space,
+    Allow,
+}
+
+impl Default for TextSpacingTrim {
+    fn default() -> Self {
+        Self {
+            start: TextSpacingTrimStart::Space,
+            adjacent: TextSpacingTrimAdjacent::Trim,
+            end: TextSpacingTrimEnd::Allow,
+            trim_all: false,
+        }
+    }
+}
+
+impl TextSpacingTrim {
+    fn from_computed(value: Option<&str>) -> Self {
+        let Some(value) = value else {
+            return Self::default();
+        };
+        match value {
+            "normal" => return Self::default(),
+            "auto" | "trim-both" => {
+                return Self {
+                    start: TextSpacingTrimStart::Trim,
+                    adjacent: TextSpacingTrimAdjacent::Trim,
+                    end: TextSpacingTrimEnd::Trim,
+                    trim_all: false,
+                };
+            }
+            "space-all" => {
+                return Self {
+                    start: TextSpacingTrimStart::Space,
+                    adjacent: TextSpacingTrimAdjacent::Space,
+                    end: TextSpacingTrimEnd::Space,
+                    trim_all: false,
+                };
+            }
+            "trim-all" => {
+                return Self {
+                    start: TextSpacingTrimStart::Trim,
+                    adjacent: TextSpacingTrimAdjacent::Trim,
+                    end: TextSpacingTrimEnd::Trim,
+                    trim_all: true,
+                };
+            }
+            _ => {}
+        }
+        let has = |keyword| value.split_ascii_whitespace().any(|part| part == keyword);
+        Self {
+            start: if has("space-start") {
+                TextSpacingTrimStart::Space
+            } else if has("space-first") {
+                TextSpacingTrimStart::SpaceFirst
+            } else {
+                TextSpacingTrimStart::Trim
+            },
+            adjacent: if has("space-adjacent") {
+                TextSpacingTrimAdjacent::Space
+            } else {
+                TextSpacingTrimAdjacent::Trim
+            },
+            end: if has("trim-end") {
+                TextSpacingTrimEnd::Trim
+            } else if has("space-end") {
+                TextSpacingTrimEnd::Space
+            } else {
+                TextSpacingTrimEnd::Allow
+            },
+            trim_all: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FullwidthPunctuationClass {
+    Opening,
+    Closing,
+    Middle,
+}
+
+pub(crate) fn fullwidth_punctuation_class(
+    character: char,
+    vertical: bool,
+) -> Option<FullwidthPunctuationClass> {
+    use FullwidthPunctuationClass::{Closing, Middle, Opening};
+    match character {
+        '\u{2018}' | '\u{201c}' | '\u{3008}' | '\u{300a}' | '\u{300c}' | '\u{300e}'
+        | '\u{3010}' | '\u{3014}' | '\u{3016}' | '\u{3018}' | '\u{301a}' | '\u{301d}'
+        | '\u{ff08}' | '\u{ff3b}' | '\u{ff5b}' | '\u{ff5f}' => Some(Opening),
+        '\u{2019}' | '\u{201d}' | '\u{3009}' | '\u{300b}' | '\u{300d}' | '\u{300f}'
+        | '\u{3011}' | '\u{3015}' | '\u{3017}' | '\u{3019}' | '\u{301b}' | '\u{301e}'
+        | '\u{301f}' | '\u{ff09}' | '\u{ff3d}' | '\u{ff5d}' | '\u{ff60}' | '\u{3001}'
+        | '\u{3002}' | '\u{ff0c}' | '\u{ff0e}' => Some(Closing),
+        '\u{00b7}' | '\u{2027}' | '\u{30fb}' | '\u{ff1a}' => Some(Middle),
+        '\u{ff1b}' if !vertical => Some(Middle),
+        _ => None,
+    }
+}
+
+pub(crate) fn opening_punctuation_trims_after(
+    previous: char,
+    previous_size: f32,
+    opening_size: f32,
+    vertical: bool,
+) -> bool {
+    match fullwidth_punctuation_class(previous, vertical) {
+        Some(FullwidthPunctuationClass::Opening | FullwidthPunctuationClass::Middle) => true,
+        Some(FullwidthPunctuationClass::Closing) => previous_size >= opening_size,
+        None => {
+            previous == '\u{3000}'
+                || get_general_category(previous) == GeneralCategory::OpenPunctuation
+        }
+    }
+}
+
+pub(crate) fn closing_punctuation_trims_before(
+    next: char,
+    closing_size: f32,
+    next_size: f32,
+    vertical: bool,
+) -> bool {
+    match fullwidth_punctuation_class(next, vertical) {
+        Some(FullwidthPunctuationClass::Closing | FullwidthPunctuationClass::Middle) => true,
+        Some(FullwidthPunctuationClass::Opening) => next_size > closing_size,
+        None => {
+            next == '\u{3000}' || get_general_category(next) == GeneralCategory::ClosePunctuation
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PunctuationTrimBoundary {
+    pub(crate) byte_offset: usize,
+    pub(crate) leading: bool,
+    pub(crate) trailing: bool,
+}
+
+pub(crate) fn text_spacing_trim_boundaries(
+    text: &str,
+    value: TextSpacingTrim,
+    vertical: bool,
+) -> Vec<PunctuationTrimBoundary> {
+    let graphemes = text.grapheme_indices(true).collect::<Vec<_>>();
+    graphemes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (offset, grapheme))| {
+            let class = fullwidth_punctuation_class(grapheme.chars().next()?, vertical)?;
+            let previous = index
+                .checked_sub(1)
+                .and_then(|index| graphemes[index].1.chars().next());
+            let next = graphemes
+                .get(index + 1)
+                .and_then(|(_, grapheme)| grapheme.chars().next());
+            let leading = (value.trim_all
+                && matches!(
+                    class,
+                    FullwidthPunctuationClass::Opening | FullwidthPunctuationClass::Middle
+                ))
+                || (class == FullwidthPunctuationClass::Opening
+                    && value.adjacent == TextSpacingTrimAdjacent::Trim
+                    && previous.is_some_and(|character| {
+                        opening_punctuation_trims_after(character, 1.0, 1.0, vertical)
+                    }));
+            let trailing = (value.trim_all && class == FullwidthPunctuationClass::Closing)
+                || (class == FullwidthPunctuationClass::Closing
+                    && value.adjacent == TextSpacingTrimAdjacent::Trim
+                    && next.is_some_and(|character| {
+                        closing_punctuation_trims_before(character, 1.0, 1.0, vertical)
+                    }));
+            (leading || trailing).then_some(PunctuationTrimBoundary {
+                byte_offset: *offset,
+                leading,
+                trailing,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn text_spacing_trim_shaping_options<'a>(
+    text: &str,
+    value: TextSpacingTrim,
+    vertical: bool,
+    base: &'a crate::font::ShapingOptions,
+) -> std::borrow::Cow<'a, crate::font::ShapingOptions> {
+    text_spacing_trim_shaping_options_with_edges(
+        text,
+        value,
+        vertical,
+        PunctuationTrim::default(),
+        base,
+    )
+}
+
+pub(crate) fn text_spacing_trim_shaping_options_with_edges<'a>(
+    text: &str,
+    value: TextSpacingTrim,
+    vertical: bool,
+    edges: PunctuationTrim,
+    base: &'a crate::font::ShapingOptions,
+) -> std::borrow::Cow<'a, crate::font::ShapingOptions> {
+    let offsets = text_spacing_trim_offsets_with_edges(text, value, vertical, edges);
+    if offsets.is_empty() {
+        return std::borrow::Cow::Borrowed(base);
+    }
+    let mut options = base.clone();
+    let tag = if vertical { *b"vhal" } else { *b"halt" };
+    for offset in offsets {
+        let Some(character) = text[offset..].chars().next() else {
+            continue;
+        };
+        let feature =
+            crate::font::OpenTypeFeature::for_range(tag, 1, offset..offset + character.len_utf8());
+        if !options.features.contains(&feature) {
+            options.features.push(feature);
+        }
+    }
+    std::borrow::Cow::Owned(options)
+}
+
+pub(crate) fn text_spacing_trim_offsets_with_edges(
+    text: &str,
+    value: TextSpacingTrim,
+    vertical: bool,
+    edges: PunctuationTrim,
+) -> Vec<usize> {
+    let mut offsets = text_spacing_trim_boundaries(text, value, vertical)
+        .into_iter()
+        .map(|boundary| boundary.byte_offset)
+        .collect::<Vec<_>>();
+    if edges.first
+        && let Some((offset, _)) = text.grapheme_indices(true).next()
+    {
+        offsets.push(offset);
+    }
+    if edges.last
+        && let Some((offset, _)) = text.grapheme_indices(true).next_back()
+    {
+        offsets.push(offset);
+    }
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets
+}
+
+/// Returns whether a prepared fragment is one combined upright unit.
+pub(crate) fn text_is_combined_upright(text: &str, style: &FragmentStyle) -> bool {
+    if text.is_empty()
+        || !matches!(
+            style.writing_mode.as_deref(),
+            Some("vertical-rl" | "vertical-lr" | "sideways-rl" | "sideways-lr")
+        )
+    {
+        return false;
+    }
+    match style.text_combine_upright {
+        TextCombineUpright::None => false,
+        TextCombineUpright::All => !text.contains(['\n', '\r']),
+        TextCombineUpright::Digits(maximum) => {
+            let count = text.len();
+            (2..=maximum as usize).contains(&count)
+                && text.bytes().all(|byte| byte.is_ascii_digit())
+        }
+    }
+}
+
+fn is_autospace_ideograph(ch: char) -> bool {
+    let code = ch as u32;
+    matches!(
+        code,
+        0x3041..=0x30FF
+            | 0x31C0..=0x31FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2FA1F
+    ) && !matches!(
+        ch,
+        '、' | '。' | '・' | '「' | '」' | '『' | '』' | '（' | '）'
+    )
+}
+
+fn is_east_asian_wide_or_fullwidth(ch: char) -> bool {
+    let code = ch as u32;
+    matches!(
+        code,
+        0x1100..=0x11FF
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7AF
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE6F
+            | 0xFF01..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1FAFF
+            | 0x20000..=0x3FFFD
+    )
+}
+
+fn is_upright_autospace_character(
+    ch: char,
+    vertical_writing: bool,
+    sideways_writing: bool,
+    orientation: TextOrientation,
+) -> bool {
+    if !vertical_writing || sideways_writing || orientation == TextOrientation::Sideways {
+        return false;
+    }
+    orientation == TextOrientation::Upright
+        || matches!(
+            char_orientation(ch),
+            Orientation::Upright | Orientation::TransformedOrUpright
+        )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AutospaceClass {
+    Ideograph,
+    Letter,
+    Numeral,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrenchAutospace {
+    NarrowNoBreak,
+    NoBreak,
+}
+
+impl FrenchAutospace {
+    pub(crate) fn character(self) -> char {
+        match self {
+            Self::NarrowNoBreak => '\u{202f}',
+            Self::NoBreak => '\u{00a0}',
+        }
+    }
+}
+
+pub(crate) fn fragment_french_autospace_pair(
+    left: char,
+    right: char,
+    style: &FragmentStyle,
+) -> Option<FrenchAutospace> {
+    french_autospace_pair(
+        left,
+        right,
+        style.french_content_language,
+        style.text_autospace.punctuation,
+    )
+}
+
+fn french_autospace_pair(
+    left: char,
+    right: char,
+    french_content_language: bool,
+    punctuation: bool,
+) -> Option<FrenchAutospace> {
+    if !french_content_language || !punctuation {
+        return None;
+    }
+    if left.is_whitespace() || right.is_whitespace() {
+        return None;
+    }
+    match (left, right) {
+        ('«', _) | (_, '»' | ':') => Some(FrenchAutospace::NoBreak),
+        (_, ';' | '?' | '!') => Some(FrenchAutospace::NarrowNoBreak),
+        _ => None,
+    }
+}
+
+pub(crate) fn fragment_french_autospace_boundaries(
+    text: &str,
+    style: &FragmentStyle,
+) -> Vec<(usize, FrenchAutospace)> {
+    let graphemes = text.grapheme_indices(true).collect::<Vec<_>>();
+    graphemes
+        .windows(2)
+        .filter_map(|pair| {
+            let (right_offset, right) = pair[1];
+            fragment_french_autospace_pair(pair[0].1.chars().next()?, right.chars().next()?, style)
+                .map(|spacing| (right_offset, spacing))
+        })
+        .collect()
+}
+
+pub(crate) fn font_metrics_french_autospace_boundaries(
+    text: &str,
+    metrics: &FontMetrics,
+) -> Vec<(usize, FrenchAutospace)> {
+    let graphemes = text.grapheme_indices(true).collect::<Vec<_>>();
+    graphemes
+        .windows(2)
+        .filter_map(|pair| {
+            let (right_offset, right) = pair[1];
+            french_autospace_pair(
+                pair[0].1.chars().next()?,
+                right.chars().next()?,
+                metrics.french_content_language,
+                metrics.text_autospace.punctuation,
+            )
+            .map(|spacing| (right_offset, spacing))
+        })
+        .collect()
+}
+
+fn autospace_class(
+    ch: char,
+    vertical_writing: bool,
+    sideways_writing: bool,
+    orientation: TextOrientation,
+) -> AutospaceClass {
+    if is_autospace_ideograph(ch) {
+        AutospaceClass::Ideograph
+    } else if is_upright_autospace_character(ch, vertical_writing, sideways_writing, orientation)
+        || is_east_asian_wide_or_fullwidth(ch)
+    {
+        AutospaceClass::Other
+    } else if ch.is_alphabetic() || matches!(ch as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF) {
+        AutospaceClass::Letter
+    } else if ch.is_numeric() {
+        AutospaceClass::Numeral
+    } else {
+        AutospaceClass::Other
+    }
+}
+
+fn autospace_pair_applies(
+    left: AutospaceClass,
+    right: AutospaceClass,
+    value: TextAutospace,
+) -> bool {
+    matches!(
+        (left, right),
+        (AutospaceClass::Ideograph, AutospaceClass::Letter)
+            | (AutospaceClass::Letter, AutospaceClass::Ideograph)
+    ) && value.ideograph_alpha
+        || matches!(
+            (left, right),
+            (AutospaceClass::Ideograph, AutospaceClass::Numeral)
+                | (AutospaceClass::Numeral, AutospaceClass::Ideograph)
+        ) && value.ideograph_numeric
+}
+
+fn autospace_boundary_offsets(
+    text: &str,
+    value: TextAutospace,
+    vertical_writing: bool,
+    sideways_writing: bool,
+    orientation: TextOrientation,
+    combined: bool,
+) -> Vec<usize> {
+    if combined || (!value.ideograph_alpha && !value.ideograph_numeric) {
+        return Vec::new();
+    }
+    let graphemes = text.grapheme_indices(true).collect::<Vec<_>>();
+    graphemes
+        .windows(2)
+        .filter_map(|pair| {
+            let (right_offset, right) = pair[1];
+            let left = pair[0].1.chars().next()?;
+            let right = right.chars().next()?;
+            autospace_pair_applies(
+                autospace_class(left, vertical_writing, sideways_writing, orientation),
+                autospace_class(right, vertical_writing, sideways_writing, orientation),
+                value,
+            )
+            .then_some(right_offset)
+        })
+        .collect()
+}
+
+pub(crate) fn fragment_autospace_boundary_offsets(text: &str, style: &FragmentStyle) -> Vec<usize> {
+    let writing_mode = style.writing_mode.as_deref();
+    autospace_boundary_offsets(
+        text,
+        style.text_autospace,
+        writing_mode.is_some_and(|value| value != "horizontal-tb"),
+        writing_mode.is_some_and(|value| value.starts_with("sideways-")),
+        style.text_orientation,
+        text_is_combined_upright(text, style),
+    )
+}
+
+pub(crate) fn fragment_autospace_pair_applies(
+    left: char,
+    right: char,
+    style: &FragmentStyle,
+) -> bool {
+    let writing_mode = style.writing_mode.as_deref();
+    autospace_pair_applies(
+        autospace_class(
+            left,
+            writing_mode.is_some_and(|value| value != "horizontal-tb"),
+            writing_mode.is_some_and(|value| value.starts_with("sideways-")),
+            style.text_orientation,
+        ),
+        autospace_class(
+            right,
+            writing_mode.is_some_and(|value| value != "horizontal-tb"),
+            writing_mode.is_some_and(|value| value.starts_with("sideways-")),
+            style.text_orientation,
+        ),
+        style.text_autospace,
+    )
+}
+
+pub(crate) fn font_metrics_autospace_advance(text: &str, metrics: &FontMetrics) -> f32 {
+    let combined = metrics.vertical_writing
+        && match metrics.text_combine_upright {
+            TextCombineUpright::All => true,
+            TextCombineUpright::Digits(maximum) => {
+                (2..=maximum as usize).contains(&text.len())
+                    && text.bytes().all(|byte| byte.is_ascii_digit())
+            }
+            TextCombineUpright::None => false,
+        };
+    autospace_boundary_offsets(
+        text,
+        metrics.text_autospace,
+        metrics.vertical_writing,
+        metrics.sideways_writing,
+        metrics.text_orientation,
+        combined,
+    )
+    .len() as f32
+        * metrics.font_size
+        * 0.125
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -944,6 +1658,12 @@ pub struct InlineFragment {
     /// Generated content and non-text payloads have no DOM text source.
     pub text_source: Vec<InlineTextSource>,
     pub rect: Rect,
+    /// Paint-free spacing appended on the physical inline-end side by
+    /// `text-autospace`. Kept separate so bidi reordering can move it to the
+    /// boundary between the visually adjacent characters.
+    pub(crate) autospace_after: f32,
+    /// Contextual CJK punctuation compaction selected after line breaking.
+    pub(crate) punctuation_trim: PunctuationTrim,
     pub metrics: FontMetrics,
     pub vertical_align: VerticalAlign,
     /// Position after this fragment in its formatting context's normalized
@@ -954,6 +1674,12 @@ pub struct InlineFragment {
     /// `text-decoration`, and `color` rather than inheriting from the
     /// containing block's style.
     pub style: FragmentStyle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct PunctuationTrim {
+    pub(crate) first: bool,
+    pub(crate) last: bool,
 }
 
 /// An owned mapping from a rendered text span to its original DOM Text node.
@@ -1049,6 +1775,13 @@ pub struct FontMetrics {
     pub letter_spacing: f32,
     /// Extra advance applied to each collapsible word separator (CSS `word-spacing`).
     pub word_spacing: f32,
+    pub(crate) text_autospace: TextAutospace,
+    pub(crate) text_spacing_trim: TextSpacingTrim,
+    pub(crate) french_content_language: bool,
+    pub(crate) text_orientation: TextOrientation,
+    pub(crate) text_combine_upright: TextCombineUpright,
+    pub(crate) vertical_writing: bool,
+    pub(crate) sideways_writing: bool,
     pub(crate) font_family: Option<FontFamilyKey>,
     pub(crate) font_scope_root: Option<usize>,
     pub(crate) font_weight: FontWeight,
@@ -1069,6 +1802,13 @@ impl FontMetrics {
             average_advance: font_size * 0.6,
             letter_spacing: 0.0,
             word_spacing: 0.0,
+            text_autospace: TextAutospace::default(),
+            text_spacing_trim: TextSpacingTrim::default(),
+            french_content_language: false,
+            text_orientation: TextOrientation::default(),
+            text_combine_upright: TextCombineUpright::default(),
+            vertical_writing: false,
+            sideways_writing: false,
             font_family: None,
             font_scope_root: None,
             font_weight: FontWeight::default(),

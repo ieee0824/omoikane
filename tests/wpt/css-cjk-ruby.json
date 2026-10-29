@@ -1,0 +1,26 @@
+{
+  "tests": [
+    { "path": "css/css-ruby/parsing/ruby-align-valid.html" },
+    { "path": "css/css-ruby/parsing/ruby-align-invalid.html" },
+    { "path": "css/css-ruby/parsing/ruby-position-valid.html" },
+    { "path": "css/css-ruby/parsing/ruby-position-invalid.html" },
+    { "path": "css/css-text-decor/parsing/text-emphasis-computed.html" },
+    { "path": "css/css-text-decor/parsing/text-emphasis-position-valid.html" },
+    { "path": "css/css-text-decor/parsing/text-emphasis-position-invalid.html" },
+    { "path": "css/css-text-decor/parsing/text-emphasis-position-computed.html" },
+    { "path": "css/css-text-decor/parsing/text-emphasis-style-computed.html" },
+    { "path": "css/css-text-decor/parsing/text-emphasis-style-computed-vertical-lr.html" },
+    { "path": "css/css-text/parsing/text-autospace-valid.html" },
+    { "path": "css/css-text/parsing/text-autospace-invalid.html" },
+    { "path": "css/css-text/parsing/text-autospace-computed.html" },
+    { "path": "css/css-text/parsing/text-spacing-trim-valid.html" },
+    { "path": "css/css-text/parsing/text-spacing-trim-invalid.html" },
+    { "path": "css/css-text/parsing/text-spacing-trim-computed.html" },
+    { "path": "css/css-writing-modes/parsing/text-combine-upright-valid.html" },
+    { "path": "css/css-writing-modes/parsing/text-combine-upright-invalid.html" },
+    { "path": "css/css-writing-modes/parsing/text-combine-upright-computed.html" },
+    { "path": "css/css-writing-modes/parsing/text-orientation-valid.html" },
+    { "path": "css/css-writing-modes/parsing/text-orientation-invalid.html" },
+    { "path": "css/css-writing-modes/parsing/text-orientation-computed.html" }
+  ]
+}

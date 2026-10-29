@@ -3168,6 +3168,45 @@ fn inherits_color_and_font_size() {
 }
 
 #[test]
+fn ruby_elements_apply_annotation_and_fallback_ua_defaults() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let ruby = NodeHandle::element("ruby");
+    let rt = NodeHandle::element("rt");
+    let rp = NodeHandle::element("rp");
+    document.append_child(body.clone());
+    body.append_child(ruby.clone());
+    ruby.append_child(rt.clone());
+    ruby.append_child(rp.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { font-size:20px; text-emphasis-style:filled dot; }").unwrap(),
+    );
+
+    let ruby_style = resolver.computed_style(&ruby);
+    let rt_style = resolver.computed_style(&rt);
+    let rp_style = resolver.computed_style(&rp);
+    assert_eq!(
+        ruby_style.get("display"),
+        Some(&ComputedValue::Keyword("inline".into()))
+    );
+    assert_eq!(rt_style.get("font-size"), Some(&ComputedValue::Px(10.0)));
+    assert_eq!(
+        rt_style.get("line-height"),
+        Some(&ComputedValue::Number(1.0))
+    );
+    assert_eq!(
+        rt_style.get("text-emphasis-style"),
+        Some(&ComputedValue::Keyword("none".into()))
+    );
+    assert_eq!(
+        rp_style.get("display"),
+        Some(&ComputedValue::Keyword("none".into()))
+    );
+}
+
+#[test]
 fn resolves_em_and_percentage_font_sizes() {
     let (document, _body, title, html) = sample_tree();
     let mut resolver = StyleResolver::new();
@@ -7145,6 +7184,119 @@ fn writing_direction_properties_validate_and_support_css_wide_keywords() {
     assert!(!supports_declaration("direction", "auto"));
     assert!(!supports_declaration("writing-mode", "diagonal"));
     assert!(!supports_declaration("unicode-bidi", "override"));
+}
+
+#[test]
+fn cjk_vertical_and_ruby_properties_validate_their_full_grammars() {
+    for (property, value) in [
+        ("text-orientation", "upright"),
+        ("text-combine-upright", "all"),
+        ("text-combine-upright", "digits 4"),
+        ("ruby-position", "alternate under"),
+        ("ruby-position", "inter-character"),
+        ("ruby-align", "space-between"),
+        ("text-autospace", "ideograph-alpha punctuation replace"),
+        ("text-spacing-trim", "trim-start trim-adjacent allow-end"),
+        ("text-spacing-trim", "trim-all"),
+        ("text-emphasis-style", "open sesame"),
+        ("text-emphasis-style", "'※'"),
+        ("text-emphasis-position", "under left"),
+        ("text-emphasis-color", "#010203"),
+        ("text-emphasis", "open sesame red"),
+    ] {
+        assert!(supports_declaration(property, value), "{property}: {value}");
+    }
+    for (property, value) in [
+        ("text-orientation", "vertical"),
+        ("text-combine-upright", "digits 5"),
+        ("ruby-position", "over under"),
+        ("ruby-align", "end"),
+        ("text-autospace", "normal insert"),
+        ("text-autospace", "insert replace"),
+        ("text-spacing-trim", "trim-start space-start"),
+        ("text-emphasis-style", "filled open"),
+        ("text-emphasis-position", "over under"),
+        ("text-emphasis", "dot circle red"),
+    ] {
+        assert!(
+            !supports_declaration(property, value),
+            "{property}: {value}"
+        );
+    }
+}
+
+#[test]
+fn cjk_vertical_and_ruby_properties_compute_canonically_and_inherit() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("span");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { text-orientation:upright; text-combine-upright:digits; \
+             ruby-position:under alternate; ruby-align:center; \
+             text-autospace:replace punctuation ideograph-alpha; \
+             text-spacing-trim:allow-end trim-start; \
+             text-emphasis:sesame open rgb(1 2 3); text-emphasis-position:under; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    for (property, expected) in [
+        ("text-orientation", "upright"),
+        ("text-combine-upright", "digits 2"),
+        ("ruby-position", "alternate under"),
+        ("ruby-align", "center"),
+        ("text-autospace", "ideograph-alpha punctuation replace"),
+        ("text-spacing-trim", "trim-start allow-end"),
+        ("text-emphasis-style", "open sesame"),
+        ("text-emphasis-color", "#010203"),
+        ("text-emphasis-position", "under"),
+    ] {
+        assert_eq!(
+            style.get(property).map(ComputedValue::css_text),
+            Some(expected.into())
+        );
+    }
+    assert_eq!(
+        crate::layout::FragmentStyle::from_computed(&style).text_orientation,
+        crate::layout::TextOrientation::Upright
+    );
+    assert_eq!(
+        crate::layout::FragmentStyle::from_computed(&style).text_combine_upright,
+        crate::layout::TextCombineUpright::Digits(2)
+    );
+    let emphasis = crate::layout::FragmentStyle::from_computed(&style);
+    assert_eq!(emphasis.text_emphasis.mark.as_deref(), Some("\u{fe46}"));
+    assert!(!emphasis.text_emphasis.over);
+    assert!(emphasis.text_emphasis.right);
+    assert_eq!(emphasis.text_emphasis_color.as_deref(), Some("#010203"));
+    let spacing_trim = crate::layout::FragmentStyle::from_computed(&style).text_spacing_trim;
+    assert_eq!(
+        spacing_trim.start,
+        crate::layout::TextSpacingTrimStart::Trim
+    );
+    assert_eq!(
+        spacing_trim.adjacent,
+        crate::layout::TextSpacingTrimAdjacent::Trim
+    );
+    assert_eq!(spacing_trim.end, crate::layout::TextSpacingTrimEnd::Allow);
+    assert!(!spacing_trim.trim_all);
+    assert_eq!(
+        crate::layout::FragmentStyle::from_computed(&style).text_autospace,
+        crate::layout::TextAutospace {
+            ideograph_alpha: true,
+            ideograph_numeric: false,
+            punctuation: true,
+            replace: true,
+        }
+    );
 }
 
 #[test]

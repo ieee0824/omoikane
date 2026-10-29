@@ -991,6 +991,77 @@ fn shaping_cache_reuses_exact_runs_without_mixing_size_or_direction() {
 }
 
 #[test]
+fn ranged_halt_and_vhal_features_compact_only_the_selected_punctuation() {
+    let font = Font::load_from_file(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/text-spacing-trim/NotoSansCJKjp-Regular-subset-halt.otf"),
+    )
+    .unwrap();
+    let text = "国（（国";
+    let selected = "国（".len().."国（（".len();
+    let base_horizontal = font
+        .shape_text(text, 20.0, ShapingDirection::LeftToRight)
+        .unwrap();
+    let halt = font
+        .shape_text_with_options(
+            text,
+            20.0,
+            ShapingDirection::LeftToRight,
+            &ShapingOptions {
+                features: vec![OpenTypeFeature::for_range(*b"halt", 1, selected.clone())],
+                ..ShapingOptions::default()
+            },
+        )
+        .unwrap();
+    let horizontal_advance = |glyphs: &[ShapedGlyph], cluster| {
+        glyphs
+            .iter()
+            .find(|glyph| glyph.cluster == cluster)
+            .unwrap()
+            .x_advance
+            .abs()
+    };
+    assert_eq!(
+        horizontal_advance(&base_horizontal, "国".len()),
+        horizontal_advance(&halt, "国".len())
+    );
+    assert!(
+        horizontal_advance(&halt, selected.start)
+            < horizontal_advance(&base_horizontal, selected.start)
+    );
+
+    let base_vertical = font
+        .shape_text(text, 20.0, ShapingDirection::TopToBottom)
+        .unwrap();
+    let vhal = font
+        .shape_text_with_options(
+            text,
+            20.0,
+            ShapingDirection::TopToBottom,
+            &ShapingOptions {
+                features: vec![OpenTypeFeature::for_range(*b"vhal", 1, selected.clone())],
+                ..ShapingOptions::default()
+            },
+        )
+        .unwrap();
+    let vertical_advance = |glyphs: &[ShapedGlyph], cluster| {
+        glyphs
+            .iter()
+            .find(|glyph| glyph.cluster == cluster)
+            .unwrap()
+            .y_advance
+            .abs()
+    };
+    assert_eq!(
+        vertical_advance(&base_vertical, "国".len()),
+        vertical_advance(&vhal, "国".len())
+    );
+    assert!(
+        vertical_advance(&vhal, selected.start) < vertical_advance(&base_vertical, selected.start)
+    );
+}
+
+#[test]
 fn unsupported_caps_and_position_features_use_typed_synthesis_fallbacks() {
     let font = load_selection_fixture();
     let baseline = font

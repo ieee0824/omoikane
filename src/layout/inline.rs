@@ -28,7 +28,8 @@ use super::{
     IMAGE_BASE_URL, IMAGE_CACHE, IMAGE_COOKIE_CONTEXT, InlineFragment, InlineFragmentContent,
     InlineTextSource, LAYOUT_FONTS, LayoutBox, LineBox, MeterRegion, Rect, TextControlPaintState,
     TextOverflowPaint, ValueIndicatorPaintState, VerticalAlign, border_box_adjust_length,
-    edge_sizes, explicit_length, is_border_box, is_non_rendered_html_element,
+    edge_sizes, explicit_length, fragment_autospace_pair_applies, fragment_french_autospace_pair,
+    is_border_box, is_non_rendered_html_element, text_is_combined_upright,
 };
 
 mod boxes;
@@ -388,6 +389,8 @@ fn attach_initial_letter(
                 width: initial.width,
                 height: initial.height,
             },
+            autospace_after: 0.0,
+            punctuation_trim: Default::default(),
             metrics: initial.metrics,
             vertical_align: VerticalAlign::Baseline,
             source_end_token: initial.source_units,
@@ -1457,6 +1460,8 @@ fn apply_overflow_marker(
                 height: marker_metrics.ascent + marker_metrics.descent,
             }
         },
+        autospace_after: 0.0,
+        punctuation_trim: Default::default(),
         metrics: marker_metrics,
         vertical_align: VerticalAlign::Baseline,
         source_end_token: 0,
@@ -1657,6 +1662,23 @@ fn inherited_hyphenation_language(node: &NodeHandle) -> Option<Lang> {
     None
 }
 
+fn inherited_content_language_is_french(node: &NodeHandle) -> bool {
+    let mut current = Some(node.clone());
+    while let Some(node) = current {
+        if let Some(language) = node
+            .get_attribute("lang")
+            .or_else(|| node.get_attribute("xml:lang"))
+        {
+            return language
+                .split(['-', '_'])
+                .next()
+                .is_some_and(|primary| primary.eq_ignore_ascii_case("fr"));
+        }
+        current = node.parent_node();
+    }
+    false
+}
+
 fn hyphenation_opportunities(
     text: &str,
     mode: super::Hyphens,
@@ -1734,14 +1756,16 @@ fn make_text_segment(node: NodeHandle, text: &str, style: &ComputedStyle) -> Opt
     if text.is_empty() {
         return None;
     }
+    let mut fragment_style = FragmentStyle::from_computed(style);
+    fragment_style.french_content_language = inherited_content_language_is_french(&node);
     Some(InlineSegment {
         node,
         text_source,
         content: InlineSegmentContent::Text(text),
-        metrics: font_metrics(style),
+        metrics: font_metrics_with_fragment_style(style, &fragment_style),
         line_height: line_height(style),
         vertical_align: vertical_align(style),
-        style: FragmentStyle::from_computed(style),
+        style: fragment_style,
         word_break: word_break(style),
         overflow_wrap: overflow_wrap(style),
         white_space_mode: white_space(style),
@@ -1824,6 +1848,27 @@ fn collect_element_inline_segments(
         Some("progress" | "meter") => {
             collect_value_indicator_segment(node, &style, out);
             return;
+        }
+        Some("ruby") if context.allow_atomic_boxes => {
+            if let Some(layout) = layout_ruby_inline(node, resolver, &style, context) {
+                let width = layout.total_width();
+                let height = layout.total_height();
+                let baseline = atomic_inline_baseline(&layout);
+                atomic_boxes.push(layout);
+                out.push(InlineSegment {
+                    node: node.clone(),
+                    text_source: Vec::new(),
+                    content: InlineSegmentContent::AtomicInline(width, height, baseline),
+                    metrics: font_metrics(&style),
+                    line_height: height,
+                    vertical_align: vertical_align(&style),
+                    style: FragmentStyle::from_computed(&style),
+                    word_break: word_break(&style),
+                    overflow_wrap: overflow_wrap(&style),
+                    white_space_mode: white_space(&style),
+                });
+                return;
+            }
         }
         Some("audio" | "canvas" | "video") if element_inline_image(node).is_none() => {
             collect_media_placeholder_segment(node, &style, out);
@@ -1954,6 +1999,437 @@ fn collect_element_inline_segments(
     if inline_box {
         boxes::edge(node, &style, false, out);
     }
+}
+
+struct RubyAnnotationLevel {
+    nodes: Vec<NodeHandle>,
+    position_owner: Option<NodeHandle>,
+}
+
+struct RubyLaidOutLevel {
+    layout: InlineLayoutResult,
+    cross: f32,
+    under: bool,
+}
+
+#[derive(Clone, Copy)]
+enum RubyAlign {
+    Start,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+}
+
+impl RubyAlign {
+    fn from_style(style: &ComputedStyle) -> Self {
+        match style.get("ruby-align") {
+            Some(ComputedValue::Keyword(value)) if value == "start" => Self::Start,
+            Some(ComputedValue::Keyword(value)) if value == "center" => Self::Center,
+            Some(ComputedValue::Keyword(value)) if value == "space-between" => Self::SpaceBetween,
+            _ => Self::SpaceAround,
+        }
+    }
+
+    fn text_align(self) -> TextAlign {
+        match self {
+            Self::Start | Self::SpaceBetween | Self::SpaceAround => TextAlign::Left,
+            Self::Center => TextAlign::Center,
+        }
+    }
+
+    fn finish(self, lines: &mut [LineBox], inline_extent: f32) {
+        if !matches!(self, Self::SpaceBetween | Self::SpaceAround) {
+            return;
+        }
+        for line in lines {
+            let graphemes = line
+                .fragments
+                .iter()
+                .filter_map(InlineFragment::text)
+                .map(|text| text.graphemes(true).count())
+                .sum::<usize>();
+            let used = line.rect.width;
+            let extra = (inline_extent - used).max(0.0);
+            if graphemes > 1 {
+                let internal = if matches!(self, Self::SpaceBetween) {
+                    extra
+                } else {
+                    extra * (graphemes - 1) as f32 / graphemes as f32
+                };
+                justify_inter_character(&mut line.fragments, used, used + internal);
+            }
+            let edge = if matches!(self, Self::SpaceBetween) {
+                0.0
+            } else if graphemes == 0 {
+                extra * 0.5
+            } else {
+                extra / (2 * graphemes) as f32
+            };
+            for fragment in &mut line.fragments {
+                fragment.rect.x += edge;
+            }
+            line.rect.width = inline_extent;
+        }
+    }
+}
+
+fn ruby_annotation_levels(children: &[NodeHandle]) -> Vec<RubyAnnotationLevel> {
+    let mut levels = Vec::new();
+    let mut direct_rt = Vec::new();
+    for child in children {
+        match child.with_tag_name(|tag| tag.map(str::to_owned)) {
+            Some(tag) if tag == "rt" => direct_rt.push(child.clone()),
+            Some(tag) if tag == "rtc" => {
+                if !direct_rt.is_empty() {
+                    levels.push(RubyAnnotationLevel {
+                        nodes: std::mem::take(&mut direct_rt),
+                        position_owner: None,
+                    });
+                }
+                levels.push(RubyAnnotationLevel {
+                    nodes: child.layout_child_nodes(),
+                    position_owner: Some(child.clone()),
+                });
+            }
+            _ => {}
+        }
+    }
+    if !direct_rt.is_empty() {
+        levels.push(RubyAnnotationLevel {
+            nodes: direct_rt,
+            position_owner: None,
+        });
+    }
+    levels.retain(|level| !level.nodes.is_empty());
+    levels
+}
+
+fn ruby_annotation_strut(
+    level: &RubyAnnotationLevel,
+    resolver: &mut StyleResolver,
+    fallback: f32,
+) -> f32 {
+    level
+        .nodes
+        .first()
+        .map(|annotation| resolver.computed_style(annotation))
+        .map(|style| font_metrics(&style).font_size * 1.2)
+        .unwrap_or(fallback * 0.5)
+}
+
+fn ruby_level_cross_extent(level: &InlineLayoutResult) -> f32 {
+    level
+        .lines
+        .iter()
+        .map(|line| line.rect.height)
+        .fold(0.0_f32, f32::max)
+}
+
+fn layout_ruby_level(
+    nodes: &[NodeHandle],
+    resolver: &mut StyleResolver,
+    width: f32,
+    align: TextAlign,
+    strut: f32,
+    direction_rtl: bool,
+    context: InlineLayoutContext,
+) -> InlineLayoutResult {
+    layout_inline_nodes_impl(
+        nodes,
+        resolver,
+        0.0,
+        0.0,
+        width,
+        align,
+        strut,
+        direction_rtl,
+        None,
+        context.containing_height,
+        context.viewport,
+        context.positioned_ancestor,
+        true,
+        None,
+        false,
+        false,
+        None,
+    )
+}
+
+fn translate_ruby_lines(lines: &mut [LineBox], dx: f32, dy: f32) {
+    for line in lines {
+        line.rect.x += dx;
+        line.rect.y += dy;
+        line.baseline += dy;
+        for fragment in &mut line.fragments {
+            fragment.rect.x += dx;
+            fragment.rect.y += dy;
+        }
+        if let Some(overflow) = &mut line.text_overflow {
+            for fragment in &mut overflow.fragments {
+                fragment.rect.x += dx;
+                fragment.rect.y += dy;
+            }
+        }
+    }
+}
+
+fn transpose_ruby_lines(lines: &mut [LineBox], cross: f32) {
+    for line in lines {
+        let old = line.rect;
+        let block_origin = line
+            .fragments
+            .iter()
+            .filter(|fragment| fragment.text().is_some())
+            .map(|fragment| fragment.rect.y - old.y)
+            .reduce(f32::min)
+            .unwrap_or(0.0);
+        for fragment in &mut line.fragments {
+            let inline = fragment.rect.x - old.x;
+            let block = fragment.rect.y - old.y - block_origin;
+            fragment.rect = Rect {
+                x: cross + block,
+                y: inline,
+                width: fragment.rect.height,
+                height: fragment.rect.width,
+            };
+        }
+        line.rect = Rect {
+            x: cross,
+            y: 0.0,
+            width: old.height,
+            height: old.width,
+        };
+    }
+}
+
+fn position_ruby_levels(
+    style: &ComputedStyle,
+    base: &mut InlineLayoutResult,
+    annotations: &mut [RubyLaidOutLevel],
+    inline_extent: f32,
+    base_cross: f32,
+) -> (f32, f32) {
+    let over_cross = annotations
+        .iter()
+        .filter(|level| !level.under)
+        .map(|level| level.cross)
+        .sum::<f32>();
+    let under_cross = annotations
+        .iter()
+        .filter(|level| level.under)
+        .map(|level| level.cross)
+        .sum::<f32>();
+    if !super::is_vertical_writing(style) {
+        translate_ruby_lines(&mut base.lines, 0.0, over_cross);
+        let mut over_cursor = over_cross;
+        let mut under_cursor = over_cross + base_cross;
+        for level in annotations {
+            let y = if level.under {
+                let y = under_cursor;
+                under_cursor += level.cross;
+                y
+            } else {
+                over_cursor -= level.cross;
+                over_cursor
+            };
+            translate_ruby_lines(&mut level.layout.lines, 0.0, y);
+        }
+        return (inline_extent, over_cross + base_cross + under_cross);
+    }
+
+    let vertical_rl = matches!(
+        style.get("writing-mode"),
+        Some(ComputedValue::Keyword(mode)) if mode == "vertical-rl" || mode == "sideways-rl"
+    );
+    let base_position = if vertical_rl { under_cross } else { over_cross };
+    transpose_ruby_lines(&mut base.lines, base_position);
+    let mut over_cursor = over_cross;
+    let mut under_cursor = over_cross + base_cross;
+    for level in annotations {
+        let logical_cross = if level.under {
+            let cross = under_cursor;
+            under_cursor += level.cross;
+            cross
+        } else {
+            over_cursor -= level.cross;
+            over_cursor
+        };
+        let physical_cross = if vertical_rl {
+            over_cross + base_cross + under_cross - logical_cross - level.cross
+        } else {
+            logical_cross
+        };
+        transpose_ruby_lines(&mut level.layout.lines, physical_cross);
+    }
+    (over_cross + base_cross + under_cross, inline_extent)
+}
+
+fn layout_ruby_inline(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    context: InlineLayoutContext,
+) -> Option<LayoutBox> {
+    let children = node.layout_child_nodes();
+    let base_nodes = children
+        .iter()
+        .filter(|child| {
+            !child.with_tag_name(|tag| matches!(tag, Some("rt" | "rtc" | "rp")))
+                && !(child.node_type() == NodeType::Text
+                    && child.data().is_none_or(|text| text.trim().is_empty()))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let annotation_levels = ruby_annotation_levels(&children);
+    if base_nodes.is_empty() || annotation_levels.is_empty() {
+        return None;
+    }
+
+    let direction_rtl = super::direction_is_rtl(style);
+    let base_strut = line_height(style);
+    let natural_width = context.available_width.max(100_000.0);
+    let natural_base = layout_ruby_level(
+        &base_nodes,
+        resolver,
+        natural_width,
+        TextAlign::Left,
+        base_strut,
+        direction_rtl,
+        context,
+    );
+    let natural_annotations = annotation_levels
+        .iter()
+        .map(|level| {
+            let strut = ruby_annotation_strut(level, resolver, base_strut);
+            layout_ruby_level(
+                &level.nodes,
+                resolver,
+                natural_width,
+                TextAlign::Left,
+                strut,
+                direction_rtl,
+                context,
+            )
+        })
+        .collect::<Vec<_>>();
+    let inline_extent = std::iter::once(&natural_base)
+        .chain(natural_annotations.iter())
+        .flat_map(|level| &level.lines)
+        .map(|line| line.rect.width)
+        .fold(0.0_f32, f32::max);
+    if inline_extent <= 0.0 {
+        return None;
+    }
+    let ruby_align = RubyAlign::from_style(style);
+    let mut base = layout_ruby_level(
+        &base_nodes,
+        resolver,
+        inline_extent,
+        ruby_align.text_align(),
+        base_strut,
+        direction_rtl,
+        context,
+    );
+    ruby_align.finish(&mut base.lines, inline_extent);
+    let base_cross = ruby_level_cross_extent(&base);
+    let mut annotations = annotation_levels
+        .iter()
+        .map(|level| {
+            let strut = ruby_annotation_strut(level, resolver, base_strut);
+            let mut layout = layout_ruby_level(
+                &level.nodes,
+                resolver,
+                inline_extent,
+                ruby_align.text_align(),
+                strut,
+                direction_rtl,
+                context,
+            );
+            ruby_align.finish(&mut layout.lines, inline_extent);
+            RubyLaidOutLevel {
+                under: false,
+                cross: ruby_level_cross_extent(&layout),
+                layout,
+            }
+        })
+        .collect::<Vec<_>>();
+    let position = match style.get("ruby-position") {
+        Some(ComputedValue::Keyword(value)) => value.as_str(),
+        _ => "alternate",
+    };
+    let starts_under = position
+        .split_ascii_whitespace()
+        .any(|part| part == "under");
+    let mut previous_under = !starts_under;
+    for (source, laid_out) in annotation_levels.iter().zip(&mut annotations) {
+        let level_style = source
+            .position_owner
+            .as_ref()
+            .map(|owner| resolver.computed_style(owner));
+        let explicit = level_style
+            .as_ref()
+            .and_then(|style| style.get("ruby-position"))
+            .and_then(|value| match value {
+                ComputedValue::Keyword(value)
+                    if value != position && value.split_ascii_whitespace().any(|v| v == "over") =>
+                {
+                    Some(false)
+                }
+                ComputedValue::Keyword(value)
+                    if value != position
+                        && value.split_ascii_whitespace().any(|v| v == "under") =>
+                {
+                    Some(true)
+                }
+                _ => None,
+            });
+        laid_out.under = explicit.unwrap_or(!previous_under);
+        previous_under = laid_out.under;
+    }
+
+    let (width, height) = position_ruby_levels(
+        style,
+        &mut base,
+        &mut annotations,
+        inline_extent,
+        base_cross,
+    );
+    let mut lines = base.lines;
+    let mut atomic_boxes = base.atomic_boxes;
+    for level in annotations {
+        lines.extend(level.layout.lines);
+        atomic_boxes.extend(level.layout.atomic_boxes);
+    }
+    position_atomic_boxes(&lines, &mut atomic_boxes, resolver);
+
+    Some(LayoutBox {
+        node: node.clone(),
+        pseudo: None,
+        dimensions: BoxDimensions {
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height,
+            },
+            ..BoxDimensions::default()
+        },
+        visibility: super::visibility(style),
+        overflow: super::Overflow::Visible,
+        position_scheme: super::position_scheme(style),
+        fixed_containing_block: super::establishes_fixed_containing_block(style),
+        z_index: super::z_index(style),
+        transform: crate::css::AffineTransform::identity(),
+        needs_scroll_translation: false,
+        has_out_of_flow_descendants: None,
+        content_visibility_contents_skipped: false,
+        paint_scroll: None,
+        block_fragments: Vec::new(),
+        multicol: None,
+        lines,
+        children: atomic_boxes,
+        marker: None,
+    })
 }
 
 fn collect_input_segment(node: &NodeHandle, style: &ComputedStyle, out: &mut Vec<InlineSegment>) {
@@ -2457,13 +2933,14 @@ pub(super) fn generated_inline_segments(
     let Some(content) = style.get("content") else {
         return Vec::new();
     };
-    let metrics = font_metrics(&style);
     let line_height = line_height(&style);
     let vertical_align = vertical_align(&style);
     let wb = word_break(&style);
     let ow = overflow_wrap(&style);
     let mut fragment_style = FragmentStyle::from_computed(&style);
     fragment_style.pseudo = Some(pseudo);
+    fragment_style.french_content_language = inherited_content_language_is_french(node);
+    let metrics = font_metrics_with_fragment_style(&style, &fragment_style);
 
     match generated_content_value(
         content,
@@ -3843,9 +4320,32 @@ fn adjusted_font_size(
 }
 
 pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
+    let fragment_style = FragmentStyle::from_computed(style);
+    font_metrics_with_fragment_style(style, &fragment_style)
+}
+
+fn font_metrics_with_fragment_style(
+    style: &ComputedStyle,
+    fragment_style: &FragmentStyle,
+) -> FontMetrics {
     let mut metrics = FontMetrics::from_font_size(font_size(style));
     metrics.letter_spacing = letter_spacing(style);
     metrics.word_spacing = word_spacing(style);
+    metrics.text_autospace = fragment_style.text_autospace;
+    metrics.text_spacing_trim = fragment_style.text_spacing_trim;
+    metrics.french_content_language = fragment_style.french_content_language;
+    metrics.text_orientation = fragment_style.text_orientation;
+    metrics.text_combine_upright = fragment_style.text_combine_upright;
+    metrics.vertical_writing = fragment_style.writing_mode.as_deref().is_some_and(|value| {
+        matches!(
+            value,
+            "vertical-rl" | "vertical-lr" | "sideways-rl" | "sideways-lr"
+        )
+    });
+    metrics.sideways_writing = fragment_style
+        .writing_mode
+        .as_deref()
+        .is_some_and(|value| value.starts_with("sideways-"));
     metrics.font_family = style.get("font-family").and_then(computed_font_family_key);
     metrics.font_scope_root = style.font_family_scope_root();
     metrics.shaping_options = Arc::clone(style.shaping_options());
@@ -4072,6 +4572,7 @@ struct InlineCursor {
     direction_rtl: bool,
     indent: TextIndent,
     last_align: TextAlign,
+    line_after_forced_break: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -4111,6 +4612,7 @@ impl InlineCursor {
             direction_rtl,
             indent,
             last_align,
+            line_after_forced_break: false,
         };
         cursor.apply_line_indent(indent.initial_affected);
         cursor
@@ -4159,6 +4661,7 @@ impl InlineCursor {
             self.direction_rtl,
             self.strut_line_height,
             self.strut_metrics.clone(),
+            lines.is_empty() || self.line_after_forced_break,
         );
         self.y += used_height;
         if let Some(constraints) = line_constraints {
@@ -4172,6 +4675,7 @@ impl InlineCursor {
         self.apply_line_indent(
             matches!(break_kind, LineBreakKind::Forced) && self.indent.each_line,
         );
+        self.line_after_forced_break = matches!(break_kind, LineBreakKind::Forced);
         self.line_height = self.strut_line_height;
     }
     fn finish_line(
@@ -4204,6 +4708,7 @@ impl InlineCursor {
                 self.direction_rtl,
                 self.strut_line_height,
                 self.strut_metrics.clone(),
+                lines.is_empty() || self.line_after_forced_break,
             );
         }
     }
@@ -4282,6 +4787,8 @@ fn break_text_by_characters(
                 width: ch_width,
                 height,
             },
+            autospace_after: 0.0,
+            punctuation_trim: Default::default(),
             metrics: segment.metrics.clone(),
             vertical_align: segment.vertical_align,
             source_end_token: source_start_token + index + 1,
@@ -4441,6 +4948,8 @@ fn push_hyphenated_fragment(
             width,
             height,
         },
+        autospace_after: 0.0,
+        punctuation_trim: Default::default(),
         metrics: segment.metrics.clone(),
         vertical_align: segment.vertical_align,
         source_end_token,
@@ -4455,6 +4964,7 @@ struct InlineFragmentInput {
     content: InlineFragmentContent,
     width: f32,
     height: f32,
+    autospace_after: f32,
     token_range: std::ops::Range<usize>,
     text_source: Vec<InlineTextSource>,
 }
@@ -4466,13 +4976,18 @@ impl InlineFragmentInput {
         text_byte: &mut usize,
         source_token: &mut usize,
     ) -> Self {
-        let InlinePiece::Fragment {
-            content,
-            width,
-            height,
-        } = piece
-        else {
-            unreachable!()
+        let (content, width, height, autospace_after) = match piece {
+            InlinePiece::Fragment {
+                content,
+                width,
+                height,
+            } => (content, width, height, 0.0),
+            InlinePiece::AutospaceReplacement {
+                text,
+                width,
+                height,
+            } => (InlineFragmentContent::Text(text), width, height, width),
+            InlinePiece::Newline => unreachable!(),
         };
         let start_byte = *text_byte;
         let text_source = match (&segment.content, &content) {
@@ -4492,6 +5007,7 @@ impl InlineFragmentInput {
             content,
             width,
             height,
+            autospace_after,
             token_range: start_token..*source_token,
             text_source,
         }
@@ -4513,6 +5029,7 @@ fn layout_inline_fragment(
         content,
         width,
         height,
+        autospace_after,
         token_range,
         text_source: piece_source,
     } = input;
@@ -4534,6 +5051,16 @@ fn layout_inline_fragment(
     };
     *is_first_piece_in_segment = false;
 
+    cursor.x += apply_pending_autospace_replacement(fragments, &content, segment);
+
+    let candidate_used_width =
+        cursor.x + autospace_before_fragment(fragments, &content, segment) + width - cursor.start_x;
+    let allow_end_delta = allow_end_trim_delta(&content, segment);
+    let candidate_fits_with_allow_end = allow_end_delta < 0.0
+        && !exceeds_available_inline_width(
+            candidate_used_width + allow_end_delta,
+            cursor.available_width,
+        );
     if can_wrap
         && let InlineFragmentContent::Text(text) = &content
         && layout_hyphenated_text(
@@ -4558,7 +5085,9 @@ fn layout_inline_fragment(
             InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
         )
         && cursor.x > cursor.start_x
-        && exceeds_available_inline_width(cursor.x + width - cursor.start_x, cursor.available_width)
+        && french_autospace_before_fragment(fragments, &content, segment).is_none()
+        && exceeds_available_inline_width(candidate_used_width, cursor.available_width)
+        && !candidate_fits_with_allow_end
     {
         // Collapsible whitespace at the end of a line is
         // discarded. Do not let it create an otherwise empty
@@ -4608,6 +5137,15 @@ fn layout_inline_fragment(
         return;
     }
 
+    let autospace = autospace_before_fragment(fragments, &content, segment);
+    if autospace > 0.0
+        && let Some(previous) = previous_autospace_text_fragment_mut(fragments)
+    {
+        previous.rect.width += autospace;
+        previous.autospace_after += autospace;
+        cursor.x += autospace;
+    }
+
     fragments.push(InlineFragment {
         node: segment.node.clone(),
         text_source: piece_source,
@@ -4618,6 +5156,8 @@ fn layout_inline_fragment(
             width,
             height,
         },
+        autospace_after,
+        punctuation_trim: Default::default(),
         metrics: segment.metrics.clone(),
         vertical_align: segment.vertical_align,
         source_end_token: source_token,
@@ -4625,6 +5165,179 @@ fn layout_inline_fragment(
     });
     cursor.x += width;
     cursor.line_height = cursor.line_height.max(segment.line_height.max(height));
+}
+
+fn allow_end_trim_delta(content: &InlineFragmentContent, segment: &InlineSegment) -> f32 {
+    let InlineFragmentContent::Text(text) = content else {
+        return 0.0;
+    };
+    let Some(last) = text.chars().next_back() else {
+        return 0.0;
+    };
+    if segment.metrics.text_spacing_trim.end != super::TextSpacingTrimEnd::Allow
+        || super::fullwidth_punctuation_class(last, segment.metrics.vertical_writing)
+            != Some(super::FullwidthPunctuationClass::Closing)
+    {
+        return 0.0;
+    }
+    measure_text_width_with_trim_edges(
+        text,
+        &segment.metrics,
+        super::PunctuationTrim {
+            first: false,
+            last: true,
+        },
+    ) - measure_text_width(text, &segment.metrics)
+}
+
+fn autospace_before_fragment(
+    fragments: &[InlineFragment],
+    content: &InlineFragmentContent,
+    segment: &InlineSegment,
+) -> f32 {
+    if let Some(spacing) = french_autospace_before_fragment(fragments, content, segment) {
+        return spacing;
+    }
+    let InlineFragmentContent::Text(text) = content else {
+        return 0.0;
+    };
+    if text_is_combined_upright(text, &segment.style) {
+        return 0.0;
+    }
+    let Some(current) = text.chars().next() else {
+        return 0.0;
+    };
+    let Some(previous) = previous_autospace_text_fragment(fragments).and_then(|fragment| {
+        let text = fragment.text()?;
+        (!text_is_combined_upright(text, &fragment.style))
+            .then(|| text.chars().next_back())
+            .flatten()
+    }) else {
+        return 0.0;
+    };
+    fragment_autospace_pair_applies(previous, current, &segment.style)
+        .then_some(segment.metrics.font_size * 0.125)
+        .unwrap_or(0.0)
+}
+
+fn french_autospace_before_fragment(
+    fragments: &[InlineFragment],
+    content: &InlineFragmentContent,
+    segment: &InlineSegment,
+) -> Option<f32> {
+    let current = match content {
+        InlineFragmentContent::Text(text) => text.chars().next()?,
+        _ => return None,
+    };
+    let previous = previous_autospace_text_fragment(fragments)?
+        .text()?
+        .chars()
+        .next_back()?;
+    let spacing = fragment_french_autospace_pair(previous, current, &segment.style)?;
+    Some(measure_text_width(
+        &spacing.character().to_string(),
+        &segment.metrics,
+    ))
+}
+
+fn previous_autospace_text_fragment(fragments: &[InlineFragment]) -> Option<&InlineFragment> {
+    for fragment in fragments.iter().rev() {
+        if fragment.text().is_some() {
+            return Some(fragment);
+        }
+        if !matches!(
+            &fragment.content,
+            InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+        ) || fragment.rect.width != 0.0
+        {
+            return None;
+        }
+    }
+    None
+}
+
+fn previous_autospace_text_fragment_mut(
+    fragments: &mut [InlineFragment],
+) -> Option<&mut InlineFragment> {
+    let index = fragments.iter().rposition(|fragment| {
+        fragment.text().is_some()
+            || !matches!(
+                &fragment.content,
+                InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+            )
+            || fragment.rect.width != 0.0
+    })?;
+    if fragments[index].text().is_some() {
+        Some(&mut fragments[index])
+    } else {
+        None
+    }
+}
+
+fn apply_pending_autospace_replacement(
+    fragments: &mut [InlineFragment],
+    content: &InlineFragmentContent,
+    segment: &InlineSegment,
+) -> f32 {
+    if !segment.style.text_autospace.replace {
+        return 0.0;
+    }
+    let Some(current) = (match content {
+        InlineFragmentContent::Text(text) => text.chars().next(),
+        _ => None,
+    }) else {
+        return 0.0;
+    };
+    let mut index = fragments.len();
+    while index > 0 && is_zero_width_inline_boundary(&fragments[index - 1]) {
+        index -= 1;
+    }
+    let Some(space_index) = index.checked_sub(1) else {
+        return 0.0;
+    };
+    let Some(space_text) = fragments[space_index].text() else {
+        return 0.0;
+    };
+    if space_text.is_empty()
+        || !space_text.chars().all(|character| character == ' ')
+        || !fragments[space_index].style.text_autospace.replace
+    {
+        return 0.0;
+    }
+    index = space_index;
+    while index > 0 && is_zero_width_inline_boundary(&fragments[index - 1]) {
+        index -= 1;
+    }
+    let Some(previous) = index
+        .checked_sub(1)
+        .and_then(|index| fragments[index].text())
+        .and_then(|text| text.chars().next_back())
+    else {
+        return 0.0;
+    };
+    let Some(width) = fragment_french_autospace_pair(previous, current, &segment.style)
+        .map(|spacing| measure_text_width(&spacing.character().to_string(), &segment.metrics))
+        .or_else(|| {
+            fragment_autospace_pair_applies(previous, current, &segment.style)
+                .then_some(segment.metrics.font_size * 0.125)
+        })
+    else {
+        return 0.0;
+    };
+    let delta = width - fragments[space_index].rect.width;
+    fragments[space_index].rect.width = width;
+    fragments[space_index].autospace_after = width;
+    for fragment in &mut fragments[space_index + 1..] {
+        fragment.rect.x += delta;
+    }
+    delta
+}
+
+fn is_zero_width_inline_boundary(fragment: &InlineFragment) -> bool {
+    matches!(
+        &fragment.content,
+        InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+    ) && fragment.rect.width == 0.0
 }
 
 fn layout_inline_newline(
@@ -4648,6 +5361,8 @@ fn layout_inline_newline(
             width: 0.0,
             height: segment.line_height,
         },
+        autospace_after: 0.0,
+        punctuation_trim: Default::default(),
         metrics: segment.metrics.clone(),
         vertical_align: segment.vertical_align,
         source_end_token: source_token,
@@ -4713,7 +5428,8 @@ fn layout_inline_segments(
                         line_constraints,
                     );
                 }
-                mut piece @ InlinePiece::Fragment { .. } => {
+                mut piece @ (InlinePiece::Fragment { .. }
+                | InlinePiece::AutospaceReplacement { .. }) => {
                     if let InlinePiece::Fragment {
                         content: InlineFragmentContent::Text(text),
                         width,
@@ -4832,6 +5548,11 @@ fn optimize_text_wrap_style(
 
 enum InlinePiece {
     Newline,
+    AutospaceReplacement {
+        text: String,
+        width: f32,
+        height: f32,
+    },
     Fragment {
         content: InlineFragmentContent,
         width: f32,
@@ -4876,14 +5597,19 @@ fn take_trailing_inline_starts(
 
 fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
     match &segment.content {
-        InlineSegmentContent::Text(text) => split_text_segment(
-            text,
-            &segment.metrics,
-            segment.line_height,
-            segment.word_break,
-            segment.style.line_break,
-            segment.white_space_mode,
-        ),
+        InlineSegmentContent::Text(text) => {
+            let mut pieces = split_text_segment(
+                text,
+                &segment.metrics,
+                segment.line_height,
+                segment.word_break,
+                segment.style.line_break,
+                segment.white_space_mode,
+                &segment.style,
+            );
+            apply_autospace_replacements(&mut pieces, segment);
+            pieces
+        }
         InlineSegmentContent::InlineEdge(style, start) => {
             let margin = inline_edge_size(style, edge_sizes(style, "margin"), *start);
             let border_box_edge = InlinePiece::Fragment {
@@ -4989,6 +5715,66 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
     }
 }
 
+fn apply_autospace_replacements(pieces: &mut [InlinePiece], segment: &InlineSegment) {
+    if !segment.style.text_autospace.replace || pieces.len() < 3 {
+        return;
+    }
+    let replacements = (1..pieces.len() - 1)
+        .filter_map(|index| {
+            let text = match &pieces[index] {
+                InlinePiece::Fragment {
+                    content: InlineFragmentContent::Text(text),
+                    ..
+                } => text,
+                _ => return None,
+            };
+            if text.is_empty() || !text.chars().all(|character| character == ' ') {
+                return None;
+            }
+            let left = match &pieces[index - 1] {
+                InlinePiece::Fragment {
+                    content: InlineFragmentContent::Text(text),
+                    ..
+                } => text.chars().next_back(),
+                _ => None,
+            };
+            let right = match &pieces[index + 1] {
+                InlinePiece::Fragment {
+                    content: InlineFragmentContent::Text(text),
+                    ..
+                } => text.chars().next(),
+                _ => None,
+            };
+            let (left, right) = left.zip(right)?;
+            let width = fragment_french_autospace_pair(left, right, &segment.style)
+                .map(|spacing| {
+                    measure_text_width(&spacing.character().to_string(), &segment.metrics)
+                })
+                .or_else(|| {
+                    fragment_autospace_pair_applies(left, right, &segment.style)
+                        .then_some(segment.metrics.font_size * 0.125)
+                })?;
+            Some((index, width))
+        })
+        .collect::<Vec<_>>();
+    for (index, width) in replacements {
+        let old = std::mem::replace(&mut pieces[index], InlinePiece::Newline);
+        let InlinePiece::Fragment {
+            content: InlineFragmentContent::Text(text),
+            height,
+            ..
+        } = old
+        else {
+            unreachable!("replacement candidates are text fragments")
+        };
+        pieces[index] = InlinePiece::AutospaceReplacement {
+            text,
+            width,
+            height,
+        };
+    }
+}
+
 fn split_text_segment(
     text: &str,
     metrics: &FontMetrics,
@@ -4996,6 +5782,118 @@ fn split_text_segment(
     wb: WordBreak,
     line_break: super::LineBreak,
     ws_mode: WhiteSpaceMode,
+    style: &FragmentStyle,
+) -> Vec<InlinePiece> {
+    if vertical_text_combine_applies(style) {
+        match style.text_combine_upright {
+            super::TextCombineUpright::All => {
+                return split_all_combined_text(text, metrics, line_height, ws_mode);
+            }
+            super::TextCombineUpright::Digits(maximum) => {
+                return split_digit_combined_text(
+                    text,
+                    metrics,
+                    line_height,
+                    wb,
+                    line_break,
+                    ws_mode,
+                    style,
+                    maximum,
+                );
+            }
+            super::TextCombineUpright::None => {}
+        }
+    }
+    split_uncombined_text_segment(text, metrics, line_height, wb, line_break, ws_mode, style)
+}
+
+fn vertical_text_combine_applies(style: &FragmentStyle) -> bool {
+    matches!(
+        style.writing_mode.as_deref(),
+        Some("vertical-rl" | "vertical-lr" | "sideways-rl" | "sideways-lr")
+    )
+}
+
+fn combined_text_piece(text: &str, metrics: &FontMetrics, line_height: f32) -> InlinePiece {
+    InlinePiece::Fragment {
+        content: InlineFragmentContent::Text(text.to_string()),
+        width: metrics.font_size,
+        height: line_height,
+    }
+}
+
+fn split_all_combined_text(
+    text: &str,
+    metrics: &FontMetrics,
+    line_height: f32,
+    ws_mode: WhiteSpaceMode,
+) -> Vec<InlinePiece> {
+    if !ws_mode.preserves_newlines() || !text.contains('\n') {
+        return (!text.is_empty())
+            .then(|| combined_text_piece(text, metrics, line_height))
+            .into_iter()
+            .collect();
+    }
+    let mut pieces = Vec::new();
+    let line_count = text.split('\n').count();
+    for (index, part) in text.split('\n').enumerate() {
+        if !part.is_empty() {
+            pieces.push(combined_text_piece(part, metrics, line_height));
+        }
+        if index + 1 < line_count {
+            pieces.push(InlinePiece::Newline);
+        }
+    }
+    pieces
+}
+
+#[allow(clippy::too_many_arguments)]
+fn split_digit_combined_text(
+    text: &str,
+    metrics: &FontMetrics,
+    line_height: f32,
+    wb: WordBreak,
+    line_break: super::LineBreak,
+    ws_mode: WhiteSpaceMode,
+    style: &FragmentStyle,
+    maximum: u8,
+) -> Vec<InlinePiece> {
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut chars = text[start..].char_indices();
+        let (_, first) = chars.next().expect("start is a character boundary");
+        let digits = first.is_ascii_digit();
+        let end = chars
+            .find_map(|(offset, ch)| (ch.is_ascii_digit() != digits).then_some(start + offset))
+            .unwrap_or(text.len());
+        let run = &text[start..end];
+        if digits && (2..=maximum as usize).contains(&run.len()) {
+            pieces.push(combined_text_piece(run, metrics, line_height));
+        } else {
+            pieces.extend(split_uncombined_text_segment(
+                run,
+                metrics,
+                line_height,
+                wb,
+                line_break,
+                ws_mode,
+                style,
+            ));
+        }
+        start = end;
+    }
+    pieces
+}
+
+fn split_uncombined_text_segment(
+    text: &str,
+    metrics: &FontMetrics,
+    line_height: f32,
+    wb: WordBreak,
+    line_break: super::LineBreak,
+    ws_mode: WhiteSpaceMode,
+    style: &FragmentStyle,
 ) -> Vec<InlinePiece> {
     // `word-break: break-word` is a non-standard value treated identically to
     // `word-break: normal` for segment-level splitting; the actual emergency
@@ -5019,6 +5917,7 @@ fn split_text_segment(
                     wb,
                     line_break,
                     ws_mode,
+                    style,
                 ));
             }
             if index + 1 < parts.len() {
@@ -5315,7 +6214,16 @@ fn push_line(
     direction_rtl: bool,
     strut_line_height: f32,
     strut_metrics: Option<FontMetrics>,
+    space_first_should_space: bool,
 ) -> f32 {
+    let allow_end_should_trim = exceeds_available_inline_width(width, available_width);
+    resolve_line_bidi_geometry(fragments, x, direction_rtl);
+    width += apply_line_text_spacing_trim(
+        fragments,
+        direction_rtl,
+        space_first_should_space,
+        allow_end_should_trim,
+    );
     let physical_align = match align {
         TextAlign::Start if direction_rtl => TextAlign::Right,
         TextAlign::Start => TextAlign::Left,
@@ -5338,8 +6246,6 @@ fn push_line(
     for fragment in fragments.iter_mut() {
         fragment.rect.x += offset_x;
     }
-
-    resolve_line_bidi_geometry(fragments, x + offset_x, direction_rtl);
 
     let has_atomic_inline = fragments
         .iter()
@@ -5536,6 +6442,10 @@ fn justify_inter_character(
             let end = start + grapheme.len();
             unit.content = InlineFragmentContent::Text(grapheme.to_string());
             unit.text_source = text_source::slice(&fragment.text_source, text, start..end);
+            unit.punctuation_trim = super::PunctuationTrim {
+                first: fragment.punctuation_trim.first && start == 0,
+                last: fragment.punctuation_trim.last && end == text.len(),
+            };
             unit.rect.x = x;
             unit.rect.width = measured_width * scale;
             x += unit.rect.width;
@@ -5650,6 +6560,133 @@ fn resolve_line_bidi_geometry(
         .collect();
     let visual_order = BidiInfo::reorder_visual(&fragment_levels);
 
+    // Line construction reserves autospace in logical order so it participates
+    // in wrapping. CSS Text requires the actual spacing boundaries to be
+    // selected after UAX#9 reordering, so discard those reservations and attach
+    // the same kind of spacing to visually adjacent fragments instead.
+    let replacements = fragments
+        .iter()
+        .map(|fragment| {
+            fragment.autospace_after > 0.0
+                && fragment
+                    .text()
+                    .is_some_and(|text| !text.is_empty() && text.chars().all(|ch| ch == ' '))
+                && fragment.style.text_autospace.replace
+        })
+        .collect::<Vec<_>>();
+    for fragment in fragments.iter_mut() {
+        fragment.rect.width -= fragment.autospace_after;
+        fragment.autospace_after = 0.0;
+    }
+    let mut visual_text_groups = vec![Vec::new()];
+    for index in visual_order.iter().copied() {
+        let fragment = &fragments[index];
+        if fragment.text().is_some() {
+            visual_text_groups.last_mut().unwrap().push(index);
+        } else if !matches!(
+            &fragment.content,
+            InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+        ) || fragment.rect.width != 0.0
+        {
+            visual_text_groups.push(Vec::new());
+        }
+    }
+    let visual_autospace = visual_text_groups
+        .iter()
+        .flat_map(|group| group.windows(2))
+        .filter_map(|pair| {
+            let left_index = pair[0];
+            let right_index = pair[1];
+            let left = &fragments[left_index];
+            let right = &fragments[right_index];
+            let left_text = left.text()?;
+            let right_text = right.text()?;
+            if text_is_combined_upright(left_text, &left.style)
+                || text_is_combined_upright(right_text, &right.style)
+            {
+                return None;
+            }
+            let left_reversed = homogeneous_levels[left_index].is_some_and(|level| level.is_rtl());
+            let right_reversed =
+                homogeneous_levels[right_index].is_some_and(|level| level.is_rtl());
+            let left_character = if left_reversed {
+                left_text.chars().next()
+            } else {
+                left_text.chars().next_back()
+            }?;
+            let right_character = if right_reversed {
+                right_text.chars().next_back()
+            } else {
+                right_text.chars().next()
+            }?;
+            let spacing =
+                fragment_french_autospace_pair(left_character, right_character, &right.style)
+                    .map(|spacing| {
+                        measure_text_width(&spacing.character().to_string(), &right.metrics)
+                    })
+                    .or_else(|| {
+                        fragment_autospace_pair_applies(
+                            left_character,
+                            right_character,
+                            &right.style,
+                        )
+                        .then_some(right.metrics.font_size * 0.125)
+                    })?;
+            Some((left_index, spacing))
+        })
+        .collect::<Vec<_>>();
+    for (left_index, spacing) in visual_autospace {
+        fragments[left_index].rect.width += spacing;
+        fragments[left_index].autospace_after += spacing;
+    }
+    let visual_replacements = visual_text_groups
+        .iter()
+        .flat_map(|group| group.windows(3))
+        .filter_map(|window| {
+            let left_index = window[0];
+            let space_index = window[1];
+            let right_index = window[2];
+            if !replacements[space_index] {
+                return None;
+            }
+            let left = &fragments[left_index];
+            let right = &fragments[right_index];
+            let left_text = left.text()?;
+            let right_text = right.text()?;
+            let left_character =
+                if homogeneous_levels[left_index].is_some_and(|level| level.is_rtl()) {
+                    left_text.chars().next()
+                } else {
+                    left_text.chars().next_back()
+                }?;
+            let right_character =
+                if homogeneous_levels[right_index].is_some_and(|level| level.is_rtl()) {
+                    right_text.chars().next_back()
+                } else {
+                    right_text.chars().next()
+                }?;
+            let space = &fragments[space_index];
+            let spacing =
+                fragment_french_autospace_pair(left_character, right_character, &space.style)
+                    .map(|spacing| {
+                        measure_text_width(&spacing.character().to_string(), &space.metrics)
+                    })
+                    .or_else(|| {
+                        fragment_autospace_pair_applies(
+                            left_character,
+                            right_character,
+                            &space.style,
+                        )
+                        .then_some(space.metrics.font_size * 0.125)
+                    })?;
+            Some((space_index, spacing))
+        })
+        .collect::<Vec<_>>();
+    for (space_index, spacing) in visual_replacements {
+        fragments[space_index].rect.width = spacing;
+        fragments[space_index].autospace_after = spacing;
+    }
+
     let mut cursor = line_start;
     for logical_index in visual_order {
         let fragment = &mut fragments[logical_index];
@@ -5658,6 +6695,186 @@ fn resolve_line_bidi_geometry(
             homogeneous_levels[logical_index].map(|level| level.number());
         cursor += fragment.rect.width;
     }
+}
+
+fn apply_line_text_spacing_trim(
+    fragments: &mut [InlineFragment],
+    direction_rtl: bool,
+    space_first_should_space: bool,
+    allow_end_should_trim: bool,
+) -> f32 {
+    fn source_edge(fragment: &InlineFragment, physical_left: bool) -> Option<(char, bool)> {
+        let text = fragment.text()?;
+        let reversed = fragment
+            .style
+            .resolved_bidi_level
+            .is_some_and(|level| level % 2 == 1);
+        let source_first = physical_left != reversed;
+        let character = if source_first {
+            text.chars().next()
+        } else {
+            text.chars().next_back()
+        }?;
+        Some((character, source_first))
+    }
+
+    let mut visual_order = (0..fragments.len()).collect::<Vec<_>>();
+    visual_order.sort_by(|left, right| {
+        let left_start = fragments[*left]
+            .rect
+            .x
+            .min(fragments[*left].rect.x + fragments[*left].rect.width);
+        let right_start = fragments[*right]
+            .rect
+            .x
+            .min(fragments[*right].rect.x + fragments[*right].rect.width);
+        left_start
+            .total_cmp(&right_start)
+            .then_with(|| left.cmp(right))
+    });
+    let mut text_groups = vec![Vec::new()];
+    for index in visual_order.iter().copied() {
+        if fragments[index].text().is_some_and(|text| !text.is_empty()) {
+            text_groups.last_mut().unwrap().push(index);
+        } else if !matches!(
+            fragments[index].content,
+            InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+        ) || fragments[index].rect.width != 0.0
+        {
+            text_groups.push(Vec::new());
+        }
+    }
+
+    let mut trim_source_edges = Vec::<(usize, bool)>::new();
+    for group in &text_groups {
+        for pair in group.windows(2) {
+            let left_index = pair[0];
+            let right_index = pair[1];
+            let Some((left_character, left_source_first)) =
+                source_edge(&fragments[left_index], false)
+            else {
+                continue;
+            };
+            let Some((right_character, right_source_first)) =
+                source_edge(&fragments[right_index], true)
+            else {
+                continue;
+            };
+            let vertical = fragments[right_index].metrics.vertical_writing;
+            let left_class = super::fullwidth_punctuation_class(left_character, vertical);
+            let right_class = super::fullwidth_punctuation_class(right_character, vertical);
+            if right_class == Some(super::FullwidthPunctuationClass::Opening)
+                && fragments[right_index].metrics.text_spacing_trim.adjacent
+                    == super::TextSpacingTrimAdjacent::Trim
+                && super::opening_punctuation_trims_after(
+                    left_character,
+                    fragments[left_index].metrics.font_size,
+                    fragments[right_index].metrics.font_size,
+                    vertical,
+                )
+            {
+                trim_source_edges.push((right_index, right_source_first));
+            }
+            if left_class == Some(super::FullwidthPunctuationClass::Closing)
+                && fragments[left_index].metrics.text_spacing_trim.adjacent
+                    == super::TextSpacingTrimAdjacent::Trim
+                && super::closing_punctuation_trims_before(
+                    right_character,
+                    fragments[left_index].metrics.font_size,
+                    fragments[right_index].metrics.font_size,
+                    vertical,
+                )
+            {
+                trim_source_edges.push((left_index, left_source_first));
+            }
+        }
+    }
+
+    let first_meaningful = visual_order.iter().copied().find(|index| {
+        fragments[*index]
+            .text()
+            .is_some_and(|text| !text.is_empty())
+            || fragments[*index].rect.width != 0.0
+    });
+    let last_meaningful = visual_order.iter().copied().rev().find(|index| {
+        fragments[*index]
+            .text()
+            .is_some_and(|text| !text.is_empty())
+            || fragments[*index].rect.width != 0.0
+    });
+    let inline_start = if direction_rtl {
+        last_meaningful
+    } else {
+        first_meaningful
+    };
+    let inline_end = if direction_rtl {
+        first_meaningful
+    } else {
+        last_meaningful
+    };
+    if let Some(index) = inline_start
+        && let Some((character, source_first)) = source_edge(&fragments[index], !direction_rtl)
+        && super::fullwidth_punctuation_class(character, fragments[index].metrics.vertical_writing)
+            == Some(super::FullwidthPunctuationClass::Opening)
+        && (fragments[index].metrics.text_spacing_trim.start == super::TextSpacingTrimStart::Trim
+            || fragments[index].metrics.text_spacing_trim.start
+                == super::TextSpacingTrimStart::SpaceFirst
+                && !space_first_should_space)
+    {
+        trim_source_edges.push((index, source_first));
+    }
+    if let Some(index) = inline_end
+        && let Some((character, source_first)) = source_edge(&fragments[index], direction_rtl)
+        && super::fullwidth_punctuation_class(character, fragments[index].metrics.vertical_writing)
+            == Some(super::FullwidthPunctuationClass::Closing)
+        && (fragments[index].metrics.text_spacing_trim.end == super::TextSpacingTrimEnd::Trim
+            || fragments[index].metrics.text_spacing_trim.end == super::TextSpacingTrimEnd::Allow
+                && allow_end_should_trim)
+    {
+        trim_source_edges.push((index, source_first));
+    }
+
+    trim_source_edges.sort_unstable();
+    trim_source_edges.dedup();
+    for (index, source_first) in trim_source_edges {
+        if source_first {
+            fragments[index].punctuation_trim.first = true;
+        } else {
+            fragments[index].punctuation_trim.last = true;
+        }
+    }
+
+    let old_width = fragments
+        .iter()
+        .map(|fragment| fragment.rect.width)
+        .sum::<f32>();
+    for fragment in fragments.iter_mut() {
+        let Some(text) = fragment.text() else {
+            continue;
+        };
+        if fragment.punctuation_trim == Default::default() {
+            continue;
+        }
+        let untrimmed = measure_text_width(text, &fragment.metrics);
+        let trimmed =
+            measure_text_width_with_trim_edges(text, &fragment.metrics, fragment.punctuation_trim);
+        fragment.rect.width += trimmed - untrimmed;
+    }
+    let new_width = fragments
+        .iter()
+        .map(|fragment| fragment.rect.width)
+        .sum::<f32>();
+    let line_start = visual_order
+        .iter()
+        .map(|index| fragments[*index].rect.x)
+        .reduce(f32::min)
+        .unwrap_or(0.0);
+    let mut cursor = line_start;
+    for index in visual_order {
+        fragments[index].rect.x = cursor;
+        cursor += fragments[index].rect.width;
+    }
+    new_width - old_width
 }
 
 fn bidi_controls(style: &FragmentStyle) -> (&'static str, &'static str) {
@@ -5682,7 +6899,22 @@ fn bidi_controls(style: &FragmentStyle) -> (&'static str, &'static str) {
 // ── Text measurement ────────────────────────────────────────────────────────
 
 pub(super) fn measure_text_width(text: &str, metrics: &FontMetrics) -> f32 {
+    measure_text_width_with_trim_edges(text, metrics, Default::default())
+}
+
+fn measure_text_width_with_trim_edges(
+    text: &str,
+    metrics: &FontMetrics,
+    edges: super::PunctuationTrim,
+) -> f32 {
     let _measure_phase = super::profile::Scope::begin(super::profile::Phase::TextMeasure);
+    let shaping_options = super::text_spacing_trim_shaping_options_with_edges(
+        text,
+        metrics.text_spacing_trim,
+        metrics.vertical_writing,
+        edges,
+        &metrics.shaping_options,
+    );
     LAYOUT_FONTS.with(|cell| {
         let mut fonts_ref = cell.borrow_mut();
         if fonts_ref.is_none() {
@@ -5725,19 +6957,69 @@ pub(super) fn measure_text_width(text: &str, metrics: &FontMetrics) -> f32 {
             drop(font_phase);
             let primary = selected.as_ref().map(AsRef::as_ref);
             if primary.is_some() || !context.system_fonts.is_empty() {
+                let horizontal_options = if metrics.vertical_writing {
+                    metrics.shaping_options.as_ref()
+                } else {
+                    shaping_options.as_ref()
+                };
                 let base = measure_text_width_with_fallback(
                     text,
                     metrics.font_size,
-                    &metrics.shaping_options,
+                    horizontal_options,
                     primary,
                     &web_candidates,
                     &context.system_fonts,
                 );
+                let vertical_trim_delta = if metrics.vertical_writing
+                    && matches!(shaping_options, std::borrow::Cow::Owned(_))
+                {
+                    let untrimmed = measure_text_advance_with_fallback(
+                        text,
+                        metrics.font_size,
+                        &metrics.shaping_options,
+                        primary,
+                        &web_candidates,
+                        &context.system_fonts,
+                        ShapingDirection::TopToBottom,
+                        true,
+                    );
+                    let trimmed = measure_text_advance_with_fallback(
+                        text,
+                        metrics.font_size,
+                        &shaping_options,
+                        primary,
+                        &web_candidates,
+                        &context.system_fonts,
+                        ShapingDirection::TopToBottom,
+                        true,
+                    );
+                    trimmed - untrimmed
+                } else {
+                    0.0
+                };
                 // Shaped paint inserts spacing between extended grapheme
                 // clusters, not between the scalars that form one cluster.
                 let spacing = metrics.letter_spacing * grapheme_spacing_boundaries(text) as f32;
                 let word_spacing = metrics.word_spacing * text.matches(' ').count() as f32;
-                return base + spacing + word_spacing;
+                let french_spacing = super::font_metrics_french_autospace_boundaries(text, metrics)
+                    .into_iter()
+                    .map(|(_, spacing)| {
+                        measure_text_width_with_fallback(
+                            &spacing.character().to_string(),
+                            metrics.font_size,
+                            &shaping_options,
+                            primary,
+                            &web_candidates,
+                            &context.system_fonts,
+                        )
+                    })
+                    .sum::<f32>();
+                return base
+                    + vertical_trim_delta
+                    + spacing
+                    + word_spacing
+                    + french_spacing
+                    + super::font_metrics_autospace_advance(text, metrics);
             }
         }
 
@@ -5749,7 +7031,17 @@ pub(super) fn measure_text_width(text: &str, metrics: &FontMetrics) -> f32 {
         let base = char_count as f32 * metrics.average_advance;
         let spacing = metrics.letter_spacing * grapheme_spacing_boundaries(text) as f32;
         let word_spacing = metrics.word_spacing * text.matches(' ').count() as f32;
-        base + spacing + word_spacing
+        let french_spacing = super::font_metrics_french_autospace_boundaries(text, metrics)
+            .into_iter()
+            .map(|(_, spacing)| match spacing {
+                super::FrenchAutospace::NarrowNoBreak => metrics.font_size * 0.2,
+                super::FrenchAutospace::NoBreak => metrics.average_advance,
+            })
+            .sum::<f32>();
+        base + spacing
+            + word_spacing
+            + french_spacing
+            + super::font_metrics_autospace_advance(text, metrics)
     })
 }
 
@@ -5773,6 +7065,22 @@ fn measure_text_width_with_fallback(
     } else {
         ShapingDirection::LeftToRight
     };
+    measure_text_advance_with_fallback(
+        text, font_size, options, primary, web_fonts, fonts, direction, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_text_advance_with_fallback(
+    text: &str,
+    font_size: f32,
+    options: &crate::font::ShapingOptions,
+    primary: Option<&Font>,
+    web_fonts: &[WebFontCandidate<'_>],
+    fonts: &[Arc<Font>],
+    direction: ShapingDirection,
+    vertical_axis: bool,
+) -> f32 {
     let mut run_fonts =
         Vec::with_capacity(web_fonts.len() + fonts.len() + usize::from(primary.is_some()));
     run_fonts.extend(web_fonts.iter().map(|candidate| FontFallbackCandidate {
@@ -5800,7 +7108,13 @@ fn measure_text_width_with_fallback(
         return runs
             .iter()
             .flat_map(|run| &run.glyphs)
-            .map(|glyph| glyph.x_advance.abs())
+            .map(|glyph| {
+                if vertical_axis {
+                    glyph.y_advance.abs()
+                } else {
+                    glyph.x_advance.abs()
+                }
+            })
             .sum();
     }
 
@@ -5819,7 +7133,16 @@ fn measure_text_width_with_fallback(
         .map(|candidate| candidate.font)
     {
         if let Ok(glyphs) = font.shape_text_with_options(text, font_size, direction, options) {
-            return glyphs.iter().map(|glyph| glyph.x_advance.abs()).sum();
+            return glyphs
+                .iter()
+                .map(|glyph| {
+                    if vertical_axis {
+                        glyph.y_advance.abs()
+                    } else {
+                        glyph.x_advance.abs()
+                    }
+                })
+                .sum();
         }
     }
 
@@ -5841,7 +7164,8 @@ fn measure_text_width_with_fallback(
         };
         let font_id = std::ptr::from_ref(font);
 
-        if !is_zero_advance_character(ch)
+        if !vertical_axis
+            && !is_zero_advance_character(ch)
             && let Some((prev_char, prev_font)) = previous
             && prev_font == font_id
         {
@@ -5849,7 +7173,11 @@ fn measure_text_width_with_fallback(
         }
 
         if !is_zero_advance_character(ch) {
-            let advance = font.glyph_advance(ch, font_size);
+            let advance = if vertical_axis {
+                font_size
+            } else {
+                font.glyph_advance(ch, font_size)
+            };
             width += if advance > 0.0 { advance } else { 0.0 };
             previous = Some((ch, font_id));
         }

@@ -167,16 +167,37 @@ pub enum ShapingDirection {
 pub struct OpenTypeFeature {
     tag: [u8; 4],
     value: u32,
+    start: u32,
+    end: u32,
 }
 
 impl OpenTypeFeature {
     /// Creates a feature after the CSS boundary has validated its tag and value.
     pub const fn new(tag: [u8; 4], value: u32) -> Self {
-        Self { tag, value }
+        Self {
+            tag,
+            value,
+            start: 0,
+            end: u32::MAX,
+        }
+    }
+
+    /// Creates a feature restricted to a validated UTF-8 source-byte range.
+    pub(crate) fn for_range(tag: [u8; 4], value: u32, range: std::ops::Range<usize>) -> Self {
+        Self {
+            tag,
+            value,
+            start: range.start.min(u32::MAX as usize) as u32,
+            end: range.end.min(u32::MAX as usize) as u32,
+        }
     }
 
     fn rustybuzz(self) -> Feature {
-        Feature::new(Tag::from_bytes(&self.tag), self.value, ..)
+        Feature::new(
+            Tag::from_bytes(&self.tag),
+            self.value,
+            self.start as usize..self.end as usize,
+        )
     }
 
     fn enables(self, tag: &[u8; 4]) -> bool {

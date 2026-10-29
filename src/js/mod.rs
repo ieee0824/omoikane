@@ -19200,7 +19200,9 @@ fn computed_value_to_css_string(property_name: &str, value: &ComputedValue) -> S
     match value {
         ComputedValue::Keyword(keyword) => keyword.clone(),
         ComputedValue::Color(color) => computed_color_to_css_string(color),
-        ComputedValue::String(string) if property_name == "hyphenate-character" => {
+        ComputedValue::String(string)
+            if matches!(property_name, "hyphenate-character" | "text-emphasis-style") =>
+        {
             cssom_normalization::serialize_css_string(string)
         }
         ComputedValue::String(string) => string.clone(),
@@ -19251,12 +19253,32 @@ fn computed_text_wrap(style: &ComputedStyle) -> Option<String> {
     })
 }
 
+fn computed_text_emphasis(style: &ComputedStyle) -> Option<String> {
+    let emphasis_style = style.get("text-emphasis-style")?;
+    let emphasis_style = computed_value_to_css_string("text-emphasis-style", emphasis_style);
+    let emphasis_color = style.get("text-emphasis-color")?.css_text();
+    let emphasis_color = if emphasis_color.eq_ignore_ascii_case("currentcolor") {
+        style.get("color")?.css_text()
+    } else {
+        emphasis_color
+    };
+    Some(format!(
+        "{emphasis_style} {}",
+        computed_color_to_css_string(&emphasis_color)
+    ))
+}
+
 /// Resolves property values that need the element's own context for CSSOM.
 fn computed_style_property_to_css_string(
     property_name: &str,
     value: &ComputedValue,
     style: &ComputedStyle,
 ) -> String {
+    if property_name == "text-emphasis"
+        && let Some(value) = computed_text_emphasis(style)
+    {
+        return value;
+    }
     if property_name == "line-height" {
         if let ComputedValue::Number(factor) = value {
             if let Some(ComputedValue::Px(font_size)) = style.get("font-size") {
