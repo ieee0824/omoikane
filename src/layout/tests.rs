@@ -3709,6 +3709,61 @@ fn initial_letter_sinks_and_excludes_following_lines() {
 }
 
 #[test]
+fn initial_letter_raise_includes_opening_punctuation_and_uses_rtl_start() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    paragraph.append_child(NodeHandle::text(
+        "“A one two three four five six seven eight nine ten",
+    ));
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { margin:0; width:100px; font:10px monospace; line-height:10px; direction:rtl } \
+             p::first-letter { initial-letter:3 raise }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 20.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let paragraph = find_layout_box(&layout, &paragraph).unwrap();
+    let initial = paragraph.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("“A"))
+        .expect("opening punctuation must stay with the raised first letter");
+    assert!((initial.rect.height - 30.0).abs() < 0.01);
+    assert!((initial.rect.y - paragraph.dimensions.content.y + 20.0).abs() < 0.01);
+    assert!(
+        (initial.rect.x + initial.rect.width
+            - paragraph.dimensions.content.x
+            - paragraph.dimensions.content.width)
+            .abs()
+            < 0.01
+    );
+    assert!(
+        paragraph.lines[0]
+            .fragments
+            .iter()
+            .filter(|fragment| fragment.text() != Some("“A"))
+            .all(|fragment| fragment.rect.x + fragment.rect.width <= initial.rect.x + 0.01)
+    );
+}
+
+#[test]
 fn horizontal_rtl_inline_geometry_uses_logical_start_and_end() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
