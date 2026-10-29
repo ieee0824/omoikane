@@ -1534,6 +1534,9 @@ impl Parser {
     }
 
     fn parse_style_attribute(&mut self) -> Vec<Declaration> {
+        if has_nested_important_marker(&self.tokens) {
+            return Vec::new();
+        }
         let mut declarations = Vec::new();
         loop {
             self.skip_whitespace();
@@ -1578,7 +1581,7 @@ impl Parser {
         }
     }
 
-    fn parse_declaration_value_tokens(&mut self) -> Vec<CssToken> {
+    fn parse_declaration_value_tokens(&mut self) -> (Vec<CssToken>, usize) {
         let mut value_tokens = Vec::new();
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
@@ -1608,8 +1611,9 @@ impl Parser {
 
         // CSS component values close unfinished functions at the end of their
         // containing declaration, including before `;` and `}` delimiters.
+        let source_len = value_tokens.len();
         value_tokens.extend(std::iter::repeat_n(CssToken::ParenClose, paren_depth));
-        value_tokens
+        (value_tokens, source_len)
     }
 
     fn parse_declaration(&mut self) -> Result<Vec<Declaration>, CssParseError> {
@@ -1623,7 +1627,11 @@ impl Parser {
         self.expect_colon()?;
         self.skip_whitespace();
 
-        let value_tokens = self.parse_declaration_value_tokens();
+        let (value_tokens, source_len) = self.parse_declaration_value_tokens();
+
+        if has_nested_important_suffix(&value_tokens[..source_len]) {
+            return Err(CssParseError::InvalidDeclaration);
+        }
 
         let (value_tokens, important) = split_important(&value_tokens);
         let contains_var = tokens_contain_var_function(&value_tokens);
@@ -2587,6 +2595,44 @@ fn split_important(tokens: &[CssToken]) -> (Vec<CssToken>, bool) {
     }
 
     (tokens.to_vec(), false)
+}
+
+fn has_nested_important_suffix(tokens: &[CssToken]) -> bool {
+    let Some(important_index) = tokens
+        .iter()
+        .rposition(|token| !matches!(token, CssToken::Whitespace))
+    else {
+        return false;
+    };
+    if !matches!(
+        &tokens[important_index],
+        CssToken::Ident(keyword) if keyword.eq_ignore_ascii_case("important")
+    ) {
+        return false;
+    }
+    let Some(bang_index) = tokens[..important_index]
+        .iter()
+        .rposition(|token| !matches!(token, CssToken::Whitespace))
+    else {
+        return false;
+    };
+    matches!(tokens[bang_index], CssToken::Delim('!')) && !token_is_at_top_level(tokens, bang_index)
+}
+
+fn has_nested_important_marker(tokens: &[CssToken]) -> bool {
+    tokens.iter().enumerate().any(|(important_index, token)| {
+        if !matches!(token, CssToken::Ident(keyword) if keyword.eq_ignore_ascii_case("important")) {
+            return false;
+        }
+        let Some(bang_index) = tokens[..important_index]
+            .iter()
+            .rposition(|token| !matches!(token, CssToken::Whitespace))
+        else {
+            return false;
+        };
+        matches!(tokens[bang_index], CssToken::Delim('!'))
+            && !token_is_at_top_level(tokens, bang_index)
+    })
 }
 
 fn token_is_at_top_level(tokens: &[CssToken], index: usize) -> bool {

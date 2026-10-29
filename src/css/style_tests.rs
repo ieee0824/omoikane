@@ -14744,7 +14744,7 @@ fn inline_display_toggle_updates_external_counter_and_geometry_like_full_clear()
     target.append_child(child.clone());
     parent.append_child(observer.clone());
     target.set_attribute("style", "display:block");
-    let stylesheet = "#parent{width:200px;container-type:inline-size}\
+    let stylesheet = "#parent{display:block;width:200px;container-type:inline-size}\
         #target{height:20px;width:180px;container-type:inline-size;counter-reset:item 7}\
         #observer{display:block;height:10px;color:color(srgb calc(sign(2cqh - .4px)) 0 0)}\
         #observer::before{content:counter(item)}\
@@ -14809,9 +14809,9 @@ fn inline_display_toggle_updates_external_counter_and_geometry_like_full_clear()
         );
         if current == "display:none" {
             assert_ne!(actual, initial, "hidden subtree must change full geometry");
-            assert_ne!(
+            assert_eq!(
                 color, visible_observer_color,
-                "external sibling's cqh color must track ancestor auto height"
+                "cqh must use the viewport fallback for an inline-size container"
             );
         } else {
             assert_eq!(actual, initial, "showing subtree must restore geometry");
