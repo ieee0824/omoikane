@@ -3332,10 +3332,14 @@ fn line_clamp_limits_direct_and_descendant_line_boxes() {
         paragraph.append_child(NodeHandle::text(text));
         exact.append_child(paragraph);
     }
+    let legacy = NodeHandle::element("div");
+    legacy.set_attribute("id", "legacy");
+    legacy.append_child(NodeHandle::text("aa bb cc dd"));
     document.append_child(body.clone());
     body.append_child(direct.clone());
     body.append_child(nested.clone());
     body.append_child(exact.clone());
+    body.append_child(legacy.clone());
 
     let mut resolver = resolver_without_body_ua_margin();
     resolver.add_stylesheet(
@@ -3344,6 +3348,7 @@ fn line_clamp_limits_direct_and_descendant_line_boxes() {
             "div, p { margin:0; font:10px monospace; line-height:10px } \
              #direct { width:50px; line-clamp:1 \"MORE\" } \
              #nested, #exact { line-clamp:2 } \
+             #legacy { width:50px; -webkit-line-clamp:1 } \
              #nested p:first-child { position:relative; top:30px } \
              #nested p:nth-child(2) { block-ellipsis:\"INNER\" }",
         )
@@ -3391,6 +3396,18 @@ fn line_clamp_limits_direct_and_descendant_line_boxes() {
     let exact_box = find_layout_box(&layout, &exact).unwrap();
     assert!((exact_box.dimensions.content.height - 20.0).abs() < 0.01);
     assert_eq!(exact_box.overflow, Overflow::Visible);
+
+    let legacy_box = find_layout_box(&layout, &legacy).unwrap();
+    assert!((legacy_box.dimensions.content.height - 10.0).abs() < 0.01);
+    assert_eq!(legacy_box.overflow, Overflow::Clip);
+    assert_eq!(
+        legacy_box.lines[0]
+            .text_overflow
+            .as_ref()
+            .and_then(|paint| paint.fragments.last())
+            .and_then(InlineFragment::text),
+        Some("…")
+    );
 }
 
 #[test]

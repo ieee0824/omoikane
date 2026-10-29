@@ -3780,7 +3780,9 @@ fn line_clamp_max_lines(style: &ComputedStyle) -> Option<usize> {
     let Some(ComputedValue::Keyword(continuation)) = style.get_by_id(PropertyId::Continue) else {
         return None;
     };
-    if !continuation.eq_ignore_ascii_case("collapse") {
+    if !continuation.eq_ignore_ascii_case("collapse")
+        && !continuation.eq_ignore_ascii_case("-webkit-legacy")
+    {
         return None;
     }
     let Some(ComputedValue::Keyword(max_lines)) = style.get_by_id(PropertyId::MaxLines) else {
