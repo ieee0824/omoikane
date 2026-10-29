@@ -31,6 +31,7 @@ const VALIDATED_PROPERTIES: &[&str] = &[
     "mix-blend-mode",
     "isolation",
     "text-overflow",
+    "tab-size",
     "content-visibility",
     "opacity",
     "width",
@@ -356,6 +357,31 @@ mod tests {
         assert_eq!(
             normalize("transform", "scale(calc(log(0)))").as_deref(),
             Some("scale(calc(-infinity))")
+        );
+    }
+
+    #[test]
+    fn property_boundaries_finish_numeric_math_normalization() {
+        assert_eq!(normalize("tab-size", "calc(40% + 50px)"), None);
+        assert_eq!(
+            normalize("scale", "calc(2 * 1) 3 calc(4 * 100%)").as_deref(),
+            Some("calc(2) 3 calc(400%)")
+        );
+        assert_eq!(
+            normalize("color", "color(xyz 0 calc(infinity) 0)").as_deref(),
+            Some("color(xyz-d65 0 calc(infinity) 0)")
+        );
+        assert_eq!(
+            normalize("color", "hwb(calc(infinity) 20% 10%)").as_deref(),
+            Some("rgb(230, 51, 51)")
+        );
+        assert_eq!(
+            normalize(
+                "color",
+                "lch(calc(50 * 3) calc(0.5 - 1) calc(20deg * 2) / calc(-0.5 + 1))",
+            )
+            .as_deref(),
+            Some("lch(calc(150) calc(-0.5) calc(40deg) / calc(0.5))")
         );
     }
 }

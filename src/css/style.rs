@@ -5965,6 +5965,11 @@ pub(crate) fn normalize_numeric_math_specified(property: &str, text: &str) -> Op
     if !supports_declaration(property, text) {
         return None;
     }
+    if is_color_property(property)
+        && let Some(color) = crate::paint::color4::CssColor::parse(text)
+    {
+        return Some(color.serialize());
+    }
     let value = super::parse_style_attribute(&format!("{property}: {text}"))
         .into_iter()
         .find(|declaration| declaration.name == property)?
@@ -5988,6 +5993,14 @@ pub(crate) fn normalize_numeric_math_specified(property: &str, text: &str) -> Op
                 if let Some(result) = individual_transform::fixed_unclamped_number_expression(value)
                 {
                     return (format!("calc({})", number(result)), true);
+                }
+                if let Some(result) = individual_transform::fixed_percentage_expression(value) {
+                    return (format!("calc({}%)", number(result)), true);
+                }
+                if let Some(Value::Length(result, unit)) =
+                    individual_transform::fixed_angle_expression(value)
+                {
+                    return (format!("calc({}{unit})", number(result)), true);
                 }
                 let canonical = arguments.iter().map(canonical).collect::<Vec<_>>();
                 let changed = canonical.iter().any(|(_, changed)| *changed);
