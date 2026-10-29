@@ -592,6 +592,12 @@ fn paint_text_fragment_glyphs(
     // independent styling.
     let frag_color =
         override_color.unwrap_or_else(|| fragment_paint_color(fragment, resolver, fallback_color));
+    // Layout gives preserved tabs their cursor-relative advance. They do not
+    // produce a glyph, but the fragment remains so selection, decoration, and
+    // DOM source mapping retain the occupied inline range.
+    if text == "\t" {
+        return (frag_color, vertical_paint_mode(&fragment.style));
+    }
     let text_transform = fragment_text_transform(&fragment.style);
 
     let transformed = apply_text_transform(text, text_transform);

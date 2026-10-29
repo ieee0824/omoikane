@@ -2836,10 +2836,17 @@ pub(super) enum WhiteSpaceCollapse {
     BreakSpaces,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TabSize {
+    Spaces(f32),
+    Length(f32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct WhiteSpaceMode {
     collapse: WhiteSpaceCollapse,
     wraps: bool,
+    tab_size: TabSize,
 }
 
 impl WhiteSpaceMode {
@@ -2847,6 +2854,7 @@ impl WhiteSpaceMode {
         Self {
             collapse: WhiteSpaceCollapse::PreserveBreaks,
             wraps: true,
+            tab_size: TabSize::Spaces(8.0),
         }
     }
 
@@ -2876,6 +2884,26 @@ impl WhiteSpaceMode {
     pub(super) fn collapse(self) -> WhiteSpaceCollapse {
         self.collapse
     }
+
+    fn tab_advance(self, used_inline_size: f32, metrics: FontMetrics) -> f32 {
+        let interval = match self.tab_size {
+            TabSize::Spaces(count) => {
+                let mut space_metrics = metrics;
+                space_metrics.word_spacing = 0.0;
+                measure_text_width(" ", space_metrics) * count
+            }
+            TabSize::Length(length) => length,
+        };
+        if interval <= 0.0 || !interval.is_finite() {
+            return 0.0;
+        }
+        let remainder = used_inline_size.max(0.0) % interval;
+        if remainder <= f32::EPSILON {
+            interval
+        } else {
+            interval - remainder
+        }
+    }
 }
 
 pub(super) fn white_space(style: &ComputedStyle) -> WhiteSpaceMode {
@@ -2894,7 +2922,16 @@ pub(super) fn white_space(style: &ComputedStyle) -> WhiteSpaceMode {
         style.get("text-wrap-mode"),
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("nowrap")
     );
-    WhiteSpaceMode { collapse, wraps }
+    let tab_size = match style.get("tab-size") {
+        Some(ComputedValue::Px(length)) => TabSize::Length(length.max(0.0)),
+        Some(ComputedValue::Number(count)) => TabSize::Spaces(count.max(0.0)),
+        _ => TabSize::Spaces(8.0),
+    };
+    WhiteSpaceMode {
+        collapse,
+        wraps,
+        tab_size,
+    }
 }
 
 pub(super) fn normalize_text(text: &str, mode: WhiteSpaceMode) -> String {
@@ -3574,7 +3611,18 @@ fn layout_inline_segments(
                         line_constraints,
                     );
                 }
-                piece @ InlinePiece::Fragment { .. } => {
+                mut piece @ InlinePiece::Fragment { .. } => {
+                    if let InlinePiece::Fragment {
+                        content: InlineFragmentContent::Text(text),
+                        width,
+                        ..
+                    } = &mut piece
+                        && text == "\t"
+                    {
+                        *width = segment
+                            .white_space_mode
+                            .tab_advance(cursor.x - cursor.start_x, segment.metrics);
+                    }
                     let input =
                         InlineFragmentInput::new(segment, piece, &mut text_byte, &mut source_token);
                     layout_inline_fragment(
@@ -3773,6 +3821,28 @@ fn split_text_segment(
         WordBreak::KeepAll => split_words_no_cjk_break,
         WordBreak::Normal | WordBreak::BreakWord => split_words_preserving_spaces_cjk,
     };
+
+    // A tab advances to a cursor-relative stop, so it cannot be measured with
+    // the surrounding shaped text. Keep it as an independent piece whose used
+    // width is filled in by the line builder once the current inline position
+    // is known.
+    if text.contains('\t') {
+        let parts = text.split('\t').collect::<Vec<_>>();
+        let mut pieces = Vec::new();
+        for (index, part) in parts.iter().enumerate() {
+            if !part.is_empty() {
+                pieces.extend(split_text_segment(part, metrics, line_height, wb, ws_mode));
+            }
+            if index + 1 < parts.len() {
+                pieces.push(InlinePiece::Fragment {
+                    content: InlineFragmentContent::Text("\t".to_string()),
+                    width: 0.0,
+                    height: line_height,
+                });
+            }
+        }
+        return pieces;
+    }
 
     // For nowrap: treat the entire text as one fragment (no splitting into words).
     if !ws_mode.allows_wrapping() {

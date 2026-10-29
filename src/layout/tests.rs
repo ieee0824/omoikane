@@ -2568,6 +2568,66 @@ fn whitespace_longhands_drive_normalization_and_wrapping() {
 }
 
 #[test]
+fn tab_size_advances_to_cursor_relative_stops() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let columns = NodeHandle::element("p");
+    columns.set_attribute("id", "columns");
+    columns.append_child(NodeHandle::text("A\tB"));
+    let length = NodeHandle::element("p");
+    length.set_attribute("id", "length");
+    length.append_child(NodeHandle::text("A\tB"));
+    document.append_child(body.clone());
+    body.append_child(columns);
+    body.append_child(length);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { white-space: pre; font: 20px monospace; } \
+             #columns { tab-size: 4; } \
+             #length { tab-size: 40px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let column_fragments = &layout.children[0].lines[0].fragments;
+    let column_a = column_fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .unwrap();
+    let column_b = column_fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("B"))
+        .unwrap();
+    let space_width = super::inline::measure_text_width(" ", column_a.metrics);
+    assert!((column_b.rect.x - column_a.rect.x - 4.0 * space_width).abs() < 0.01);
+
+    let length_fragments = &layout.children[1].lines[0].fragments;
+    let length_a = length_fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .unwrap();
+    let length_b = length_fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("B"))
+        .unwrap();
+    assert!((length_b.rect.x - length_a.rect.x - 40.0).abs() < 0.01);
+}
+
+#[test]
 fn pre_white_space_preserves_spaces_and_newlines() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
