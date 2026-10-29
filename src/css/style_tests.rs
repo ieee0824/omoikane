@@ -8940,6 +8940,111 @@ fn invalid_line_alignment_and_hanging_punctuation_use_initial_values() {
 }
 
 #[test]
+fn line_clamp_and_text_box_shorthands_expand_to_specified_longhands() {
+    let document = NodeHandle::document();
+    let standard = NodeHandle::element("div");
+    standard.set_attribute("id", "standard");
+    let legacy = NodeHandle::element("div");
+    legacy.set_attribute("id", "legacy");
+    let metrics = NodeHandle::element("div");
+    metrics.set_attribute("id", "metrics");
+    document.append_child(standard.clone());
+    document.append_child(legacy.clone());
+    document.append_child(metrics.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#standard { line-clamp: 3 \"more\"; } \
+             #legacy { -webkit-line-clamp: 2; } \
+             #metrics { max-lines: 4 auto; initial-letter: drop 2.5; \
+                        text-box: cap alphabetic trim-end; }",
+        )
+        .unwrap(),
+    );
+
+    let standard = resolver.computed_style(&standard);
+    assert_eq!(
+        standard.get("max-lines"),
+        Some(&ComputedValue::Keyword("3".into()))
+    );
+    assert_eq!(
+        standard.get("block-ellipsis"),
+        Some(&ComputedValue::Keyword("\"more\"".into()))
+    );
+    assert_eq!(
+        standard.get("continue"),
+        Some(&ComputedValue::Keyword("collapse".into()))
+    );
+
+    let legacy = resolver.computed_style(&legacy);
+    assert_eq!(
+        legacy.get("max-lines"),
+        Some(&ComputedValue::Keyword("2".into()))
+    );
+    assert_eq!(
+        legacy.get("block-ellipsis"),
+        Some(&ComputedValue::Keyword("ellipsis".into()))
+    );
+    assert_eq!(
+        legacy.get("continue"),
+        Some(&ComputedValue::Keyword("-webkit-legacy".into()))
+    );
+
+    let metrics = resolver.computed_style(&metrics);
+    assert_eq!(
+        metrics.get("max-lines"),
+        Some(&ComputedValue::Keyword("auto 4".into()))
+    );
+    assert_eq!(
+        metrics.get("initial-letter"),
+        Some(&ComputedValue::Keyword("2.5 2".into()))
+    );
+    assert_eq!(
+        metrics.get("text-box-trim"),
+        Some(&ComputedValue::Keyword("trim-end".into()))
+    );
+    assert_eq!(
+        metrics.get("text-box-edge"),
+        Some(&ComputedValue::Keyword("cap alphabetic".into()))
+    );
+}
+
+#[test]
+fn invalid_line_clamp_and_text_box_values_use_initial_values() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { max-lines: 0; block-ellipsis: marker; continue: stop; \
+                   initial-letter: 0; text-box-trim: both; text-box-edge: cap; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    for (name, expected) in [
+        ("max-lines", "auto"),
+        ("block-ellipsis", "no-ellipsis"),
+        ("continue", "normal"),
+        ("initial-letter", "normal"),
+        ("text-box-trim", "none"),
+        ("text-box-edge", "auto"),
+    ] {
+        assert_eq!(
+            style.get(name),
+            Some(&ComputedValue::Keyword(expected.into())),
+            "{name} should reject its invalid declaration"
+        );
+    }
+}
+
+#[test]
 fn text_wrap_shorthand_expands_mode_and_style_in_either_order() {
     let document = NodeHandle::document();
     let first = NodeHandle::element("div");

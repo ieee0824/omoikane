@@ -106,6 +106,8 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "flex" => expand_flex_shorthand(value, important),
         "text-decoration" => expand_text_decoration_shorthand(value, important),
         "text-wrap" => expand_text_wrap_shorthand(value, important),
+        "line-clamp" | "-webkit-line-clamp" => expand_line_clamp_shorthand(name, value, important),
+        "text-box" => expand_text_box_shorthand(value, important),
         "white-space" => expand_white_space_shorthand(value, important),
         "border-radius" => expand_border_radius_shorthand(value, important),
         "box-shadow" => expand_box_shadow_shorthand(value, important),
@@ -190,6 +192,9 @@ pub(super) fn is_deferred_var_shorthand(name: &str) -> bool {
             | "flex"
             | "text-decoration"
             | "text-wrap"
+            | "line-clamp"
+            | "-webkit-line-clamp"
+            | "text-box"
             | "border-radius"
             | "list-style"
             | "flex-flow"
@@ -383,6 +388,14 @@ fn expand_css_wide_shorthand(
         .map(str::to_string)
         .collect(),
         "text-wrap" => ["text-wrap-mode", "text-wrap-style"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "line-clamp" | "-webkit-line-clamp" => ["max-lines", "block-ellipsis", "continue"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "text-box" => ["text-box-trim", "text-box-edge"]
             .into_iter()
             .map(str::to_string)
             .collect(),
@@ -2433,6 +2446,193 @@ fn expand_text_wrap_shorthand(value: Value, important: bool) -> Vec<Declaration>
         important,
     })
     .collect()
+}
+
+fn expand_line_clamp_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
+    let invalid = || {
+        vec![Declaration {
+            name: name.to_string(),
+            value: value.clone(),
+            important,
+        }]
+    };
+    if matches!(&value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none")) {
+        return line_clamp_declarations(
+            Value::Keyword("auto".to_string()),
+            Value::Keyword("no-ellipsis".to_string()),
+            "normal",
+            important,
+        );
+    }
+
+    let values = match &value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if name == "-webkit-line-clamp" {
+        let [Value::Number(lines)] = values else {
+            return invalid();
+        };
+        if !lines.is_finite() || *lines < 1.0 || lines.fract() != 0.0 {
+            return invalid();
+        }
+        return line_clamp_declarations(
+            Value::Number(*lines),
+            Value::Keyword("ellipsis".to_string()),
+            "-webkit-legacy",
+            important,
+        );
+    }
+
+    let mut max_lines = Vec::new();
+    let mut block_ellipsis = None;
+    let mut legacy = false;
+    for component in values {
+        match component {
+            Value::Number(lines)
+                if lines.is_finite()
+                    && *lines >= 1.0
+                    && lines.fract() == 0.0
+                    && !max_lines
+                        .iter()
+                        .any(|value| matches!(value, Value::Number(_))) =>
+            {
+                max_lines.push(component.clone());
+            }
+            Value::Keyword(keyword)
+                if keyword.eq_ignore_ascii_case("auto")
+                    && !max_lines
+                        .iter()
+                        .any(|value| matches!(value, Value::Keyword(_))) =>
+            {
+                max_lines.insert(0, component.clone());
+            }
+            Value::Keyword(keyword)
+                if matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "no-ellipsis" | "ellipsis"
+                ) && block_ellipsis.is_none() =>
+            {
+                block_ellipsis = Some(component.clone());
+            }
+            Value::String(_) if block_ellipsis.is_none() => {
+                block_ellipsis = Some(component.clone());
+            }
+            Value::Keyword(keyword)
+                if keyword.eq_ignore_ascii_case("-webkit-legacy") && !legacy =>
+            {
+                legacy = true;
+            }
+            _ => return invalid(),
+        }
+    }
+    if max_lines.is_empty() && block_ellipsis.is_none() {
+        return invalid();
+    }
+    let max_lines = match max_lines.as_slice() {
+        [] => Value::Keyword("auto".to_string()),
+        [value] => value.clone(),
+        _ => Value::List(max_lines),
+    };
+    let block_ellipsis = block_ellipsis.unwrap_or_else(|| Value::Keyword("ellipsis".to_string()));
+    let continue_value = if legacy { "-webkit-legacy" } else { "collapse" };
+    line_clamp_declarations(max_lines, block_ellipsis, continue_value, important)
+}
+
+fn line_clamp_declarations(
+    max_lines: Value,
+    block_ellipsis: Value,
+    continue_value: &str,
+    important: bool,
+) -> Vec<Declaration> {
+    [
+        ("max-lines", max_lines),
+        ("block-ellipsis", block_ellipsis),
+        ("continue", Value::Keyword(continue_value.to_string())),
+    ]
+    .into_iter()
+    .map(|(name, value)| Declaration {
+        name: name.to_string(),
+        value,
+        important,
+    })
+    .collect()
+}
+
+fn expand_text_box_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let invalid = || {
+        vec![Declaration {
+            name: "text-box".to_string(),
+            value: value.clone(),
+            important,
+        }]
+    };
+    if matches!(&value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("normal")) {
+        return [
+            ("text-box-trim", Value::Keyword("none".to_string())),
+            ("text-box-edge", Value::Keyword("auto".to_string())),
+        ]
+        .into_iter()
+        .map(|(name, value)| Declaration {
+            name: name.to_string(),
+            value,
+            important,
+        })
+        .collect();
+    }
+    let values = match &value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let mut trim = None;
+    let mut edge = Vec::new();
+    for component in values {
+        if matches!(component, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "none" | "trim-start" | "trim-end" | "trim-both"))
+        {
+            if trim.replace(component.clone()).is_some() {
+                return invalid();
+            }
+        } else {
+            edge.push(component.clone());
+        }
+    }
+    if edge.is_empty() && trim.is_none() || !text_box_edge_is_valid(&edge) {
+        return invalid();
+    }
+    let trim = trim.unwrap_or_else(|| Value::Keyword("trim-both".to_string()));
+    let edge = match edge.as_slice() {
+        [] => Value::Keyword("auto".to_string()),
+        [value] => value.clone(),
+        _ => Value::List(edge),
+    };
+    [("text-box-trim", trim), ("text-box-edge", edge)]
+        .into_iter()
+        .map(|(name, value)| Declaration {
+            name: name.to_string(),
+            value,
+            important,
+        })
+        .collect()
+}
+
+pub(super) fn text_box_edge_is_valid(values: &[Value]) -> bool {
+    match values {
+        [] => true,
+        [Value::Keyword(keyword)] => matches!(
+            keyword.to_ascii_lowercase().as_str(),
+            "auto" | "text" | "ideographic" | "ideographic-ink"
+        ),
+        [Value::Keyword(over), Value::Keyword(under)] => {
+            matches!(
+                over.to_ascii_lowercase().as_str(),
+                "text" | "ideographic" | "ideographic-ink" | "cap" | "ex"
+            ) && matches!(
+                under.to_ascii_lowercase().as_str(),
+                "text" | "ideographic" | "ideographic-ink" | "alphabetic"
+            )
+        }
+        _ => false,
+    }
 }
 
 /// Expands the legacy single-keyword `white-space` values into the CSS Text 4

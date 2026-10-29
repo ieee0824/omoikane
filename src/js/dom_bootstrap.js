@@ -1143,6 +1143,9 @@ export const __omoikane_service_worker_lifecycle = {};
     "overscroll-behavior": ["overscroll-behavior-x", "overscroll-behavior-y"],
     "overflow": ["overflow-x", "overflow-y"],
     "text-wrap": ["text-wrap-mode", "text-wrap-style"],
+    "line-clamp": ["max-lines", "block-ellipsis", "continue"],
+    "-webkit-line-clamp": ["max-lines", "block-ellipsis", "continue"],
+    "text-box": ["text-box-trim", "text-box-edge"],
     "scroll-padding": ["scroll-padding-top", "scroll-padding-right", "scroll-padding-bottom", "scroll-padding-left"],
     "scroll-margin": ["scroll-margin-top", "scroll-margin-right", "scroll-margin-bottom", "scroll-margin-left"],
     "scroll-padding-inline": ["scroll-padding-inline-start", "scroll-padding-inline-end"],
@@ -1192,6 +1195,39 @@ export const __omoikane_service_worker_lifecycle = {};
       if (mode === "wrap") return style === "auto" ? "wrap" : style;
       return style === "auto" ? "nowrap" : "nowrap " + style;
     }
+    if (kebab === "line-clamp" || kebab === "-webkit-line-clamp") {
+      const [maxLines, blockEllipsis, continuation] = parts;
+      if (!maxLines || !blockEllipsis || !continuation) return "";
+      if (longhands.some(name => priorities.get(name) !== priorities.get(longhands[0]))) return "";
+      if (parts.some(value => /^(initial|inherit|unset|revert|revert-layer)$/.test(value))) {
+        return parts.every(value => value === parts[0]) ? parts[0] : "";
+      }
+      if (maxLines === "auto" && blockEllipsis === "no-ellipsis" && continuation === "normal") {
+        return "none";
+      }
+      if (kebab === "-webkit-line-clamp") {
+        return continuation === "-webkit-legacy" && blockEllipsis === "ellipsis" && /^[1-9]\d*$/.test(maxLines)
+          ? maxLines : "";
+      }
+      if (continuation !== "collapse" && continuation !== "-webkit-legacy") return "";
+      const serialized = [];
+      if (maxLines !== "auto") serialized.push(maxLines);
+      if (blockEllipsis !== "ellipsis") serialized.push(blockEllipsis);
+      if (continuation === "-webkit-legacy") serialized.push("-webkit-legacy");
+      return serialized.length ? serialized.join(" ") : "auto";
+    }
+    if (kebab === "text-box") {
+      const [trim, edge] = parts;
+      if (!trim || !edge) return "";
+      if (priorities.get("text-box-trim") !== priorities.get("text-box-edge")) return "";
+      if (/^(initial|inherit|unset|revert|revert-layer)$/.test(trim) ||
+          /^(initial|inherit|unset|revert|revert-layer)$/.test(edge)) {
+        return trim === edge ? trim : "";
+      }
+      if (trim === "none" && edge === "auto") return "normal";
+      if (trim === "trim-both") return edge;
+      return edge === "auto" ? trim : trim + " " + edge;
+    }
     if (logicalBoxStyleProperties.has(kebab)) {
       if (longhands.some(name => priorities.get(name) !== priorities.get(longhands[0]))) return "";
       if (parts.some(value => /^(initial|inherit|unset|revert|revert-layer)$/.test(value)) &&
@@ -1232,6 +1268,8 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     if (!logicalBoxStyleProperties.has(kebab) &&
         kebab !== "overscroll-behavior" && kebab !== "overflow" &&
+        kebab !== "line-clamp" && kebab !== "-webkit-line-clamp" &&
+        kebab !== "text-box" &&
         kebab !== "inset" && kebab !== "inset-inline" && kebab !== "inset-block" &&
         kebab !== "border-inline" && kebab !== "border-block" &&
         !kebab.startsWith("border-inline-") && !kebab.startsWith("border-block-")) {
@@ -4270,6 +4308,8 @@ export const __omoikane_service_worker_lifecycle = {};
       const getValue = (kebab) => {
         const decls = parseDecls();
         if (logicalBoxStyleProperties.has(kebab) || kebab === "text-wrap" ||
+            kebab === "line-clamp" || kebab === "-webkit-line-clamp" ||
+            kebab === "text-box" ||
             kebab === "inset" || kebab.startsWith("inset-") ||
             kebab === "border-inline" || kebab.startsWith("border-inline-") ||
             kebab === "border-block" || kebab.startsWith("border-block-")) {
@@ -4299,7 +4339,8 @@ export const __omoikane_service_worker_lifecycle = {};
       };
       const getPriority = (kebab) => {
         const decls = parseDecls();
-        const longhands = (logicalBoxStyleProperties.has(kebab) || kebab === "text-wrap") &&
+        const longhands = (logicalBoxStyleProperties.has(kebab) || kebab === "text-wrap" ||
+          kebab === "line-clamp" || kebab === "-webkit-line-clamp" || kebab === "text-box") &&
           styleShorthandLonghands[kebab];
         if (longhands) {
           if (!logicalShorthandValue(kebab, decls)) return "";
