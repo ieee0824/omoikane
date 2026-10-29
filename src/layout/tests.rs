@@ -2512,6 +2512,62 @@ fn normal_white_space_collapses_runs() {
 }
 
 #[test]
+fn whitespace_longhands_drive_normalization_and_wrapping() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let preserved = NodeHandle::element("p");
+    preserved.set_attribute("id", "preserved");
+    preserved.append_child(NodeHandle::text("hello   world\nnext"));
+    let discarded = NodeHandle::element("p");
+    discarded.set_attribute("id", "discarded");
+    discarded.append_child(NodeHandle::text("a \t\n b"));
+    document.append_child(body.clone());
+    body.append_child(preserved);
+    body.append_child(discarded);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#preserved { white-space-collapse: preserve; text-wrap-mode: nowrap; } \
+             #discarded { white-space-collapse: discard; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let preserved = &layout.children[0];
+    assert_eq!(preserved.lines.len(), 2);
+    assert_eq!(
+        preserved.lines[0]
+            .fragments
+            .iter()
+            .filter_map(|fragment| fragment.text())
+            .collect::<String>(),
+        "hello   world"
+    );
+    let discarded = &layout.children[1];
+    assert_eq!(
+        discarded.lines[0]
+            .fragments
+            .iter()
+            .filter_map(|fragment| fragment.text())
+            .collect::<String>(),
+        "ab"
+    );
+}
+
+#[test]
 fn pre_white_space_preserves_spaces_and_newlines() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

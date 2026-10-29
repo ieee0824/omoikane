@@ -1004,7 +1004,7 @@ fn collect_element_inline_segments(
                 style: FragmentStyle::from_computed(&style),
                 word_break: word_break(&style),
                 overflow_wrap: overflow_wrap(&style),
-                white_space_mode: WhiteSpaceMode::PreLine,
+                white_space_mode: WhiteSpaceMode::pre_line(),
             });
             return;
         }
@@ -2827,47 +2827,74 @@ pub(super) fn apply_text_transform_layout(text: &str, style: &ComputedStyle) -> 
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WhiteSpaceMode {
-    /// Collapse whitespace, no preserved newlines, allow wrapping.
-    Normal,
-    /// Preserve all whitespace and newlines, no wrapping.
-    Pre,
-    /// Collapse whitespace, no preserved newlines, no wrapping.
-    Nowrap,
-    /// Preserve whitespace and newlines, allow wrapping.
-    PreWrap,
-    /// Collapse whitespace sequences, preserve newlines, allow wrapping.
-    PreLine,
+pub(super) enum WhiteSpaceCollapse {
+    Collapse,
+    Discard,
+    Preserve,
+    PreserveBreaks,
+    PreserveSpaces,
+    BreakSpaces,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct WhiteSpaceMode {
+    collapse: WhiteSpaceCollapse,
+    wraps: bool,
 }
 
 impl WhiteSpaceMode {
+    fn pre_line() -> Self {
+        Self {
+            collapse: WhiteSpaceCollapse::PreserveBreaks,
+            wraps: true,
+        }
+    }
+
     /// Whether the mode collapses whitespace sequences into a single space.
     pub(super) fn collapses_whitespace(self) -> bool {
-        matches!(self, Self::Normal | Self::Nowrap | Self::PreLine)
+        matches!(
+            self.collapse,
+            WhiteSpaceCollapse::Collapse | WhiteSpaceCollapse::PreserveBreaks
+        )
     }
 
     /// Whether the mode preserves newline characters as line breaks.
     pub(super) fn preserves_newlines(self) -> bool {
-        matches!(self, Self::Pre | Self::PreWrap | Self::PreLine)
+        matches!(
+            self.collapse,
+            WhiteSpaceCollapse::Preserve
+                | WhiteSpaceCollapse::PreserveBreaks
+                | WhiteSpaceCollapse::BreakSpaces
+        )
     }
 
     /// Whether the mode allows automatic line wrapping.
     pub(super) fn allows_wrapping(self) -> bool {
-        matches!(self, Self::Normal | Self::PreWrap | Self::PreLine)
+        self.wraps
+    }
+
+    pub(super) fn collapse(self) -> WhiteSpaceCollapse {
+        self.collapse
     }
 }
 
 pub(super) fn white_space(style: &ComputedStyle) -> WhiteSpaceMode {
-    match style.get("white-space") {
+    let collapse = match style.get("white-space-collapse") {
         Some(ComputedValue::Keyword(keyword)) => match keyword.to_ascii_lowercase().as_str() {
-            "pre" => WhiteSpaceMode::Pre,
-            "nowrap" => WhiteSpaceMode::Nowrap,
-            "pre-wrap" => WhiteSpaceMode::PreWrap,
-            "pre-line" => WhiteSpaceMode::PreLine,
-            _ => WhiteSpaceMode::Normal,
+            "discard" => WhiteSpaceCollapse::Discard,
+            "preserve" => WhiteSpaceCollapse::Preserve,
+            "preserve-breaks" => WhiteSpaceCollapse::PreserveBreaks,
+            "preserve-spaces" => WhiteSpaceCollapse::PreserveSpaces,
+            "break-spaces" => WhiteSpaceCollapse::BreakSpaces,
+            _ => WhiteSpaceCollapse::Collapse,
         },
-        _ => WhiteSpaceMode::Normal,
-    }
+        _ => WhiteSpaceCollapse::Collapse,
+    };
+    let wraps = !matches!(
+        style.get("text-wrap-mode"),
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("nowrap")
+    );
+    WhiteSpaceMode { collapse, wraps }
 }
 
 pub(super) fn normalize_text(text: &str, mode: WhiteSpaceMode) -> String {

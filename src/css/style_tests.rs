@@ -8784,6 +8784,132 @@ fn valid_white_space_keyword_survives_cascade() {
 }
 
 #[test]
+fn css_text_longhands_validate_compute_and_inherit() {
+    let document = NodeHandle::document();
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    document.append_child(parent.clone());
+    parent.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { \
+                white-space-collapse: preserve-breaks; \
+                text-wrap-mode: nowrap; \
+                text-wrap-style: pretty; \
+                line-break: strict; \
+                hyphens: auto; \
+                hyphenate-character: \"‐\"; \
+                tab-size: 3; \
+            }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&child);
+    for (name, expected) in [
+        ("white-space-collapse", "preserve-breaks"),
+        ("text-wrap-mode", "nowrap"),
+        ("text-wrap-style", "pretty"),
+        ("line-break", "strict"),
+        ("hyphens", "auto"),
+    ] {
+        assert_eq!(
+            style.get(name),
+            Some(&ComputedValue::Keyword(expected.to_string())),
+            "{name} should inherit its validated computed value"
+        );
+    }
+    assert_eq!(style.get("tab-size"), Some(&ComputedValue::Number(3.0)));
+    assert_eq!(
+        style.get("hyphenate-character"),
+        Some(&ComputedValue::String("‐".to_string()))
+    );
+}
+
+#[test]
+fn invalid_css_text_longhands_fall_back_to_initial_values() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { \
+                white-space-collapse: invalid; \
+                text-wrap-mode: balance; \
+                text-wrap-style: nowrap; \
+                line-break: hard; \
+                hyphens: always; \
+                hyphenate-character: 2; \
+                tab-size: -1; \
+            }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    for (name, expected) in [
+        ("white-space-collapse", "collapse"),
+        ("text-wrap-mode", "wrap"),
+        ("text-wrap-style", "auto"),
+        ("line-break", "auto"),
+        ("hyphens", "manual"),
+        ("hyphenate-character", "auto"),
+    ] {
+        assert_eq!(
+            style.get(name),
+            Some(&ComputedValue::Keyword(expected.into()))
+        );
+    }
+    assert_eq!(style.get("tab-size"), Some(&ComputedValue::Number(8.0)));
+}
+
+#[test]
+fn text_wrap_shorthand_expands_mode_and_style_in_either_order() {
+    let document = NodeHandle::document();
+    let first = NodeHandle::element("div");
+    first.set_attribute("id", "first");
+    let second = NodeHandle::element("div");
+    second.set_attribute("id", "second");
+    document.append_child(first.clone());
+    document.append_child(second.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#first { text-wrap: pretty nowrap; } \
+             #second { text-wrap: balance; }",
+        )
+        .unwrap(),
+    );
+
+    let first_style = resolver.computed_style(&first);
+    assert_eq!(
+        first_style.get("text-wrap-mode"),
+        Some(&ComputedValue::Keyword("nowrap".into()))
+    );
+    assert_eq!(
+        first_style.get("text-wrap-style"),
+        Some(&ComputedValue::Keyword("pretty".into()))
+    );
+    let second_style = resolver.computed_style(&second);
+    assert_eq!(
+        second_style.get("text-wrap-mode"),
+        Some(&ComputedValue::Keyword("wrap".into()))
+    );
+    assert_eq!(
+        second_style.get("text-wrap-style"),
+        Some(&ComputedValue::Keyword("balance".into()))
+    );
+}
+
+#[test]
 fn text_overflow_accepts_one_value_keywords_and_rejects_other_grammars() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
