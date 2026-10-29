@@ -10,6 +10,7 @@ const VALIDATED_PROPERTIES: &[&str] = &[
     "border-bottom-color",
     "border-left-color",
     "outline-color",
+    "outline-offset",
     "text-decoration",
     "text-decoration-color",
     "text-decoration-thickness",
@@ -31,6 +32,7 @@ const VALIDATED_PROPERTIES: &[&str] = &[
     "isolation",
     "text-overflow",
     "content-visibility",
+    "opacity",
     "width",
     "height",
     "min-width",
@@ -199,6 +201,9 @@ pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
     if let Some(value) = crate::css::style::normalize_tree_counting_numeric(property, value) {
         return Some(value);
     }
+    if let Some(value) = crate::css::style::normalize_numeric_math_specified(property, value) {
+        return Some(value);
+    }
     if matches!(property, "translate" | "rotate" | "scale") {
         return crate::css::style::individual_transform::normalize_specified(property, value);
     }
@@ -279,7 +284,14 @@ pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
             | "transition-timing-function"
             | "transition-delay"
     ) {
-        crate::css::normalize_transition_longhand(property, value)
+        if matches!(property, "transition-duration" | "transition-delay")
+            && value.contains('(')
+            && crate::css::style::supports_declaration(property, value)
+        {
+            Some(value.to_string())
+        } else {
+            crate::css::normalize_transition_longhand(property, value)
+        }
     } else {
         normalize_validated_or_unchecked(property, value)
     }
@@ -329,4 +341,21 @@ fn normalize_validated_or_unchecked(property: &str, value: &str) -> Option<Strin
                 .map_or_else(|| value.to_string(), |color| color.serialize())
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize;
+
+    #[test]
+    fn specified_number_math_is_canonicalized_at_the_cssom_boundary() {
+        assert_eq!(
+            normalize("opacity", "round(1.1,1)").as_deref(),
+            Some("calc(1)")
+        );
+        assert_eq!(
+            normalize("transform", "scale(calc(log(0)))").as_deref(),
+            Some("scale(calc(-infinity))")
+        );
+    }
 }

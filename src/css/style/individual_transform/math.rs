@@ -1,7 +1,7 @@
 //! Typed scalar math for individual rotations and scales.
 use super::*;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Dimension {
     Number,
     Percentage,
@@ -173,6 +173,9 @@ fn function(name: &str, arguments: &[Value], context: ResolutionContext) -> Opti
     if name == "calc" {
         return evaluate_unclamped(arguments.first().filter(|_| arguments.len() == 1)?, context);
     }
+    if name == "round" {
+        return round_function(arguments, context);
+    }
     let values = arguments
         .iter()
         .map(|value| evaluate_unclamped(value, context))
@@ -216,8 +219,73 @@ fn function(name: &str, arguments: &[Value], context: ResolutionContext) -> Opti
             Dimension::Number,
         ),
         "abs" if values.len() == 1 => Scalar::result(first.value.abs(), first.dimension),
+        "pow"
+            if values.len() == 2
+                && values
+                    .iter()
+                    .all(|value| value.dimension == Dimension::Number) =>
+        {
+            let exponent = values[1].value;
+            let value = if first.value.is_nan()
+                || exponent.is_nan()
+                || (first.value.abs() == 1.0 && exponent.is_infinite())
+            {
+                f32::NAN
+            } else {
+                first.value.powf(exponent)
+            };
+            Scalar::result(value, Dimension::Number)
+        }
+        "sqrt" if values.len() == 1 && first.dimension == Dimension::Number => {
+            Scalar::result(first.value.sqrt(), Dimension::Number)
+        }
+        "log"
+            if matches!(values.len(), 1 | 2)
+                && values
+                    .iter()
+                    .all(|value| value.dimension == Dimension::Number) =>
+        {
+            let value = if values.iter().any(|value| value.value.is_nan()) {
+                f32::NAN
+            } else if first.value == 1.0 {
+                0.0
+            } else if values.len() == 1 {
+                first.value.ln()
+            } else if values[1].value <= 0.0 || values[1].value == 1.0 {
+                f32::NAN
+            } else {
+                first.value.log(values[1].value)
+            };
+            Scalar::result(value, Dimension::Number)
+        }
+        "exp" if values.len() == 1 && first.dimension == Dimension::Number => {
+            Scalar::result(first.value.exp(), Dimension::Number)
+        }
         _ => consistent_function(&name, &values),
     }
+}
+
+fn round_function(arguments: &[Value], context: ResolutionContext) -> Option<Scalar> {
+    let (strategy, value, step) = match arguments {
+        [value, step] => (MathRoundingStrategy::Nearest, value, step),
+        [Value::Keyword(strategy), value, step] => {
+            let strategy = match strategy.to_ascii_lowercase().as_str() {
+                "nearest" => MathRoundingStrategy::Nearest,
+                "up" => MathRoundingStrategy::Up,
+                "down" => MathRoundingStrategy::Down,
+                "to-zero" => MathRoundingStrategy::ToZero,
+                _ => return None,
+            };
+            (strategy, value, step)
+        }
+        _ => return None,
+    };
+    let value = evaluate_unclamped(value, context)?;
+    let step = evaluate_unclamped(step, context)?;
+    (value.dimension == step.dimension).then(|| Scalar {
+        value: round_math_value(value.value, step.value, strategy),
+        dimension: value.dimension,
+    })
 }
 
 fn consistent_function(name: &str, values: &[Scalar]) -> Option<Scalar> {
@@ -241,9 +309,15 @@ fn consistent_function(name: &str, values: &[Scalar]) -> Option<Scalar> {
                     left.max(right)
                 }
             })?,
-        "hypot" => values
-            .iter()
-            .fold(0.0_f32, |result, value| result.hypot(value.value)),
+        "hypot" => {
+            if values.iter().any(|value| value.value.is_nan()) {
+                f32::NAN
+            } else {
+                values
+                    .iter()
+                    .fold(0.0_f32, |result, value| result.hypot(value.value))
+            }
+        }
         "clamp" if values.len() == 3 => {
             if values.iter().any(|value| value.value.is_nan()) {
                 f32::NAN
@@ -261,7 +335,7 @@ fn consistent_function(name: &str, values: &[Scalar]) -> Option<Scalar> {
             {
                 f32::NAN
             } else if remainder == 0.0 {
-                0.0_f32.copysign(divisor)
+                if name == "mod" { 0.0 } else { remainder }
             } else if remainder.is_sign_negative() != divisor.is_sign_negative() {
                 remainder + divisor
             } else {
@@ -271,4 +345,88 @@ fn consistent_function(name: &str, values: &[Scalar]) -> Option<Scalar> {
         _ => return None,
     };
     Scalar::result(value, first.dimension)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn value(text: &str) -> Value {
+        super::super::super::super::parse_style_attribute(&format!("--probe:{text}"))[0]
+            .value
+            .clone()
+    }
+
+    #[test]
+    fn stepped_and_exponential_functions_evaluate_with_css_rounding() {
+        let context = ResolutionContext::default();
+        let cases = [
+            ("round(-1.5, 1)", -1.0),
+            ("round(up, -1.2, 1)", -1.0),
+            ("round(down, -1.2, 1)", -2.0),
+            ("round(to-zero, -1.8, 1)", -1.0),
+            ("pow(2, 3)", 8.0),
+            ("sqrt(9)", 3.0),
+            ("log(8, 2)", 3.0),
+            ("exp(1)", std::f32::consts::E),
+        ];
+        for (expression, expected) in cases {
+            let actual = evaluate(&value(expression), context).unwrap();
+            assert_eq!(actual.dimension, Dimension::Number, "{expression}");
+            assert!((actual.value - expected).abs() < 0.000_01, "{expression}");
+        }
+    }
+
+    #[test]
+    fn numeric_math_preserves_css_ieee_edge_cases_until_computation() {
+        let context = ResolutionContext::default();
+        for expression in [
+            "pow(-1, infinity)",
+            "pow(NaN, 0)",
+            "pow(1, NaN)",
+            "hypot(infinity, NaN)",
+            "log(2, 1)",
+            "log(2, 0)",
+        ] {
+            assert!(
+                evaluate_unclamped(&value(expression), context)
+                    .unwrap()
+                    .value
+                    .is_nan(),
+                "{expression}"
+            );
+        }
+        assert!(
+            !evaluate_unclamped(&value("log(1, 0.5)"), context)
+                .unwrap()
+                .value
+                .is_sign_negative()
+        );
+
+        let negative_zero = [
+            "round(nearest, -4, infinity)",
+            "round(to-zero, -4, -infinity)",
+            "round(up, -1, infinity)",
+            "round(down, 1, infinity)",
+        ];
+        for expression in negative_zero {
+            let result = evaluate_unclamped(&value(expression), context)
+                .unwrap()
+                .value;
+            assert_eq!(result, 0.0, "{expression}");
+            assert!(result.is_sign_negative(), "{expression}");
+        }
+        assert_eq!(
+            evaluate_unclamped(&value("round(up, 1, infinity)"), context)
+                .unwrap()
+                .value,
+            f32::INFINITY
+        );
+        assert_eq!(
+            evaluate_unclamped(&value("round(down, -1, infinity)"), context)
+                .unwrap()
+                .value,
+            f32::NEG_INFINITY
+        );
+    }
 }

@@ -213,6 +213,18 @@ collect_pattern "/css/css-writing-modes/parsing/text-combine-upright-computed.ht
 collect_pattern "/css/css-writing-modes/parsing/text-orientation-valid.html"
 collect_pattern "/css/css-writing-modes/parsing/text-orientation-invalid.html"
 collect_pattern "/css/css-writing-modes/parsing/text-orientation-computed.html"
+collect_pattern \
+  "/css/css-values/round-mod-rem-computed.html" \
+  "/css/css-values/round-mod-rem-invalid.html" \
+  "/css/css-values/round-mod-rem-serialize.html" \
+  "/css/css-values/hypot-pow-sqrt-computed.html" \
+  "/css/css-values/hypot-pow-sqrt-invalid.html" \
+  "/css/css-values/hypot-pow-sqrt-serialize.html" \
+  "/css/css-values/exp-log-compute.html" \
+  "/css/css-values/exp-log-invalid.html" \
+  "/css/css-values/exp-log-serialize.html" \
+  "/css/support/numeric-testcommon.js" \
+  "/css/support/serialize-testcommon.js"
 collect_pattern "/css/css-overflow/parsing/line-clamp-valid.html"
 collect_pattern "/css/css-overflow/parsing/line-clamp-invalid.html"
 collect_pattern "/css/css-overflow/parsing/webkit-line-clamp-valid.html"

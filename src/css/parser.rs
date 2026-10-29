@@ -1578,7 +1578,7 @@ impl Parser {
         }
     }
 
-    fn parse_declaration_value_tokens(&mut self, close_functions_at_eof: bool) -> Vec<CssToken> {
+    fn parse_declaration_value_tokens(&mut self) -> Vec<CssToken> {
         let mut value_tokens = Vec::new();
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
@@ -1606,11 +1606,9 @@ impl Parser {
             }
         }
 
-        // CSS component values close unfinished functions at end of input.
-        // Individual transforms require this for CSSOM assignment/supports.
-        if close_functions_at_eof && self.peek().is_none() {
-            value_tokens.extend(std::iter::repeat_n(CssToken::ParenClose, paren_depth));
-        }
+        // CSS component values close unfinished functions at the end of their
+        // containing declaration, including before `;` and `}` delimiters.
+        value_tokens.extend(std::iter::repeat_n(CssToken::ParenClose, paren_depth));
         value_tokens
     }
 
@@ -1625,10 +1623,7 @@ impl Parser {
         self.expect_colon()?;
         self.skip_whitespace();
 
-        let value_tokens = self.parse_declaration_value_tokens(matches!(
-            name.as_str(),
-            "translate" | "rotate" | "scale"
-        ));
+        let value_tokens = self.parse_declaration_value_tokens();
 
         let (value_tokens, important) = split_important(&value_tokens);
         let contains_var = tokens_contain_var_function(&value_tokens);
@@ -1671,12 +1666,17 @@ impl Parser {
                     | "rotate"
                     | "scale"
                     | "will-change"
+                    | "transition-duration"
+                    | "transition-delay"
             )
             || contains_var && matches!(name.as_str(), "font" | "transition"))
             && has_top_level_comma(&value_tokens)
         {
             parse_comma_separated_value(&value_tokens)?
-        } else if (name == "transition" || name.starts_with("transition-")) && !contains_var {
+        } else if (name == "transition" || name.starts_with("transition-"))
+            && !matches!(name.as_str(), "transition-duration" | "transition-delay")
+            && !contains_var
+        {
             // Transition lists need their top-level commas. The generic Value
             // parser intentionally discards commas, so retain the declaration
             // text for the dedicated transition grammar instead.
@@ -2157,7 +2157,27 @@ fn parse_value_sequence_with_mode(
                 } else {
                     let is_math_function = matches!(
                         name.to_ascii_lowercase().as_str(),
-                        "calc" | "min" | "max" | "clamp" | "sign" | "abs"
+                        "calc"
+                            | "min"
+                            | "max"
+                            | "clamp"
+                            | "round"
+                            | "mod"
+                            | "rem"
+                            | "hypot"
+                            | "abs"
+                            | "sign"
+                            | "sin"
+                            | "cos"
+                            | "tan"
+                            | "asin"
+                            | "acos"
+                            | "atan"
+                            | "atan2"
+                            | "pow"
+                            | "sqrt"
+                            | "log"
+                            | "exp"
                     );
                     if ((name.eq_ignore_ascii_case("rgb")
                         || name.eq_ignore_ascii_case("rgba")
@@ -2989,5 +3009,14 @@ mod selector_list_tests {
                 .iter()
                 .any(|declaration| declaration.name == "margin-left")
         );
+    }
+
+    #[test]
+    fn numeric_math_comma_arguments_reject_only_empty_segments() {
+        let tokens = tokenize("10s, 6s").unwrap();
+        assert!(!has_empty_top_level_comma_segment(&tokens));
+        for value in [", 1", "1,", "1, , 2"] {
+            assert!(has_empty_top_level_comma_segment(&tokenize(value).unwrap()));
+        }
     }
 }

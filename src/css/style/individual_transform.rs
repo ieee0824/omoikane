@@ -73,6 +73,15 @@ pub(super) fn fixed_number_expression(value: &Value) -> Option<f32> {
     (scalar.dimension == math::Dimension::Number).then_some(scalar.value)
 }
 
+/// Evaluates context-free number math without clamping IEEE special values.
+pub(super) fn fixed_unclamped_number_expression(value: &Value) -> Option<f32> {
+    if !is_fixed_expression(value) {
+        return None;
+    }
+    let scalar = math::evaluate_unclamped(value, ResolutionContext::default())?;
+    (scalar.dimension == math::Dimension::Number).then_some(scalar.value)
+}
+
 /// Evaluates an intermediate number without clamping subexpressions early.
 pub(super) fn unclamped_number_expression(
     value: &Value,

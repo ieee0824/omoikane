@@ -146,6 +146,45 @@ impl ComputedValue {
 /// Relative and absolute lengths have already been converted to CSS pixels.
 /// Percentages remain symbolic until the property supplies its percentage
 /// basis during layout or paint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MathRoundingStrategy {
+    /// Round to the closest multiple, resolving ties toward positive infinity.
+    Nearest,
+    /// Round toward positive infinity.
+    Up,
+    /// Round toward negative infinity.
+    Down,
+    /// Round toward zero.
+    ToZero,
+}
+
+fn round_math_value(value: f32, step: f32, strategy: MathRoundingStrategy) -> f32 {
+    if step == 0.0 {
+        return f32::NAN;
+    }
+    let step = step.abs();
+    if step.is_infinite() && value.is_finite() {
+        if value == 0.0 {
+            return value;
+        }
+        return match strategy {
+            MathRoundingStrategy::Nearest | MathRoundingStrategy::ToZero => 0.0_f32.copysign(value),
+            MathRoundingStrategy::Up if value > 0.0 => f32::INFINITY,
+            MathRoundingStrategy::Up => -0.0,
+            MathRoundingStrategy::Down if value < 0.0 => f32::NEG_INFINITY,
+            MathRoundingStrategy::Down => -0.0,
+        };
+    }
+    let quotient = value / step;
+    let rounded = match strategy {
+        MathRoundingStrategy::Nearest => (quotient + 0.5).floor(),
+        MathRoundingStrategy::Up => quotient.ceil(),
+        MathRoundingStrategy::Down => quotient.floor(),
+        MathRoundingStrategy::ToZero => quotient.trunc(),
+    };
+    rounded * step
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum LengthPercentageMath {
     /// An affine `px + percentage` value.
@@ -180,6 +219,15 @@ pub enum LengthPercentageMath {
         divisor: Box<Self>,
         /// True for `rem()`, false for `mod()`.
         remainder: bool,
+    },
+    /// Rounds a value to an integer multiple of a step.
+    Round {
+        /// The rounding direction.
+        strategy: MathRoundingStrategy,
+        /// The value to round.
+        value: Box<Self>,
+        /// The interval between adjacent rounded values.
+        step: Box<Self>,
     },
     /// `max(minimum, min(preferred, maximum))`.
     Clamp {
@@ -255,6 +303,15 @@ impl LengthPercentageMath {
                     }
                 }
             }
+            Self::Round {
+                strategy,
+                value,
+                step,
+            } => round_math_value(
+                value.resolve_unclamped(basis),
+                step.resolve_unclamped(basis),
+                *strategy,
+            ),
             Self::Clamp {
                 minimum,
                 preferred,
@@ -281,7 +338,8 @@ impl LengthPercentageMath {
             | Self::Clamp { .. }
             | Self::Abs(_)
             | Self::Hypot(_)
-            | Self::Modulo { .. } => None,
+            | Self::Modulo { .. }
+            | Self::Round { .. } => None,
         }
     }
 
@@ -327,6 +385,7 @@ impl LengthPercentageMath {
             Self::Modulo {
                 dividend, divisor, ..
             } => dividend.is_pure_px() && divisor.is_pure_px(),
+            Self::Round { value, step, .. } => value.is_pure_px() && step.is_pure_px(),
             Self::Clamp {
                 minimum,
                 preferred,
@@ -345,7 +404,8 @@ impl LengthPercentageMath {
             | Self::Clamp { .. }
             | Self::Abs(_)
             | Self::Hypot(_)
-            | Self::Modulo { .. } => self.expression_text(),
+            | Self::Modulo { .. }
+            | Self::Round { .. } => self.expression_text(),
             Self::Linear { .. } | Self::Sum(_) | Self::Scale { .. } => {
                 format!("calc({})", self.expression_text())
             }
@@ -376,6 +436,23 @@ impl LengthPercentageMath {
                 dividend.expression_text(),
                 divisor.expression_text()
             ),
+            Self::Round {
+                strategy,
+                value,
+                step,
+            } => {
+                let strategy = match strategy {
+                    MathRoundingStrategy::Nearest => "",
+                    MathRoundingStrategy::Up => "up, ",
+                    MathRoundingStrategy::Down => "down, ",
+                    MathRoundingStrategy::ToZero => "to-zero, ",
+                };
+                format!(
+                    "round({strategy}{}, {})",
+                    value.expression_text(),
+                    step.expression_text()
+                )
+            }
             Self::Linear { px, percentage } if *percentage == 0.0 => format!("{px}px"),
             Self::Linear { px, percentage } if *px == 0.0 => format!("{percentage}%"),
             Self::Linear { px, percentage } if *px < 0.0 => {
@@ -5845,6 +5922,80 @@ pub(crate) fn normalize_tree_counting_numeric(property: &str, text: &str) -> Opt
     }
 }
 
+/// Folds context-free number math for specified-value CSSOM serialization.
+pub(crate) fn normalize_numeric_math_specified(property: &str, text: &str) -> Option<String> {
+    if !supports_declaration(property, text) {
+        return None;
+    }
+    let value = super::parse_style_attribute(&format!("{property}: {text}"))
+        .into_iter()
+        .find(|declaration| declaration.name == property)?
+        .value;
+
+    fn number(value: f32) -> String {
+        if value.is_nan() {
+            "NaN".into()
+        } else if value == f32::INFINITY {
+            "infinity".into()
+        } else if value == f32::NEG_INFINITY {
+            "-infinity".into()
+        } else {
+            super::tokenizer::trimmed_number(value)
+        }
+    }
+
+    fn canonical(value: &Value) -> (String, bool) {
+        match value {
+            Value::Function { name, arguments } => {
+                if let Some(result) = individual_transform::fixed_unclamped_number_expression(value)
+                {
+                    return (format!("calc({})", number(result)), true);
+                }
+                let canonical = arguments.iter().map(canonical).collect::<Vec<_>>();
+                let changed = canonical.iter().any(|(_, changed)| *changed);
+                let arguments = canonical
+                    .into_iter()
+                    .map(|(value, _)| value)
+                    .collect::<Vec<_>>()
+                    .join(if name.eq_ignore_ascii_case("url") {
+                        ","
+                    } else {
+                        ", "
+                    });
+                (format!("{name}({arguments})"), changed)
+            }
+            Value::List(values) => {
+                let canonical = values.iter().map(canonical).collect::<Vec<_>>();
+                let changed = canonical.iter().any(|(_, changed)| *changed);
+                (
+                    canonical
+                        .into_iter()
+                        .map(|(value, _)| value)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    changed,
+                )
+            }
+            Value::CommaList(values) => {
+                let canonical = values.iter().map(canonical).collect::<Vec<_>>();
+                let changed = canonical.iter().any(|(_, changed)| *changed);
+                (
+                    canonical
+                        .into_iter()
+                        .map(|(value, _)| value)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    changed,
+                )
+            }
+            _ => (render_value(value), false),
+        }
+    }
+
+    let (value, changed) = canonical(&value);
+    changed.then_some(value)
+}
+
 fn canonical_tree_counting_numeric(value: &Value) -> Value {
     match value {
         Value::Length(number, unit) if unit.eq_ignore_ascii_case("ms") => {
@@ -6464,6 +6615,49 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     }
     if let Some(validation) = validate_tree_counting_numeric_declaration(name, value) {
         return validation;
+    }
+    if name.eq_ignore_ascii_case("opacity") {
+        let valid = match value {
+            Value::Keyword(keyword) => is_css_wide_keyword(&keyword.to_ascii_lowercase()),
+            Value::Number(number) | Value::Percentage(number) => number.is_finite(),
+            Value::Function { name, .. }
+                if name.eq_ignore_ascii_case("var") || name.eq_ignore_ascii_case("env") =>
+            {
+                true
+            }
+            Value::Function { .. } | Value::List(_) => matches!(
+                typed_math::infer(value, None),
+                Some(typed_math::NumericType::NUMBER | typed_math::NumericType::PERCENTAGE)
+            ),
+            _ => false,
+        };
+        return if valid {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
+    if name.eq_ignore_ascii_case("outline-offset") {
+        let valid = match value {
+            Value::Keyword(keyword) => is_css_wide_keyword(&keyword.to_ascii_lowercase()),
+            Value::Number(number) => *number == 0.0,
+            Value::Length(number, unit) => number.is_finite() && is_css_length_unit(unit),
+            Value::Function { name, .. }
+                if name.eq_ignore_ascii_case("var") || name.eq_ignore_ascii_case("env") =>
+            {
+                true
+            }
+            Value::Function { .. } | Value::List(_) => {
+                typed_math::infer(value, Some(typed_math::NumericType::LENGTH))
+                    == Some(typed_math::NumericType::LENGTH)
+            }
+            _ => false,
+        };
+        return if valid {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        };
     }
     if let Some(validation) = validate_font_numeric_declaration(name, value) {
         return validation;
@@ -7258,6 +7452,27 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         | "transition-duration"
         | "transition-timing-function"
         | "transition-delay" => {
+            if matches!(name, "transition-duration" | "transition-delay") {
+                let values = match value {
+                    Value::CommaList(values) => values.as_slice(),
+                    value => std::slice::from_ref(value),
+                };
+                let allow_negative = name == "transition-delay";
+                if let Some(seconds) = values
+                    .iter()
+                    .map(|value| resolve_time_seconds(value))
+                    .collect::<Option<Vec<_>>>()
+                    && (allow_negative || seconds.iter().all(|value| *value >= 0.0))
+                {
+                    return DeclarationValidation::Valid(ComputedValue::Keyword(
+                        seconds
+                            .iter()
+                            .map(|value| format!("{}s", super::tokenizer::trimmed_number(*value)))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ));
+                }
+            }
             let rendered = render_value(value);
             return match super::computed_transition_longhand(name, &rendered) {
                 Some(normalized) => {
@@ -8164,7 +8379,7 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
 fn is_length_percentage_math_function(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "calc" | "min" | "max" | "clamp" | "hypot" | "abs" | "mod" | "rem"
+        "calc" | "min" | "max" | "clamp" | "round" | "hypot" | "abs" | "mod" | "rem"
     )
 }
 
@@ -11385,6 +11600,13 @@ fn contains_top_level_semicolon(value: &str) -> bool {
 }
 
 fn resolve_time_seconds(value: &Value) -> Option<f32> {
+    if typed_math::infer(value, None) == Some(typed_math::NumericType::TIME)
+        && let Value::Length(milliseconds, unit) =
+            individual_transform::computed_numeric_expression(value, ResolutionContext::default())?
+        && unit.eq_ignore_ascii_case("ms")
+    {
+        return Some(milliseconds / 1000.0);
+    }
     match value {
         Value::Length(number, unit) if unit.eq_ignore_ascii_case("s") => Some(*number),
         Value::Length(number, unit) if unit.eq_ignore_ascii_case("ms") => Some(*number / 1000.0),
@@ -12225,7 +12447,8 @@ fn compute_standalone_numeric_math(
     };
     if !matches!(
         function.to_ascii_lowercase().as_str(),
-        "hypot"
+        "round"
+            | "hypot"
             | "abs"
             | "sign"
             | "mod"
@@ -12237,6 +12460,10 @@ fn compute_standalone_numeric_math(
             | "acos"
             | "atan"
             | "atan2"
+            | "pow"
+            | "sqrt"
+            | "log"
+            | "exp"
     ) {
         return None;
     }
@@ -13358,7 +13585,7 @@ fn evaluate_length_math_value(value: &Value, ctx: ResolutionContext) -> Option<L
         Value::Function { name, arguments }
             if matches!(
                 name.to_ascii_lowercase().as_str(),
-                "hypot" | "abs" | "mod" | "rem"
+                "round" | "hypot" | "abs" | "mod" | "rem"
             ) =>
         {
             scalar_length_math_value(value, ctx)
@@ -13374,6 +13601,24 @@ fn evaluate_deferred_length_function(
     arguments: &[Value],
     ctx: ResolutionContext,
 ) -> Option<LengthMathValue> {
+    let (strategy, arguments) = if name.eq_ignore_ascii_case("round") {
+        match arguments {
+            [Value::Keyword(strategy), _, _] => {
+                let strategy = match strategy.to_ascii_lowercase().as_str() {
+                    "nearest" => MathRoundingStrategy::Nearest,
+                    "up" => MathRoundingStrategy::Up,
+                    "down" => MathRoundingStrategy::Down,
+                    "to-zero" => MathRoundingStrategy::ToZero,
+                    _ => return None,
+                };
+                (strategy, &arguments[1..])
+            }
+            [_, _] => (MathRoundingStrategy::Nearest, arguments),
+            _ => return None,
+        }
+    } else {
+        (MathRoundingStrategy::Nearest, arguments)
+    };
     let values = arguments
         .iter()
         .map(|value| match evaluate_length_math_value(value, ctx)? {
@@ -13392,6 +13637,14 @@ fn evaluate_deferred_length_function(
                 dividend: Box::new(values.next()?),
                 divisor: Box::new(values.next()?),
                 remainder: name.eq_ignore_ascii_case("rem"),
+            }
+        }
+        "round" if values.len() == 2 => {
+            let mut values = values.into_iter();
+            LengthPercentageMath::Round {
+                strategy,
+                value: Box::new(values.next()?),
+                step: Box::new(values.next()?),
             }
         }
         _ => return None,
@@ -13751,6 +14004,7 @@ fn resolve_length_to_px(number: f32, unit: &str, ctx: ResolutionContext) -> Opti
         "vmin" => number * ctx.viewport_width.min(ctx.viewport_height) / 100.0,
         "vmax" => number * ctx.viewport_width.max(ctx.viewport_height) / 100.0,
         "mm" => number * (96.0 / 25.4),
+        "q" => number * (96.0 / 101.6),
         "cm" => number * (96.0 / 2.54),
         "in" => number * 96.0,
         "pt" => number * (96.0 / 72.0),
