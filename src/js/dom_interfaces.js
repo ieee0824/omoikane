@@ -64,8 +64,26 @@
   }
 
   const isIndex = key => typeof key === "string" && /^(?:0|[1-9]\d*)$/.test(key) && Number(key) < 4294967295;
+  // Same order as TRACKED_COLLECTION_ATTRIBUTES in src/dom/mod.rs. A
+  // collection's dependency mask selects the attribute changes that can alter
+  // its membership; tree mutations always invalidate it.
+  // Plain indexing keeps page-patched Array methods out of this internal path.
+  const trackedAttributes = ["class", "href", "name"];
+  function attributeMask(attributes) {
+    if (attributes === undefined) return undefined;
+    let mask = 0;
+    for (let index = 0; index < attributes.length; index++) {
+      let bit = -1;
+      for (let tracked = 0; tracked < trackedAttributes.length; tracked++) {
+        if (trackedAttributes[tracked] === attributes[index]) bit = tracked;
+      }
+      if (bit < 0) throw new TypeErrorIntrinsic("Untracked collection attribute: " + attributes[index]);
+      mask |= 1 << bit;
+    }
+    return mask;
+  }
   function collectionItems(state) {
-    const generation = collectionGeneration();
+    const generation = state.mask === undefined ? collectionGeneration() : collectionGeneration(state.mask);
     if (state.generation !== generation) {
       state.items = state.collect();
       state.generation = generation;
@@ -108,9 +126,14 @@
     }
     return [...names];
   }
-  function makeCollection(collect, allowsName, missingValue) {
+  // `attributes` lists the attributes membership reads. Named access reads
+  // id/name live, so they are only needed when `collect` itself reads them.
+  // Omit it to invalidate on every attribute change.
+  function makeCollection(collect, allowsName, missingValue, attributes = undefined) {
     const target = new HTMLCollection(token);
-    const state = { collect, allowsName, generation: undefined, items: [] };
+    const state = {
+      collect, allowsName, mask: attributeMask(attributes), generation: undefined, items: [],
+    };
     const value = key => isIndex(key) ? collectionItems(state)[Number(key)] :
       typeof key === "string" && !(key in target) ? namedItem(state, key) ?? undefined : undefined;
     const handler = {
