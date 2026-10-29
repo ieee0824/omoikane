@@ -3202,6 +3202,42 @@ fn text_align_last_applies_to_final_and_forced_lines() {
 }
 
 #[test]
+fn text_align_last_match_parent_uses_the_parent_physical_direction() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("p");
+    child.append_child(NodeHandle::text("text"));
+    document.append_child(body.clone());
+    body.append_child(parent.clone());
+    parent.append_child(child.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { width:100px; direction:rtl; text-align-last:start } \
+             p { margin:0; direction:ltr; text-align-last:match-parent; \
+                 font:10px monospace; line-height:10px }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let line = &find_layout_box(&layout, &child).unwrap().lines[0];
+    assert!(line.rect.x > 60.0);
+}
+
+#[test]
 fn inter_word_justification_expands_only_selected_lines() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

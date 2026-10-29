@@ -178,7 +178,11 @@ pub(super) fn text_align(style: &ComputedStyle) -> TextAlign {
     }
 }
 
-fn text_align_last(style: Option<&ComputedStyle>, align: TextAlign) -> TextAlign {
+fn text_align_last(
+    style: Option<&ComputedStyle>,
+    align: TextAlign,
+    match_parent: Option<TextAlign>,
+) -> TextAlign {
     let automatic = match align {
         TextAlign::JustifyInterWord | TextAlign::JustifyInterCharacter => TextAlign::Start,
         align => align,
@@ -205,10 +209,29 @@ fn text_align_last(style: Option<&ComputedStyle>, align: TextAlign) -> TextAlign
             }
             _ => TextAlign::JustifyInterWord,
         },
-        // `match-parent` is resolved to the containing logical start until the
-        // parent-relative computed-value unit lands alongside justification.
-        "match-parent" => TextAlign::Start,
+        "match-parent" => match_parent.unwrap_or(TextAlign::Start),
         _ => automatic,
+    }
+}
+
+fn resolved_text_align_last(
+    owner: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    align: TextAlign,
+) -> TextAlign {
+    let parent_align = owner.parent_node().map(|parent| {
+        let parent_style = resolver.computed_style(&parent);
+        let align = text_align(&parent_style);
+        resolved_text_align_last(&parent, resolver, &parent_style, align)
+    });
+    let resolved = text_align_last(Some(style), align, parent_align);
+    match resolved {
+        TextAlign::Start if super::direction_is_rtl(style) => TextAlign::Right,
+        TextAlign::Start => TextAlign::Left,
+        TextAlign::End if super::direction_is_rtl(style) => TextAlign::Left,
+        TextAlign::End => TextAlign::Right,
+        resolved => resolved,
     }
 }
 
@@ -372,17 +395,24 @@ fn layout_inline_nodes_impl(
     if source_start_token > 0 {
         skip_inline_prefix(&mut segments, source_start_token);
     }
-    let container_style = generated_owner
+    let container_owner = generated_owner
         .cloned()
-        .or_else(|| nodes.first().and_then(NodeHandle::parent_node))
-        .map(|container| resolver.computed_style(&container));
+        .or_else(|| nodes.first().and_then(NodeHandle::parent_node));
+    let container_style = container_owner
+        .as_ref()
+        .map(|container| resolver.computed_style(container));
     let strut_metrics = container_style.as_ref().map(font_metrics);
     let mut first_line_indent = container_style
         .as_ref()
         .map(|style| text_indent(style, available_width))
         .unwrap_or_default();
     first_line_indent.initial_affected = source_start_token == 0;
-    let last_align = text_align_last(container_style.as_ref(), align);
+    let last_align = container_owner
+        .as_ref()
+        .zip(container_style.as_ref())
+        .map_or(align, |(owner, style)| {
+            resolved_text_align_last(owner, resolver, style, align)
+        });
 
     let (line_start_x, line_available_width) = line_constraints
         .map(|constraints| constraints(start_y, strut_line_height))
@@ -535,15 +565,22 @@ pub(super) fn layout_vertical_inline_nodes(
         (TextAlign::End, true) => TextAlign::Left,
         (align, _) => align,
     };
-    let container_style = generated_owner
+    let container_owner = generated_owner
         .cloned()
-        .or_else(|| nodes.first().and_then(NodeHandle::parent_node))
-        .map(|owner| resolver.computed_style(&owner));
+        .or_else(|| nodes.first().and_then(NodeHandle::parent_node));
+    let container_style = container_owner
+        .as_ref()
+        .map(|owner| resolver.computed_style(owner));
     let first_line_indent = container_style
         .as_ref()
         .map(|style| text_indent(style, available_height))
         .unwrap_or_default();
-    let layout_last_align = text_align_last(container_style.as_ref(), layout_align);
+    let layout_last_align = container_owner
+        .as_ref()
+        .zip(container_style.as_ref())
+        .map_or(layout_align, |(owner, style)| {
+            resolved_text_align_last(owner, resolver, style, layout_align)
+        });
     let mut horizontal_lines = layout_inline_segments(
         &segments,
         0,
@@ -2259,7 +2296,7 @@ pub(super) fn layout_block_pseudo_content(
         start_y,
         available_width,
         text_align(style),
-        text_align_last(Some(style), text_align(style)),
+        resolved_text_align_last(node, resolver, style, text_align(style)),
         line_height(style),
         Some(font_metrics(style)),
         super::direction_is_rtl(style),
