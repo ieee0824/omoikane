@@ -137,6 +137,7 @@ pub(super) enum TextAlign {
     Left,
     Right,
     Center,
+    JustifyInterWord,
 }
 
 pub(super) fn text_align(style: &ComputedStyle) -> TextAlign {
@@ -156,6 +157,17 @@ pub(super) fn text_align(style: &ComputedStyle) -> TextAlign {
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("center") => {
             TextAlign::Center
         }
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("justify") => {
+            match style.get("text-justify") {
+                Some(ComputedValue::Keyword(method))
+                    if method.eq_ignore_ascii_case("none")
+                        || method.eq_ignore_ascii_case("inter-character") =>
+                {
+                    TextAlign::Start
+                }
+                _ => TextAlign::JustifyInterWord,
+            }
+        }
         // `start` is the CSS initial value.  Keeping it logical means that a
         // block with `direction: rtl` naturally starts at its right edge even
         // when no explicit text-align declaration is present.
@@ -164,10 +176,15 @@ pub(super) fn text_align(style: &ComputedStyle) -> TextAlign {
 }
 
 fn text_align_last(style: Option<&ComputedStyle>, align: TextAlign) -> TextAlign {
+    let automatic = if align == TextAlign::JustifyInterWord {
+        TextAlign::Start
+    } else {
+        align
+    };
     let Some(ComputedValue::Keyword(keyword)) =
         style.and_then(|style| style.get("text-align-last"))
     else {
-        return align;
+        return automatic;
     };
     match keyword.to_ascii_lowercase().as_str() {
         "start" => TextAlign::Start,
@@ -175,13 +192,19 @@ fn text_align_last(style: Option<&ComputedStyle>, align: TextAlign) -> TextAlign
         "left" => TextAlign::Left,
         "right" => TextAlign::Right,
         "center" => TextAlign::Center,
-        // Justification is added by the next line-distribution unit. Until
-        // then, a justified final line has the specified inline-start origin.
-        "justify" => TextAlign::Start,
+        "justify" => match style.and_then(|style| style.get("text-justify")) {
+            Some(ComputedValue::Keyword(method))
+                if method.eq_ignore_ascii_case("none")
+                    || method.eq_ignore_ascii_case("inter-character") =>
+            {
+                TextAlign::Start
+            }
+            _ => TextAlign::JustifyInterWord,
+        },
         // `match-parent` is resolved to the containing logical start until the
         // parent-relative computed-value unit lands alongside justification.
         "match-parent" => TextAlign::Start,
-        _ => align,
+        _ => automatic,
     }
 }
 
@@ -4517,7 +4540,7 @@ fn push_line(
     fragments: &mut Vec<InlineFragment>,
     x: f32,
     y: f32,
-    width: f32,
+    mut width: f32,
     mut height: f32,
     available_width: f32,
     align: TextAlign,
@@ -4532,10 +4555,14 @@ fn push_line(
         TextAlign::End => TextAlign::Right,
         other => other,
     };
+    if physical_align == TextAlign::JustifyInterWord {
+        width = justify_inter_word(fragments, width, available_width);
+    }
     let offset_x = match physical_align {
         TextAlign::Left => 0.0,
         TextAlign::Right => (available_width - width).max(0.0),
         TextAlign::Center => (available_width - width).max(0.0) / 2.0,
+        TextAlign::JustifyInterWord => 0.0,
         TextAlign::Start | TextAlign::End => unreachable!("logical alignment must be resolved"),
     };
     for fragment in fragments.iter_mut() {
@@ -4660,6 +4687,39 @@ fn push_line(
         text_overflow: None,
     });
     height
+}
+
+fn justify_inter_word(
+    fragments: &mut [InlineFragment],
+    used_width: f32,
+    available_width: f32,
+) -> f32 {
+    let extra = available_width - used_width;
+    if extra <= 0.0 {
+        return used_width;
+    }
+    let opportunities = fragments
+        .iter()
+        .filter(|fragment| {
+            matches!(&fragment.content, InlineFragmentContent::Text(text)
+                if !text.is_empty() && text.chars().all(char::is_whitespace))
+        })
+        .count();
+    if opportunities == 0 {
+        return used_width;
+    }
+    let expansion = extra / opportunities as f32;
+    let mut shift = 0.0;
+    for fragment in fragments {
+        fragment.rect.x += shift;
+        if matches!(&fragment.content, InlineFragmentContent::Text(text)
+            if !text.is_empty() && text.chars().all(char::is_whitespace))
+        {
+            fragment.rect.width += expansion;
+            shift += expansion;
+        }
+    }
+    available_width
 }
 
 /// Resolves adjacent inline fragments as one UAX#9 line while retaining the

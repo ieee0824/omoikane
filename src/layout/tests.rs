@@ -3202,6 +3202,69 @@ fn text_align_last_applies_to_final_and_forced_lines() {
 }
 
 #[test]
+fn inter_word_justification_expands_only_selected_lines() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let automatic = NodeHandle::element("p");
+    automatic.set_attribute("id", "automatic");
+    automatic.append_child(NodeHandle::text("aa bb cc dd"));
+    let disabled = NodeHandle::element("p");
+    disabled.set_attribute("id", "disabled");
+    disabled.append_child(NodeHandle::text("aa bb cc dd"));
+    let final_line = NodeHandle::element("p");
+    final_line.set_attribute("id", "final-line");
+    final_line.append_child(NodeHandle::text("aa bb"));
+    document.append_child(body.clone());
+    body.append_child(automatic.clone());
+    body.append_child(disabled.clone());
+    body.append_child(final_line.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { margin:0; width:50px; font:10px monospace; line-height:10px; \
+                  text-align:justify } \
+             #disabled { text-justify:none } \
+             #final-line { text-align-last:justify }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 50.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let automatic_lines = &find_layout_box(&layout, &automatic).unwrap().lines;
+    assert_eq!(automatic_lines.len(), 2);
+    assert!((automatic_lines[0].rect.width - 50.0).abs() < 0.01);
+    assert!(automatic_lines[1].rect.width < 50.0);
+    assert_eq!(automatic_lines[1].rect.x, 0.0);
+
+    let disabled_lines = &find_layout_box(&layout, &disabled).unwrap().lines;
+    assert_eq!(disabled_lines.len(), 2);
+    assert!(disabled_lines[0].rect.width < 50.0);
+
+    let final_lines = &find_layout_box(&layout, &final_line).unwrap().lines;
+    assert_eq!(final_lines.len(), 1);
+    assert!((final_lines[0].rect.width - 50.0).abs() < 0.01);
+    let final_space = final_lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some(" "))
+        .expect("inter-word justification must retain a space fragment");
+    assert!(final_space.rect.width > 10.0);
+}
+
+#[test]
 fn horizontal_rtl_inline_geometry_uses_logical_start_and_end() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
