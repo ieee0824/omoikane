@@ -263,7 +263,11 @@ fn initial_letter_style(
     }
     let mut components = value.split_ascii_whitespace();
     let size = components.next()?.parse::<f32>().ok()?;
-    let sink = components.next()?.parse::<usize>().ok()?;
+    let sink = match components.next() {
+        None | Some("drop") => size.floor() as usize,
+        Some("raise") => 1,
+        Some(value) => value.parse::<usize>().ok()?,
+    };
     (size >= 1.0 && sink >= 1).then(|| (style.clone(), size, sink))
 }
 

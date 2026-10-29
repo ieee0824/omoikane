@@ -6053,34 +6053,48 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
         let computed = match values {
             [Value::Number(size)] if size.is_finite() && *size >= 1.0 => {
-                Some((*size, size.floor()))
+                Some(format!("{}", super::tokenizer::trimmed_number(*size)))
             }
             [Value::Number(size), Value::Number(sink)] => (size.is_finite()
                 && *size >= 1.0
                 && sink.is_finite()
                 && *sink >= 1.0
                 && sink.fract() == 0.0)
-                .then_some((*size, *sink)),
+                .then(|| {
+                    format!(
+                        "{} {}",
+                        super::tokenizer::trimmed_number(*size),
+                        super::tokenizer::trimmed_number(*sink)
+                    )
+                }),
+            [Value::Number(size), Value::Function { name, arguments }]
+                if name.eq_ignore_ascii_case("calc") && size.is_finite() && *size >= 1.0 =>
+            {
+                calc_unitless_number(arguments).and_then(|sink| {
+                    (sink.is_finite() && sink >= 1.0).then(|| {
+                        format!(
+                            "{} {}",
+                            super::tokenizer::trimmed_number(*size),
+                            super::tokenizer::trimmed_number(sink.round())
+                        )
+                    })
+                })
+            }
             [Value::Number(size), Value::Keyword(position)]
             | [Value::Keyword(position), Value::Number(size)] => (size.is_finite()
                 && *size >= 1.0
                 && matches!(position.to_ascii_lowercase().as_str(), "drop" | "raise"))
             .then(|| {
-                let sink = if position.eq_ignore_ascii_case("raise") {
-                    1.0
-                } else {
-                    size.floor()
-                };
-                (*size, sink)
+                format!(
+                    "{} {}",
+                    super::tokenizer::trimmed_number(*size),
+                    position.to_ascii_lowercase()
+                )
             }),
             _ => None,
         };
-        return if let Some((size, sink)) = computed {
-            DeclarationValidation::Valid(ComputedValue::Keyword(format!(
-                "{} {}",
-                super::tokenizer::trimmed_number(size),
-                super::tokenizer::trimmed_number(sink)
-            )))
+        return if let Some(computed) = computed {
+            DeclarationValidation::Valid(ComputedValue::Keyword(computed))
         } else {
             DeclarationValidation::Invalid
         };
@@ -6097,8 +6111,8 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             Value::List(values) => values.as_slice(),
             value => std::slice::from_ref(value),
         };
-        return if super::shorthand::text_box_edge_is_valid(values) {
-            DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)))
+        return if let Some(computed) = super::shorthand::canonical_text_box_edge(values) {
+            DeclarationValidation::Valid(ComputedValue::Keyword(computed))
         } else {
             DeclarationValidation::Invalid
         };
@@ -6522,6 +6536,46 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+pub(crate) fn normalize_initial_letter_specified(value: &Value) -> Option<String> {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    match values {
+        [Value::Keyword(keyword)] if keyword.eq_ignore_ascii_case("normal") => {
+            Some("normal".to_string())
+        }
+        [Value::Number(size)] if size.is_finite() && *size >= 1.0 => {
+            Some(super::tokenizer::trimmed_number(*size))
+        }
+        [Value::Number(size), second] if size.is_finite() && *size >= 1.0 => Some(format!(
+            "{} {}",
+            super::tokenizer::trimmed_number(*size),
+            render_value(second)
+        )),
+        [Value::Keyword(position), Value::Number(size)]
+            if matches!(position.to_ascii_lowercase().as_str(), "drop" | "raise")
+                && size.is_finite()
+                && *size >= 1.0 =>
+        {
+            Some(format!(
+                "{} {}",
+                super::tokenizer::trimmed_number(*size),
+                position.to_ascii_lowercase()
+            ))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn normalize_text_box_edge_specified(value: &Value) -> Option<String> {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    super::shorthand::canonical_text_box_edge(values)
 }
 
 fn text_indent_components(value: &Value) -> Option<(&Value, bool, bool)> {

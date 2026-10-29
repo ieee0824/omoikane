@@ -1108,6 +1108,7 @@ export const __omoikane_service_worker_lifecycle = {};
   const needsStyleValueNormalization = (name, value) =>
     name === "transition" || name.startsWith("transition-") ||
     name === "hyphenate-character" ||
+    name === "initial-letter" || name === "text-box-edge" ||
     logicalBoxStyleProperties.has(name) ||
     validatesSpecialStyleProperties.has(name) ||
     (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
@@ -1182,7 +1183,10 @@ export const __omoikane_service_worker_lifecycle = {};
         priorities.set(declaration.name, declaration.priority || "");
       }
     }
-    if (pendingValue !== null) return pendingOverridden ? "" : pendingValue;
+    if (pendingValue !== null &&
+        kebab !== "line-clamp" && kebab !== "-webkit-line-clamp" && kebab !== "text-box") {
+      return pendingOverridden ? "" : pendingValue;
+    }
     const parts = longhands.map(name => values.get(name));
     if (kebab === "text-wrap") {
       const [mode, style] = parts;
@@ -1211,7 +1215,15 @@ export const __omoikane_service_worker_lifecycle = {};
       }
       if (continuation !== "collapse" && continuation !== "-webkit-legacy") return "";
       const serialized = [];
-      if (maxLines !== "auto") serialized.push(maxLines);
+      const maxParts = maxLines.split(/\s+/);
+      const lineCount = maxParts.find(value => /^[1-9]\d*$/.test(value));
+      const hasAuto = maxParts.includes("auto");
+      if (lineCount) serialized.push(lineCount);
+      const explicitEllipsis = maxParts.length === 2 && maxParts[0] === lineCount && hasAuto;
+      if (explicitEllipsis) serialized.push("ellipsis");
+      if (hasAuto && (lineCount || blockEllipsis !== "ellipsis" || continuation === "-webkit-legacy")) {
+        serialized.push("auto");
+      }
       if (blockEllipsis !== "ellipsis") serialized.push(blockEllipsis);
       if (continuation === "-webkit-legacy") serialized.push("-webkit-legacy");
       return serialized.length ? serialized.join(" ") : "auto";
@@ -1225,7 +1237,7 @@ export const __omoikane_service_worker_lifecycle = {};
         return trim === edge ? trim : "";
       }
       if (trim === "none" && edge === "auto") return "normal";
-      if (trim === "trim-both") return edge;
+      if (trim === "trim-both") return edge === "auto" ? "trim-both" : edge;
       return edge === "auto" ? trim : trim + " " + edge;
     }
     if (logicalBoxStyleProperties.has(kebab)) {

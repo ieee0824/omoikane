@@ -9007,7 +9007,7 @@ fn line_clamp_and_text_box_shorthands_expand_to_specified_longhands() {
     );
     assert_eq!(
         metrics.get("initial-letter"),
-        Some(&ComputedValue::Keyword("2.5 2".into()))
+        Some(&ComputedValue::Keyword("2.5 drop".into()))
     );
     assert_eq!(
         metrics.get("text-box-trim"),

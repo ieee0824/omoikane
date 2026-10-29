@@ -2486,6 +2486,7 @@ fn expand_line_clamp_shorthand(name: &str, value: Value, important: bool) -> Vec
 
     let mut max_lines = Vec::new();
     let mut block_ellipsis = None;
+    let mut explicit_ellipsis = false;
     let mut legacy = false;
     for component in values {
         match component {
@@ -2513,6 +2514,7 @@ fn expand_line_clamp_shorthand(name: &str, value: Value, important: bool) -> Vec
                     "no-ellipsis" | "ellipsis"
                 ) && block_ellipsis.is_none() =>
             {
+                explicit_ellipsis = keyword.eq_ignore_ascii_case("ellipsis");
                 block_ellipsis = Some(component.clone());
             }
             Value::String(_) if block_ellipsis.is_none() => {
@@ -2528,6 +2530,12 @@ fn expand_line_clamp_shorthand(name: &str, value: Value, important: bool) -> Vec
     }
     if max_lines.is_empty() && block_ellipsis.is_none() {
         return invalid();
+    }
+    if explicit_ellipsis
+        && max_lines.len() == 2
+        && matches!(&max_lines[0], Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto"))
+    {
+        max_lines.swap(0, 1);
     }
     let max_lines = match max_lines.as_slice() {
         [] => Value::Keyword("auto".to_string()),
@@ -2585,25 +2593,35 @@ fn expand_text_box_shorthand(value: Value, important: bool) -> Vec<Declaration> 
         value => std::slice::from_ref(value),
     };
     let mut trim = None;
+    let mut trim_index = None;
     let mut edge = Vec::new();
-    for component in values {
+    for (index, component) in values.iter().enumerate() {
         if matches!(component, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "none" | "trim-start" | "trim-end" | "trim-both"))
         {
             if trim.replace(component.clone()).is_some() {
                 return invalid();
             }
+            trim_index = Some(index);
         } else {
             edge.push(component.clone());
         }
     }
-    if edge.is_empty() && trim.is_none() || !text_box_edge_is_valid(&edge) {
+    if edge.is_empty() && trim.is_none()
+        || edge.len() == 2
+            && trim_index.is_some_and(|index| index != 0 && index + 1 != values.len())
+        || !text_box_edge_is_valid(&edge)
+    {
         return invalid();
     }
     let trim = trim.unwrap_or_else(|| Value::Keyword("trim-both".to_string()));
-    let edge = match edge.as_slice() {
-        [] => Value::Keyword("auto".to_string()),
+    let canonical_edge = canonical_text_box_edge(&edge).expect("edge was validated");
+    let edge_parts = canonical_edge
+        .split_ascii_whitespace()
+        .map(|part| Value::Keyword(part.to_string()))
+        .collect::<Vec<_>>();
+    let edge = match edge_parts.as_slice() {
         [value] => value.clone(),
-        _ => Value::List(edge),
+        _ => Value::List(edge_parts),
     };
     [("text-box-trim", trim), ("text-box-edge", edge)]
         .into_iter()
@@ -2616,22 +2634,43 @@ fn expand_text_box_shorthand(value: Value, important: bool) -> Vec<Declaration> 
 }
 
 pub(super) fn text_box_edge_is_valid(values: &[Value]) -> bool {
+    canonical_text_box_edge(values).is_some()
+}
+
+pub(crate) fn canonical_text_box_edge(values: &[Value]) -> Option<String> {
     match values {
-        [] => true,
-        [Value::Keyword(keyword)] => matches!(
-            keyword.to_ascii_lowercase().as_str(),
-            "auto" | "text" | "ideographic" | "ideographic-ink"
-        ),
-        [Value::Keyword(over), Value::Keyword(under)] => {
-            matches!(
-                over.to_ascii_lowercase().as_str(),
-                "text" | "ideographic" | "ideographic-ink" | "cap" | "ex"
-            ) && matches!(
-                under.to_ascii_lowercase().as_str(),
-                "text" | "ideographic" | "ideographic-ink" | "alphabetic"
-            )
+        [] => Some("auto".to_string()),
+        [Value::Keyword(keyword)]
+            if matches!(
+                keyword.to_ascii_lowercase().as_str(),
+                "auto" | "text" | "ideographic" | "ideographic-ink" | "cap" | "ex" | "alphabetic"
+            ) =>
+        {
+            Some(keyword.to_ascii_lowercase())
         }
-        _ => false,
+        [Value::Keyword(over), Value::Keyword(under)] => {
+            let over = over.to_ascii_lowercase();
+            let under = under.to_ascii_lowercase();
+            if !matches!(
+                over.as_str(),
+                "text" | "ideographic" | "ideographic-ink" | "cap" | "ex"
+            ) || !matches!(
+                under.as_str(),
+                "text" | "ideographic" | "ideographic-ink" | "alphabetic"
+            ) {
+                return None;
+            }
+            let computed =
+                if over == under || under == "text" && matches!(over.as_str(), "cap" | "ex") {
+                    over
+                } else if over == "text" && under == "alphabetic" {
+                    under
+                } else {
+                    format!("{over} {under}")
+                };
+            Some(computed)
+        }
+        _ => None,
     }
 }
 

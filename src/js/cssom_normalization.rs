@@ -105,6 +105,27 @@ const VALIDATED_PROPERTIES: &[&str] = &[
 ];
 
 pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
+    if matches!(property, "initial-letter" | "text-box-edge") {
+        if !crate::css::style::supports_declaration(property, value) {
+            return None;
+        }
+        let keyword = value.trim().to_ascii_lowercase();
+        if matches!(
+            keyword.as_str(),
+            "initial" | "inherit" | "unset" | "revert" | "revert-layer"
+        ) {
+            return Some(keyword);
+        }
+        let declarations = crate::css::parse_style_attribute(&format!("{property}: {value}"));
+        let declaration = declarations
+            .iter()
+            .find(|declaration| declaration.name == property)?;
+        return if property == "initial-letter" {
+            crate::css::style::normalize_initial_letter_specified(&declaration.value)
+        } else {
+            crate::css::style::normalize_text_box_edge_specified(&declaration.value)
+        };
+    }
     if property == "hyphenate-character" {
         let declarations = crate::css::parse_style_attribute(&format!("{property}: {value}"));
         let declaration = declarations

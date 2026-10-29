@@ -8227,7 +8227,7 @@ fn css_supports_line_clamp_and_inline_metric_grammars() {
                     CSS.supports("line-clamp", "0") ||
                     CSS.supports("-webkit-line-clamp", "2 ellipsis") ||
                     CSS.supports("initial-letter", "0") ||
-                    CSS.supports("text-box-edge", "cap")) return "accepted-invalid";
+                    CSS.supports("text-box-edge", "leading")) return "accepted-invalid";
                 const style = document.body.appendChild(document.createElement("div")).style;
                 style.setProperty("line-clamp", "3 \"more\"");
                 if (style.getPropertyValue("line-clamp") !== '3 "more"' ||
