@@ -61,6 +61,8 @@ mod child_document;
 mod clipboard_store;
 use clipboard_store::{HostClipboard, WireRepresentation};
 #[cfg(test)]
+mod bootstrap_module_cache_tests;
+#[cfg(test)]
 mod child_document_tests;
 mod console_trace;
 mod cssom_normalization;
@@ -883,6 +885,34 @@ fn capture_parser_update_callback(
     Ok(())
 }
 
+/// Returns the runtime's parsed bootstrap module for `bindings`, parsing the
+/// generated source on first use. Every Realm of a runtime shares one Boa
+/// Context and interner, so the parsed tree can be reused across them; this
+/// avoids re-parsing the large bootstrap source for each iframe Realm.
+fn parsed_bootstrap_module(
+    host_state: &Rc<RefCell<HostState>>,
+    bindings: &BootstrapBindings,
+    context: &mut Context,
+) -> JsResult<Rc<boa_engine::module::ParsedModuleSource>> {
+    if let Some(parsed) = host_state
+        .borrow()
+        .parsed_bootstrap_modules
+        .get(&bindings.names)
+    {
+        return Ok(Rc::clone(parsed));
+    }
+    let source = bindings.module_source();
+    let parsed = Rc::new(boa_engine::module::ParsedModuleSource::parse(
+        Source::from_bytes(source.as_bytes()),
+        context,
+    )?);
+    host_state
+        .borrow_mut()
+        .parsed_bootstrap_modules
+        .insert(bindings.names.clone(), Rc::clone(&parsed));
+    Ok(parsed)
+}
+
 fn evaluate_dom_bootstrap(
     context: &mut Context,
     host_state: &Rc<RefCell<HostState>>,
@@ -900,15 +930,10 @@ fn evaluate_dom_bootstrap(
         .as_ref()
         .and_then(Weak::upgrade)
         .expect("browser module loader is live during bootstrap");
-    let source = bindings.module_source();
     let mut metadata = boa_engine::HostDefined::default();
     metadata.insert(BrowserBootstrapModule);
-    let module = Module::parse_with_host_defined(
-        Source::from_bytes(source.as_bytes()),
-        None,
-        metadata,
-        context,
-    )?;
+    let parsed = parsed_bootstrap_module(host_state, bindings, context)?;
+    let module = Module::from_parsed_source_with_host_defined(&parsed, None, metadata, context)?;
     loader
         .bootstrap_modules
         .borrow_mut()
@@ -2306,6 +2331,10 @@ struct HostState {
     /// Keeps newly constructed native capabilities rooted until the trusted
     /// bootstrap module receives them through its private import.meta hook.
     bootstrap_bindings: HashMap<usize, JsObject>,
+    /// Bootstrap module sources parsed once per runtime, keyed by the private
+    /// binding names that select the generated source. Each Realm still runs
+    /// its own scope analysis, so reuse only skips repeating the parse.
+    parsed_bootstrap_modules: HashMap<Vec<String>, Rc<boa_engine::module::ParsedModuleSource>>,
     promise_reports: script_errors::PromiseReports,
     /// CDP remote object handles are retained by the host rather than by a
     /// page-visible global property.  Keeping these values in HostState also
@@ -3280,6 +3309,7 @@ impl HostState {
             current_window_events: HashMap::new(),
             window_proxy_registry: None,
             bootstrap_bindings: HashMap::new(),
+            parsed_bootstrap_modules: HashMap::new(),
             promise_reports: script_errors::PromiseReports::default(),
             remote_objects: HashMap::new(),
             console_logs: Vec::new(),

@@ -35,7 +35,7 @@ use boa_engine::value::TryFromJs;
 use boa_gc::{Finalize, Gc, GcEdge, GcRefCell, Rooted, Trace};
 use boa_interner::Interner;
 use boa_parser::source::ReadChar;
-use boa_parser::{Parser, Source};
+use boa_parser::{Parser, Source, analyze_module_scope};
 pub use loader::*;
 pub use namespace::ModuleNamespace;
 use source::SourceTextModule;
@@ -57,6 +57,52 @@ mod loader;
 mod namespace;
 mod source;
 mod synthetic;
+
+/// Module source text that has been parsed but not yet bound to a realm.
+///
+/// Parsing a large module repeatedly for every realm of a context dominates
+/// realm startup. This keeps the tree before scope analysis so
+/// [`Module::from_parsed_source_with_host_defined`] can create a module for
+/// each realm without parsing the text again. Each created module still
+/// analyzes its own clone of the tree against its realm's global scope.
+///
+/// The tree refers to identifiers interned in the [`Context`] that parsed it,
+/// so it must only be used with that context.
+#[derive(Clone)]
+pub struct ParsedModuleSource {
+    module: boa_ast::Module,
+    source_text: SourceText,
+    path: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for ParsedModuleSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParsedModuleSource")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ParsedModuleSource {
+    /// Parses `src` as a module without binding it to a realm.
+    ///
+    /// # Errors
+    ///
+    /// Returns a syntax error found while parsing. Early errors that depend
+    /// on scope analysis are reported when a module is created from it.
+    pub fn parse<R: ReadChar>(src: Source<'_, R>, context: &mut Context) -> JsResult<Self> {
+        let path = src.path().map(Path::to_path_buf);
+        let mut parser = Parser::new(src);
+        parser.set_identifier(context.next_parser_identifier());
+        let (module, source) =
+            parser.parse_module_without_scope_analysis(context.interner_mut())?;
+        Ok(Self {
+            module,
+            source_text: SourceText::new(source),
+            path,
+        })
+    }
+}
 
 /// ECMAScript's [**Abstract module record**][spec].
 ///
@@ -234,6 +280,44 @@ impl Module {
                 kind: ModuleKind::SourceText(Box::new(src)),
                 host_defined,
                 path,
+            }),
+        })
+    }
+
+    /// Creates a module from a source parsed once with
+    /// [`ParsedModuleSource::parse`], running scope analysis against the
+    /// realm's global scope.
+    ///
+    /// The result is equivalent to [`Module::parse_with_host_defined`] with the
+    /// same source, but skips tokenizing and parsing. `parsed` must come from
+    /// this `context`, because its identifiers are interned there.
+    ///
+    /// # Errors
+    ///
+    /// Returns an early error found by scope analysis.
+    pub fn from_parsed_source_with_host_defined(
+        parsed: &ParsedModuleSource,
+        realm: Option<Realm>,
+        host_defined: HostDefined,
+        context: &mut Context,
+    ) -> JsResult<Self> {
+        let realm = realm.unwrap_or_else(|| context.realm().clone());
+        let mut module = parsed.module.clone();
+        analyze_module_scope(&mut module, realm.scope(), context.interner())?;
+        let src = SourceTextModule::new(
+            module,
+            context.interner(),
+            parsed.source_text.clone(),
+            parsed.path.clone(),
+        );
+
+        Ok(Self {
+            inner: Rooted::new(ModuleRepr {
+                realm: realm.to_edge(),
+                namespace: GcRefCell::default(),
+                kind: ModuleKind::SourceText(Box::new(src)),
+                host_defined,
+                path: parsed.path.clone(),
             }),
         })
     }
@@ -804,6 +888,89 @@ impl<T: IntoIterator<Item = (JsString, NativeFunction)> + Clone> IntoJsModule fo
 mod tests {
     use super::Module;
     use crate::{Context, JsValue, NativeFunction, Source};
+
+    #[test]
+    fn modules_from_one_parsed_source_are_analyzed_per_realm() {
+        use super::{HostDefined, ParsedModuleSource};
+
+        let mut context = Context::default();
+        // `shared` resolves through each realm's own global scope: one realm
+        // declares it as a global lexical binding, the other does not.
+        let parsed = ParsedModuleSource::parse(
+            Source::from_bytes(
+                "let count = 0;
+                const tag = strings => strings;
+                globalThis.bump = () => ++count;
+                globalThis.site = () => tag`x`;
+                globalThis.sharedValue = () => typeof shared === 'undefined' ? 'none' : shared;",
+            ),
+            &mut context,
+        )
+        .unwrap();
+        let mut realms = Vec::new();
+        for declares_shared in [true, false] {
+            let realm = context.create_realm().unwrap();
+            let previous = context.enter_realm(realm.clone());
+            if declares_shared {
+                context
+                    .eval(Source::from_bytes("let shared = 'lexical';"))
+                    .unwrap();
+            }
+            let module = Module::from_parsed_source_with_host_defined(
+                &parsed,
+                None,
+                HostDefined::default(),
+                &mut context,
+            )
+            .unwrap();
+            assert!(module.realm() == realm);
+            let promise = module.load_link_evaluate(&mut context);
+            context.run_jobs().unwrap();
+            assert!(promise.state().as_fulfilled().is_some());
+            context.enter_realm(previous);
+            realms.push(realm);
+        }
+        let eval_in = |context: &mut Context, realm: &crate::realm::Realm, source: &str| {
+            let previous = context.enter_realm(realm.clone());
+            let value = context.eval(Source::from_bytes(source)).unwrap();
+            context.enter_realm(previous);
+            value
+        };
+        // Module state is per realm.
+        assert_eq!(
+            eval_in(&mut context, &realms[0], "bump(); bump()"),
+            JsValue::from(2)
+        );
+        assert_eq!(
+            eval_in(&mut context, &realms[1], "bump()"),
+            JsValue::from(1)
+        );
+        // Tagged template sites are per realm and stable within a realm.
+        assert_eq!(
+            eval_in(&mut context, &realms[0], "site() === site()"),
+            JsValue::from(true)
+        );
+        let first = eval_in(&mut context, &realms[0], "site()");
+        let second = eval_in(&mut context, &realms[1], "site()");
+        assert_ne!(first, second);
+        // Scope analysis used each realm's global scope.
+        assert_eq!(
+            eval_in(&mut context, &realms[0], "sharedValue()"),
+            JsValue::from(crate::js_string!("lexical"))
+        );
+        assert_eq!(
+            eval_in(&mut context, &realms[1], "sharedValue()"),
+            JsValue::from(crate::js_string!("none"))
+        );
+    }
+
+    #[test]
+    fn parsed_module_source_reports_syntax_errors() {
+        use super::ParsedModuleSource;
+
+        let mut context = Context::default();
+        assert!(ParsedModuleSource::parse(Source::from_bytes("export {"), &mut context).is_err());
+    }
 
     #[test]
     fn synchronous_ancestor_error_after_async_dependency_rejects_the_ancestor() {
