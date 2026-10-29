@@ -2333,15 +2333,16 @@ pub(crate) fn paint_shaped_horizontal_text_with_candidates(
         let font = candidate.font;
         let synthesis = glyph_synthesis(candidate, style);
         for (glyph_index, shaped) in run.glyphs.iter().enumerate() {
+            let raster_size = font_size * shaped.font_size_scale;
             let color_layers = font.rasterize_color_glyph(
                 shaped.glyph_id,
-                font_size,
+                raster_size,
                 &style.font_palette,
                 [color.r, color.g, color.b, color.a],
             );
             if let Some(layers) = color_layers {
                 for layer in layers {
-                    let glyph = synthesize_glyph(&layer.raster, synthesis, font_size);
+                    let glyph = synthesize_glyph(&layer.raster, synthesis, raster_size);
                     if glyph.width == 0 || glyph.height == 0 || glyph.bitmap.is_empty() {
                         continue;
                     }
@@ -2360,8 +2361,8 @@ pub(crate) fn paint_shaped_horizontal_text_with_candidates(
                         clip,
                     );
                 }
-            } else if let Ok(glyph) = rasterize_glyph_cached(font, shaped.glyph_id, font_size) {
-                let glyph = synthesize_glyph(&glyph, synthesis, font_size);
+            } else if let Ok(glyph) = rasterize_glyph_cached(font, shaped.glyph_id, raster_size) {
+                let glyph = synthesize_glyph(&glyph, synthesis, raster_size);
                 if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
                     canvas.draw_glyph_mask(
                         cursor_x + shaped.x_offset + glyph.offset_x,

@@ -11833,9 +11833,30 @@ fn computed_shaping_options(
                     .map(|value| crate::font::OpenTypeVariation::new(tag, value))
             }),
     );
+    let synthesis = computed_font_synthesis(properties);
+    let synthetic_caps = if synthesis.small_caps {
+        match words(PropertyId::FontVariantCaps).as_slice() {
+            ["small-caps"] | ["petite-caps"] => crate::font::SyntheticCaps::Lowercase,
+            ["all-small-caps"] | ["all-petite-caps"] => crate::font::SyntheticCaps::All,
+            _ => crate::font::SyntheticCaps::None,
+        }
+    } else {
+        crate::font::SyntheticCaps::None
+    };
+    let synthetic_position = if synthesis.position {
+        match words(PropertyId::FontVariantPosition).as_slice() {
+            ["sub"] => crate::font::SyntheticPosition::Subscript,
+            ["super"] => crate::font::SyntheticPosition::Superscript,
+            _ => crate::font::SyntheticPosition::None,
+        }
+    } else {
+        crate::font::SyntheticPosition::None
+    };
     crate::font::ShapingOptions {
         features,
         variations,
+        synthetic_caps,
+        synthetic_position,
     }
 }
 

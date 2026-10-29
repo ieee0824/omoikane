@@ -10513,6 +10513,83 @@ fn shaped_paint_synthesizes_only_permitted_missing_weight_and_style() {
 }
 
 #[test]
+fn shaped_paint_uses_synthetic_caps_and_position_raster_sizes() {
+    use super::text::paint_shaped_horizontal_text;
+    use crate::font::{Font, OpenTypeFeature, ShapingOptions, SyntheticCaps, SyntheticPosition};
+
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/anonymized-font-face-ranges/regular.ttf").to_vec(),
+    )
+    .unwrap();
+    let paint = |text: &str, options: ShapingOptions| {
+        let mut canvas = Canvas::new(96, 72);
+        paint_shaped_horizontal_text(
+            &mut canvas,
+            Rect {
+                x: 4.0,
+                y: 0.0,
+                width: 88.0,
+                height: 72.0,
+            },
+            text,
+            40.0,
+            54.0,
+            &[&font],
+            &FragmentStyle {
+                shaping_options: Arc::new(options),
+                ..FragmentStyle::default()
+            },
+            Color::rgb(0, 0, 0),
+            None,
+            0.0,
+        )
+        .unwrap();
+        canvas
+    };
+    let alpha_bounds = |canvas: &Canvas| {
+        let mut bounds = (u32::MAX, u32::MAX, 0, 0);
+        for (index, pixel) in canvas.pixels().chunks_exact(4).enumerate() {
+            if pixel[3] == 0 {
+                continue;
+            }
+            let x = index as u32 % canvas.width;
+            let y = index as u32 / canvas.width;
+            bounds.0 = bounds.0.min(x);
+            bounds.1 = bounds.1.min(y);
+            bounds.2 = bounds.2.max(x);
+            bounds.3 = bounds.3.max(y);
+        }
+        bounds
+    };
+
+    let ordinary = paint("a", ShapingOptions::default());
+    let small_caps = paint(
+        "a",
+        ShapingOptions {
+            features: vec![OpenTypeFeature::new(*b"smcp", 1)],
+            synthetic_caps: SyntheticCaps::Lowercase,
+            ..ShapingOptions::default()
+        },
+    );
+    assert_ne!(small_caps.pixels(), ordinary.pixels());
+    let ordinary_bounds = alpha_bounds(&ordinary);
+    let caps_bounds = alpha_bounds(&small_caps);
+    assert!(caps_bounds.3 - caps_bounds.1 < ordinary_bounds.3 - ordinary_bounds.1);
+
+    let superscript = paint(
+        "a",
+        ShapingOptions {
+            features: vec![OpenTypeFeature::new(*b"sups", 1)],
+            synthetic_position: SyntheticPosition::Superscript,
+            ..ShapingOptions::default()
+        },
+    );
+    let super_bounds = alpha_bounds(&superscript);
+    assert!(super_bounds.1 < ordinary_bounds.1);
+    assert!(super_bounds.3 - super_bounds.1 < ordinary_bounds.3 - ordinary_bounds.1);
+}
+
+#[test]
 fn shaped_paint_does_not_space_after_non_advancing_leading_cluster() {
     use super::text::paint_shaped_horizontal_text;
     use crate::font::{ShapingDirection, load_default_text_fonts};

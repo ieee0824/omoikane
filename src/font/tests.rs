@@ -971,12 +971,14 @@ fn shaping_cache_reuses_exact_runs_without_mixing_size_or_direction() {
     let feature_options = ShapingOptions {
         features: vec![OpenTypeFeature::new(*b"liga", 0)],
         variations: Vec::new(),
+        ..ShapingOptions::default()
     };
     font.shape_text_with_options("AB", 16.0, ShapingDirection::LeftToRight, &feature_options)
         .unwrap();
     let variation_options = ShapingOptions {
         features: Vec::new(),
         variations: vec![OpenTypeVariation::new(*b"wght", 700.0)],
+        ..ShapingOptions::default()
     };
     font.shape_text_with_options(
         "AB",
@@ -986,6 +988,74 @@ fn shaping_cache_reuses_exact_runs_without_mixing_size_or_direction() {
     )
     .unwrap();
     assert_eq!(font.shape_cache.lock().unwrap().entries.len(), 5);
+}
+
+#[test]
+fn unsupported_caps_and_position_features_use_typed_synthesis_fallbacks() {
+    let font = load_selection_fixture();
+    assert!(!font.supports_opentype_feature(*b"smcp"));
+    assert!(!font.supports_opentype_feature(*b"sups"));
+
+    let baseline = font
+        .shape_text("aA", 20.0, ShapingDirection::LeftToRight)
+        .unwrap();
+    let caps = font
+        .shape_text_with_options(
+            "aA",
+            20.0,
+            ShapingDirection::LeftToRight,
+            &ShapingOptions {
+                features: vec![OpenTypeFeature::new(*b"smcp", 1)],
+                synthetic_caps: SyntheticCaps::Lowercase,
+                ..ShapingOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(caps[0].glyph_id, baseline[1].glyph_id);
+    assert_eq!(caps[0].font_size_scale, 0.8);
+    assert_eq!(caps[1].font_size_scale, 1.0);
+
+    let superscript = font
+        .shape_text_with_options(
+            "A",
+            20.0,
+            ShapingDirection::LeftToRight,
+            &ShapingOptions {
+                features: vec![OpenTypeFeature::new(*b"sups", 1)],
+                synthetic_position: SyntheticPosition::Superscript,
+                ..ShapingOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(superscript[0].font_size_scale, 0.8);
+    assert!(superscript[0].y_offset > 0.0);
+    assert!(superscript[0].x_advance < baseline[1].x_advance);
+
+    let disabled = font
+        .shape_text_with_options(
+            "a",
+            20.0,
+            ShapingDirection::LeftToRight,
+            &ShapingOptions {
+                features: vec![
+                    OpenTypeFeature::new(*b"smcp", 1),
+                    OpenTypeFeature::new(*b"smcp", 0),
+                ],
+                synthetic_caps: SyntheticCaps::Lowercase,
+                ..ShapingOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(disabled[0].glyph_id, baseline[0].glyph_id);
+    assert_eq!(disabled[0].font_size_scale, 1.0);
+}
+
+#[test]
+fn synthetic_caps_preserve_source_clusters_across_uppercase_expansion() {
+    let (text, map, clusters) = synthetic_caps_text("aßZ", true, false);
+    assert_eq!(text, "ASSZ");
+    assert_eq!(map, vec![(0, 0), (1, 1), (2, 1), (3, 3)]);
+    assert_eq!(clusters, HashSet::from([0, 1]));
 }
 
 #[test]

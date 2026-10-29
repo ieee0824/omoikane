@@ -150,6 +150,8 @@ pub struct ShapedGlyph {
     pub y_advance: f32,
     pub x_offset: f32,
     pub y_offset: f32,
+    /// Raster-size multiplier used by deterministic synthetic variants.
+    pub font_size_scale: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -175,6 +177,14 @@ impl OpenTypeFeature {
 
     fn rustybuzz(self) -> Feature {
         Feature::new(Tag::from_bytes(&self.tag), self.value, ..)
+    }
+
+    fn enables(self, tag: &[u8; 4]) -> bool {
+        &self.tag == tag && self.value != 0
+    }
+
+    fn matches(self, tag: &[u8; 4]) -> bool {
+        &self.tag == tag
     }
 }
 
@@ -209,6 +219,34 @@ pub struct ShapingOptions {
     pub features: Vec<OpenTypeFeature>,
     /// Variation axes in CSS application order; later duplicate tags take precedence.
     pub variations: Vec<OpenTypeVariation>,
+    /// Small-cap fallback requested after CSS synthesis permissions are resolved.
+    pub synthetic_caps: SyntheticCaps,
+    /// Position fallback requested after CSS synthesis permissions are resolved.
+    pub synthetic_position: SyntheticPosition,
+}
+
+/// Cased characters eligible for a synthetic small-cap fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SyntheticCaps {
+    /// Do not synthesize small-cap glyphs.
+    #[default]
+    None,
+    /// Replace lowercase characters when `smcp` is unavailable.
+    Lowercase,
+    /// Replace all cased characters when `c2sc`/`smcp` are unavailable.
+    All,
+}
+
+/// Baseline fallback used when a font has no requested position feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SyntheticPosition {
+    /// Do not synthesize positioned glyphs.
+    #[default]
+    None,
+    /// Synthesize subscript glyphs when `subs` is unavailable.
+    Subscript,
+    /// Synthesize superscript glyphs when `sups` is unavailable.
+    Superscript,
 }
 
 /// Permission for synthesizing a missing italic or oblique face.
@@ -252,6 +290,42 @@ impl Default for FontSynthesis {
             position: true,
         }
     }
+}
+
+fn synthetic_caps_text(
+    text: &str,
+    lowercase: bool,
+    uppercase: bool,
+) -> (String, Vec<(usize, usize)>, HashSet<usize>) {
+    let mut transformed = String::with_capacity(text.len());
+    let mut cluster_map = Vec::new();
+    let mut small_cap_clusters = HashSet::new();
+    for (source_start, character) in text.char_indices() {
+        let eligible =
+            lowercase && character.is_lowercase() || uppercase && character.is_uppercase();
+        if eligible {
+            small_cap_clusters.insert(source_start);
+        }
+        let replacement = if eligible {
+            character.to_uppercase().collect::<String>()
+        } else {
+            character.to_string()
+        };
+        for (offset, _) in replacement.char_indices() {
+            cluster_map.push((transformed.len() + offset, source_start));
+        }
+        transformed.push_str(&replacement);
+    }
+    (transformed, cluster_map, small_cap_clusters)
+}
+
+fn synthetic_position_fallback(position: SyntheticPosition, size_px: f32) -> (f32, f32) {
+    let shift = match position {
+        SyntheticPosition::None => return (1.0, 0.0),
+        SyntheticPosition::Subscript => -size_px * 0.2,
+        SyntheticPosition::Superscript => size_px * 0.34,
+    };
+    (0.8, shift)
 }
 
 /// Number of CSS letter-spacing boundaries in a source text run.
@@ -685,8 +759,50 @@ impl Font {
             .copied()
             .map(OpenTypeFeature::rustybuzz)
             .collect::<Vec<_>>();
+        let active_caps_tag = |tags: [[u8; 4]; 2]| {
+            tags.into_iter().find(|tag| {
+                options
+                    .features
+                    .iter()
+                    .rev()
+                    .find(|feature| feature.matches(tag))
+                    .is_some_and(|feature| feature.enables(tag))
+            })
+        };
+        let lowercase_tag = active_caps_tag([*b"smcp", *b"pcap"]);
+        let uppercase_tag = active_caps_tag([*b"c2sc", *b"c2pc"]);
+        let synthesize_lowercase = options.synthetic_caps != SyntheticCaps::None
+            && lowercase_tag.is_some_and(|tag| !self.supports_opentype_feature(tag));
+        let synthesize_uppercase = options.synthetic_caps == SyntheticCaps::All
+            && uppercase_tag.is_some_and(|tag| !self.supports_opentype_feature(tag));
+        let (shaping_text, cluster_map, small_cap_clusters) =
+            if synthesize_lowercase || synthesize_uppercase {
+                synthetic_caps_text(text, synthesize_lowercase, synthesize_uppercase)
+            } else {
+                (text.to_string(), Vec::new(), HashSet::new())
+            };
+        let position_tag = match options.synthetic_position {
+            SyntheticPosition::None => None,
+            SyntheticPosition::Subscript => Some(*b"subs"),
+            SyntheticPosition::Superscript => Some(*b"sups"),
+        }
+        .filter(|tag| {
+            options
+                .features
+                .iter()
+                .rev()
+                .find(|feature| feature.matches(tag))
+                .is_some_and(|feature| feature.enables(tag))
+        });
+        let synthesize_position =
+            position_tag.is_some_and(|tag| !self.supports_opentype_feature(tag));
+        let (position_scale, position_shift) = if synthesize_position {
+            self.synthetic_position_metrics(options.synthetic_position, size_px)
+        } else {
+            (1.0, 0.0)
+        };
         let mut buffer = UnicodeBuffer::new();
-        buffer.push_str(text);
+        buffer.push_str(&shaping_text);
         buffer.set_direction(match direction {
             ShapingDirection::LeftToRight => Direction::LeftToRight,
             ShapingDirection::RightToLeft => Direction::RightToLeft,
@@ -700,13 +816,32 @@ impl Font {
             .glyph_infos()
             .iter()
             .zip(glyphs.glyph_positions())
-            .map(|(info, position)| ShapedGlyph {
-                glyph_id: info.glyph_id as u16,
-                cluster: info.cluster as usize,
-                x_advance: position.x_advance as f32 * scale,
-                y_advance: position.y_advance as f32 * scale,
-                x_offset: position.x_offset as f32 * scale,
-                y_offset: position.y_offset as f32 * scale,
+            .map(|(info, position)| {
+                let cluster = if cluster_map.is_empty() {
+                    info.cluster as usize
+                } else {
+                    let output = info.cluster as usize;
+                    let index = cluster_map
+                        .partition_point(|(start, _)| *start <= output)
+                        .saturating_sub(1);
+                    cluster_map[index].1
+                };
+                let mut font_size_scale = 1.0;
+                if small_cap_clusters.contains(&cluster) {
+                    font_size_scale *= 0.8;
+                }
+                if synthesize_position {
+                    font_size_scale *= position_scale;
+                }
+                ShapedGlyph {
+                    glyph_id: info.glyph_id as u16,
+                    cluster,
+                    x_advance: position.x_advance as f32 * scale * font_size_scale,
+                    y_advance: position.y_advance as f32 * scale * font_size_scale,
+                    x_offset: position.x_offset as f32 * scale * font_size_scale,
+                    y_offset: position.y_offset as f32 * scale * font_size_scale + position_shift,
+                    font_size_scale,
+                }
             })
             .collect();
         if let Some(key) = key
@@ -718,6 +853,43 @@ impl Font {
                 .insert(key, shaped.clone());
         }
         Ok(shaped)
+    }
+
+    fn supports_opentype_feature(&self, tag: [u8; 4]) -> bool {
+        TtfFace::parse(self.inner.font_data(), self.face_index)
+            .ok()
+            .and_then(|face| face.tables().gsub)
+            .is_some_and(|table| table.features.index(Tag::from_bytes(&tag)).is_some())
+    }
+
+    fn synthetic_position_metrics(&self, position: SyntheticPosition, size_px: f32) -> (f32, f32) {
+        let Ok(face) = TtfFace::parse(self.inner.font_data(), self.face_index) else {
+            return synthetic_position_fallback(position, size_px);
+        };
+        let metrics = match position {
+            SyntheticPosition::None => return (1.0, 0.0),
+            SyntheticPosition::Subscript => face.subscript_metrics(),
+            SyntheticPosition::Superscript => face.superscript_metrics(),
+        };
+        let Some(metrics) = metrics else {
+            return synthetic_position_fallback(position, size_px);
+        };
+        if metrics.y_size <= 0 || metrics.y_offset <= 0 {
+            return synthetic_position_fallback(position, size_px);
+        }
+        let units = f32::from(face.units_per_em().max(1));
+        let scale = (f32::from(metrics.y_size) / units).clamp(0.5, 1.0);
+        let offset = f32::from(metrics.y_offset) / units * size_px;
+        let shift = match position {
+            SyntheticPosition::Subscript => -offset,
+            SyntheticPosition::Superscript => offset,
+            SyntheticPosition::None => 0.0,
+        };
+        if scale.is_finite() && shift.is_finite() && shift != 0.0 {
+            (scale, shift)
+        } else {
+            synthetic_position_fallback(position, size_px)
+        }
     }
 
     /// Rasterizes a glyph selected by the shaping engine.

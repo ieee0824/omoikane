@@ -6748,6 +6748,29 @@ fn font_variant_properties_expand_before_explicit_opentype_settings() {
             crate::font::OpenTypeVariation::new(*b"wght", 700.0),
         ]
     );
+    assert_eq!(
+        style.shaping_options().synthetic_caps,
+        crate::font::SyntheticCaps::All
+    );
+    assert_eq!(
+        style.shaping_options().synthetic_position,
+        crate::font::SyntheticPosition::Superscript
+    );
+
+    let no_synthesis = NodeHandle::element("span");
+    no_synthesis.set_attribute(
+        "style",
+        "font-variant-caps: small-caps; font-variant-position: sub; font-synthesis: none",
+    );
+    let no_synthesis = resolver.computed_style(&no_synthesis);
+    assert_eq!(
+        no_synthesis.shaping_options().synthetic_caps,
+        crate::font::SyntheticCaps::None
+    );
+    assert_eq!(
+        no_synthesis.shaping_options().synthetic_position,
+        crate::font::SyntheticPosition::None
+    );
 
     for (property, value) in [
         ("font-kerning", "sometimes"),
