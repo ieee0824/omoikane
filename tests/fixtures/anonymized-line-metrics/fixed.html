@@ -1,0 +1,62 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Line and inline metrics fixed fixture</title>
+<style>
+  @font-face {
+    font-family: MetricsFixture;
+    src: url("../acid2/LiberationSans-Regular.ttf") format("truetype");
+  }
+  html, body {
+    margin: 0;
+    width: 720px;
+    height: 760px;
+    overflow: hidden;
+    background: white;
+    color: #202020;
+    font: 16px/24px MetricsFixture, sans-serif;
+  }
+  .row {
+    box-sizing: border-box;
+    min-height: 112px;
+    padding: 10px 16px;
+    border-bottom: 1px solid #d8d8d8;
+  }
+  .sample { width: 330px; background: #f1f3f5; }
+  .clamp {
+    width: 260px;
+    line-clamp: 2 " [more]";
+    overflow: hidden;
+  }
+  .last { width: 310px; text-align: justify; text-align-last: center; text-justify: inter-word; }
+  .initial { width: 330px; }
+  .initial::first-letter { initial-letter: 3 2; color: #8b1e3f; }
+  .hanging { width: 265px; hanging-punctuation: first allow-end last; }
+  .trimmed { width: 310px; line-height: 36px; text-box: trim-both cap alphabetic; }
+  .vertical {
+    width: 112px;
+    height: 170px;
+    writing-mode: vertical-lr;
+    line-clamp: 2;
+    overflow: hidden;
+    text-box: trim-both cap alphabetic;
+  }
+  .vertical::first-letter { initial-letter: 3 2; color: #1f5f8b; }
+</style>
+<div class="row">
+  <div class="sample clamp" data-probe id="clamp">A clamped paragraph keeps exactly two visible lines and paints its custom continuation marker after the final visible content.</div>
+</div>
+<div class="row">
+  <div class="sample last" data-probe id="last">Justified text expands ordinary lines while the final line uses its independently centered alignment.</div>
+</div>
+<div class="row">
+  <div class="sample initial" data-probe id="initial">“Initial letters” occupy three line heights, sink through two lines, and leave later lines at the normal measure.</div>
+</div>
+<div class="row">
+  <div class="sample hanging" data-probe id="hanging">“Opening and closing punctuation can hang outside the measure.”</div>
+</div>
+<div class="row">
+  <div class="sample trimmed" data-probe id="trimmed">Text box trimming removes the outer half-leading while preserving the inline content metrics.</div>
+</div>
+<div class="row">
+  <div class="sample vertical" data-probe id="vertical">縦書きの頭文字と行数制限を同時に比較します。</div>
+</div>
