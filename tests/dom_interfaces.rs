@@ -105,40 +105,60 @@ fn retained_html_collections_methods_indices_and_named_properties_stay_live() {
 }
 
 /// Runs `getElementsByClassName('item')` over `count` items and returns how
-/// many times membership read `class` while `body` ran for each index. The
-/// loop is split across evaluations so the per-evaluation JS time limit
-/// bounds each chunk rather than the whole N=10,000 debug-build loop.
+/// many times membership read `class` while `body` ran for each index. Setup
+/// and the loop are split across evaluations so the per-evaluation JS time
+/// limit bounds each chunk rather than the whole N=10,000 debug-build run.
 fn class_reads_during_collection_loop(count: usize, body: &str) -> usize {
+    const CHUNK: usize = 1_000;
     let mut runtime = JsRuntime::with_document(
         TreeBuilder::parse("<!doctype html><html><body></body></html>").document(),
     )
     .unwrap();
     runtime
-        .eval(&format!(
-            r#"(() => {{
-            const parent = document.createElement('div');
-            for (let i = 0; i < {count}; i++) {{
+        .eval("globalThis.loopParent = document.createElement('div');")
+        .unwrap();
+    for start in (0..count).step_by(CHUNK) {
+        runtime
+            .eval(&format!(
+                r#"for (let i = {start}; i < Math.min({end}, {count}); i++) {{
                 const item = document.createElement('span');
                 item.className = 'item';
-                parent.append(item);
-            }}
-            document.body.append(parent);
-            globalThis.loop = {{
+                loopParent.append(item);
+            }}"#,
+                end = start + CHUNK,
+            ))
+            .unwrap();
+    }
+    runtime
+        .eval(
+            r#"(() => {
+            document.body.append(loopParent);
+            globalThis.loop = {
                 items: document.getElementsByClassName('item'),
-                children: parent.children,
-                all: parent.getElementsByTagName('span'),
+                children: loopParent.children,
+                all: loopParent.getElementsByTagName('span'),
                 classReads: 0,
                 failure: '',
-            }};
+            };
+        })()"#,
+        )
+        .unwrap();
+    // The first scan of each collection gets its own evaluation and is not
+    // counted; later rescans would be.
+    runtime
+        .eval("loop.items.length + loop.children.length + loop.all.length")
+        .unwrap();
+    runtime
+        .eval(
+            r#"(() => {
             const original = Element.prototype.getAttribute;
-            Element.prototype.getAttribute = function (name) {{
+            Element.prototype.getAttribute = function (name) {
                 if (name === 'class') loop.classReads++;
                 return original.call(this, name);
-            }};
-        }})()"#
-        ))
+            };
+        })()"#,
+        )
         .unwrap();
-    const CHUNK: usize = 1_000;
     for start in (0..count).step_by(CHUNK) {
         runtime
             .eval(&format!(
@@ -168,16 +188,17 @@ fn class_reads_during_collection_loop(count: usize, body: &str) -> usize {
 fn unrelated_attribute_writes_in_a_collection_loop_rescan_the_tree_once() {
     // Issue #1519: style/data-* writes must not invalidate collections whose
     // membership does not read them, or the loop rescans the tree N times.
-    // One document-wide scan also visits html/head/body/div, so the bound is
-    // 2N; a rescan per write would read class about N * N times.
+    // The warm-up scan is not counted, so a correct loop reads class at most
+    // a handful of times; the bound is N, while a rescan per write would read
+    // class about N * N times.
     let reads = class_reads_during_collection_loop(
         1_000,
         "items[i].style.color = 'red'; items[i].dataset.index = String(i);
          if (children[i] !== items[i] || all[i] !== items[i]) loop.failure ||= 'identity ' + i;",
     );
-    assert!(reads < 2 * 1_000, "N=1000 read class {reads} times");
+    assert!(reads < 1_000, "N=1000 read class {reads} times");
     let reads = class_reads_during_collection_loop(10_000, "items[i].style.color = 'red';");
-    assert!(reads < 2 * 10_000, "N=10000 read class {reads} times");
+    assert!(reads < 10_000, "N=10000 read class {reads} times");
 }
 
 #[test]
