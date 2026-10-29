@@ -185,13 +185,32 @@ pub struct ShapingOptions {
     pub variations: Vec<OpenTypeVariation>,
 }
 
+/// Permission for synthesizing a missing italic or oblique face.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FontStyleSynthesis {
+    /// Do not synthesize missing italic or oblique faces.
+    None,
+    /// Synthesize both missing italic and oblique faces.
+    #[default]
+    Auto,
+    /// Synthesize only a missing oblique face, never a missing italic face.
+    ObliqueOnly,
+}
+
+impl FontStyleSynthesis {
+    pub(crate) fn allows(self, requested: FontStyle) -> bool {
+        matches!(self, Self::Auto)
+            || matches!((self, requested), (Self::ObliqueOnly, FontStyle::Oblique))
+    }
+}
+
 /// Font synthesis permissions resolved from the CSS `font-synthesis` property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FontSynthesis {
     /// Whether missing bold faces may be synthesized.
     pub weight: bool,
-    /// Whether missing italic or oblique faces may be synthesized.
-    pub style: bool,
+    /// Which missing italic or oblique faces may be synthesized.
+    pub style: FontStyleSynthesis,
     /// Whether missing small-cap glyphs may be synthesized.
     pub small_caps: bool,
     /// Whether missing subscript or superscript glyphs may be synthesized.
@@ -202,7 +221,7 @@ impl Default for FontSynthesis {
     fn default() -> Self {
         Self {
             weight: true,
-            style: true,
+            style: FontStyleSynthesis::Auto,
             small_caps: true,
             position: true,
         }

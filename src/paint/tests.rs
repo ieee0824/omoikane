@@ -10453,11 +10453,57 @@ fn shaped_paint_synthesizes_only_permitted_missing_weight_and_style() {
         ..FragmentStyle::default()
     });
     assert_ne!(oblique, regular, "missing face was not obliqued");
+    let shallow_oblique = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("oblique 6deg".into()),
+        ..FragmentStyle::default()
+    });
+    let steep_oblique = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("oblique 24deg".into()),
+        ..FragmentStyle::default()
+    });
+    let negative_oblique = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("oblique -14deg".into()),
+        ..FragmentStyle::default()
+    });
+    assert_ne!(shallow_oblique, steep_oblique, "oblique angle was ignored");
+    assert_ne!(
+        negative_oblique, oblique,
+        "negative oblique angle was ignored"
+    );
+    let italic_oblique_only = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("italic".into()),
+        font_synthesis: FontSynthesis {
+            style: crate::font::FontStyleSynthesis::ObliqueOnly,
+            ..FontSynthesis::default()
+        },
+        ..FragmentStyle::default()
+    });
+    assert_eq!(
+        italic_oblique_only, regular,
+        "oblique-only synthesized an italic request"
+    );
+    let requested_oblique_only = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("oblique 14deg".into()),
+        font_synthesis: FontSynthesis {
+            style: crate::font::FontStyleSynthesis::ObliqueOnly,
+            ..FontSynthesis::default()
+        },
+        ..FragmentStyle::default()
+    });
+    assert_ne!(
+        requested_oblique_only, regular,
+        "oblique-only did not synthesize an oblique request"
+    );
     let oblique_disabled = paint(FragmentStyle {
         font_weight: Some("400".into()),
         font_style: Some("italic".into()),
         font_synthesis: FontSynthesis {
-            style: false,
+            style: crate::font::FontStyleSynthesis::None,
             ..FontSynthesis::default()
         },
         ..FragmentStyle::default()

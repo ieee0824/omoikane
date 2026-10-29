@@ -39,6 +39,7 @@ collect_pattern \
   "/css/css-color/parsing/color-valid-hwb.html" \
   "/css/css-color/parsing/color-valid-lab.html"
 collect_pattern "/css/css-logical/"
+collect_pattern "/css/css-fonts/parsing/" "/css/css-fonts/font-variant-alternates-parsing.html" "/css/css-fonts/test_font_feature_values_parsing.html"
 collect_pattern "/reporting/" "/content-security-policy/securitypolicyviolation/constructor-required-fields.html"
 collect_pattern "/cookies/resources/"
 collect_pattern \

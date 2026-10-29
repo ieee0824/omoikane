@@ -11,8 +11,7 @@ pub(super) fn valid(value: &Value) -> bool {
 fn palette(value: &Value) -> bool {
     match value {
         Value::Keyword(word) => {
-            matches!(word.as_str(), "normal" | "light" | "dark")
-                || (word.starts_with("--") && word.len() > 2)
+            matches!(word.as_str(), "normal" | "light" | "dark") || word.starts_with("--")
         }
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("palette-mix") => {
             let components = palette_arguments(arguments);

@@ -63,11 +63,13 @@ fn unit_type(unit: &str) -> Option<NumericType> {
 fn function(name: &str, arguments: &[Value], hint: Option<NumericType>) -> Option<NumericType> {
     match name.to_ascii_lowercase().as_str() {
         "sibling-index" | "sibling-count" if arguments.is_empty() => Some(NumericType::NUMBER),
-        "calc" if arguments.len() == 1 => infer(&arguments[0], hint),
+        "calc" if !arguments.is_empty() => argument_expression(arguments, hint),
         "min" | "max" | "hypot" if !arguments.is_empty() => consistent(arguments, hint),
         "clamp" if arguments.len() == 3 => consistent(arguments, hint),
         "abs" if arguments.len() == 1 => infer(&arguments[0], hint),
-        "sign" if arguments.len() == 1 => infer(&arguments[0], hint).map(|_| NumericType::NUMBER),
+        "sign" if !arguments.is_empty() => {
+            argument_expression(arguments, hint).map(|_| NumericType::NUMBER)
+        }
         "sin" | "cos" | "tan" if arguments.len() == 1 => {
             let input = infer(&arguments[0], hint)?;
             matches!(input, NumericType::NUMBER | NumericType::ANGLE).then_some(NumericType::NUMBER)
@@ -78,6 +80,13 @@ fn function(name: &str, arguments: &[Value], hint: Option<NumericType>) -> Optio
         "atan2" if arguments.len() == 2 => consistent(arguments, hint).map(|_| NumericType::ANGLE),
         "mod" | "rem" if arguments.len() == 2 => consistent(arguments, hint),
         _ => None,
+    }
+}
+
+fn argument_expression(arguments: &[Value], hint: Option<NumericType>) -> Option<NumericType> {
+    match arguments {
+        [argument] => infer(argument, hint),
+        arguments => expression(arguments, hint),
     }
 }
 
@@ -173,5 +182,10 @@ mod tests {
             Some(NumericType::RESOLUTION)
         );
         assert_eq!(infer(&value("sibling-index(1)"), None), None);
+        let container_expression = value("calc(10 + (sign(2cqw - 10px) * 5))");
+        assert_eq!(
+            infer(&container_expression, None),
+            Some(NumericType::NUMBER)
+        );
     }
 }

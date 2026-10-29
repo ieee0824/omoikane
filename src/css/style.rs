@@ -1547,6 +1547,10 @@ fn is_css_length_unit(unit: &str) -> bool {
             | "lvh"
             | "dvw"
             | "dvh"
+            | "cqw"
+            | "cqh"
+            | "cqi"
+            | "cqb"
     )
 }
 
@@ -3991,10 +3995,10 @@ impl StyleResolver {
             .unwrap_or(16.0);
         let parent_line_height = used_line_height(parent_style, parent_font_size);
         let root_line_height = self.root_line_height();
-        let uses_font_metrics = candidates
-            .iter()
-            .any(|candidate| value_has_font_metric_unit(&candidate.value))
-            || custom_properties.values().any(value_has_font_metric_unit);
+        let uses_font_metrics = candidates.iter().any(|candidate| {
+            value_has_font_metric_unit(&candidate.value)
+                || candidate.name.eq_ignore_ascii_case("font-size-adjust")
+        }) || custom_properties.values().any(value_has_font_metric_unit);
         let parent_font_metrics = if uses_font_metrics {
             parent_style.map_or_else(
                 || self.css_font_metrics(&PropertyMap::new(), None, parent_font_size),
@@ -5910,7 +5914,14 @@ fn validate_font_variant_declaration(name: &str, value: &Value) -> Option<Declar
     let allowed: &[&str] = match name {
         "font-kerning" => &["auto", "normal", "none"],
         "font-optical-sizing" => &["auto", "none"],
-        "font-synthesis" => &["none", "weight", "style", "small-caps", "position"],
+        "font-synthesis" => &[
+            "none",
+            "weight",
+            "style",
+            "oblique-only",
+            "small-caps",
+            "position",
+        ],
         "font-variant-caps" => &[
             "normal",
             "small-caps",
@@ -6010,6 +6021,7 @@ fn validate_font_variant_declaration(name: &str, value: &Value) -> Option<Declar
                 || group_count(&["proportional-nums", "tabular-nums"]) > 1
                 || group_count(&["diagonal-fractions", "stacked-fractions"]) > 1
         }
+        "font-synthesis" => group_count(&["style", "oblique-only"]) > 1,
         _ => false,
     };
     let valid = css_wide
@@ -6020,7 +6032,7 @@ fn validate_font_variant_declaration(name: &str, value: &Value) -> Option<Declar
             && words.iter().all(|word| allowed.contains(&word.as_str()))
             && (words.len() == 1 || !words.iter().any(|word| word == "normal" || word == "none"));
     Some(if valid {
-        let computed = if name == "font-synthesis" && words.len() > 1 {
+        let computed = if allows_multiple && words.len() > 1 {
             allowed
                 .iter()
                 .filter(|candidate| words.iter().any(|word| word == **candidate))
@@ -6072,42 +6084,182 @@ fn validate_font_variant_alternates(value: &Value) -> DeclarationValidation {
                             if !identifier.is_empty()
                                 && !is_css_wide_keyword(&identifier.to_ascii_lowercase()))
                     })
-                    && (name.eq_ignore_ascii_case("styleset") || arguments.len() == 1)
+                    && (name.eq_ignore_ascii_case("styleset")
+                        || name.eq_ignore_ascii_case("character-variant")
+                        || arguments.len() == 1)
             }
             _ => false,
         });
     if valid {
-        DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)))
+        let canonical = values
+            .iter()
+            .map(|value| match value {
+                Value::Keyword(keyword) => keyword.to_ascii_lowercase(),
+                Value::Function { name, arguments } => format!(
+                    "{}({})",
+                    name.to_ascii_lowercase(),
+                    arguments
+                        .iter()
+                        .map(render_value)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                value => render_value(value),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        DeclarationValidation::Valid(ComputedValue::Keyword(canonical))
     } else {
         DeclarationValidation::Invalid
     }
 }
 
-fn validate_font_size_adjust(value: &Value) -> DeclarationValidation {
-    let valid_ratio = |value: &Value| match value {
-        Value::Number(number) => number.is_finite() && *number >= 0.0,
-        Value::Keyword(keyword) => keyword.eq_ignore_ascii_case("from-font"),
-        _ => false,
-    };
-    let valid = match value {
-        Value::Keyword(keyword) => {
-            is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                || matches!(keyword.to_ascii_lowercase().as_str(), "none" | "from-font")
+#[derive(Clone, Copy)]
+enum FontSizeAdjustMetric {
+    ExHeight,
+    CapHeight,
+    ChWidth,
+    IcWidth,
+    IcHeight,
+}
+
+enum FontSizeAdjustRatio<'a> {
+    FromFont,
+    Value(&'a Value),
+}
+
+fn parse_font_size_adjust(
+    value: &Value,
+) -> Option<(FontSizeAdjustMetric, FontSizeAdjustRatio<'_>)> {
+    fn ratio(value: &Value) -> Option<FontSizeAdjustRatio<'_>> {
+        match value {
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("from-font") => {
+                Some(FontSizeAdjustRatio::FromFont)
+            }
+            Value::Number(number) if number.is_finite() && *number >= 0.0 => {
+                Some(FontSizeAdjustRatio::Value(value))
+            }
+            Value::Function { .. }
+                if typed_math::infer(value, None) == Some(typed_math::NumericType::NUMBER) =>
+            {
+                Some(FontSizeAdjustRatio::Value(value))
+            }
+            _ => None,
         }
-        Value::Number(number) => number.is_finite() && *number >= 0.0,
+    }
+    match value {
+        Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("from-font") => Some((
+            FontSizeAdjustMetric::ExHeight,
+            FontSizeAdjustRatio::FromFont,
+        )),
+        Value::Number(_) | Value::Function { .. } => {
+            Some((FontSizeAdjustMetric::ExHeight, ratio(value)?))
+        }
         Value::List(values) if values.len() == 2 => {
-            matches!(&values[0], Value::Keyword(metric) if matches!(
-                metric.to_ascii_lowercase().as_str(),
-                "ex-height" | "cap-height" | "ch-width" | "ic-width" | "ic-height"
-            )) && valid_ratio(&values[1])
+            let Value::Keyword(metric) = &values[0] else {
+                return None;
+            };
+            let metric = match metric.to_ascii_lowercase().as_str() {
+                "ex-height" => FontSizeAdjustMetric::ExHeight,
+                "cap-height" => FontSizeAdjustMetric::CapHeight,
+                "ch-width" => FontSizeAdjustMetric::ChWidth,
+                "ic-width" => FontSizeAdjustMetric::IcWidth,
+                "ic-height" => FontSizeAdjustMetric::IcHeight,
+                _ => return None,
+            };
+            Some((metric, ratio(&values[1])?))
         }
-        _ => false,
-    };
+        _ => None,
+    }
+}
+
+fn validate_font_size_adjust(value: &Value) -> DeclarationValidation {
+    let valid = matches!(value, Value::Keyword(keyword)
+        if is_css_wide_keyword(&keyword.to_ascii_lowercase()) || keyword.eq_ignore_ascii_case("none"))
+        || parse_font_size_adjust(value).is_some();
     if valid {
-        DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)))
+        DeclarationValidation::Unvalidated
     } else {
         DeclarationValidation::Invalid
     }
+}
+
+/// Canonicalizes a validated `font-size-adjust` specified value for CSSOM.
+pub(crate) fn normalize_font_size_adjust_specified(value: &Value) -> Option<String> {
+    if let Value::Keyword(keyword) = value
+        && (keyword.eq_ignore_ascii_case("none")
+            || is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+    {
+        return Some(keyword.to_ascii_lowercase());
+    }
+    let (metric, ratio) = parse_font_size_adjust(value)?;
+    let ratio = match ratio {
+        FontSizeAdjustRatio::FromFont => "from-font".to_string(),
+        FontSizeAdjustRatio::Value(value) => serialize_font_size_adjust_ratio(value),
+    };
+    Some(match metric {
+        FontSizeAdjustMetric::ExHeight => ratio,
+        FontSizeAdjustMetric::CapHeight => format!("cap-height {ratio}"),
+        FontSizeAdjustMetric::ChWidth => format!("ch-width {ratio}"),
+        FontSizeAdjustMetric::IcWidth => format!("ic-width {ratio}"),
+        FontSizeAdjustMetric::IcHeight => format!("ic-height {ratio}"),
+    })
+}
+
+fn serialize_font_size_adjust_ratio(value: &Value) -> String {
+    fn expression(values: &[Value]) -> String {
+        if let [left, Value::Keyword(operator), right] = values
+            && operator == "*"
+            && matches!(right, Value::Number(_))
+            && !matches!(left, Value::Number(_))
+        {
+            return format!("{} * {}", component(right, true), component(left, true));
+        }
+        values
+            .iter()
+            .map(|value| component(value, true))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn component(value: &Value, nested: bool) -> String {
+        if let Value::List(values) = value {
+            let body = expression(values);
+            return if nested { format!("({body})") } else { body };
+        }
+        let Value::Function { name, arguments } = value else {
+            return render_value(value);
+        };
+        if name.eq_ignore_ascii_case("calc") {
+            if let Some(number) = individual_transform::fixed_number_expression(value) {
+                return if nested {
+                    serialize_opentype_number(number)
+                } else {
+                    format!("calc({})", serialize_opentype_number(number))
+                };
+            }
+            let body = match arguments.as_slice() {
+                [Value::List(values)] => expression(values),
+                _ => expression(arguments),
+            };
+            return if nested {
+                format!("({body})")
+            } else {
+                format!("calc({body})")
+            };
+        }
+        format!(
+            "{}({})",
+            name.to_ascii_lowercase(),
+            arguments
+                .iter()
+                .map(|argument| component(argument, false))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    component(value, false)
 }
 
 /// Validates a resolved declaration value against the property's grammar.
@@ -11027,38 +11179,108 @@ fn resolve_time_calc(value: &Value) -> Option<f32> {
     (!expects_value).then_some(total)
 }
 
+fn serialize_opentype_tag(tag: &str) -> Option<String> {
+    (tag.len() == 4 && tag.bytes().all(|byte| (0x20..=0x7e).contains(&byte)))
+        .then(|| format!("\"{}\"", tag.replace('\\', "\\\\").replace('"', "\\\"")))
+}
+
+fn serialize_opentype_number(number: f32) -> String {
+    let rounded = (number * 1_000_000.0).round() / 1_000_000.0;
+    rounded.to_string()
+}
+
+/// Canonicalizes an OpenType settings specified value for CSSOM.
+pub(crate) fn normalize_opentype_settings_specified(
+    property: &str,
+    value: &Value,
+) -> Option<String> {
+    let feature = property.eq_ignore_ascii_case("font-feature-settings");
+    if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("normal")) {
+        return Some("normal".to_string());
+    }
+    let setting = |value: &Value| {
+        let (tag, amount) = match value {
+            Value::String(tag) if feature => (tag, None),
+            Value::List(values) => match values.as_slice() {
+                [Value::String(tag)] if feature => (tag, None),
+                [Value::String(tag), Value::Keyword(keyword)]
+                    if feature && keyword.eq_ignore_ascii_case("on") =>
+                {
+                    (tag, None)
+                }
+                [Value::String(tag), Value::Keyword(keyword)]
+                    if feature && keyword.eq_ignore_ascii_case("off") =>
+                {
+                    (tag, Some("0".to_string()))
+                }
+                [Value::String(tag), Value::Number(number)] => {
+                    let amount = if feature && *number == 1.0 {
+                        None
+                    } else {
+                        Some(render_value(&Value::Number(*number)))
+                    };
+                    (tag, amount)
+                }
+                [Value::String(tag), amount]
+                    if typed_math::infer(amount, None) == Some(typed_math::NumericType::NUMBER) =>
+                {
+                    (tag, Some(render_value(amount)))
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let tag = serialize_opentype_tag(tag)?;
+        Some(amount.map_or(tag.clone(), |amount| format!("{tag} {amount}")))
+    };
+    match value {
+        Value::CommaList(values) => values
+            .iter()
+            .map(setting)
+            .collect::<Option<Vec<_>>>()
+            .map(|values| values.join(", ")),
+        value => setting(value),
+    }
+}
+
 /// Computes each axis value while preserving the quoted OpenType axis tag.
 fn compute_font_variation_settings(value: &Value, ctx: ResolutionContext) -> Option<ComputedValue> {
-    fn axis(value: &Value, ctx: ResolutionContext) -> Option<String> {
+    fn axis(value: &Value, ctx: ResolutionContext) -> Option<(String, String)> {
         let Value::List(values) = value else {
             return None;
         };
         let [Value::String(tag), amount] = values.as_slice() else {
             return None;
         };
-        if tag.len() != 4 || !tag.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
-            return None;
-        }
+        let serialized_tag = serialize_opentype_tag(tag)?;
         let LengthMathValue::Number(number) = evaluate_length_math_value(amount, ctx)? else {
             return None;
         };
-        let tag = tag.replace('\\', "\\\\").replace('"', "\\\"");
-        Some(format!("\"{tag}\" {number}"))
+        Some((
+            tag.clone(),
+            format!("{serialized_tag} {}", serialize_opentype_number(number)),
+        ))
     }
-    let text = match value {
-        Value::CommaList(values) => values
-            .iter()
-            .map(|value| axis(value, ctx))
-            .collect::<Option<Vec<_>>>()?
-            .join(", "),
-        value => axis(value, ctx)?,
+    if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("normal")) {
+        return Some(ComputedValue::Keyword("normal".to_string()));
+    }
+    let values = match value {
+        Value::CommaList(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
     };
-    Some(ComputedValue::Keyword(text))
+    let mut axes = std::collections::BTreeMap::new();
+    for value in values {
+        let (tag, serialized) = axis(value, ctx)?;
+        axes.insert(tag, serialized);
+    }
+    Some(ComputedValue::Keyword(
+        axes.into_values().collect::<Vec<_>>().join(", "),
+    ))
 }
 
 /// Computes feature values while preserving quoted four-byte OpenType tags.
 fn compute_font_feature_settings(value: &Value, ctx: ResolutionContext) -> Option<ComputedValue> {
-    fn feature(value: &Value, ctx: ResolutionContext) -> Option<String> {
+    fn feature(value: &Value, ctx: ResolutionContext) -> Option<(String, String)> {
         let (tag, amount) = match value {
             Value::String(tag) => (tag, 1),
             Value::List(values) => match values.as_slice() {
@@ -11087,24 +11309,29 @@ fn compute_font_feature_settings(value: &Value, ctx: ResolutionContext) -> Optio
             },
             _ => return None,
         };
-        if tag.len() != 4 || !tag.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
-            return None;
-        }
-        let tag = tag.replace('\\', "\\\\").replace('"', "\\\"");
-        Some(format!("\"{tag}\" {amount}"))
+        let serialized_tag = serialize_opentype_tag(tag)?;
+        let serialized = if amount == 1 {
+            serialized_tag
+        } else {
+            format!("{serialized_tag} {amount}")
+        };
+        Some((tag.clone(), serialized))
     }
-    let text = match value {
-        Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("normal") => {
-            return Some(ComputedValue::Keyword("normal".to_string()));
-        }
-        Value::CommaList(values) => values
-            .iter()
-            .map(|value| feature(value, ctx))
-            .collect::<Option<Vec<_>>>()?
-            .join(", "),
-        value => feature(value, ctx)?,
+    if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("normal")) {
+        return Some(ComputedValue::Keyword("normal".to_string()));
+    }
+    let values = match value {
+        Value::CommaList(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
     };
-    Some(ComputedValue::Keyword(text))
+    let mut features = std::collections::BTreeMap::new();
+    for value in values {
+        let (tag, serialized) = feature(value, ctx)?;
+        features.insert(tag, serialized);
+    }
+    Some(ComputedValue::Keyword(
+        features.into_values().collect::<Vec<_>>().join(", "),
+    ))
 }
 
 fn serialized_opentype_settings(value: &ComputedValue) -> Vec<([u8; 4], &str)> {
@@ -11153,9 +11380,11 @@ fn serialized_opentype_settings(value: &ComputedValue) -> Vec<([u8; 4], &str)> {
             cursor += 1;
         }
         let setting_value = text[value_start..cursor].trim();
-        if setting_value.is_empty() {
-            return Vec::new();
-        }
+        let setting_value = if setting_value.is_empty() {
+            "1"
+        } else {
+            setting_value
+        };
         settings.push((tag, setting_value));
     }
     settings
@@ -11168,9 +11397,26 @@ fn computed_font_synthesis(properties: &PropertyMap) -> crate::font::FontSynthes
     let words = value.split_ascii_whitespace().collect::<HashSet<_>>();
     crate::font::FontSynthesis {
         weight: words.contains("weight"),
-        style: words.contains("style"),
+        style: if words.contains("style") {
+            crate::font::FontStyleSynthesis::Auto
+        } else if words.contains("oblique-only") {
+            crate::font::FontStyleSynthesis::ObliqueOnly
+        } else {
+            crate::font::FontStyleSynthesis::None
+        },
         small_caps: words.contains("small-caps"),
         position: words.contains("position"),
+    }
+}
+
+/// Validates and canonicalizes a keyword-list font value for CSSOM.
+pub(crate) fn normalize_font_keyword_list_specified(
+    property: &str,
+    value: &Value,
+) -> Option<String> {
+    match validate_font_variant_declaration(property, value)? {
+        DeclarationValidation::Valid(ComputedValue::Keyword(value)) => Some(value),
+        _ => None,
     }
 }
 
@@ -11696,6 +11942,42 @@ fn compute_standalone_numeric_math(
     )
 }
 
+fn compute_font_size_adjust(value: &Value, ctx: ResolutionContext) -> Option<ComputedValue> {
+    if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none")) {
+        return Some(ComputedValue::Keyword("none".to_string()));
+    }
+    let (metric, ratio) = parse_font_size_adjust(value)?;
+    let ratio = match ratio {
+        FontSizeAdjustRatio::FromFont => {
+            let font_size = ctx.parent_font_size;
+            if !font_size.is_finite() || font_size <= 0.0 {
+                return None;
+            }
+            match metric {
+                FontSizeAdjustMetric::ExHeight => ctx.font_metrics.ex / font_size,
+                FontSizeAdjustMetric::CapHeight => ctx.font_metrics.cap / font_size,
+                FontSizeAdjustMetric::ChWidth => ctx.font_metrics.ch / font_size,
+                FontSizeAdjustMetric::IcWidth => ctx.font_metrics.ic / font_size,
+                FontSizeAdjustMetric::IcHeight => 1.0,
+            }
+        }
+        FontSizeAdjustRatio::Value(value) => {
+            let LengthMathValue::Number(value) = evaluate_length_math_value(value, ctx)? else {
+                return None;
+            };
+            value.max(0.0)
+        }
+    };
+    let ratio = serialize_opentype_number(ratio);
+    Some(ComputedValue::Keyword(match metric {
+        FontSizeAdjustMetric::ExHeight => ratio,
+        FontSizeAdjustMetric::CapHeight => format!("cap-height {ratio}"),
+        FontSizeAdjustMetric::ChWidth => format!("ch-width {ratio}"),
+        FontSizeAdjustMetric::IcWidth => format!("ic-width {ratio}"),
+        FontSizeAdjustMetric::IcHeight => format!("ic-height {ratio}"),
+    }))
+}
+
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
     if matches!(
         property_name,
@@ -11741,6 +12023,11 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
     }
     if property_name.eq_ignore_ascii_case("font-palette") {
         return ComputedValue::Keyword(font_palette::compute(value));
+    }
+    if property_name.eq_ignore_ascii_case("font-size-adjust")
+        && let Some(value) = compute_font_size_adjust(value, ctx)
+    {
+        return value;
     }
     if property_name.eq_ignore_ascii_case("font-feature-settings") {
         if let Some(value) = compute_font_feature_settings(value, ctx) {
@@ -12727,10 +13014,12 @@ fn evaluate_length_math_value(value: &Value, ctx: ResolutionContext) -> Option<L
         Value::Number(number) if number.is_finite() => Some(LengthMathValue::Number(*number)),
         Value::List(_) => evaluate_length_math_expression(value, ctx),
         Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
-            let [expression] = arguments.as_slice() else {
-                return None;
+            let expression = if let [expression] = arguments.as_slice() {
+                expression.clone()
+            } else {
+                Value::List(arguments.clone())
             };
-            evaluate_length_math_expression(expression, ctx)
+            evaluate_length_math_expression(&expression, ctx)
                 .or_else(|| scalar_length_math_value(value, ctx))
         }
         Value::Function { name, arguments }
@@ -14290,6 +14579,10 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::FontSize, InitialValue::Px(16.0)),
     (
         PropertyId::FontFeatureSettings,
+        InitialValue::Keyword("normal"),
+    ),
+    (
+        PropertyId::FontVariationSettings,
         InitialValue::Keyword("normal"),
     ),
     (PropertyId::FontPalette, InitialValue::Keyword("normal")),

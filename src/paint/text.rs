@@ -195,7 +195,7 @@ fn rasterize_glyph_cached(
 #[derive(Clone, Copy, Default)]
 struct GlyphSynthesis {
     embolden: bool,
-    oblique: bool,
+    oblique_angle: Option<f32>,
 }
 
 fn glyph_synthesis(candidate: FontFallbackCandidate<'_>, style: &FragmentStyle) -> GlyphSynthesis {
@@ -213,9 +213,16 @@ fn glyph_synthesis(candidate: FontFallbackCandidate<'_>, style: &FragmentStyle) 
         embolden: style.font_synthesis.weight
             && requested_weight.0 >= 600
             && candidate.weight.max.0 < 600,
-        oblique: style.font_synthesis.style
+        oblique_angle: (style.font_synthesis.style.allows(requested_style.style)
             && requested_style.style != crate::font::FontStyle::Normal
-            && candidate.style.style == crate::font::FontStyle::Normal,
+            && candidate.style.style == crate::font::FontStyle::Normal)
+            .then(|| {
+                if requested_style.style == crate::font::FontStyle::Oblique {
+                    requested_style.requested_angle() as f32 / 1_000.0
+                } else {
+                    14.0
+                }
+            }),
     }
 }
 
@@ -224,23 +231,32 @@ fn synthesize_glyph<'a>(
     synthesis: GlyphSynthesis,
     size_px: f32,
 ) -> Cow<'a, GlyphRaster> {
-    if (!synthesis.embolden && !synthesis.oblique) || glyph.bitmap.is_empty() {
+    if (!synthesis.embolden && synthesis.oblique_angle.is_none()) || glyph.bitmap.is_empty() {
         return Cow::Borrowed(glyph);
     }
     let mut result = glyph.clone();
-    if synthesis.oblique {
-        let shear = 14.0f32.to_radians().tan();
-        let extra = (result.height as f32 * shear).ceil().max(0.0) as u32;
+    if let Some(angle) = synthesis.oblique_angle {
+        let shear = angle.to_radians().tan();
+        let shift = |y: u32| ((result.height.saturating_sub(1 + y)) as f32 * shear).round() as i32;
+        let (min_shift, max_shift) = if result.height == 0 {
+            (0, 0)
+        } else {
+            let top = shift(0);
+            let bottom = shift(result.height - 1);
+            (top.min(bottom), top.max(bottom))
+        };
+        let extra = max_shift.saturating_sub(min_shift) as u32;
         let width = result.width.saturating_add(extra);
         let mut bitmap = vec![0; width.saturating_mul(result.height) as usize];
         for y in 0..result.height {
-            let shift = ((result.height.saturating_sub(1 + y)) as f32 * shear).round() as u32;
+            let shifted_x = shift(y).saturating_sub(min_shift) as u32;
             for x in 0..result.width {
-                bitmap[(y * width + x + shift) as usize] =
+                bitmap[(y * width + x + shifted_x) as usize] =
                     result.bitmap[(y * result.width + x) as usize];
             }
         }
         result.width = width;
+        result.offset_x += min_shift as f32;
         result.bitmap = bitmap;
     }
     if synthesis.embolden {

@@ -6513,21 +6513,17 @@ fn font_feature_and_variation_settings_compute_inherit_and_become_typed() {
     let parent_style = resolver.computed_style(&parent);
     assert_eq!(
         parent_style.get("font-feature-settings"),
-        Some(&ComputedValue::Keyword(
-            "\"liga\" 0, \"ss01\" 1".to_string()
-        ))
+        Some(&ComputedValue::Keyword("\"liga\" 0, \"ss01\"".to_string()))
     );
     let style = resolver.computed_style(&child);
     assert_eq!(
         style.get("font-feature-settings"),
-        Some(&ComputedValue::Keyword(
-            "\"liga\" 0, \"ss01\" 1".to_string()
-        ))
+        Some(&ComputedValue::Keyword("\"liga\" 0, \"ss01\"".to_string()))
     );
     assert_eq!(
         style.get("font-variation-settings"),
         Some(&ComputedValue::Keyword(
-            "\"wght\" 650, \"wdth\" 90".to_string()
+            "\"wdth\" 90, \"wght\" 650".to_string()
         ))
     );
     assert_eq!(
@@ -6545,8 +6541,8 @@ fn font_feature_and_variation_settings_compute_inherit_and_become_typed() {
             crate::font::OpenTypeVariation::new(*b"ital", 0.0),
             crate::font::OpenTypeVariation::new(*b"slnt", 0.0),
             crate::font::OpenTypeVariation::new(*b"opsz", 16.0),
-            crate::font::OpenTypeVariation::new(*b"wght", 650.0),
             crate::font::OpenTypeVariation::new(*b"wdth", 90.0),
+            crate::font::OpenTypeVariation::new(*b"wght", 650.0),
         ]
     );
 
@@ -6628,6 +6624,25 @@ fn font_size_adjust_validates_and_inherits_metric_ratio() {
 }
 
 #[test]
+fn font_size_adjust_specified_math_uses_canonical_calc_serialization() {
+    let declaration = |value| {
+        parse_style_attribute(&format!("font-size-adjust: {value}"))[0]
+            .value
+            .clone()
+    };
+    assert_eq!(
+        normalize_font_size_adjust_specified(&declaration("cap-height calc(0.5 + 1)")),
+        Some("cap-height calc(1.5)".to_string())
+    );
+    assert_eq!(
+        normalize_font_size_adjust_specified(&declaration(
+            "cap-height calc(10 + (sign(20cqw - 10px) * 5))"
+        )),
+        Some("cap-height calc(10 + (5 * sign(20cqw - 10px)))".to_string())
+    );
+}
+
+#[test]
 fn font_synthesis_uses_fonts_four_initial_and_canonical_order() {
     let element = NodeHandle::element("div");
     let mut resolver = StyleResolver::new();
@@ -6664,10 +6679,24 @@ fn font_synthesis_uses_fonts_four_initial_and_canonical_order() {
         resolver.computed_style(&none).font_synthesis(),
         crate::font::FontSynthesis {
             weight: false,
-            style: false,
+            style: crate::font::FontStyleSynthesis::None,
             small_caps: false,
             position: false,
         }
+    );
+
+    let oblique_only = NodeHandle::element("span");
+    oblique_only.set_attribute("style", "font-synthesis: position weight oblique-only");
+    let oblique_only = resolver.computed_style(&oblique_only);
+    assert_eq!(
+        oblique_only.get("font-synthesis"),
+        Some(&ComputedValue::Keyword(
+            "weight oblique-only position".to_string()
+        ))
+    );
+    assert_eq!(
+        oblique_only.font_synthesis().style,
+        crate::font::FontStyleSynthesis::ObliqueOnly
     );
 }
 

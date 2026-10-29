@@ -65,6 +65,22 @@ pub(super) fn accepted_rule_sources(input: &str) -> Vec<String> {
     rule_sources(input)
         .into_iter()
         .filter(|source| {
+            let without_comments = source
+                .trim_start()
+                .trim_start_matches(|character: char| character.is_whitespace());
+            let font_rule = without_comments
+                .find('@')
+                .map(|index| &without_comments[index..])
+                .is_some_and(|rule| {
+                    rule.get(..20)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("@font-palette-values"))
+                        || rule.get(..20).is_some_and(|prefix| {
+                            prefix.eq_ignore_ascii_case("@font-feature-values")
+                        })
+                });
+            if font_rule {
+                return true;
+            }
             if source
                 .trim_start()
                 .get(..7)
@@ -225,6 +241,14 @@ mod tests {
         assert_eq!(
             accepted_rule_sources("[class=second two] { color: red; } p { color: blue; }"),
             ["p { color: blue; }"]
+        );
+    }
+
+    #[test]
+    fn font_descriptor_rules_survive_invalid_inner_declarations() {
+        assert_eq!(
+            accepted_rule_sources("/* marker */ @font-palette-values --a { base-palette: ; }"),
+            ["/* marker */ @font-palette-values --a { base-palette: ; }"]
         );
     }
 }
