@@ -6108,8 +6108,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         {
             return DeclarationValidation::Unvalidated;
         }
-        let Value::List(values) = value else {
-            return DeclarationValidation::Invalid;
+        let values = match value {
+            Value::List(values) => values.as_slice(),
+            value => std::slice::from_ref(value),
         };
         let mut first = false;
         let mut end = None;

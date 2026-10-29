@@ -3497,6 +3497,103 @@ fn text_box_trim_removes_outer_leading_in_horizontal_and_vertical_flow() {
 }
 
 #[test]
+fn hanging_punctuation_moves_first_and_last_graphemes_outside_the_line() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    paragraph.append_child(NodeHandle::text("“text”"));
+    let forced = NodeHandle::element("p");
+    forced.set_attribute("id", "forced");
+    forced.append_child(NodeHandle::text("one.\ntwo."));
+    let allowed = NodeHandle::element("p");
+    allowed.set_attribute("id", "allowed");
+    allowed.append_child(NodeHandle::text("abcd."));
+    let fitting = NodeHandle::element("p");
+    fitting.set_attribute("id", "fitting");
+    fitting.append_child(NodeHandle::text("abc."));
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+    body.append_child(forced.clone());
+    body.append_child(allowed.clone());
+    body.append_child(fitting.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { margin:0; width:100px; font:10px monospace; line-height:10px; \
+                  hanging-punctuation:first last } \
+             #forced { white-space:pre; hanging-punctuation:force-end } \
+             #allowed, #fitting { width:25px; white-space:nowrap; \
+                                  hanging-punctuation:allow-end }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let line = &find_layout_box(&layout, &paragraph).unwrap().lines[0];
+    let opening = line
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("“"))
+        .unwrap();
+    let closing = line
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("”"))
+        .unwrap();
+    assert!(opening.rect.x < line.rect.x);
+    assert!(closing.rect.x >= line.rect.x + line.rect.width - 0.01);
+
+    let forced = find_layout_box(&layout, &forced).unwrap();
+    assert_eq!(forced.lines.len(), 2);
+    for line in &forced.lines {
+        let punctuation = line
+            .fragments
+            .iter()
+            .find(|fragment| fragment.text() == Some("."))
+            .unwrap_or_else(|| {
+                panic!(
+                    "force-end fragments: {:?}",
+                    line.fragments
+                        .iter()
+                        .filter_map(InlineFragment::text)
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert!(punctuation.rect.x >= line.rect.x + line.rect.width - 0.01);
+    }
+
+    let allowed = &find_layout_box(&layout, &allowed).unwrap().lines[0];
+    let allowed_punctuation = allowed
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("."))
+        .unwrap();
+    assert!(allowed.rect.width <= 25.01);
+    assert!(allowed_punctuation.rect.x >= allowed.rect.x + allowed.rect.width - 0.01);
+
+    let fitting = &find_layout_box(&layout, &fitting).unwrap().lines[0];
+    assert!(fitting.rect.width <= 25.01);
+    assert!(
+        fitting
+            .fragments
+            .iter()
+            .all(|fragment| fragment.text() != Some("."))
+    );
+}
+
+#[test]
 fn horizontal_rtl_inline_geometry_uses_logical_start_and_end() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

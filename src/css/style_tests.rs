@@ -8875,7 +8875,10 @@ fn line_alignment_and_hanging_punctuation_validate_and_inherit() {
     let parent = NodeHandle::element("div");
     parent.set_attribute("id", "parent");
     let child = NodeHandle::element("span");
+    let single = NodeHandle::element("span");
+    single.set_attribute("id", "single");
     parent.append_child(child.clone());
+    parent.append_child(single.clone());
     document.append_child(parent.clone());
 
     let mut resolver = StyleResolver::new();
@@ -8886,7 +8889,8 @@ fn line_alignment_and_hanging_punctuation_validate_and_inherit() {
                 text-align-last: center; \
                 text-justify: distribute; \
                 hanging-punctuation: last first allow-end; \
-            }",
+            } \
+            #single { hanging-punctuation: force-end; }",
         )
         .unwrap(),
     );
@@ -8903,6 +8907,10 @@ fn line_alignment_and_hanging_punctuation_validate_and_inherit() {
     assert_eq!(
         style.get("hanging-punctuation"),
         Some(&ComputedValue::Keyword("first allow-end last".into()))
+    );
+    assert_eq!(
+        resolver.computed_style(&single).get("hanging-punctuation"),
+        Some(&ComputedValue::Keyword("force-end".into()))
     );
 }
 

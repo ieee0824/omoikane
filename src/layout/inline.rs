@@ -431,6 +431,7 @@ fn layout_inline_nodes_impl(
     }
     boxes::finish(&mut lines, nodes, resolver, strut_line_height);
     if let Some(style) = container_style.as_ref() {
+        apply_hanging_punctuation(&mut lines, style, direction_rtl, available_width);
         apply_text_box_trim(&mut lines, style);
     }
     if let Some(style) = text_overflow_style {
@@ -561,6 +562,12 @@ pub(super) fn layout_vertical_inline_nodes(
 
     boxes::finish(&mut horizontal_lines, nodes, resolver, strut_line_height);
     if let Some(style) = container_style.as_ref() {
+        apply_hanging_punctuation(
+            &mut horizontal_lines,
+            style,
+            direction_rtl,
+            available_height,
+        );
         apply_text_box_trim(&mut horizontal_lines, style);
     }
     if let Some(style) = text_overflow_style {
@@ -719,6 +726,198 @@ fn apply_text_box_trim(lines: &mut [LineBox], style: &ComputedStyle) {
         let amount = (last.rect.y + last.rect.height - edge).clamp(0.0, last.rect.height);
         last.rect.height = (last.rect.height - amount).max(0.0);
     }
+}
+
+fn apply_hanging_punctuation(
+    lines: &mut [LineBox],
+    style: &ComputedStyle,
+    direction_rtl: bool,
+    available_width: f32,
+) {
+    let Some(ComputedValue::Keyword(value)) = style.get("hanging-punctuation") else {
+        return;
+    };
+    let values = value
+        .split_ascii_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<HashSet<_>>();
+    if values.contains("first")
+        && let Some(first) = lines.first_mut()
+    {
+        hang_punctuation(first, true, direction_rtl, is_opening_hanging_punctuation);
+    }
+    if values.contains("force-end") {
+        for line in lines.iter_mut() {
+            hang_punctuation(line, false, direction_rtl, is_closing_hanging_punctuation);
+        }
+    } else if values.contains("allow-end")
+        && !matches!(style.get("text-align"), Some(ComputedValue::Keyword(align)) if align.eq_ignore_ascii_case("justify"))
+    {
+        for line in lines.iter_mut() {
+            let forced_break = line
+                .fragments
+                .iter()
+                .any(|fragment| fragment.rect.width == 0.0 && fragment.text() == Some(""));
+            if forced_break || line.rect.width <= available_width + 0.01 {
+                continue;
+            }
+            let original = line.clone();
+            hang_punctuation(line, false, direction_rtl, is_closing_hanging_punctuation);
+            if line.rect.width > available_width + 0.01
+                || (line.rect.width - original.rect.width).abs() < 0.01
+            {
+                *line = original;
+            }
+        }
+    } else if values.contains("last")
+        && let Some(last) = lines.last_mut()
+    {
+        hang_punctuation(last, false, direction_rtl, is_closing_hanging_punctuation);
+    }
+}
+
+fn hang_punctuation(
+    line: &mut LineBox,
+    inline_start: bool,
+    direction_rtl: bool,
+    eligible: fn(char) -> bool,
+) {
+    let Some((index, width)) = isolate_edge_grapheme(line, inline_start, direction_rtl, eligible)
+    else {
+        return;
+    };
+    if inline_start {
+        if direction_rtl {
+            for (candidate, fragment) in line.fragments.iter_mut().enumerate() {
+                if candidate != index {
+                    fragment.rect.x += width;
+                }
+            }
+            line.fragments[index].rect.x += width;
+            line.rect.x += width;
+        } else {
+            for (candidate, fragment) in line.fragments.iter_mut().enumerate() {
+                if candidate != index {
+                    fragment.rect.x -= width;
+                }
+            }
+            line.fragments[index].rect.x -= width;
+        }
+    } else if direction_rtl {
+        line.rect.x += width;
+    }
+    line.rect.width = (line.rect.width - width).max(0.0);
+}
+
+fn isolate_edge_grapheme(
+    line: &mut LineBox,
+    inline_start: bool,
+    direction_rtl: bool,
+    eligible: fn(char) -> bool,
+) -> Option<(usize, f32)> {
+    let index = line
+        .fragments
+        .iter()
+        .enumerate()
+        .filter(|(_, fragment)| {
+            fragment.rect.width > 0.0 && fragment.text().is_some_and(|text| !text.is_empty())
+        })
+        .min_by(|(_, left), (_, right)| {
+            let ordering = left.rect.x.total_cmp(&right.rect.x);
+            if direction_rtl == inline_start {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        })?
+        .0;
+    let fragment = line.fragments[index].clone();
+    let text = fragment.text()?.to_string();
+    let odd_level = fragment
+        .style
+        .resolved_bidi_level
+        .is_some_and(|level| level % 2 == 1);
+    let keep_prefix = if inline_start {
+        direction_rtl == odd_level
+    } else {
+        direction_rtl != odd_level
+    };
+    let mut graphemes = text.grapheme_indices(true);
+    let (start, grapheme) = if keep_prefix {
+        graphemes.next()?
+    } else {
+        graphemes.next_back()?
+    };
+    if !grapheme.chars().next().is_some_and(eligible) {
+        return None;
+    }
+    let width = measure_text_width(grapheme, fragment.metrics).min(fragment.rect.width);
+    if grapheme.len() == text.len() {
+        return Some((index, width));
+    }
+
+    let end = start + grapheme.len();
+    let mut punctuation = fragment.clone();
+    punctuation.content = InlineFragmentContent::Text(grapheme.to_string());
+    punctuation.text_source = text_source::slice(&fragment.text_source, &text, start..end);
+    punctuation.rect.width = width;
+    let punctuation_at_left = keep_prefix != odd_level;
+    punctuation.rect.x = if punctuation_at_left {
+        fragment.rect.x
+    } else {
+        fragment.rect.x + fragment.rect.width - width
+    };
+
+    let remainder_range = if keep_prefix {
+        end..text.len()
+    } else {
+        0..start
+    };
+    let mut remainder = fragment;
+    let remainder_text = text[remainder_range.clone()].to_string();
+    remainder.text_source = text_source::slice(&remainder.text_source, &text, remainder_range);
+    remainder.content = InlineFragmentContent::Text(remainder_text);
+    remainder.rect.width = (remainder.rect.width - width).max(0.0);
+    if punctuation_at_left {
+        remainder.rect.x += width;
+    }
+
+    line.fragments.remove(index);
+    if keep_prefix {
+        line.fragments.insert(index, punctuation);
+        line.fragments.insert(index + 1, remainder);
+        Some((index, width))
+    } else {
+        line.fragments.insert(index, remainder);
+        line.fragments.insert(index + 1, punctuation);
+        Some((index + 1, width))
+    }
+}
+
+fn is_opening_hanging_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '"' | '\'' | '(' | '[' | '{' | '\u{2018}' | '\u{201C}' | '\u{00AB}'
+    ) || is_line_end_prohibited(ch, super::LineBreak::Normal)
+}
+
+fn is_closing_hanging_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '"' | '\''
+            | ')'
+            | ']'
+            | '}'
+            | ','
+            | '.'
+            | ':'
+            | ';'
+            | '!'
+            | '?'
+            | '\u{2019}'
+            | '\u{201D}'
+            | '\u{00BB}'
+    ) || is_line_start_prohibited(ch, super::LineBreak::Normal)
 }
 
 fn text_box_edges(style: &ComputedStyle, metrics: FontMetrics) -> (f32, f32) {
