@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Text layout and decoration fixed fixture</title>
+<style>
+  @font-face {
+    font-family: TextFixture;
+    src: url("../acid2/LiberationSans-Regular.ttf") format("truetype");
+  }
+  html, body {
+    margin: 0;
+    width: 640px;
+    height: 440px;
+    overflow: hidden;
+    background: white;
+    color: #202020;
+    font: 24px/32px TextFixture, sans-serif;
+  }
+  .row { height: 72px; box-sizing: border-box; padding: 8px 16px; border-bottom: 1px solid #ddd; }
+  .styles span { margin-right: 16px; text-decoration-line: underline; text-decoration-thickness: 3px; }
+  .double { text-decoration-style: double; color: #9b1c1c; }
+  .dotted { text-decoration-style: dotted; color: #14532d; }
+  .dashed { text-decoration-style: dashed; color: #1e3a8a; }
+  .wavy { text-decoration-style: wavy; color: #6b21a8; }
+  .ink { text-decoration: underline 3px #075985; text-decoration-skip-ink: auto; }
+  .ink-none { text-decoration-skip-ink: none; }
+  .spacing { word-spacing: 18px; }
+  .indent { width: 280px; height: 112px; text-indent: 36px; }
+  .vertical { position: absolute; left: 520px; top: 84px; width: 90px; height: 320px;
+              writing-mode: vertical-rl; text-indent: 28px; word-spacing: 10px;
+              text-decoration: underline wavy 3px #b45309; }
+  .anonymous { width: 420px; height: 112px; }
+  .anonymous > div { display: block; font-size: 16px; line-height: 20px; }
+</style>
+<div class="row styles" data-probe id="styles"><span class="double">Double</span><span class="dotted">Dotted</span><span class="dashed">Dashed</span><span class="wavy">Wavy</span></div>
+<div class="row" data-probe id="ink"><span class="ink">glyph gap</span> <span class="ink ink-none">glyph solid</span></div>
+<div class="row spacing" data-probe id="spacing"><span>one two</span><span> three four</span></div>
+<div class="row indent" data-probe id="indent"><span>Indented first line across </span><span>multiple inline fragments.</span></div>
+<div class="row anonymous" data-probe id="anonymous">anonymous text before<div>block child</div>anonymous text after</div>
+<div class="vertical" data-probe id="vertical"><span>vertical words</span><span> across fragments</span></div>

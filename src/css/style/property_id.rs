@@ -301,6 +301,7 @@ define_properties! {
         "text-align" => TextAlign,
         "text-decoration-color" => TextDecorationColor,
         "text-decoration-line" => TextDecorationLine,
+        "text-decoration-skip-ink" => TextDecorationSkipInk,
         "text-decoration-style" => TextDecorationStyle,
         "text-decoration-thickness" => TextDecorationThickness,
         "text-indent" => TextIndent,

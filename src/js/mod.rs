@@ -19200,6 +19200,7 @@ fn computed_value_to_css_string(property_name: &str, value: &ComputedValue) -> S
             }
         }
         value @ ComputedValue::LengthPercentage(_) => value.css_text(),
+        value @ ComputedValue::TextIndent { .. } => value.css_text(),
         value @ ComputedValue::Position { .. } => value.css_text(),
     }
 }

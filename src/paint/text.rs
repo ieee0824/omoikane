@@ -316,6 +316,29 @@ pub(super) fn paint_text_with_context(
             let fragment_rect = offset.rect(fragment.rect);
             match &fragment.content {
                 InlineFragmentContent::Text(text) => {
+                    let ink_rects = if fragment
+                        .style
+                        .text_decorations
+                        .iter()
+                        .any(|decoration| decoration.skip_ink != "none")
+                    {
+                        let mut probe = Canvas::text_ink_probe();
+                        paint_text_fragment_glyphs(
+                            &mut probe,
+                            fragment,
+                            fragment_rect,
+                            text,
+                            resolver,
+                            fallback_color,
+                            fonts,
+                            web_fonts,
+                            clip,
+                            None,
+                        );
+                        probe.probed_ink_rects().to_vec()
+                    } else {
+                        Vec::new()
+                    };
                     let (frag_color, vertical_mode) = paint_text_fragment_glyphs(
                         canvas,
                         fragment,
@@ -343,6 +366,7 @@ pub(super) fn paint_text_with_context(
                         &mut decorations,
                         &mut decoration_colors,
                         None,
+                        &ink_rects,
                     );
                 }
                 InlineFragmentContent::AtomicInline(_) => {
@@ -720,6 +744,7 @@ fn paint_text_fragment_decorations(
     decorations: &mut HashMap<DecorationOrigin, DecorationGeometry>,
     decoration_colors: &mut HashMap<DecorationOrigin, Color>,
     override_color: Option<Color>,
+    ink_rects: &[Rect],
 ) {
     // Draw every decoration captured at its originating box.
     // Descendant longhands therefore cannot restyle or cancel it.
@@ -741,6 +766,12 @@ fn paint_text_fragment_decorations(
             fragment.metrics.ascent,
             geometry,
             lines,
+            &decoration.style,
+            if decoration.skip_ink == "none" {
+                &[]
+            } else {
+                ink_rects
+            },
             color,
             clip,
             vertical_mode.is_some(),
@@ -1309,6 +1340,8 @@ fn paint_fragment_decoration(
     ascent: f32,
     geometry: &DecorationGeometry,
     decoration: TextDecorationLines,
+    decoration_style: &str,
+    ink_rects: &[Rect],
     color: Color,
     clip: Option<Rect>,
     vertical: bool,
@@ -1336,7 +1369,15 @@ fn paint_fragment_decoration(
                 height: thickness,
             }
         };
-        canvas.fill_rect_clipped(line_rect, color, clip);
+        paint_decoration_stroke_skipping_ink(
+            canvas,
+            line_rect,
+            decoration_style,
+            ink_rects,
+            color,
+            clip,
+            vertical,
+        );
     };
     if decoration.underline {
         let position = if vertical {
@@ -1385,6 +1426,199 @@ fn paint_fragment_decoration(
         } else {
             rect.y - offset.y + ascent * 0.6
         });
+    }
+}
+
+pub(crate) fn paint_decoration_stroke_skipping_ink(
+    canvas: &mut Canvas,
+    rect: Rect,
+    style: &str,
+    ink_rects: &[Rect],
+    color: Color,
+    clip: Option<Rect>,
+    vertical: bool,
+) {
+    if ink_rects.is_empty() {
+        paint_decoration_stroke(canvas, rect, style, color, clip, vertical);
+        return;
+    }
+    let probe_band = if vertical {
+        Rect {
+            x: rect.x - 1.0,
+            width: rect.width + 2.0,
+            ..rect
+        }
+    } else {
+        Rect {
+            y: rect.y - 1.0,
+            height: rect.height + 2.0,
+            ..rect
+        }
+    };
+    let mut exclusions: Vec<(f32, f32)> = ink_rects
+        .iter()
+        .filter(|ink| super::intersect(**ink, probe_band).is_some())
+        .map(|ink| {
+            if vertical {
+                (ink.y - 1.0, ink.y + ink.height + 1.0)
+            } else {
+                (ink.x - 1.0, ink.x + ink.width + 1.0)
+            }
+        })
+        .collect();
+    exclusions.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let start = if vertical { rect.y } else { rect.x };
+    let end = if vertical {
+        rect.y + rect.height
+    } else {
+        rect.x + rect.width
+    };
+    let mut cursor = start;
+    for (excluded_start, excluded_end) in exclusions {
+        let excluded_start = excluded_start.clamp(start, end);
+        let excluded_end = excluded_end.clamp(start, end);
+        if excluded_start > cursor {
+            let segment = if vertical {
+                Rect {
+                    y: cursor,
+                    height: excluded_start - cursor,
+                    ..rect
+                }
+            } else {
+                Rect {
+                    x: cursor,
+                    width: excluded_start - cursor,
+                    ..rect
+                }
+            };
+            paint_decoration_stroke(canvas, segment, style, color, clip, vertical);
+        }
+        cursor = cursor.max(excluded_end);
+    }
+    if cursor < end {
+        let segment = if vertical {
+            Rect {
+                y: cursor,
+                height: end - cursor,
+                ..rect
+            }
+        } else {
+            Rect {
+                x: cursor,
+                width: end - cursor,
+                ..rect
+            }
+        };
+        paint_decoration_stroke(canvas, segment, style, color, clip, vertical);
+    }
+}
+
+pub(crate) fn paint_decoration_stroke(
+    canvas: &mut Canvas,
+    rect: Rect,
+    style: &str,
+    color: Color,
+    clip: Option<Rect>,
+    vertical: bool,
+) {
+    let thickness = if vertical { rect.width } else { rect.height };
+    let thickness = thickness.max(1.0);
+    match style {
+        "double" => {
+            let stroke = (thickness / 3.0).max(1.0);
+            let first = Rect {
+                width: if vertical { stroke } else { rect.width },
+                height: if vertical { rect.height } else { stroke },
+                ..rect
+            };
+            let second = Rect {
+                x: if vertical {
+                    rect.x + rect.width - stroke
+                } else {
+                    rect.x
+                },
+                y: if vertical {
+                    rect.y
+                } else {
+                    rect.y + rect.height - stroke
+                },
+                ..first
+            };
+            canvas.fill_rect_clipped(first, color, clip);
+            canvas.fill_rect_clipped(second, color, clip);
+        }
+        "dotted" | "dashed" => {
+            let segment = if style == "dotted" {
+                thickness
+            } else {
+                thickness * 3.0
+            };
+            let gap = if style == "dotted" {
+                thickness
+            } else {
+                thickness * 2.0
+            };
+            let (start, end) = if vertical {
+                (rect.y, rect.y + rect.height)
+            } else {
+                (rect.x, rect.x + rect.width)
+            };
+            let mut cursor = start;
+            while cursor < end {
+                let extent = segment.min(end - cursor);
+                let dash = if vertical {
+                    Rect {
+                        x: rect.x,
+                        y: cursor,
+                        width: rect.width,
+                        height: extent,
+                    }
+                } else {
+                    Rect {
+                        x: cursor,
+                        y: rect.y,
+                        width: extent,
+                        height: rect.height,
+                    }
+                };
+                canvas.fill_rect_clipped(dash, color, clip);
+                cursor += segment + gap;
+            }
+        }
+        "wavy" => {
+            let (start, end) = if vertical {
+                (rect.y, rect.y + rect.height)
+            } else {
+                (rect.x, rect.x + rect.width)
+            };
+            let step = (thickness * 0.75).max(1.0);
+            let amplitude = thickness;
+            let wavelength = (thickness * 4.0).max(4.0);
+            let mut cursor = start;
+            while cursor < end {
+                let phase = (cursor - start) / wavelength * std::f32::consts::TAU;
+                let shift = phase.sin() * amplitude;
+                let extent = step.min(end - cursor);
+                let wave = if vertical {
+                    Rect {
+                        x: rect.x + shift,
+                        y: cursor,
+                        width: thickness,
+                        height: extent,
+                    }
+                } else {
+                    Rect {
+                        x: cursor,
+                        y: rect.y + shift,
+                        width: extent,
+                        height: thickness,
+                    }
+                };
+                canvas.fill_rect_clipped(wave, color, clip);
+                cursor += step;
+            }
+        }
+        _ => canvas.fill_rect_clipped(rect, color, clip),
     }
 }
 

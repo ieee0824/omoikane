@@ -6018,6 +6018,10 @@ fn apply_text_transform_none_returns_none() {
 
 /// Helper: build a canvas rendering "Hi" with the given text-decoration CSS value.
 fn render_text_with_decoration(decoration: &str) -> Canvas {
+    render_text_with_decoration_and_extra_style(decoration, "")
+}
+
+fn render_text_with_decoration_and_extra_style(decoration: &str, extra_style: &str) -> Canvas {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
     let body = NodeHandle::element("body");
@@ -6033,8 +6037,8 @@ fn render_text_with_decoration(decoration: &str) -> Canvas {
         Origin::Author,
         parse_stylesheet(&format!(
             "body {{ margin: 0; }} \
-             p {{ margin-top: 12px; text-decoration: {}; color: #ff0000; font-size: 20px; }}",
-            decoration
+             p {{ margin-top: 12px; text-decoration: {}; color: #ff0000; font-size: 20px; {} }}",
+            decoration, extra_style
         ))
         .unwrap(),
     );
@@ -6202,7 +6206,12 @@ fn text_decoration_length_changes_the_painted_line_thickness() {
 #[test]
 fn text_decoration_thickness_applies_to_every_line_position() {
     for line in ["underline", "overline", "line-through"] {
-        let canvas = render_text_with_decoration(&format!("{line} 6px blue"));
+        // This test isolates authored thickness from glyph-dependent ink
+        // skipping. System fonts can cover the complete line-through band.
+        let canvas = render_text_with_decoration_and_extra_style(
+            &format!("{line} 6px blue"),
+            "text-decoration-skip-ink: none;",
+        );
         let blue_rows = (0..canvas.height())
             .filter(|&y| {
                 (0..canvas.width()).any(|x| {
@@ -8240,6 +8249,118 @@ fn placeholder_letter_spacing_shifts_pixels_right() {
         right_with_spacing,
         right_no_spacing,
     );
+}
+
+#[test]
+fn text_decoration_styles_produce_distinct_horizontal_and_vertical_strokes() {
+    let color = Color::rgb(20, 40, 80);
+    let painted = |style: &str, vertical: bool| {
+        let mut canvas = Canvas::new(40, 40);
+        let rect = if vertical {
+            Rect {
+                x: 12.0,
+                y: 2.0,
+                width: 6.0,
+                height: 32.0,
+            }
+        } else {
+            Rect {
+                x: 2.0,
+                y: 12.0,
+                width: 32.0,
+                height: 6.0,
+            }
+        };
+        crate::paint::text::paint_decoration_stroke(
+            &mut canvas,
+            rect,
+            style,
+            color,
+            None,
+            vertical,
+        );
+        canvas
+    };
+    let count = |canvas: &Canvas| {
+        (0..40)
+            .flat_map(|x| (0..40).map(move |y| (x, y)))
+            .filter(|&(x, y)| canvas.pixel(x, y) == Some(color))
+            .count()
+    };
+
+    for vertical in [false, true] {
+        let solid = painted("solid", vertical);
+        let double = painted("double", vertical);
+        let dotted = painted("dotted", vertical);
+        let dashed = painted("dashed", vertical);
+        let wavy = painted("wavy", vertical);
+        assert!(count(&solid) > count(&double));
+        assert!(count(&double) > 0);
+        assert!(count(&dotted) > 0 && count(&dotted) < count(&solid));
+        assert!(count(&dashed) > 0 && count(&dashed) < count(&solid));
+        assert!(count(&wavy) > 0);
+        assert_ne!(wavy.pixels(), solid.pixels());
+    }
+}
+
+#[test]
+fn text_decoration_skip_ink_splits_horizontal_and_vertical_strokes() {
+    let color = Color::rgb(20, 40, 80);
+    for vertical in [false, true] {
+        let mut canvas = Canvas::new(40, 40);
+        let (line, ink, before, overlap, after) = if vertical {
+            (
+                Rect {
+                    x: 10.0,
+                    y: 2.0,
+                    width: 2.0,
+                    height: 30.0,
+                },
+                Rect {
+                    x: 9.0,
+                    y: 12.0,
+                    width: 5.0,
+                    height: 4.0,
+                },
+                (10, 5),
+                (10, 13),
+                (10, 20),
+            )
+        } else {
+            (
+                Rect {
+                    x: 2.0,
+                    y: 10.0,
+                    width: 30.0,
+                    height: 2.0,
+                },
+                Rect {
+                    x: 12.0,
+                    y: 9.0,
+                    width: 4.0,
+                    height: 5.0,
+                },
+                (5, 10),
+                (13, 10),
+                (20, 10),
+            )
+        };
+        crate::paint::text::paint_decoration_stroke_skipping_ink(
+            &mut canvas,
+            line,
+            "solid",
+            &[ink],
+            color,
+            None,
+            vertical,
+        );
+        assert_eq!(canvas.pixel(before.0, before.1), Some(color));
+        assert_eq!(
+            canvas.pixel(overlap.0, overlap.1),
+            Some(Color::rgba(0, 0, 0, 0))
+        );
+        assert_eq!(canvas.pixel(after.0, after.1), Some(color));
+    }
 }
 
 #[test]

@@ -326,6 +326,12 @@ fn layout_inline_nodes_impl(
         .first()
         .and_then(NodeHandle::parent_node)
         .map(|parent| font_metrics(&resolver.computed_style(&parent)));
+    let mut first_line_indent = nodes
+        .first()
+        .and_then(NodeHandle::parent_node)
+        .map(|parent| text_indent(&resolver.computed_style(&parent), available_width))
+        .unwrap_or_default();
+    first_line_indent.initial_affected = source_start_token == 0;
 
     let (line_start_x, line_available_width) = line_constraints
         .map(|constraints| constraints(start_y, strut_line_height))
@@ -340,6 +346,7 @@ fn layout_inline_nodes_impl(
         strut_line_height,
         strut_metrics,
         direction_rtl,
+        first_line_indent,
         line_constraints,
     );
     boxes::finish(&mut lines, nodes, resolver, strut_line_height);
@@ -444,6 +451,11 @@ pub(super) fn layout_vertical_inline_nodes(
         (TextAlign::End, true) => TextAlign::Left,
         (align, _) => align,
     };
+    let first_line_indent = generated_owner
+        .cloned()
+        .or_else(|| nodes.first().and_then(NodeHandle::parent_node))
+        .map(|owner| text_indent(&resolver.computed_style(&owner), available_height))
+        .unwrap_or_default();
     let mut horizontal_lines = layout_inline_segments(
         &segments,
         0,
@@ -454,6 +466,7 @@ pub(super) fn layout_vertical_inline_nodes(
         strut_line_height,
         None,
         false,
+        first_line_indent,
         local_constraints,
     );
 
@@ -1732,6 +1745,7 @@ pub(super) fn layout_block_pseudo_content(
         line_height(style),
         Some(font_metrics(style)),
         super::direction_is_rtl(style),
+        text_indent(style, available_width),
         None,
     )
 }
@@ -2870,6 +2884,7 @@ pub(super) fn font_size(style: &ComputedStyle) -> f32 {
 pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
     let mut metrics = FontMetrics::from_font_size(font_size(style));
     metrics.letter_spacing = letter_spacing(style);
+    metrics.word_spacing = word_spacing(style);
     metrics.font_family = style.get("font-family").and_then(computed_font_family_key);
     metrics.font_scope_root = style.font_family_scope_root();
     metrics.font_weight = computed_font_weight(style);
@@ -2977,6 +2992,65 @@ fn letter_spacing(style: &ComputedStyle) -> f32 {
     }
 }
 
+fn word_spacing(style: &ComputedStyle) -> f32 {
+    match style.get("word-spacing") {
+        Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("normal") => 0.0,
+        Some(value) => value
+            .resolve_length_percentage(font_size(style))
+            .unwrap_or(0.0),
+        None => 0.0,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TextIndent {
+    amount: f32,
+    hanging: bool,
+    each_line: bool,
+    initial_affected: bool,
+}
+
+impl Default for TextIndent {
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            hanging: false,
+            each_line: false,
+            initial_affected: true,
+        }
+    }
+}
+
+fn text_indent(style: &ComputedStyle, containing_inline_size: f32) -> TextIndent {
+    let Some(value) = style.get("text-indent") else {
+        return TextIndent::default();
+    };
+    match value {
+        ComputedValue::TextIndent {
+            value,
+            hanging,
+            each_line,
+        } => TextIndent {
+            amount: value
+                .resolve_length_percentage(containing_inline_size)
+                .unwrap_or(0.0),
+            hanging: *hanging,
+            each_line: *each_line,
+            initial_affected: true,
+        },
+        value => TextIndent {
+            amount: value
+                .resolve_length_percentage(containing_inline_size)
+                .unwrap_or(0.0),
+            ..TextIndent::default()
+        },
+    }
+}
+
+pub(super) fn text_indent_amount(style: &ComputedStyle, containing_inline_size: f32) -> f32 {
+    text_indent(style, containing_inline_size).amount
+}
+
 pub(super) fn line_height(style: &ComputedStyle) -> f32 {
     match style.get("line-height") {
         Some(ComputedValue::Px(value)) => *value,
@@ -3023,9 +3097,18 @@ struct InlineCursor {
     line_height: f32,
     start_x: f32,
     available_width: f32,
+    unindented_start_x: f32,
+    unindented_available_width: f32,
     strut_line_height: f32,
     strut_metrics: Option<FontMetrics>,
     direction_rtl: bool,
+    indent: TextIndent,
+}
+
+#[derive(Clone, Copy)]
+enum LineBreakKind {
+    Soft,
+    Forced,
 }
 
 impl InlineCursor {
@@ -3036,17 +3119,40 @@ impl InlineCursor {
         strut_line_height: f32,
         strut_metrics: Option<FontMetrics>,
         direction_rtl: bool,
+        indent: TextIndent,
     ) -> Self {
-        Self {
+        let unindented_start_x = start_x;
+        let unindented_available_width = available_width;
+        let mut cursor = Self {
             x: start_x,
             y: start_y,
             line_height: strut_line_height,
             start_x,
             available_width,
+            unindented_start_x,
+            unindented_available_width,
             strut_line_height,
             strut_metrics,
             direction_rtl,
-        }
+            indent,
+        };
+        cursor.apply_line_indent(indent.initial_affected);
+        cursor
+    }
+
+    fn apply_line_indent(&mut self, normally_affected: bool) {
+        let amount = if normally_affected != self.indent.hanging {
+            self.indent.amount
+        } else {
+            0.0
+        };
+        self.start_x = if self.direction_rtl {
+            self.unindented_start_x
+        } else {
+            self.unindented_start_x + amount
+        };
+        self.available_width = (self.unindented_available_width - amount).max(0.0);
+        self.x = self.start_x;
     }
 
     fn wrap_line(
@@ -3056,6 +3162,7 @@ impl InlineCursor {
         segment_line_height: f32,
         align: TextAlign,
         line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
+        break_kind: LineBreakKind,
     ) {
         let effective_height = self.line_height.max(segment_line_height);
         let used_height = push_line(
@@ -3073,9 +3180,12 @@ impl InlineCursor {
         );
         self.y += used_height;
         if let Some(constraints) = line_constraints {
-            (self.start_x, self.available_width) = constraints(self.y, self.strut_line_height);
+            (self.unindented_start_x, self.unindented_available_width) =
+                constraints(self.y, self.strut_line_height);
         }
-        self.x = self.start_x;
+        self.apply_line_indent(
+            matches!(break_kind, LineBreakKind::Forced) && self.indent.each_line,
+        );
         self.line_height = self.strut_line_height;
     }
     fn finish_line(
@@ -3167,7 +3277,14 @@ fn break_text_by_characters(
                 cursor.available_width,
             )
         {
-            cursor.wrap_line(lines, fragments, 0.0, align, line_constraints);
+            cursor.wrap_line(
+                lines,
+                fragments,
+                0.0,
+                align,
+                line_constraints,
+                LineBreakKind::Soft,
+            );
         }
         fragments.push(InlineFragment {
             node: segment.node.clone(),
@@ -3288,7 +3405,14 @@ fn layout_inline_fragment(
             return;
         }
         let pending_starts = take_trailing_inline_starts(fragments, &mut cursor.x);
-        cursor.wrap_line(lines, fragments, 0.0, align, line_constraints);
+        cursor.wrap_line(
+            lines,
+            fragments,
+            0.0,
+            align,
+            line_constraints,
+            LineBreakKind::Soft,
+        );
         for mut fragment in pending_starts {
             fragment.rect.x = cursor.x;
             fragment.rect.y = cursor.y;
@@ -3373,6 +3497,7 @@ fn layout_inline_newline(
         segment.line_height,
         align,
         line_constraints,
+        LineBreakKind::Forced,
     );
 }
 
@@ -3386,6 +3511,7 @@ fn layout_inline_segments(
     strut_line_height: f32,
     strut_metrics: Option<FontMetrics>,
     direction_rtl: bool,
+    first_line_indent: TextIndent,
     line_constraints: Option<&dyn Fn(f32, f32) -> (f32, f32)>,
 ) -> Vec<LineBox> {
     let mut lines = Vec::new();
@@ -3397,6 +3523,7 @@ fn layout_inline_segments(
         strut_line_height,
         strut_metrics,
         direction_rtl,
+        first_line_indent,
     );
 
     let mut prev_segment_allows_wrapping = true;
@@ -3639,11 +3766,14 @@ fn split_text_segment(
             }
             return pieces;
         }
-        return vec![InlinePiece::Fragment {
-            width: measure_text_width(text, metrics),
-            height: line_height,
-            content: InlineFragmentContent::Text(text.to_string()),
-        }];
+        return split_fn(text)
+            .into_iter()
+            .map(|piece| InlinePiece::Fragment {
+                width: measure_text_width(&piece, metrics),
+                height: line_height,
+                content: InlineFragmentContent::Text(piece),
+            })
+            .collect();
     }
 
     if ws_mode.preserves_newlines() && text.contains('\n') {
@@ -4183,7 +4313,8 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                 // Shaped paint inserts spacing between extended grapheme
                 // clusters, not between the scalars that form one cluster.
                 let spacing = metrics.letter_spacing * grapheme_spacing_boundaries(text) as f32;
-                return base + spacing;
+                let word_spacing = metrics.word_spacing * text.matches(' ').count() as f32;
+                return base + spacing + word_spacing;
             }
         }
 
@@ -4194,7 +4325,8 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
             .count();
         let base = char_count as f32 * metrics.average_advance;
         let spacing = metrics.letter_spacing * grapheme_spacing_boundaries(text) as f32;
-        base + spacing
+        let word_spacing = metrics.word_spacing * text.matches(' ').count() as f32;
+        base + spacing + word_spacing
     })
 }
 

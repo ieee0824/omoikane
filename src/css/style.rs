@@ -77,6 +77,15 @@ pub enum ComputedValue {
     /// A typed `<length-percentage>` math expression whose percentage basis is
     /// not available until used-value resolution.
     LengthPercentage(LengthPercentageMath),
+    /// A computed `text-indent` amount and its line-selection flags.
+    TextIndent {
+        /// The computed `<length-percentage>` amount.
+        value: Box<Self>,
+        /// Whether the normally affected lines are inverted.
+        hanging: bool,
+        /// Whether lines after forced breaks are normally affected.
+        each_line: bool,
+    },
     /// The two typed axes of a computed `<position>` value.
     Position {
         /// Horizontal component.
@@ -113,6 +122,20 @@ impl ComputedValue {
             Self::Percentage(value) => format!("{value}%"),
             Self::Number(value) => value.to_string(),
             Self::LengthPercentage(value) => value.css_text(),
+            Self::TextIndent {
+                value,
+                hanging,
+                each_line,
+            } => {
+                let mut parts = vec![value.css_text()];
+                if *hanging {
+                    parts.push("hanging".to_string());
+                }
+                if *each_line {
+                    parts.push("each-line".to_string());
+                }
+                parts.join(" ")
+            }
             Self::Position { x, y } => format!("{} {}", x.css_text(), y.css_text()),
         }
     }
@@ -407,6 +430,8 @@ pub(crate) struct PropagatedTextDecoration {
     pub(crate) origin: (usize, Option<PseudoElement>),
     pub(crate) line: String,
     pub(crate) color: String,
+    pub(crate) style: String,
+    pub(crate) skip_ink: String,
     pub(crate) thickness: ComputedValue,
     pub(crate) underline_position: String,
     pub(crate) underline_offset: ComputedValue,
@@ -4832,6 +4857,14 @@ fn propagated_text_decorations(
         origin,
         line: line.clone(),
         color,
+        style: properties
+            .get(&PropertyId::TextDecorationStyle)
+            .map(computed_value_css_text)
+            .unwrap_or_else(|| "solid".to_string()),
+        skip_ink: properties
+            .get(&PropertyId::TextDecorationSkipInk)
+            .map(computed_value_css_text)
+            .unwrap_or_else(|| "auto".to_string()),
         thickness: properties
             .get(&PropertyId::TextDecorationThickness)
             .cloned()
@@ -5900,6 +5933,32 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if key == "text-decoration-thickness" {
         return validate_text_decoration_thickness(value);
     }
+    if key == "text-decoration-skip-ink" {
+        return validate_keyword_value(value, &["auto", "all", "none"]);
+    }
+    if key == "word-spacing" {
+        return match value {
+            Value::Keyword(keyword)
+                if keyword.eq_ignore_ascii_case("normal")
+                    || is_css_wide_keyword(&keyword.to_ascii_lowercase()) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            value if valid_logical_length(value, true, true) => DeclarationValidation::Unvalidated,
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if key == "text-indent" {
+        if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+        {
+            return DeclarationValidation::Unvalidated;
+        }
+        return if text_indent_components(value).is_some() {
+            DeclarationValidation::Unvalidated
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
     if key == "text-underline-position" {
         return validate_text_underline_position(value);
     }
@@ -5970,6 +6029,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     // it does not change which branch a given property name takes.
     match key.as_str() {
         "text-overflow" => return validate_keyword_value(value, &["clip", "ellipsis"]),
+        "text-decoration-style" => {
+            return validate_keyword_value(value, &["solid", "double", "dotted", "dashed", "wavy"]);
+        }
         "position" => {
             return validate_keyword_value(
                 value,
@@ -6221,6 +6283,31 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+fn text_indent_components(value: &Value) -> Option<(&Value, bool, bool)> {
+    let components = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let mut amount = None;
+    let mut hanging = false;
+    let mut each_line = false;
+    for component in components {
+        match component {
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("hanging") && !hanging => {
+                hanging = true;
+            }
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("each-line") && !each_line => {
+                each_line = true;
+            }
+            value if amount.is_none() && valid_logical_length(value, true, true) => {
+                amount = Some(value);
+            }
+            _ => return None,
+        }
+    }
+    Some((amount?, hanging, each_line))
 }
 
 /// Validates `background-image`: gradient functions are checked with the
@@ -9776,7 +9863,8 @@ pub(super) fn all_longhand_properties() -> impl Iterator<Item = &'static str> {
 /// property the resolver understands.
 pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
     let property = property.trim();
-    let value = value.trim();
+    let value = close_unfinished_functions(value.trim());
+    let value = value.as_str();
     if property.is_empty() || value.is_empty() || contains_top_level_semicolon(value) {
         return false;
     }
@@ -9889,6 +9977,23 @@ pub(crate) fn normalize_counter_specified(property: &str, text: &str) -> Option<
     } else {
         Some(output.join(" "))
     }
+}
+
+fn close_unfinished_functions(value: &str) -> String {
+    let Ok(tokens) = super::tokenize(value) else {
+        return value.to_string();
+    };
+    let mut depth = 0usize;
+    for token in tokens {
+        match token {
+            CssToken::ParenOpen => depth += 1,
+            CssToken::ParenClose => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    let mut repaired = value.to_string();
+    repaired.extend(std::iter::repeat_n(')', depth));
+    repaired
 }
 
 /// Canonicalizes a logical border width assigned through CSSOM.
@@ -10027,6 +10132,76 @@ pub(crate) fn normalize_underline_value(property: &str, value: &str) -> Option<S
     match validate_declaration(property, &declarations.first()?.value) {
         DeclarationValidation::Valid(computed) => Some(computed_value_css_text(&computed)),
         _ => Some(value.trim().to_string()),
+    }
+}
+
+/// Validates and canonicalizes the specified CSSOM value of `text-indent` or
+/// `word-spacing` while preserving unresolved relative units.
+pub(crate) fn normalize_text_spacing_value(property: &str, text: &str) -> Option<String> {
+    let repaired = close_unfinished_functions(text.trim());
+    if !supports_declaration(property, &repaired) {
+        return None;
+    }
+    let declarations = super::parse_style_attribute(&format!("{property}: {repaired}"));
+    let value = &declarations.first()?.value;
+    if property.eq_ignore_ascii_case("text-indent") {
+        let (amount, hanging, each_line) = text_indent_components(value)?;
+        let mut parts = vec![normalize_spacing_length_percentage(amount)];
+        if hanging {
+            parts.push("hanging".to_string());
+        }
+        if each_line {
+            parts.push("each-line".to_string());
+        }
+        return Some(parts.join(" "));
+    }
+    Some(normalize_spacing_length_percentage(value))
+}
+
+fn normalize_spacing_length_percentage(value: &Value) -> String {
+    if matches!(value, Value::Number(number) if *number == 0.0) {
+        return "0px".to_string();
+    }
+    if let Value::Function { name, arguments } = value
+        && name.eq_ignore_ascii_case("calc")
+    {
+        if spacing_math_uses_only_px_and_percentages(value) {
+            let computed = compute_value(value, "word-spacing", ResolutionContext::default());
+            if !matches!(computed, ComputedValue::Keyword(_)) {
+                return computed.css_text();
+            }
+        }
+        if let [Value::List(terms)] = arguments.as_slice()
+            && let [
+                Value::Length(length, unit),
+                Value::Keyword(operator),
+                Value::Percentage(percentage),
+            ] = terms.as_slice()
+            && matches!(operator.as_str(), "+" | "-")
+        {
+            let percentage = if operator == "-" {
+                -*percentage
+            } else {
+                *percentage
+            };
+            return format!("calc({percentage}% + {length}{unit})");
+        }
+    }
+    render_value(value)
+}
+
+fn spacing_math_uses_only_px_and_percentages(value: &Value) -> bool {
+    match value {
+        Value::Length(_, unit) => unit.eq_ignore_ascii_case("px"),
+        Value::Percentage(_) | Value::Number(_) => true,
+        Value::Keyword(operator) => matches!(operator.as_str(), "+" | "-" | "*" | "/"),
+        Value::List(values) | Value::CommaList(values) => {
+            values.iter().all(spacing_math_uses_only_px_and_percentages)
+        }
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => arguments
+            .iter()
+            .all(spacing_math_uses_only_px_and_percentages),
+        _ => false,
     }
 }
 
@@ -10364,6 +10539,20 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
                 }
             }
         }
+    }
+    if property_name.eq_ignore_ascii_case("word-spacing")
+        && matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("normal"))
+    {
+        return ComputedValue::Px(0.0);
+    }
+    if property_name.eq_ignore_ascii_case("text-indent")
+        && let Some((amount, hanging, each_line)) = text_indent_components(value)
+    {
+        return ComputedValue::TextIndent {
+            value: Box::new(compute_value(amount, "left", ctx)),
+            hanging,
+            each_line,
+        };
     }
     if matches!(property_name, "translate" | "rotate" | "scale") {
         return ComputedValue::Keyword(individual_transform::compute(property_name, value, ctx));
@@ -12882,6 +13071,8 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     ),
     (PropertyId::UnicodeBidi, InitialValue::Keyword("normal")),
     (PropertyId::TextTransform, InitialValue::Keyword("none")),
+    (PropertyId::TextIndent, InitialValue::Px(0.0)),
+    (PropertyId::WordSpacing, InitialValue::Px(0.0)),
     (PropertyId::WhiteSpace, InitialValue::Keyword("normal")),
     (PropertyId::TextOverflow, InitialValue::Keyword("clip")),
     (PropertyId::OverflowX, InitialValue::Keyword("visible")),
@@ -12890,6 +13081,10 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (
         PropertyId::TextDecorationLine,
         InitialValue::Keyword("none"),
+    ),
+    (
+        PropertyId::TextDecorationSkipInk,
+        InitialValue::Keyword("auto"),
     ),
     (
         PropertyId::TextDecorationStyle,
@@ -13316,6 +13511,7 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::PointerEvents,
     PropertyId::Quotes,
     PropertyId::TextAlign,
+    PropertyId::TextDecorationSkipInk,
     PropertyId::TextIndent,
     PropertyId::TextShadow,
     PropertyId::TextTransform,
@@ -14194,6 +14390,7 @@ fn computed_value_to_value(cv: &ComputedValue) -> Value {
         ComputedValue::Keyword(k) => Value::Keyword(k.clone()),
         ComputedValue::String(s) => Value::Keyword(s.clone()),
         ComputedValue::LengthPercentage(value) => Value::Keyword(value.css_text()),
+        value @ ComputedValue::TextIndent { .. } => Value::Keyword(value.css_text()),
         value @ ComputedValue::Position { .. } => Value::Keyword(value.css_text()),
     }
 }

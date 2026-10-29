@@ -65,6 +65,29 @@ fn paint_fragment_mask(
         None,
         Some(white),
     );
+    let ink_rects = if fragment
+        .style
+        .text_decorations
+        .iter()
+        .any(|decoration| decoration.skip_ink != "none")
+    {
+        let mut probe = Canvas::text_ink_probe();
+        paint_text_fragment_glyphs(
+            &mut probe,
+            fragment,
+            rect,
+            text,
+            resolver,
+            white,
+            context.text_fonts,
+            context.web_fonts,
+            None,
+            Some(white),
+        );
+        probe.probed_ink_rects().to_vec()
+    } else {
+        Vec::new()
+    };
     paint_text_fragment_decorations(
         canvas,
         fragment,
@@ -80,6 +103,7 @@ fn paint_fragment_mask(
         &mut HashMap::new(),
         &mut HashMap::new(),
         Some(white),
+        &ink_rects,
     );
 }
 

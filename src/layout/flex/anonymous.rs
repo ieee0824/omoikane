@@ -2,7 +2,9 @@
 //! wrappers into the DOM or applies element selectors to synthetic elements.
 
 use super::*;
-use crate::layout::inline::{TextAlign, layout_inline_nodes, line_height, text_align};
+use crate::layout::inline::{
+    TextAlign, layout_inline_nodes, line_height, text_align, text_indent_amount,
+};
 
 fn lines(
     nodes: &[NodeHandle],
@@ -46,10 +48,14 @@ pub(super) fn append(
         return;
     };
     let style = resolver.computed_style(&nodes[0]);
+    // Percentages contribute zero to intrinsic sizes; the used percentage is
+    // resolved later when the anonymous item is laid out at its final width.
+    let indent = text_indent_amount(&style, 0.0);
     let maximum = max_width(&nodes, resolver);
     let minimum = lines(&nodes, resolver, &style, 0.0, TextAlign::Left)
         .iter()
-        .map(|line| line.rect.width)
+        .enumerate()
+        .map(|(index, line)| line.rect.width + if index == 0 { indent } else { 0.0 })
         .fold(0.0, f32::max);
     let cross_size = (direction == FlexDirection::Column && align != AlignItems::Stretch)
         .then_some(maximum.min(width));
@@ -158,8 +164,11 @@ pub(super) fn take_text(nodes: &mut Vec<NodeHandle>) -> Option<Vec<NodeHandle>> 
 
 pub(super) fn max_width(nodes: &[NodeHandle], resolver: &mut StyleResolver) -> f32 {
     let style = resolver.computed_style(&nodes[0]);
+    let indent = text_indent_amount(&style, 0.0);
     lines(nodes, resolver, &style, f32::MAX, TextAlign::Left)
         .iter()
-        .map(|line| line.rect.width)
+        .enumerate()
+        .map(|(index, line)| line.rect.width + if index == 0 { indent } else { 0.0 })
         .fold(0.0, f32::max)
+        .max(0.0)
 }
