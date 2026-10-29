@@ -7233,6 +7233,17 @@ fn cjk_vertical_and_ruby_properties_compute_canonically_and_inherit() {
         crate::layout::FragmentStyle::from_computed(&style).text_combine_upright,
         crate::layout::TextCombineUpright::Digits(2)
     );
+    let spacing_trim = crate::layout::FragmentStyle::from_computed(&style).text_spacing_trim;
+    assert_eq!(
+        spacing_trim.start,
+        crate::layout::TextSpacingTrimStart::Trim
+    );
+    assert_eq!(
+        spacing_trim.adjacent,
+        crate::layout::TextSpacingTrimAdjacent::Trim
+    );
+    assert_eq!(spacing_trim.end, crate::layout::TextSpacingTrimEnd::Allow);
+    assert!(!spacing_trim.trim_all);
     assert_eq!(
         crate::layout::FragmentStyle::from_computed(&style).text_autospace,
         crate::layout::TextAutospace {

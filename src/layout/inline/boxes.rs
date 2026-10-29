@@ -236,6 +236,7 @@ pub(super) fn finish(
                 content: InlineFragmentContent::InlineBox(owner.style.clone()),
                 rect,
                 autospace_after: 0.0,
+                punctuation_trim: Default::default(),
                 metrics: owner.metrics.clone(),
                 vertical_align: owner.align,
                 source_end_token: 0,

@@ -690,18 +690,29 @@ fn paint_text_fragment_glyphs(
 
     let transformed = apply_text_transform(text, text_transform);
     let transformed_text = transformed.as_deref().unwrap_or(text);
+    let mut paint_style = fragment.style.clone();
+    paint_style.shaping_options = Arc::new(
+        crate::layout::text_spacing_trim_shaping_options_with_edges(
+            transformed_text,
+            paint_style.text_spacing_trim,
+            fragment.metrics.vertical_writing,
+            fragment.punctuation_trim,
+            &paint_style.shaping_options,
+        )
+        .into_owned(),
+    );
     // Resolve bidi before selecting the physical paint axis.
     // The vertical painter already maps the resulting visual
     // sequence onto its direction-aware column cursor, so it
     // must consume the same UAX#9 order as horizontal paint.
-    let (visual_text, vertical_mode) = fragment_text_for_paint(transformed_text, &fragment.style);
+    let (visual_text, vertical_mode) = fragment_text_for_paint(transformed_text, &paint_style);
     let display_text = visual_text.as_ref();
     // A resolved fragment level lets rustybuzz consume the logical
     // string with the matching direction. Without such a level, an
     // owned value means paint-time bidi resolution rewrote the
     // string, so preserve that established visual-order path.
     let can_shape_logical_text =
-        fragment.style.resolved_bidi_level.is_some() || matches!(&visual_text, Cow::Borrowed(_));
+        paint_style.resolved_bidi_level.is_some() || matches!(&visual_text, Cow::Borrowed(_));
 
     // Resolve the same installed or web face used by layout,
     // retaining the existing cluster-level fallback fonts.
@@ -734,7 +745,7 @@ fn paint_text_fragment_glyphs(
                 font_size,
                 fragment.metrics.ascent,
                 &shaping_fonts,
-                &fragment.style,
+                &paint_style,
                 frag_color,
                 clip,
                 fragment.metrics.letter_spacing,
@@ -749,7 +760,7 @@ fn paint_text_fragment_glyphs(
                     font_size,
                     fragment.metrics.ascent,
                     &shaping_fonts,
-                    &fragment.style,
+                    &paint_style,
                     frag_color,
                     clip,
                     fragment.metrics.letter_spacing,
@@ -763,11 +774,12 @@ fn paint_text_fragment_glyphs(
                 font_size,
                 fragment.metrics.ascent,
                 &shaping_fonts,
-                &fragment.style,
+                &paint_style,
                 frag_color,
                 clip,
                 fragment.metrics.letter_spacing,
                 vertical_mode,
+                fragment.punctuation_trim,
             );
         }
     } else if !fonts.is_empty() {
@@ -784,7 +796,7 @@ fn paint_text_fragment_glyphs(
                 font_size,
                 fragment.metrics.ascent,
                 &font_refs,
-                &fragment.style,
+                &paint_style,
                 frag_color,
                 clip,
                 fragment.metrics.letter_spacing,
@@ -797,11 +809,12 @@ fn paint_text_fragment_glyphs(
                 font_size,
                 fragment.metrics.ascent,
                 &font_refs,
-                &fragment.style,
+                &paint_style,
                 frag_color,
                 clip,
                 fragment.metrics.letter_spacing,
                 Some(vertical_mode),
+                fragment.punctuation_trim,
             );
         } else if !combined {
             let font_refs: Vec<&Font> = fonts.iter().map(|font| font.as_ref()).collect();
@@ -813,7 +826,7 @@ fn paint_text_fragment_glyphs(
                     font_size,
                     fragment.metrics.ascent,
                     &font_refs,
-                    &fragment.style,
+                    &paint_style,
                     frag_color,
                     clip,
                     fragment.metrics.letter_spacing,
@@ -836,7 +849,7 @@ fn paint_text_fragment_glyphs(
     } else {
         // Fallback: placeholder rectangles
         let combined =
-            vertical_mode.is_some() && text_is_combined_upright(transformed_text, &fragment.style);
+            vertical_mode.is_some() && text_is_combined_upright(transformed_text, &paint_style);
         let (placeholder_rect, placeholder_size, placeholder_spacing, placeholder_vertical) =
             if combined {
                 let graphemes = display_text.graphemes(true).count().max(1);
@@ -2230,15 +2243,29 @@ fn fallback_paint_characters(
     direction_rtl: bool,
     fonts: &[FontFallbackCandidate<'_>],
 ) -> Vec<(char, usize)> {
-    let mut clusters = text.graphemes(true).collect::<Vec<_>>();
+    fallback_paint_characters_with_offsets(text, direction_rtl, fonts)
+        .into_iter()
+        .map(|(_, character, font_index)| (character, font_index))
+        .collect()
+}
+
+fn fallback_paint_characters_with_offsets(
+    text: &str,
+    direction_rtl: bool,
+    fonts: &[FontFallbackCandidate<'_>],
+) -> Vec<(usize, char, usize)> {
+    let mut clusters = text.grapheme_indices(true).collect::<Vec<_>>();
     if direction_rtl {
         clusters.reverse();
     }
     clusters
         .into_iter()
-        .filter_map(|cluster| {
-            fallback_font_for_cluster(fonts, cluster)
-                .map(|font_index| cluster.chars().map(move |ch| (ch, font_index)))
+        .filter_map(|(cluster_offset, cluster)| {
+            fallback_font_for_cluster(fonts, cluster).map(|font_index| {
+                cluster
+                    .char_indices()
+                    .map(move |(offset, ch)| (cluster_offset + offset, ch, font_index))
+            })
         })
         .flatten()
         .collect()
@@ -2330,6 +2357,7 @@ fn paint_fragment_text(
     clip: Option<Rect>,
     letter_spacing: f32,
     vertical_mode: Option<VerticalPaintMode>,
+    punctuation_trim: crate::layout::PunctuationTrim,
 ) {
     if let Some(vertical_mode) = vertical_mode {
         paint_text_vertical_with_candidates(
@@ -2344,6 +2372,7 @@ fn paint_fragment_text(
             clip,
             letter_spacing,
             vertical_mode,
+            punctuation_trim,
         );
     } else {
         paint_text_with_candidates(
@@ -2488,12 +2517,18 @@ pub(crate) fn paint_shaped_horizontal_text_with_candidates(
     clip: Option<Rect>,
     letter_spacing: f32,
 ) -> Option<f32> {
+    let shaping_options = crate::layout::text_spacing_trim_shaping_options(
+        text,
+        style.text_spacing_trim,
+        false,
+        &style.shaping_options,
+    );
     let Ok(runs) = shape_text_with_fallback_candidates_and_options(
         fonts,
         text,
         font_size,
         text_shaping_direction(text, style),
-        &style.shaping_options,
+        &shaping_options,
     ) else {
         return None;
     };
@@ -2513,7 +2548,7 @@ pub(crate) fn paint_shaped_horizontal_text_with_candidates(
                 &spacing.character().to_string(),
                 font_size,
                 ShapingDirection::LeftToRight,
-                &style.shaping_options,
+                &shaping_options,
             )
             .map(|runs| {
                 runs.iter()
@@ -2633,25 +2668,66 @@ fn paint_text_vertical_with_candidates(
     clip: Option<Rect>,
     letter_spacing: f32,
     mode: VerticalPaintMode,
-) {
+    punctuation_trim: crate::layout::PunctuationTrim,
+) -> f32 {
     let direction_rtl = mode.direction_rtl;
-    let chars = fallback_paint_characters(text, direction_rtl, fonts);
+    let chars = fallback_paint_characters_with_offsets(text, direction_rtl, fonts);
+    let trim_offsets = crate::layout::text_spacing_trim_offsets_with_edges(
+        text,
+        style.text_spacing_trim,
+        true,
+        punctuation_trim,
+    );
+    let shaped_trim_glyphs = (!trim_offsets.is_empty())
+        .then(|| {
+            shape_text_with_fallback_candidates_and_options(
+                fonts,
+                text,
+                font_size,
+                if direction_rtl {
+                    ShapingDirection::BottomToTop
+                } else {
+                    ShapingDirection::TopToBottom
+                },
+                &style.shaping_options,
+            )
+            .ok()
+        })
+        .flatten()
+        .map(|runs| {
+            runs.into_iter()
+                .flat_map(|run| {
+                    run.glyphs
+                        .into_iter()
+                        .map(move |glyph| (glyph.cluster, (run.font_index, glyph)))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
 
     let mut cursor_y = if direction_rtl {
         rect.y + rect.height
     } else {
         rect.y
     };
+    let initial_cursor_y = cursor_y;
     let mut previous_cell = None;
     let mut previous_rotation = None;
     let mut previous_autospace_char = None;
     let autospace_enabled = !text_is_combined_upright(text, style);
     let mut remaining_non_zero = chars
         .iter()
-        .filter(|(ch, _)| !is_zero_advance_character(*ch))
+        .filter(|(_, ch, _)| !is_zero_advance_character(*ch))
         .count();
-    for (ch, font_index) in chars {
+    for (source_offset, ch, fallback_font_index) in chars {
         let zero_advance = is_zero_advance_character(ch);
+        let shaped_trim = trim_offsets
+            .binary_search(&source_offset)
+            .ok()
+            .and_then(|_| shaped_trim_glyphs.get(&source_offset).copied());
+        let font_index = shaped_trim
+            .map(|(font_index, _)| font_index)
+            .unwrap_or(fallback_font_index);
         let candidate = fonts[font_index];
         if autospace_enabled
             && !zero_advance
@@ -2677,7 +2753,17 @@ fn paint_text_vertical_with_candidates(
             }
         }
         let rotation = vertical_glyph_rotation(mode.glyphs, ch, previous_rotation);
-        let (_, glyph, advance_x) = rasterize_with_fallback_refs(&[candidate.font], ch, font_size);
+        let (glyph, advance_x, shaped_offset) = if let Some((_, shaped)) = shaped_trim {
+            (
+                rasterize_glyph_cached(candidate.font, shaped.glyph_id, font_size).ok(),
+                shaped.y_advance.abs(),
+                (shaped.x_offset, -shaped.y_offset),
+            )
+        } else {
+            let (_, glyph, advance) =
+                rasterize_with_fallback_refs(&[candidate.font], ch, font_size);
+            (glyph, advance, (0.0, 0.0))
+        };
         let glyph = (!is_invisible_shaping_control(ch))
             .then_some(glyph)
             .flatten();
@@ -2699,9 +2785,12 @@ fn paint_text_vertical_with_candidates(
             if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
                 match rotation {
                     GlyphRotation::Upright => {
-                        let glyph_x = rect.x + ((rect.width - glyph.width as f32) * 0.5).max(0.0);
-                        let glyph_y =
-                            cell_start + ((paint_advance - glyph.height as f32) * 0.5).max(0.0);
+                        let glyph_x = rect.x
+                            + ((rect.width - glyph.width as f32) * 0.5).max(0.0)
+                            + shaped_offset.0;
+                        let glyph_y = cell_start
+                            + ((paint_advance - glyph.height as f32) * 0.5).max(0.0)
+                            + shaped_offset.1;
                         canvas.draw_glyph_mask(
                             glyph_x,
                             glyph_y,
@@ -2715,9 +2804,12 @@ fn paint_text_vertical_with_candidates(
                     GlyphRotation::Clockwise | GlyphRotation::CounterClockwise => {
                         let rotated_width = glyph.height as f32;
                         let rotated_height = glyph.width as f32;
-                        let glyph_x = rect.x + ((rect.width - rotated_width) * 0.5).max(0.0);
-                        let glyph_y =
-                            cell_start + ((paint_advance - rotated_height) * 0.5).max(0.0);
+                        let glyph_x = rect.x
+                            + ((rect.width - rotated_width) * 0.5).max(0.0)
+                            + shaped_offset.0;
+                        let glyph_y = cell_start
+                            + ((paint_advance - rotated_height) * 0.5).max(0.0)
+                            + shaped_offset.1;
                         draw_rotated_glyph_mask(
                             canvas,
                             glyph_x,
@@ -2754,6 +2846,7 @@ fn paint_text_vertical_with_candidates(
             remaining_non_zero -= 1;
         }
     }
+    (cursor_y - initial_cursor_y).abs()
 }
 
 /// Rotates a single-channel glyph mask without changing the canvas API.
@@ -3867,8 +3960,62 @@ mod bidi_tests {
                 glyphs: VerticalGlyphMode::Mixed,
                 direction_rtl: false,
             },
+            Default::default(),
         );
         assert_ne!(combined.pixels(), vertical.pixels());
+    }
+
+    #[test]
+    fn vertical_vhal_paint_advance_matches_selected_punctuation_ranges() {
+        use std::sync::Arc;
+
+        let font = Font::load_from_bytes(
+            include_bytes!(
+                "../../tests/fixtures/text-spacing-trim/NotoSansCJKjp-Regular-subset-halt.otf"
+            )
+            .to_vec(),
+        )
+        .expect("fixed text-spacing-trim font fixture");
+        let fonts = [FontFallbackCandidate::unrestricted(&font)];
+        let text = "国（（国";
+        let mut style = FragmentStyle {
+            writing_mode: Some("vertical-rl".into()),
+            ..FragmentStyle::default()
+        };
+        style.shaping_options = Arc::new(
+            crate::layout::text_spacing_trim_shaping_options(
+                text,
+                style.text_spacing_trim,
+                true,
+                &style.shaping_options,
+            )
+            .into_owned(),
+        );
+        let mut canvas = Canvas::new(40, 100);
+        let advance = paint_text_vertical_with_candidates(
+            &mut canvas,
+            crate::layout::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 80.0,
+            },
+            text,
+            20.0,
+            16.0,
+            &fonts,
+            &style,
+            Color::rgb(0, 0, 0),
+            None,
+            0.0,
+            VerticalPaintMode {
+                glyphs: VerticalGlyphMode::Mixed,
+                direction_rtl: false,
+            },
+            Default::default(),
+        );
+        assert!((advance - 70.0).abs() < 0.01, "advance={advance}");
+        assert!(canvas.pixels().chunks_exact(4).any(|pixel| pixel[3] != 0));
     }
 
     #[test]

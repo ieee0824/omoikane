@@ -83,6 +83,8 @@ rustls = "0.23"
 rustybuzz = "0.20.1"
 encoding_rs = "0.8"
 unicode-bidi = "0.3.18"
+# CSS Text contextual punctuation includes all Unicode Ps/Pe characters.
+unicode-general-category = "1.1.0"
 unicode-segmentation = "1.12"
 # CSS vertical mixed text needs the Unicode UAX #50 orientation table.
 unicode-vo = "0.1.0"

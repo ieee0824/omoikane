@@ -29,6 +29,7 @@ use crate::http::cors::{CorpViolation, Origin as CorsOrigin};
 use crate::http::{Client, CookieJar, Url};
 use crate::paint::Image;
 use rusqlite::{Connection, params};
+use unicode_general_category::{GeneralCategory, get_general_category};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_vo::{Orientation, char_orientation};
 
@@ -817,6 +818,8 @@ pub struct FragmentStyle {
     pub(crate) text_combine_upright: TextCombineUpright,
     /// Typed CSS `text-autospace` controls shared by measurement and paint.
     pub(crate) text_autospace: TextAutospace,
+    /// Typed CSS `text-spacing-trim` controls for contextual CJK punctuation.
+    pub(crate) text_spacing_trim: TextSpacingTrim,
     /// Whether the inherited document language is French. Resolved once from
     /// the DOM language boundary for language-specific `text-autospace` rules.
     pub(crate) french_content_language: bool,
@@ -900,6 +903,9 @@ impl FragmentStyle {
             },
             text_autospace: TextAutospace::from_computed(
                 normalize_lower(PropertyId::TextAutospace).as_deref(),
+            ),
+            text_spacing_trim: TextSpacingTrim::from_computed(
+                normalize_lower(PropertyId::TextSpacingTrim).as_deref(),
             ),
             french_content_language: false,
             direction: normalize_lower(PropertyId::Direction),
@@ -994,6 +1000,276 @@ impl TextAutospace {
             replace: has("replace"),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextSpacingTrim {
+    pub(crate) start: TextSpacingTrimStart,
+    pub(crate) adjacent: TextSpacingTrimAdjacent,
+    pub(crate) end: TextSpacingTrimEnd,
+    pub(crate) trim_all: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextSpacingTrimStart {
+    Trim,
+    Space,
+    SpaceFirst,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextSpacingTrimAdjacent {
+    Trim,
+    Space,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextSpacingTrimEnd {
+    Trim,
+    Space,
+    Allow,
+}
+
+impl Default for TextSpacingTrim {
+    fn default() -> Self {
+        Self {
+            start: TextSpacingTrimStart::Space,
+            adjacent: TextSpacingTrimAdjacent::Trim,
+            end: TextSpacingTrimEnd::Allow,
+            trim_all: false,
+        }
+    }
+}
+
+impl TextSpacingTrim {
+    fn from_computed(value: Option<&str>) -> Self {
+        let Some(value) = value else {
+            return Self::default();
+        };
+        match value {
+            "normal" => return Self::default(),
+            "auto" | "trim-both" => {
+                return Self {
+                    start: TextSpacingTrimStart::Trim,
+                    adjacent: TextSpacingTrimAdjacent::Trim,
+                    end: TextSpacingTrimEnd::Trim,
+                    trim_all: false,
+                };
+            }
+            "space-all" => {
+                return Self {
+                    start: TextSpacingTrimStart::Space,
+                    adjacent: TextSpacingTrimAdjacent::Space,
+                    end: TextSpacingTrimEnd::Space,
+                    trim_all: false,
+                };
+            }
+            "trim-all" => {
+                return Self {
+                    start: TextSpacingTrimStart::Trim,
+                    adjacent: TextSpacingTrimAdjacent::Trim,
+                    end: TextSpacingTrimEnd::Trim,
+                    trim_all: true,
+                };
+            }
+            _ => {}
+        }
+        let has = |keyword| value.split_ascii_whitespace().any(|part| part == keyword);
+        Self {
+            start: if has("space-start") {
+                TextSpacingTrimStart::Space
+            } else if has("space-first") {
+                TextSpacingTrimStart::SpaceFirst
+            } else {
+                TextSpacingTrimStart::Trim
+            },
+            adjacent: if has("space-adjacent") {
+                TextSpacingTrimAdjacent::Space
+            } else {
+                TextSpacingTrimAdjacent::Trim
+            },
+            end: if has("trim-end") {
+                TextSpacingTrimEnd::Trim
+            } else if has("space-end") {
+                TextSpacingTrimEnd::Space
+            } else {
+                TextSpacingTrimEnd::Allow
+            },
+            trim_all: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FullwidthPunctuationClass {
+    Opening,
+    Closing,
+    Middle,
+}
+
+pub(crate) fn fullwidth_punctuation_class(
+    character: char,
+    vertical: bool,
+) -> Option<FullwidthPunctuationClass> {
+    use FullwidthPunctuationClass::{Closing, Middle, Opening};
+    match character {
+        '\u{2018}' | '\u{201c}' | '\u{3008}' | '\u{300a}' | '\u{300c}' | '\u{300e}'
+        | '\u{3010}' | '\u{3014}' | '\u{3016}' | '\u{3018}' | '\u{301a}' | '\u{301d}'
+        | '\u{ff08}' | '\u{ff3b}' | '\u{ff5b}' | '\u{ff5f}' => Some(Opening),
+        '\u{2019}' | '\u{201d}' | '\u{3009}' | '\u{300b}' | '\u{300d}' | '\u{300f}'
+        | '\u{3011}' | '\u{3015}' | '\u{3017}' | '\u{3019}' | '\u{301b}' | '\u{301e}'
+        | '\u{301f}' | '\u{ff09}' | '\u{ff3d}' | '\u{ff5d}' | '\u{ff60}' | '\u{3001}'
+        | '\u{3002}' | '\u{ff0c}' | '\u{ff0e}' => Some(Closing),
+        '\u{00b7}' | '\u{2027}' | '\u{30fb}' | '\u{ff1a}' => Some(Middle),
+        '\u{ff1b}' if !vertical => Some(Middle),
+        _ => None,
+    }
+}
+
+pub(crate) fn opening_punctuation_trims_after(
+    previous: char,
+    previous_size: f32,
+    opening_size: f32,
+    vertical: bool,
+) -> bool {
+    match fullwidth_punctuation_class(previous, vertical) {
+        Some(FullwidthPunctuationClass::Opening | FullwidthPunctuationClass::Middle) => true,
+        Some(FullwidthPunctuationClass::Closing) => previous_size >= opening_size,
+        None => {
+            previous == '\u{3000}'
+                || get_general_category(previous) == GeneralCategory::OpenPunctuation
+        }
+    }
+}
+
+pub(crate) fn closing_punctuation_trims_before(
+    next: char,
+    closing_size: f32,
+    next_size: f32,
+    vertical: bool,
+) -> bool {
+    match fullwidth_punctuation_class(next, vertical) {
+        Some(FullwidthPunctuationClass::Closing | FullwidthPunctuationClass::Middle) => true,
+        Some(FullwidthPunctuationClass::Opening) => next_size > closing_size,
+        None => {
+            next == '\u{3000}' || get_general_category(next) == GeneralCategory::ClosePunctuation
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PunctuationTrimBoundary {
+    pub(crate) byte_offset: usize,
+    pub(crate) leading: bool,
+    pub(crate) trailing: bool,
+}
+
+pub(crate) fn text_spacing_trim_boundaries(
+    text: &str,
+    value: TextSpacingTrim,
+    vertical: bool,
+) -> Vec<PunctuationTrimBoundary> {
+    let graphemes = text.grapheme_indices(true).collect::<Vec<_>>();
+    graphemes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (offset, grapheme))| {
+            let class = fullwidth_punctuation_class(grapheme.chars().next()?, vertical)?;
+            let previous = index
+                .checked_sub(1)
+                .and_then(|index| graphemes[index].1.chars().next());
+            let next = graphemes
+                .get(index + 1)
+                .and_then(|(_, grapheme)| grapheme.chars().next());
+            let leading = (value.trim_all
+                && matches!(
+                    class,
+                    FullwidthPunctuationClass::Opening | FullwidthPunctuationClass::Middle
+                ))
+                || (class == FullwidthPunctuationClass::Opening
+                    && value.adjacent == TextSpacingTrimAdjacent::Trim
+                    && previous.is_some_and(|character| {
+                        opening_punctuation_trims_after(character, 1.0, 1.0, vertical)
+                    }));
+            let trailing = (value.trim_all && class == FullwidthPunctuationClass::Closing)
+                || (class == FullwidthPunctuationClass::Closing
+                    && value.adjacent == TextSpacingTrimAdjacent::Trim
+                    && next.is_some_and(|character| {
+                        closing_punctuation_trims_before(character, 1.0, 1.0, vertical)
+                    }));
+            (leading || trailing).then_some(PunctuationTrimBoundary {
+                byte_offset: *offset,
+                leading,
+                trailing,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn text_spacing_trim_shaping_options<'a>(
+    text: &str,
+    value: TextSpacingTrim,
+    vertical: bool,
+    base: &'a crate::font::ShapingOptions,
+) -> std::borrow::Cow<'a, crate::font::ShapingOptions> {
+    text_spacing_trim_shaping_options_with_edges(
+        text,
+        value,
+        vertical,
+        PunctuationTrim::default(),
+        base,
+    )
+}
+
+pub(crate) fn text_spacing_trim_shaping_options_with_edges<'a>(
+    text: &str,
+    value: TextSpacingTrim,
+    vertical: bool,
+    edges: PunctuationTrim,
+    base: &'a crate::font::ShapingOptions,
+) -> std::borrow::Cow<'a, crate::font::ShapingOptions> {
+    let offsets = text_spacing_trim_offsets_with_edges(text, value, vertical, edges);
+    if offsets.is_empty() {
+        return std::borrow::Cow::Borrowed(base);
+    }
+    let mut options = base.clone();
+    let tag = if vertical { *b"vhal" } else { *b"halt" };
+    for offset in offsets {
+        let Some(character) = text[offset..].chars().next() else {
+            continue;
+        };
+        let feature =
+            crate::font::OpenTypeFeature::for_range(tag, 1, offset..offset + character.len_utf8());
+        if !options.features.contains(&feature) {
+            options.features.push(feature);
+        }
+    }
+    std::borrow::Cow::Owned(options)
+}
+
+pub(crate) fn text_spacing_trim_offsets_with_edges(
+    text: &str,
+    value: TextSpacingTrim,
+    vertical: bool,
+    edges: PunctuationTrim,
+) -> Vec<usize> {
+    let mut offsets = text_spacing_trim_boundaries(text, value, vertical)
+        .into_iter()
+        .map(|boundary| boundary.byte_offset)
+        .collect::<Vec<_>>();
+    if edges.first
+        && let Some((offset, _)) = text.grapheme_indices(true).next()
+    {
+        offsets.push(offset);
+    }
+    if edges.last
+        && let Some((offset, _)) = text.grapheme_indices(true).next_back()
+    {
+        offsets.push(offset);
+    }
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets
 }
 
 /// Returns whether a prepared fragment is one combined upright unit.
@@ -1326,6 +1602,8 @@ pub struct InlineFragment {
     /// `text-autospace`. Kept separate so bidi reordering can move it to the
     /// boundary between the visually adjacent characters.
     pub(crate) autospace_after: f32,
+    /// Contextual CJK punctuation compaction selected after line breaking.
+    pub(crate) punctuation_trim: PunctuationTrim,
     pub metrics: FontMetrics,
     pub vertical_align: VerticalAlign,
     /// Position after this fragment in its formatting context's normalized
@@ -1336,6 +1614,12 @@ pub struct InlineFragment {
     /// `text-decoration`, and `color` rather than inheriting from the
     /// containing block's style.
     pub style: FragmentStyle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct PunctuationTrim {
+    pub(crate) first: bool,
+    pub(crate) last: bool,
 }
 
 /// An owned mapping from a rendered text span to its original DOM Text node.
@@ -1432,6 +1716,7 @@ pub struct FontMetrics {
     /// Extra advance applied to each collapsible word separator (CSS `word-spacing`).
     pub word_spacing: f32,
     pub(crate) text_autospace: TextAutospace,
+    pub(crate) text_spacing_trim: TextSpacingTrim,
     pub(crate) french_content_language: bool,
     pub(crate) text_orientation: TextOrientation,
     pub(crate) text_combine_upright: TextCombineUpright,
@@ -1458,6 +1743,7 @@ impl FontMetrics {
             letter_spacing: 0.0,
             word_spacing: 0.0,
             text_autospace: TextAutospace::default(),
+            text_spacing_trim: TextSpacingTrim::default(),
             french_content_language: false,
             text_orientation: TextOrientation::default(),
             text_combine_upright: TextCombineUpright::default(),

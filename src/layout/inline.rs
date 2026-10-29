@@ -390,6 +390,7 @@ fn attach_initial_letter(
                 height: initial.height,
             },
             autospace_after: 0.0,
+            punctuation_trim: Default::default(),
             metrics: initial.metrics,
             vertical_align: VerticalAlign::Baseline,
             source_end_token: initial.source_units,
@@ -1460,6 +1461,7 @@ fn apply_overflow_marker(
             }
         },
         autospace_after: 0.0,
+        punctuation_trim: Default::default(),
         metrics: marker_metrics,
         vertical_align: VerticalAlign::Baseline,
         source_end_token: 0,
@@ -3878,6 +3880,7 @@ fn font_metrics_with_fragment_style(
     metrics.letter_spacing = letter_spacing(style);
     metrics.word_spacing = word_spacing(style);
     metrics.text_autospace = fragment_style.text_autospace;
+    metrics.text_spacing_trim = fragment_style.text_spacing_trim;
     metrics.french_content_language = fragment_style.french_content_language;
     metrics.text_orientation = fragment_style.text_orientation;
     metrics.text_combine_upright = fragment_style.text_combine_upright;
@@ -4117,6 +4120,7 @@ struct InlineCursor {
     direction_rtl: bool,
     indent: TextIndent,
     last_align: TextAlign,
+    line_after_forced_break: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -4156,6 +4160,7 @@ impl InlineCursor {
             direction_rtl,
             indent,
             last_align,
+            line_after_forced_break: false,
         };
         cursor.apply_line_indent(indent.initial_affected);
         cursor
@@ -4204,6 +4209,7 @@ impl InlineCursor {
             self.direction_rtl,
             self.strut_line_height,
             self.strut_metrics.clone(),
+            lines.is_empty() || self.line_after_forced_break,
         );
         self.y += used_height;
         if let Some(constraints) = line_constraints {
@@ -4217,6 +4223,7 @@ impl InlineCursor {
         self.apply_line_indent(
             matches!(break_kind, LineBreakKind::Forced) && self.indent.each_line,
         );
+        self.line_after_forced_break = matches!(break_kind, LineBreakKind::Forced);
         self.line_height = self.strut_line_height;
     }
     fn finish_line(
@@ -4249,6 +4256,7 @@ impl InlineCursor {
                 self.direction_rtl,
                 self.strut_line_height,
                 self.strut_metrics.clone(),
+                lines.is_empty() || self.line_after_forced_break,
             );
         }
     }
@@ -4328,6 +4336,7 @@ fn break_text_by_characters(
                 height,
             },
             autospace_after: 0.0,
+            punctuation_trim: Default::default(),
             metrics: segment.metrics.clone(),
             vertical_align: segment.vertical_align,
             source_end_token: source_start_token + index + 1,
@@ -4488,6 +4497,7 @@ fn push_hyphenated_fragment(
             height,
         },
         autospace_after: 0.0,
+        punctuation_trim: Default::default(),
         metrics: segment.metrics.clone(),
         vertical_align: segment.vertical_align,
         source_end_token,
@@ -4591,6 +4601,14 @@ fn layout_inline_fragment(
 
     cursor.x += apply_pending_autospace_replacement(fragments, &content, segment);
 
+    let candidate_used_width =
+        cursor.x + autospace_before_fragment(fragments, &content, segment) + width - cursor.start_x;
+    let allow_end_delta = allow_end_trim_delta(&content, segment);
+    let candidate_fits_with_allow_end = allow_end_delta < 0.0
+        && !exceeds_available_inline_width(
+            candidate_used_width + allow_end_delta,
+            cursor.available_width,
+        );
     if can_wrap
         && let InlineFragmentContent::Text(text) = &content
         && layout_hyphenated_text(
@@ -4616,11 +4634,8 @@ fn layout_inline_fragment(
         )
         && cursor.x > cursor.start_x
         && french_autospace_before_fragment(fragments, &content, segment).is_none()
-        && exceeds_available_inline_width(
-            cursor.x + autospace_before_fragment(fragments, &content, segment) + width
-                - cursor.start_x,
-            cursor.available_width,
-        )
+        && exceeds_available_inline_width(candidate_used_width, cursor.available_width)
+        && !candidate_fits_with_allow_end
     {
         // Collapsible whitespace at the end of a line is
         // discarded. Do not let it create an otherwise empty
@@ -4690,6 +4705,7 @@ fn layout_inline_fragment(
             height,
         },
         autospace_after,
+        punctuation_trim: Default::default(),
         metrics: segment.metrics.clone(),
         vertical_align: segment.vertical_align,
         source_end_token: source_token,
@@ -4697,6 +4713,29 @@ fn layout_inline_fragment(
     });
     cursor.x += width;
     cursor.line_height = cursor.line_height.max(segment.line_height.max(height));
+}
+
+fn allow_end_trim_delta(content: &InlineFragmentContent, segment: &InlineSegment) -> f32 {
+    let InlineFragmentContent::Text(text) = content else {
+        return 0.0;
+    };
+    let Some(last) = text.chars().next_back() else {
+        return 0.0;
+    };
+    if segment.metrics.text_spacing_trim.end != super::TextSpacingTrimEnd::Allow
+        || super::fullwidth_punctuation_class(last, segment.metrics.vertical_writing)
+            != Some(super::FullwidthPunctuationClass::Closing)
+    {
+        return 0.0;
+    }
+    measure_text_width_with_trim_edges(
+        text,
+        &segment.metrics,
+        super::PunctuationTrim {
+            first: false,
+            last: true,
+        },
+    ) - measure_text_width(text, &segment.metrics)
 }
 
 fn autospace_before_fragment(
@@ -4871,6 +4910,7 @@ fn layout_inline_newline(
             height: segment.line_height,
         },
         autospace_after: 0.0,
+        punctuation_trim: Default::default(),
         metrics: segment.metrics.clone(),
         vertical_align: segment.vertical_align,
         source_end_token: source_token,
@@ -5722,7 +5762,16 @@ fn push_line(
     direction_rtl: bool,
     strut_line_height: f32,
     strut_metrics: Option<FontMetrics>,
+    space_first_should_space: bool,
 ) -> f32 {
+    let allow_end_should_trim = exceeds_available_inline_width(width, available_width);
+    resolve_line_bidi_geometry(fragments, x, direction_rtl);
+    width += apply_line_text_spacing_trim(
+        fragments,
+        direction_rtl,
+        space_first_should_space,
+        allow_end_should_trim,
+    );
     let physical_align = match align {
         TextAlign::Start if direction_rtl => TextAlign::Right,
         TextAlign::Start => TextAlign::Left,
@@ -5943,6 +5992,10 @@ fn justify_inter_character(
             let end = start + grapheme.len();
             unit.content = InlineFragmentContent::Text(grapheme.to_string());
             unit.text_source = text_source::slice(&fragment.text_source, text, start..end);
+            unit.punctuation_trim = super::PunctuationTrim {
+                first: fragment.punctuation_trim.first && start == 0,
+                last: fragment.punctuation_trim.last && end == text.len(),
+            };
             unit.rect.x = x;
             unit.rect.width = measured_width * scale;
             x += unit.rect.width;
@@ -6194,6 +6247,180 @@ fn resolve_line_bidi_geometry(
     }
 }
 
+fn apply_line_text_spacing_trim(
+    fragments: &mut [InlineFragment],
+    direction_rtl: bool,
+    space_first_should_space: bool,
+    allow_end_should_trim: bool,
+) -> f32 {
+    fn source_edge(fragment: &InlineFragment, physical_left: bool) -> Option<(char, bool)> {
+        let text = fragment.text()?;
+        let reversed = fragment
+            .style
+            .resolved_bidi_level
+            .is_some_and(|level| level % 2 == 1);
+        let source_first = physical_left != reversed;
+        let character = if source_first {
+            text.chars().next()
+        } else {
+            text.chars().next_back()
+        }?;
+        Some((character, source_first))
+    }
+
+    let mut visual_order = (0..fragments.len()).collect::<Vec<_>>();
+    visual_order.sort_by(|left, right| {
+        fragments[*left]
+            .rect
+            .x
+            .total_cmp(&fragments[*right].rect.x)
+            .then_with(|| left.cmp(right))
+    });
+    let mut text_groups = vec![Vec::new()];
+    for index in visual_order.iter().copied() {
+        if fragments[index].text().is_some_and(|text| !text.is_empty()) {
+            text_groups.last_mut().unwrap().push(index);
+        } else if !matches!(
+            fragments[index].content,
+            InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+        ) || fragments[index].rect.width != 0.0
+        {
+            text_groups.push(Vec::new());
+        }
+    }
+
+    let mut trim_source_edges = Vec::<(usize, bool)>::new();
+    for group in &text_groups {
+        for pair in group.windows(2) {
+            let left_index = pair[0];
+            let right_index = pair[1];
+            let Some((left_character, left_source_first)) =
+                source_edge(&fragments[left_index], false)
+            else {
+                continue;
+            };
+            let Some((right_character, right_source_first)) =
+                source_edge(&fragments[right_index], true)
+            else {
+                continue;
+            };
+            let vertical = fragments[right_index].metrics.vertical_writing;
+            let left_class = super::fullwidth_punctuation_class(left_character, vertical);
+            let right_class = super::fullwidth_punctuation_class(right_character, vertical);
+            if right_class == Some(super::FullwidthPunctuationClass::Opening)
+                && fragments[right_index].metrics.text_spacing_trim.adjacent
+                    == super::TextSpacingTrimAdjacent::Trim
+                && super::opening_punctuation_trims_after(
+                    left_character,
+                    fragments[left_index].metrics.font_size,
+                    fragments[right_index].metrics.font_size,
+                    vertical,
+                )
+            {
+                trim_source_edges.push((right_index, right_source_first));
+            }
+            if left_class == Some(super::FullwidthPunctuationClass::Closing)
+                && fragments[left_index].metrics.text_spacing_trim.adjacent
+                    == super::TextSpacingTrimAdjacent::Trim
+                && super::closing_punctuation_trims_before(
+                    right_character,
+                    fragments[left_index].metrics.font_size,
+                    fragments[right_index].metrics.font_size,
+                    vertical,
+                )
+            {
+                trim_source_edges.push((left_index, left_source_first));
+            }
+        }
+    }
+
+    let first_meaningful = visual_order.iter().copied().find(|index| {
+        fragments[*index]
+            .text()
+            .is_some_and(|text| !text.is_empty())
+            || fragments[*index].rect.width != 0.0
+    });
+    let last_meaningful = visual_order.iter().copied().rev().find(|index| {
+        fragments[*index]
+            .text()
+            .is_some_and(|text| !text.is_empty())
+            || fragments[*index].rect.width != 0.0
+    });
+    let inline_start = if direction_rtl {
+        last_meaningful
+    } else {
+        first_meaningful
+    };
+    let inline_end = if direction_rtl {
+        first_meaningful
+    } else {
+        last_meaningful
+    };
+    if let Some(index) = inline_start
+        && let Some((character, source_first)) = source_edge(&fragments[index], !direction_rtl)
+        && super::fullwidth_punctuation_class(character, fragments[index].metrics.vertical_writing)
+            == Some(super::FullwidthPunctuationClass::Opening)
+        && (fragments[index].metrics.text_spacing_trim.start == super::TextSpacingTrimStart::Trim
+            || fragments[index].metrics.text_spacing_trim.start
+                == super::TextSpacingTrimStart::SpaceFirst
+                && !space_first_should_space)
+    {
+        trim_source_edges.push((index, source_first));
+    }
+    if let Some(index) = inline_end
+        && let Some((character, source_first)) = source_edge(&fragments[index], direction_rtl)
+        && super::fullwidth_punctuation_class(character, fragments[index].metrics.vertical_writing)
+            == Some(super::FullwidthPunctuationClass::Closing)
+        && (fragments[index].metrics.text_spacing_trim.end == super::TextSpacingTrimEnd::Trim
+            || fragments[index].metrics.text_spacing_trim.end == super::TextSpacingTrimEnd::Allow
+                && allow_end_should_trim)
+    {
+        trim_source_edges.push((index, source_first));
+    }
+
+    trim_source_edges.sort_unstable();
+    trim_source_edges.dedup();
+    for (index, source_first) in trim_source_edges {
+        if source_first {
+            fragments[index].punctuation_trim.first = true;
+        } else {
+            fragments[index].punctuation_trim.last = true;
+        }
+    }
+
+    let old_width = fragments
+        .iter()
+        .map(|fragment| fragment.rect.width)
+        .sum::<f32>();
+    for fragment in fragments.iter_mut() {
+        let Some(text) = fragment.text() else {
+            continue;
+        };
+        if fragment.punctuation_trim == Default::default() {
+            continue;
+        }
+        let untrimmed = measure_text_width(text, &fragment.metrics);
+        let trimmed =
+            measure_text_width_with_trim_edges(text, &fragment.metrics, fragment.punctuation_trim);
+        fragment.rect.width += trimmed - untrimmed;
+    }
+    let new_width = fragments
+        .iter()
+        .map(|fragment| fragment.rect.width)
+        .sum::<f32>();
+    let line_start = visual_order
+        .iter()
+        .map(|index| fragments[*index].rect.x)
+        .reduce(f32::min)
+        .unwrap_or(0.0);
+    let mut cursor = line_start;
+    for index in visual_order {
+        fragments[index].rect.x = cursor;
+        cursor += fragments[index].rect.width;
+    }
+    new_width - old_width
+}
+
 fn bidi_controls(style: &FragmentStyle) -> (&'static str, &'static str) {
     let rtl = style.direction.as_deref() == Some("rtl");
     match style.unicode_bidi.as_deref() {
@@ -6216,7 +6443,22 @@ fn bidi_controls(style: &FragmentStyle) -> (&'static str, &'static str) {
 // ── Text measurement ────────────────────────────────────────────────────────
 
 pub(super) fn measure_text_width(text: &str, metrics: &FontMetrics) -> f32 {
+    measure_text_width_with_trim_edges(text, metrics, Default::default())
+}
+
+fn measure_text_width_with_trim_edges(
+    text: &str,
+    metrics: &FontMetrics,
+    edges: super::PunctuationTrim,
+) -> f32 {
     let _measure_phase = super::profile::Scope::begin(super::profile::Phase::TextMeasure);
+    let shaping_options = super::text_spacing_trim_shaping_options_with_edges(
+        text,
+        metrics.text_spacing_trim,
+        metrics.vertical_writing,
+        edges,
+        &metrics.shaping_options,
+    );
     LAYOUT_FONTS.with(|cell| {
         let mut fonts_ref = cell.borrow_mut();
         if fonts_ref.is_none() {
@@ -6259,14 +6501,46 @@ pub(super) fn measure_text_width(text: &str, metrics: &FontMetrics) -> f32 {
             drop(font_phase);
             let primary = selected.as_ref().map(AsRef::as_ref);
             if primary.is_some() || !context.system_fonts.is_empty() {
+                let horizontal_options = if metrics.vertical_writing {
+                    metrics.shaping_options.as_ref()
+                } else {
+                    shaping_options.as_ref()
+                };
                 let base = measure_text_width_with_fallback(
                     text,
                     metrics.font_size,
-                    &metrics.shaping_options,
+                    horizontal_options,
                     primary,
                     &web_candidates,
                     &context.system_fonts,
                 );
+                let vertical_trim_delta = if metrics.vertical_writing
+                    && matches!(shaping_options, std::borrow::Cow::Owned(_))
+                {
+                    let untrimmed = measure_text_advance_with_fallback(
+                        text,
+                        metrics.font_size,
+                        &metrics.shaping_options,
+                        primary,
+                        &web_candidates,
+                        &context.system_fonts,
+                        ShapingDirection::TopToBottom,
+                        true,
+                    );
+                    let trimmed = measure_text_advance_with_fallback(
+                        text,
+                        metrics.font_size,
+                        &shaping_options,
+                        primary,
+                        &web_candidates,
+                        &context.system_fonts,
+                        ShapingDirection::TopToBottom,
+                        true,
+                    );
+                    trimmed - untrimmed
+                } else {
+                    0.0
+                };
                 // Shaped paint inserts spacing between extended grapheme
                 // clusters, not between the scalars that form one cluster.
                 let spacing = metrics.letter_spacing * grapheme_spacing_boundaries(text) as f32;
@@ -6277,7 +6551,7 @@ pub(super) fn measure_text_width(text: &str, metrics: &FontMetrics) -> f32 {
                         measure_text_width_with_fallback(
                             &spacing.character().to_string(),
                             metrics.font_size,
-                            &metrics.shaping_options,
+                            &shaping_options,
                             primary,
                             &web_candidates,
                             &context.system_fonts,
@@ -6285,6 +6559,7 @@ pub(super) fn measure_text_width(text: &str, metrics: &FontMetrics) -> f32 {
                     })
                     .sum::<f32>();
                 return base
+                    + vertical_trim_delta
                     + spacing
                     + word_spacing
                     + french_spacing
@@ -6334,6 +6609,22 @@ fn measure_text_width_with_fallback(
     } else {
         ShapingDirection::LeftToRight
     };
+    measure_text_advance_with_fallback(
+        text, font_size, options, primary, web_fonts, fonts, direction, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_text_advance_with_fallback(
+    text: &str,
+    font_size: f32,
+    options: &crate::font::ShapingOptions,
+    primary: Option<&Font>,
+    web_fonts: &[WebFontCandidate<'_>],
+    fonts: &[Arc<Font>],
+    direction: ShapingDirection,
+    vertical_axis: bool,
+) -> f32 {
     let mut run_fonts =
         Vec::with_capacity(web_fonts.len() + fonts.len() + usize::from(primary.is_some()));
     run_fonts.extend(web_fonts.iter().map(|candidate| FontFallbackCandidate {
@@ -6361,7 +6652,13 @@ fn measure_text_width_with_fallback(
         return runs
             .iter()
             .flat_map(|run| &run.glyphs)
-            .map(|glyph| glyph.x_advance.abs())
+            .map(|glyph| {
+                if vertical_axis {
+                    glyph.y_advance.abs()
+                } else {
+                    glyph.x_advance.abs()
+                }
+            })
             .sum();
     }
 
@@ -6380,7 +6677,16 @@ fn measure_text_width_with_fallback(
         .map(|candidate| candidate.font)
     {
         if let Ok(glyphs) = font.shape_text_with_options(text, font_size, direction, options) {
-            return glyphs.iter().map(|glyph| glyph.x_advance.abs()).sum();
+            return glyphs
+                .iter()
+                .map(|glyph| {
+                    if vertical_axis {
+                        glyph.y_advance.abs()
+                    } else {
+                        glyph.x_advance.abs()
+                    }
+                })
+                .sum();
         }
     }
 
@@ -6402,7 +6708,8 @@ fn measure_text_width_with_fallback(
         };
         let font_id = std::ptr::from_ref(font);
 
-        if !is_zero_advance_character(ch)
+        if !vertical_axis
+            && !is_zero_advance_character(ch)
             && let Some((prev_char, prev_font)) = previous
             && prev_font == font_id
         {
@@ -6410,7 +6717,11 @@ fn measure_text_width_with_fallback(
         }
 
         if !is_zero_advance_character(ch) {
-            let advance = font.glyph_advance(ch, font_size);
+            let advance = if vertical_axis {
+                font_size
+            } else {
+                font.glyph_advance(ch, font_size)
+            };
             width += if advance > 0.0 { advance } else { 0.0 };
             previous = Some((ch, font_id));
         }

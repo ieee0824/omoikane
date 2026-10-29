@@ -736,6 +736,7 @@ mod tests {
                 height: 100.0,
             },
             autospace_after: 0.0,
+            punctuation_trim: Default::default(),
             metrics: crate::layout::FontMetrics::from_font_size(20.0),
             vertical_align: crate::layout::VerticalAlign::Baseline,
             source_end_token: 0,

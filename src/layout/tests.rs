@@ -1000,6 +1000,386 @@ fn text_autospace_uses_one_eighth_em_for_selected_script_boundaries() {
 }
 
 #[test]
+fn text_spacing_trim_classifies_and_collapses_cjk_punctuation_pairs() {
+    use super::{
+        FullwidthPunctuationClass, TextSpacingTrim, TextSpacingTrimAdjacent, TextSpacingTrimEnd,
+        TextSpacingTrimStart, closing_punctuation_trims_before, fullwidth_punctuation_class,
+        opening_punctuation_trims_after, text_spacing_trim_boundaries,
+    };
+
+    assert_eq!(
+        fullwidth_punctuation_class('（', false),
+        Some(FullwidthPunctuationClass::Opening)
+    );
+    assert_eq!(
+        fullwidth_punctuation_class('。', false),
+        Some(FullwidthPunctuationClass::Closing)
+    );
+    assert_eq!(
+        fullwidth_punctuation_class('・', true),
+        Some(FullwidthPunctuationClass::Middle)
+    );
+    assert_eq!(fullwidth_punctuation_class('A', false), None);
+    assert!(opening_punctuation_trims_after('）', 20.0, 20.0, false));
+    assert!(!closing_punctuation_trims_before('（', 20.0, 20.0, false));
+    assert!(closing_punctuation_trims_before('（', 20.0, 21.0, false));
+    assert!(opening_punctuation_trims_after('(', 20.0, 40.0, false));
+    assert!(closing_punctuation_trims_before(')', 40.0, 20.0, false));
+
+    let normal = TextSpacingTrim::default();
+    let boundaries = text_spacing_trim_boundaries("国（（）・国", normal, false);
+    assert_eq!(boundaries.len(), 2);
+    assert_eq!(boundaries[0].byte_offset, "国（".len());
+    assert!(boundaries[0].leading);
+    assert!(!boundaries[0].trailing);
+    assert_eq!(boundaries[1].byte_offset, "国（（".len());
+    assert!(!boundaries[1].leading);
+    assert!(boundaries[1].trailing);
+
+    let trim_all = TextSpacingTrim {
+        start: TextSpacingTrimStart::Trim,
+        adjacent: TextSpacingTrimAdjacent::Trim,
+        end: TextSpacingTrimEnd::Trim,
+        trim_all: true,
+    };
+    let boundaries = text_spacing_trim_boundaries("国（・）国", trim_all, true);
+    assert_eq!(boundaries.len(), 3);
+    assert!(
+        boundaries
+            .iter()
+            .all(|boundary| boundary.leading ^ boundary.trailing)
+    );
+
+    let space_all = TextSpacingTrim {
+        start: TextSpacingTrimStart::Space,
+        adjacent: TextSpacingTrimAdjacent::Space,
+        end: TextSpacingTrimEnd::Space,
+        trim_all: false,
+    };
+    assert!(text_spacing_trim_boundaries("（（）", space_all, false).is_empty());
+
+    let text = "国（（国";
+    let options = super::text_spacing_trim_shaping_options(
+        text,
+        normal,
+        false,
+        &crate::font::ShapingOptions::default(),
+    )
+    .into_owned();
+    assert_eq!(
+        options.features,
+        vec![crate::font::OpenTypeFeature::for_range(
+            *b"halt",
+            1,
+            "国（".len().."国（（".len(),
+        )]
+    );
+
+    let vertical_options = super::text_spacing_trim_shaping_options(
+        text,
+        normal,
+        true,
+        &crate::font::ShapingOptions::default(),
+    )
+    .into_owned();
+    assert_eq!(
+        vertical_options.features,
+        vec![crate::font::OpenTypeFeature::for_range(
+            *b"vhal",
+            1,
+            "国（".len().."国（（".len(),
+        )]
+    );
+}
+
+#[test]
+fn text_spacing_trim_marks_line_edges_and_zero_width_span_boundaries() {
+    let layout = |value: &str, pieces: &[&str]| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        document.append_child(body.clone());
+        for (index, piece) in pieces.iter().enumerate() {
+            if index % 2 == 0 {
+                body.append_child(NodeHandle::text(*piece));
+            } else {
+                let span = NodeHandle::element("span");
+                span.append_child(NodeHandle::text(*piece));
+                body.append_child(span);
+            }
+        }
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin:0; font-size:20px; text-spacing-trim:{value}; }}"
+            ))
+            .unwrap(),
+        );
+        layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 100.0,
+            },
+        )
+        .unwrap()
+    };
+
+    let adjacent = layout("normal", &["国（", "（", "国"]);
+    let adjacent_text = adjacent.lines[0]
+        .fragments
+        .iter()
+        .filter(|fragment| fragment.text().is_some_and(|text| !text.is_empty()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        adjacent_text
+            .iter()
+            .filter_map(|fragment| fragment.text())
+            .collect::<String>(),
+        "国（（国"
+    );
+    assert!(
+        adjacent_text
+            .iter()
+            .any(|fragment| { fragment.text() == Some("（") && fragment.punctuation_trim.first })
+    );
+
+    let start = layout("trim-start space-adjacent space-end", &["（国"]);
+    let start_fragment = start.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text().is_some_and(|text| !text.is_empty()))
+        .unwrap();
+    assert!(start_fragment.punctuation_trim.first);
+    assert!(!start_fragment.punctuation_trim.last);
+
+    let end = layout("space-start space-adjacent trim-end", &["国）"]);
+    let end_fragment = end.lines[0]
+        .fragments
+        .iter()
+        .rev()
+        .find(|fragment| fragment.text().is_some_and(|text| !text.is_empty()))
+        .unwrap();
+    assert!(!end_fragment.punctuation_trim.first);
+    assert!(end_fragment.punctuation_trim.last);
+}
+
+#[test]
+fn text_spacing_trim_measurement_uses_halt_and_vertical_vhal_advances() {
+    use crate::font::{Font, ShapingDirection};
+    use std::sync::Arc;
+
+    let font = Arc::new(
+        Font::load_from_bytes(
+            include_bytes!(
+                "../../tests/fixtures/text-spacing-trim/NotoSansCJKjp-Regular-subset-halt.otf"
+            )
+            .to_vec(),
+        )
+        .unwrap(),
+    );
+    let text = "国（（国";
+    let mut metrics = FontMetrics::from_font_size(20.0);
+    let horizontal_options = super::text_spacing_trim_shaping_options(
+        text,
+        metrics.text_spacing_trim,
+        false,
+        &metrics.shaping_options,
+    );
+    let expected_horizontal = font
+        .shape_text_with_options(
+            text,
+            20.0,
+            ShapingDirection::LeftToRight,
+            &horizontal_options,
+        )
+        .unwrap()
+        .iter()
+        .map(|glyph| glyph.x_advance.abs())
+        .sum::<f32>();
+    let measured_horizontal = super::with_layout_fonts(vec![Arc::clone(&font)], None, || {
+        super::measure_text_width(text, &metrics)
+    });
+    assert!((measured_horizontal - expected_horizontal).abs() < 0.01);
+
+    metrics.vertical_writing = true;
+    let base_horizontal = font
+        .shape_text(text, 20.0, ShapingDirection::LeftToRight)
+        .unwrap()
+        .iter()
+        .map(|glyph| glyph.x_advance.abs())
+        .sum::<f32>();
+    let base_vertical = font
+        .shape_text(text, 20.0, ShapingDirection::TopToBottom)
+        .unwrap()
+        .iter()
+        .map(|glyph| glyph.y_advance.abs())
+        .sum::<f32>();
+    let vertical_options = super::text_spacing_trim_shaping_options(
+        text,
+        metrics.text_spacing_trim,
+        true,
+        &metrics.shaping_options,
+    );
+    let trimmed_vertical = font
+        .shape_text_with_options(text, 20.0, ShapingDirection::TopToBottom, &vertical_options)
+        .unwrap()
+        .iter()
+        .map(|glyph| glyph.y_advance.abs())
+        .sum::<f32>();
+    let measured_vertical = super::with_layout_fonts(vec![font], None, || {
+        super::measure_text_width(text, &metrics)
+    });
+    let expected_vertical = base_horizontal + trimmed_vertical - base_vertical;
+    assert!((measured_vertical - expected_vertical).abs() < 0.01);
+}
+
+#[test]
+fn text_spacing_trim_space_first_and_allow_end_follow_line_break_state() {
+    use crate::font::Font;
+    use std::sync::Arc;
+
+    let font = Arc::new(
+        Font::load_from_bytes(
+            include_bytes!(
+                "../../tests/fixtures/text-spacing-trim/NotoSansCJKjp-Regular-subset-halt.otf"
+            )
+            .to_vec(),
+        )
+        .unwrap(),
+    );
+    let layout = |text: &str, width: f32, trim: &str, white_space: &str| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        document.append_child(body.clone());
+        body.append_child(NodeHandle::text(text));
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin:0; width:{width}px; font-size:20px; \
+                 line-height:20px; white-space:{white_space}; word-break:break-all; \
+                 text-spacing-trim:{trim}; }}"
+            ))
+            .unwrap(),
+        );
+        super::with_layout_fonts(vec![Arc::clone(&font)], None, || {
+            layout_tree(
+                &body,
+                &mut resolver,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width,
+                    height: 100.0,
+                },
+            )
+            .unwrap()
+        })
+    };
+
+    let first_line = layout(
+        "（国",
+        20.0,
+        "space-first space-adjacent space-end",
+        "normal",
+    );
+    let first_opening = first_line.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text().is_some_and(|text| text.starts_with('（')))
+        .unwrap();
+    assert!(!first_opening.punctuation_trim.first);
+
+    let soft_wrapped = layout(
+        "国（",
+        20.0,
+        "space-first space-adjacent space-end",
+        "normal",
+    );
+    let second_opening = soft_wrapped.lines[1]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text().is_some_and(|text| text.starts_with('（')))
+        .unwrap();
+    assert!(second_opening.punctuation_trim.first);
+
+    let forced = layout(
+        "国\n（",
+        20.0,
+        "space-first space-adjacent space-end",
+        "pre-line",
+    );
+    let forced_opening = forced.lines[1]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text().is_some_and(|text| text.starts_with('（')))
+        .unwrap();
+    assert!(!forced_opening.punctuation_trim.first);
+
+    let allow_end = layout("国）", 35.0, "normal", "normal");
+    assert_eq!(allow_end.lines.len(), 1);
+    let closing = allow_end.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text().is_some_and(|text| text.ends_with('）')))
+        .unwrap();
+    assert!(closing.punctuation_trim.last);
+    assert!(allow_end.lines[0].rect.width <= 35.01);
+
+    let space_end = layout(
+        "国）",
+        35.0,
+        "space-start space-adjacent space-end",
+        "normal",
+    );
+    assert_eq!(space_end.lines.len(), 2);
+}
+
+#[test]
+fn text_spacing_trim_preserves_only_true_edges_during_inter_character_justification() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    document.append_child(body.clone());
+    body.append_child(NodeHandle::text("（国（）国）"));
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin:0; width:200px; font-size:20px; text-align:justify; \
+             text-align-last:justify; text-justify:inter-character; \
+             text-spacing-trim:trim-start space-adjacent trim-end; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    let text = layout.lines[0]
+        .fragments
+        .iter()
+        .filter(|fragment| fragment.text().is_some())
+        .collect::<Vec<_>>();
+
+    assert_eq!(text.len(), 6);
+    assert!(text[0].punctuation_trim.first);
+    assert!(!text[2].punctuation_trim.first);
+    assert!(!text[3].punctuation_trim.last);
+    assert!(text[5].punctuation_trim.last);
+}
+
+#[test]
 fn text_autospace_changes_inline_advance_without_changing_text_content() {
     let width = |autospace: &str| {
         let document = NodeHandle::document();
