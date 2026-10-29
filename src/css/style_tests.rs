@@ -9030,7 +9030,7 @@ fn invalid_line_clamp_and_text_box_values_use_initial_values() {
         Origin::Author,
         parse_stylesheet(
             "div { max-lines: 0; block-ellipsis: marker; continue: stop; \
-                   initial-letter: 0; text-box-trim: both; text-box-edge: cap; }",
+                   initial-letter: 0; text-box-trim: both; text-box-edge: alphabetic cap; }",
         )
         .unwrap(),
     );
