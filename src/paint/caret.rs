@@ -735,6 +735,7 @@ mod tests {
                 width: 100.0,
                 height: 100.0,
             },
+            autospace_after: 0.0,
             metrics: crate::layout::FontMetrics::from_font_size(20.0),
             vertical_align: crate::layout::VerticalAlign::Baseline,
             source_end_token: 0,

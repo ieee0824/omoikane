@@ -971,6 +971,453 @@ fn text_combine_all_uses_one_vertical_em_and_has_no_horizontal_effect() {
 }
 
 #[test]
+fn text_autospace_uses_one_eighth_em_for_selected_script_boundaries() {
+    let mut metrics = FontMetrics::from_font_size(16.0);
+    assert_eq!(
+        super::font_metrics_autospace_advance("漢A1字", &metrics),
+        4.0
+    );
+
+    metrics.text_autospace = TextAutospace {
+        ideograph_alpha: true,
+        ideograph_numeric: false,
+        punctuation: false,
+        replace: false,
+    };
+    assert_eq!(
+        super::font_metrics_autospace_advance("漢A1字", &metrics),
+        2.0
+    );
+
+    metrics.vertical_writing = true;
+    metrics.text_orientation = TextOrientation::Upright;
+    assert_eq!(super::font_metrics_autospace_advance("漢A", &metrics), 0.0);
+    metrics.sideways_writing = true;
+    assert_eq!(super::font_metrics_autospace_advance("漢A", &metrics), 2.0);
+
+    metrics.text_combine_upright = TextCombineUpright::All;
+    assert_eq!(super::font_metrics_autospace_advance("漢A", &metrics), 0.0);
+}
+
+#[test]
+fn text_autospace_changes_inline_advance_without_changing_text_content() {
+    let width = |autospace: &str| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        document.append_child(body.clone());
+        body.append_child(NodeHandle::text("漢A"));
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin:0; font-size:20px; text-autospace:{autospace}; }}"
+            ))
+            .unwrap(),
+        );
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 100.0,
+            },
+        )
+        .unwrap();
+        let fragments = layout
+            .lines
+            .iter()
+            .flat_map(|line| &line.fragments)
+            .filter(|fragment| fragment.text().is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fragments
+                .iter()
+                .filter_map(|fragment| fragment.text())
+                .collect::<String>(),
+            "漢A"
+        );
+        fragments
+            .iter()
+            .map(|fragment| fragment.rect.width)
+            .sum::<f32>()
+    };
+    let normal = width("normal");
+    let disabled = width("no-autospace");
+    assert!(
+        (normal - disabled - 2.5).abs() < 0.01,
+        "{normal} {disabled}"
+    );
+}
+
+#[test]
+fn text_autospace_participates_in_wrapping_but_is_removed_at_line_start() {
+    let layout = |width: f32, autospace: &str| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        document.append_child(body.clone());
+        body.append_child(NodeHandle::text("漢A"));
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin:0; width:{width}px; font-size:20px; text-autospace:{autospace}; }}"
+            ))
+            .unwrap(),
+        );
+        layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height: 100.0,
+            },
+        )
+        .unwrap()
+    };
+    let unconstrained = layout(200.0, "no-autospace");
+    let base_width = unconstrained.lines[0]
+        .fragments
+        .iter()
+        .map(|fragment| fragment.rect.width)
+        .sum::<f32>();
+    let wrapped = layout(base_width + 1.0, "normal");
+    assert_eq!(wrapped.lines.len(), 2);
+    let second = wrapped.lines[1]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .unwrap();
+    assert!((second.rect.x - wrapped.lines[1].rect.x).abs() < 0.01);
+}
+
+#[test]
+fn text_autospace_is_attached_after_bidi_reordering() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    document.append_child(body.clone());
+    body.append_child(NodeHandle::text("漢A"));
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin:0; direction:rtl; unicode-bidi:bidi-override; width:200px; \
+             font-size:20px; text-autospace:normal; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    let ideograph = layout.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("漢"))
+        .unwrap();
+    let latin = layout.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .unwrap();
+
+    assert!(latin.rect.x < ideograph.rect.x);
+    assert!((latin.autospace_after - 2.5).abs() < 0.01);
+    assert_eq!(ideograph.autospace_after, 0.0);
+}
+
+#[test]
+fn text_autospace_bidi_resolution_ignores_zero_width_inline_boundaries() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let ideograph = NodeHandle::element("span");
+    let latin = NodeHandle::element("span");
+    ideograph.append_child(NodeHandle::text("漢"));
+    latin.append_child(NodeHandle::text("A"));
+    body.append_child(ideograph);
+    body.append_child(latin);
+    document.append_child(body.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin:0; direction:rtl; unicode-bidi:bidi-override; width:200px; \
+             font-size:20px; text-autospace:normal; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    let ideograph = layout.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("漢"))
+        .unwrap();
+    let latin = layout.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .unwrap();
+
+    let (visual_left, visual_right) = if latin.rect.x < ideograph.rect.x {
+        (latin, ideograph)
+    } else {
+        (ideograph, latin)
+    };
+    assert!((visual_left.autospace_after - 2.5).abs() < 0.01);
+    assert_eq!(visual_right.autospace_after, 0.0);
+}
+
+#[test]
+fn text_autospace_replace_only_replaces_u0020() {
+    let layout = |text: &str, autospace: &str| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        document.append_child(body.clone());
+        body.append_child(NodeHandle::text(text));
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin:0; width:200px; font-size:20px; text-autospace:{autospace}; }}"
+            ))
+            .unwrap(),
+        );
+        layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 100.0,
+            },
+        )
+        .unwrap()
+    };
+
+    let replaced = layout("漢 A", "replace");
+    let fragments = &replaced.lines[0].fragments;
+    assert_eq!(
+        fragments
+            .iter()
+            .filter_map(InlineFragment::text)
+            .collect::<String>(),
+        "漢 A"
+    );
+    let space = fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some(" "))
+        .unwrap();
+    assert!((space.rect.width - 2.5).abs() < 0.01);
+    assert!((space.autospace_after - 2.5).abs() < 0.01);
+
+    let width = |layout: &LayoutBox| {
+        layout.lines[0]
+            .fragments
+            .iter()
+            .map(|fragment| fragment.rect.width)
+            .sum::<f32>()
+    };
+    let nbsp_replaced = layout("漢\u{00a0}A", "replace");
+    let nbsp_disabled = layout("漢\u{00a0}A", "no-autospace");
+    assert!((width(&nbsp_replaced) - width(&nbsp_disabled)).abs() < 0.01);
+}
+
+#[test]
+fn text_autospace_replace_crosses_zero_width_inline_boundaries() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    for text in ["漢", " ", "A"] {
+        let span = NodeHandle::element("span");
+        span.append_child(NodeHandle::text(text));
+        body.append_child(span);
+    }
+    document.append_child(body.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { margin:0; font-size:20px; text-autospace:replace; }").unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    let space = layout.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some(" "))
+        .unwrap();
+
+    assert!((space.rect.width - 2.5).abs() < 0.01);
+    assert!((space.autospace_after - 2.5).abs() < 0.01);
+}
+
+#[test]
+fn french_punctuation_autospace_uses_nonbreaking_spaces_only_for_french() {
+    let width = |text: &str, language: &str, autospace: &str| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        body.set_attribute("lang", language);
+        document.append_child(body.clone());
+        body.append_child(NodeHandle::text(text));
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin:0; width:400px; font-size:20px; text-autospace:{autospace}; }}"
+            ))
+            .unwrap(),
+        );
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 100.0,
+            },
+        )
+        .unwrap();
+        layout.lines[0]
+            .fragments
+            .iter()
+            .map(|fragment| fragment.rect.width)
+            .sum::<f32>()
+    };
+
+    for text in ["Salut!", "Pourquoi?", "un;deux", "Titre:", "«oui»"] {
+        assert!(width(text, "fr-FR", "punctuation") > width(text, "fr", "no-autospace"));
+        assert!(
+            (width(text, "en", "punctuation") - width(text, "en", "no-autospace")).abs() < 0.01
+        );
+    }
+    assert!(
+        (width("Salut\u{202f}!", "fr", "punctuation")
+            - width("Salut\u{202f}!", "fr", "no-autospace"))
+        .abs()
+            < 0.01
+    );
+    assert!(
+        (width("Titre\u{00a0}:", "fr", "punctuation")
+            - width("Titre\u{00a0}:", "fr", "no-autospace"))
+        .abs()
+            < 0.01
+    );
+    assert!(
+        (width("Salut !", "fr", "punctuation replace") - width("Salut!", "fr", "punctuation"))
+            .abs()
+            < 0.01
+    );
+    assert!(
+        (width("Salut !", "fr", "punctuation") - width("Salut !", "fr", "no-autospace")).abs()
+            < 0.01
+    );
+}
+
+#[test]
+fn french_punctuation_autospace_does_not_wrap_across_element_boundary() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    body.set_attribute("lang", "fr");
+    let word = NodeHandle::element("span");
+    let punctuation = NodeHandle::element("span");
+    word.append_child(NodeHandle::text("Bonjour"));
+    punctuation.append_child(NodeHandle::text("!"));
+    body.append_child(word);
+    body.append_child(punctuation);
+    document.append_child(body.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin:0; width:60px; font-size:20px; text-autospace:punctuation; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 60.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(layout.lines.len(), 1);
+    assert!(layout.lines[0].rect.width > 60.0);
+}
+
+#[test]
+fn french_punctuation_autospace_applies_in_vertical_writing() {
+    let height = |language: &str, autospace: &str| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        body.set_attribute("lang", language);
+        document.append_child(body.clone());
+        body.append_child(NodeHandle::text("Salut!"));
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin:0; writing-mode:vertical-lr; width:100px; height:300px; \
+                 font-size:20px; text-autospace:{autospace}; }}"
+            ))
+            .unwrap(),
+        );
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 300.0,
+            },
+        )
+        .unwrap();
+        layout.lines[0]
+            .fragments
+            .iter()
+            .map(|fragment| fragment.rect.height)
+            .sum::<f32>()
+    };
+
+    assert!(height("fr", "punctuation") > height("fr", "no-autospace"));
+    assert!((height("en", "punctuation") - height("en", "no-autospace")).abs() < 0.01);
+}
+
+#[test]
 fn vertical_circle_shape_changes_the_exclusion_per_column() {
     let circle = vertical_lines_around_shape("circle(50%)", "left");
     let rectangle = vertical_lines_around_shape("none", "left");

@@ -29,6 +29,8 @@ use crate::http::cors::{CorpViolation, Origin as CorsOrigin};
 use crate::http::{Client, CookieJar, Url};
 use crate::paint::Image;
 use rusqlite::{Connection, params};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_vo::{Orientation, char_orientation};
 
 mod counters;
 mod flex;
@@ -813,6 +815,11 @@ pub struct FragmentStyle {
     pub(crate) text_orientation: TextOrientation,
     /// Typed CSS `text-combine-upright` consumed by vertical inline layout.
     pub(crate) text_combine_upright: TextCombineUpright,
+    /// Typed CSS `text-autospace` controls shared by measurement and paint.
+    pub(crate) text_autospace: TextAutospace,
+    /// Whether the inherited document language is French. Resolved once from
+    /// the DOM language boundary for language-specific `text-autospace` rules.
+    pub(crate) french_content_language: bool,
     /// Resolved inline base direction (`ltr` or `rtl`).
     pub direction: Option<String>,
     /// Resolved CSS bidi mode used while constructing the line paragraph.
@@ -891,6 +898,10 @@ impl FragmentStyle {
                     .map_or(TextCombineUpright::None, TextCombineUpright::Digits),
                 _ => TextCombineUpright::None,
             },
+            text_autospace: TextAutospace::from_computed(
+                normalize_lower(PropertyId::TextAutospace).as_deref(),
+            ),
+            french_content_language: false,
             direction: normalize_lower(PropertyId::Direction),
             unicode_bidi: normalize_lower(PropertyId::UnicodeBidi),
             hyphens: match normalize_lower(PropertyId::Hyphens).as_deref() {
@@ -938,6 +949,53 @@ pub(crate) enum TextCombineUpright {
     Digits(u8),
 }
 
+/// Character-class switches and whitespace handling for `text-autospace`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextAutospace {
+    pub(crate) ideograph_alpha: bool,
+    pub(crate) ideograph_numeric: bool,
+    pub(crate) punctuation: bool,
+    pub(crate) replace: bool,
+}
+
+impl Default for TextAutospace {
+    fn default() -> Self {
+        Self {
+            ideograph_alpha: true,
+            ideograph_numeric: true,
+            punctuation: false,
+            replace: false,
+        }
+    }
+}
+
+impl TextAutospace {
+    fn from_computed(value: Option<&str>) -> Self {
+        let Some(value) = value else {
+            return Self::default();
+        };
+        if value == "no-autospace" {
+            return Self {
+                ideograph_alpha: false,
+                ideograph_numeric: false,
+                punctuation: false,
+                replace: false,
+            };
+        }
+        if matches!(value, "normal" | "auto") {
+            return Self::default();
+        }
+        let has = |keyword| value.split_ascii_whitespace().any(|part| part == keyword);
+        let only_mode = matches!(value, "insert" | "replace");
+        Self {
+            ideograph_alpha: only_mode || has("ideograph-alpha"),
+            ideograph_numeric: only_mode || has("ideograph-numeric"),
+            punctuation: has("punctuation"),
+            replace: has("replace"),
+        }
+    }
+}
+
 /// Returns whether a prepared fragment is one combined upright unit.
 pub(crate) fn text_is_combined_upright(text: &str, style: &FragmentStyle) -> bool {
     if text.is_empty()
@@ -957,6 +1015,268 @@ pub(crate) fn text_is_combined_upright(text: &str, style: &FragmentStyle) -> boo
                 && text.bytes().all(|byte| byte.is_ascii_digit())
         }
     }
+}
+
+fn is_autospace_ideograph(ch: char) -> bool {
+    let code = ch as u32;
+    matches!(
+        code,
+        0x3041..=0x30FF
+            | 0x31C0..=0x31FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2FA1F
+    ) && !matches!(
+        ch,
+        '、' | '。' | '・' | '「' | '」' | '『' | '』' | '（' | '）'
+    )
+}
+
+fn is_east_asian_wide_or_fullwidth(ch: char) -> bool {
+    let code = ch as u32;
+    matches!(
+        code,
+        0x1100..=0x11FF
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7AF
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE6F
+            | 0xFF01..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1FAFF
+            | 0x20000..=0x3FFFD
+    )
+}
+
+fn is_upright_autospace_character(
+    ch: char,
+    vertical_writing: bool,
+    sideways_writing: bool,
+    orientation: TextOrientation,
+) -> bool {
+    if !vertical_writing || sideways_writing || orientation == TextOrientation::Sideways {
+        return false;
+    }
+    orientation == TextOrientation::Upright
+        || matches!(
+            char_orientation(ch),
+            Orientation::Upright | Orientation::TransformedOrUpright
+        )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AutospaceClass {
+    Ideograph,
+    Letter,
+    Numeral,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrenchAutospace {
+    NarrowNoBreak,
+    NoBreak,
+}
+
+impl FrenchAutospace {
+    pub(crate) fn character(self) -> char {
+        match self {
+            Self::NarrowNoBreak => '\u{202f}',
+            Self::NoBreak => '\u{00a0}',
+        }
+    }
+}
+
+pub(crate) fn fragment_french_autospace_pair(
+    left: char,
+    right: char,
+    style: &FragmentStyle,
+) -> Option<FrenchAutospace> {
+    french_autospace_pair(
+        left,
+        right,
+        style.french_content_language,
+        style.text_autospace.punctuation,
+    )
+}
+
+fn french_autospace_pair(
+    left: char,
+    right: char,
+    french_content_language: bool,
+    punctuation: bool,
+) -> Option<FrenchAutospace> {
+    if !french_content_language || !punctuation {
+        return None;
+    }
+    if left.is_whitespace() || right.is_whitespace() {
+        return None;
+    }
+    match (left, right) {
+        ('«', _) | (_, '»' | ':') => Some(FrenchAutospace::NoBreak),
+        (_, ';' | '?' | '!') => Some(FrenchAutospace::NarrowNoBreak),
+        _ => None,
+    }
+}
+
+pub(crate) fn fragment_french_autospace_boundaries(
+    text: &str,
+    style: &FragmentStyle,
+) -> Vec<(usize, FrenchAutospace)> {
+    let graphemes = text.grapheme_indices(true).collect::<Vec<_>>();
+    graphemes
+        .windows(2)
+        .filter_map(|pair| {
+            let (right_offset, right) = pair[1];
+            fragment_french_autospace_pair(pair[0].1.chars().next()?, right.chars().next()?, style)
+                .map(|spacing| (right_offset, spacing))
+        })
+        .collect()
+}
+
+pub(crate) fn font_metrics_french_autospace_boundaries(
+    text: &str,
+    metrics: &FontMetrics,
+) -> Vec<(usize, FrenchAutospace)> {
+    let graphemes = text.grapheme_indices(true).collect::<Vec<_>>();
+    graphemes
+        .windows(2)
+        .filter_map(|pair| {
+            let (right_offset, right) = pair[1];
+            french_autospace_pair(
+                pair[0].1.chars().next()?,
+                right.chars().next()?,
+                metrics.french_content_language,
+                metrics.text_autospace.punctuation,
+            )
+            .map(|spacing| (right_offset, spacing))
+        })
+        .collect()
+}
+
+fn autospace_class(
+    ch: char,
+    vertical_writing: bool,
+    sideways_writing: bool,
+    orientation: TextOrientation,
+) -> AutospaceClass {
+    if is_autospace_ideograph(ch) {
+        AutospaceClass::Ideograph
+    } else if is_upright_autospace_character(ch, vertical_writing, sideways_writing, orientation)
+        || is_east_asian_wide_or_fullwidth(ch)
+    {
+        AutospaceClass::Other
+    } else if ch.is_alphabetic() || matches!(ch as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF) {
+        AutospaceClass::Letter
+    } else if ch.is_numeric() {
+        AutospaceClass::Numeral
+    } else {
+        AutospaceClass::Other
+    }
+}
+
+fn autospace_pair_applies(
+    left: AutospaceClass,
+    right: AutospaceClass,
+    value: TextAutospace,
+) -> bool {
+    matches!(
+        (left, right),
+        (AutospaceClass::Ideograph, AutospaceClass::Letter)
+            | (AutospaceClass::Letter, AutospaceClass::Ideograph)
+    ) && value.ideograph_alpha
+        || matches!(
+            (left, right),
+            (AutospaceClass::Ideograph, AutospaceClass::Numeral)
+                | (AutospaceClass::Numeral, AutospaceClass::Ideograph)
+        ) && value.ideograph_numeric
+}
+
+fn autospace_boundary_offsets(
+    text: &str,
+    value: TextAutospace,
+    vertical_writing: bool,
+    sideways_writing: bool,
+    orientation: TextOrientation,
+    combined: bool,
+) -> Vec<usize> {
+    if combined || (!value.ideograph_alpha && !value.ideograph_numeric) {
+        return Vec::new();
+    }
+    let graphemes = text.grapheme_indices(true).collect::<Vec<_>>();
+    graphemes
+        .windows(2)
+        .filter_map(|pair| {
+            let (right_offset, right) = pair[1];
+            let left = pair[0].1.chars().next()?;
+            let right = right.chars().next()?;
+            autospace_pair_applies(
+                autospace_class(left, vertical_writing, sideways_writing, orientation),
+                autospace_class(right, vertical_writing, sideways_writing, orientation),
+                value,
+            )
+            .then_some(right_offset)
+        })
+        .collect()
+}
+
+pub(crate) fn fragment_autospace_boundary_offsets(text: &str, style: &FragmentStyle) -> Vec<usize> {
+    let writing_mode = style.writing_mode.as_deref();
+    autospace_boundary_offsets(
+        text,
+        style.text_autospace,
+        writing_mode.is_some_and(|value| value != "horizontal-tb"),
+        writing_mode.is_some_and(|value| value.starts_with("sideways-")),
+        style.text_orientation,
+        text_is_combined_upright(text, style),
+    )
+}
+
+pub(crate) fn fragment_autospace_pair_applies(
+    left: char,
+    right: char,
+    style: &FragmentStyle,
+) -> bool {
+    let writing_mode = style.writing_mode.as_deref();
+    autospace_pair_applies(
+        autospace_class(
+            left,
+            writing_mode.is_some_and(|value| value != "horizontal-tb"),
+            writing_mode.is_some_and(|value| value.starts_with("sideways-")),
+            style.text_orientation,
+        ),
+        autospace_class(
+            right,
+            writing_mode.is_some_and(|value| value != "horizontal-tb"),
+            writing_mode.is_some_and(|value| value.starts_with("sideways-")),
+            style.text_orientation,
+        ),
+        style.text_autospace,
+    )
+}
+
+pub(crate) fn font_metrics_autospace_advance(text: &str, metrics: &FontMetrics) -> f32 {
+    let combined = metrics.vertical_writing
+        && match metrics.text_combine_upright {
+            TextCombineUpright::All => true,
+            TextCombineUpright::Digits(maximum) => {
+                (2..=maximum as usize).contains(&text.len())
+                    && text.bytes().all(|byte| byte.is_ascii_digit())
+            }
+            TextCombineUpright::None => false,
+        };
+    autospace_boundary_offsets(
+        text,
+        metrics.text_autospace,
+        metrics.vertical_writing,
+        metrics.sideways_writing,
+        metrics.text_orientation,
+        combined,
+    )
+    .len() as f32
+        * metrics.font_size
+        * 0.125
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1002,6 +1322,10 @@ pub struct InlineFragment {
     /// Generated content and non-text payloads have no DOM text source.
     pub text_source: Vec<InlineTextSource>,
     pub rect: Rect,
+    /// Paint-free spacing appended on the physical inline-end side by
+    /// `text-autospace`. Kept separate so bidi reordering can move it to the
+    /// boundary between the visually adjacent characters.
+    pub(crate) autospace_after: f32,
     pub metrics: FontMetrics,
     pub vertical_align: VerticalAlign,
     /// Position after this fragment in its formatting context's normalized
@@ -1107,6 +1431,12 @@ pub struct FontMetrics {
     pub letter_spacing: f32,
     /// Extra advance applied to each collapsible word separator (CSS `word-spacing`).
     pub word_spacing: f32,
+    pub(crate) text_autospace: TextAutospace,
+    pub(crate) french_content_language: bool,
+    pub(crate) text_orientation: TextOrientation,
+    pub(crate) text_combine_upright: TextCombineUpright,
+    pub(crate) vertical_writing: bool,
+    pub(crate) sideways_writing: bool,
     pub(crate) font_family: Option<FontFamilyKey>,
     pub(crate) font_scope_root: Option<usize>,
     pub(crate) font_weight: FontWeight,
@@ -1127,6 +1457,12 @@ impl FontMetrics {
             average_advance: font_size * 0.6,
             letter_spacing: 0.0,
             word_spacing: 0.0,
+            text_autospace: TextAutospace::default(),
+            french_content_language: false,
+            text_orientation: TextOrientation::default(),
+            text_combine_upright: TextCombineUpright::default(),
+            vertical_writing: false,
+            sideways_writing: false,
             font_family: None,
             font_scope_root: None,
             font_weight: FontWeight::default(),

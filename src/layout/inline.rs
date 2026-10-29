@@ -28,7 +28,8 @@ use super::{
     IMAGE_BASE_URL, IMAGE_CACHE, IMAGE_COOKIE_CONTEXT, InlineFragment, InlineFragmentContent,
     InlineTextSource, LAYOUT_FONTS, LayoutBox, LineBox, MeterRegion, Rect, TextControlPaintState,
     TextOverflowPaint, ValueIndicatorPaintState, VerticalAlign, border_box_adjust_length,
-    edge_sizes, explicit_length, is_border_box, is_non_rendered_html_element,
+    edge_sizes, explicit_length, fragment_autospace_pair_applies, fragment_french_autospace_pair,
+    is_border_box, is_non_rendered_html_element, text_is_combined_upright,
 };
 
 mod boxes;
@@ -388,6 +389,7 @@ fn attach_initial_letter(
                 width: initial.width,
                 height: initial.height,
             },
+            autospace_after: 0.0,
             metrics: initial.metrics,
             vertical_align: VerticalAlign::Baseline,
             source_end_token: initial.source_units,
@@ -1457,6 +1459,7 @@ fn apply_overflow_marker(
                 height: marker_metrics.ascent + marker_metrics.descent,
             }
         },
+        autospace_after: 0.0,
         metrics: marker_metrics,
         vertical_align: VerticalAlign::Baseline,
         source_end_token: 0,
@@ -1657,6 +1660,23 @@ fn inherited_hyphenation_language(node: &NodeHandle) -> Option<Lang> {
     None
 }
 
+fn inherited_content_language_is_french(node: &NodeHandle) -> bool {
+    let mut current = Some(node.clone());
+    while let Some(node) = current {
+        if let Some(language) = node
+            .get_attribute("lang")
+            .or_else(|| node.get_attribute("xml:lang"))
+        {
+            return language
+                .split(['-', '_'])
+                .next()
+                .is_some_and(|primary| primary.eq_ignore_ascii_case("fr"));
+        }
+        current = node.parent_node();
+    }
+    false
+}
+
 fn hyphenation_opportunities(
     text: &str,
     mode: super::Hyphens,
@@ -1734,14 +1754,16 @@ fn make_text_segment(node: NodeHandle, text: &str, style: &ComputedStyle) -> Opt
     if text.is_empty() {
         return None;
     }
+    let mut fragment_style = FragmentStyle::from_computed(style);
+    fragment_style.french_content_language = inherited_content_language_is_french(&node);
     Some(InlineSegment {
         node,
         text_source,
         content: InlineSegmentContent::Text(text),
-        metrics: font_metrics(style),
+        metrics: font_metrics_with_fragment_style(style, &fragment_style),
         line_height: line_height(style),
         vertical_align: vertical_align(style),
-        style: FragmentStyle::from_computed(style),
+        style: fragment_style,
         word_break: word_break(style),
         overflow_wrap: overflow_wrap(style),
         white_space_mode: white_space(style),
@@ -2457,13 +2479,14 @@ pub(super) fn generated_inline_segments(
     let Some(content) = style.get("content") else {
         return Vec::new();
     };
-    let metrics = font_metrics(&style);
     let line_height = line_height(&style);
     let vertical_align = vertical_align(&style);
     let wb = word_break(&style);
     let ow = overflow_wrap(&style);
     let mut fragment_style = FragmentStyle::from_computed(&style);
     fragment_style.pseudo = Some(pseudo);
+    fragment_style.french_content_language = inherited_content_language_is_french(node);
+    let metrics = font_metrics_with_fragment_style(&style, &fragment_style);
 
     match generated_content_value(
         content,
@@ -3843,9 +3866,31 @@ fn adjusted_font_size(
 }
 
 pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
+    let fragment_style = FragmentStyle::from_computed(style);
+    font_metrics_with_fragment_style(style, &fragment_style)
+}
+
+fn font_metrics_with_fragment_style(
+    style: &ComputedStyle,
+    fragment_style: &FragmentStyle,
+) -> FontMetrics {
     let mut metrics = FontMetrics::from_font_size(font_size(style));
     metrics.letter_spacing = letter_spacing(style);
     metrics.word_spacing = word_spacing(style);
+    metrics.text_autospace = fragment_style.text_autospace;
+    metrics.french_content_language = fragment_style.french_content_language;
+    metrics.text_orientation = fragment_style.text_orientation;
+    metrics.text_combine_upright = fragment_style.text_combine_upright;
+    metrics.vertical_writing = fragment_style.writing_mode.as_deref().is_some_and(|value| {
+        matches!(
+            value,
+            "vertical-rl" | "vertical-lr" | "sideways-rl" | "sideways-lr"
+        )
+    });
+    metrics.sideways_writing = fragment_style
+        .writing_mode
+        .as_deref()
+        .is_some_and(|value| value.starts_with("sideways-"));
     metrics.font_family = style.get("font-family").and_then(computed_font_family_key);
     metrics.font_scope_root = style.font_family_scope_root();
     metrics.shaping_options = Arc::clone(style.shaping_options());
@@ -4282,6 +4327,7 @@ fn break_text_by_characters(
                 width: ch_width,
                 height,
             },
+            autospace_after: 0.0,
             metrics: segment.metrics.clone(),
             vertical_align: segment.vertical_align,
             source_end_token: source_start_token + index + 1,
@@ -4441,6 +4487,7 @@ fn push_hyphenated_fragment(
             width,
             height,
         },
+        autospace_after: 0.0,
         metrics: segment.metrics.clone(),
         vertical_align: segment.vertical_align,
         source_end_token,
@@ -4455,6 +4502,7 @@ struct InlineFragmentInput {
     content: InlineFragmentContent,
     width: f32,
     height: f32,
+    autospace_after: f32,
     token_range: std::ops::Range<usize>,
     text_source: Vec<InlineTextSource>,
 }
@@ -4466,13 +4514,18 @@ impl InlineFragmentInput {
         text_byte: &mut usize,
         source_token: &mut usize,
     ) -> Self {
-        let InlinePiece::Fragment {
-            content,
-            width,
-            height,
-        } = piece
-        else {
-            unreachable!()
+        let (content, width, height, autospace_after) = match piece {
+            InlinePiece::Fragment {
+                content,
+                width,
+                height,
+            } => (content, width, height, 0.0),
+            InlinePiece::AutospaceReplacement {
+                text,
+                width,
+                height,
+            } => (InlineFragmentContent::Text(text), width, height, width),
+            InlinePiece::Newline => unreachable!(),
         };
         let start_byte = *text_byte;
         let text_source = match (&segment.content, &content) {
@@ -4492,6 +4545,7 @@ impl InlineFragmentInput {
             content,
             width,
             height,
+            autospace_after,
             token_range: start_token..*source_token,
             text_source,
         }
@@ -4513,6 +4567,7 @@ fn layout_inline_fragment(
         content,
         width,
         height,
+        autospace_after,
         token_range,
         text_source: piece_source,
     } = input;
@@ -4533,6 +4588,8 @@ fn layout_inline_fragment(
         allows_wrapping
     };
     *is_first_piece_in_segment = false;
+
+    cursor.x += apply_pending_autospace_replacement(fragments, &content, segment);
 
     if can_wrap
         && let InlineFragmentContent::Text(text) = &content
@@ -4558,7 +4615,12 @@ fn layout_inline_fragment(
             InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
         )
         && cursor.x > cursor.start_x
-        && exceeds_available_inline_width(cursor.x + width - cursor.start_x, cursor.available_width)
+        && french_autospace_before_fragment(fragments, &content, segment).is_none()
+        && exceeds_available_inline_width(
+            cursor.x + autospace_before_fragment(fragments, &content, segment) + width
+                - cursor.start_x,
+            cursor.available_width,
+        )
     {
         // Collapsible whitespace at the end of a line is
         // discarded. Do not let it create an otherwise empty
@@ -4608,6 +4670,15 @@ fn layout_inline_fragment(
         return;
     }
 
+    let autospace = autospace_before_fragment(fragments, &content, segment);
+    if autospace > 0.0
+        && let Some(previous) = previous_autospace_text_fragment_mut(fragments)
+    {
+        previous.rect.width += autospace;
+        previous.autospace_after += autospace;
+        cursor.x += autospace;
+    }
+
     fragments.push(InlineFragment {
         node: segment.node.clone(),
         text_source: piece_source,
@@ -4618,6 +4689,7 @@ fn layout_inline_fragment(
             width,
             height,
         },
+        autospace_after,
         metrics: segment.metrics.clone(),
         vertical_align: segment.vertical_align,
         source_end_token: source_token,
@@ -4625,6 +4697,156 @@ fn layout_inline_fragment(
     });
     cursor.x += width;
     cursor.line_height = cursor.line_height.max(segment.line_height.max(height));
+}
+
+fn autospace_before_fragment(
+    fragments: &[InlineFragment],
+    content: &InlineFragmentContent,
+    segment: &InlineSegment,
+) -> f32 {
+    if let Some(spacing) = french_autospace_before_fragment(fragments, content, segment) {
+        return spacing;
+    }
+    let InlineFragmentContent::Text(text) = content else {
+        return 0.0;
+    };
+    if text_is_combined_upright(text, &segment.style) {
+        return 0.0;
+    }
+    let Some(current) = text.chars().next() else {
+        return 0.0;
+    };
+    let Some(previous) = previous_autospace_text_fragment(fragments).and_then(|fragment| {
+        let text = fragment.text()?;
+        (!text_is_combined_upright(text, &fragment.style))
+            .then(|| text.chars().next_back())
+            .flatten()
+    }) else {
+        return 0.0;
+    };
+    fragment_autospace_pair_applies(previous, current, &segment.style)
+        .then_some(segment.metrics.font_size * 0.125)
+        .unwrap_or(0.0)
+}
+
+fn french_autospace_before_fragment(
+    fragments: &[InlineFragment],
+    content: &InlineFragmentContent,
+    segment: &InlineSegment,
+) -> Option<f32> {
+    let current = match content {
+        InlineFragmentContent::Text(text) => text.chars().next()?,
+        _ => return None,
+    };
+    let previous = previous_autospace_text_fragment(fragments)?
+        .text()?
+        .chars()
+        .next_back()?;
+    let spacing = fragment_french_autospace_pair(previous, current, &segment.style)?;
+    Some(measure_text_width(
+        &spacing.character().to_string(),
+        &segment.metrics,
+    ))
+}
+
+fn previous_autospace_text_fragment(fragments: &[InlineFragment]) -> Option<&InlineFragment> {
+    for fragment in fragments.iter().rev() {
+        if fragment.text().is_some() {
+            return Some(fragment);
+        }
+        if !matches!(
+            &fragment.content,
+            InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+        ) || fragment.rect.width != 0.0
+        {
+            return None;
+        }
+    }
+    None
+}
+
+fn previous_autospace_text_fragment_mut(
+    fragments: &mut [InlineFragment],
+) -> Option<&mut InlineFragment> {
+    let index = fragments.iter().rposition(|fragment| {
+        fragment.text().is_some()
+            || !matches!(
+                &fragment.content,
+                InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+            )
+            || fragment.rect.width != 0.0
+    })?;
+    if fragments[index].text().is_some() {
+        Some(&mut fragments[index])
+    } else {
+        None
+    }
+}
+
+fn apply_pending_autospace_replacement(
+    fragments: &mut [InlineFragment],
+    content: &InlineFragmentContent,
+    segment: &InlineSegment,
+) -> f32 {
+    if !segment.style.text_autospace.replace {
+        return 0.0;
+    }
+    let Some(current) = (match content {
+        InlineFragmentContent::Text(text) => text.chars().next(),
+        _ => None,
+    }) else {
+        return 0.0;
+    };
+    let mut index = fragments.len();
+    while index > 0 && is_zero_width_inline_boundary(&fragments[index - 1]) {
+        index -= 1;
+    }
+    let Some(space_index) = index.checked_sub(1) else {
+        return 0.0;
+    };
+    let Some(space_text) = fragments[space_index].text() else {
+        return 0.0;
+    };
+    if space_text.is_empty()
+        || !space_text.chars().all(|character| character == ' ')
+        || !fragments[space_index].style.text_autospace.replace
+    {
+        return 0.0;
+    }
+    index = space_index;
+    while index > 0 && is_zero_width_inline_boundary(&fragments[index - 1]) {
+        index -= 1;
+    }
+    let Some(previous) = index
+        .checked_sub(1)
+        .and_then(|index| fragments[index].text())
+        .and_then(|text| text.chars().next_back())
+    else {
+        return 0.0;
+    };
+    let Some(width) = fragment_french_autospace_pair(previous, current, &segment.style)
+        .map(|spacing| measure_text_width(&spacing.character().to_string(), &segment.metrics))
+        .or_else(|| {
+            fragment_autospace_pair_applies(previous, current, &segment.style)
+                .then_some(segment.metrics.font_size * 0.125)
+        })
+    else {
+        return 0.0;
+    };
+    let delta = width - fragments[space_index].rect.width;
+    fragments[space_index].rect.width = width;
+    fragments[space_index].autospace_after = width;
+    for fragment in &mut fragments[space_index + 1..] {
+        fragment.rect.x += delta;
+    }
+    delta
+}
+
+fn is_zero_width_inline_boundary(fragment: &InlineFragment) -> bool {
+    matches!(
+        &fragment.content,
+        InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+    ) && fragment.rect.width == 0.0
 }
 
 fn layout_inline_newline(
@@ -4648,6 +4870,7 @@ fn layout_inline_newline(
             width: 0.0,
             height: segment.line_height,
         },
+        autospace_after: 0.0,
         metrics: segment.metrics.clone(),
         vertical_align: segment.vertical_align,
         source_end_token: source_token,
@@ -4713,7 +4936,8 @@ fn layout_inline_segments(
                         line_constraints,
                     );
                 }
-                mut piece @ InlinePiece::Fragment { .. } => {
+                mut piece @ (InlinePiece::Fragment { .. }
+                | InlinePiece::AutospaceReplacement { .. }) => {
                     if let InlinePiece::Fragment {
                         content: InlineFragmentContent::Text(text),
                         width,
@@ -4832,6 +5056,11 @@ fn optimize_text_wrap_style(
 
 enum InlinePiece {
     Newline,
+    AutospaceReplacement {
+        text: String,
+        width: f32,
+        height: f32,
+    },
     Fragment {
         content: InlineFragmentContent,
         width: f32,
@@ -4876,15 +5105,19 @@ fn take_trailing_inline_starts(
 
 fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
     match &segment.content {
-        InlineSegmentContent::Text(text) => split_text_segment(
-            text,
-            &segment.metrics,
-            segment.line_height,
-            segment.word_break,
-            segment.style.line_break,
-            segment.white_space_mode,
-            &segment.style,
-        ),
+        InlineSegmentContent::Text(text) => {
+            let mut pieces = split_text_segment(
+                text,
+                &segment.metrics,
+                segment.line_height,
+                segment.word_break,
+                segment.style.line_break,
+                segment.white_space_mode,
+                &segment.style,
+            );
+            apply_autospace_replacements(&mut pieces, segment);
+            pieces
+        }
         InlineSegmentContent::InlineEdge(style, start) => {
             let margin = inline_edge_size(style, edge_sizes(style, "margin"), *start);
             let border_box_edge = InlinePiece::Fragment {
@@ -4987,6 +5220,66 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
                 height,
             }]
         }
+    }
+}
+
+fn apply_autospace_replacements(pieces: &mut [InlinePiece], segment: &InlineSegment) {
+    if !segment.style.text_autospace.replace || pieces.len() < 3 {
+        return;
+    }
+    let replacements = (1..pieces.len() - 1)
+        .filter_map(|index| {
+            let text = match &pieces[index] {
+                InlinePiece::Fragment {
+                    content: InlineFragmentContent::Text(text),
+                    ..
+                } => text,
+                _ => return None,
+            };
+            if text.is_empty() || !text.chars().all(|character| character == ' ') {
+                return None;
+            }
+            let left = match &pieces[index - 1] {
+                InlinePiece::Fragment {
+                    content: InlineFragmentContent::Text(text),
+                    ..
+                } => text.chars().next_back(),
+                _ => None,
+            };
+            let right = match &pieces[index + 1] {
+                InlinePiece::Fragment {
+                    content: InlineFragmentContent::Text(text),
+                    ..
+                } => text.chars().next(),
+                _ => None,
+            };
+            let (left, right) = left.zip(right)?;
+            let width = fragment_french_autospace_pair(left, right, &segment.style)
+                .map(|spacing| {
+                    measure_text_width(&spacing.character().to_string(), &segment.metrics)
+                })
+                .or_else(|| {
+                    fragment_autospace_pair_applies(left, right, &segment.style)
+                        .then_some(segment.metrics.font_size * 0.125)
+                })?;
+            Some((index, width))
+        })
+        .collect::<Vec<_>>();
+    for (index, width) in replacements {
+        let old = std::mem::replace(&mut pieces[index], InlinePiece::Newline);
+        let InlinePiece::Fragment {
+            content: InlineFragmentContent::Text(text),
+            height,
+            ..
+        } = old
+        else {
+            unreachable!("replacement candidates are text fragments")
+        };
+        pieces[index] = InlinePiece::AutospaceReplacement {
+            text,
+            width,
+            height,
+        };
     }
 }
 
@@ -5764,6 +6057,133 @@ fn resolve_line_bidi_geometry(
         .collect();
     let visual_order = BidiInfo::reorder_visual(&fragment_levels);
 
+    // Line construction reserves autospace in logical order so it participates
+    // in wrapping. CSS Text requires the actual spacing boundaries to be
+    // selected after UAX#9 reordering, so discard those reservations and attach
+    // the same kind of spacing to visually adjacent fragments instead.
+    let replacements = fragments
+        .iter()
+        .map(|fragment| {
+            fragment.autospace_after > 0.0
+                && fragment
+                    .text()
+                    .is_some_and(|text| !text.is_empty() && text.chars().all(|ch| ch == ' '))
+                && fragment.style.text_autospace.replace
+        })
+        .collect::<Vec<_>>();
+    for fragment in fragments.iter_mut() {
+        fragment.rect.width -= fragment.autospace_after;
+        fragment.autospace_after = 0.0;
+    }
+    let mut visual_text_groups = vec![Vec::new()];
+    for index in visual_order.iter().copied() {
+        let fragment = &fragments[index];
+        if fragment.text().is_some() {
+            visual_text_groups.last_mut().unwrap().push(index);
+        } else if !matches!(
+            &fragment.content,
+            InlineFragmentContent::InlineEdge(_, _) | InlineFragmentContent::InlineSpacing(_)
+        ) || fragment.rect.width != 0.0
+        {
+            visual_text_groups.push(Vec::new());
+        }
+    }
+    let visual_autospace = visual_text_groups
+        .iter()
+        .flat_map(|group| group.windows(2))
+        .filter_map(|pair| {
+            let left_index = pair[0];
+            let right_index = pair[1];
+            let left = &fragments[left_index];
+            let right = &fragments[right_index];
+            let left_text = left.text()?;
+            let right_text = right.text()?;
+            if text_is_combined_upright(left_text, &left.style)
+                || text_is_combined_upright(right_text, &right.style)
+            {
+                return None;
+            }
+            let left_reversed = homogeneous_levels[left_index].is_some_and(|level| level.is_rtl());
+            let right_reversed =
+                homogeneous_levels[right_index].is_some_and(|level| level.is_rtl());
+            let left_character = if left_reversed {
+                left_text.chars().next()
+            } else {
+                left_text.chars().next_back()
+            }?;
+            let right_character = if right_reversed {
+                right_text.chars().next_back()
+            } else {
+                right_text.chars().next()
+            }?;
+            let spacing =
+                fragment_french_autospace_pair(left_character, right_character, &right.style)
+                    .map(|spacing| {
+                        measure_text_width(&spacing.character().to_string(), &right.metrics)
+                    })
+                    .or_else(|| {
+                        fragment_autospace_pair_applies(
+                            left_character,
+                            right_character,
+                            &right.style,
+                        )
+                        .then_some(right.metrics.font_size * 0.125)
+                    })?;
+            Some((left_index, spacing))
+        })
+        .collect::<Vec<_>>();
+    for (left_index, spacing) in visual_autospace {
+        fragments[left_index].rect.width += spacing;
+        fragments[left_index].autospace_after += spacing;
+    }
+    let visual_replacements = visual_text_groups
+        .iter()
+        .flat_map(|group| group.windows(3))
+        .filter_map(|window| {
+            let left_index = window[0];
+            let space_index = window[1];
+            let right_index = window[2];
+            if !replacements[space_index] {
+                return None;
+            }
+            let left = &fragments[left_index];
+            let right = &fragments[right_index];
+            let left_text = left.text()?;
+            let right_text = right.text()?;
+            let left_character =
+                if homogeneous_levels[left_index].is_some_and(|level| level.is_rtl()) {
+                    left_text.chars().next()
+                } else {
+                    left_text.chars().next_back()
+                }?;
+            let right_character =
+                if homogeneous_levels[right_index].is_some_and(|level| level.is_rtl()) {
+                    right_text.chars().next_back()
+                } else {
+                    right_text.chars().next()
+                }?;
+            let space = &fragments[space_index];
+            let spacing =
+                fragment_french_autospace_pair(left_character, right_character, &space.style)
+                    .map(|spacing| {
+                        measure_text_width(&spacing.character().to_string(), &space.metrics)
+                    })
+                    .or_else(|| {
+                        fragment_autospace_pair_applies(
+                            left_character,
+                            right_character,
+                            &space.style,
+                        )
+                        .then_some(space.metrics.font_size * 0.125)
+                    })?;
+            Some((space_index, spacing))
+        })
+        .collect::<Vec<_>>();
+    for (space_index, spacing) in visual_replacements {
+        fragments[space_index].rect.width = spacing;
+        fragments[space_index].autospace_after = spacing;
+    }
+
     let mut cursor = line_start;
     for logical_index in visual_order {
         let fragment = &mut fragments[logical_index];
@@ -5851,7 +6271,24 @@ pub(super) fn measure_text_width(text: &str, metrics: &FontMetrics) -> f32 {
                 // clusters, not between the scalars that form one cluster.
                 let spacing = metrics.letter_spacing * grapheme_spacing_boundaries(text) as f32;
                 let word_spacing = metrics.word_spacing * text.matches(' ').count() as f32;
-                return base + spacing + word_spacing;
+                let french_spacing = super::font_metrics_french_autospace_boundaries(text, metrics)
+                    .into_iter()
+                    .map(|(_, spacing)| {
+                        measure_text_width_with_fallback(
+                            &spacing.character().to_string(),
+                            metrics.font_size,
+                            &metrics.shaping_options,
+                            primary,
+                            &web_candidates,
+                            &context.system_fonts,
+                        )
+                    })
+                    .sum::<f32>();
+                return base
+                    + spacing
+                    + word_spacing
+                    + french_spacing
+                    + super::font_metrics_autospace_advance(text, metrics);
             }
         }
 
@@ -5863,7 +6300,17 @@ pub(super) fn measure_text_width(text: &str, metrics: &FontMetrics) -> f32 {
         let base = char_count as f32 * metrics.average_advance;
         let spacing = metrics.letter_spacing * grapheme_spacing_boundaries(text) as f32;
         let word_spacing = metrics.word_spacing * text.matches(' ').count() as f32;
-        base + spacing + word_spacing
+        let french_spacing = super::font_metrics_french_autospace_boundaries(text, metrics)
+            .into_iter()
+            .map(|(_, spacing)| match spacing {
+                super::FrenchAutospace::NarrowNoBreak => metrics.font_size * 0.2,
+                super::FrenchAutospace::NoBreak => metrics.average_advance,
+            })
+            .sum::<f32>();
+        base + spacing
+            + word_spacing
+            + french_spacing
+            + super::font_metrics_autospace_advance(text, metrics)
     })
 }
 

@@ -235,6 +235,7 @@ pub(super) fn finish(
                 text_source: Vec::new(),
                 content: InlineFragmentContent::InlineBox(owner.style.clone()),
                 rect,
+                autospace_after: 0.0,
                 metrics: owner.metrics.clone(),
                 vertical_align: owner.align,
                 source_end_token: 0,

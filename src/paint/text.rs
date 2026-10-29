@@ -16,7 +16,9 @@ use crate::font::{
 };
 use crate::layout::{
     FragmentStyle, InlineFragmentContent, LayoutBox, LineBox, ListMarker, MeterRegion, Rect,
-    TextOrientation, ValueIndicatorPaintState, text_is_combined_upright,
+    TextOrientation, ValueIndicatorPaintState, fragment_autospace_boundary_offsets,
+    fragment_autospace_pair_applies, fragment_french_autospace_boundaries,
+    fragment_french_autospace_pair, text_is_combined_upright,
 };
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
@@ -2376,6 +2378,7 @@ fn paint_text_with_candidates(
     let mut cursor_x = rect.x;
     let mut cluster_origin_x = rect.x;
     let mut previous_char: Option<(char, usize)> = None;
+    let autospace_enabled = !text_is_combined_upright(text, style);
     let mut remaining_non_zero = chars
         .iter()
         .filter(|(ch, _)| !is_zero_advance_character(*ch))
@@ -2385,6 +2388,21 @@ fn paint_text_with_candidates(
         let candidate = fonts[font_index];
         let font = candidate.font;
         let zero_advance = is_zero_advance_character(ch);
+        if autospace_enabled
+            && !zero_advance
+            && let Some((previous, _)) = previous_char
+            && fragment_autospace_pair_applies(previous, ch, style)
+        {
+            cursor_x += font_size * 0.125;
+        }
+        if !zero_advance
+            && let Some((previous, _)) = previous_char
+            && let Some(spacing) = fragment_french_autospace_pair(previous, ch, style)
+        {
+            let (_, _, advance) =
+                rasterize_with_fallback_refs(&[font], spacing.character(), font_size);
+            cursor_x += advance.max(0.0);
+        }
         let (_, glyph, advance_x) = rasterize_with_fallback_refs(&[font], ch, font_size);
         let glyph = (!is_invisible_shaping_control(ch))
             .then_some(glyph)
@@ -2486,6 +2504,27 @@ pub(crate) fn paint_shaped_horizontal_text_with_candidates(
     let baseline_y = rect.y + layout_ascent;
     let mut cursor_x = rect.x;
     let spacing_clusters = grapheme_spacing_cluster_starts(text);
+    let autospace_boundaries = fragment_autospace_boundary_offsets(text, style);
+    let french_autospace = fragment_french_autospace_boundaries(text, style)
+        .into_iter()
+        .map(|(offset, spacing)| {
+            let advance = shape_text_with_fallback_candidates_and_options(
+                fonts,
+                &spacing.character().to_string(),
+                font_size,
+                ShapingDirection::LeftToRight,
+                &style.shaping_options,
+            )
+            .map(|runs| {
+                runs.iter()
+                    .flat_map(|run| &run.glyphs)
+                    .map(|glyph| glyph.x_advance.abs())
+                    .sum::<f32>()
+            })
+            .unwrap_or(0.0);
+            (offset, advance)
+        })
+        .collect::<Vec<_>>();
     let spacing_boundaries = spacing_clusters.len().saturating_sub(1);
     let mut applied_spacing = 0usize;
     for (run_index, run) in runs.iter().enumerate() {
@@ -2550,6 +2589,25 @@ pub(crate) fn paint_shaped_horizontal_text_with_candidates(
                 cursor_x += letter_spacing;
                 applied_spacing += 1;
             }
+            if next_cluster.is_some_and(|cluster| {
+                cluster != shaped.cluster
+                    && autospace_boundaries
+                        .binary_search(&(cluster as usize))
+                        .is_ok()
+            }) {
+                cursor_x += font_size * 0.125;
+            }
+            if let Some((_, advance)) = next_cluster.and_then(|cluster| {
+                (cluster != shaped.cluster)
+                    .then(|| {
+                        french_autospace
+                            .iter()
+                            .find(|(offset, _)| *offset == cluster as usize)
+                    })
+                    .flatten()
+            }) {
+                cursor_x += advance;
+            }
         }
     }
     // A ligature may absorb several source grapheme boundaries into one
@@ -2586,14 +2644,39 @@ fn paint_text_vertical_with_candidates(
     };
     let mut previous_cell = None;
     let mut previous_rotation = None;
+    let mut previous_autospace_char = None;
+    let autospace_enabled = !text_is_combined_upright(text, style);
     let mut remaining_non_zero = chars
         .iter()
         .filter(|(ch, _)| !is_zero_advance_character(*ch))
         .count();
     for (ch, font_index) in chars {
         let zero_advance = is_zero_advance_character(ch);
-        let rotation = vertical_glyph_rotation(mode.glyphs, ch, previous_rotation);
         let candidate = fonts[font_index];
+        if autospace_enabled
+            && !zero_advance
+            && let Some(previous) = previous_autospace_char
+            && fragment_autospace_pair_applies(previous, ch, style)
+        {
+            if direction_rtl {
+                cursor_y -= font_size * 0.125;
+            } else {
+                cursor_y += font_size * 0.125;
+            }
+        }
+        if !zero_advance
+            && let Some(previous) = previous_autospace_char
+            && let Some(spacing) = fragment_french_autospace_pair(previous, ch, style)
+        {
+            let (_, _, advance) =
+                rasterize_with_fallback_refs(&[candidate.font], spacing.character(), font_size);
+            if direction_rtl {
+                cursor_y -= advance.max(0.0);
+            } else {
+                cursor_y += advance.max(0.0);
+            }
+        }
+        let rotation = vertical_glyph_rotation(mode.glyphs, ch, previous_rotation);
         let (_, glyph, advance_x) = rasterize_with_fallback_refs(&[candidate.font], ch, font_size);
         let glyph = (!is_invisible_shaping_control(ch))
             .then_some(glyph)
@@ -2667,6 +2750,7 @@ fn paint_text_vertical_with_candidates(
         if !zero_advance {
             previous_cell = Some((cell_start, advance, font_index));
             previous_rotation = Some(rotation);
+            previous_autospace_char = Some(ch);
             remaining_non_zero -= 1;
         }
     }
@@ -3463,11 +3547,12 @@ mod bidi_tests {
         FragmentStyle, GlyphRotation, VerticalGlyphMode, VerticalPaintMode, bidi_visual_text,
         fallback_paint_characters, fragment_text_for_paint, horizontal_glyph_origin,
         is_invisible_shaping_control, paint_combined_upright_with_candidates,
-        paint_text_vertical_with_candidates, vertical_cursor_after, vertical_glyph_cell,
-        vertical_glyph_rotation, vertical_paint_characters,
+        paint_shaped_horizontal_text_with_candidates, paint_text_vertical_with_candidates,
+        vertical_cursor_after, vertical_glyph_cell, vertical_glyph_rotation,
+        vertical_paint_characters,
     };
     use crate::font::{Font, FontFallbackCandidate, UnicodeRangeSet};
-    use crate::layout::{TextCombineUpright, TextOrientation};
+    use crate::layout::{TextAutospace, TextCombineUpright, TextOrientation};
     use crate::paint::{Canvas, Color};
 
     #[test]
@@ -3784,6 +3869,91 @@ mod bidi_tests {
             },
         );
         assert_ne!(combined.pixels(), vertical.pixels());
+    }
+
+    #[test]
+    fn shaped_paint_advance_matches_text_autospace_measurement() {
+        let font = Font::load_from_bytes(
+            include_bytes!("../../tests/fixtures/anonymized-arabic-fallback/DejaVuSans.ttf")
+                .to_vec(),
+        )
+        .expect("fixed font fixture");
+        let fonts = [FontFallbackCandidate::unrestricted(&font)];
+        let paint = |style: &FragmentStyle| {
+            paint_shaped_horizontal_text_with_candidates(
+                &mut Canvas::new(80, 40),
+                crate::layout::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 80.0,
+                    height: 40.0,
+                },
+                "漢A",
+                20.0,
+                16.0,
+                &fonts,
+                style,
+                Color::rgb(0, 0, 0),
+                None,
+                0.0,
+            )
+            .unwrap()
+        };
+        let normal = paint(&FragmentStyle::default());
+        let disabled = paint(&FragmentStyle {
+            text_autospace: TextAutospace {
+                ideograph_alpha: false,
+                ideograph_numeric: false,
+                punctuation: false,
+                replace: false,
+            },
+            ..FragmentStyle::default()
+        });
+        assert!((normal - disabled - 2.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn shaped_paint_uses_the_font_advance_for_french_narrow_no_break_space() {
+        let font = Font::load_from_bytes(
+            include_bytes!("../../tests/fixtures/anonymized-arabic-fallback/DejaVuSans.ttf")
+                .to_vec(),
+        )
+        .expect("fixed font fixture");
+        let fonts = [FontFallbackCandidate::unrestricted(&font)];
+        let paint = |style: &FragmentStyle| {
+            paint_shaped_horizontal_text_with_candidates(
+                &mut Canvas::new(120, 40),
+                crate::layout::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 120.0,
+                    height: 40.0,
+                },
+                "Salut!",
+                20.0,
+                16.0,
+                &fonts,
+                style,
+                Color::rgb(0, 0, 0),
+                None,
+                0.0,
+            )
+            .unwrap()
+        };
+        let enabled = paint(&FragmentStyle {
+            text_autospace: TextAutospace {
+                ideograph_alpha: false,
+                ideograph_numeric: false,
+                punctuation: true,
+                replace: false,
+            },
+            french_content_language: true,
+            ..FragmentStyle::default()
+        });
+        let disabled = paint(&FragmentStyle::default());
+        let expected = font.glyph_advance('\u{202f}', 20.0);
+
+        assert!((enabled - disabled - expected).abs() < 0.01);
     }
 
     #[test]
