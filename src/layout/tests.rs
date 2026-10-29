@@ -3265,6 +3265,53 @@ fn inter_word_justification_expands_only_selected_lines() {
 }
 
 #[test]
+fn inter_character_justification_distributes_between_graphemes() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    paragraph.append_child(NodeHandle::text("aé👩‍🔬"));
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { margin:0; width:100px; font:10px monospace; line-height:10px; \
+                  text-align:justify; text-align-last:justify; \
+                  text-justify:inter-character }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let line = &find_layout_box(&layout, &paragraph).unwrap().lines[0];
+    let text_fragments = line
+        .fragments
+        .iter()
+        .filter(|fragment| fragment.text().is_some())
+        .collect::<Vec<_>>();
+
+    assert_eq!(line.rect.width, 100.0);
+    assert_eq!(text_fragments.len(), 3);
+    assert_eq!(text_fragments[0].text(), Some("a"));
+    assert_eq!(text_fragments[1].text(), Some("é"));
+    assert_eq!(text_fragments[2].text(), Some("👩‍🔬"));
+    assert!(text_fragments[1].rect.x > text_fragments[0].rect.x + 10.0);
+    assert!(text_fragments[2].rect.x > text_fragments[1].rect.x + 10.0);
+}
+
+#[test]
 fn line_clamp_limits_direct_and_descendant_line_boxes() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

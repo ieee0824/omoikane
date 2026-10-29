@@ -138,6 +138,7 @@ pub(super) enum TextAlign {
     Right,
     Center,
     JustifyInterWord,
+    JustifyInterCharacter,
 }
 
 pub(super) fn text_align(style: &ComputedStyle) -> TextAlign {
@@ -159,11 +160,13 @@ pub(super) fn text_align(style: &ComputedStyle) -> TextAlign {
         }
         Some(ComputedValue::Keyword(keyword)) if keyword.eq_ignore_ascii_case("justify") => {
             match style.get("text-justify") {
-                Some(ComputedValue::Keyword(method))
-                    if method.eq_ignore_ascii_case("none")
-                        || method.eq_ignore_ascii_case("inter-character") =>
-                {
+                Some(ComputedValue::Keyword(method)) if method.eq_ignore_ascii_case("none") => {
                     TextAlign::Start
+                }
+                Some(ComputedValue::Keyword(method))
+                    if method.eq_ignore_ascii_case("inter-character") =>
+                {
+                    TextAlign::JustifyInterCharacter
                 }
                 _ => TextAlign::JustifyInterWord,
             }
@@ -176,10 +179,9 @@ pub(super) fn text_align(style: &ComputedStyle) -> TextAlign {
 }
 
 fn text_align_last(style: Option<&ComputedStyle>, align: TextAlign) -> TextAlign {
-    let automatic = if align == TextAlign::JustifyInterWord {
-        TextAlign::Start
-    } else {
-        align
+    let automatic = match align {
+        TextAlign::JustifyInterWord | TextAlign::JustifyInterCharacter => TextAlign::Start,
+        align => align,
     };
     let Some(ComputedValue::Keyword(keyword)) =
         style.and_then(|style| style.get("text-align-last"))
@@ -193,11 +195,13 @@ fn text_align_last(style: Option<&ComputedStyle>, align: TextAlign) -> TextAlign
         "right" => TextAlign::Right,
         "center" => TextAlign::Center,
         "justify" => match style.and_then(|style| style.get("text-justify")) {
-            Some(ComputedValue::Keyword(method))
-                if method.eq_ignore_ascii_case("none")
-                    || method.eq_ignore_ascii_case("inter-character") =>
-            {
+            Some(ComputedValue::Keyword(method)) if method.eq_ignore_ascii_case("none") => {
                 TextAlign::Start
+            }
+            Some(ComputedValue::Keyword(method))
+                if method.eq_ignore_ascii_case("inter-character") =>
+            {
+                TextAlign::JustifyInterCharacter
             }
             _ => TextAlign::JustifyInterWord,
         },
@@ -4594,12 +4598,14 @@ fn push_line(
     };
     if physical_align == TextAlign::JustifyInterWord {
         width = justify_inter_word(fragments, width, available_width);
+    } else if physical_align == TextAlign::JustifyInterCharacter {
+        width = justify_inter_character(fragments, width, available_width);
     }
     let offset_x = match physical_align {
         TextAlign::Left => 0.0,
         TextAlign::Right => (available_width - width).max(0.0),
         TextAlign::Center => (available_width - width).max(0.0) / 2.0,
-        TextAlign::JustifyInterWord => 0.0,
+        TextAlign::JustifyInterWord | TextAlign::JustifyInterCharacter => 0.0,
         TextAlign::Start | TextAlign::End => unreachable!("logical alignment must be resolved"),
     };
     for fragment in fragments.iter_mut() {
@@ -4756,6 +4762,74 @@ fn justify_inter_word(
             shift += expansion;
         }
     }
+    available_width
+}
+
+fn justify_inter_character(
+    fragments: &mut Vec<InlineFragment>,
+    used_width: f32,
+    available_width: f32,
+) -> f32 {
+    let extra = available_width - used_width;
+    if extra <= 0.0 {
+        return used_width;
+    }
+
+    let grapheme_count = fragments
+        .iter()
+        .filter_map(InlineFragment::text)
+        .map(|text| text.graphemes(true).count())
+        .sum::<usize>();
+    let opportunities = grapheme_count.saturating_sub(1);
+    if opportunities == 0 {
+        return used_width;
+    }
+
+    let mut split = Vec::with_capacity(fragments.len() + opportunities);
+    for fragment in std::mem::take(fragments) {
+        let Some(text) = fragment.text() else {
+            split.push(fragment);
+            continue;
+        };
+        let measured = text
+            .grapheme_indices(true)
+            .map(|(_, grapheme)| measure_text_width(grapheme, fragment.metrics))
+            .collect::<Vec<_>>();
+        let measured_total = measured.iter().sum::<f32>();
+        let scale = if measured_total > 0.0 {
+            fragment.rect.width / measured_total
+        } else {
+            1.0
+        };
+        let mut x = fragment.rect.x;
+        for ((start, grapheme), measured_width) in
+            text.grapheme_indices(true).zip(measured.into_iter())
+        {
+            let mut unit = fragment.clone();
+            let end = start + grapheme.len();
+            unit.content = InlineFragmentContent::Text(grapheme.to_string());
+            unit.text_source = text_source::slice(&fragment.text_source, text, start..end);
+            unit.rect.x = x;
+            unit.rect.width = measured_width * scale;
+            x += unit.rect.width;
+            split.push(unit);
+        }
+    }
+
+    let expansion = extra / opportunities as f32;
+    let mut remaining_text_units = grapheme_count;
+    let mut shift = 0.0;
+    for fragment in &mut split {
+        fragment.rect.x += shift;
+        if fragment.text().is_some() {
+            remaining_text_units -= 1;
+            if remaining_text_units > 0 {
+                fragment.rect.width += expansion;
+                shift += expansion;
+            }
+        }
+    }
+    *fragments = split;
     available_width
 }
 
