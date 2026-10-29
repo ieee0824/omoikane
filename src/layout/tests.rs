@@ -3411,6 +3411,67 @@ fn line_clamp_limits_direct_and_descendant_line_boxes() {
 }
 
 #[test]
+fn text_box_trim_removes_outer_leading_in_horizontal_and_vertical_flow() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let normal = NodeHandle::element("div");
+    normal.set_attribute("id", "normal");
+    normal.append_child(NodeHandle::text("A\nB"));
+    let trimmed = NodeHandle::element("div");
+    trimmed.set_attribute("id", "trimmed");
+    trimmed.append_child(NodeHandle::text("A\nB"));
+    let vertical = NodeHandle::element("div");
+    vertical.set_attribute("id", "vertical");
+    vertical.append_child(NodeHandle::text("A\nB"));
+    document.append_child(body.clone());
+    body.append_child(normal.clone());
+    body.append_child(trimmed.clone());
+    body.append_child(vertical.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { margin:0; width:100px; height:auto; font:10px monospace; \
+                   line-height:20px; white-space:pre } \
+             #trimmed { text-box:trim-both text } \
+             #vertical { writing-mode:vertical-lr; height:100px; \
+                         text-box:trim-both text }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+
+    let normal = find_layout_box(&layout, &normal).unwrap();
+    let trimmed = find_layout_box(&layout, &trimmed).unwrap();
+    assert!((normal.dimensions.content.height - 40.0).abs() < 0.01);
+    assert!((trimmed.dimensions.content.height - 30.0).abs() < 0.01);
+    assert!((trimmed.lines[0].rect.height - 15.0).abs() < 0.01);
+    assert!((trimmed.lines[1].rect.y - trimmed.dimensions.content.y - 15.0).abs() < 0.01);
+    assert!((trimmed.lines[1].rect.height - 15.0).abs() < 0.01);
+
+    let vertical = find_layout_box(&layout, &vertical).unwrap();
+    assert_eq!(vertical.lines.len(), 2);
+    assert!(
+        vertical
+            .lines
+            .iter()
+            .all(|line| (line.rect.width - 15.0).abs() < 0.01)
+    );
+    assert!((vertical.lines[1].rect.x - vertical.lines[0].rect.x - 15.0).abs() < 0.01);
+}
+
+#[test]
 fn horizontal_rtl_inline_geometry_uses_logical_start_and_end() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

@@ -430,6 +430,9 @@ fn layout_inline_nodes_impl(
         );
     }
     boxes::finish(&mut lines, nodes, resolver, strut_line_height);
+    if let Some(style) = container_style.as_ref() {
+        apply_text_box_trim(&mut lines, style);
+    }
     if let Some(style) = text_overflow_style {
         apply_text_overflow(
             &mut lines,
@@ -557,6 +560,9 @@ pub(super) fn layout_vertical_inline_nodes(
     );
 
     boxes::finish(&mut horizontal_lines, nodes, resolver, strut_line_height);
+    if let Some(style) = container_style.as_ref() {
+        apply_text_box_trim(&mut horizontal_lines, style);
+    }
     if let Some(style) = text_overflow_style {
         apply_text_overflow(
             &mut horizontal_lines,
@@ -671,6 +677,67 @@ fn apply_text_overflow(
             "…",
         );
     }
+}
+
+fn apply_text_box_trim(lines: &mut [LineBox], style: &ComputedStyle) {
+    let Some(ComputedValue::Keyword(trim)) = style.get("text-box-trim") else {
+        return;
+    };
+    let (trim_start, trim_end) = match trim.to_ascii_lowercase().as_str() {
+        "trim-start" => (true, false),
+        "trim-end" => (false, true),
+        "trim-both" => (true, true),
+        _ => return,
+    };
+    let Some(first) = lines.first() else {
+        return;
+    };
+    let metrics = font_metrics(style);
+    let (over, under) = text_box_edges(style, metrics);
+    let start_amount = if trim_start {
+        (first.baseline - over - first.rect.y).clamp(0.0, first.rect.height)
+    } else {
+        0.0
+    };
+    if start_amount > 0.0 {
+        for (index, line) in lines.iter_mut().enumerate() {
+            if index == 0 {
+                line.rect.height = (line.rect.height - start_amount).max(0.0);
+            } else {
+                line.rect.y -= start_amount;
+            }
+            line.baseline -= start_amount;
+            for fragment in &mut line.fragments {
+                fragment.rect.y -= start_amount;
+            }
+        }
+    }
+    if trim_end {
+        let last = lines.last_mut().expect("non-empty line slice");
+        let edge = last.baseline + under;
+        let amount = (last.rect.y + last.rect.height - edge).clamp(0.0, last.rect.height);
+        last.rect.height = (last.rect.height - amount).max(0.0);
+    }
+}
+
+fn text_box_edges(style: &ComputedStyle, metrics: FontMetrics) -> (f32, f32) {
+    let edge = match style.get("text-box-edge") {
+        Some(ComputedValue::Keyword(edge)) => edge.as_str(),
+        _ => "auto",
+    };
+    let mut components = edge.split_ascii_whitespace();
+    let over = components.next().unwrap_or("auto");
+    let under = components.next().unwrap_or(over);
+    let over = match over.to_ascii_lowercase().as_str() {
+        "cap" => metrics.font_size * 0.7,
+        "ex" => metrics.font_size * 0.5,
+        _ => metrics.ascent,
+    };
+    let under = match under.to_ascii_lowercase().as_str() {
+        "alphabetic" => 0.0,
+        _ => metrics.descent,
+    };
+    (over, under)
 }
 
 pub(super) fn apply_block_ellipsis(
