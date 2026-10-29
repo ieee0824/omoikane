@@ -5956,6 +5956,68 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if key == "text-wrap-style" {
         return validate_keyword_value(value, &["auto", "balance", "stable", "pretty"]);
     }
+    if key == "text-align-last" {
+        return validate_keyword_value(
+            value,
+            &[
+                "auto",
+                "start",
+                "end",
+                "left",
+                "right",
+                "center",
+                "justify",
+                "match-parent",
+            ],
+        );
+    }
+    if key == "text-justify" {
+        if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("distribute")) {
+            return DeclarationValidation::Valid(ComputedValue::Keyword(
+                "inter-character".to_string(),
+            ));
+        }
+        return validate_keyword_value(value, &["auto", "none", "inter-word", "inter-character"]);
+    }
+    if key == "hanging-punctuation" {
+        if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none") || is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+        {
+            return DeclarationValidation::Unvalidated;
+        }
+        let Value::List(values) = value else {
+            return DeclarationValidation::Invalid;
+        };
+        let mut first = false;
+        let mut end = None;
+        let mut last = false;
+        for value in values {
+            let Value::Keyword(keyword) = value else {
+                return DeclarationValidation::Invalid;
+            };
+            match keyword.to_ascii_lowercase().as_str() {
+                "first" if !first => first = true,
+                "force-end" | "allow-end" if end.is_none() => {
+                    end = Some(keyword.to_ascii_lowercase())
+                }
+                "last" if !last => last = true,
+                _ => return DeclarationValidation::Invalid,
+            }
+        }
+        if !first && end.is_none() && !last {
+            return DeclarationValidation::Invalid;
+        }
+        let mut canonical = Vec::new();
+        if first {
+            canonical.push("first".to_string());
+        }
+        if let Some(end) = end {
+            canonical.push(end);
+        }
+        if last {
+            canonical.push("last".to_string());
+        }
+        return DeclarationValidation::Valid(ComputedValue::Keyword(canonical.join(" ")));
+    }
     if key == "line-break" {
         return validate_keyword_value(value, &["auto", "loose", "normal", "strict", "anywhere"]);
     }
@@ -13136,10 +13198,16 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::LineBreak, InitialValue::Keyword("auto")),
     (PropertyId::Hyphens, InitialValue::Keyword("manual")),
     (
+        PropertyId::HangingPunctuation,
+        InitialValue::Keyword("none"),
+    ),
+    (
         PropertyId::HyphenateCharacter,
         InitialValue::Keyword("auto"),
     ),
     (PropertyId::TabSize, InitialValue::Number(8.0)),
+    (PropertyId::TextAlignLast, InitialValue::Keyword("auto")),
+    (PropertyId::TextJustify, InitialValue::Keyword("auto")),
     (PropertyId::TextOverflow, InitialValue::Keyword("clip")),
     (PropertyId::OverflowX, InitialValue::Keyword("visible")),
     (PropertyId::OverflowY, InitialValue::Keyword("visible")),
@@ -13578,8 +13646,10 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::PointerEvents,
     PropertyId::Quotes,
     PropertyId::TextAlign,
+    PropertyId::TextAlignLast,
     PropertyId::TextDecorationSkipInk,
     PropertyId::TextIndent,
+    PropertyId::TextJustify,
     PropertyId::TextWrapMode,
     PropertyId::TextWrapStyle,
     PropertyId::TextShadow,
@@ -13595,6 +13665,7 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::Widows,
     PropertyId::HyphenateCharacter,
     PropertyId::Hyphens,
+    PropertyId::HangingPunctuation,
     PropertyId::TabSize,
 ];
 

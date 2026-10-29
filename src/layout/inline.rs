@@ -163,6 +163,28 @@ pub(super) fn text_align(style: &ComputedStyle) -> TextAlign {
     }
 }
 
+fn text_align_last(style: Option<&ComputedStyle>, align: TextAlign) -> TextAlign {
+    let Some(ComputedValue::Keyword(keyword)) =
+        style.and_then(|style| style.get("text-align-last"))
+    else {
+        return align;
+    };
+    match keyword.to_ascii_lowercase().as_str() {
+        "start" => TextAlign::Start,
+        "end" => TextAlign::End,
+        "left" => TextAlign::Left,
+        "right" => TextAlign::Right,
+        "center" => TextAlign::Center,
+        // Justification is added by the next line-distribution unit. Until
+        // then, a justified final line has the specified inline-start origin.
+        "justify" => TextAlign::Start,
+        // `match-parent` is resolved to the containing logical start until the
+        // parent-relative computed-value unit lands alongside justification.
+        "match-parent" => TextAlign::Start,
+        _ => align,
+    }
+}
+
 // ── Inline layout entry point ───────────────────────────────────────────────
 
 pub(super) struct InlineLayoutResult {
@@ -323,16 +345,17 @@ fn layout_inline_nodes_impl(
     if source_start_token > 0 {
         skip_inline_prefix(&mut segments, source_start_token);
     }
-    let strut_metrics = nodes
-        .first()
-        .and_then(NodeHandle::parent_node)
-        .map(|parent| font_metrics(&resolver.computed_style(&parent)));
-    let mut first_line_indent = nodes
-        .first()
-        .and_then(NodeHandle::parent_node)
-        .map(|parent| text_indent(&resolver.computed_style(&parent), available_width))
+    let container_style = generated_owner
+        .cloned()
+        .or_else(|| nodes.first().and_then(NodeHandle::parent_node))
+        .map(|container| resolver.computed_style(&container));
+    let strut_metrics = container_style.as_ref().map(font_metrics);
+    let mut first_line_indent = container_style
+        .as_ref()
+        .map(|style| text_indent(style, available_width))
         .unwrap_or_default();
     first_line_indent.initial_affected = source_start_token == 0;
+    let last_align = text_align_last(container_style.as_ref(), align);
 
     let (line_start_x, line_available_width) = line_constraints
         .map(|constraints| constraints(start_y, strut_line_height))
@@ -344,6 +367,7 @@ fn layout_inline_nodes_impl(
         start_y,
         line_available_width,
         align,
+        last_align,
         strut_line_height,
         strut_metrics,
         direction_rtl,
@@ -369,6 +393,7 @@ fn layout_inline_nodes_impl(
             start_y,
             line_available_width,
             align,
+            last_align,
             strut_line_height,
             strut_metrics,
             direction_rtl,
@@ -479,11 +504,15 @@ pub(super) fn layout_vertical_inline_nodes(
         (TextAlign::End, true) => TextAlign::Left,
         (align, _) => align,
     };
-    let first_line_indent = generated_owner
+    let container_style = generated_owner
         .cloned()
         .or_else(|| nodes.first().and_then(NodeHandle::parent_node))
-        .map(|owner| text_indent(&resolver.computed_style(&owner), available_height))
+        .map(|owner| resolver.computed_style(&owner));
+    let first_line_indent = container_style
+        .as_ref()
+        .map(|style| text_indent(style, available_height))
         .unwrap_or_default();
+    let layout_last_align = text_align_last(container_style.as_ref(), layout_align);
     let mut horizontal_lines = layout_inline_segments(
         &segments,
         0,
@@ -491,6 +520,7 @@ pub(super) fn layout_vertical_inline_nodes(
         0.0,
         line_height,
         layout_align,
+        layout_last_align,
         strut_line_height,
         None,
         false,
@@ -1820,6 +1850,7 @@ pub(super) fn layout_block_pseudo_content(
         start_y,
         available_width,
         text_align(style),
+        text_align_last(Some(style), text_align(style)),
         line_height(style),
         Some(font_metrics(style)),
         super::direction_is_rtl(style),
@@ -3249,6 +3280,7 @@ struct InlineCursor {
     strut_metrics: Option<FontMetrics>,
     direction_rtl: bool,
     indent: TextIndent,
+    last_align: TextAlign,
 }
 
 #[derive(Clone, Copy)]
@@ -3267,6 +3299,7 @@ impl InlineCursor {
         strut_metrics: Option<FontMetrics>,
         direction_rtl: bool,
         indent: TextIndent,
+        last_align: TextAlign,
     ) -> Self {
         let unindented_start_x = start_x;
         let maximum_wrap_width = wrap_width.map(|width| width.min(available_width));
@@ -3286,6 +3319,7 @@ impl InlineCursor {
             strut_metrics,
             direction_rtl,
             indent,
+            last_align,
         };
         cursor.apply_line_indent(indent.initial_affected);
         cursor
@@ -3317,6 +3351,11 @@ impl InlineCursor {
         break_kind: LineBreakKind,
     ) {
         let effective_height = self.line_height.max(segment_line_height);
+        let line_align = if matches!(break_kind, LineBreakKind::Forced) {
+            self.last_align
+        } else {
+            align
+        };
         let used_height = push_line(
             lines,
             fragments,
@@ -3325,7 +3364,7 @@ impl InlineCursor {
             self.x - self.start_x,
             effective_height,
             self.line_box_width,
-            align,
+            line_align,
             self.direction_rtl,
             self.strut_line_height,
             self.strut_metrics,
@@ -3348,7 +3387,7 @@ impl InlineCursor {
         &self,
         lines: &mut Vec<LineBox>,
         fragments: &mut Vec<InlineFragment>,
-        align: TextAlign,
+        _align: TextAlign,
     ) {
         if !fragments.is_empty() {
             let final_height = if fragments.iter().all(|fragment| {
@@ -3370,7 +3409,7 @@ impl InlineCursor {
                 self.x - self.start_x,
                 final_height,
                 self.line_box_width,
-                align,
+                self.last_align,
                 self.direction_rtl,
                 self.strut_line_height,
                 self.strut_metrics,
@@ -3840,6 +3879,7 @@ fn layout_inline_segments(
     start_y: f32,
     available_width: f32,
     align: TextAlign,
+    last_align: TextAlign,
     strut_line_height: f32,
     strut_metrics: Option<FontMetrics>,
     direction_rtl: bool,
@@ -3858,6 +3898,7 @@ fn layout_inline_segments(
         strut_metrics,
         direction_rtl,
         first_line_indent,
+        last_align,
     );
 
     let mut prev_segment_allows_wrapping = true;
@@ -3925,6 +3966,7 @@ fn optimize_text_wrap_style(
     start_y: f32,
     available_width: f32,
     align: TextAlign,
+    last_align: TextAlign,
     strut_line_height: f32,
     strut_metrics: Option<FontMetrics>,
     direction_rtl: bool,
@@ -3979,6 +4021,7 @@ fn optimize_text_wrap_style(
             start_y,
             available_width,
             align,
+            last_align,
             strut_line_height,
             strut_metrics,
             direction_rtl,

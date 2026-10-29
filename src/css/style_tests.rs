@@ -8870,6 +8870,76 @@ fn invalid_css_text_longhands_fall_back_to_initial_values() {
 }
 
 #[test]
+fn line_alignment_and_hanging_punctuation_validate_and_inherit() {
+    let document = NodeHandle::document();
+    let parent = NodeHandle::element("div");
+    parent.set_attribute("id", "parent");
+    let child = NodeHandle::element("span");
+    parent.append_child(child.clone());
+    document.append_child(parent.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#parent { \
+                text-align-last: center; \
+                text-justify: distribute; \
+                hanging-punctuation: last first allow-end; \
+            }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&child);
+    assert_eq!(
+        style.get("text-align-last"),
+        Some(&ComputedValue::Keyword("center".into()))
+    );
+    assert_eq!(
+        style.get("text-justify"),
+        Some(&ComputedValue::Keyword("inter-character".into()))
+    );
+    assert_eq!(
+        style.get("hanging-punctuation"),
+        Some(&ComputedValue::Keyword("first allow-end last".into()))
+    );
+}
+
+#[test]
+fn invalid_line_alignment_and_hanging_punctuation_use_initial_values() {
+    let document = NodeHandle::document();
+    let target = NodeHandle::element("div");
+    document.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { \
+                text-align-last: middle; \
+                text-justify: character; \
+                hanging-punctuation: first first; \
+            }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&target);
+    for (name, expected) in [
+        ("text-align-last", "auto"),
+        ("text-justify", "auto"),
+        ("hanging-punctuation", "none"),
+    ] {
+        assert_eq!(
+            style.get(name),
+            Some(&ComputedValue::Keyword(expected.into())),
+            "{name} should reject its invalid declaration"
+        );
+    }
+}
+
+#[test]
 fn text_wrap_shorthand_expands_mode_and_style_in_either_order() {
     let document = NodeHandle::document();
     let first = NodeHandle::element("div");

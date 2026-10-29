@@ -3152,6 +3152,56 @@ fn inline_content_honors_text_align_right() {
 }
 
 #[test]
+fn text_align_last_applies_to_final_and_forced_lines() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let wrapped = NodeHandle::element("p");
+    wrapped.set_attribute("id", "wrapped");
+    wrapped.append_child(NodeHandle::text("alpha beta gamma"));
+    let forced = NodeHandle::element("p");
+    forced.set_attribute("id", "forced");
+    forced.append_child(NodeHandle::text("a\nb"));
+    document.append_child(body.clone());
+    body.append_child(wrapped.clone());
+    body.append_child(forced.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { margin:0; width:60px; font:10px monospace; line-height:10px; \
+                  text-align:right; text-align-last:center } \
+             #forced { white-space-collapse:preserve-breaks }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 60.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let wrapped_lines = &find_layout_box(&layout, &wrapped).unwrap().lines;
+    assert_eq!(wrapped_lines.len(), 2);
+    assert!(wrapped_lines[1].rect.x > wrapped_lines[0].rect.x);
+    assert!((wrapped_lines[1].rect.x - 15.0).abs() < 1.0);
+
+    let forced_lines = &find_layout_box(&layout, &forced).unwrap().lines;
+    assert_eq!(forced_lines.len(), 2);
+    assert!(
+        forced_lines
+            .iter()
+            .all(|line| (line.rect.x - 27.0).abs() < 1.0)
+    );
+}
+
+#[test]
 fn horizontal_rtl_inline_geometry_uses_logical_start_and_end() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
