@@ -17282,7 +17282,7 @@ fn register_host_bindings(
         ),
         (
             js_string!("__omoikane_collection_generation"),
-            0,
+            1,
             NativeFunction::from_copy_closure(collection_generation_native),
         ),
         (
@@ -26426,8 +26426,19 @@ fn child_node_ids_native(
     })
 }
 
-fn collection_generation_native(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
-    Ok(boa_engine::JsBigInt::from(live_collection_epoch()).into())
+/// Returns the live collection generation. An optional numeric argument is a
+/// mask over `TRACKED_COLLECTION_ATTRIBUTES`; without it, every attribute
+/// change invalidates.
+fn collection_generation_native(
+    _: &JsValue,
+    args: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    let mask = args
+        .first()
+        .and_then(JsValue::as_number)
+        .map(|mask| mask as u32);
+    Ok(boa_engine::JsBigInt::from(live_collection_epoch(mask)).into())
 }
 
 fn first_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {

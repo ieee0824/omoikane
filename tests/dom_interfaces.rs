@@ -104,6 +104,128 @@ fn retained_html_collections_methods_indices_and_named_properties_stay_live() {
     );
 }
 
+/// Runs `getElementsByClassName('item')` over `count` items and returns how
+/// many times membership read `class` while `body` ran for each index. The
+/// loop is split across evaluations so the per-evaluation JS time limit
+/// bounds each chunk rather than the whole N=10,000 debug-build loop.
+fn class_reads_during_collection_loop(count: usize, body: &str) -> usize {
+    let mut runtime = JsRuntime::with_document(
+        TreeBuilder::parse("<!doctype html><html><body></body></html>").document(),
+    )
+    .unwrap();
+    runtime
+        .eval(&format!(
+            r#"(() => {{
+            const parent = document.createElement('div');
+            for (let i = 0; i < {count}; i++) {{
+                const item = document.createElement('span');
+                item.className = 'item';
+                parent.append(item);
+            }}
+            document.body.append(parent);
+            globalThis.loop = {{
+                items: document.getElementsByClassName('item'),
+                children: parent.children,
+                all: parent.getElementsByTagName('span'),
+                classReads: 0,
+                failure: '',
+            }};
+            const original = Element.prototype.getAttribute;
+            Element.prototype.getAttribute = function (name) {{
+                if (name === 'class') loop.classReads++;
+                return original.call(this, name);
+            }};
+        }})()"#
+        ))
+        .unwrap();
+    const CHUNK: usize = 1_000;
+    for start in (0..count).step_by(CHUNK) {
+        runtime
+            .eval(&format!(
+                r#"(() => {{
+                const {{ items, children, all }} = loop;
+                for (let i = {start}; i < Math.min({end}, items.length); i++) {{ {body} }}
+            }})()"#,
+                end = start + CHUNK,
+            ))
+            .unwrap();
+    }
+    let result = runtime
+        .eval("loop.failure + '|' + loop.classReads + '|' + loop.items.length")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    let [failure, reads, length] = result.split('|').collect::<Vec<_>>()[..] else {
+        panic!("unexpected result {result}");
+    };
+    assert_eq!(failure, "", "N={count}");
+    assert_eq!(length, count.to_string(), "N={count}");
+    reads.parse().unwrap()
+}
+
+#[test]
+fn unrelated_attribute_writes_in_a_collection_loop_rescan_the_tree_once() {
+    // Issue #1519: style/data-* writes must not invalidate collections whose
+    // membership does not read them, or the loop rescans the tree N times.
+    // One document-wide scan also visits html/head/body/div, so the bound is
+    // 2N; a rescan per write would read class about N * N times.
+    let reads = class_reads_during_collection_loop(
+        1_000,
+        "items[i].style.color = 'red'; items[i].dataset.index = String(i);
+         if (children[i] !== items[i] || all[i] !== items[i]) loop.failure ||= 'identity ' + i;",
+    );
+    assert!(reads < 2 * 1_000, "N=1000 read class {reads} times");
+    let reads = class_reads_during_collection_loop(10_000, "items[i].style.color = 'red';");
+    assert!(reads < 2 * 10_000, "N=10000 read class {reads} times");
+}
+
+#[test]
+fn membership_attribute_changes_keep_cached_collections_live() {
+    check(
+        r#"(() => {
+        const parent = document.createElement('div');
+        document.body.append(parent);
+        const first = document.createElement('a'), second = document.createElement('a');
+        parent.append(first, second);
+        const classed = parent.getElementsByClassName('hit');
+        const links = document.links, anchors = document.anchors;
+        const children = parent.children;
+        // Warm every snapshot, then change only attributes.
+        if (classed.length !== 0 || links.length !== 0 || anchors.length !== 0 ||
+            children.length !== 2) return 'warm';
+        first.style.color = 'red';
+        first.className = 'hit';
+        if (classed.length !== 1 || classed[0] !== first) return 'className';
+        second.setAttributeNS(null, 'class', 'hit');
+        if (classed.length !== 2) return 'setAttributeNS class';
+        first.getAttributeNode('class').value = 'miss';
+        if (classed.length !== 1 || classed[0] !== second) return 'Attr.value';
+        second.classList.remove('hit');
+        if (classed.length !== 0) return 'classList';
+        first.dataset.x = '1';
+        first.setAttribute('href', '#a');
+        if (links.length !== 1 || links[0] !== first) return 'href add';
+        second.toggleAttribute('href');
+        if (links.length !== 2) return 'href toggle';
+        first.removeAttribute('href');
+        if (links.length !== 1 || links[0] !== second) return 'href remove';
+        second.setAttribute('name', 'anchor');
+        if (anchors.length !== 1 || anchors.anchor !== second) return 'name add';
+        second.removeAttributeNS(null, 'name');
+        if (anchors.length !== 0 || anchors.anchor !== undefined) return 'name remove';
+        // Named access reads id/name live even though they do not change membership.
+        first.id = 'one';
+        if (children.one !== first || children.namedItem('one') !== first) return 'id add';
+        first.id = 'uno';
+        if (children.one !== undefined || children.uno !== first) return 'id rename';
+        second.setAttribute('name', 'two');
+        if (children.namedItem('two') !== second) return 'name named access';
+        return 'ok';
+    })() === 'ok'"#,
+    );
+}
+
 #[test]
 fn geometry_nested_dictionaries_convert_each_member_before_reading_the_next() {
     check(

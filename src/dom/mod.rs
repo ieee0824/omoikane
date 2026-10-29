@@ -39,6 +39,9 @@ mod document_body_tests;
 mod slot_cache_tests;
 
 #[cfg(test)]
+mod live_collection_epoch_tests;
+
+#[cfg(test)]
 thread_local! {
     static SLOT_ASSIGNMENT_WORK: std::cell::Cell<(usize, usize, usize)> = const {
         std::cell::Cell::new((0, 0, 0))
@@ -59,6 +62,11 @@ thread_local! {
     // Live HTMLCollections may reuse one native subtree snapshot until a tree
     // or attribute mutation can change membership or named properties.
     static LIVE_COLLECTION_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    // Tree-only generation for collections that declare which attributes their
+    // membership reads. Attribute changes advance only their tracked epoch.
+    static TREE_COLLECTION_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TRACKED_ATTRIBUTE_EPOCHS: [std::cell::Cell<u64>; TRACKED_COLLECTION_ATTRIBUTES.len()] =
+        const { [const { std::cell::Cell::new(0) }; TRACKED_COLLECTION_ATTRIBUTES.len()] };
     /// Number of elements on this thread that currently hold a non-zero scroll
     /// offset. Scrolling is rare, so paint and the layout-metrics bindings use
     /// this to skip their scroll passes entirely on documents that never
@@ -72,32 +80,70 @@ thread_local! {
     static MODAL_DIALOG_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn invalidate_slot_assignments() {
-    SLOT_ASSIGNMENT_EPOCH.with(|epoch| {
-        epoch.set(
-            epoch
-                .get()
-                .checked_add(1)
-                .expect("DOM mutation epoch exhausted"),
-        );
-    });
-    invalidate_live_collections();
+/// Attribute names whose changes live collections can track individually.
+/// A collection that declares a subset of these is not invalidated by any
+/// other attribute change. The bit of each name in a dependency mask is its
+/// index here.
+pub(crate) const TRACKED_COLLECTION_ATTRIBUTES: [&str; 3] = ["class", "href", "name"];
+
+fn advance_epoch(epoch: &std::cell::Cell<u64>) {
+    epoch.set(
+        epoch
+            .get()
+            .checked_add(1)
+            .expect("DOM mutation epoch exhausted"),
+    );
 }
 
-fn invalidate_live_collections() {
-    LIVE_COLLECTION_EPOCH.with(|epoch| {
-        epoch.set(
-            epoch
-                .get()
-                .checked_add(1)
-                .expect("live collection epoch exhausted"),
-        );
+/// Records a tree mutation, which can change slot assignment and the
+/// membership of every live collection.
+fn invalidate_slot_assignments() {
+    SLOT_ASSIGNMENT_EPOCH.with(advance_epoch);
+    TREE_COLLECTION_EPOCH.with(advance_epoch);
+    LIVE_COLLECTION_EPOCH.with(advance_epoch);
+}
+
+/// Records an attribute change. `slot` and `name` also change slot
+/// assignment. Collections that did not declare their attribute
+/// dependencies are always invalidated; declared ones only when one of
+/// `names` (qualified or local name) is tracked and in their mask.
+fn invalidate_for_attribute(names: &[&str]) {
+    if names.iter().any(|name| matches!(*name, "slot" | "name")) {
+        SLOT_ASSIGNMENT_EPOCH.with(advance_epoch);
+    }
+    LIVE_COLLECTION_EPOCH.with(advance_epoch);
+    TRACKED_ATTRIBUTE_EPOCHS.with(|epochs| {
+        for (tracked, epoch) in TRACKED_COLLECTION_ATTRIBUTES.iter().zip(epochs) {
+            // Over-invalidation is safe, so case differences between HTML and
+            // foreign attributes do not need exact matching rules here.
+            if names.iter().any(|name| name.eq_ignore_ascii_case(tracked)) {
+                advance_epoch(epoch);
+            }
+        }
     });
 }
 
 /// Returns the thread-local DOM generation used by live collection snapshots.
-pub(crate) fn live_collection_epoch() -> u64 {
-    LIVE_COLLECTION_EPOCH.with(std::cell::Cell::get)
+///
+/// With `None`, every tree or attribute mutation changes the result. With a
+/// mask over [`TRACKED_COLLECTION_ATTRIBUTES`], only tree mutations and
+/// changes of the selected attributes do. The result for one mask only
+/// increases, so equality means no relevant mutation happened.
+pub(crate) fn live_collection_epoch(attribute_mask: Option<u32>) -> u64 {
+    let Some(mask) = attribute_mask else {
+        return LIVE_COLLECTION_EPOCH.with(std::cell::Cell::get);
+    };
+    let tree = TREE_COLLECTION_EPOCH.with(std::cell::Cell::get);
+    TRACKED_ATTRIBUTE_EPOCHS.with(|epochs| {
+        epochs
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| mask & (1 << index) != 0)
+            .fold(tree, |sum, (_, epoch)| {
+                sum.checked_add(epoch.get())
+                    .expect("live collection epoch exhausted")
+            })
+    })
 }
 
 /// Whether any element on this thread holds a non-zero scroll offset.
@@ -1796,7 +1842,7 @@ impl NodeHandle {
             }
         }
         rebuild_attribute_projection(element);
-        invalidate_live_collections();
+        invalidate_for_attribute(&[local_name]);
     }
 
     /// Returns the number of attributes without cloning their records.
@@ -1989,11 +2035,7 @@ impl NodeHandle {
         };
         inner.aria_element_references.remove(&name);
         if let NodeData::Element(element) = &mut inner.data {
-            if matches!(name.as_str(), "slot" | "name") {
-                invalidate_slot_assignments();
-            } else {
-                invalidate_live_collections();
-            }
+            invalidate_for_attribute(&[&name]);
             if name == "async" {
                 element.script_force_async = false;
             }
@@ -2127,11 +2169,7 @@ impl NodeHandle {
             {
                 element.selected = true;
             }
-            if matches!(qualified_name.as_str(), "slot" | "name") {
-                invalidate_slot_assignments();
-            } else {
-                invalidate_live_collections();
-            }
+            invalidate_for_attribute(&[&qualified_name, &local_name]);
             if let Some(attribute) = element.attribute_records.iter_mut().find(|attribute| {
                 attribute.namespace_uri == namespace_uri && attribute.local_name == local_name
             }) {
@@ -2198,11 +2236,7 @@ impl NodeHandle {
         };
         inner.aria_element_references.remove(&name);
         if let NodeData::Element(element) = &mut inner.data {
-            if matches!(name.as_str(), "slot" | "name") {
-                invalidate_slot_assignments();
-            } else {
-                invalidate_live_collections();
-            }
+            invalidate_for_attribute(&[&name]);
             if let Some(index) = element
                 .attribute_records
                 .iter()
@@ -2231,11 +2265,7 @@ impl NodeHandle {
         let mut inner = self.0.borrow_mut();
         inner.aria_element_references.remove(qualified_name);
         if let NodeData::Element(element) = &mut inner.data {
-            if matches!(qualified_name, "slot" | "name") {
-                invalidate_slot_assignments();
-            } else {
-                invalidate_live_collections();
-            }
+            invalidate_for_attribute(&[qualified_name]);
             if qualified_name == "form"
                 && element.attribute_records.iter().any(|attribute| {
                     attribute.qualified_name == qualified_name && attribute.namespace_uri.is_none()
@@ -2274,11 +2304,7 @@ impl NodeHandle {
                 return;
             };
             let qualified_name = element.attribute_records[index].qualified_name.clone();
-            if matches!(qualified_name.as_str(), "slot" | "name") {
-                invalidate_slot_assignments();
-            } else {
-                invalidate_live_collections();
-            }
+            invalidate_for_attribute(&[&qualified_name, local_name]);
             if qualified_name == "form" && namespace_uri.is_none() {
                 element.parser_form_owner = None;
             }

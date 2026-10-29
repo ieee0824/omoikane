@@ -4472,7 +4472,8 @@ export const __omoikane_service_worker_lifecycle = {};
     get children() {
       let collection = childCollections.get(this);
       if (!collection) {
-        collection = makeHTMLCollection(() => this.childNodes.filter(node => node.nodeType === 1));
+        collection = makeHTMLCollection(() => this.childNodes.filter(node => node.nodeType === 1),
+          undefined, undefined, []);
         childCollections.set(this, collection);
       }
       return collection;
@@ -4537,7 +4538,7 @@ export const __omoikane_service_worker_lifecycle = {};
       const selectorSafe = requested === "*" || /^[A-Za-z_][A-Za-z0-9_-]*$/.test(requested);
       return makeHTMLCollection(() => selectorSafe
         ? (nativeQuerySelectorAll(internalNodeId(this), requested) || []).map(wrapNode).filter(matches)
-        : collectElements(this, matches));
+        : collectElements(this, matches), undefined, undefined, []);
     }
 
     getElementsByTagNameNS(namespace, localName) {
@@ -4545,7 +4546,7 @@ export const __omoikane_service_worker_lifecycle = {};
       const name = String(localName);
       return makeHTMLCollection(() => collectElements(this, element =>
         (ns === "*" || (element.namespaceURI || (element instanceof HTMLElement ? "http://www.w3.org/1999/xhtml" : null)) === ns) &&
-        (name === "*" || element.localName === name)));
+        (name === "*" || element.localName === name)), undefined, undefined, []);
     }
 
     getElementsByClassName(classes) {
@@ -4555,7 +4556,7 @@ export const __omoikane_service_worker_lifecycle = {};
       return makeHTMLCollection(() => collectElements(this, element => {
         const actual = (element.getAttribute("class") || "").split(/[\t\n\f\r ]+/).map(fold);
         return names.length > 0 && names.every(name => actual.includes(fold(name)));
-      }));
+      }), undefined, undefined, ["class"]);
     }
 
     get ownerDocument() {
@@ -8607,12 +8608,15 @@ export const __omoikane_service_worker_lifecycle = {};
 
   // Named access is restricted to HTML-namespace name attributes. The shared
   // factory implements indexed properties and live methods over this resolver.
+  // `attributes` declares which attributes `collect` reads (see
+  // domInterfaces.makeCollection); omitted means any attribute change.
   function makeHTMLCollection(
     collect,
     allowsNamedName = element => element.namespaceURI === "http://www.w3.org/1999/xhtml" || element instanceof HTMLElement,
     missingNamedValue = undefined,
+    attributes = undefined,
   ) {
-    return domInterfaces.makeCollection(collect, allowsNamedName, missingNamedValue);
+    return domInterfaces.makeCollection(collect, allowsNamedName, missingNamedValue, attributes);
   }
 
   function documentTagElement(root, tag) {
@@ -8639,7 +8643,7 @@ export const __omoikane_service_worker_lifecycle = {};
     return collection;
   }
 
-  function documentHTMLCollection(root, name, filter) {
+  function documentHTMLCollection(root, name, filter, attributes) {
     let collections = safeWeakMapGet(documentCollections, root);
     if (!collections) {
       collections = new DocumentCollectionMap();
@@ -8647,7 +8651,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     let collection = safeMapGet(collections, name);
     if (!collection) {
-      collection = makeHTMLCollection(() => collectElements(root, filter));
+      collection = makeHTMLCollection(() => collectElements(root, filter), undefined, undefined, attributes);
       safeMapSet(collections, name, collection);
     }
     return collection;
@@ -9348,23 +9352,23 @@ export const __omoikane_service_worker_lifecycle = {};
     // (e.g. `document.forms.myForm`). Scoped to this document's own tree, so an
     // iframe's contentDocument resolves its own forms.
     get forms() {
-      return documentHTMLCollection(this, "forms", element => hasHTMLCollectionTag(element, ["form"]));
+      return documentHTMLCollection(this, "forms", element => hasHTMLCollectionTag(element, ["form"]), []);
     }
 
     // Same live collection for HTML links carrying an href attribute.
     get links() {
       return documentHTMLCollection(this, "links", element =>
-        hasHTMLCollectionTag(element, ["a", "area"]) && element.hasAttribute("href"));
+        hasHTMLCollectionTag(element, ["a", "area"]) && element.hasAttribute("href"), ["href"]);
     }
 
     get images() {
-      return documentHTMLCollection(this, "images", element => hasHTMLCollectionTag(element, ["img"]));
+      return documentHTMLCollection(this, "images", element => hasHTMLCollectionTag(element, ["img"]), []);
     }
 
     // Same live collection for named HTML anchors.
     get anchors() {
       return documentHTMLCollection(this, "anchors", element =>
-        hasHTMLCollectionTag(element, ["a"]) && element.hasAttribute("name"));
+        hasHTMLCollectionTag(element, ["a"]) && element.hasAttribute("name"), ["name"]);
     }
 
     get readyState() {
@@ -13080,7 +13084,8 @@ export const __omoikane_service_worker_lifecycle = {};
     get options() {
       return specialElementCollection(this, "options", () => makeHTMLCollection(() =>
         collectElements(this, element =>
-          element.namespaceURI === HTML_NAMESPACE && element.localName === "option")));
+          element.namespaceURI === HTML_NAMESPACE && element.localName === "option"),
+        undefined, undefined, []));
     }
   }
 
@@ -13091,7 +13096,8 @@ export const __omoikane_service_worker_lifecycle = {};
     get areas() {
       return specialElementCollection(this, "areas", () => makeHTMLCollection(() =>
         collectElements(this, element =>
-          element.namespaceURI === HTML_NAMESPACE && element.localName === "area")));
+          element.namespaceURI === HTML_NAMESPACE && element.localName === "area"),
+        undefined, undefined, []));
     }
   }
 
