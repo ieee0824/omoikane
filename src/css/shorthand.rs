@@ -105,6 +105,7 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "overscroll-behavior" => expand_overscroll_behavior_shorthand(value, important),
         "flex" => expand_flex_shorthand(value, important),
         "text-decoration" => expand_text_decoration_shorthand(value, important),
+        "text-emphasis" => expand_text_emphasis_shorthand(value, important),
         "text-wrap" => expand_text_wrap_shorthand(value, important),
         "line-clamp" | "-webkit-line-clamp" => expand_line_clamp_shorthand(name, value, important),
         "text-box" => expand_text_box_shorthand(value, important),
@@ -191,6 +192,7 @@ pub(super) fn is_deferred_var_shorthand(name: &str) -> bool {
             | "overscroll-behavior"
             | "flex"
             | "text-decoration"
+            | "text-emphasis"
             | "text-wrap"
             | "line-clamp"
             | "-webkit-line-clamp"
@@ -387,6 +389,10 @@ fn expand_css_wide_shorthand(
         .into_iter()
         .map(str::to_string)
         .collect(),
+        "text-emphasis" => ["text-emphasis-style", "text-emphasis-color"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         "text-wrap" => ["text-wrap-mode", "text-wrap-style"]
             .into_iter()
             .map(str::to_string)
@@ -2374,6 +2380,45 @@ fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declar
     ];
 
     decls
+}
+
+/// Expands `text-emphasis` into its independently inherited style and color.
+fn expand_text_emphasis_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let values = match value {
+        Value::List(values) => values,
+        single => vec![single],
+    };
+    let mut style = Vec::new();
+    let mut color = None;
+    for value in values {
+        if crate::css::style::is_valid_text_emphasis_style_component(&value) {
+            style.push(value);
+        } else if color.is_none() && crate::css::style::is_valid_color_value(&value) {
+            color = Some(value);
+        } else {
+            return Vec::new();
+        }
+    }
+    let style = match style.as_slice() {
+        [] => Value::Keyword("none".into()),
+        [single] => single.clone(),
+        values => Value::List(values.to_vec()),
+    };
+    if !crate::css::style::text_emphasis_style_is_valid(&style) {
+        return Vec::new();
+    }
+    vec![
+        Declaration {
+            name: "text-emphasis-style".into(),
+            value: style,
+            important,
+        },
+        Declaration {
+            name: "text-emphasis-color".into(),
+            value: color.unwrap_or_else(|| Value::Keyword("currentcolor".into())),
+            important,
+        },
+    ]
 }
 
 /// Expands `text-wrap` into its mode and style longhands.

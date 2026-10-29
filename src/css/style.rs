@@ -5292,6 +5292,17 @@ enum DeclarationValidation {
     Unvalidated,
 }
 
+impl DeclarationValidation {
+    fn map_keyword(self, map: impl FnOnce(String) -> String) -> Self {
+        match self {
+            Self::Valid(ComputedValue::Keyword(value)) => {
+                Self::Valid(ComputedValue::Keyword(map(value)))
+            }
+            validation => validation,
+        }
+    }
+}
+
 fn validate_keyword_value(value: &Value, keywords: &[&str]) -> DeclarationValidation {
     let Value::Keyword(keyword) = value else {
         return DeclarationValidation::Invalid;
@@ -5337,6 +5348,172 @@ fn is_color_property(name: &str) -> bool {
         || name.eq_ignore_ascii_case("outline-color")
         || name.eq_ignore_ascii_case("column-rule-color")
         || name.eq_ignore_ascii_case("text-decoration-color")
+        || name.eq_ignore_ascii_case("text-emphasis-color")
+}
+
+pub(crate) fn is_valid_text_emphasis_style_component(value: &Value) -> bool {
+    matches!(value, Value::String(_))
+        || matches!(value, Value::Keyword(keyword) if matches!(
+            keyword.to_ascii_lowercase().as_str(),
+            "none" | "filled" | "open" | "dot" | "circle" | "double-circle" | "triangle" | "sesame"
+        ))
+}
+
+pub(crate) fn text_emphasis_style_is_valid(value: &Value) -> bool {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if values.len() == 1 {
+        return is_valid_text_emphasis_style_component(&values[0]);
+    }
+    if values.len() != 2 {
+        return false;
+    }
+    let mut fill = false;
+    let mut shape = false;
+    values.iter().all(|value| match value {
+        Value::Keyword(keyword)
+            if matches!(keyword.to_ascii_lowercase().as_str(), "filled" | "open") && !fill =>
+        {
+            fill = true;
+            true
+        }
+        Value::Keyword(keyword)
+            if matches!(
+                keyword.to_ascii_lowercase().as_str(),
+                "dot" | "circle" | "double-circle" | "triangle" | "sesame"
+            ) && !shape =>
+        {
+            shape = true;
+            true
+        }
+        _ => false,
+    })
+}
+
+fn validate_text_emphasis_style(value: &Value) -> DeclarationValidation {
+    if let Value::Keyword(keyword) = value
+        && is_css_wide_keyword(&keyword.to_ascii_lowercase())
+    {
+        return DeclarationValidation::Unvalidated;
+    }
+    if !text_emphasis_style_is_valid(value) {
+        return DeclarationValidation::Invalid;
+    }
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if let [Value::String(value)] = values {
+        return DeclarationValidation::Valid(ComputedValue::String(value.clone()));
+    }
+    if let [Value::Keyword(keyword)] = values
+        && matches!(keyword.to_ascii_lowercase().as_str(), "none")
+    {
+        return DeclarationValidation::Valid(ComputedValue::Keyword("none".into()));
+    }
+    let fill = values.iter().find_map(|value| match value {
+        Value::Keyword(keyword)
+            if matches!(keyword.to_ascii_lowercase().as_str(), "filled" | "open") =>
+        {
+            Some(keyword.to_ascii_lowercase())
+        }
+        _ => None,
+    });
+    let shape = values.iter().find_map(|value| match value {
+        Value::Keyword(keyword)
+            if matches!(
+                keyword.to_ascii_lowercase().as_str(),
+                "dot" | "circle" | "double-circle" | "triangle" | "sesame"
+            ) =>
+        {
+            Some(keyword.to_ascii_lowercase())
+        }
+        _ => None,
+    });
+    DeclarationValidation::Valid(ComputedValue::Keyword(format!(
+        "{} {}",
+        fill.as_deref().unwrap_or("filled"),
+        shape.as_deref().unwrap_or("dot")
+    )))
+}
+
+fn keyword_components(value: &Value) -> Option<Vec<String>> {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    values
+        .iter()
+        .map(|value| match value {
+            Value::Keyword(keyword) => Some(keyword.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn validate_keyword_groups(
+    value: &Value,
+    groups: &[&[&str]],
+    singular: &[&str],
+) -> DeclarationValidation {
+    let Some(keywords) = keyword_components(value) else {
+        return DeclarationValidation::Invalid;
+    };
+    if keywords.len() == 1
+        && (is_css_wide_keyword(&keywords[0]) || singular.contains(&keywords[0].as_str()))
+    {
+        return DeclarationValidation::Valid(ComputedValue::Keyword(keywords[0].clone()));
+    }
+    if keywords.is_empty()
+        || keywords
+            .iter()
+            .any(|keyword| singular.contains(&keyword.as_str()))
+    {
+        return DeclarationValidation::Invalid;
+    }
+    let mut selected = vec![None; groups.len()];
+    for keyword in keywords {
+        let Some(group) = groups
+            .iter()
+            .position(|group| group.contains(&keyword.as_str()))
+        else {
+            return DeclarationValidation::Invalid;
+        };
+        if selected[group].replace(keyword).is_some() {
+            return DeclarationValidation::Invalid;
+        }
+    }
+    DeclarationValidation::Valid(ComputedValue::Keyword(
+        selected.into_iter().flatten().collect::<Vec<_>>().join(" "),
+    ))
+}
+
+fn validate_text_combine_upright(value: &Value) -> DeclarationValidation {
+    match value {
+        Value::Keyword(_) => {
+            validate_keyword_value(value, &["none", "all", "digits"]).map_keyword(|value| {
+                if value == "digits" {
+                    "digits 2".into()
+                } else {
+                    value
+                }
+            })
+        }
+        Value::List(values)
+            if matches!(values.as_slice(), [Value::Keyword(keyword), Value::Number(number)]
+                if keyword.eq_ignore_ascii_case("digits")
+                    && number.fract() == 0.0
+                    && (2.0..=4.0).contains(number)) =>
+        {
+            let Value::Number(number) = values[1] else {
+                unreachable!()
+            };
+            DeclarationValidation::Valid(ComputedValue::Keyword(format!("digits {}", number as u8)))
+        }
+        _ => DeclarationValidation::Invalid,
+    }
 }
 
 /// Checks runtime color channels structurally without inventing DOM values.
@@ -6422,6 +6599,61 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     }
     if key == "text-decoration-skip-ink" {
         return validate_keyword_value(value, &["auto", "all", "none"]);
+    }
+    if key == "text-emphasis-style" {
+        return validate_text_emphasis_style(value);
+    }
+    if key == "text-emphasis-position" {
+        return validate_keyword_groups(value, &[&["over", "under"], &["right", "left"]], &[])
+            .map_keyword(|value| {
+                if value == "over" || value == "under" {
+                    format!("{value} right")
+                } else {
+                    value
+                }
+            });
+    }
+    if key == "ruby-position" {
+        return validate_keyword_groups(
+            value,
+            &[&["alternate"], &["over", "under"]],
+            &["inter-character"],
+        );
+    }
+    if key == "ruby-align" {
+        return validate_keyword_value(
+            value,
+            &["start", "center", "space-between", "space-around"],
+        );
+    }
+    if key == "text-orientation" {
+        return validate_keyword_value(value, &["mixed", "upright", "sideways"]);
+    }
+    if key == "text-combine-upright" {
+        return validate_text_combine_upright(value);
+    }
+    if key == "text-autospace" {
+        return validate_keyword_groups(
+            value,
+            &[
+                &["ideograph-alpha"],
+                &["ideograph-numeric"],
+                &["punctuation"],
+                &["insert", "replace"],
+            ],
+            &["normal", "auto", "no-autospace"],
+        );
+    }
+    if key == "text-spacing-trim" {
+        return validate_keyword_groups(
+            value,
+            &[
+                &["trim-start", "space-start", "space-first"],
+                &["trim-adjacent", "space-adjacent"],
+                &["trim-end", "space-end", "allow-end"],
+            ],
+            &["normal", "auto", "trim-both", "space-all", "trim-all"],
+        );
     }
     if key == "white-space-collapse" {
         return validate_keyword_value(
@@ -14656,6 +14888,21 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
         InitialValue::Keyword("horizontal-tb"),
     ),
     (PropertyId::UnicodeBidi, InitialValue::Keyword("normal")),
+    (PropertyId::TextOrientation, InitialValue::Keyword("mixed")),
+    (
+        PropertyId::TextCombineUpright,
+        InitialValue::Keyword("none"),
+    ),
+    (PropertyId::RubyPosition, InitialValue::Keyword("alternate")),
+    (PropertyId::RubyAlign, InitialValue::Keyword("space-around")),
+    (PropertyId::TextAutospace, InitialValue::Keyword("normal")),
+    (PropertyId::TextSpacingTrim, InitialValue::Keyword("normal")),
+    (PropertyId::TextEmphasisStyle, InitialValue::Keyword("none")),
+    (
+        PropertyId::TextEmphasisPosition,
+        InitialValue::Keyword("over right"),
+    ),
+    (PropertyId::TextEmphasisColor, InitialValue::CurrentColor),
     (PropertyId::TextTransform, InitialValue::Keyword("none")),
     (PropertyId::TextIndent, InitialValue::Px(0.0)),
     (PropertyId::WordSpacing, InitialValue::Px(0.0)),
@@ -15136,12 +15383,21 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::Orphans,
     PropertyId::PointerEvents,
     PropertyId::Quotes,
+    PropertyId::RubyAlign,
+    PropertyId::RubyPosition,
     PropertyId::TextAlign,
     PropertyId::TextAlignLast,
+    PropertyId::TextAutospace,
     PropertyId::TextBoxEdge,
     PropertyId::TextDecorationSkipInk,
+    PropertyId::TextEmphasisColor,
+    PropertyId::TextEmphasisPosition,
+    PropertyId::TextEmphasisStyle,
     PropertyId::TextIndent,
     PropertyId::TextJustify,
+    PropertyId::TextCombineUpright,
+    PropertyId::TextOrientation,
+    PropertyId::TextSpacingTrim,
     PropertyId::TextWrapMode,
     PropertyId::TextWrapStyle,
     PropertyId::TextShadow,

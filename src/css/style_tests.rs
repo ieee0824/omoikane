@@ -7148,6 +7148,86 @@ fn writing_direction_properties_validate_and_support_css_wide_keywords() {
 }
 
 #[test]
+fn cjk_vertical_and_ruby_properties_validate_their_full_grammars() {
+    for (property, value) in [
+        ("text-orientation", "upright"),
+        ("text-combine-upright", "all"),
+        ("text-combine-upright", "digits 4"),
+        ("ruby-position", "alternate under"),
+        ("ruby-position", "inter-character"),
+        ("ruby-align", "space-between"),
+        ("text-autospace", "ideograph-alpha punctuation replace"),
+        ("text-spacing-trim", "space-first trim-adjacent allow-end"),
+        ("text-spacing-trim", "trim-all"),
+        ("text-emphasis-style", "open sesame"),
+        ("text-emphasis-style", "'※'"),
+        ("text-emphasis-position", "under left"),
+        ("text-emphasis-color", "#010203"),
+        ("text-emphasis", "open sesame red"),
+    ] {
+        assert!(supports_declaration(property, value), "{property}: {value}");
+    }
+    for (property, value) in [
+        ("text-orientation", "vertical"),
+        ("text-combine-upright", "digits 5"),
+        ("ruby-position", "over under"),
+        ("ruby-align", "end"),
+        ("text-autospace", "normal insert"),
+        ("text-autospace", "insert replace"),
+        ("text-spacing-trim", "trim-start space-start"),
+        ("text-emphasis-style", "filled open"),
+        ("text-emphasis-position", "over under"),
+        ("text-emphasis", "dot circle red"),
+    ] {
+        assert!(
+            !supports_declaration(property, value),
+            "{property}: {value}"
+        );
+    }
+}
+
+#[test]
+fn cjk_vertical_and_ruby_properties_compute_canonically_and_inherit() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let body = NodeHandle::element("body");
+    let child = NodeHandle::element("span");
+    document.append_child(html.clone());
+    html.append_child(body.clone());
+    body.append_child(child.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { text-orientation:upright; text-combine-upright:digits; \
+             ruby-position:under alternate; ruby-align:center; \
+             text-autospace:replace punctuation ideograph-alpha; \
+             text-spacing-trim:allow-end trim-start; \
+             text-emphasis:sesame open rgb(1 2 3); text-emphasis-position:under; }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&child);
+    for (property, expected) in [
+        ("text-orientation", "upright"),
+        ("text-combine-upright", "digits 2"),
+        ("ruby-position", "alternate under"),
+        ("ruby-align", "center"),
+        ("text-autospace", "ideograph-alpha punctuation replace"),
+        ("text-spacing-trim", "trim-start allow-end"),
+        ("text-emphasis-style", "open sesame"),
+        ("text-emphasis-color", "#010203"),
+        ("text-emphasis-position", "under right"),
+    ] {
+        assert_eq!(
+            style.get(property).map(ComputedValue::css_text),
+            Some(expected.into())
+        );
+    }
+}
+
+#[test]
 fn inherits_direction_and_writing_mode_but_not_unicode_bidi_from_parent() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
