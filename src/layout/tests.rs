@@ -3265,6 +3265,88 @@ fn inter_word_justification_expands_only_selected_lines() {
 }
 
 #[test]
+fn line_clamp_limits_direct_and_descendant_line_boxes() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let direct = NodeHandle::element("div");
+    direct.set_attribute("id", "direct");
+    direct.append_child(NodeHandle::text("aa bb cc dd"));
+    let nested = NodeHandle::element("div");
+    nested.set_attribute("id", "nested");
+    for text in ["first", "second", "third"] {
+        let paragraph = NodeHandle::element("p");
+        paragraph.append_child(NodeHandle::text(text));
+        nested.append_child(paragraph);
+    }
+    let exact = NodeHandle::element("div");
+    exact.set_attribute("id", "exact");
+    for text in ["first", "second"] {
+        let paragraph = NodeHandle::element("p");
+        paragraph.append_child(NodeHandle::text(text));
+        exact.append_child(paragraph);
+    }
+    document.append_child(body.clone());
+    body.append_child(direct.clone());
+    body.append_child(nested.clone());
+    body.append_child(exact.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div, p { margin:0; font:10px monospace; line-height:10px } \
+             #direct { width:50px; line-clamp:1 \"MORE\" } \
+             #nested, #exact { line-clamp:2 } \
+             #nested p:first-child { position:relative; top:30px } \
+             #nested p:nth-child(2) { block-ellipsis:\"INNER\" }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let direct_box = find_layout_box(&layout, &direct).unwrap();
+    assert_eq!(direct_box.lines.len(), 2);
+    assert!((direct_box.dimensions.content.height - 10.0).abs() < 0.01);
+    assert_eq!(direct_box.overflow, Overflow::Clip);
+    assert_eq!(
+        direct_box.lines[0]
+            .text_overflow
+            .as_ref()
+            .and_then(|paint| paint.fragments.last())
+            .and_then(InlineFragment::text),
+        Some("MORE")
+    );
+
+    let nested_box = find_layout_box(&layout, &nested).unwrap();
+    assert!(nested_box.lines.is_empty());
+    assert!((nested_box.dimensions.content.height - 20.0).abs() < 0.01);
+    assert_eq!(nested_box.overflow, Overflow::Clip);
+    assert_eq!(
+        nested_box.children[1].lines[0]
+            .text_overflow
+            .as_ref()
+            .and_then(|paint| paint.fragments.last())
+            .and_then(InlineFragment::text),
+        Some("INNER")
+    );
+
+    let exact_box = find_layout_box(&layout, &exact).unwrap();
+    assert!((exact_box.dimensions.content.height - 20.0).abs() < 0.01);
+    assert_eq!(exact_box.overflow, Overflow::Visible);
+}
+
+#[test]
 fn horizontal_rtl_inline_geometry_uses_logical_start_and_end() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

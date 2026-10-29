@@ -653,159 +653,196 @@ fn apply_text_overflow(
     let Some(marker_node) = nodes.first().cloned() else {
         return;
     };
-    let available_width = available_width.max(0.0);
-    let marker_metrics = font_metrics(style);
-    let marker_width = measure_text_width("…", marker_metrics).max(0.0);
-
     for line in lines {
         if !exceeds_available_inline_width(line.rect.width, available_width) {
             continue;
         }
-        let content_budget = (available_width - marker_width).max(0.0);
-        let content_start = if direction_rtl {
-            start + marker_width
-        } else {
-            start
-        };
-        let content_end = if direction_rtl {
-            start + available_width
-        } else {
-            start + content_budget
-        };
-        let mut decorations = line
-            .fragments
-            .iter()
-            .filter(|fragment| matches!(fragment.content, InlineFragmentContent::InlineBox(_)))
-            .filter_map(|fragment| {
-                let left = fragment.rect.x.max(content_start);
-                let right = (fragment.rect.x + fragment.rect.width).min(content_end);
-                (right > left).then(|| {
-                    let mut clipped = fragment.clone();
-                    clipped.rect.x = left;
-                    clipped.rect.width = right - left;
-                    clipped
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut candidates = line
-            .fragments
-            .iter()
-            .filter(|fragment| !matches!(fragment.content, InlineFragmentContent::InlineBox(_)))
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
-        if direction_rtl {
-            candidates.reverse();
-        }
-        let first_unit_width = candidates
-            .iter()
-            .find_map(|fragment| match &fragment.content {
-                InlineFragmentContent::Text(text) => {
-                    let odd_level = fragment
-                        .style
-                        .resolved_bidi_level
-                        .map_or(direction_rtl, |level| level % 2 == 1);
-                    let keep_prefix = direction_rtl == odd_level;
-                    let mut graphemes = text.graphemes(true);
-                    let grapheme = if keep_prefix {
-                        graphemes.next()
-                    } else {
-                        graphemes.next_back()
-                    }?;
-                    Some(measure_text_width(grapheme, fragment.metrics))
-                }
-                _ => Some(fragment.rect.width.max(0.0)),
-            });
-        // The inline-start unit must be clipped rather than removed to make
-        // room for an ellipsis. Leaving the original fragments in place lets
-        // the container's overflow clip expose the fitting part of that unit.
-        if first_unit_width
-            .is_some_and(|width| exceeds_available_inline_width(width, content_budget))
-        {
-            continue;
-        }
+        apply_overflow_marker(
+            line,
+            &marker_node,
+            start,
+            available_width,
+            direction_rtl,
+            style,
+            "…",
+        );
+    }
+}
 
-        let mut remaining = content_budget;
-        let mut cursor = if direction_rtl {
-            start + available_width
-        } else {
-            start
-        };
-        let mut visible = Vec::new();
-        for fragment in candidates {
-            let mut painted = fragment.clone();
-            let width = fragment.rect.width.max(0.0);
-            if width > remaining + 0.01 {
-                let InlineFragmentContent::Text(text) = &fragment.content else {
-                    break;
-                };
+pub(super) fn apply_block_ellipsis(
+    line: &mut LineBox,
+    marker_node: &NodeHandle,
+    start: f32,
+    available_width: f32,
+    direction_rtl: bool,
+    style: &ComputedStyle,
+    marker: &str,
+) {
+    apply_overflow_marker(
+        line,
+        marker_node,
+        start,
+        available_width,
+        direction_rtl,
+        style,
+        marker,
+    );
+}
+
+fn apply_overflow_marker(
+    line: &mut LineBox,
+    marker_node: &NodeHandle,
+    start: f32,
+    available_width: f32,
+    direction_rtl: bool,
+    style: &ComputedStyle,
+    marker_text: &str,
+) {
+    let available_width = available_width.max(0.0);
+    let marker_metrics = font_metrics(style);
+    let marker_width = measure_text_width(marker_text, marker_metrics).max(0.0);
+    let content_budget = (available_width - marker_width).max(0.0);
+    let content_start = if direction_rtl {
+        start + marker_width
+    } else {
+        start
+    };
+    let content_end = if direction_rtl {
+        start + available_width
+    } else {
+        start + content_budget
+    };
+    let mut decorations = line
+        .fragments
+        .iter()
+        .filter(|fragment| matches!(fragment.content, InlineFragmentContent::InlineBox(_)))
+        .filter_map(|fragment| {
+            let left = fragment.rect.x.max(content_start);
+            let right = (fragment.rect.x + fragment.rect.width).min(content_end);
+            (right > left).then(|| {
+                let mut clipped = fragment.clone();
+                clipped.rect.x = left;
+                clipped.rect.width = right - left;
+                clipped
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut candidates = line
+        .fragments
+        .iter()
+        .filter(|fragment| !matches!(fragment.content, InlineFragmentContent::InlineBox(_)))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
+    if direction_rtl {
+        candidates.reverse();
+    }
+    let first_unit_width = candidates
+        .iter()
+        .find_map(|fragment| match &fragment.content {
+            InlineFragmentContent::Text(text) => {
                 let odd_level = fragment
                     .style
                     .resolved_bidi_level
                     .map_or(direction_rtl, |level| level % 2 == 1);
                 let keep_prefix = direction_rtl == odd_level;
-                let Some((text, width)) =
-                    text_fitting_graphemes(text, fragment.metrics, remaining, keep_prefix)
-                else {
-                    break;
-                };
-                let original = match &fragment.content {
-                    InlineFragmentContent::Text(text) => text,
-                    _ => unreachable!(),
-                };
-                let start = if keep_prefix {
-                    0
+                let mut graphemes = text.graphemes(true);
+                let grapheme = if keep_prefix {
+                    graphemes.next()
                 } else {
-                    original.len() - text.len()
-                };
-                painted.text_source =
-                    text_source::slice(&fragment.text_source, original, start..start + text.len());
-                painted.content = InlineFragmentContent::Text(text);
-                painted.rect.width = width;
+                    graphemes.next_back()
+                }?;
+                Some(measure_text_width(grapheme, fragment.metrics))
             }
+            _ => Some(fragment.rect.width.max(0.0)),
+        });
+    // The inline-start unit must be clipped rather than removed to make
+    // room for an ellipsis. Leaving the original fragments in place lets
+    // the container's overflow clip expose the fitting part of that unit.
+    if first_unit_width.is_some_and(|width| exceeds_available_inline_width(width, content_budget)) {
+        return;
+    }
 
-            let painted_width = painted.rect.width.max(0.0);
-            if direction_rtl {
-                cursor -= painted_width;
-                painted.rect.x = cursor;
-            } else {
-                painted.rect.x = cursor;
-                cursor += painted_width;
-            }
-            remaining = (remaining - painted_width).max(0.0);
-            visible.push(painted);
-            if width > remaining + painted_width + 0.01 {
+    let mut remaining = content_budget;
+    let mut cursor = if direction_rtl {
+        start + available_width
+    } else {
+        start
+    };
+    let mut visible = Vec::new();
+    for fragment in candidates {
+        let mut painted = fragment.clone();
+        let width = fragment.rect.width.max(0.0);
+        if width > remaining + 0.01 {
+            let InlineFragmentContent::Text(text) = &fragment.content else {
                 break;
-            }
+            };
+            let odd_level = fragment
+                .style
+                .resolved_bidi_level
+                .map_or(direction_rtl, |level| level % 2 == 1);
+            let keep_prefix = direction_rtl == odd_level;
+            let Some((text, width)) =
+                text_fitting_graphemes(text, fragment.metrics, remaining, keep_prefix)
+            else {
+                break;
+            };
+            let original = match &fragment.content {
+                InlineFragmentContent::Text(text) => text,
+                _ => unreachable!(),
+            };
+            let start = if keep_prefix {
+                0
+            } else {
+                original.len() - text.len()
+            };
+            painted.text_source =
+                text_source::slice(&fragment.text_source, original, start..start + text.len());
+            painted.content = InlineFragmentContent::Text(text);
+            painted.rect.width = width;
         }
 
-        let mut marker_style = FragmentStyle::from_computed(style);
-        marker_style.resolved_bidi_level = Some(if direction_rtl { 1 } else { 0 });
-        let marker = InlineFragment {
-            node: marker_node.clone(),
-            text_source: Vec::new(),
-            content: InlineFragmentContent::Text("…".to_string()),
-            rect: Rect {
-                x: if direction_rtl {
-                    start
-                } else {
-                    start + (available_width - marker_width).max(0.0)
-                },
-                y: line.baseline - marker_metrics.ascent,
-                width: marker_width,
-                height: marker_metrics.ascent + marker_metrics.descent,
-            },
-            metrics: marker_metrics,
-            vertical_align: VerticalAlign::Baseline,
-            source_end_token: 0,
-            style: marker_style,
-        };
-        visible.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
-        decorations.extend(visible);
-        decorations.push(marker);
-        line.text_overflow = Some(TextOverflowPaint {
-            fragments: decorations,
-        });
+        let painted_width = painted.rect.width.max(0.0);
+        if direction_rtl {
+            cursor -= painted_width;
+            painted.rect.x = cursor;
+        } else {
+            painted.rect.x = cursor;
+            cursor += painted_width;
+        }
+        remaining = (remaining - painted_width).max(0.0);
+        visible.push(painted);
+        if width > remaining + painted_width + 0.01 {
+            break;
+        }
     }
+
+    let mut marker_style = FragmentStyle::from_computed(style);
+    marker_style.resolved_bidi_level = Some(if direction_rtl { 1 } else { 0 });
+    let marker = InlineFragment {
+        node: marker_node.clone(),
+        text_source: Vec::new(),
+        content: InlineFragmentContent::Text(marker_text.to_string()),
+        rect: Rect {
+            x: if direction_rtl {
+                start
+            } else {
+                start + (available_width - marker_width).max(0.0)
+            },
+            y: line.baseline - marker_metrics.ascent,
+            width: marker_width,
+            height: marker_metrics.ascent + marker_metrics.descent,
+        },
+        metrics: marker_metrics,
+        vertical_align: VerticalAlign::Baseline,
+        source_end_token: 0,
+        style: marker_style,
+    };
+    visible.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
+    decorations.extend(visible);
+    decorations.push(marker);
+    line.text_overflow = Some(TextOverflowPaint {
+        fragments: decorations,
+    });
 }
 
 fn text_fitting_graphemes(
