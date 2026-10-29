@@ -12080,11 +12080,35 @@ fn font_size_adjust_scales_selected_font_metrics_and_shaping_size() {
     assert!((metrics.ascent - expected.ascent).abs() < 0.01);
     assert!((metrics.average_advance - expected.average_advance).abs() < 0.01);
 
-    let from_font = resolve_style_for_test(
-        "div { font-size: 20px; font-size-adjust: from-font }",
-        "div",
+    // `from-font` is resolved to a number during style resolution, so the
+    // resolver must see the same font as layout. Otherwise the ratio comes
+    // from the platform's default font and only matches on some hosts (#1541).
+    let mut web_fonts = crate::font::WebFontRegistry::new();
+    web_fonts.push_shared(
+        "Liberation Sans",
+        crate::font::FontWeight(400),
+        crate::font::FontStyle::Normal,
+        font,
     );
-    let metrics = super::with_layout_fonts(vec![font], None, || font_metrics(&from_font));
+    let web_fonts = Arc::new(web_fonts);
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.set_web_fonts(Arc::clone(&web_fonts));
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "* { font-family: 'Liberation Sans' } \
+             div { font-size: 20px; font-size-adjust: from-font }",
+        )
+        .unwrap(),
+    );
+    let from_font = resolver.computed_style(&div);
+    let metrics =
+        super::with_layout_fonts(Vec::new(), Some(web_fonts), || font_metrics(&from_font));
     assert!((metrics.font_size - 20.0).abs() < 0.01);
 }
 
