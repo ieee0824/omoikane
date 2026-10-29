@@ -6878,6 +6878,7 @@ fn font_palette_values_resolve_for_the_selected_family_and_reach_fragments() {
                 (4, [1, 2, 3, 128]),
                 (9, [6, 5, 4, 255])
             ],
+            mix: None,
         }
     );
     let fragment = crate::layout::FragmentStyle::from_computed(&style);
@@ -6917,6 +6918,35 @@ fn font_palette_values_resolve_for_the_selected_family_and_reach_fragments() {
             expected
         );
     }
+}
+
+#[test]
+fn font_palette_mix_is_deferred_with_resolved_named_components() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@font-palette-values --warm { font-family: Demo; base-palette: 0; } \
+             @font-palette-values --cool { font-family: Demo; base-palette: 1; } \
+             div { font-family: Demo; font-palette: palette-mix(in srgb, --warm 25%, --cool 75%); }",
+        )
+        .unwrap(),
+    );
+    let palette = resolver.computed_style(&element).font_palette().clone();
+    let mix = palette.mix.as_ref().expect("deferred palette mix");
+    assert_eq!(mix.method, "in srgb");
+    assert_eq!(mix.components.len(), 2);
+    assert_eq!(
+        mix.components[0].palette.base,
+        crate::font::FontPaletteBase::Index(0)
+    );
+    assert_eq!(mix.components[0].weight_bits, 25.0_f32.to_bits());
+    assert_eq!(
+        mix.components[1].palette.base,
+        crate::font::FontPaletteBase::Index(1)
+    );
+    assert_eq!(mix.components[1].weight_bits, 75.0_f32.to_bits());
 }
 
 #[test]

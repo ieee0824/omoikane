@@ -4412,21 +4412,6 @@ impl StyleResolver {
         let Some(ComputedValue::Keyword(name)) = properties.get(&PropertyId::FontPalette) else {
             return crate::font::FontPalette::default();
         };
-        if name.eq_ignore_ascii_case("light") {
-            return crate::font::FontPalette {
-                base: crate::font::FontPaletteBase::Light,
-                overrides: Vec::new(),
-            };
-        }
-        if name.eq_ignore_ascii_case("dark") {
-            return crate::font::FontPalette {
-                base: crate::font::FontPaletteBase::Dark,
-                overrides: Vec::new(),
-            };
-        }
-        if !name.starts_with("--") {
-            return crate::font::FontPalette::default();
-        }
         let families = match properties.get(&PropertyId::FontFamily) {
             Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
                 FontFamilyKey::new(value).member_keys()
@@ -4453,7 +4438,13 @@ impl StyleResolver {
                 );
             }
         }
-        definitions.resolve(name, &families).unwrap_or_default()
+        let declaration = crate::css::parse_style_attribute(&format!("font-palette: {name}"));
+        declaration
+            .first()
+            .and_then(|declaration| {
+                resolve_font_palette_value(&declaration.value, &definitions, &families, 0)
+            })
+            .unwrap_or_default()
     }
 
     /// Applies a deterministic animation snapshot. Paused animations are
@@ -11435,6 +11426,52 @@ impl FontPaletteValues {
     }
 }
 
+fn resolve_font_palette_value(
+    value: &Value,
+    definitions: &FontPaletteValues,
+    families: &[FontFamilyKey],
+    depth: usize,
+) -> Option<crate::font::FontPalette> {
+    if depth >= 16 {
+        return None;
+    }
+    if let Value::Keyword(name) = value {
+        if name.eq_ignore_ascii_case("normal") {
+            return Some(crate::font::FontPalette::default());
+        }
+        if name.eq_ignore_ascii_case("light") || name.eq_ignore_ascii_case("dark") {
+            return Some(crate::font::FontPalette {
+                base: if name.eq_ignore_ascii_case("light") {
+                    crate::font::FontPaletteBase::Light
+                } else {
+                    crate::font::FontPaletteBase::Dark
+                },
+                overrides: Vec::new(),
+                mix: None,
+            });
+        }
+        return name
+            .starts_with("--")
+            .then(|| definitions.resolve(name, families))
+            .flatten();
+    }
+    let (method, components) = font_palette::mix_components(value)?;
+    let components = components
+        .into_iter()
+        .map(|(value, weight)| {
+            Some(crate::font::FontPaletteMixComponent {
+                palette: resolve_font_palette_value(value, definitions, families, depth + 1)?,
+                weight_bits: weight.to_bits(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(crate::font::FontPalette {
+        base: crate::font::FontPaletteBase::default(),
+        overrides: Vec::new(),
+        mix: Some(Box::new(crate::font::FontPaletteMix { method, components })),
+    })
+}
+
 fn collect_font_palette_values(
     rules: &[Rule],
     values: &mut FontPaletteValues,
@@ -11492,6 +11529,7 @@ fn collect_font_palette_values(
                     crate::font::FontPalette {
                         base,
                         overrides: overrides.clone(),
+                        mix: None,
                     },
                 );
             }

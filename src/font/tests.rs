@@ -1558,6 +1558,7 @@ fn solid_colr_layers_rasterize_and_unsupported_transforms_fall_back() {
             &FontPalette {
                 base: FontPaletteBase::Index(1),
                 overrides: Vec::new(),
+                mix: None,
             },
             [1, 2, 3, 255],
         )
@@ -1577,11 +1578,79 @@ fn solid_colr_layers_rasterize_and_unsupported_transforms_fall_back() {
             &FontPalette {
                 base: FontPaletteBase::Index(0),
                 overrides: vec![(9, [9, 8, 7, 255])],
+                mix: None,
             },
             [1, 2, 3, 255],
         )
         .unwrap();
     assert_eq!(overridden[0].color, [9, 8, 7, 255]);
+
+    let first = font
+        .rasterize_color_glyph(
+            solid,
+            32.0,
+            &FontPalette {
+                base: FontPaletteBase::Index(0),
+                overrides: Vec::new(),
+                mix: None,
+            },
+            [1, 2, 3, 255],
+        )
+        .unwrap();
+    let second = font
+        .rasterize_color_glyph(
+            solid,
+            32.0,
+            &FontPalette {
+                base: FontPaletteBase::Index(1),
+                overrides: Vec::new(),
+                mix: None,
+            },
+            [1, 2, 3, 255],
+        )
+        .unwrap();
+    let mixed = font
+        .rasterize_color_glyph(
+            solid,
+            32.0,
+            &FontPalette {
+                base: FontPaletteBase::Index(0),
+                overrides: Vec::new(),
+                mix: Some(Box::new(FontPaletteMix {
+                    method: "in srgb".to_string(),
+                    components: vec![
+                        FontPaletteMixComponent {
+                            palette: FontPalette {
+                                base: FontPaletteBase::Index(0),
+                                overrides: Vec::new(),
+                                mix: None,
+                            },
+                            weight_bits: 25.0_f32.to_bits(),
+                        },
+                        FontPaletteMixComponent {
+                            palette: FontPalette {
+                                base: FontPaletteBase::Index(1),
+                                overrides: Vec::new(),
+                                mix: None,
+                            },
+                            weight_bits: 75.0_f32.to_bits(),
+                        },
+                    ],
+                })),
+            },
+            [1, 2, 3, 255],
+        )
+        .unwrap();
+    for ((mixed, first), second) in mixed.iter().zip(&first).zip(&second) {
+        assert_eq!(
+            mixed.color,
+            crate::paint::color4::mix_palette_colors(
+                "in srgb",
+                &[(first.color, 25.0), (second.color, 75.0)]
+            )
+            .unwrap()
+        );
+    }
 }
 
 #[test]

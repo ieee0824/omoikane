@@ -188,6 +188,184 @@ impl CssColor {
     }
 }
 
+/// Mixes concrete CPAL colors in the CSS `palette-mix()` interpolation space.
+pub(crate) fn mix_palette_colors(method: &str, colors: &[([u8; 4], f32)]) -> Option<[u8; 4]> {
+    let mut words = method.split_ascii_whitespace();
+    if !words.next()?.eq_ignore_ascii_case("in") {
+        return None;
+    }
+    let space_name = words.next()?.to_ascii_lowercase();
+    let is_hsl = space_name == "hsl";
+    let space = match space_name.as_str() {
+        "hsl" => Space::Hwb,
+        "hwb" => Space::Hwb,
+        "lab" => Space::Lab,
+        "lch" => Space::Lch,
+        "oklab" => Space::Oklab,
+        "oklch" => Space::Oklch,
+        "srgb" => Space::Srgb,
+        "srgb-linear" => Space::SrgbLinear,
+        "display-p3" => Space::DisplayP3,
+        "a98-rgb" => Space::A98Rgb,
+        "prophoto-rgb" => Space::ProphotoRgb,
+        "rec2020" => Space::Rec2020,
+        "xyz" | "xyz-d65" => Space::XyzD65,
+        "xyz-d50" => Space::XyzD50,
+        _ => return None,
+    };
+    let hue_method = match (words.next(), words.next(), words.next()) {
+        (None, None, None) => "shorter",
+        (Some(method), Some("hue"), None) => method,
+        _ => return None,
+    };
+    if colors.is_empty()
+        || colors
+            .iter()
+            .any(|(_, weight)| !weight.is_finite() || *weight < 0.0)
+    {
+        return None;
+    }
+    let sum = colors.iter().map(|(_, weight)| *weight as f64).sum::<f64>();
+    if sum <= 0.0 {
+        return None;
+    }
+    let alpha_multiplier = (sum / 100.0).min(1.0);
+    let hue_index = match space {
+        Space::Hwb => Some(0),
+        Space::Lch | Space::Oklch => Some(2),
+        _ => None,
+    };
+    let converted = colors
+        .iter()
+        .map(|(rgba, weight)| {
+            let rgb = [rgba[0], rgba[1], rgba[2]].map(|value| f64::from(value) / 255.0);
+            let channels = if is_hsl {
+                rgb_to_hsl(rgb)
+            } else {
+                convert::from_srgb(space, rgb)
+            };
+            (channels, f64::from(rgba[3]) / 255.0, f64::from(*weight))
+        })
+        .collect::<Vec<_>>();
+    // An achromatic component has a missing hue. CSS hue fixup borrows a
+    // present hue before interpolation instead of treating it as zero degrees.
+    let reference_hue = hue_index.and_then(|index| {
+        converted
+            .iter()
+            .find(|(channels, _, _)| !powerless_hue(space, is_hsl, channels))
+            .map(|(channels, _, _)| channels[index])
+    });
+    let mut premultiplied = [0.0; 3];
+    let mut alpha = 0.0;
+    let mut hue_total = 0.0;
+    for (mut channels, source_alpha, weight) in converted {
+        let normalized = weight / sum;
+        if let (Some(index), Some(reference)) = (hue_index, reference_hue) {
+            channels[index] = if powerless_hue(space, is_hsl, &channels) {
+                reference
+            } else {
+                adjusted_hue(reference, channels[index], hue_method)?
+            };
+            hue_total += channels[index] * source_alpha * normalized;
+        }
+        alpha += source_alpha * normalized;
+        for index in 0..3 {
+            if Some(index) != hue_index {
+                premultiplied[index] += channels[index] * source_alpha * normalized;
+            }
+        }
+    }
+    let mut channels = [0.0; 3];
+    if alpha > 0.0 {
+        for index in 0..3 {
+            channels[index] = if Some(index) == hue_index {
+                hue_total / alpha
+            } else {
+                premultiplied[index] / alpha
+            };
+        }
+    }
+    if let Some(index) = hue_index {
+        channels[index] = channels[index].rem_euclid(360.0);
+    }
+    let rgb = if is_hsl {
+        hsl_to_rgb(channels)
+    } else {
+        convert::to_srgb(space, channels)
+    };
+    Some([
+        (rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+        (rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+        (rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+        (alpha * alpha_multiplier * 255.0).round().clamp(0.0, 255.0) as u8,
+    ])
+}
+
+fn powerless_hue(space: Space, is_hsl: bool, channels: &[f64; 3]) -> bool {
+    if is_hsl {
+        channels[1].abs() <= 1e-12
+    } else {
+        match space {
+            Space::Hwb => channels[1] + channels[2] >= 1.0 - 1e-12,
+            Space::Lch | Space::Oklch => channels[1].abs() <= 1e-12,
+            _ => false,
+        }
+    }
+}
+
+fn rgb_to_hsl(rgb: [f64; 3]) -> [f64; 3] {
+    let max = rgb.into_iter().fold(f64::NEG_INFINITY, f64::max);
+    let min = rgb.into_iter().fold(f64::INFINITY, f64::min);
+    let lightness = (max + min) / 2.0;
+    let delta = max - min;
+    if delta == 0.0 {
+        return [0.0, 0.0, lightness];
+    }
+    let saturation = delta / (1.0 - (2.0 * lightness - 1.0).abs());
+    let hue = if max == rgb[0] {
+        60.0 * ((rgb[1] - rgb[2]) / delta).rem_euclid(6.0)
+    } else if max == rgb[1] {
+        60.0 * ((rgb[2] - rgb[0]) / delta + 2.0)
+    } else {
+        60.0 * ((rgb[0] - rgb[1]) / delta + 4.0)
+    };
+    [hue, saturation, lightness]
+}
+
+fn hsl_to_rgb([hue, saturation, lightness]: [f64; 3]) -> [f64; 3] {
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let h = hue.rem_euclid(360.0) / 60.0;
+    let x = chroma * (1.0 - (h.rem_euclid(2.0) - 1.0).abs());
+    let pure = match h.floor() as u32 {
+        0 => [chroma, x, 0.0],
+        1 => [x, chroma, 0.0],
+        2 => [0.0, chroma, x],
+        3 => [0.0, x, chroma],
+        4 => [x, 0.0, chroma],
+        _ => [chroma, 0.0, x],
+    };
+    let offset = lightness - chroma / 2.0;
+    pure.map(|value| value + offset)
+}
+
+fn adjusted_hue(reference: f64, hue: f64, method: &str) -> Option<f64> {
+    let shorter = (hue - reference + 180.0).rem_euclid(360.0) - 180.0;
+    let delta = match method.to_ascii_lowercase().as_str() {
+        "shorter" => shorter,
+        "longer" => {
+            if shorter == 0.0 {
+                360.0
+            } else {
+                shorter - shorter.signum() * 360.0
+            }
+        }
+        "increasing" => (hue - reference).rem_euclid(360.0),
+        "decreasing" => -((reference - hue).rem_euclid(360.0)),
+        _ => return None,
+    };
+    Some(reference + delta)
+}
+
 fn canonical_math(text: &str) -> Option<String> {
     text.contains('(').then(|| math::canonical(text)).flatten()
 }
@@ -350,6 +528,35 @@ fn angle(text: &str, context: Option<ColorContext>) -> Option<Option<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_palette_colors_mix_in_the_requested_space_and_premultiplied_alpha() {
+        assert_eq!(
+            mix_palette_colors(
+                "in srgb",
+                &[([255, 0, 0, 255], 50.0), ([0, 0, 255, 255], 50.0)]
+            ),
+            Some([128, 0, 128, 255])
+        );
+        assert_eq!(
+            mix_palette_colors(
+                "in srgb",
+                &[([255, 0, 0, 255], 50.0), ([0, 0, 255, 0], 50.0)]
+            ),
+            Some([255, 0, 0, 128])
+        );
+        assert_eq!(
+            mix_palette_colors("in srgb", &[([10, 20, 30, 255], 50.0)]),
+            Some([10, 20, 30, 128])
+        );
+        assert_eq!(
+            mix_palette_colors(
+                "in hsl",
+                &[([128, 128, 128, 255], 50.0), ([0, 0, 255, 255], 50.0)]
+            ),
+            Some([64, 64, 191, 255])
+        );
+    }
 
     #[test]
     fn extreme_components_are_finite_and_invalid_number_tokens_are_rejected() {

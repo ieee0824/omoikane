@@ -176,3 +176,49 @@ pub(super) fn compute(value: &Value) -> String {
     }));
     format!("palette-mix({})", serialized.join(", "))
 }
+
+pub(super) fn mix_components(value: &Value) -> Option<(String, Vec<(&Value, f32)>)> {
+    let Value::Function { name, arguments } = value else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("palette-mix") || !valid(value) {
+        return None;
+    }
+    let components = palette_arguments(arguments)
+        .iter()
+        .map(component)
+        .collect::<Option<Vec<_>>>()?;
+    let mut weights = components
+        .iter()
+        .map(|(_, weight)| match weight {
+            Some(weight) => individual_transform::fixed_percentage_expression(weight).map(Some),
+            None => Some(None),
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let specified: f32 = weights.iter().flatten().sum();
+    let omitted = weights.iter().filter(|weight| weight.is_none()).count();
+    if omitted > 0 {
+        let remainder = (100.0 - specified).max(0.0) / omitted as f32;
+        for weight in &mut weights {
+            if weight.is_none() {
+                *weight = Some(remainder);
+            }
+        }
+    }
+    let weights = weights.into_iter().flatten().collect::<Vec<_>>();
+    (weights.iter().sum::<f32>() > 0.0).then(|| {
+        let method = if has_interpolation(arguments) {
+            interpolation(&arguments[0]).unwrap()
+        } else {
+            "in oklab".to_string()
+        };
+        (
+            method,
+            components
+                .into_iter()
+                .zip(weights)
+                .map(|((palette, _), weight)| (palette, weight))
+                .collect(),
+        )
+    })
+}

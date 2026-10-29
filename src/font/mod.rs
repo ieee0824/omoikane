@@ -113,6 +113,32 @@ pub struct FontPalette {
     pub base: FontPaletteBase,
     /// Palette entry replacements in source order; later duplicates win.
     pub overrides: Vec<(u16, [u8; 4])>,
+    /// A deferred palette mix, resolved only after the selected font exposes CPAL entries.
+    pub mix: Option<Box<FontPaletteMix>>,
+}
+
+/// A color-space interpolation recipe for two or more font palettes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FontPaletteMix {
+    /// CSS interpolation method, for example `in oklab` or `in lch longer hue`.
+    pub method: String,
+    /// Resolved palette components and percentage weights in source order.
+    pub components: Vec<FontPaletteMixComponent>,
+}
+
+/// One deferred palette and its non-negative percentage weight.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FontPaletteMixComponent {
+    /// The recursively resolved palette request.
+    pub palette: FontPalette,
+    /// IEEE-754 bits of the computed percentage, retained for deterministic hashing.
+    pub weight_bits: u32,
+}
+
+impl FontPaletteMixComponent {
+    fn weight(&self) -> f32 {
+        f32::from_bits(self.weight_bits)
+    }
 }
 
 /// One positioned glyph produced by OpenType shaping.
@@ -723,20 +749,22 @@ impl Font {
         }
         let cpal_data = face.raw_face().table(Tag::from_bytes(b"CPAL"))?;
         let cpal = rustybuzz::ttf_parser::cpal::Table::parse(cpal_data)?;
+        let entry_count = u16::from_be_bytes([*cpal_data.get(2)?, *cpal_data.get(3)?]);
         let palette_index =
             resolve_cpal_palette_index(cpal_data, cpal.palettes().get(), palette.base);
-        let entry_count = u16::from_be_bytes([*cpal_data.get(2)?, *cpal_data.get(3)?]);
-        let palette_entries = (0..entry_count)
+        let source_palette_entries = (0..entry_count)
             .filter_map(|entry| cpal.get(palette_index, entry).map(|color| (entry, color)))
-            .collect::<Vec<_>>();
+            .collect();
+        let resolved_palette_entries =
+            resolve_font_palette_entries(cpal_data, &cpal, entry_count, palette_index, palette, 0)?;
         let mut painter = SolidColorGlyphPainter {
             font: self,
             size_px,
             current: None,
             layers: Vec::new(),
             unsupported: false,
-            palette_entries,
-            overrides: &palette.overrides,
+            source_palette_entries,
+            resolved_palette_entries,
         };
         face.paint_color_glyph(
             glyph_id,
@@ -902,6 +930,82 @@ impl Font {
     }
 }
 
+fn resolve_font_palette_entries(
+    cpal_data: &[u8],
+    cpal: &rustybuzz::ttf_parser::cpal::Table<'_>,
+    entry_count: u16,
+    fallback_index: u16,
+    palette: &FontPalette,
+    depth: usize,
+) -> Option<Vec<(u16, RgbaColor)>> {
+    if depth >= 16 {
+        return None;
+    }
+    let Some(mix) = &palette.mix else {
+        let palette_index =
+            resolve_cpal_palette_index(cpal_data, cpal.palettes().get(), palette.base);
+        return Some(
+            (0..entry_count)
+                .filter_map(|entry| {
+                    let mut color = cpal.get(palette_index, entry)?;
+                    if let Some((_, override_color)) = palette
+                        .overrides
+                        .iter()
+                        .rev()
+                        .find(|(override_entry, _)| *override_entry == entry)
+                    {
+                        color = RgbaColor::new(
+                            override_color[0],
+                            override_color[1],
+                            override_color[2],
+                            override_color[3],
+                        );
+                    }
+                    Some((entry, color))
+                })
+                .collect(),
+        );
+    };
+    let components = mix
+        .components
+        .iter()
+        .map(|component| {
+            Some((
+                resolve_font_palette_entries(
+                    cpal_data,
+                    cpal,
+                    entry_count,
+                    fallback_index,
+                    &component.palette,
+                    depth + 1,
+                )?,
+                component.weight(),
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(
+        (0..entry_count)
+            .filter_map(|entry| {
+                let colors = components
+                    .iter()
+                    .map(|(entries, weight)| {
+                        let color = entries
+                            .iter()
+                            .find_map(|(candidate, color)| (*candidate == entry).then_some(*color))
+                            .or_else(|| cpal.get(fallback_index, entry))?;
+                        Some(([color.red, color.green, color.blue, color.alpha], *weight))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let mixed = crate::paint::color4::mix_palette_colors(&mix.method, &colors)?;
+                Some((
+                    entry,
+                    RgbaColor::new(mixed[0], mixed[1], mixed[2], mixed[3]),
+                ))
+            })
+            .collect(),
+    )
+}
+
 fn resolve_cpal_palette_index(data: &[u8], palette_count: u16, base: FontPaletteBase) -> u16 {
     match base {
         FontPaletteBase::Index(index) => (index < palette_count).then_some(index).unwrap_or(0),
@@ -952,8 +1056,8 @@ struct SolidColorGlyphPainter<'a> {
     current: Option<TtfGlyphId>,
     layers: Vec<ColorGlyphLayer>,
     unsupported: bool,
-    palette_entries: Vec<(u16, RgbaColor)>,
-    overrides: &'a [(u16, [u8; 4])],
+    source_palette_entries: Vec<(u16, RgbaColor)>,
+    resolved_palette_entries: Vec<(u16, RgbaColor)>,
 }
 
 impl<'font> Painter<'font> for SolidColorGlyphPainter<'_> {
@@ -971,17 +1075,16 @@ impl<'font> Painter<'font> for SolidColorGlyphPainter<'_> {
             return;
         };
         let matching_entries = self
-            .palette_entries
+            .source_palette_entries
             .iter()
             .filter(|(_, candidate)| *candidate == color)
             .map(|(entry, _)| *entry)
             .collect::<Vec<_>>();
         let color = if let [entry] = matching_entries.as_slice() {
-            self.overrides
+            self.resolved_palette_entries
                 .iter()
-                .rev()
                 .find(|(candidate, _)| candidate == entry)
-                .map(|(_, color)| RgbaColor::new(color[0], color[1], color[2], color[3]))
+                .map(|(_, color)| *color)
                 .unwrap_or(color)
         } else {
             color

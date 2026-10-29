@@ -65,6 +65,150 @@ pub(super) fn to_srgb(space: Space, values: Triple) -> Triple {
     gamut_map(rgb)
 }
 
+pub(super) fn from_srgb(space: Space, rgb: Triple) -> Triple {
+    if space == Space::Srgb {
+        return rgb;
+    }
+    if space == Space::Hwb {
+        let max = rgb.into_iter().fold(f64::NEG_INFINITY, f64::max);
+        let min = rgb.into_iter().fold(f64::INFINITY, f64::min);
+        let delta = max - min;
+        let hue = if delta == 0.0 {
+            0.0
+        } else if max == rgb[0] {
+            60.0 * ((rgb[1] - rgb[2]) / delta).rem_euclid(6.0)
+        } else if max == rgb[1] {
+            60.0 * ((rgb[2] - rgb[0]) / delta + 2.0)
+        } else {
+            60.0 * ((rgb[0] - rgb[1]) / delta + 4.0)
+        };
+        return [hue, min, 1.0 - max];
+    }
+    if matches!(space, Space::Oklab | Space::Oklch) {
+        let lab = rgb_oklab(rgb);
+        return if space == Space::Oklch {
+            [
+                lab[0],
+                lab[1].hypot(lab[2]),
+                lab[2].atan2(lab[1]).to_degrees().rem_euclid(360.0),
+            ]
+        } else {
+            lab
+        };
+    }
+    let xyz_d65 = mul(SRGB_XYZ, rgb.map(decode_srgb));
+    match space {
+        Space::XyzD65 => xyz_d65,
+        Space::XyzD50 => mul(D65_D50, xyz_d65),
+        Space::Lab | Space::Lch => {
+            let lab = xyz_lab(mul(D65_D50, xyz_d65));
+            if space == Space::Lch {
+                [
+                    lab[0],
+                    lab[1].hypot(lab[2]),
+                    lab[2].atan2(lab[1]).to_degrees().rem_euclid(360.0),
+                ]
+            } else {
+                lab
+            }
+        }
+        Space::SrgbLinear => rgb.map(decode_srgb),
+        Space::DisplayP3 | Space::DisplayP3Linear => {
+            let linear = mul(XYZ_DISPLAY_P3, xyz_d65);
+            if space == Space::DisplayP3 {
+                linear.map(encode_srgb)
+            } else {
+                linear
+            }
+        }
+        Space::A98Rgb => mul(XYZ_A98, xyz_d65).map(|value| signed_pow(value, 256.0 / 563.0)),
+        Space::ProphotoRgb => mul(XYZ_PROPHOTO, mul(D65_D50, xyz_d65)).map(|value| {
+            if value.abs() <= 1.0 / 512.0 {
+                value * 16.0
+            } else {
+                signed_pow(value, 1.0 / 1.8)
+            }
+        }),
+        Space::Rec2020 => mul(XYZ_REC2020, xyz_d65).map(|value| signed_pow(value, 1.0 / 2.4)),
+        Space::Hwb | Space::Oklab | Space::Oklch | Space::Srgb => unreachable!(),
+    }
+}
+
+const D65_D50: Matrix = [
+    [
+        1.0479298208405488,
+        0.022946793341019088,
+        -0.05019222954313557,
+    ],
+    [
+        0.029627815688159344,
+        0.990434484573249,
+        -0.01707382502938514,
+    ],
+    [
+        -0.009243058152591178,
+        0.015055144896577895,
+        0.7518742814281371,
+    ],
+];
+const XYZ_DISPLAY_P3: Matrix = [
+    [2.493496911941425, -0.9313836179191239, -0.40271078445071684],
+    [
+        -0.8294889695615747,
+        1.7626640603183463,
+        0.023624685841943577,
+    ],
+    [
+        0.03584583024378447,
+        -0.07617238926804182,
+        0.9568845240076872,
+    ],
+];
+const XYZ_A98: Matrix = [
+    [
+        2.0415879038107465,
+        -0.5650069742788597,
+        -0.34473135077832956,
+    ],
+    [-0.9692436362808798, 1.8759675015077202, 0.04155505740717557],
+    [
+        0.013444280632031142,
+        -0.11836239223101838,
+        1.0151749943912054,
+    ],
+];
+const XYZ_PROPHOTO: Matrix = [
+    [
+        1.3457868816471583,
+        -0.25557208737979464,
+        -0.05110186497554526,
+    ],
+    [-0.5446307051249019, 1.5082477428451468, 0.02052744743642139],
+    [0.0, 0.0, 1.2119675456389454],
+];
+const XYZ_REC2020: Matrix = [
+    [1.716651187971268, -0.355670783776392, -0.25336628137366],
+    [-0.666684351832489, 1.616481236634939, 0.015768545813911],
+    [0.017639857445311, -0.042770613257809, 0.942103121235474],
+];
+
+fn xyz_lab(xyz: Triple) -> Triple {
+    let white = [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
+    let f: Triple = std::array::from_fn(|index| {
+        let value = xyz[index] / white[index];
+        if value > 216.0 / 24389.0 {
+            value.cbrt()
+        } else {
+            (24389.0 / 27.0 * value + 16.0) / 116.0
+        }
+    });
+    [
+        116.0 * f[1] - 16.0,
+        500.0 * (f[0] - f[1]),
+        200.0 * (f[1] - f[2]),
+    ]
+}
+
 fn to_xyz(space: Space, mut v: Triple) -> Triple {
     if matches!(space, Space::Lch | Space::Oklch) {
         let angle = v[2].to_radians();
@@ -262,4 +406,38 @@ fn delta_ok(first: Triple, second: Triple) -> f64 {
         .map(|(a, b)| (a - b).powi(2))
         .sum::<f64>()
         .sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supported_interpolation_spaces_round_trip_srgb() {
+        let rgb = [0.24, 0.51, 0.73];
+        for space in [
+            Space::Hwb,
+            Space::Lab,
+            Space::Lch,
+            Space::Oklab,
+            Space::Oklch,
+            Space::Srgb,
+            Space::SrgbLinear,
+            Space::DisplayP3,
+            Space::DisplayP3Linear,
+            Space::A98Rgb,
+            Space::ProphotoRgb,
+            Space::Rec2020,
+            Space::XyzD50,
+            Space::XyzD65,
+        ] {
+            let round_trip = to_srgb(space, from_srgb(space, rgb));
+            for (actual, expected) in round_trip.into_iter().zip(rgb) {
+                assert!(
+                    (actual - expected).abs() <= 1e-6,
+                    "{space:?}: expected {expected}, got {actual}"
+                );
+            }
+        }
+    }
 }

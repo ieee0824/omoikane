@@ -10357,6 +10357,7 @@ fn shaped_paint_uses_solid_colr_layers_before_foreground_fallback() {
         font_palette: Arc::new(FontPalette {
             base: FontPaletteBase::Index(0),
             overrides: vec![(9, [9, 8, 7, 255])],
+            mix: None,
         }),
         ..FragmentStyle::default()
     };
