@@ -1532,3 +1532,31 @@ fn font_family_selection_does_not_initialize_unused_fallback_members() {
     assert!(members[0].key.get().is_some());
     assert!(members[1].key.get().is_none());
 }
+
+#[test]
+fn solid_colr_layers_rasterize_and_unsupported_transforms_fall_back() {
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/color-font/twemoji-smiley-glyf-colr1.ttf").to_vec(),
+    )
+    .unwrap();
+    let solid = font.inner.glyph_id('😁').0;
+    let layers = font
+        .rasterize_color_glyph(solid, 32.0, 0, [1, 2, 3, 255])
+        .expect("solid COLR glyph");
+    assert_eq!(layers.len(), 4);
+    assert_eq!(layers[0].color, [255, 204, 77, 255]);
+    assert_eq!(layers[1].color, [102, 69, 0, 255]);
+    assert_eq!(layers[2].color, [255, 255, 255, 255]);
+    assert_eq!(layers[3].color, [102, 69, 0, 255]);
+    assert!(layers.iter().all(|layer| !layer.raster.bitmap.is_empty()));
+    assert!(
+        font.rasterize_color_glyph(solid, 32.0, 1, [1, 2, 3, 255])
+            .is_none()
+    );
+
+    let transformed = font.inner.glyph_id('☺').0;
+    assert!(
+        font.rasterize_color_glyph(transformed, 32.0, 0, [1, 2, 3, 255])
+            .is_none()
+    );
+}

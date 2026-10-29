@@ -4,7 +4,13 @@
 //! Handles font file loading, character-to-glyph mapping, and rasterization.
 
 use ab_glyph::{Font as AbGlyphFont, FontVec, GlyphId, ScaleFont};
-use rustybuzz::{Direction, Face, Feature, UnicodeBuffer, Variation, ttf_parser::Tag};
+use rustybuzz::{
+    Direction, Face, Feature, UnicodeBuffer, Variation,
+    ttf_parser::{
+        Face as TtfFace, GlyphId as TtfGlyphId, RgbaColor, Tag, Transform,
+        colr::{ClipBox, CompositeMode, Paint, Painter},
+    },
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -72,6 +78,15 @@ pub struct GlyphRaster {
     pub offset_x: f32,
     /// Vertical offset from the baseline to the bitmap top edge (typically negative).
     pub offset_y: f32,
+}
+
+/// One solid COLR/CPAL layer rasterized in font paint order.
+#[derive(Debug, Clone)]
+pub struct ColorGlyphLayer {
+    /// Alpha mask and placement for this layer's outline.
+    pub raster: GlyphRaster,
+    /// Unpremultiplied RGBA color selected from CPAL.
+    pub color: [u8; 4],
 }
 
 /// One positioned glyph produced by OpenType shaping.
@@ -580,6 +595,39 @@ impl Font {
         self.rasterize_glyph_id(glyph_id, size_px, advance_x)
     }
 
+    /// Rasterizes a solid-layer COLR glyph with the selected CPAL palette.
+    ///
+    /// COLR programs requiring transforms, gradients, or non-source-over
+    /// compositing return `None`; callers must use the ordinary outline as a
+    /// deterministic foreground-color fallback.
+    pub fn rasterize_color_glyph(
+        &self,
+        glyph_id: u16,
+        size_px: f32,
+        palette: u16,
+        foreground: [u8; 4],
+    ) -> Option<Vec<ColorGlyphLayer>> {
+        let face = TtfFace::parse(self.inner.font_data(), self.face_index).ok()?;
+        let glyph_id = TtfGlyphId(glyph_id);
+        if !face.is_color_glyph(glyph_id) || palette >= face.color_palettes()?.get() {
+            return None;
+        }
+        let mut painter = SolidColorGlyphPainter {
+            font: self,
+            size_px,
+            current: None,
+            layers: Vec::new(),
+            unsupported: false,
+        };
+        face.paint_color_glyph(
+            glyph_id,
+            palette,
+            RgbaColor::new(foreground[0], foreground[1], foreground[2], foreground[3]),
+            &mut painter,
+        )?;
+        (!painter.unsupported && !painter.layers.is_empty()).then_some(painter.layers)
+    }
+
     fn rasterize_glyph_id(
         &self,
         glyph_id: GlyphId,
@@ -733,6 +781,56 @@ impl Font {
         let metrics = face.underline_metrics()?;
         Some(-(metrics.position as f32) * size_px / face.units_per_em().max(1) as f32)
     }
+}
+
+struct SolidColorGlyphPainter<'a> {
+    font: &'a Font,
+    size_px: f32,
+    current: Option<TtfGlyphId>,
+    layers: Vec<ColorGlyphLayer>,
+    unsupported: bool,
+}
+
+impl<'font> Painter<'font> for SolidColorGlyphPainter<'_> {
+    fn outline_glyph(&mut self, glyph_id: TtfGlyphId) {
+        self.current = Some(glyph_id);
+    }
+
+    fn paint(&mut self, paint: Paint<'font>) {
+        let Paint::Solid(color) = paint else {
+            self.unsupported = true;
+            return;
+        };
+        let Some(glyph_id) = self.current else {
+            self.unsupported = true;
+            return;
+        };
+        match self.font.rasterize_glyph(glyph_id.0, self.size_px) {
+            Ok(raster) => self.layers.push(ColorGlyphLayer {
+                raster,
+                color: [color.red, color.green, color.blue, color.alpha],
+            }),
+            Err(_) => self.unsupported = true,
+        }
+    }
+
+    fn push_clip(&mut self) {}
+    fn push_clip_box(&mut self, _clipbox: ClipBox) {}
+    fn pop_clip(&mut self) {}
+
+    fn push_layer(&mut self, mode: CompositeMode) {
+        if mode != CompositeMode::SourceOver {
+            self.unsupported = true;
+        }
+    }
+
+    fn pop_layer(&mut self) {}
+
+    fn push_transform(&mut self, _transform: Transform) {
+        self.unsupported = true;
+    }
+
+    fn pop_transform(&mut self) {}
 }
 
 /// Resolved font-relative CSS measures for one font size.

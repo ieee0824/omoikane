@@ -10306,6 +10306,54 @@ fn opentype_shaped_paint_uses_the_layout_advance_model() {
 }
 
 #[test]
+fn shaped_paint_uses_solid_colr_layers_before_foreground_fallback() {
+    use super::text::paint_shaped_horizontal_text;
+    use crate::font::Font;
+
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/color-font/twemoji-smiley-glyf-colr1.ttf").to_vec(),
+    )
+    .unwrap();
+    let mut canvas = Canvas::new(64, 64);
+    paint_shaped_horizontal_text(
+        &mut canvas,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+        },
+        "😁",
+        48.0,
+        50.0,
+        &[&font],
+        &FragmentStyle::default(),
+        Color::rgb(1, 2, 3),
+        None,
+        0.0,
+    )
+    .unwrap();
+    let colors = canvas
+        .pixels()
+        .chunks_exact(4)
+        .filter(|pixel| pixel[3] > 0)
+        .map(|pixel| (pixel[0], pixel[1], pixel[2]))
+        .collect::<HashSet<_>>();
+    assert!(
+        colors.contains(&(255, 204, 77)),
+        "missing yellow COLR layer"
+    );
+    assert!(colors.contains(&(102, 69, 0)), "missing brown COLR layer");
+    assert!(
+        colors
+            .iter()
+            .any(|(red, green, blue)| *red >= 250 && *green >= 250 && *blue >= 250),
+        "missing antialiased white COLR layer"
+    );
+    assert!(!colors.contains(&(1, 2, 3)), "used foreground fallback");
+}
+
+#[test]
 fn shaped_paint_does_not_space_after_non_advancing_leading_cluster() {
     use super::text::paint_shaped_horizontal_text;
     use crate::font::{ShapingDirection, load_default_text_fonts};

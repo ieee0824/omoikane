@@ -2230,7 +2230,34 @@ pub(crate) fn paint_shaped_horizontal_text_with_candidates(
     for (run_index, run) in runs.iter().enumerate() {
         let font = fonts[run.font_index].font;
         for (glyph_index, shaped) in run.glyphs.iter().enumerate() {
-            if let Ok(glyph) = rasterize_glyph_cached(font, shaped.glyph_id, font_size)
+            let color_layers = font.rasterize_color_glyph(
+                shaped.glyph_id,
+                font_size,
+                0,
+                [color.r, color.g, color.b, color.a],
+            );
+            if let Some(layers) = color_layers {
+                for layer in layers {
+                    let glyph = layer.raster;
+                    if glyph.width == 0 || glyph.height == 0 || glyph.bitmap.is_empty() {
+                        continue;
+                    }
+                    canvas.draw_glyph_mask(
+                        cursor_x + shaped.x_offset + glyph.offset_x,
+                        baseline_y - shaped.y_offset + glyph.offset_y,
+                        glyph.width,
+                        glyph.height,
+                        &glyph.bitmap,
+                        Color {
+                            r: layer.color[0],
+                            g: layer.color[1],
+                            b: layer.color[2],
+                            a: layer.color[3],
+                        },
+                        clip,
+                    );
+                }
+            } else if let Ok(glyph) = rasterize_glyph_cached(font, shaped.glyph_id, font_size)
                 && glyph.width > 0
                 && glyph.height > 0
                 && !glyph.bitmap.is_empty()
