@@ -101,7 +101,8 @@ fn property_support_agrees_with_css_supports_and_cascade() {
                 return element.style.getPropertyValue(name) === '10deg' &&
                     getComputedStyle(element).getPropertyValue(name) === '10deg';
             }
-            if (name === 'font-variation-settings' || name === 'counter-set') {
+            if (name === 'font-variation-settings' || name === 'counter-set' ||
+                name === 'hyphenate-character') {
                 return CSS.supports(name, value) &&
                     element.style.getPropertyValue(name) === value &&
                     getComputedStyle(element).getPropertyValue(name) === value;

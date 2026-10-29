@@ -2,7 +2,9 @@
 
 use std::ops::Range;
 
-use super::{InlineTextSource, WhiteSpaceMode, apply_text_transform_layout, white_space};
+use super::{
+    InlineTextSource, WhiteSpaceCollapse, WhiteSpaceMode, apply_text_transform_layout, white_space,
+};
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::dom::{Node, NodeHandle, NodeType};
 
@@ -14,14 +16,18 @@ pub(super) fn normalized_chars(text: &str, mode: WhiteSpaceMode) -> Vec<(char, R
     for ch in text.chars() {
         let source = offset..offset + ch.len_utf16();
         offset = source.end;
-        if mode == WhiteSpaceMode::PreLine && ch == '\n' {
+        if mode.collapse() == WhiteSpaceCollapse::Discard && ch != '\u{00a0}' && ch.is_whitespace()
+        {
+            continue;
+        }
+        if mode.collapse() == WhiteSpaceCollapse::PreserveBreaks && ch == '\n' {
             if result.last().is_some_and(|(ch, _)| *ch == ' ') {
                 result.pop();
             }
             result.push((ch, source));
             previous_space = true;
         } else if mode.collapses_whitespace()
-            && if mode == WhiteSpaceMode::PreLine {
+            && if mode.collapse() == WhiteSpaceCollapse::PreserveBreaks {
                 ch.is_ascii_whitespace()
             } else {
                 ch != '\u{00a0}' && ch.is_whitespace()
@@ -34,6 +40,13 @@ pub(super) fn normalized_chars(text: &str, mode: WhiteSpaceMode) -> Vec<(char, R
             }
             previous_space = true;
         } else {
+            let ch = if mode.collapse() == WhiteSpaceCollapse::PreserveSpaces
+                && matches!(ch, '\t' | '\n' | '\r')
+            {
+                ' '
+            } else {
+                ch
+            };
             result.push((ch, source));
             previous_space = false;
         }
@@ -289,6 +302,7 @@ mod tests {
             false,
             TextIndent::default(),
             None,
+            None,
         );
         assert_eq!(lines.len(), 2);
         let first = &lines[0].fragments[0];
@@ -330,6 +344,7 @@ mod tests {
             None,
             false,
             TextIndent::default(),
+            None,
             None,
         );
         assert_eq!(lines.len(), 2);

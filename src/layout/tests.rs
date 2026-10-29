@@ -2512,6 +2512,304 @@ fn normal_white_space_collapses_runs() {
 }
 
 #[test]
+fn whitespace_longhands_drive_normalization_and_wrapping() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let preserved = NodeHandle::element("p");
+    preserved.set_attribute("id", "preserved");
+    preserved.append_child(NodeHandle::text("hello   world\nnext"));
+    let discarded = NodeHandle::element("p");
+    discarded.set_attribute("id", "discarded");
+    discarded.append_child(NodeHandle::text("a \t\n b"));
+    document.append_child(body.clone());
+    body.append_child(preserved);
+    body.append_child(discarded);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "#preserved { white-space-collapse: preserve; text-wrap-mode: nowrap; } \
+             #discarded { white-space-collapse: discard; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let preserved = &layout.children[0];
+    assert_eq!(preserved.lines.len(), 2);
+    assert_eq!(
+        preserved.lines[0]
+            .fragments
+            .iter()
+            .filter_map(|fragment| fragment.text())
+            .collect::<String>(),
+        "hello   world"
+    );
+    let discarded = &layout.children[1];
+    assert_eq!(
+        discarded.lines[0]
+            .fragments
+            .iter()
+            .filter_map(|fragment| fragment.text())
+            .collect::<String>(),
+        "ab"
+    );
+}
+
+#[test]
+fn text_wrap_style_balances_lines_and_preserves_container_alignment() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    for id in ["auto", "balance", "pretty", "stable"] {
+        let paragraph = NodeHandle::element("p");
+        paragraph.set_attribute("id", id);
+        paragraph.append_child(NodeHandle::text("alpha beta gamma delta"));
+        body.append_child(paragraph);
+    }
+    document.append_child(body.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin:0 } p { margin:0; width:100px; font:10px monospace; \
+             line-height:10px; text-align:center } #balance { text-wrap-style:balance } \
+             #pretty { text-wrap-style:pretty } #stable { text-wrap-style:stable }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let auto = &layout.children[0].lines;
+    let balance = &layout.children[1].lines;
+    let pretty = &layout.children[2].lines;
+    let stable = &layout.children[3].lines;
+    let spread = |lines: &[LineBox]| {
+        let widths = lines.iter().map(|line| line.rect.width).collect::<Vec<_>>();
+        widths.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            - widths.iter().copied().fold(f32::INFINITY, f32::min)
+    };
+
+    assert_eq!(auto.len(), 2);
+    assert_eq!(balance.len(), auto.len());
+    assert_eq!(pretty.len(), auto.len());
+    let widths = |lines: &[LineBox]| lines.iter().map(|line| line.rect.width).collect::<Vec<_>>();
+    assert!(
+        spread(balance) < spread(auto),
+        "auto={:?}, balance={:?}",
+        widths(auto),
+        widths(balance)
+    );
+    assert!(
+        spread(pretty) < spread(auto),
+        "auto={:?}, pretty={:?}",
+        widths(auto),
+        widths(pretty)
+    );
+    assert_eq!(
+        stable
+            .iter()
+            .map(|line| line.rect.width)
+            .collect::<Vec<_>>(),
+        auto.iter().map(|line| line.rect.width).collect::<Vec<_>>()
+    );
+    for line in balance.iter().chain(pretty) {
+        assert!((line.rect.x + line.rect.width / 2.0 - 50.0).abs() < 0.01);
+    }
+}
+
+#[test]
+fn tab_size_advances_to_cursor_relative_stops() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let columns = NodeHandle::element("p");
+    columns.set_attribute("id", "columns");
+    columns.append_child(NodeHandle::text("A\tB"));
+    let length = NodeHandle::element("p");
+    length.set_attribute("id", "length");
+    length.append_child(NodeHandle::text("A\tB"));
+    document.append_child(body.clone());
+    body.append_child(columns);
+    body.append_child(length);
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { white-space: pre; font: 20px monospace; } \
+             #columns { tab-size: 4; } \
+             #length { tab-size: 40px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+
+    let column_fragments = &layout.children[0].lines[0].fragments;
+    let column_a = column_fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .unwrap();
+    let column_b = column_fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("B"))
+        .unwrap();
+    let space_width = super::inline::measure_text_width(" ", column_a.metrics);
+    assert!((column_b.rect.x - column_a.rect.x - 4.0 * space_width).abs() < 0.01);
+
+    let length_fragments = &layout.children[1].lines[0].fragments;
+    let length_a = length_fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .unwrap();
+    let length_b = length_fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("B"))
+        .unwrap();
+    assert!((length_b.rect.x - length_a.rect.x - 40.0).abs() < 0.01);
+}
+
+#[test]
+fn tab_size_resolves_container_units_after_container_layout() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    container.set_attribute("id", "container");
+    let target = NodeHandle::element("p");
+    target.set_attribute("id", "target");
+    target.append_child(NodeHandle::text("a\tb"));
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(target.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin:0 } #container { container-type:inline-size; width:100px } \
+             #target { white-space:pre; tab-size:calc(10 + (sign(2cqw - 10px) * 5)) }",
+        )
+        .unwrap(),
+    );
+    let _ = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        resolver.computed_style(&target).get("tab-size"),
+        Some(&ComputedValue::Number(5.0))
+    );
+}
+
+#[test]
+fn hyphens_manual_none_and_auto_control_line_breaks() {
+    fn paragraph(css: &str, text: &str, language: Option<&str>) -> LayoutBox {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        if let Some(language) = language {
+            paragraph.set_attribute("lang", language);
+        }
+        paragraph.append_child(NodeHandle::text(text));
+        document.append_child(body.clone());
+        body.append_child(paragraph);
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "p {{ margin: 0; font: 20px monospace; width: 110px; {css} }}"
+            ))
+            .unwrap(),
+        );
+        layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 110.0,
+                height: 0.0,
+            },
+        )
+        .unwrap()
+        .children
+        .remove(0)
+    }
+
+    let manual = paragraph(
+        "hyphens: manual; hyphenate-character: \"*\";",
+        "encyclo\u{ad}pedia",
+        None,
+    );
+    assert_eq!(manual.lines.len(), 2);
+    let inserted = manual.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("*"))
+        .expect("manual soft hyphen should use the authored character");
+    assert!(inserted.text_source.is_empty());
+
+    let none = paragraph(
+        "hyphens: none; hyphenate-character: \"*\";",
+        "encyclo\u{ad}pedia",
+        None,
+    );
+    assert_eq!(none.lines.len(), 1);
+    assert!(
+        none.lines[0]
+            .fragments
+            .iter()
+            .all(|fragment| fragment.text() != Some("*"))
+    );
+
+    let automatic = paragraph("hyphens: auto;", "demonstration", Some("en-US"));
+    assert!(automatic.lines.len() >= 2);
+    assert!(automatic.lines.iter().any(|line| {
+        line.fragments
+            .iter()
+            .any(|fragment| fragment.text() == Some("‐") && fragment.text_source.is_empty())
+    }));
+}
+
+#[test]
 fn pre_white_space_preserves_spaces_and_newlines() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -9592,6 +9890,63 @@ fn cjk_small_kana_stays_with_previous() {
     assert_eq!(pieces[0], "日");
     assert_eq!(pieces[1], "本っ");
     assert_eq!(pieces[2], "語");
+}
+
+#[test]
+fn line_break_loose_and_strict_adjust_cjk_kinsoku_candidates() {
+    let loose = super::inline::split_words_preserving_spaces_cjk_with_mode(
+        "日っ語",
+        super::LineBreak::Loose,
+    );
+    assert_eq!(loose, ["日", "っ", "語"]);
+
+    let normal = super::inline::split_words_preserving_spaces_cjk_with_mode(
+        "日‐語",
+        super::LineBreak::Normal,
+    );
+    let strict = super::inline::split_words_preserving_spaces_cjk_with_mode(
+        "日‐語",
+        super::LineBreak::Strict,
+    );
+    assert_eq!(normal, ["日", "‐", "語"]);
+    assert_eq!(strict, ["日‐", "語"]);
+}
+
+#[test]
+fn line_break_anywhere_creates_non_cjk_wrap_opportunities() {
+    fn line_count(line_break: &str) -> usize {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let paragraph = NodeHandle::element("p");
+        paragraph.append_child(NodeHandle::text("abcdef"));
+        document.append_child(body.clone());
+        body.append_child(paragraph);
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "p {{ margin:0; width:25px; font:20px monospace; line-break:{line_break}; }}"
+            ))
+            .unwrap(),
+        );
+        layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 25.0,
+                height: 0.0,
+            },
+        )
+        .unwrap()
+        .children[0]
+            .lines
+            .len()
+    }
+
+    assert_eq!(line_count("normal"), 1);
+    assert!(line_count("anywhere") > 1);
 }
 
 #[test]

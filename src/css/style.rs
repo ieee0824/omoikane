@@ -4630,7 +4630,7 @@ fn record_component_value(
     if matches!(
         name.as_str(),
         "content" | "counter-reset" | "counter-increment" | "counter-set" | "quotes" | "color"
-    ) || color_uses_container_units(value)
+    ) || value_uses_container_units(value)
     {
         values.insert(name, value.clone());
     } else {
@@ -4638,7 +4638,8 @@ fn record_component_value(
     }
 }
 
-/// Retains only color expressions that need a layout-provided container size.
+/// Recognizes color expressions whose computed value depends on a query
+/// container. Forced-colors handling uses this narrower classification.
 fn color_uses_container_units(value: &Value) -> bool {
     matches!(value, Value::Function { name, .. }
         if matches!(name.to_ascii_lowercase().as_str(), "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color")
@@ -5936,6 +5937,57 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if key == "text-decoration-skip-ink" {
         return validate_keyword_value(value, &["auto", "all", "none"]);
     }
+    if key == "white-space-collapse" {
+        return validate_keyword_value(
+            value,
+            &[
+                "collapse",
+                "discard",
+                "preserve",
+                "preserve-breaks",
+                "preserve-spaces",
+                "break-spaces",
+            ],
+        );
+    }
+    if key == "text-wrap-mode" {
+        return validate_keyword_value(value, &["wrap", "nowrap"]);
+    }
+    if key == "text-wrap-style" {
+        return validate_keyword_value(value, &["auto", "balance", "stable", "pretty"]);
+    }
+    if key == "line-break" {
+        return validate_keyword_value(value, &["auto", "loose", "normal", "strict", "anywhere"]);
+    }
+    if key == "hyphens" {
+        return validate_keyword_value(value, &["none", "manual", "auto"]);
+    }
+    if key == "hyphenate-character" {
+        return match value {
+            Value::Keyword(keyword)
+                if keyword.eq_ignore_ascii_case("auto")
+                    || is_css_wide_keyword(&keyword.to_ascii_lowercase()) =>
+            {
+                DeclarationValidation::Unvalidated
+            }
+            Value::String(_) => DeclarationValidation::Unvalidated,
+            _ => DeclarationValidation::Invalid,
+        };
+    }
+    if key == "tab-size" {
+        return match value {
+            Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()) => {
+                DeclarationValidation::Unvalidated
+            }
+            Value::Number(number) if number.is_finite() && *number >= 0.0 => {
+                DeclarationValidation::Unvalidated
+            }
+            value if valid_logical_length(value, false, false) => {
+                DeclarationValidation::Unvalidated
+            }
+            _ => DeclarationValidation::Invalid,
+        };
+    }
     if key == "word-spacing" {
         return match value {
             Value::Keyword(keyword)
@@ -7133,6 +7185,7 @@ fn is_non_negative_sizing_property(name: &str) -> bool {
             | "column-gap"
             | "column-rule-width"
             | "shape-margin"
+            | "tab-size"
     )
 }
 
@@ -10431,7 +10484,7 @@ fn normalize_numeric_property(name: &str, value: f32) -> f32 {
     };
     match name {
         "opacity" => value.clamp(0.0, 1.0),
-        "flex-grow" | "flex-shrink" => value.max(0.0),
+        "flex-grow" | "flex-shrink" | "tab-size" => value.max(0.0),
         "order" | "z-index" => round_css_integer(value),
         "column-count" | "orphans" | "widows" => round_css_integer(value).max(1.0),
         _ => value,
@@ -13074,6 +13127,19 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::TextIndent, InitialValue::Px(0.0)),
     (PropertyId::WordSpacing, InitialValue::Px(0.0)),
     (PropertyId::WhiteSpace, InitialValue::Keyword("normal")),
+    (
+        PropertyId::WhiteSpaceCollapse,
+        InitialValue::Keyword("collapse"),
+    ),
+    (PropertyId::TextWrapMode, InitialValue::Keyword("wrap")),
+    (PropertyId::TextWrapStyle, InitialValue::Keyword("auto")),
+    (PropertyId::LineBreak, InitialValue::Keyword("auto")),
+    (PropertyId::Hyphens, InitialValue::Keyword("manual")),
+    (
+        PropertyId::HyphenateCharacter,
+        InitialValue::Keyword("auto"),
+    ),
+    (PropertyId::TabSize, InitialValue::Number(8.0)),
     (PropertyId::TextOverflow, InitialValue::Keyword("clip")),
     (PropertyId::OverflowX, InitialValue::Keyword("visible")),
     (PropertyId::OverflowY, InitialValue::Keyword("visible")),
@@ -13502,6 +13568,7 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::FontVariationSettings,
     PropertyId::FontWeight,
     PropertyId::LetterSpacing,
+    PropertyId::LineBreak,
     PropertyId::LineHeight,
     PropertyId::ListStyleImage,
     PropertyId::ListStylePosition,
@@ -13513,16 +13580,22 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::TextAlign,
     PropertyId::TextDecorationSkipInk,
     PropertyId::TextIndent,
+    PropertyId::TextWrapMode,
+    PropertyId::TextWrapStyle,
     PropertyId::TextShadow,
     PropertyId::TextTransform,
     PropertyId::Visibility,
     PropertyId::WhiteSpace,
+    PropertyId::WhiteSpaceCollapse,
     PropertyId::WritingMode,
     PropertyId::TextUnderlinePosition,
     PropertyId::TextUnderlineOffset,
     PropertyId::WordBreak,
     PropertyId::WordSpacing,
     PropertyId::Widows,
+    PropertyId::HyphenateCharacter,
+    PropertyId::Hyphens,
+    PropertyId::TabSize,
 ];
 
 fn is_inherited_property(name: &str) -> bool {

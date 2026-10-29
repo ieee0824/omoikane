@@ -105,6 +105,19 @@ const VALIDATED_PROPERTIES: &[&str] = &[
 ];
 
 pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
+    if property == "hyphenate-character" {
+        let declarations = crate::css::parse_style_attribute(&format!("{property}: {value}"));
+        let declaration = declarations
+            .iter()
+            .find(|declaration| declaration.name == property)?;
+        return match &declaration.value {
+            crate::css::Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto") => {
+                Some("auto".to_string())
+            }
+            crate::css::Value::String(string) => Some(serialize_css_string(string)),
+            _ => None,
+        };
+    }
     if matches!(
         property,
         "counter-reset" | "counter-increment" | "counter-set"
@@ -210,6 +223,27 @@ pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
     } else {
         normalize_validated_or_unchecked(property, value)
     }
+}
+
+pub(super) fn serialize_css_string(value: &str) -> String {
+    let mut serialized = String::with_capacity(value.len() + 2);
+    serialized.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' | '\\' => {
+                serialized.push('\\');
+                serialized.push(ch);
+            }
+            '\0' => serialized.push_str("\\fffd "),
+            ch if ch.is_control() => {
+                serialized.push('\\');
+                serialized.push_str(&format!("{:x} ", ch as u32));
+            }
+            ch => serialized.push(ch),
+        }
+    }
+    serialized.push('"');
+    serialized
 }
 
 fn normalize_validated_or_unchecked(property: &str, value: &str) -> Option<String> {

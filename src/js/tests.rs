@@ -8618,6 +8618,34 @@ fn style_set_property_records_priority_without_leaking_into_value() {
 }
 
 #[test]
+fn text_wrap_shorthand_requires_consistent_longhand_priorities() {
+    let doc = NodeHandle::document();
+    let div = NodeHandle::element("div");
+    doc.append_child(div);
+
+    let mut runtime = JsRuntime::with_document(doc).unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            r#"(() => {
+                const style = document.querySelector("div").style;
+                style.setProperty("text-wrap", "balance", "important");
+                const initial = [
+                    style.getPropertyValue("text-wrap"),
+                    style.getPropertyPriority("text-wrap"),
+                    style.removeProperty("text-wrap")
+                ].join("|");
+                style.setProperty("text-wrap-mode", "wrap", "important");
+                style.setProperty("text-wrap-style", "balance");
+                return initial + "|" + style.getPropertyValue("text-wrap") +
+                    "|" + style.getPropertyPriority("text-wrap");
+            })()"#,
+        ),
+        "balance|important|balance||"
+    );
+}
+
+#[test]
 fn style_item_length_and_css_text() {
     let doc = NodeHandle::document();
     let div = NodeHandle::element("div");
@@ -12613,6 +12641,29 @@ fn size_container_query_controls_javascript_computed_style() {
         ),
         "10px",
         "a forced layout after container geometry changes must re-evaluate the query"
+    );
+}
+
+#[test]
+fn tab_size_container_units_use_nearest_query_container_in_computed_style() {
+    let doc = crate::html::TreeBuilder::parse(
+        r#"<html><head><style>
+                #container { container-type: inline-size; width: 100px; }
+                #target { font-size: 40px; }
+            </style></head><body><div id="container"><div id="target"></div></div></body></html>"#,
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(doc).unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            r#"(() => {
+                const target = document.getElementById('target');
+                target.style.tabSize = 'calc(10 + (sign(2cqw - 10px) * 5))';
+                return [getComputedStyle(target).width, getComputedStyle(target).tabSize].join('|');
+            })()"#,
+        ),
+        "100px|5"
     );
 }
 

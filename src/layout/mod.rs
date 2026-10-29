@@ -805,6 +805,12 @@ pub struct FragmentStyle {
     pub direction: Option<String>,
     /// Resolved CSS bidi mode used while constructing the line paragraph.
     pub unicode_bidi: Option<String>,
+    /// Typed CSS Text break controls consumed by inline layout. Values are
+    /// validated by the style system and converted once at this boundary.
+    pub(crate) hyphens: Hyphens,
+    pub(crate) hyphenate_character: HyphenateCharacter,
+    pub(crate) line_break: LineBreak,
+    pub(crate) text_wrap_style: TextWrapStyle,
     /// UAX#9 embedding level resolved for this fragment as part of its line.
     /// Paint uses this instead of resolving adjacent fragments independently.
     pub resolved_bidi_level: Option<u8>,
@@ -858,9 +864,65 @@ impl FragmentStyle {
             writing_mode: normalize_lower(PropertyId::WritingMode),
             direction: normalize_lower(PropertyId::Direction),
             unicode_bidi: normalize_lower(PropertyId::UnicodeBidi),
+            hyphens: match normalize_lower(PropertyId::Hyphens).as_deref() {
+                Some("none") => Hyphens::None,
+                Some("auto") => Hyphens::Auto,
+                _ => Hyphens::Manual,
+            },
+            hyphenate_character: match style.get_by_id(PropertyId::HyphenateCharacter) {
+                Some(ComputedValue::String(value)) => HyphenateCharacter::String(value.clone()),
+                _ => HyphenateCharacter::Auto,
+            },
+            line_break: match normalize_lower(PropertyId::LineBreak).as_deref() {
+                Some("loose") => LineBreak::Loose,
+                Some("normal") => LineBreak::Normal,
+                Some("strict") => LineBreak::Strict,
+                Some("anywhere") => LineBreak::Anywhere,
+                _ => LineBreak::Auto,
+            },
+            text_wrap_style: match normalize_lower(PropertyId::TextWrapStyle).as_deref() {
+                Some("balance") => TextWrapStyle::Balance,
+                Some("stable") => TextWrapStyle::Stable,
+                Some("pretty") => TextWrapStyle::Pretty,
+                _ => TextWrapStyle::Auto,
+            },
             resolved_bidi_level: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Hyphens {
+    None,
+    #[default]
+    Manual,
+    Auto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum HyphenateCharacter {
+    #[default]
+    Auto,
+    String(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum LineBreak {
+    #[default]
+    Auto,
+    Loose,
+    Normal,
+    Strict,
+    Anywhere,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TextWrapStyle {
+    #[default]
+    Auto,
+    Balance,
+    Stable,
+    Pretty,
 }
 
 /// A laid out fragment of inline text.

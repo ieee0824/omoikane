@@ -105,6 +105,8 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         "overscroll-behavior" => expand_overscroll_behavior_shorthand(value, important),
         "flex" => expand_flex_shorthand(value, important),
         "text-decoration" => expand_text_decoration_shorthand(value, important),
+        "text-wrap" => expand_text_wrap_shorthand(value, important),
+        "white-space" => expand_white_space_shorthand(value, important),
         "border-radius" => expand_border_radius_shorthand(value, important),
         "box-shadow" => expand_box_shadow_shorthand(value, important),
         "list-style" => expand_list_style_shorthand(value, important),
@@ -187,6 +189,7 @@ pub(super) fn is_deferred_var_shorthand(name: &str) -> bool {
             | "overscroll-behavior"
             | "flex"
             | "text-decoration"
+            | "text-wrap"
             | "border-radius"
             | "list-style"
             | "flex-flow"
@@ -379,6 +382,10 @@ fn expand_css_wide_shorthand(
         .into_iter()
         .map(str::to_string)
         .collect(),
+        "text-wrap" => ["text-wrap-mode", "text-wrap-style"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         "border-radius" => [
             "border-top-left-radius",
             "border-top-right-radius",
@@ -2354,6 +2361,119 @@ fn expand_text_decoration_shorthand(value: Value, important: bool) -> Vec<Declar
     ];
 
     decls
+}
+
+/// Expands `text-wrap` into its mode and style longhands.
+///
+/// CSS Text 4 permits the two components in either order. A style-only value
+/// resets the mode to `wrap`, while a mode-only value resets the style to
+/// `auto`, as required for every shorthand's omitted components.
+fn expand_text_wrap_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let components = match &value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let mut mode = None;
+    let mut style = None;
+    for component in components {
+        let Value::Keyword(keyword) = component else {
+            return vec![Declaration {
+                name: "text-wrap".to_string(),
+                value: value.clone(),
+                important,
+            }];
+        };
+        let keyword = keyword.to_ascii_lowercase();
+        if matches!(keyword.as_str(), "wrap" | "nowrap") {
+            if mode.is_some() {
+                return vec![Declaration {
+                    name: "text-wrap".to_string(),
+                    value: value.clone(),
+                    important,
+                }];
+            }
+            mode = Some(keyword);
+            continue;
+        }
+        if matches!(keyword.as_str(), "auto" | "balance" | "stable" | "pretty") {
+            if style.is_some() {
+                return vec![Declaration {
+                    name: "text-wrap".to_string(),
+                    value: value.clone(),
+                    important,
+                }];
+            }
+            style = Some(keyword);
+            continue;
+        }
+        return vec![Declaration {
+            name: "text-wrap".to_string(),
+            value: value.clone(),
+            important,
+        }];
+    }
+    if components.is_empty() {
+        return vec![Declaration {
+            name: "text-wrap".to_string(),
+            value: value.clone(),
+            important,
+        }];
+    }
+    [
+        ("text-wrap-mode", mode.unwrap_or_else(|| "wrap".to_string())),
+        (
+            "text-wrap-style",
+            style.unwrap_or_else(|| "auto".to_string()),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, keyword)| Declaration {
+        name: name.to_string(),
+        value: Value::Keyword(keyword),
+        important,
+    })
+    .collect()
+}
+
+/// Expands the legacy single-keyword `white-space` values into the CSS Text 4
+/// collapse and wrapping longhands while retaining the canonical legacy value
+/// for existing computed-style/CSSOM consumers.
+fn expand_white_space_shorthand(value: Value, important: bool) -> Vec<Declaration> {
+    let Value::Keyword(keyword) = &value else {
+        return vec![Declaration {
+            name: "white-space".to_string(),
+            value,
+            important,
+        }];
+    };
+    let keyword = keyword.to_ascii_lowercase();
+    let Some((collapse, wrap)) = (match keyword.as_str() {
+        "normal" => Some(("collapse", "wrap")),
+        "pre" => Some(("preserve", "nowrap")),
+        "nowrap" => Some(("collapse", "nowrap")),
+        "pre-wrap" => Some(("preserve", "wrap")),
+        "pre-line" => Some(("preserve-breaks", "wrap")),
+        "break-spaces" => Some(("break-spaces", "wrap")),
+        _ => None,
+    }) else {
+        return vec![Declaration {
+            name: "white-space".to_string(),
+            value,
+            important,
+        }];
+    };
+    [
+        ("white-space", keyword),
+        ("white-space-collapse", collapse.to_string()),
+        ("text-wrap-mode", wrap.to_string()),
+    ]
+    .into_iter()
+    .map(|(name, keyword)| Declaration {
+        name: name.to_string(),
+        value: Value::Keyword(keyword),
+        important,
+    })
+    .collect()
 }
 
 /// box-shadow 宣言を単一の Declaration に変換する。

@@ -72,6 +72,9 @@ flate2 = "1.1"
 gif = "0.13"
 getrandom = "0.3"
 hmac = "0.12"
+# Permissively licensed TeX patterns provide language-aware CSS `hyphens: auto`
+# opportunities; line fitting, inserted glyphs, and DOM mapping remain owned by layout.
+hypher = "0.1.8"
 jpeg-decoder = "0.3"
 # Decimal HTML input steps require exact ties; already used by vendored Boa.
 num-bigint = "0.4.8"
