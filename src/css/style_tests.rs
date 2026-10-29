@@ -3168,6 +3168,41 @@ fn inherits_color_and_font_size() {
 }
 
 #[test]
+fn ruby_elements_apply_annotation_and_fallback_ua_defaults() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let ruby = NodeHandle::element("ruby");
+    let rt = NodeHandle::element("rt");
+    let rp = NodeHandle::element("rp");
+    document.append_child(body.clone());
+    body.append_child(ruby.clone());
+    ruby.append_child(rt.clone());
+    ruby.append_child(rp.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("body { font-size:20px; text-emphasis-style:filled dot; }").unwrap(),
+    );
+
+    let ruby_style = resolver.computed_style(&ruby);
+    let rt_style = resolver.computed_style(&rt);
+    let rp_style = resolver.computed_style(&rp);
+    assert_eq!(
+        ruby_style.get("display"),
+        Some(&ComputedValue::Keyword("inline".into()))
+    );
+    assert_eq!(rt_style.get("font-size"), Some(&ComputedValue::Px(10.0)));
+    assert_eq!(
+        rt_style.get("text-emphasis-style"),
+        Some(&ComputedValue::Keyword("none".into()))
+    );
+    assert_eq!(
+        rp_style.get("display"),
+        Some(&ComputedValue::Keyword("none".into()))
+    );
+}
+
+#[test]
 fn resolves_em_and_percentage_font_sizes() {
     let (document, _body, title, html) = sample_tree();
     let mut resolver = StyleResolver::new();

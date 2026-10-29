@@ -1380,6 +1380,242 @@ fn text_spacing_trim_preserves_only_true_edges_during_inter_character_justificat
 }
 
 #[test]
+fn ruby_layout_places_annotations_on_horizontal_and_vertical_logical_sides() {
+    let layout_ruby = |writing_mode: &str, position: &str| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let ruby = NodeHandle::element("ruby");
+        let base = NodeHandle::text("漢字");
+        let rt = NodeHandle::element("rt");
+        rt.append_child(NodeHandle::text("かんじ"));
+        ruby.append_child(base);
+        ruby.append_child(rt.clone());
+        body.append_child(ruby.clone());
+        document.append_child(body.clone());
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin:0; width:200px; height:200px; font-size:20px; \
+                 line-height:20px; writing-mode:{writing_mode}; }} \
+                 ruby {{ ruby-position:{position}; ruby-align:center; }}"
+            ))
+            .unwrap(),
+        );
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        let ruby_layout = find_layout_box(&layout, &ruby).unwrap();
+        let level = |size: f32, expected: &str| {
+            let fragments = ruby_layout
+                .lines
+                .iter()
+                .flat_map(|line| &line.fragments)
+                .filter(|fragment| {
+                    fragment.text().is_some() && (fragment.metrics.font_size - size).abs() < 0.01
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                fragments
+                    .iter()
+                    .filter_map(|fragment| fragment.text())
+                    .collect::<String>(),
+                expected
+            );
+            let left = fragments
+                .iter()
+                .map(|fragment| fragment.rect.x)
+                .reduce(f32::min)
+                .unwrap();
+            let top = fragments
+                .iter()
+                .map(|fragment| fragment.rect.y)
+                .reduce(f32::min)
+                .unwrap();
+            let right = fragments
+                .iter()
+                .map(|fragment| fragment.rect.x + fragment.rect.width)
+                .reduce(f32::max)
+                .unwrap();
+            let bottom = fragments
+                .iter()
+                .map(|fragment| fragment.rect.y + fragment.rect.height)
+                .reduce(f32::max)
+                .unwrap();
+            Rect {
+                x: left,
+                y: top,
+                width: right - left,
+                height: bottom - top,
+            }
+        };
+        let base = level(20.0, "漢字");
+        let annotation = level(10.0, "かんじ");
+        (base, annotation, ruby_layout.dimensions.content)
+    };
+
+    let (base, annotation, ruby) = layout_ruby("horizontal-tb", "over");
+    assert!(annotation.y + annotation.height * 0.5 < base.y + base.height * 0.5);
+    assert!(ruby.width >= base.width.max(annotation.width));
+
+    let (base, annotation, _) = layout_ruby("horizontal-tb", "under");
+    assert!(annotation.y + annotation.height * 0.5 > base.y + base.height * 0.5);
+
+    let (base, annotation, ruby) = layout_ruby("vertical-rl", "over");
+    assert!(
+        annotation.x + annotation.width * 0.5 > base.x + base.width * 0.5,
+        "base={base:?}, annotation={annotation:?}"
+    );
+    assert!(ruby.height >= base.height.max(annotation.height));
+
+    let (base, annotation, _) = layout_ruby("vertical-rl", "under");
+    assert!(
+        annotation.x + annotation.width * 0.5 < base.x + base.width * 0.5,
+        "base={base:?}, annotation={annotation:?}"
+    );
+}
+
+#[test]
+fn ruby_position_alternates_multiple_annotation_levels() {
+    let layout_levels = |position: &str, first_position: Option<&str>| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let ruby = NodeHandle::element("ruby");
+        ruby.append_child(NodeHandle::text("基"));
+        for (index, text) in ["一", "二", "三"].into_iter().enumerate() {
+            let rtc = NodeHandle::element("rtc");
+            if index == 0
+                && let Some(position) = first_position
+            {
+                rtc.set_attribute("style", &format!("ruby-position:{position}"));
+            }
+            let rt = NodeHandle::element("rt");
+            rt.append_child(NodeHandle::text(text));
+            rtc.append_child(rt);
+            ruby.append_child(rtc);
+        }
+        body.append_child(ruby.clone());
+        document.append_child(body.clone());
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin:0; font-size:20px; line-height:20px; }} \
+                 ruby {{ ruby-position:{position}; ruby-align:center; }}"
+            ))
+            .unwrap(),
+        );
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        let ruby_layout = find_layout_box(&layout, &ruby).unwrap();
+        ["基", "一", "二", "三"].map(|expected| {
+            ruby_layout
+                .lines
+                .iter()
+                .flat_map(|line| &line.fragments)
+                .find(|fragment| fragment.text() == Some(expected))
+                .map(|fragment| fragment.rect.y + fragment.rect.height * 0.5)
+                .unwrap()
+        })
+    };
+
+    let [base, first, second, third] = layout_levels("alternate over", None);
+    assert!(first < base && second > base && third < first);
+    let [base, first, second, third] = layout_levels("alternate under", None);
+    assert!(first > base && second < base && third > first);
+    let [base, first, second, third] = layout_levels("alternate over", Some("under"));
+    assert!(first > base && second < base && third > first);
+}
+
+#[test]
+fn ruby_align_distributes_the_shorter_base_level() {
+    let base_edges = |align: &str| {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let ruby = NodeHandle::element("ruby");
+        ruby.append_child(NodeHandle::text("漢字"));
+        let rt = NodeHandle::element("rt");
+        rt.append_child(NodeHandle::text("abcdefghijklmnopqrst"));
+        ruby.append_child(rt);
+        body.append_child(ruby.clone());
+        document.append_child(body.clone());
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                "body {{ margin:0; font-size:20px; line-height:20px; }} \
+                 ruby {{ ruby-align:{align}; }}"
+            ))
+            .unwrap(),
+        );
+        let layout = layout_tree(
+            &body,
+            &mut resolver,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        let ruby_layout = find_layout_box(&layout, &ruby).unwrap();
+        let base = ruby_layout
+            .lines
+            .iter()
+            .flat_map(|line| &line.fragments)
+            .filter(|fragment| {
+                fragment.text().is_some() && (fragment.metrics.font_size - 20.0).abs() < 0.01
+            })
+            .collect::<Vec<_>>();
+        let left = base
+            .iter()
+            .map(|fragment| fragment.rect.x)
+            .reduce(f32::min)
+            .unwrap();
+        let right = base
+            .iter()
+            .map(|fragment| fragment.rect.x + fragment.rect.width)
+            .reduce(f32::max)
+            .unwrap();
+        let content = ruby_layout.dimensions.content;
+        (left - content.x, content.x + content.width - right)
+    };
+
+    let (start, end) = base_edges("start");
+    assert!(
+        start.abs() < 0.01 && end > 0.0,
+        "start alignment edges: {start}, {end}"
+    );
+    let (start, end) = base_edges("center");
+    assert!((start - end).abs() < 0.01 && start > 0.0);
+    let (start, end) = base_edges("space-between");
+    assert!(
+        start.abs() < 0.01 && end.abs() < 0.01,
+        "space-between edges: {start}, {end}"
+    );
+    let (start, end) = base_edges("space-around");
+    assert!((start - end).abs() < 0.01 && start > 0.0);
+}
+
+#[test]
 fn text_autospace_changes_inline_advance_without_changing_text_content() {
     let width = |autospace: &str| {
         let document = NodeHandle::document();

@@ -1849,6 +1849,27 @@ fn collect_element_inline_segments(
             collect_value_indicator_segment(node, &style, out);
             return;
         }
+        Some("ruby") if context.allow_atomic_boxes => {
+            if let Some(layout) = layout_ruby_inline(node, resolver, &style, context) {
+                let width = layout.total_width();
+                let height = layout.total_height();
+                let baseline = atomic_inline_baseline(&layout);
+                atomic_boxes.push(layout);
+                out.push(InlineSegment {
+                    node: node.clone(),
+                    text_source: Vec::new(),
+                    content: InlineSegmentContent::AtomicInline(width, height, baseline),
+                    metrics: font_metrics(&style),
+                    line_height: height,
+                    vertical_align: vertical_align(&style),
+                    style: FragmentStyle::from_computed(&style),
+                    word_break: word_break(&style),
+                    overflow_wrap: overflow_wrap(&style),
+                    white_space_mode: white_space(&style),
+                });
+                return;
+            }
+        }
         Some("audio" | "canvas" | "video") if element_inline_image(node).is_none() => {
             collect_media_placeholder_segment(node, &style, out);
             return;
@@ -1978,6 +1999,437 @@ fn collect_element_inline_segments(
     if inline_box {
         boxes::edge(node, &style, false, out);
     }
+}
+
+struct RubyAnnotationLevel {
+    nodes: Vec<NodeHandle>,
+    position_owner: Option<NodeHandle>,
+}
+
+struct RubyLaidOutLevel {
+    layout: InlineLayoutResult,
+    cross: f32,
+    under: bool,
+}
+
+#[derive(Clone, Copy)]
+enum RubyAlign {
+    Start,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+}
+
+impl RubyAlign {
+    fn from_style(style: &ComputedStyle) -> Self {
+        match style.get("ruby-align") {
+            Some(ComputedValue::Keyword(value)) if value == "start" => Self::Start,
+            Some(ComputedValue::Keyword(value)) if value == "center" => Self::Center,
+            Some(ComputedValue::Keyword(value)) if value == "space-between" => Self::SpaceBetween,
+            _ => Self::SpaceAround,
+        }
+    }
+
+    fn text_align(self) -> TextAlign {
+        match self {
+            Self::Start | Self::SpaceBetween | Self::SpaceAround => TextAlign::Left,
+            Self::Center => TextAlign::Center,
+        }
+    }
+
+    fn finish(self, lines: &mut [LineBox], inline_extent: f32) {
+        if !matches!(self, Self::SpaceBetween | Self::SpaceAround) {
+            return;
+        }
+        for line in lines {
+            let graphemes = line
+                .fragments
+                .iter()
+                .filter_map(InlineFragment::text)
+                .map(|text| text.graphemes(true).count())
+                .sum::<usize>();
+            let used = line.rect.width;
+            let extra = (inline_extent - used).max(0.0);
+            if graphemes > 1 {
+                let internal = if matches!(self, Self::SpaceBetween) {
+                    extra
+                } else {
+                    extra * (graphemes - 1) as f32 / graphemes as f32
+                };
+                justify_inter_character(&mut line.fragments, used, used + internal);
+            }
+            let edge = if matches!(self, Self::SpaceBetween) {
+                0.0
+            } else if graphemes == 0 {
+                extra * 0.5
+            } else {
+                extra / (2 * graphemes) as f32
+            };
+            for fragment in &mut line.fragments {
+                fragment.rect.x += edge;
+            }
+            line.rect.width = inline_extent;
+        }
+    }
+}
+
+fn ruby_annotation_levels(children: &[NodeHandle]) -> Vec<RubyAnnotationLevel> {
+    let mut levels = Vec::new();
+    let mut direct_rt = Vec::new();
+    for child in children {
+        match child.with_tag_name(|tag| tag.map(str::to_owned)) {
+            Some(tag) if tag == "rt" => direct_rt.push(child.clone()),
+            Some(tag) if tag == "rtc" => {
+                if !direct_rt.is_empty() {
+                    levels.push(RubyAnnotationLevel {
+                        nodes: std::mem::take(&mut direct_rt),
+                        position_owner: None,
+                    });
+                }
+                levels.push(RubyAnnotationLevel {
+                    nodes: child.layout_child_nodes(),
+                    position_owner: Some(child.clone()),
+                });
+            }
+            _ => {}
+        }
+    }
+    if !direct_rt.is_empty() {
+        levels.push(RubyAnnotationLevel {
+            nodes: direct_rt,
+            position_owner: None,
+        });
+    }
+    levels.retain(|level| !level.nodes.is_empty());
+    levels
+}
+
+fn ruby_annotation_strut(
+    level: &RubyAnnotationLevel,
+    resolver: &mut StyleResolver,
+    fallback: f32,
+) -> f32 {
+    level
+        .nodes
+        .first()
+        .map(|annotation| resolver.computed_style(annotation))
+        .map(|style| font_metrics(&style).font_size * 1.2)
+        .unwrap_or(fallback * 0.5)
+}
+
+fn ruby_level_cross_extent(level: &InlineLayoutResult) -> f32 {
+    level
+        .lines
+        .iter()
+        .map(|line| line.rect.height)
+        .fold(0.0_f32, f32::max)
+}
+
+fn layout_ruby_level(
+    nodes: &[NodeHandle],
+    resolver: &mut StyleResolver,
+    width: f32,
+    align: TextAlign,
+    strut: f32,
+    direction_rtl: bool,
+    context: InlineLayoutContext,
+) -> InlineLayoutResult {
+    layout_inline_nodes_impl(
+        nodes,
+        resolver,
+        0.0,
+        0.0,
+        width,
+        align,
+        strut,
+        direction_rtl,
+        None,
+        context.containing_height,
+        context.viewport,
+        context.positioned_ancestor,
+        true,
+        None,
+        false,
+        false,
+        None,
+    )
+}
+
+fn translate_ruby_lines(lines: &mut [LineBox], dx: f32, dy: f32) {
+    for line in lines {
+        line.rect.x += dx;
+        line.rect.y += dy;
+        line.baseline += dy;
+        for fragment in &mut line.fragments {
+            fragment.rect.x += dx;
+            fragment.rect.y += dy;
+        }
+        if let Some(overflow) = &mut line.text_overflow {
+            for fragment in &mut overflow.fragments {
+                fragment.rect.x += dx;
+                fragment.rect.y += dy;
+            }
+        }
+    }
+}
+
+fn transpose_ruby_lines(lines: &mut [LineBox], cross: f32) {
+    for line in lines {
+        let old = line.rect;
+        let block_origin = line
+            .fragments
+            .iter()
+            .filter(|fragment| fragment.text().is_some())
+            .map(|fragment| fragment.rect.y - old.y)
+            .reduce(f32::min)
+            .unwrap_or(0.0);
+        for fragment in &mut line.fragments {
+            let inline = fragment.rect.x - old.x;
+            let block = fragment.rect.y - old.y - block_origin;
+            fragment.rect = Rect {
+                x: cross + block,
+                y: inline,
+                width: fragment.rect.height,
+                height: fragment.rect.width,
+            };
+        }
+        line.rect = Rect {
+            x: cross,
+            y: 0.0,
+            width: old.height,
+            height: old.width,
+        };
+    }
+}
+
+fn position_ruby_levels(
+    style: &ComputedStyle,
+    base: &mut InlineLayoutResult,
+    annotations: &mut [RubyLaidOutLevel],
+    inline_extent: f32,
+    base_cross: f32,
+) -> (f32, f32) {
+    let over_cross = annotations
+        .iter()
+        .filter(|level| !level.under)
+        .map(|level| level.cross)
+        .sum::<f32>();
+    let under_cross = annotations
+        .iter()
+        .filter(|level| level.under)
+        .map(|level| level.cross)
+        .sum::<f32>();
+    if !super::is_vertical_writing(style) {
+        translate_ruby_lines(&mut base.lines, 0.0, over_cross);
+        let mut over_cursor = over_cross;
+        let mut under_cursor = over_cross + base_cross;
+        for level in annotations {
+            let y = if level.under {
+                let y = under_cursor;
+                under_cursor += level.cross;
+                y
+            } else {
+                over_cursor -= level.cross;
+                over_cursor
+            };
+            translate_ruby_lines(&mut level.layout.lines, 0.0, y);
+        }
+        return (inline_extent, over_cross + base_cross + under_cross);
+    }
+
+    let vertical_rl = matches!(
+        style.get("writing-mode"),
+        Some(ComputedValue::Keyword(mode)) if mode == "vertical-rl" || mode == "sideways-rl"
+    );
+    let base_position = if vertical_rl { under_cross } else { over_cross };
+    transpose_ruby_lines(&mut base.lines, base_position);
+    let mut over_cursor = over_cross;
+    let mut under_cursor = over_cross + base_cross;
+    for level in annotations {
+        let logical_cross = if level.under {
+            let cross = under_cursor;
+            under_cursor += level.cross;
+            cross
+        } else {
+            over_cursor -= level.cross;
+            over_cursor
+        };
+        let physical_cross = if vertical_rl {
+            over_cross + base_cross + under_cross - logical_cross - level.cross
+        } else {
+            logical_cross
+        };
+        transpose_ruby_lines(&mut level.layout.lines, physical_cross);
+    }
+    (over_cross + base_cross + under_cross, inline_extent)
+}
+
+fn layout_ruby_inline(
+    node: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    context: InlineLayoutContext,
+) -> Option<LayoutBox> {
+    let children = node.layout_child_nodes();
+    let base_nodes = children
+        .iter()
+        .filter(|child| {
+            !child.with_tag_name(|tag| matches!(tag, Some("rt" | "rtc" | "rp")))
+                && !(child.node_type() == NodeType::Text
+                    && child.data().is_none_or(|text| text.trim().is_empty()))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let annotation_levels = ruby_annotation_levels(&children);
+    if base_nodes.is_empty() || annotation_levels.is_empty() {
+        return None;
+    }
+
+    let direction_rtl = super::direction_is_rtl(style);
+    let base_strut = line_height(style);
+    let natural_width = context.available_width.max(100_000.0);
+    let natural_base = layout_ruby_level(
+        &base_nodes,
+        resolver,
+        natural_width,
+        TextAlign::Left,
+        base_strut,
+        direction_rtl,
+        context,
+    );
+    let natural_annotations = annotation_levels
+        .iter()
+        .map(|level| {
+            let strut = ruby_annotation_strut(level, resolver, base_strut);
+            layout_ruby_level(
+                &level.nodes,
+                resolver,
+                natural_width,
+                TextAlign::Left,
+                strut,
+                direction_rtl,
+                context,
+            )
+        })
+        .collect::<Vec<_>>();
+    let inline_extent = std::iter::once(&natural_base)
+        .chain(natural_annotations.iter())
+        .flat_map(|level| &level.lines)
+        .map(|line| line.rect.width)
+        .fold(0.0_f32, f32::max);
+    if inline_extent <= 0.0 {
+        return None;
+    }
+    let ruby_align = RubyAlign::from_style(style);
+    let mut base = layout_ruby_level(
+        &base_nodes,
+        resolver,
+        inline_extent,
+        ruby_align.text_align(),
+        base_strut,
+        direction_rtl,
+        context,
+    );
+    ruby_align.finish(&mut base.lines, inline_extent);
+    let base_cross = ruby_level_cross_extent(&base);
+    let mut annotations = annotation_levels
+        .iter()
+        .map(|level| {
+            let strut = ruby_annotation_strut(level, resolver, base_strut);
+            let mut layout = layout_ruby_level(
+                &level.nodes,
+                resolver,
+                inline_extent,
+                ruby_align.text_align(),
+                strut,
+                direction_rtl,
+                context,
+            );
+            ruby_align.finish(&mut layout.lines, inline_extent);
+            RubyLaidOutLevel {
+                under: false,
+                cross: ruby_level_cross_extent(&layout),
+                layout,
+            }
+        })
+        .collect::<Vec<_>>();
+    let position = match style.get("ruby-position") {
+        Some(ComputedValue::Keyword(value)) => value.as_str(),
+        _ => "alternate",
+    };
+    let starts_under = position
+        .split_ascii_whitespace()
+        .any(|part| part == "under");
+    let mut previous_under = !starts_under;
+    for (source, laid_out) in annotation_levels.iter().zip(&mut annotations) {
+        let level_style = source
+            .position_owner
+            .as_ref()
+            .map(|owner| resolver.computed_style(owner));
+        let explicit = level_style
+            .as_ref()
+            .and_then(|style| style.get("ruby-position"))
+            .and_then(|value| match value {
+                ComputedValue::Keyword(value)
+                    if value != position && value.split_ascii_whitespace().any(|v| v == "over") =>
+                {
+                    Some(false)
+                }
+                ComputedValue::Keyword(value)
+                    if value != position
+                        && value.split_ascii_whitespace().any(|v| v == "under") =>
+                {
+                    Some(true)
+                }
+                _ => None,
+            });
+        laid_out.under = explicit.unwrap_or(!previous_under);
+        previous_under = laid_out.under;
+    }
+
+    let (width, height) = position_ruby_levels(
+        style,
+        &mut base,
+        &mut annotations,
+        inline_extent,
+        base_cross,
+    );
+    let mut lines = base.lines;
+    let mut atomic_boxes = base.atomic_boxes;
+    for level in annotations {
+        lines.extend(level.layout.lines);
+        atomic_boxes.extend(level.layout.atomic_boxes);
+    }
+    position_atomic_boxes(&lines, &mut atomic_boxes, resolver);
+
+    Some(LayoutBox {
+        node: node.clone(),
+        pseudo: None,
+        dimensions: BoxDimensions {
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height,
+            },
+            ..BoxDimensions::default()
+        },
+        visibility: super::visibility(style),
+        overflow: super::Overflow::Visible,
+        position_scheme: super::position_scheme(style),
+        fixed_containing_block: super::establishes_fixed_containing_block(style),
+        z_index: super::z_index(style),
+        transform: crate::css::AffineTransform::identity(),
+        needs_scroll_translation: false,
+        has_out_of_flow_descendants: None,
+        content_visibility_contents_skipped: false,
+        paint_scroll: None,
+        block_fragments: Vec::new(),
+        multicol: None,
+        lines,
+        children: atomic_boxes,
+        marker: None,
+    })
 }
 
 fn collect_input_segment(node: &NodeHandle, style: &ComputedStyle, out: &mut Vec<InlineSegment>) {

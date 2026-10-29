@@ -14255,6 +14255,14 @@ fn apply_ua_defaults(
                 .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("inline".to_string()));
         }
+        "rt" => {
+            properties
+                .entry(PropertyId::FontSize)
+                .or_insert(ComputedValue::Px(parent_font_size * 0.5));
+            properties
+                .entry(PropertyId::TextEmphasisStyle)
+                .or_insert(ComputedValue::Keyword("none".to_string()));
+        }
         "progress" | "meter" => apply_progress_or_meter_ua_defaults(properties),
         "form" => {
             properties
