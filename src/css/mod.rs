@@ -2087,6 +2087,31 @@ mod tests {
         assert!(matches!(&stylesheet.rules[0], Rule::At(_)));
     }
 
+    #[test]
+    fn font_feature_values_retains_nested_named_value_rules() {
+        let sheet = parse_stylesheet(
+            "@font-feature-values Demo { @swash { flowing: 2; } \
+             @styleset { display: 1 4; } }",
+        )
+        .unwrap();
+        let Rule::At(outer) = &sheet.rules[0] else {
+            panic!("expected @font-feature-values");
+        };
+        assert_eq!(outer.name, "font-feature-values");
+        assert_eq!(outer.prelude, "Demo");
+        let nested = outer.block.as_ref().unwrap();
+        let Rule::At(swash) = &nested[0] else {
+            panic!("expected nested @swash");
+        };
+        assert_eq!(swash.name, "swash");
+        assert_eq!(swash.declarations[0].name, "flowing");
+        assert_eq!(style::render_value(&swash.declarations[0].value), "2");
+        let Rule::At(styleset) = &nested[1] else {
+            panic!("expected nested @styleset");
+        };
+        assert_eq!(style::render_value(&styleset.declarations[0].value), "1 4");
+    }
+
     // ── Attribute selector parsing ──────────────────────────────────────
 
     #[test]

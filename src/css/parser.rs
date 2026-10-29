@@ -827,6 +827,23 @@ impl Parser {
                         }));
                     }
 
+                    // The body of @font-feature-values is a list of nested
+                    // feature-value at-rules, not a declaration list. Reuse
+                    // the top-level at-rule parser so each @swash/@styleset
+                    // block retains owned, validated declaration values.
+                    if name.eq_ignore_ascii_case("font-feature-values") {
+                        let raw_block = self.consume_raw_block()?;
+                        let nested = super::parse_stylesheet(&raw_block)?.rules;
+                        return Ok(Rule::At(AtRule {
+                            name,
+                            page_margin_box: None,
+                            prelude: render_tokens(&prelude_tokens).trim().to_string(),
+                            block: Some(nested),
+                            declarations: Vec::new(),
+                            anonymous_layer_id: None,
+                        }));
+                    }
+
                     let declarations = self.parse_declaration_list()?;
 
                     // Produce a structured FontFace rule when possible.
