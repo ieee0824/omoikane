@@ -275,8 +275,12 @@ fn fill_single_byte_large_canvas_fixture() {
 
 #[test]
 fn resizable_buffer_filter_propagates_bigint_conversion_errors() {
-    run_test_actions([TestAction::assert(
-        r"(() => {
+    // `ArrayBuffer.prototype.transfer` requires the `experimental` feature, so
+    // detach through the test helper to cover default features too.
+    run_test_actions([
+        TestAction::inspect_context(register_fill_detach_helper),
+        TestAction::assert(
+            r"(() => {
         for (const TA of [BigInt64Array, BigUint64Array]) {
             for (const fixed of [false, true]) {
                 for (const detach of [false, true]) {
@@ -290,7 +294,7 @@ fn resizable_buffer_filter_propagates_bigint_conversion_errors() {
                             if (index !== calls || receiver !== array) throw Error('callback');
                             if (calls === 0) {
                                 if (value !== 1n) throw Error('initial value');
-                                if (detach) buffer.transfer(); else buffer.resize(8);
+                                if (detach) detachFillTestBuffer(buffer); else buffer.resize(8);
                             } else if (value !== undefined) throw Error('missing value');
                             calls++;
                             return true;
@@ -302,7 +306,8 @@ fn resizable_buffer_filter_propagates_bigint_conversion_errors() {
         }
         return true;
     })()",
-    )]);
+        ),
+    ]);
 }
 
 #[test]
