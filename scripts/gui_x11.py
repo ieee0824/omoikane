@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import select
+import shlex
 import subprocess as S
 import time
 
@@ -31,6 +32,24 @@ def trace_records(path, kind):
         return []
     return [json.loads(line[len(prefix):]) for line in complete.split('\n')
             if line.startswith(prefix)]
+
+
+def thread_states(pid):
+    """Snapshot each thread's name, scheduler state and kernel wait channel.
+
+    A process that misses a deadline can then be told apart as busy, blocked
+    in the kernel or exiting. Threads that vanish while being read are skipped.
+    """
+    states = []
+    for task in sorted(Path(f'/proc/{pid}/task').glob('*'), key=lambda path: int(path.name)):
+        try:
+            stat = (task / 'stat').read_text()
+            states.append({'tid': int(task.name), 'name': (task / 'comm').read_text().strip(),
+                           'state': stat[stat.rindex(')') + 2],
+                           'wchan': (task / 'wchan').read_text().strip()})
+        except (OSError, ValueError):
+            continue
+    return states
 
 
 def wait_for(label, probe, predicate, seconds=20, evidence=None):
@@ -109,8 +128,11 @@ class GuiSession:
     def _desktop(self):
         read_fd, write_fd = os.pipe()
         try:
+            # -noreset keeps the server from regenerating whenever its last
+            # client disconnects; a client connecting during that window,
+            # such as Openbox right after xdpyinfo, is otherwise refused.
             process = self.start(['Xvfb', '-displayfd', write_fd, '-screen', '0',
-                                  '1600x1000x24', '-nolisten', 'tcp'],
+                                  '1600x1000x24', '-nolisten', 'tcp', '-noreset'],
                                  'xvfb', pass_fds=(write_fd,))
         except BaseException:
             os.close(read_fd)
@@ -137,7 +159,13 @@ class GuiSession:
         self.inputs['display'] = self.env['DISPLAY']
         self._write_inputs()
         self.command('xdpyinfo')
-        self.start(['openbox'], 'openbox')
+        # Openbox publishes _NET_SUPPORTING_WM_CHECK before it finishes
+        # starting. A window mapped in between, which is likely while a cold
+        # fontconfig cache is built, is never managed and stays unmapped.
+        # Openbox runs the --startup command only once it manages windows.
+        started = self.out / 'openbox-started'
+        self.start(['openbox', '--startup', 'touch ' + shlex.quote(str(started))], 'openbox')
+        self.wait_for('window manager started', started.is_file, bool)
         self.wait_for('window manager ready',
                       lambda: self.command('xprop', '-root', '_NET_SUPPORTING_WM_CHECK'),
                       lambda value: 'window id #' in value)
@@ -161,6 +189,17 @@ class GuiSession:
             assert result.returncode in (0, 1), result.stderr
             return result.stdout.splitlines()
         return self.wait_for('window created', probe, bool)[0]
+
+    def focus_state(self):
+        """Record which window the WM reports active and which holds X input focus."""
+        state = {}
+        for key, args in (('active', ['xprop', '-root', '_NET_ACTIVE_WINDOW']),
+                          ('input_focus', ['xdotool', 'getwindowfocus'])):
+            try:
+                state[key] = self.command(*args)
+            except (OSError, S.SubprocessError) as error:
+                state[key] = 'error: ' + str(error)
+        return state
 
     def screenshot(self, name):
         """Keep original and losslessly compressed PNGs with equal pixels and size."""
@@ -187,6 +226,10 @@ class GuiSession:
                     self.screenshot('failure')
                 except Exception as capture_error:
                     self.evidence.append({'capture_error': str(capture_error)})
+                self.evidence.append({'focus': self.focus_state()})
+            for process in self.processes:
+                if process.poll() is None:
+                    self.evidence.append({'pid': process.pid, 'threads': thread_states(process.pid)})
         try:
             for process in reversed(self.processes):
                 if process.poll() is None:
