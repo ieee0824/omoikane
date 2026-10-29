@@ -2684,7 +2684,7 @@ fn tab_size_advances_to_cursor_relative_stops() {
         .iter()
         .find(|fragment| fragment.text() == Some("B"))
         .unwrap();
-    let space_width = super::inline::measure_text_width(" ", column_a.metrics);
+    let space_width = super::inline::measure_text_width(" ", &column_a.metrics);
     assert!((column_b.rect.x - column_a.rect.x - 4.0 * space_width).abs() < 0.01);
 
     let length_fragments = &layout.children[1].lines[0].fragments;
@@ -10820,12 +10820,12 @@ fn zero_width_shaping_controls_do_not_change_inline_advance() {
     let mut metrics = FontMetrics::from_font_size(16.0);
     metrics.letter_spacing = 2.0;
 
-    let base = super::measure_text_width("e", metrics);
-    let composed = super::measure_text_width("e\u{301}", metrics);
-    let paired = super::measure_text_width("e\u{301}f", metrics);
-    let unmarked = super::measure_text_width("ef", metrics);
-    let emoji = super::measure_text_width("\u{1f600}", metrics);
-    let emoji_with_selector = super::measure_text_width("\u{1f600}\u{fe0f}", metrics);
+    let base = super::measure_text_width("e", &metrics);
+    let composed = super::measure_text_width("e\u{301}", &metrics);
+    let paired = super::measure_text_width("e\u{301}f", &metrics);
+    let unmarked = super::measure_text_width("ef", &metrics);
+    let emoji = super::measure_text_width("\u{1f600}", &metrics);
+    let emoji_with_selector = super::measure_text_width("\u{1f600}\u{fe0f}", &metrics);
 
     assert!(
         (composed - base).abs() < 0.01,
@@ -10862,7 +10862,7 @@ fn complex_script_layout_uses_run_shaping_advances() {
         .map(|glyph| glyph.x_advance.abs())
         .sum::<f32>()
         + metrics.letter_spacing;
-    let measured = super::measure_text_width("لا", metrics);
+    let measured = super::measure_text_width("لا", &metrics);
     assert!(
         (measured - expected).abs() < 0.01,
         "layout={measured}, shaped={expected}"
@@ -10870,13 +10870,91 @@ fn complex_script_layout_uses_run_shaping_advances() {
 }
 
 #[test]
+fn layout_measurement_applies_computed_opentype_settings() {
+    use crate::font::{Font, ShapingDirection};
+    use std::sync::Arc;
+
+    let font = Arc::new(
+        Font::load_from_bytes(
+            include_bytes!("../../tests/fixtures/acid2/LiberationSans-Regular.ttf").to_vec(),
+        )
+        .unwrap(),
+    );
+    let style = resolve_style_for_test(
+        "div { font-feature-settings: \"kern\" 0; \
+         font-variation-settings: \"wght\" 650 }",
+        "div",
+    );
+    let metrics = font_metrics(&style);
+    let default_glyphs = font
+        .shape_text("AV", metrics.font_size, ShapingDirection::LeftToRight)
+        .unwrap();
+    let configured_glyphs = font
+        .shape_text_with_options(
+            "AV",
+            metrics.font_size,
+            ShapingDirection::LeftToRight,
+            &metrics.shaping_options,
+        )
+        .unwrap();
+    let default_advance = default_glyphs
+        .iter()
+        .map(|glyph| glyph.x_advance.abs())
+        .sum::<f32>();
+    let expected = configured_glyphs
+        .iter()
+        .map(|glyph| glyph.x_advance.abs())
+        .sum::<f32>();
+    assert!(
+        (expected - default_advance).abs() > 0.01,
+        "fixture must expose the kern setting"
+    );
+    let measured = super::with_layout_fonts(vec![font], None, || {
+        super::measure_text_width("AV", &metrics)
+    });
+    assert!((measured - expected).abs() < 0.01);
+}
+
+#[test]
+fn font_size_adjust_scales_selected_font_metrics_and_shaping_size() {
+    use crate::font::Font;
+    use std::sync::Arc;
+
+    let font = Arc::new(
+        Font::load_from_bytes(
+            include_bytes!("../../tests/fixtures/acid2/LiberationSans-Regular.ttf").to_vec(),
+        )
+        .unwrap(),
+    );
+    let style = resolve_style_for_test(
+        "div { font-size: 20px; font-size-adjust: ex-height 0.7 }",
+        "div",
+    );
+    let actual_ratio = font.css_relative_metrics(1.0, false, false).ex;
+    let expected_size = 20.0 * 0.7 / actual_ratio;
+    let metrics = super::with_layout_fonts(vec![Arc::clone(&font)], None, || font_metrics(&style));
+
+    assert!((metrics.font_size - expected_size).abs() < 0.01);
+    let expected = font.layout_metrics(expected_size);
+    assert!((metrics.ascent - expected.ascent).abs() < 0.01);
+    assert!((metrics.average_advance - expected.average_advance).abs() < 0.01);
+
+    let from_font = resolve_style_for_test(
+        "div { font-size: 20px; font-size-adjust: from-font }",
+        "div",
+    );
+    let metrics = super::with_layout_fonts(vec![font], None, || font_metrics(&from_font));
+    assert!((metrics.font_size - 20.0).abs() < 0.01);
+}
+
+#[test]
 fn letter_spacing_is_applied_between_grapheme_clusters_not_emoji_components() {
     let plain = FontMetrics::from_font_size(24.0);
-    let mut spaced = plain;
+    let mut spaced = plain.clone();
     spaced.letter_spacing = 5.0;
     let cluster = "👩‍💻";
-    let plain_width = super::measure_text_width(cluster, plain);
-    let spaced_width = super::measure_text_width(cluster, spaced);
+    let plain_width = super::measure_text_width(cluster, &plain);
+    let spaced_width = super::measure_text_width(cluster, &spaced);
     assert!((plain_width - spaced_width).abs() < 0.01);
 }
 

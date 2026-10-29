@@ -967,6 +967,126 @@ fn shaping_cache_reuses_exact_runs_without_mixing_size_or_direction() {
     font.shape_text("AB", 16.0, ShapingDirection::RightToLeft)
         .unwrap();
     assert_eq!(font.shape_cache.lock().unwrap().entries.len(), 3);
+
+    let feature_options = ShapingOptions {
+        features: vec![OpenTypeFeature::new(*b"liga", 0)],
+        variations: Vec::new(),
+        ..ShapingOptions::default()
+    };
+    font.shape_text_with_options("AB", 16.0, ShapingDirection::LeftToRight, &feature_options)
+        .unwrap();
+    let variation_options = ShapingOptions {
+        features: Vec::new(),
+        variations: vec![OpenTypeVariation::new(*b"wght", 700.0)],
+        ..ShapingOptions::default()
+    };
+    font.shape_text_with_options(
+        "AB",
+        16.0,
+        ShapingDirection::LeftToRight,
+        &variation_options,
+    )
+    .unwrap();
+    assert_eq!(font.shape_cache.lock().unwrap().entries.len(), 5);
+}
+
+#[test]
+fn unsupported_caps_and_position_features_use_typed_synthesis_fallbacks() {
+    let font = load_selection_fixture();
+    let baseline = font
+        .shape_text("aA", 20.0, ShapingDirection::LeftToRight)
+        .unwrap();
+    let caps = font
+        .shape_text_with_options(
+            "aA",
+            20.0,
+            ShapingDirection::LeftToRight,
+            &ShapingOptions {
+                features: vec![OpenTypeFeature::new(*b"smcp", 1)],
+                synthetic_caps: SyntheticCaps::Lowercase,
+                ..ShapingOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(caps[0].glyph_id, baseline[1].glyph_id);
+    assert_eq!(caps[0].font_size_scale, 0.8);
+    assert_eq!(caps[1].font_size_scale, 1.0);
+
+    let superscript = font
+        .shape_text_with_options(
+            "A",
+            20.0,
+            ShapingDirection::LeftToRight,
+            &ShapingOptions {
+                features: vec![OpenTypeFeature::new(*b"sups", 1)],
+                synthetic_position: SyntheticPosition::Superscript,
+                ..ShapingOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(superscript[0].font_size_scale, 0.8);
+    assert!(superscript[0].y_offset > 0.0);
+    assert!(superscript[0].x_advance < baseline[1].x_advance);
+
+    let disabled = font
+        .shape_text_with_options(
+            "a",
+            20.0,
+            ShapingDirection::LeftToRight,
+            &ShapingOptions {
+                features: vec![
+                    OpenTypeFeature::new(*b"smcp", 1),
+                    OpenTypeFeature::new(*b"smcp", 0),
+                ],
+                synthetic_caps: SyntheticCaps::Lowercase,
+                ..ShapingOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(disabled[0].glyph_id, baseline[0].glyph_id);
+    assert_eq!(disabled[0].font_size_scale, 1.0);
+}
+
+#[test]
+fn position_feature_or_fallback_shrinks_the_whole_run() {
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/acid2/LiberationSans-Regular.ttf").to_vec(),
+    )
+    .unwrap();
+    let baseline = font
+        .shape_text("Open Abcde 123", 32.0, ShapingDirection::LeftToRight)
+        .unwrap();
+    let superscript = font
+        .shape_text_with_options(
+            "Open Abcde 123",
+            32.0,
+            ShapingDirection::LeftToRight,
+            &ShapingOptions {
+                features: vec![OpenTypeFeature::new(*b"sups", 1)],
+                synthetic_position: SyntheticPosition::Superscript,
+                ..ShapingOptions::default()
+            },
+        )
+        .unwrap();
+    let width = |glyphs: &[ShapedGlyph]| {
+        glyphs
+            .iter()
+            .map(|glyph| glyph.x_advance.abs())
+            .sum::<f32>()
+    };
+    let ratio = width(&superscript) / width(&baseline);
+    assert!(
+        ratio < 0.85,
+        "position feature must shrink the whole run: {ratio}"
+    );
+}
+
+#[test]
+fn synthetic_caps_preserve_source_clusters_across_uppercase_expansion() {
+    let (text, map, clusters) = synthetic_caps_text("aßZ", true, false);
+    assert_eq!(text, "ASSZ");
+    assert_eq!(map, vec![(0, 0), (1, 1), (2, 1), (3, 3)]);
+    assert_eq!(clusters, HashSet::from([0, 1]));
 }
 
 #[test]
@@ -978,6 +1098,7 @@ fn shaping_cache_evicts_old_runs_at_its_entry_limit() {
                 text: index.to_string(),
                 size_bits: 16.0_f32.to_bits(),
                 direction: ShapingDirection::LeftToRight,
+                options: ShapingOptions::default(),
             },
             Vec::new(),
         );
@@ -1091,6 +1212,8 @@ fn unicode_range_composite_face_splits_grapheme_runs_in_source_order() {
         .map(|candidate| FontFallbackCandidate {
             font: candidate.font,
             unicode_range: Some(candidate.unicode_range),
+            weight: candidate.weight,
+            style: candidate.style,
         })
         .collect::<Vec<_>>();
     let runs =
@@ -1511,4 +1634,153 @@ fn font_family_selection_does_not_initialize_unused_fallback_members() {
     assert!(std::ptr::eq(selected[0].font, font.as_ref()));
     assert!(members[0].key.get().is_some());
     assert!(members[1].key.get().is_none());
+}
+
+#[test]
+fn solid_colr_layers_rasterize_and_unsupported_transforms_fall_back() {
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/color-font/twemoji-smiley-glyf-colr1.ttf").to_vec(),
+    )
+    .unwrap();
+    let solid = font.inner.glyph_id('😁').0;
+    let layers = font
+        .rasterize_color_glyph(solid, 32.0, &FontPalette::default(), [1, 2, 3, 255])
+        .expect("solid COLR glyph");
+    assert_eq!(layers.len(), 4);
+    assert_eq!(layers[0].color, [255, 204, 77, 255]);
+    assert_eq!(layers[1].color, [102, 69, 0, 255]);
+    assert_eq!(layers[2].color, [255, 255, 255, 255]);
+    assert_eq!(layers[3].color, [102, 69, 0, 255]);
+    assert!(layers.iter().all(|layer| !layer.raster.bitmap.is_empty()));
+    assert!(
+        font.rasterize_color_glyph(
+            solid,
+            32.0,
+            &FontPalette {
+                base: FontPaletteBase::Index(1),
+                overrides: Vec::new(),
+                mix: None,
+            },
+            [1, 2, 3, 255],
+        )
+        .is_some()
+    );
+
+    let transformed = font.inner.glyph_id('☺').0;
+    assert!(
+        font.rasterize_color_glyph(transformed, 32.0, &FontPalette::default(), [1, 2, 3, 255],)
+            .is_none()
+    );
+
+    let overridden = font
+        .rasterize_color_glyph(
+            solid,
+            32.0,
+            &FontPalette {
+                base: FontPaletteBase::Index(0),
+                overrides: vec![(9, [9, 8, 7, 255])],
+                mix: None,
+            },
+            [1, 2, 3, 255],
+        )
+        .unwrap();
+    assert_eq!(overridden[0].color, [9, 8, 7, 255]);
+
+    let first = font
+        .rasterize_color_glyph(
+            solid,
+            32.0,
+            &FontPalette {
+                base: FontPaletteBase::Index(0),
+                overrides: Vec::new(),
+                mix: None,
+            },
+            [1, 2, 3, 255],
+        )
+        .unwrap();
+    let second = font
+        .rasterize_color_glyph(
+            solid,
+            32.0,
+            &FontPalette {
+                base: FontPaletteBase::Index(1),
+                overrides: Vec::new(),
+                mix: None,
+            },
+            [1, 2, 3, 255],
+        )
+        .unwrap();
+    let mixed = font
+        .rasterize_color_glyph(
+            solid,
+            32.0,
+            &FontPalette {
+                base: FontPaletteBase::Index(0),
+                overrides: Vec::new(),
+                mix: Some(Box::new(FontPaletteMix {
+                    method: "in srgb".to_string(),
+                    components: vec![
+                        FontPaletteMixComponent {
+                            palette: FontPalette {
+                                base: FontPaletteBase::Index(0),
+                                overrides: Vec::new(),
+                                mix: None,
+                            },
+                            weight_bits: 25.0_f32.to_bits(),
+                        },
+                        FontPaletteMixComponent {
+                            palette: FontPalette {
+                                base: FontPaletteBase::Index(1),
+                                overrides: Vec::new(),
+                                mix: None,
+                            },
+                            weight_bits: 75.0_f32.to_bits(),
+                        },
+                    ],
+                })),
+            },
+            [1, 2, 3, 255],
+        )
+        .unwrap();
+    for ((mixed, first), second) in mixed.iter().zip(&first).zip(&second) {
+        assert_eq!(
+            mixed.color,
+            crate::paint::color4::mix_palette_colors(
+                "in srgb",
+                &[(first.color, 25.0), (second.color, 75.0)]
+            )
+            .unwrap()
+        );
+    }
+}
+
+#[test]
+fn cpal_base_palette_resolves_metadata_and_specified_fallbacks() {
+    let palette_count = 3u16;
+    let types_offset = 30u32;
+    let mut cpal = vec![0u8; 42];
+    cpal[0..2].copy_from_slice(&1u16.to_be_bytes());
+    cpal[4..6].copy_from_slice(&palette_count.to_be_bytes());
+    cpal[18..22].copy_from_slice(&types_offset.to_be_bytes());
+    cpal[30..34].copy_from_slice(&0u32.to_be_bytes());
+    cpal[34..38].copy_from_slice(&0x0002u32.to_be_bytes());
+    cpal[38..42].copy_from_slice(&0x0001u32.to_be_bytes());
+
+    assert_eq!(
+        resolve_cpal_palette_index(&cpal, palette_count, FontPaletteBase::Light),
+        2
+    );
+    assert_eq!(
+        resolve_cpal_palette_index(&cpal, palette_count, FontPaletteBase::Dark),
+        1
+    );
+    assert_eq!(
+        resolve_cpal_palette_index(&cpal, palette_count, FontPaletteBase::Index(9)),
+        0
+    );
+    cpal[18..22].copy_from_slice(&0u32.to_be_bytes());
+    assert_eq!(
+        resolve_cpal_palette_index(&cpal, palette_count, FontPaletteBase::Light),
+        0
+    );
 }

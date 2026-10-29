@@ -147,9 +147,19 @@ def main():
     parser.add_argument('--fixtures', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--case')
+    parser.add_argument(
+        '--serve-root',
+        type=Path,
+        help='HTTP root containing the fixture directory and any shared assets',
+    )
     parser.add_argument('--url', help=argparse.SUPPRESS)
     args = parser.parse_args()
     fixtures, output = args.fixtures.resolve(), args.output.resolve()
+    serve_root = args.serve_root.resolve() if args.serve_root else fixtures
+    try:
+        fixture_prefix = fixtures.relative_to(serve_root)
+    except ValueError as error:
+        raise ValueError('--fixtures must be inside --serve-root') from error
     cases = json.loads((fixtures / 'manifest.json').read_text())
     if args.case:
         cases = [case for case in cases if case['name'] == args.case]
@@ -181,11 +191,14 @@ def main():
             def log_message(self, fmt, *values):
                 log.write((fmt % values) + '\n')
                 log.flush()
-        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Handler, directory=str(fixtures)))
+        server = http.server.ThreadingHTTPServer(
+            ('127.0.0.1', 0), functools.partial(Handler, directory=str(serve_root))
+        )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            url = f'http://127.0.0.1:{server.server_port}/'
+            prefix = fixture_prefix.as_posix().strip('/')
+            url = f'http://127.0.0.1:{server.server_port}/' + (prefix + '/' if prefix else '')
             if args.mode == 'firefox':
                 firefox(cases, url, output)
             else:

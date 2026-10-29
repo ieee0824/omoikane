@@ -4,7 +4,13 @@
 //! Handles font file loading, character-to-glyph mapping, and rasterization.
 
 use ab_glyph::{Font as AbGlyphFont, FontVec, GlyphId, ScaleFont};
-use rustybuzz::{Direction, Face, UnicodeBuffer};
+use rustybuzz::{
+    Direction, Face, Feature, UnicodeBuffer, Variation,
+    ttf_parser::{
+        Face as TtfFace, GlyphId as TtfGlyphId, RgbaColor, Tag, Transform,
+        colr::{ClipBox, CompositeMode, Paint, Painter},
+    },
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -74,6 +80,67 @@ pub struct GlyphRaster {
     pub offset_y: f32,
 }
 
+/// One solid COLR/CPAL layer rasterized in font paint order.
+#[derive(Debug, Clone)]
+pub struct ColorGlyphLayer {
+    /// Alpha mask and placement for this layer's outline.
+    pub raster: GlyphRaster,
+    /// Unpremultiplied RGBA color selected from CPAL.
+    pub color: [u8; 4],
+}
+
+/// A base CPAL palette requested by CSS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontPaletteBase {
+    /// A zero-based palette index. Out-of-range indices resolve to palette 0.
+    Index(u16),
+    /// The first palette marked for use on a light background.
+    Light,
+    /// The first palette marked for use on a dark background.
+    Dark,
+}
+
+impl Default for FontPaletteBase {
+    fn default() -> Self {
+        Self::Index(0)
+    }
+}
+
+/// A resolved CSS palette request and explicit entry overrides.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct FontPalette {
+    /// Base palette selection, resolved against the selected font at paint time.
+    pub base: FontPaletteBase,
+    /// Palette entry replacements in source order; later duplicates win.
+    pub overrides: Vec<(u16, [u8; 4])>,
+    /// A deferred palette mix, resolved only after the selected font exposes CPAL entries.
+    pub mix: Option<Box<FontPaletteMix>>,
+}
+
+/// A color-space interpolation recipe for two or more font palettes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FontPaletteMix {
+    /// CSS interpolation method, for example `in oklab` or `in lch longer hue`.
+    pub method: String,
+    /// Resolved palette components and percentage weights in source order.
+    pub components: Vec<FontPaletteMixComponent>,
+}
+
+/// One deferred palette and its non-negative percentage weight.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FontPaletteMixComponent {
+    /// The recursively resolved palette request.
+    pub palette: FontPalette,
+    /// IEEE-754 bits of the computed percentage, retained for deterministic hashing.
+    pub weight_bits: u32,
+}
+
+impl FontPaletteMixComponent {
+    fn weight(&self) -> f32 {
+        f32::from_bits(self.weight_bits)
+    }
+}
+
 /// One positioned glyph produced by OpenType shaping.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShapedGlyph {
@@ -83,6 +150,8 @@ pub struct ShapedGlyph {
     pub y_advance: f32,
     pub x_offset: f32,
     pub y_offset: f32,
+    /// Raster-size multiplier used by deterministic synthetic variants.
+    pub font_size_scale: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -91,6 +160,206 @@ pub enum ShapingDirection {
     RightToLeft,
     TopToBottom,
     BottomToTop,
+}
+
+/// A validated four-byte OpenType feature tag and its unsigned value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OpenTypeFeature {
+    tag: [u8; 4],
+    value: u32,
+}
+
+impl OpenTypeFeature {
+    /// Creates a feature after the CSS boundary has validated its tag and value.
+    pub const fn new(tag: [u8; 4], value: u32) -> Self {
+        Self { tag, value }
+    }
+
+    fn rustybuzz(self) -> Feature {
+        Feature::new(Tag::from_bytes(&self.tag), self.value, ..)
+    }
+
+    fn enables(self, tag: &[u8; 4]) -> bool {
+        &self.tag == tag && self.value != 0
+    }
+
+    fn matches(self, tag: &[u8; 4]) -> bool {
+        &self.tag == tag
+    }
+}
+
+/// A validated four-byte OpenType variation axis and its coordinate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OpenTypeVariation {
+    tag: [u8; 4],
+    value_bits: u32,
+}
+
+impl OpenTypeVariation {
+    /// Creates an axis setting after the CSS boundary has validated its tag.
+    pub fn new(tag: [u8; 4], value: f32) -> Self {
+        Self {
+            tag,
+            value_bits: value.to_bits(),
+        }
+    }
+
+    fn rustybuzz(self) -> Variation {
+        Variation {
+            tag: Tag::from_bytes(&self.tag),
+            value: f32::from_bits(self.value_bits),
+        }
+    }
+}
+
+/// Typed settings that affect OpenType shaping and therefore its cache key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct ShapingOptions {
+    /// Features in CSS application order; later duplicate tags take precedence.
+    pub features: Vec<OpenTypeFeature>,
+    /// Variation axes in CSS application order; later duplicate tags take precedence.
+    pub variations: Vec<OpenTypeVariation>,
+    /// Small-cap fallback requested after CSS synthesis permissions are resolved.
+    pub synthetic_caps: SyntheticCaps,
+    /// Position fallback requested after CSS synthesis permissions are resolved.
+    pub synthetic_position: SyntheticPosition,
+}
+
+/// Cased characters eligible for a synthetic small-cap fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SyntheticCaps {
+    /// Do not synthesize small-cap glyphs.
+    #[default]
+    None,
+    /// Replace lowercase characters when `smcp` is unavailable.
+    Lowercase,
+    /// Replace all cased characters when `c2sc`/`smcp` are unavailable.
+    All,
+}
+
+/// Baseline fallback used when a font has no requested position feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SyntheticPosition {
+    /// Do not synthesize positioned glyphs.
+    #[default]
+    None,
+    /// Synthesize subscript glyphs when `subs` is unavailable.
+    Subscript,
+    /// Synthesize superscript glyphs when `sups` is unavailable.
+    Superscript,
+}
+
+/// Permission for synthesizing a missing italic or oblique face.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FontStyleSynthesis {
+    /// Do not synthesize missing italic or oblique faces.
+    None,
+    /// Synthesize both missing italic and oblique faces.
+    #[default]
+    Auto,
+    /// Synthesize only a missing oblique face, never a missing italic face.
+    ObliqueOnly,
+}
+
+impl FontStyleSynthesis {
+    pub(crate) fn allows(self, requested: FontStyle) -> bool {
+        matches!(self, Self::Auto)
+            || matches!((self, requested), (Self::ObliqueOnly, FontStyle::Oblique))
+    }
+}
+
+/// Font synthesis permissions resolved from the CSS `font-synthesis` property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FontSynthesis {
+    /// Whether missing bold faces may be synthesized.
+    pub weight: bool,
+    /// Which missing italic or oblique faces may be synthesized.
+    pub style: FontStyleSynthesis,
+    /// Whether missing small-cap glyphs may be synthesized.
+    pub small_caps: bool,
+    /// Whether missing subscript or superscript glyphs may be synthesized.
+    pub position: bool,
+}
+
+impl Default for FontSynthesis {
+    fn default() -> Self {
+        Self {
+            weight: true,
+            style: FontStyleSynthesis::Auto,
+            small_caps: true,
+            position: true,
+        }
+    }
+}
+
+fn synthetic_caps_text(
+    text: &str,
+    lowercase: bool,
+    uppercase: bool,
+) -> (String, Vec<(usize, usize)>, HashSet<usize>) {
+    let mut transformed = String::with_capacity(text.len());
+    let mut cluster_map = Vec::new();
+    let mut small_cap_clusters = HashSet::new();
+    for (source_start, character) in text.char_indices() {
+        let eligible =
+            lowercase && character.is_lowercase() || uppercase && character.is_uppercase();
+        if eligible {
+            small_cap_clusters.insert(source_start);
+        }
+        let replacement = if eligible {
+            character.to_uppercase().collect::<String>()
+        } else {
+            character.to_string()
+        };
+        for (offset, _) in replacement.char_indices() {
+            cluster_map.push((transformed.len() + offset, source_start));
+        }
+        transformed.push_str(&replacement);
+    }
+    (transformed, cluster_map, small_cap_clusters)
+}
+
+fn synthetic_position_fallback(position: SyntheticPosition, size_px: f32) -> (f32, f32) {
+    let shift = match position {
+        SyntheticPosition::None => return (1.0, 0.0),
+        SyntheticPosition::Subscript => -size_px * 0.2,
+        SyntheticPosition::Superscript => size_px * 0.34,
+    };
+    (0.8, shift)
+}
+
+fn feature_covers_text(
+    face: &Face<'_>,
+    text: &str,
+    direction: ShapingDirection,
+    tag: [u8; 4],
+    applies_to: impl Fn(char) -> bool,
+) -> bool {
+    text.graphemes(true)
+        .filter(|cluster| cluster.chars().any(&applies_to))
+        .all(|cluster| {
+            let shape = |enabled| {
+                let mut buffer = UnicodeBuffer::new();
+                buffer.push_str(cluster);
+                buffer.set_direction(match direction {
+                    ShapingDirection::LeftToRight => Direction::LeftToRight,
+                    ShapingDirection::RightToLeft => Direction::RightToLeft,
+                    ShapingDirection::TopToBottom => Direction::TopToBottom,
+                    ShapingDirection::BottomToTop => Direction::BottomToTop,
+                });
+                buffer.guess_segment_properties();
+                rustybuzz::shape(
+                    face,
+                    &[Feature::new(Tag::from_bytes(&tag), u32::from(enabled), ..)],
+                    buffer,
+                )
+                .glyph_infos()
+                .iter()
+                .map(|info| info.glyph_id)
+                .collect::<Vec<_>>()
+            };
+            shape(false) != shape(true)
+        })
 }
 
 /// Number of CSS letter-spacing boundaries in a source text run.
@@ -128,13 +397,18 @@ pub(crate) struct ShapedRun {
 pub(crate) struct FontFallbackCandidate<'a> {
     pub font: &'a Font,
     pub unicode_range: Option<&'a UnicodeRangeSet>,
+    pub weight: FontWeightRange,
+    pub style: FontStyleRange,
 }
 
 impl<'a> FontFallbackCandidate<'a> {
     pub fn unrestricted(font: &'a Font) -> Self {
+        let (weight, style) = font.face_weight_and_style();
         Self {
             font,
             unicode_range: None,
+            weight,
+            style,
         }
     }
 
@@ -167,6 +441,23 @@ pub(crate) fn shape_text_with_fallback_candidates(
     size_px: f32,
     direction: ShapingDirection,
 ) -> Result<Vec<ShapedRun>, FontError> {
+    shape_text_with_fallback_candidates_and_options(
+        fonts,
+        text,
+        size_px,
+        direction,
+        &ShapingOptions::default(),
+    )
+}
+
+/// Shapes fallback runs using typed CSS OpenType settings.
+pub(crate) fn shape_text_with_fallback_candidates_and_options(
+    fonts: &[FontFallbackCandidate<'_>],
+    text: &str,
+    size_px: f32,
+    direction: ShapingDirection,
+    options: &ShapingOptions,
+) -> Result<Vec<ShapedRun>, FontError> {
     if text.is_empty() {
         return Ok(Vec::new());
     }
@@ -178,7 +469,9 @@ pub(crate) fn shape_text_with_fallback_candidates(
 
     // Most runs are fully covered by the primary font. Shape them once and
     // avoid probing and shaping every grapheme cluster independently.
-    let primary_glyphs = fonts[0].font.shape_text(text, size_px, direction);
+    let primary_glyphs = fonts[0]
+        .font
+        .shape_text_with_options(text, size_px, direction, options);
     if let Ok(primary_glyphs) = primary_glyphs
         && fonts[0].supports_range(text)
         && primary_glyphs.iter().all(|glyph| glyph.glyph_id != 0)
@@ -197,12 +490,17 @@ pub(crate) fn shape_text_with_fallback_candidates(
             .iter()
             .position(|font| {
                 font.supports_range(cluster)
-                    && cluster_supported_by_font(font.font, cluster, size_px, direction)
+                    && cluster_supported_by_font_with_options(
+                        font.font, cluster, size_px, direction, options,
+                    )
             })
             .or_else(|| {
                 fonts.iter().position(|font| {
                     font.supports_range(cluster)
-                        && font.font.shape_text(cluster, size_px, direction).is_ok()
+                        && font
+                            .font
+                            .shape_text_with_options(cluster, size_px, direction, options)
+                            .is_ok()
                 })
             })
             .ok_or_else(|| FontError::Other("No usable font available for shaping".to_string()))?;
@@ -217,10 +515,12 @@ pub(crate) fn shape_text_with_fallback_candidates(
 
     let mut runs = Vec::with_capacity(selections.len());
     for (font_index, range) in selections {
-        let mut glyphs =
-            fonts[font_index]
-                .font
-                .shape_text(&text[range.clone()], size_px, direction)?;
+        let mut glyphs = fonts[font_index].font.shape_text_with_options(
+            &text[range.clone()],
+            size_px,
+            direction,
+            options,
+        )?;
         for glyph in &mut glyphs {
             glyph.cluster += range.start;
         }
@@ -245,13 +545,29 @@ fn cluster_supported_by_font(
     size_px: f32,
     direction: ShapingDirection,
 ) -> bool {
+    cluster_supported_by_font_with_options(
+        font,
+        cluster,
+        size_px,
+        direction,
+        &ShapingOptions::default(),
+    )
+}
+
+fn cluster_supported_by_font_with_options(
+    font: &Font,
+    cluster: &str,
+    size_px: f32,
+    direction: ShapingDirection,
+    options: &ShapingOptions,
+) -> bool {
     if !cluster
         .chars()
         .all(|ch| ch.is_whitespace() || is_zero_advance_character(ch) || font.has_glyph(ch))
     {
         return false;
     }
-    font.shape_text(cluster, size_px, direction)
+    font.shape_text_with_options(cluster, size_px, direction, options)
         .is_ok_and(|glyphs| glyphs.iter().all(|glyph| glyph.glyph_id != 0))
 }
 
@@ -269,6 +585,7 @@ struct ShapeKey {
     text: String,
     size_bits: u32,
     direction: ShapingDirection,
+    options: ShapingOptions,
 }
 
 #[derive(Default)]
@@ -319,6 +636,41 @@ pub(crate) fn is_zero_advance_character(ch: char) -> bool {
 }
 
 impl Font {
+    fn face_weight_and_style(&self) -> (FontWeightRange, FontStyleRange) {
+        let face = TtfFace::parse(self.inner.font_data(), self.face_index).ok();
+        let weight = face
+            .as_ref()
+            .and_then(|face| {
+                face.variation_axes()
+                    .into_iter()
+                    .find(|axis| axis.tag == Tag::from_bytes(b"wght"))
+                    .map(|axis| FontWeightRange {
+                        min: FontWeight(axis.min_value.round().clamp(1.0, 1000.0) as u16),
+                        max: FontWeight(axis.max_value.round().clamp(1.0, 1000.0) as u16),
+                    })
+            })
+            .unwrap_or_else(|| {
+                FontWeightRange::exact(
+                    face.as_ref()
+                        .map(|face| FontWeight(face.weight().to_number()))
+                        .unwrap_or_default(),
+                )
+            });
+        let style = face
+            .as_ref()
+            .map(|face| {
+                if face.is_oblique() {
+                    FontStyle::Oblique
+                } else if face.is_italic() {
+                    FontStyle::Italic
+                } else {
+                    FontStyle::Normal
+                }
+            })
+            .unwrap_or_default();
+        (weight, FontStyleRange::exact(style))
+    }
+
     /// Load a font from a file path.
     pub fn load_from_file(path: &Path) -> Result<Self, FontError> {
         let data = std::fs::read(path)?;
@@ -399,10 +751,22 @@ impl Font {
         size_px: f32,
         direction: ShapingDirection,
     ) -> Result<Vec<ShapedGlyph>, FontError> {
+        self.shape_text_with_options(text, size_px, direction, &ShapingOptions::default())
+    }
+
+    /// Shapes a complete script run with explicit OpenType features and axes.
+    pub fn shape_text_with_options(
+        &self,
+        text: &str,
+        size_px: f32,
+        direction: ShapingDirection,
+        options: &ShapingOptions,
+    ) -> Result<Vec<ShapedGlyph>, FontError> {
         let key = (text.len() <= 1024).then(|| ShapeKey {
             text: text.to_owned(),
             size_bits: size_px.to_bits(),
             direction,
+            options: options.clone(),
         });
         if let Some(cached) = key.as_ref().and_then(|key| {
             self.shape_cache
@@ -414,10 +778,72 @@ impl Font {
         }) {
             return Ok(cached);
         }
-        let face = Face::from_slice(self.inner.font_data(), self.face_index)
+        let mut face = Face::from_slice(self.inner.font_data(), self.face_index)
             .ok_or_else(|| FontError::InvalidFont("Failed to build shaping face".to_string()))?;
+        let variations = options
+            .variations
+            .iter()
+            .copied()
+            .map(OpenTypeVariation::rustybuzz)
+            .collect::<Vec<_>>();
+        face.set_variations(&variations);
+        let features = options
+            .features
+            .iter()
+            .copied()
+            .map(OpenTypeFeature::rustybuzz)
+            .collect::<Vec<_>>();
+        let active_caps_tag = |tags: [[u8; 4]; 2]| {
+            tags.into_iter().find(|tag| {
+                options
+                    .features
+                    .iter()
+                    .rev()
+                    .find(|feature| feature.matches(tag))
+                    .is_some_and(|feature| feature.enables(tag))
+            })
+        };
+        let lowercase_tag = active_caps_tag([*b"smcp", *b"pcap"]);
+        let uppercase_tag = active_caps_tag([*b"c2sc", *b"c2pc"]);
+        let synthesize_lowercase = options.synthetic_caps != SyntheticCaps::None
+            && lowercase_tag.is_some_and(|tag| {
+                !feature_covers_text(&face, text, direction, tag, char::is_lowercase)
+            });
+        let synthesize_uppercase = options.synthetic_caps == SyntheticCaps::All
+            && uppercase_tag.is_some_and(|tag| {
+                !feature_covers_text(&face, text, direction, tag, char::is_uppercase)
+            });
+        let (shaping_text, cluster_map, small_cap_clusters) =
+            if synthesize_lowercase || synthesize_uppercase {
+                synthetic_caps_text(text, synthesize_lowercase, synthesize_uppercase)
+            } else {
+                (text.to_string(), Vec::new(), HashSet::new())
+            };
+        let position_tag = match options.synthetic_position {
+            SyntheticPosition::None => None,
+            SyntheticPosition::Subscript => Some(*b"subs"),
+            SyntheticPosition::Superscript => Some(*b"sups"),
+        }
+        .filter(|tag| {
+            options
+                .features
+                .iter()
+                .rev()
+                .find(|feature| feature.matches(tag))
+                .is_some_and(|feature| feature.enables(tag))
+        });
+        let synthesize_position = position_tag.is_some_and(|tag| {
+            !feature_covers_text(&face, text, direction, tag, |ch| {
+                !ch.is_whitespace() && !is_zero_advance_character(ch)
+            })
+        });
+        let (position_scale, position_shift) = if synthesize_position {
+            self.synthetic_position_metrics(options.synthetic_position, size_px)
+        } else {
+            (1.0, 0.0)
+        };
         let mut buffer = UnicodeBuffer::new();
-        buffer.push_str(text);
+        buffer.push_str(&shaping_text);
         buffer.set_direction(match direction {
             ShapingDirection::LeftToRight => Direction::LeftToRight,
             ShapingDirection::RightToLeft => Direction::RightToLeft,
@@ -425,19 +851,38 @@ impl Font {
             ShapingDirection::BottomToTop => Direction::BottomToTop,
         });
         buffer.guess_segment_properties();
-        let glyphs = rustybuzz::shape(&face, &[], buffer);
+        let glyphs = rustybuzz::shape(&face, &features, buffer);
         let scale = size_px / face.units_per_em().max(1) as f32;
         let shaped: Vec<_> = glyphs
             .glyph_infos()
             .iter()
             .zip(glyphs.glyph_positions())
-            .map(|(info, position)| ShapedGlyph {
-                glyph_id: info.glyph_id as u16,
-                cluster: info.cluster as usize,
-                x_advance: position.x_advance as f32 * scale,
-                y_advance: position.y_advance as f32 * scale,
-                x_offset: position.x_offset as f32 * scale,
-                y_offset: position.y_offset as f32 * scale,
+            .map(|(info, position)| {
+                let cluster = if cluster_map.is_empty() {
+                    info.cluster as usize
+                } else {
+                    let output = info.cluster as usize;
+                    let index = cluster_map
+                        .partition_point(|(start, _)| *start <= output)
+                        .saturating_sub(1);
+                    cluster_map[index].1
+                };
+                let mut font_size_scale = 1.0;
+                if small_cap_clusters.contains(&cluster) {
+                    font_size_scale *= 0.8;
+                }
+                if synthesize_position {
+                    font_size_scale *= position_scale;
+                }
+                ShapedGlyph {
+                    glyph_id: info.glyph_id as u16,
+                    cluster,
+                    x_advance: position.x_advance as f32 * scale * font_size_scale,
+                    y_advance: position.y_advance as f32 * scale * font_size_scale,
+                    x_offset: position.x_offset as f32 * scale * font_size_scale,
+                    y_offset: position.y_offset as f32 * scale * font_size_scale + position_shift,
+                    font_size_scale,
+                }
             })
             .collect();
         if let Some(key) = key
@@ -451,6 +896,36 @@ impl Font {
         Ok(shaped)
     }
 
+    fn synthetic_position_metrics(&self, position: SyntheticPosition, size_px: f32) -> (f32, f32) {
+        let Ok(face) = TtfFace::parse(self.inner.font_data(), self.face_index) else {
+            return synthetic_position_fallback(position, size_px);
+        };
+        let metrics = match position {
+            SyntheticPosition::None => return (1.0, 0.0),
+            SyntheticPosition::Subscript => face.subscript_metrics(),
+            SyntheticPosition::Superscript => face.superscript_metrics(),
+        };
+        let Some(metrics) = metrics else {
+            return synthetic_position_fallback(position, size_px);
+        };
+        if metrics.y_size <= 0 || metrics.y_offset <= 0 {
+            return synthetic_position_fallback(position, size_px);
+        }
+        let units = f32::from(face.units_per_em().max(1));
+        let scale = (f32::from(metrics.y_size) / units).clamp(0.5, 1.0);
+        let offset = f32::from(metrics.y_offset) / units * size_px;
+        let shift = match position {
+            SyntheticPosition::Subscript => -offset,
+            SyntheticPosition::Superscript => offset,
+            SyntheticPosition::None => 0.0,
+        };
+        if scale.is_finite() && shift.is_finite() && shift != 0.0 {
+            (scale, shift)
+        } else {
+            synthetic_position_fallback(position, size_px)
+        }
+    }
+
     /// Rasterizes a glyph selected by the shaping engine.
     pub fn rasterize_glyph(&self, glyph_id: u16, size_px: f32) -> Result<GlyphRaster, FontError> {
         let glyph_id = GlyphId(glyph_id);
@@ -459,6 +934,51 @@ impl Font {
             .as_scaled(self.ab_glyph_scale_for_css_px(size_px))
             .h_advance(glyph_id);
         self.rasterize_glyph_id(glyph_id, size_px, advance_x)
+    }
+
+    /// Rasterizes a solid-layer COLR glyph with the selected CPAL palette.
+    ///
+    /// COLR programs requiring transforms, gradients, or non-source-over
+    /// compositing return `None`; callers must use the ordinary outline as a
+    /// deterministic foreground-color fallback.
+    pub fn rasterize_color_glyph(
+        &self,
+        glyph_id: u16,
+        size_px: f32,
+        palette: &FontPalette,
+        foreground: [u8; 4],
+    ) -> Option<Vec<ColorGlyphLayer>> {
+        let face = TtfFace::parse(self.inner.font_data(), self.face_index).ok()?;
+        let glyph_id = TtfGlyphId(glyph_id);
+        if !face.is_color_glyph(glyph_id) {
+            return None;
+        }
+        let cpal_data = face.raw_face().table(Tag::from_bytes(b"CPAL"))?;
+        let cpal = rustybuzz::ttf_parser::cpal::Table::parse(cpal_data)?;
+        let entry_count = u16::from_be_bytes([*cpal_data.get(2)?, *cpal_data.get(3)?]);
+        let palette_index =
+            resolve_cpal_palette_index(cpal_data, cpal.palettes().get(), palette.base);
+        let source_palette_entries = (0..entry_count)
+            .filter_map(|entry| cpal.get(palette_index, entry).map(|color| (entry, color)))
+            .collect();
+        let resolved_palette_entries =
+            resolve_font_palette_entries(cpal_data, &cpal, entry_count, palette_index, palette, 0)?;
+        let mut painter = SolidColorGlyphPainter {
+            font: self,
+            size_px,
+            current: None,
+            layers: Vec::new(),
+            unsupported: false,
+            source_palette_entries,
+            resolved_palette_entries,
+        };
+        face.paint_color_glyph(
+            glyph_id,
+            palette_index,
+            RgbaColor::new(foreground[0], foreground[1], foreground[2], foreground[3]),
+            &mut painter,
+        )?;
+        (!painter.unsupported && !painter.layers.is_empty()).then_some(painter.layers)
     }
 
     fn rasterize_glyph_id(
@@ -614,6 +1134,193 @@ impl Font {
         let metrics = face.underline_metrics()?;
         Some(-(metrics.position as f32) * size_px / face.units_per_em().max(1) as f32)
     }
+}
+
+fn resolve_font_palette_entries(
+    cpal_data: &[u8],
+    cpal: &rustybuzz::ttf_parser::cpal::Table<'_>,
+    entry_count: u16,
+    fallback_index: u16,
+    palette: &FontPalette,
+    depth: usize,
+) -> Option<Vec<(u16, RgbaColor)>> {
+    if depth >= 16 {
+        return None;
+    }
+    let Some(mix) = &palette.mix else {
+        let palette_index =
+            resolve_cpal_palette_index(cpal_data, cpal.palettes().get(), palette.base);
+        return Some(
+            (0..entry_count)
+                .filter_map(|entry| {
+                    let mut color = cpal.get(palette_index, entry)?;
+                    if let Some((_, override_color)) = palette
+                        .overrides
+                        .iter()
+                        .rev()
+                        .find(|(override_entry, _)| *override_entry == entry)
+                    {
+                        color = RgbaColor::new(
+                            override_color[0],
+                            override_color[1],
+                            override_color[2],
+                            override_color[3],
+                        );
+                    }
+                    Some((entry, color))
+                })
+                .collect(),
+        );
+    };
+    let components = mix
+        .components
+        .iter()
+        .map(|component| {
+            Some((
+                resolve_font_palette_entries(
+                    cpal_data,
+                    cpal,
+                    entry_count,
+                    fallback_index,
+                    &component.palette,
+                    depth + 1,
+                )?,
+                component.weight(),
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(
+        (0..entry_count)
+            .filter_map(|entry| {
+                let colors = components
+                    .iter()
+                    .map(|(entries, weight)| {
+                        let color = entries
+                            .iter()
+                            .find_map(|(candidate, color)| (*candidate == entry).then_some(*color))
+                            .or_else(|| cpal.get(fallback_index, entry))?;
+                        Some(([color.red, color.green, color.blue, color.alpha], *weight))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let mixed = crate::paint::color4::mix_palette_colors(&mix.method, &colors)?;
+                Some((
+                    entry,
+                    RgbaColor::new(mixed[0], mixed[1], mixed[2], mixed[3]),
+                ))
+            })
+            .collect(),
+    )
+}
+
+fn resolve_cpal_palette_index(data: &[u8], palette_count: u16, base: FontPaletteBase) -> u16 {
+    match base {
+        FontPaletteBase::Index(index) => (index < palette_count).then_some(index).unwrap_or(0),
+        FontPaletteBase::Light => first_cpal_palette_with_type(data, palette_count, 0x0001),
+        FontPaletteBase::Dark => first_cpal_palette_with_type(data, palette_count, 0x0002),
+    }
+}
+
+fn first_cpal_palette_with_type(data: &[u8], palette_count: u16, flag: u32) -> u16 {
+    let Some(version) = data
+        .get(0..2)
+        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+    else {
+        return 0;
+    };
+    if version != 1 {
+        return 0;
+    }
+    let offset_position = 12usize.saturating_add(usize::from(palette_count).saturating_mul(2));
+    let Some(offset_bytes) = data.get(offset_position..offset_position.saturating_add(4)) else {
+        return 0;
+    };
+    let Ok(types_offset) = usize::try_from(u32::from_be_bytes([
+        offset_bytes[0],
+        offset_bytes[1],
+        offset_bytes[2],
+        offset_bytes[3],
+    ])) else {
+        return 0;
+    };
+    if types_offset == 0 {
+        return 0;
+    }
+    (0..palette_count)
+        .find(|index| {
+            let start = types_offset.saturating_add(usize::from(*index).saturating_mul(4));
+            data.get(start..start.saturating_add(4))
+                .is_some_and(|bytes| {
+                    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) & flag != 0
+                })
+        })
+        .unwrap_or(0)
+}
+
+struct SolidColorGlyphPainter<'a> {
+    font: &'a Font,
+    size_px: f32,
+    current: Option<TtfGlyphId>,
+    layers: Vec<ColorGlyphLayer>,
+    unsupported: bool,
+    source_palette_entries: Vec<(u16, RgbaColor)>,
+    resolved_palette_entries: Vec<(u16, RgbaColor)>,
+}
+
+impl<'font> Painter<'font> for SolidColorGlyphPainter<'_> {
+    fn outline_glyph(&mut self, glyph_id: TtfGlyphId) {
+        self.current = Some(glyph_id);
+    }
+
+    fn paint(&mut self, paint: Paint<'font>) {
+        let Paint::Solid(color) = paint else {
+            self.unsupported = true;
+            return;
+        };
+        let Some(glyph_id) = self.current else {
+            self.unsupported = true;
+            return;
+        };
+        let matching_entries = self
+            .source_palette_entries
+            .iter()
+            .filter(|(_, candidate)| *candidate == color)
+            .map(|(entry, _)| *entry)
+            .collect::<Vec<_>>();
+        let color = if let [entry] = matching_entries.as_slice() {
+            self.resolved_palette_entries
+                .iter()
+                .find(|(candidate, _)| candidate == entry)
+                .map(|(_, color)| *color)
+                .unwrap_or(color)
+        } else {
+            color
+        };
+        match self.font.rasterize_glyph(glyph_id.0, self.size_px) {
+            Ok(raster) => self.layers.push(ColorGlyphLayer {
+                raster,
+                color: [color.red, color.green, color.blue, color.alpha],
+            }),
+            Err(_) => self.unsupported = true,
+        }
+    }
+
+    fn push_clip(&mut self) {}
+    fn push_clip_box(&mut self, _clipbox: ClipBox) {}
+    fn pop_clip(&mut self) {}
+
+    fn push_layer(&mut self, mode: CompositeMode) {
+        if mode != CompositeMode::SourceOver {
+            self.unsupported = true;
+        }
+    }
+
+    fn pop_layer(&mut self) {}
+
+    fn push_transform(&mut self, _transform: Transform) {
+        self.unsupported = true;
+    }
+
+    fn pop_transform(&mut self) {}
 }
 
 /// Resolved font-relative CSS measures for one font size.
@@ -1778,6 +2485,11 @@ impl FontFamilyKey {
         let intern = intern.lock().unwrap_or_else(PoisonError::into_inner);
         Arc::clone(&intern.families[self.0 as usize])
     }
+
+    /// Returns stable keys for each family in this ordered fallback list.
+    pub(crate) fn member_keys(self) -> Vec<Self> {
+        self.families().iter().map(FontFamilyMember::key).collect()
+    }
 }
 
 impl FontVariantKey {
@@ -2024,6 +2736,8 @@ struct WebFontEntry {
 pub(crate) struct WebFontCandidate<'a> {
     pub font: &'a Font,
     pub unicode_range: &'a UnicodeRangeSet,
+    pub weight: FontWeightRange,
+    pub style: FontStyleRange,
 }
 
 #[derive(Default)]
@@ -2238,6 +2952,8 @@ fn select_best_web_fonts(
         .map(|entry| WebFontCandidate {
             font: entry.font.as_ref(),
             unicode_range: &entry.descriptors.unicode_range,
+            weight: entry.descriptors.weight,
+            style: entry.descriptors.style,
         })
         .collect()
 }

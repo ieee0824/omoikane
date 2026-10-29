@@ -3,7 +3,7 @@
 use crate::css::{ComputedStyle, ComputedValue};
 use crate::font::{
     FontFallbackCandidate, ShapingDirection, grapheme_spacing_cluster_starts,
-    shape_text_with_fallback_candidates,
+    shape_text_with_fallback_candidates_and_options,
 };
 use crate::layout::{FragmentStyle, Rect, TextControlPaintState};
 use unicode_bidi::{BidiClass, bidi_class};
@@ -457,7 +457,13 @@ pub(super) fn measure_textarea_text_width(
     } else {
         ShapingDirection::LeftToRight
     };
-    if let Ok(runs) = shape_text_with_fallback_candidates(fonts, text, font_size, direction) {
+    if let Ok(runs) = shape_text_with_fallback_candidates_and_options(
+        fonts,
+        text,
+        font_size,
+        direction,
+        &style.shaping_options,
+    ) {
         let advance = runs
             .iter()
             .flat_map(|run| &run.glyphs)

@@ -976,11 +976,11 @@ fn margin_content_sizes(
             PageMarginFragment::Text(text) => {
                 text_present = true;
                 if horizontal {
-                    maximum += measure_text_width(text, metrics);
+                    maximum += measure_text_width(text, &metrics);
                     minimum = minimum.max(
                         super::inline::split_words_preserving_spaces_cjk(text)
                             .iter()
-                            .map(|word| measure_text_width(word, metrics))
+                            .map(|word| measure_text_width(word, &metrics))
                             .fold(0.0f32, f32::max),
                     );
                 } else {

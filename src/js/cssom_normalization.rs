@@ -141,6 +141,39 @@ pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
     }
     if matches!(
         property,
+        "font-feature-settings" | "font-variation-settings"
+    ) {
+        let declarations = crate::css::parse_style_attribute(&format!("{property}: {value}"));
+        let declaration = declarations
+            .iter()
+            .find(|declaration| declaration.name == property)?;
+        return crate::css::style::normalize_opentype_settings_specified(
+            property,
+            &declaration.value,
+        );
+    }
+    if matches!(
+        property,
+        "font-synthesis" | "font-variant-east-asian" | "font-variant-alternates"
+    ) {
+        let declarations = crate::css::parse_style_attribute(&format!("{property}: {value}"));
+        let declaration = declarations
+            .iter()
+            .find(|declaration| declaration.name == property)?;
+        return crate::css::style::normalize_font_keyword_list_specified(
+            property,
+            &declaration.value,
+        );
+    }
+    if property == "font-size-adjust" {
+        let declarations = crate::css::parse_style_attribute(&format!("{property}: {value}"));
+        let declaration = declarations
+            .iter()
+            .find(|declaration| declaration.name == property)?;
+        return crate::css::style::normalize_font_size_adjust_specified(&declaration.value);
+    }
+    if matches!(
+        property,
         "counter-reset" | "counter-increment" | "counter-set"
     ) {
         return crate::css::style::normalize_counter_specified(property, value);

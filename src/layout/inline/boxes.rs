@@ -25,7 +25,7 @@ pub(super) fn edge(
 // Round the selected face's ascent and descent separately to the CSS pixel
 // grid, as used for the content area of non-replaced inline boxes. Leading
 // belongs to the line, not to the background or border of the inline element.
-fn face_metrics(metrics: FontMetrics) -> (f32, f32) {
+fn face_metrics(metrics: &FontMetrics) -> (f32, f32) {
     LAYOUT_FONTS.with(|cell| {
         let mut fonts = cell.borrow_mut();
         let context = fonts.get_or_insert_with(|| super::super::LayoutFontContext {
@@ -82,7 +82,7 @@ pub(super) fn finish(
         return;
     }
     let mut face_cache = HashMap::new();
-    let mut metrics_for = |m: FontMetrics| {
+    let mut metrics_for = |m: &FontMetrics| {
         *face_cache
             .entry((
                 m.font_family,
@@ -98,7 +98,8 @@ pub(super) fn finish(
         .and_then(NodeHandle::parent_node)
         .map(|node| resolver.computed_style(&node))
         .unwrap_or_default();
-    let (strut_ascent, strut_descent) = metrics_for(font_metrics(&parent_style));
+    let parent_metrics = font_metrics(&parent_style);
+    let (strut_ascent, strut_descent) = metrics_for(&parent_metrics);
     let mut owners: HashMap<usize, Owner> = HashMap::new();
     let mut chains: HashMap<(usize, bool), Vec<usize>> = HashMap::new();
     let mut emitted_owners = HashSet::new();
@@ -113,7 +114,7 @@ pub(super) fn finish(
                 continue;
             }
             if let InlineFragmentContent::Text(_) = &fragment.content {
-                let (a, d) = metrics_for(fragment.metrics);
+                let (a, d) = metrics_for(&fragment.metrics);
                 let above = (fragment.rect.height - a - d) / 2.0 + a;
                 match fragment.vertical_align {
                     VerticalAlign::Baseline => baseline = baseline.max(above),
@@ -161,7 +162,7 @@ pub(super) fn finish(
                         owners.entry(id).or_insert_with(|| {
                             let style = resolver.computed_style(&node);
                             let metrics = font_metrics(&style);
-                            let (ascent, descent) = metrics_for(metrics);
+                            let (ascent, descent) = metrics_for(&metrics);
                             Owner {
                                 node: node.clone(),
                                 align: vertical_align(&style),
@@ -234,7 +235,7 @@ pub(super) fn finish(
                 text_source: Vec::new(),
                 content: InlineFragmentContent::InlineBox(owner.style.clone()),
                 rect,
-                metrics: owner.metrics,
+                metrics: owner.metrics.clone(),
                 vertical_align: owner.align,
                 source_end_token: 0,
                 style: FragmentStyle::from_computed(&owner.style),

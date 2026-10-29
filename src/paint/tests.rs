@@ -10306,6 +10306,290 @@ fn opentype_shaped_paint_uses_the_layout_advance_model() {
 }
 
 #[test]
+fn shaped_paint_uses_solid_colr_layers_before_foreground_fallback() {
+    use super::text::paint_shaped_horizontal_text;
+    use crate::font::{Font, FontPalette, FontPaletteBase};
+
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/color-font/twemoji-smiley-glyf-colr1.ttf").to_vec(),
+    )
+    .unwrap();
+    let mut canvas = Canvas::new(64, 64);
+    paint_shaped_horizontal_text(
+        &mut canvas,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+        },
+        "😁",
+        48.0,
+        50.0,
+        &[&font],
+        &FragmentStyle::default(),
+        Color::rgb(1, 2, 3),
+        None,
+        0.0,
+    )
+    .unwrap();
+    let colors = canvas
+        .pixels()
+        .chunks_exact(4)
+        .filter(|pixel| pixel[3] > 0)
+        .map(|pixel| (pixel[0], pixel[1], pixel[2]))
+        .collect::<HashSet<_>>();
+    assert!(
+        colors.contains(&(255, 204, 77)),
+        "missing yellow COLR layer"
+    );
+    assert!(colors.contains(&(102, 69, 0)), "missing brown COLR layer");
+    assert!(
+        colors
+            .iter()
+            .any(|(red, green, blue)| *red >= 250 && *green >= 250 && *blue >= 250),
+        "missing antialiased white COLR layer"
+    );
+    assert!(!colors.contains(&(1, 2, 3)), "used foreground fallback");
+
+    let mut overridden_canvas = Canvas::new(64, 64);
+    let overridden_style = FragmentStyle {
+        font_palette: Arc::new(FontPalette {
+            base: FontPaletteBase::Index(0),
+            overrides: vec![(9, [9, 8, 7, 255])],
+            mix: None,
+        }),
+        ..FragmentStyle::default()
+    };
+    paint_shaped_horizontal_text(
+        &mut overridden_canvas,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+        },
+        "😁",
+        48.0,
+        50.0,
+        &[&font],
+        &overridden_style,
+        Color::rgb(1, 2, 3),
+        None,
+        0.0,
+    )
+    .unwrap();
+    let overridden_colors = overridden_canvas
+        .pixels()
+        .chunks_exact(4)
+        .filter(|pixel| pixel[3] > 0)
+        .map(|pixel| (pixel[0], pixel[1], pixel[2]))
+        .collect::<HashSet<_>>();
+    assert!(
+        overridden_colors.contains(&(9, 8, 7)),
+        "missing overridden CPAL entry"
+    );
+    assert!(
+        !overridden_colors.contains(&(255, 204, 77)),
+        "paint ignored the resolved palette override"
+    );
+}
+
+#[test]
+fn shaped_paint_synthesizes_only_permitted_missing_weight_and_style() {
+    use super::text::paint_shaped_horizontal_text;
+    use crate::font::{Font, FontSynthesis};
+
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/anonymized-font-face-ranges/regular.ttf").to_vec(),
+    )
+    .unwrap();
+    let paint = |style: FragmentStyle| {
+        let mut canvas = Canvas::new(96, 64);
+        paint_shaped_horizontal_text(
+            &mut canvas,
+            Rect {
+                x: 4.0,
+                y: 0.0,
+                width: 88.0,
+                height: 64.0,
+            },
+            "Test",
+            40.0,
+            48.0,
+            &[&font],
+            &style,
+            Color::rgb(0, 0, 0),
+            None,
+            0.0,
+        )
+        .unwrap();
+        canvas.pixels().to_vec()
+    };
+    let regular = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("normal".into()),
+        ..FragmentStyle::default()
+    });
+    let bold = paint(FragmentStyle {
+        font_weight: Some("700".into()),
+        font_style: Some("normal".into()),
+        ..FragmentStyle::default()
+    });
+    assert_ne!(bold, regular, "missing face was not emboldened");
+    let bold_disabled = paint(FragmentStyle {
+        font_weight: Some("700".into()),
+        font_style: Some("normal".into()),
+        font_synthesis: FontSynthesis {
+            weight: false,
+            ..FontSynthesis::default()
+        },
+        ..FragmentStyle::default()
+    });
+    assert_eq!(bold_disabled, regular, "font-synthesis disabled weight");
+
+    let oblique = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("italic".into()),
+        ..FragmentStyle::default()
+    });
+    assert_ne!(oblique, regular, "missing face was not obliqued");
+    let shallow_oblique = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("oblique 6deg".into()),
+        ..FragmentStyle::default()
+    });
+    let steep_oblique = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("oblique 24deg".into()),
+        ..FragmentStyle::default()
+    });
+    let negative_oblique = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("oblique -14deg".into()),
+        ..FragmentStyle::default()
+    });
+    assert_ne!(shallow_oblique, steep_oblique, "oblique angle was ignored");
+    assert_ne!(
+        negative_oblique, oblique,
+        "negative oblique angle was ignored"
+    );
+    let italic_oblique_only = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("italic".into()),
+        font_synthesis: FontSynthesis {
+            style: crate::font::FontStyleSynthesis::ObliqueOnly,
+            ..FontSynthesis::default()
+        },
+        ..FragmentStyle::default()
+    });
+    assert_eq!(
+        italic_oblique_only, regular,
+        "oblique-only synthesized an italic request"
+    );
+    let requested_oblique_only = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("oblique 14deg".into()),
+        font_synthesis: FontSynthesis {
+            style: crate::font::FontStyleSynthesis::ObliqueOnly,
+            ..FontSynthesis::default()
+        },
+        ..FragmentStyle::default()
+    });
+    assert_ne!(
+        requested_oblique_only, regular,
+        "oblique-only did not synthesize an oblique request"
+    );
+    let oblique_disabled = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("italic".into()),
+        font_synthesis: FontSynthesis {
+            style: crate::font::FontStyleSynthesis::None,
+            ..FontSynthesis::default()
+        },
+        ..FragmentStyle::default()
+    });
+    assert_eq!(oblique_disabled, regular, "font-synthesis disabled style");
+}
+
+#[test]
+fn shaped_paint_uses_synthetic_caps_and_position_raster_sizes() {
+    use super::text::paint_shaped_horizontal_text;
+    use crate::font::{Font, OpenTypeFeature, ShapingOptions, SyntheticCaps, SyntheticPosition};
+
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/anonymized-font-face-ranges/regular.ttf").to_vec(),
+    )
+    .unwrap();
+    let paint = |text: &str, options: ShapingOptions| {
+        let mut canvas = Canvas::new(96, 72);
+        paint_shaped_horizontal_text(
+            &mut canvas,
+            Rect {
+                x: 4.0,
+                y: 0.0,
+                width: 88.0,
+                height: 72.0,
+            },
+            text,
+            40.0,
+            54.0,
+            &[&font],
+            &FragmentStyle {
+                shaping_options: Arc::new(options),
+                ..FragmentStyle::default()
+            },
+            Color::rgb(0, 0, 0),
+            None,
+            0.0,
+        )
+        .unwrap();
+        canvas
+    };
+    let alpha_bounds = |canvas: &Canvas| {
+        let mut bounds = (u32::MAX, u32::MAX, 0, 0);
+        for (index, pixel) in canvas.pixels().chunks_exact(4).enumerate() {
+            if pixel[3] == 0 {
+                continue;
+            }
+            let x = index as u32 % canvas.width;
+            let y = index as u32 / canvas.width;
+            bounds.0 = bounds.0.min(x);
+            bounds.1 = bounds.1.min(y);
+            bounds.2 = bounds.2.max(x);
+            bounds.3 = bounds.3.max(y);
+        }
+        bounds
+    };
+
+    let ordinary = paint("a", ShapingOptions::default());
+    let small_caps = paint(
+        "a",
+        ShapingOptions {
+            features: vec![OpenTypeFeature::new(*b"smcp", 1)],
+            synthetic_caps: SyntheticCaps::Lowercase,
+            ..ShapingOptions::default()
+        },
+    );
+    assert_ne!(small_caps.pixels(), ordinary.pixels());
+    let ordinary_bounds = alpha_bounds(&ordinary);
+    let caps_bounds = alpha_bounds(&small_caps);
+    assert!(caps_bounds.3 - caps_bounds.1 < ordinary_bounds.3 - ordinary_bounds.1);
+
+    let superscript = paint(
+        "a",
+        ShapingOptions {
+            features: vec![OpenTypeFeature::new(*b"sups", 1)],
+            synthetic_position: SyntheticPosition::Superscript,
+            ..ShapingOptions::default()
+        },
+    );
+    let super_bounds = alpha_bounds(&superscript);
+    assert!(super_bounds.1 < ordinary_bounds.1);
+    assert!(super_bounds.3 - super_bounds.1 < ordinary_bounds.3 - ordinary_bounds.1);
+}
+
+#[test]
 fn shaped_paint_does_not_space_after_non_advancing_leading_cluster() {
     use super::text::paint_shaped_horizontal_text;
     use crate::font::{ShapingDirection, load_default_text_fonts};

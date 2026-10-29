@@ -1073,6 +1073,8 @@ export const __omoikane_service_worker_lifecycle = {};
     "scroll-margin-inline-start", "scroll-margin-inline-end",
     "scroll-margin-block-start", "scroll-margin-block-end",
     "text-indent", "word-spacing",
+    "font-feature-settings", "font-variation-settings", "font-synthesis",
+    "font-variant-east-asian", "font-variant-alternates", "font-size-adjust",
   ]);
   // A conservative fast path: every declaration must be an independent,
   // unaliased longhand. Logical properties, shorthands and vendor aliases keep
@@ -9874,12 +9876,57 @@ export const __omoikane_service_worker_lifecycle = {};
     const css = String(source || "");
     try {
       return JSON.parse(__omoikane_css_rule_sources(css)).filter(rule =>
-        !/^@property(?=\s|\/\*|\{)/i.test(cssRuleWithoutLeadingComments(rule)) ||
-        __omoikane_css_property_rule(rule) !== null
+        ((!/^@property(?=\s|\/\*|\{)/i.test(cssRuleWithoutLeadingComments(rule)) ||
+          __omoikane_css_property_rule(rule) !== null) && fontAtRulePreludeValid(rule))
       );
     } catch (error) {
       throw new DOMException(error.message || "Invalid CSS rule.", "SyntaxError");
     }
+  }
+
+  function cssIdentifierValue(source) {
+    const text = String(source).trim();
+    if (!text || /\s/.test(text.replace(/\\(?:[0-9a-f]{1,6}\s?|.)/gi, ""))) return null;
+    return text.replace(/\\([0-9a-f]{1,6})\s?|\\(.)/gi, (_, hex, escaped) =>
+      hex ? String.fromCodePoint(parseInt(hex, 16) || 0xfffd) : escaped);
+  }
+
+  function cssIdentifierText(value) {
+    return [...String(value)].map((ch, index) => {
+      if (/[-_a-z0-9\u0080-\uffff]/i.test(ch) && !(index === 0 && /\d/.test(ch))) return ch;
+      return "\\" + ch;
+    }).join("");
+  }
+
+  function validFontFeatureFamilyList(source) {
+    const generics = /^(?:serif|sans-serif|cursive|fantasy|monospace|system-ui|emoji|math|fangsong|ui-serif|ui-sans-serif|ui-monospace|ui-rounded)$/i;
+    const families = splitFontPaletteItems(source);
+    return families.length > 0 && families.every(family => {
+      if (!family || family.startsWith("--")) return false;
+      if ((family[0] === '"' || family[0] === "'") && family.at(-1) === family[0]) return true;
+      if (/['"]/.test(family)) return false;
+      const words = family.trim().split(/\s+/);
+      return words.length > 0 && !generics.test(family) && words.every(word =>
+        cssIdentifierValue(word) !== null && !/^\d/.test(word));
+    });
+  }
+
+  function fontAtRulePreludeValid(source) {
+    const text = cssRuleWithoutLeadingComments(source);
+    const open = cssRuleBlockStart(text);
+    if (open < 0) return true;
+    if (/^@font-palette-values(?=\s|\/\*)/i.test(text)) {
+      const raw = text.slice(0, open).replace(/^@font-palette-values/i, "")
+        .replace(/\/\*[\s\S]*?\*\//g, " ").trim();
+      const name = cssIdentifierValue(raw);
+      return name !== null && name.startsWith("--");
+    }
+    if (/^@font-feature-values(?=\s|\/\*)/i.test(text)) {
+      const raw = text.slice(0, open).replace(/^@font-feature-values/i, "")
+        .replace(/\/\*[\s\S]*?\*\//g, " ").trim();
+      return validFontFeatureFamilyList(raw);
+    }
+    return true;
   }
 
   function scopeRulesValid(source) {
@@ -10352,11 +10399,93 @@ export const __omoikane_service_worker_lifecycle = {};
   }
 
   class CSSFontPaletteValuesRule extends CSSDescriptorRule {
+    constructor(text, sheet = null, index = -1) {
+      const source = cssRuleWithoutLeadingComments(text);
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      const rawName = source.slice(0, open).replace(/^@font-palette-values/i, "")
+        .replace(/\/\*[\s\S]*?\*\//g, " ").trim();
+      const name = cssIdentifierValue(rawName);
+      const declarations = fontPaletteDeclarations(source.slice(open + 1, close));
+      super("@font-palette-values " + rawName + " { " + declarations + " }", sheet, index);
+      this.__name = name === null ? rawName : name;
+      this.__prelude = "@font-palette-values " + cssIdentifierText(this.__name);
+    }
     get type() { return 0; }
-    get name() { return this.__prelude.replace(/^@font-palette-values\s+/i, ""); }
+    get name() { return this.__name; }
     get fontFamily() { return this.__style.getPropertyValue("font-family"); }
     get basePalette() { return this.__style.getPropertyValue("base-palette"); }
     get overrideColors() { return this.__style.getPropertyValue("override-colors"); }
+  }
+
+  function splitFontPaletteItems(value) {
+    const result = [];
+    let start = 0, depth = 0, quote = "", escaped = false;
+    for (let index = 0; index < value.length; index++) {
+      const ch = value[index];
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (quote) { if (ch === quote) quote = ""; continue; }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (ch === "(") depth++;
+      else if (ch === ")") depth = Math.max(0, depth - 1);
+      else if (ch === "," && depth === 0) {
+        result.push(value.slice(start, index).trim()); start = index + 1;
+      }
+    }
+    result.push(value.slice(start).trim());
+    return result;
+  }
+
+  function validPaletteFontFamily(value) {
+    const generics = /^(?:serif|sans-serif|cursive|fantasy|monospace|system-ui|emoji|math|fangsong|ui-serif|ui-sans-serif|ui-monospace|ui-rounded)$/i;
+    const families = splitFontPaletteItems(value);
+    return families.length > 0 && families.every(family => {
+      if (!family) return false;
+      if ((family[0] === '"' || family[0] === "'") && family.at(-1) === family[0]) return true;
+      return !generics.test(family) && !/^\d/.test(family) &&
+        /^(?:[-_a-z\u0080-\uffff]|\\.)+(?:\s+(?:[-_a-z0-9\u0080-\uffff]|\\.)+)*$/i.test(family);
+    });
+  }
+
+  function validPaletteColor(value) {
+    if (/\b(?:canvas|currentcolor|light-dark|sibling-index|sibling-count)\b/i.test(value)) return null;
+    if (/^color-mix\(/i.test(value)) return value;
+    if (!nativeStyleSupports("color", value)) return null;
+    const shortHex = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(value);
+    const longHex = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(value);
+    if (shortHex) {
+      const rgb = shortHex.slice(1).map(component => parseInt(component + component, 16));
+      return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+    }
+    if (longHex) {
+      const rgb = longHex.slice(1).map(component => parseInt(component, 16));
+      return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+    }
+    return __omoikane_normalize_style_value("color", value);
+  }
+
+  function normalizeOverrideColors(value) {
+    const entries = [];
+    for (const item of splitFontPaletteItems(value)) {
+      const match = /^(\d+)\s+([\s\S]+)$/.exec(item);
+      if (!match) return null;
+      const color = validPaletteColor(match[2]);
+      if (color === null) return null;
+      entries.push(match[1] + " " + color);
+    }
+    return entries.length ? entries.join(", ") : null;
+  }
+
+  function fontPaletteDeclarations(body) {
+    const values = new Map();
+    for (const [name, value] of JSON.parse(__omoikane_css_declarations(body, true))) {
+      let normalized = null;
+      if (name === "font-family" && validPaletteFontFamily(value)) normalized = value;
+      else if (name === "base-palette" && /^(?:light|dark|\d+)$/i.test(value)) normalized = value.toLowerCase();
+      else if (name === "override-colors") normalized = normalizeOverrideColors(value);
+      if (normalized !== null) values.set(name, normalized);
+    }
+    return [...values].map(([name, value]) => name + ": " + value + ";").join(" ");
   }
 
   class CSSCounterStyleRule extends CSSDescriptorRule {
@@ -10430,18 +10559,18 @@ export const __omoikane_service_worker_lifecycle = {};
       this.__family = text.slice(0, open).replace(/^@font-feature-values\s+/i, "").trim();
       this.__maps = new Map(featureValueBlocks.map(([attribute, block, limit]) =>
         [block, new CSSFontFeatureValuesMap(limit, () => this.__sync())]));
-      for (const source of JSON.parse(__omoikane_css_rule_sources(text.slice(open + 1, close)))) {
-        const start = cssRuleBlockStart(source), end = source.lastIndexOf("}");
-        const block = source.slice(0, start).trim().replace(/^@/, "").toLowerCase();
-        const map = this.__maps.get(block);
+      this.__serializedBlocks = [];
+      for (const parsed of parseFontFeatureValueBlocks(text.slice(open + 1, close))) {
+        const map = this.__maps.get(parsed.block);
         if (!map) continue;
-        for (const [name, value] of JSON.parse(__omoikane_css_declarations(source.slice(start + 1, end), true))) {
-          const encoded = __omoikane_css_feature_values(value);
-          if (encoded === null) continue;
-          const values = JSON.parse(encoded);
-          if (values.length > map.__limit) continue;
-          map.__values.set(name, values);
+        const declarations = [];
+        for (const declaration of parsed.declarations) {
+          if (declaration.values.length > map.__limit) continue;
+          map.__values.set(declaration.name, declaration.values);
+          declarations.push(declaration.text);
         }
+        if (declarations.length)
+          this.__serializedBlocks.push("@" + parsed.block + " { " + declarations.join(" ") + " }");
       }
       this.__text = text;
       if (sheet) sheet.__registerRuleView(this);
@@ -10452,6 +10581,10 @@ export const __omoikane_service_worker_lifecycle = {};
     get parentRule() { return this.__sheet ? this.__sheet.__parentRule : null; }
     get parentStyleSheet() { return this.__sheet; }
     get cssText() {
+      if (this.__serializedBlocks !== null) {
+        return "@font-feature-values " + this.fontFamily + " { " +
+          this.__serializedBlocks.join(" ") + " }";
+      }
       const blocks = [];
       for (const [block, map] of this.__maps) {
         if (map.size) blocks.push("@" + block + " { " + [...map].map(
@@ -10460,9 +10593,85 @@ export const __omoikane_service_worker_lifecycle = {};
       return "@font-feature-values " + this.fontFamily + " { " + blocks.join(" ") + " }";
     }
     __sync() {
+      this.__serializedBlocks = null;
       this.__text = this.cssText;
       if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
     }
+  }
+
+  function rawNestedRules(source) {
+    const result = [];
+    let start = -1, depth = 0, quote = "", comment = false, escaped = false;
+    for (let index = 0; index < source.length; index++) {
+      const ch = source[index], next = source[index + 1];
+      if (comment) { if (ch === "*" && next === "/") { comment = false; index++; } continue; }
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (quote) { if (ch === quote) quote = ""; continue; }
+      if (ch === "/" && next === "*") { comment = true; index++; continue; }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (depth === 0 && ch === "@" && start < 0) start = index;
+      if (ch === "{") depth++;
+      else if (ch === "}" && depth > 0 && --depth === 0 && start >= 0) {
+        result.push(source.slice(start, index + 1)); start = -1;
+      }
+    }
+    return result;
+  }
+
+  function rawFeatureDeclarations(source) {
+    const pieces = [];
+    let start = 0, quote = "", comment = false, escaped = false, depth = 0;
+    const push = end => { pieces.push(source.slice(start, end)); start = end + 1; };
+    for (let index = 0; index < source.length; index++) {
+      const ch = source[index], next = source[index + 1];
+      if (comment) { if (ch === "*" && next === "/") { comment = false; index++; } continue; }
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (quote) { if (ch === quote) quote = ""; continue; }
+      if (ch === "/" && next === "*") { comment = true; index++; continue; }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (ch === "(") depth++;
+      else if (ch === ")") depth = Math.max(0, depth - 1);
+      else if (ch === ";" && depth === 0) push(index);
+    }
+    if (source.slice(start).trim()) pieces.push(source.slice(start));
+    return pieces;
+  }
+
+  function parseFontFeatureValueBlocks(body) {
+    const limits = new Map(featureValueBlocks.map(([, block, limit]) => [block, limit]));
+    const result = [];
+    for (const source of rawNestedRules(body)) {
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      const block = source.slice(1, open).trim().toLowerCase();
+      if (!limits.has(block)) continue;
+      const declarations = [];
+      for (const raw of rawFeatureDeclarations(source.slice(open + 1, close))) {
+        let colon = -1, escaped = false;
+        for (let index = 0; index < raw.length; index++) {
+          if (escaped) { escaped = false; continue; }
+          if (raw[index] === "\\") { escaped = true; continue; }
+          if (raw[index] === ":") { colon = index; break; }
+        }
+        if (colon < 0) continue;
+        const rawName = raw.slice(0, colon).trim();
+        if (/^["'?]/.test(rawName)) continue;
+        const name = cssIdentifierValue(rawName);
+        const value = raw.slice(colon + 1).trim();
+        if (name === null || /^\d/.test(name)) continue;
+        const encodedValues = __omoikane_css_feature_values(value);
+        if (encodedValues === null) continue;
+        const values = JSON.parse(encodedValues);
+        declarations.push({
+          name,
+          values,
+          text: cssIdentifierText(name) + ": " + values.join(" ") + ";",
+        });
+      }
+      result.push({ block, declarations });
+    }
+    return result;
   }
   for (const [attribute, block] of featureValueBlocks) {
     Object.defineProperty(CSSFontFeatureValuesRule.prototype, attribute, {
@@ -10867,6 +11076,8 @@ export const __omoikane_service_worker_lifecycle = {};
       : new CSSStyleRule(text, sheet, index);
   }
 
+  class CSSRule {}
+
   class CSSRuleList {
     constructor(sheet) { this.__sheet = sheet; }
     __rules() {
@@ -11208,7 +11419,12 @@ export const __omoikane_service_worker_lifecycle = {};
         throw new DOMException("Invalid @import rule.", "SyntaxError");
       }
       let count;
-      if (nested && blockStart >= 0 && !/^\s*@/.test(text)) {
+      const fontFeatureRule = /^\s*@font-feature-values(?=\s|\/\*|;|\{)/i.test(text);
+      if (fontFeatureRule) {
+        if (blockStart < 0 || !fontAtRulePreludeValid(source))
+          throw new DOMException("Invalid @font-feature-values rule.", "SyntaxError");
+        count = 1;
+      } else if (nested && blockStart >= 0 && !/^\s*@/.test(text)) {
         const selector = text.slice(0, blockStart).trim();
         if (!nestedSelectorIsValid(selector, nested)) {
           throw new DOMException("Invalid nested selector.", "SyntaxError");
@@ -20282,6 +20498,7 @@ export const __omoikane_service_worker_lifecycle = {};
   globalThis.CSSFontPaletteValuesRule = CSSFontPaletteValuesRule;
   globalThis.CSSCounterStyleRule = CSSCounterStyleRule;
   globalThis.CSSFontFeatureValuesRule = CSSFontFeatureValuesRule;
+  globalThis.CSSRule = CSSRule;
   globalThis.CSSFontFeatureValuesMap = CSSFontFeatureValuesMap;
   globalThis.CSSPropertyRule = CSSPropertyRule;
   globalThis.CSSImportRule = CSSImportRule;

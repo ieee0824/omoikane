@@ -12,7 +12,7 @@ use crate::font::{
     Font, FontError, FontFallbackCandidate, FontFamilyKey, FontVariantKey, FontWeight, GlyphRaster,
     ShapingDirection, WebFontCandidate, WebFontRegistry, grapheme_spacing_cluster_starts,
     is_zero_advance_character, load_default_text_fonts_shared, select_text_font,
-    shape_text_with_fallback_candidates,
+    shape_text_with_fallback_candidates, shape_text_with_fallback_candidates_and_options,
 };
 use crate::layout::{
     FragmentStyle, InlineFragmentContent, LayoutBox, LineBox, ListMarker, MeterRegion, Rect,
@@ -190,6 +190,92 @@ fn rasterize_glyph_cached(
         }
     });
     Ok(glyph)
+}
+
+#[derive(Clone, Copy, Default)]
+struct GlyphSynthesis {
+    embolden: bool,
+    oblique_angle: Option<f32>,
+}
+
+fn glyph_synthesis(candidate: FontFallbackCandidate<'_>, style: &FragmentStyle) -> GlyphSynthesis {
+    let requested_weight = style
+        .font_weight
+        .as_deref()
+        .map(FontWeight::parse)
+        .unwrap_or_default();
+    let requested_style = style
+        .font_style
+        .as_deref()
+        .map(crate::font::FontStyleRange::parse)
+        .unwrap_or_else(|| crate::font::FontStyleRange::exact(crate::font::FontStyle::Normal));
+    GlyphSynthesis {
+        embolden: style.font_synthesis.weight
+            && requested_weight.0 >= 600
+            && candidate.weight.max.0 < 600,
+        oblique_angle: (style.font_synthesis.style.allows(requested_style.style)
+            && requested_style.style != crate::font::FontStyle::Normal
+            && candidate.style.style == crate::font::FontStyle::Normal)
+            .then(|| {
+                if requested_style.style == crate::font::FontStyle::Oblique {
+                    requested_style.requested_angle() as f32 / 1_000.0
+                } else {
+                    14.0
+                }
+            }),
+    }
+}
+
+fn synthesize_glyph<'a>(
+    glyph: &'a GlyphRaster,
+    synthesis: GlyphSynthesis,
+    size_px: f32,
+) -> Cow<'a, GlyphRaster> {
+    if (!synthesis.embolden && synthesis.oblique_angle.is_none()) || glyph.bitmap.is_empty() {
+        return Cow::Borrowed(glyph);
+    }
+    let mut result = glyph.clone();
+    if let Some(angle) = synthesis.oblique_angle {
+        let shear = angle.to_radians().tan();
+        let shift = |y: u32| ((result.height.saturating_sub(1 + y)) as f32 * shear).round() as i32;
+        let (min_shift, max_shift) = if result.height == 0 {
+            (0, 0)
+        } else {
+            let top = shift(0);
+            let bottom = shift(result.height - 1);
+            (top.min(bottom), top.max(bottom))
+        };
+        let extra = max_shift.saturating_sub(min_shift) as u32;
+        let width = result.width.saturating_add(extra);
+        let mut bitmap = vec![0; width.saturating_mul(result.height) as usize];
+        for y in 0..result.height {
+            let shifted_x = shift(y).saturating_sub(min_shift) as u32;
+            for x in 0..result.width {
+                bitmap[(y * width + x + shifted_x) as usize] =
+                    result.bitmap[(y * result.width + x) as usize];
+            }
+        }
+        result.width = width;
+        result.offset_x += min_shift as f32;
+        result.bitmap = bitmap;
+    }
+    if synthesis.embolden {
+        let strength = (size_px / 24.0).round().clamp(1.0, 3.0) as u32;
+        let width = result.width.saturating_add(strength);
+        let mut bitmap = vec![0; width.saturating_mul(result.height) as usize];
+        for y in 0..result.height {
+            for x in 0..result.width {
+                let alpha = result.bitmap[(y * result.width + x) as usize];
+                for offset in 0..=strength {
+                    let target = &mut bitmap[(y * width + x + offset) as usize];
+                    *target = (*target).max(alpha);
+                }
+            }
+        }
+        result.width = width;
+        result.bitmap = bitmap;
+    }
+    Cow::Owned(result)
 }
 
 #[cfg(test)]
@@ -625,6 +711,8 @@ fn paint_text_fragment_glyphs(
             .map(|candidate| FontFallbackCandidate {
                 font: candidate.font,
                 unicode_range: Some(candidate.unicode_range),
+                weight: candidate.weight,
+                style: candidate.style,
             })
             .collect();
         if web_candidates.is_empty() {
@@ -659,6 +747,7 @@ fn paint_text_fragment_glyphs(
                 font_size,
                 fragment.metrics.ascent,
                 &shaping_fonts,
+                &fragment.style,
                 frag_color,
                 clip,
                 fragment.metrics.letter_spacing,
@@ -679,6 +768,7 @@ fn paint_text_fragment_glyphs(
                 font_size,
                 fragment.metrics.ascent,
                 &font_refs,
+                &fragment.style,
                 frag_color,
                 clip,
                 fragment.metrics.letter_spacing,
@@ -933,6 +1023,8 @@ fn paint_form_control_text(
         .map(|candidate| FontFallbackCandidate {
             font: candidate.font,
             unicode_range: Some(candidate.unicode_range),
+            weight: candidate.weight,
+            style: candidate.style,
         })
         .collect();
     let selected = select_fragment_font(web_fonts, fragment, fonts);
@@ -2058,6 +2150,7 @@ fn paint_fragment_text(
     font_size: f32,
     layout_ascent: f32,
     fonts: &[FontFallbackCandidate<'_>],
+    style: &FragmentStyle,
     color: Color,
     clip: Option<Rect>,
     letter_spacing: f32,
@@ -2071,6 +2164,7 @@ fn paint_fragment_text(
             font_size,
             layout_ascent,
             fonts,
+            style,
             color,
             clip,
             letter_spacing,
@@ -2084,6 +2178,7 @@ fn paint_fragment_text(
             font_size,
             layout_ascent,
             fonts,
+            style,
             color,
             clip,
             letter_spacing,
@@ -2098,6 +2193,7 @@ fn paint_text_with_candidates(
     font_size: f32,
     layout_ascent: f32,
     fonts: &[FontFallbackCandidate<'_>],
+    style: &FragmentStyle,
     color: Color,
     clip: Option<Rect>,
     letter_spacing: f32,
@@ -2113,7 +2209,8 @@ fn paint_text_with_candidates(
         .count();
 
     for (ch, font_index) in chars {
-        let font = fonts[font_index].font;
+        let candidate = fonts[font_index];
+        let font = candidate.font;
         let zero_advance = is_zero_advance_character(ch);
         let (_, glyph, advance_x) = rasterize_with_fallback_refs(&[font], ch, font_size);
         let glyph = (!is_invisible_shaping_control(ch))
@@ -2128,20 +2225,24 @@ fn paint_text_with_candidates(
         if !zero_advance {
             cluster_origin_x = cursor_x;
         }
-        if let Some(glyph) = glyph
-            && glyph.width > 0
-            && glyph.height > 0
-            && !glyph.bitmap.is_empty()
-        {
-            canvas.draw_glyph_mask(
-                horizontal_glyph_origin(cursor_x, cluster_origin_x, zero_advance, glyph.offset_x),
-                baseline_y + glyph.offset_y,
-                glyph.width,
-                glyph.height,
-                &glyph.bitmap,
-                color,
-                clip,
-            );
+        if let Some(glyph) = glyph {
+            let glyph = synthesize_glyph(&glyph, glyph_synthesis(candidate, style), font_size);
+            if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
+                canvas.draw_glyph_mask(
+                    horizontal_glyph_origin(
+                        cursor_x,
+                        cluster_origin_x,
+                        zero_advance,
+                        glyph.offset_x,
+                    ),
+                    baseline_y + glyph.offset_y,
+                    glyph.width,
+                    glyph.height,
+                    &glyph.bitmap,
+                    color,
+                    clip,
+                );
+            }
         }
         cursor_x += advance_x;
         if !zero_advance && remaining_non_zero > 1 {
@@ -2209,7 +2310,13 @@ pub(crate) fn paint_shaped_horizontal_text_with_candidates(
     } else {
         ShapingDirection::LeftToRight
     };
-    let Ok(runs) = shape_text_with_fallback_candidates(fonts, text, font_size, direction) else {
+    let Ok(runs) = shape_text_with_fallback_candidates_and_options(
+        fonts,
+        text,
+        font_size,
+        direction,
+        &style.shaping_options,
+    ) else {
         return None;
     };
     if runs.iter().all(|run| run.glyphs.is_empty()) && !text.is_empty() {
@@ -2222,22 +2329,51 @@ pub(crate) fn paint_shaped_horizontal_text_with_candidates(
     let spacing_boundaries = spacing_clusters.len().saturating_sub(1);
     let mut applied_spacing = 0usize;
     for (run_index, run) in runs.iter().enumerate() {
-        let font = fonts[run.font_index].font;
+        let candidate = fonts[run.font_index];
+        let font = candidate.font;
+        let synthesis = glyph_synthesis(candidate, style);
         for (glyph_index, shaped) in run.glyphs.iter().enumerate() {
-            if let Ok(glyph) = rasterize_glyph_cached(font, shaped.glyph_id, font_size)
-                && glyph.width > 0
-                && glyph.height > 0
-                && !glyph.bitmap.is_empty()
-            {
-                canvas.draw_glyph_mask(
-                    cursor_x + shaped.x_offset + glyph.offset_x,
-                    baseline_y - shaped.y_offset + glyph.offset_y,
-                    glyph.width,
-                    glyph.height,
-                    &glyph.bitmap,
-                    color,
-                    clip,
-                );
+            let raster_size = font_size * shaped.font_size_scale;
+            let color_layers = font.rasterize_color_glyph(
+                shaped.glyph_id,
+                raster_size,
+                &style.font_palette,
+                [color.r, color.g, color.b, color.a],
+            );
+            if let Some(layers) = color_layers {
+                for layer in layers {
+                    let glyph = synthesize_glyph(&layer.raster, synthesis, raster_size);
+                    if glyph.width == 0 || glyph.height == 0 || glyph.bitmap.is_empty() {
+                        continue;
+                    }
+                    canvas.draw_glyph_mask(
+                        cursor_x + shaped.x_offset + glyph.offset_x,
+                        baseline_y - shaped.y_offset + glyph.offset_y,
+                        glyph.width,
+                        glyph.height,
+                        &glyph.bitmap,
+                        Color {
+                            r: layer.color[0],
+                            g: layer.color[1],
+                            b: layer.color[2],
+                            a: layer.color[3],
+                        },
+                        clip,
+                    );
+                }
+            } else if let Ok(glyph) = rasterize_glyph_cached(font, shaped.glyph_id, raster_size) {
+                let glyph = synthesize_glyph(&glyph, synthesis, raster_size);
+                if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
+                    canvas.draw_glyph_mask(
+                        cursor_x + shaped.x_offset + glyph.offset_x,
+                        baseline_y - shaped.y_offset + glyph.offset_y,
+                        glyph.width,
+                        glyph.height,
+                        &glyph.bitmap,
+                        color,
+                        clip,
+                    );
+                }
             }
             cursor_x += shaped.x_advance.abs();
             let next_cluster = run
@@ -2274,6 +2410,7 @@ fn paint_text_vertical_with_candidates(
     font_size: f32,
     _layout_ascent: f32,
     fonts: &[FontFallbackCandidate<'_>],
+    style: &FragmentStyle,
     color: Color,
     clip: Option<Rect>,
     letter_spacing: f32,
@@ -2296,8 +2433,8 @@ fn paint_text_vertical_with_candidates(
     for (ch, font_index) in chars {
         let zero_advance = is_zero_advance_character(ch);
         let rotation = vertical_glyph_rotation(mode.glyphs, ch, previous_rotation);
-        let (_, glyph, advance_x) =
-            rasterize_with_fallback_refs(&[fonts[font_index].font], ch, font_size);
+        let candidate = fonts[font_index];
+        let (_, glyph, advance_x) = rasterize_with_fallback_refs(&[candidate.font], ch, font_size);
         let glyph = (!is_invisible_shaping_control(ch))
             .then_some(glyph)
             .flatten();
@@ -2314,42 +2451,42 @@ fn paint_text_vertical_with_candidates(
             advance,
         );
 
-        if let Some(glyph) = glyph
-            && glyph.width > 0
-            && glyph.height > 0
-            && !glyph.bitmap.is_empty()
-        {
-            match rotation {
-                GlyphRotation::Upright => {
-                    let glyph_x = rect.x + ((rect.width - glyph.width as f32) * 0.5).max(0.0);
-                    let glyph_y =
-                        cell_start + ((paint_advance - glyph.height as f32) * 0.5).max(0.0);
-                    canvas.draw_glyph_mask(
-                        glyph_x,
-                        glyph_y,
-                        glyph.width,
-                        glyph.height,
-                        &glyph.bitmap,
-                        color,
-                        clip,
-                    );
-                }
-                GlyphRotation::Clockwise | GlyphRotation::CounterClockwise => {
-                    let rotated_width = glyph.height as f32;
-                    let rotated_height = glyph.width as f32;
-                    let glyph_x = rect.x + ((rect.width - rotated_width) * 0.5).max(0.0);
-                    let glyph_y = cell_start + ((paint_advance - rotated_height) * 0.5).max(0.0);
-                    draw_rotated_glyph_mask(
-                        canvas,
-                        glyph_x,
-                        glyph_y,
-                        glyph.width,
-                        glyph.height,
-                        &glyph.bitmap,
-                        rotation == GlyphRotation::Clockwise,
-                        color,
-                        clip,
-                    );
+        if let Some(glyph) = glyph {
+            let glyph = synthesize_glyph(&glyph, glyph_synthesis(candidate, style), font_size);
+            if glyph.width > 0 && glyph.height > 0 && !glyph.bitmap.is_empty() {
+                match rotation {
+                    GlyphRotation::Upright => {
+                        let glyph_x = rect.x + ((rect.width - glyph.width as f32) * 0.5).max(0.0);
+                        let glyph_y =
+                            cell_start + ((paint_advance - glyph.height as f32) * 0.5).max(0.0);
+                        canvas.draw_glyph_mask(
+                            glyph_x,
+                            glyph_y,
+                            glyph.width,
+                            glyph.height,
+                            &glyph.bitmap,
+                            color,
+                            clip,
+                        );
+                    }
+                    GlyphRotation::Clockwise | GlyphRotation::CounterClockwise => {
+                        let rotated_width = glyph.height as f32;
+                        let rotated_height = glyph.width as f32;
+                        let glyph_x = rect.x + ((rect.width - rotated_width) * 0.5).max(0.0);
+                        let glyph_y =
+                            cell_start + ((paint_advance - rotated_height) * 0.5).max(0.0);
+                        draw_rotated_glyph_mask(
+                            canvas,
+                            glyph_x,
+                            glyph_y,
+                            glyph.width,
+                            glyph.height,
+                            &glyph.bitmap,
+                            rotation == GlyphRotation::Clockwise,
+                            color,
+                            clip,
+                        );
+                    }
                 }
             }
         }
@@ -3293,12 +3430,12 @@ mod bidi_tests {
         let b = UnicodeRangeSet::parse("U+42").unwrap();
         let fonts = [
             FontFallbackCandidate {
-                font: &font,
                 unicode_range: Some(&a),
+                ..FontFallbackCandidate::unrestricted(&font)
             },
             FontFallbackCandidate {
-                font: &font,
                 unicode_range: Some(&b),
+                ..FontFallbackCandidate::unrestricted(&font)
             },
         ];
 
