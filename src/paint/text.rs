@@ -12,7 +12,7 @@ use crate::font::{
     Font, FontError, FontFallbackCandidate, FontFamilyKey, FontVariantKey, FontWeight, GlyphRaster,
     ShapingDirection, WebFontCandidate, WebFontRegistry, grapheme_spacing_cluster_starts,
     is_zero_advance_character, load_default_text_fonts_shared, select_text_font,
-    shape_text_with_fallback_candidates,
+    shape_text_with_fallback_candidates, shape_text_with_fallback_candidates_and_options,
 };
 use crate::layout::{
     FragmentStyle, InlineFragmentContent, LayoutBox, LineBox, ListMarker, MeterRegion, Rect,
@@ -2209,7 +2209,13 @@ pub(crate) fn paint_shaped_horizontal_text_with_candidates(
     } else {
         ShapingDirection::LeftToRight
     };
-    let Ok(runs) = shape_text_with_fallback_candidates(fonts, text, font_size, direction) else {
+    let Ok(runs) = shape_text_with_fallback_candidates_and_options(
+        fonts,
+        text,
+        font_size,
+        direction,
+        &style.shaping_options,
+    ) else {
         return None;
     };
     if runs.iter().all(|run| run.glyphs.is_empty()) && !text.is_empty() {

@@ -6493,6 +6493,220 @@ fn inherits_font_style_from_parent() {
 }
 
 #[test]
+fn font_feature_and_variation_settings_compute_inherit_and_become_typed() {
+    let document = NodeHandle::document();
+    let html = NodeHandle::element("html");
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    document.append_child(html.clone());
+    html.append_child(parent.clone());
+    parent.append_child(child.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { font-feature-settings: \"liga\" 0, \"ss01\"; \
+             font-variation-settings: \"wght\" 650, \"wdth\" 90 }",
+        )
+        .unwrap(),
+    );
+    let parent_style = resolver.computed_style(&parent);
+    assert_eq!(
+        parent_style.get("font-feature-settings"),
+        Some(&ComputedValue::Keyword(
+            "\"liga\" 0, \"ss01\" 1".to_string()
+        ))
+    );
+    let style = resolver.computed_style(&child);
+    assert_eq!(
+        style.get("font-feature-settings"),
+        Some(&ComputedValue::Keyword(
+            "\"liga\" 0, \"ss01\" 1".to_string()
+        ))
+    );
+    assert_eq!(
+        style.get("font-variation-settings"),
+        Some(&ComputedValue::Keyword(
+            "\"wght\" 650, \"wdth\" 90".to_string()
+        ))
+    );
+    assert_eq!(
+        style.shaping_options().features,
+        vec![
+            crate::font::OpenTypeFeature::new(*b"liga", 0),
+            crate::font::OpenTypeFeature::new(*b"ss01", 1),
+        ]
+    );
+    assert_eq!(
+        style.shaping_options().variations,
+        vec![
+            crate::font::OpenTypeVariation::new(*b"opsz", 16.0),
+            crate::font::OpenTypeVariation::new(*b"wght", 650.0),
+            crate::font::OpenTypeVariation::new(*b"wdth", 90.0),
+        ]
+    );
+
+    let fragment = crate::layout::FragmentStyle::from_computed(&style);
+    assert!(Arc::ptr_eq(
+        style.shaping_options(),
+        &fragment.shaping_options
+    ));
+}
+
+#[test]
+fn font_feature_settings_rejects_invalid_tags_and_values() {
+    for value in [
+        "\"abc\" 1",
+        "\"abcde\" 1",
+        "\"liga\" -1",
+        "\"liga\" 1.5",
+        "none",
+    ] {
+        assert!(
+            !supports_declaration("font-feature-settings", value),
+            "{value}"
+        );
+    }
+    for value in [
+        "normal",
+        "\"liga\"",
+        "\"liga\" 0",
+        "\"liga\" off",
+        "\"ss01\" on",
+        "\"ss01\" 7",
+    ] {
+        assert!(
+            supports_declaration("font-feature-settings", value),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn font_size_adjust_validates_and_inherits_metric_ratio() {
+    for value in [
+        "none",
+        "from-font",
+        "0.5",
+        "ex-height 0.5",
+        "cap-height from-font",
+        "ch-width 0",
+        "ic-width 1",
+        "ic-height from-font",
+    ] {
+        assert!(supports_declaration("font-size-adjust", value), "{value}");
+    }
+    for value in [
+        "-0.1",
+        "NaN",
+        "ex-height",
+        "bad-metric 0.5",
+        "cap-height -1",
+        "ex-height 0.5 extra",
+    ] {
+        assert!(!supports_declaration("font-size-adjust", value), "{value}");
+    }
+
+    let document = NodeHandle::document();
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("span");
+    document.append_child(parent.clone());
+    parent.append_child(child.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { font-size-adjust: cap-height 0.7 }").unwrap(),
+    );
+    assert_eq!(
+        resolver.computed_style(&child).get("font-size-adjust"),
+        Some(&ComputedValue::Keyword("cap-height 0.7".to_string()))
+    );
+}
+
+#[test]
+fn font_synthesis_uses_fonts_four_initial_and_canonical_order() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    let initial = resolver.computed_style(&element);
+    assert_eq!(
+        initial.get("font-synthesis"),
+        Some(&ComputedValue::Keyword(
+            "weight style small-caps position".to_string()
+        ))
+    );
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet("div { font-synthesis: position weight small-caps style }").unwrap(),
+    );
+    let reordered = resolver.computed_style(&element);
+    assert_eq!(
+        reordered.get("font-synthesis"),
+        Some(&ComputedValue::Keyword(
+            "weight style small-caps position".to_string()
+        ))
+    );
+}
+
+#[test]
+fn font_variant_properties_expand_before_explicit_opentype_settings() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { font-size: 20px; font-kerning: normal; font-optical-sizing: auto; \
+         font-variant-caps: all-small-caps; \
+         font-variant-ligatures: no-common-ligatures discretionary-ligatures; \
+         font-variant-numeric: oldstyle-nums tabular-nums slashed-zero; \
+         font-variant-east-asian: jis04 ruby; font-variant-position: super; \
+         font-variant-alternates: historical-forms; \
+         font-feature-settings: \"kern\" 0; font-variation-settings: \"wght\" 700 }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&element);
+    assert_eq!(
+        style.shaping_options().features,
+        vec![
+            crate::font::OpenTypeFeature::new(*b"c2sc", 1),
+            crate::font::OpenTypeFeature::new(*b"smcp", 1),
+            crate::font::OpenTypeFeature::new(*b"liga", 0),
+            crate::font::OpenTypeFeature::new(*b"clig", 0),
+            crate::font::OpenTypeFeature::new(*b"dlig", 1),
+            crate::font::OpenTypeFeature::new(*b"onum", 1),
+            crate::font::OpenTypeFeature::new(*b"tnum", 1),
+            crate::font::OpenTypeFeature::new(*b"zero", 1),
+            crate::font::OpenTypeFeature::new(*b"jp04", 1),
+            crate::font::OpenTypeFeature::new(*b"ruby", 1),
+            crate::font::OpenTypeFeature::new(*b"sups", 1),
+            crate::font::OpenTypeFeature::new(*b"hist", 1),
+            crate::font::OpenTypeFeature::new(*b"kern", 1),
+            crate::font::OpenTypeFeature::new(*b"kern", 0),
+        ]
+    );
+    assert_eq!(
+        style.shaping_options().variations,
+        vec![
+            crate::font::OpenTypeVariation::new(*b"opsz", 20.0),
+            crate::font::OpenTypeVariation::new(*b"wght", 700.0),
+        ]
+    );
+
+    for (property, value) in [
+        ("font-kerning", "sometimes"),
+        ("font-optical-sizing", "always"),
+        ("font-variant-caps", "small-caps titling-caps"),
+        ("font-variant-ligatures", "normal contextual"),
+        ("font-variant-position", "sub super"),
+    ] {
+        assert!(
+            !supports_declaration(property, value),
+            "{property}: {value}"
+        );
+    }
+}
+
+#[test]
 fn inherits_font_stretch_from_parent() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");

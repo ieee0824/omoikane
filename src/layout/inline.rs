@@ -16,7 +16,8 @@ use crate::dom::{Node, NodeHandle, NodeType};
 use crate::font::{
     Font, FontFallbackCandidate, FontFamilyKey, FontStyle, FontVariantKey, FontWeight,
     ShapingDirection, WebFontCandidate, grapheme_spacing_boundaries, is_zero_advance_character,
-    load_default_text_fonts_shared, select_text_font, shape_text_with_fallback_candidates,
+    load_default_text_fonts_shared, select_text_font,
+    shape_text_with_fallback_candidates_and_options,
 };
 use crate::http::cors::{self, CredentialsMode, PreflightCache, RedirectMode, RequestMode};
 use crate::http::{Client, HttpRequest, HttpResponse, Url, url::resolve_url};
@@ -329,7 +330,7 @@ fn take_initial_letter(
     metrics.average_advance *= scale;
     metrics.letter_spacing *= scale;
     metrics.word_spacing *= scale;
-    let width = measure_text_width(&initial_text, metrics).max(0.0);
+    let width = measure_text_width(&initial_text, &metrics).max(0.0);
     Some(InitialLetterLayout {
         node,
         text_source: initial_source,
@@ -620,7 +621,7 @@ fn layout_inline_nodes_impl(
         align,
         last_align,
         strut_line_height,
-        strut_metrics,
+        strut_metrics.clone(),
         direction_rtl,
         first_line_indent,
         effective_constraints,
@@ -1130,7 +1131,7 @@ fn isolate_edge_grapheme(
     if !grapheme.chars().next().is_some_and(eligible) {
         return None;
     }
-    let width = measure_text_width(grapheme, fragment.metrics).min(fragment.rect.width);
+    let width = measure_text_width(grapheme, &fragment.metrics).min(fragment.rect.width);
     if grapheme.len() == text.len() {
         return Some((index, width));
     }
@@ -1260,7 +1261,7 @@ fn apply_overflow_marker(
 ) {
     let available_width = available_width.max(0.0);
     let marker_metrics = font_metrics(style);
-    let marker_width = measure_text_width(marker_text, marker_metrics).max(0.0);
+    let marker_width = measure_text_width(marker_text, &marker_metrics).max(0.0);
     let content_budget = (available_width - marker_width).max(0.0);
     let content_start = if direction_rtl {
         start + marker_width
@@ -1330,7 +1331,7 @@ fn apply_overflow_marker(
                 } else {
                     graphemes.next_back()
                 }?;
-                Some(measure_text_width(grapheme, fragment.metrics))
+                Some(measure_text_width(grapheme, &fragment.metrics))
             }
             _ => Some(
                 if vertical {
@@ -1373,7 +1374,7 @@ fn apply_overflow_marker(
                 .map_or(direction_rtl, |level| level % 2 == 1);
             let keep_prefix = direction_rtl == odd_level;
             let Some((text, width)) =
-                text_fitting_graphemes(text, fragment.metrics, remaining, keep_prefix)
+                text_fitting_graphemes(text, fragment.metrics.clone(), remaining, keep_prefix)
             else {
                 break;
             };
@@ -1497,7 +1498,7 @@ fn text_fitting_graphemes(
         } else {
             &text[boundaries[grapheme_count - count]..]
         };
-        if measure_text_width(candidate, metrics) <= max_width + 0.01 {
+        if measure_text_width(candidate, &metrics) <= max_width + 0.01 {
             low = count;
         } else {
             high = count;
@@ -1511,7 +1512,7 @@ fn text_fitting_graphemes(
     } else {
         &text[boundaries[grapheme_count - low]..]
     };
-    Some((fitted.to_string(), measure_text_width(fitted, metrics)))
+    Some((fitted.to_string(), measure_text_width(fitted, &metrics)))
 }
 
 fn position_atomic_boxes(
@@ -1978,7 +1979,7 @@ fn collect_input_segment(node: &NodeHandle, style: &ComputedStyle, out: &mut Vec
         });
     let content_width = explicit_length(style, "width").unwrap_or_else(|| {
         if button_like {
-            measure_text_width(&value, metrics)
+            measure_text_width(&value, &metrics)
         } else {
             let columns = attributes
                 .get("size")
@@ -2020,7 +2021,7 @@ fn collect_button_segment(
     let metrics = font_metrics(style);
     let label = normalize_inline_whitespace(&collect_rendered_text(node, resolver));
     let content_width =
-        explicit_length(style, "width").unwrap_or_else(|| measure_text_width(&label, metrics));
+        explicit_length(style, "width").unwrap_or_else(|| measure_text_width(&label, &metrics));
     let content_height =
         explicit_length(style, "height").unwrap_or_else(|| metrics.font_size.max(13.0));
 
@@ -2045,7 +2046,7 @@ fn collect_button_segment(
                 icon_width,
                 icon_height,
             ),
-            metrics,
+            metrics: metrics.clone(),
             line_height: line_height(style).max(total_height),
             vertical_align: vertical_align(style),
             style: FragmentStyle::from_computed(style),
@@ -2171,7 +2172,7 @@ fn collect_select_segment(
     let content_width = explicit_length(style, "width").unwrap_or_else(|| {
         let widest = options
             .iter()
-            .map(|(text, _)| measure_text_width(text, metrics))
+            .map(|(text, _)| measure_text_width(text, &metrics))
             .fold(0.0f32, f32::max);
         widest + 20.0
     });
@@ -2483,7 +2484,7 @@ pub(super) fn generated_inline_segments(
                 let transformed = apply_text_transform_layout(&normalized, &style);
                 InlineSegmentContent::Text(transformed)
             },
-            metrics,
+            metrics: metrics.clone(),
             line_height,
             vertical_align,
             style: fragment_style.clone(),
@@ -2500,7 +2501,7 @@ pub(super) fn generated_inline_segments(
                 image.width() as f32,
                 image.height() as f32,
             ),
-            metrics,
+            metrics: metrics.clone(),
             line_height: line_height.max(metrics.font_size),
             vertical_align,
             style: fragment_style,
@@ -3683,12 +3684,12 @@ impl WhiteSpaceMode {
         self.collapse
     }
 
-    fn tab_advance(self, used_inline_size: f32, metrics: FontMetrics) -> f32 {
+    fn tab_advance(self, used_inline_size: f32, metrics: &FontMetrics) -> f32 {
         let interval = match self.tab_size {
             TabSize::Spaces(count) => {
-                let mut space_metrics = metrics;
+                let mut space_metrics = metrics.clone();
                 space_metrics.word_spacing = 0.0;
-                measure_text_width(" ", space_metrics) * count
+                measure_text_width(" ", &space_metrics) * count
             }
             TabSize::Length(length) => length,
         };
@@ -3743,12 +3744,111 @@ pub(super) fn font_size(style: &ComputedStyle) -> f32 {
     explicit_length(style, "font-size").unwrap_or(16.0)
 }
 
+#[derive(Clone, Copy)]
+enum FontSizeAdjustMetric {
+    ExHeight,
+    CapHeight,
+    ChWidth,
+    IcWidth,
+    IcHeight,
+}
+
+#[derive(Clone, Copy)]
+enum FontSizeAdjustRatio {
+    Number(f32),
+    FromFont,
+}
+
+fn font_size_adjust(style: &ComputedStyle) -> Option<(FontSizeAdjustMetric, FontSizeAdjustRatio)> {
+    let value = match style.get("font-size-adjust")? {
+        ComputedValue::Number(value) => {
+            return Some((
+                FontSizeAdjustMetric::ExHeight,
+                FontSizeAdjustRatio::Number(*value),
+            ));
+        }
+        ComputedValue::Keyword(value) | ComputedValue::String(value) => value.as_str(),
+        _ => return None,
+    };
+    let mut components = value.split_ascii_whitespace();
+    let first = components.next()?;
+    let (metric, ratio) = match first.to_ascii_lowercase().as_str() {
+        "none" => return None,
+        "from-font" => (
+            FontSizeAdjustMetric::ExHeight,
+            FontSizeAdjustRatio::FromFont,
+        ),
+        "ex-height" => (
+            FontSizeAdjustMetric::ExHeight,
+            parse_font_size_adjust_ratio(components.next()?)?,
+        ),
+        "cap-height" => (
+            FontSizeAdjustMetric::CapHeight,
+            parse_font_size_adjust_ratio(components.next()?)?,
+        ),
+        "ch-width" => (
+            FontSizeAdjustMetric::ChWidth,
+            parse_font_size_adjust_ratio(components.next()?)?,
+        ),
+        "ic-width" => (
+            FontSizeAdjustMetric::IcWidth,
+            parse_font_size_adjust_ratio(components.next()?)?,
+        ),
+        "ic-height" => (
+            FontSizeAdjustMetric::IcHeight,
+            parse_font_size_adjust_ratio(components.next()?)?,
+        ),
+        number => (
+            FontSizeAdjustMetric::ExHeight,
+            FontSizeAdjustRatio::Number(number.parse().ok()?),
+        ),
+    };
+    components.next().is_none().then_some((metric, ratio))
+}
+
+fn parse_font_size_adjust_ratio(value: &str) -> Option<FontSizeAdjustRatio> {
+    if value.eq_ignore_ascii_case("from-font") {
+        Some(FontSizeAdjustRatio::FromFont)
+    } else {
+        value.parse().ok().map(FontSizeAdjustRatio::Number)
+    }
+}
+
+fn adjusted_font_size(
+    font: &crate::font::Font,
+    specified_size: f32,
+    adjustment: Option<(FontSizeAdjustMetric, FontSizeAdjustRatio)>,
+) -> f32 {
+    let Some((metric, ratio)) = adjustment else {
+        return specified_size;
+    };
+    let metrics = font.css_relative_metrics(1.0, false, false);
+    let actual_ratio = match metric {
+        FontSizeAdjustMetric::ExHeight => metrics.ex,
+        FontSizeAdjustMetric::CapHeight => metrics.cap,
+        FontSizeAdjustMetric::ChWidth => metrics.ch,
+        FontSizeAdjustMetric::IcWidth => metrics.ic,
+        // CSS fallback for a missing ideographic full-height metric is 1em.
+        FontSizeAdjustMetric::IcHeight => 1.0,
+    };
+    let desired_ratio = match ratio {
+        FontSizeAdjustRatio::Number(value) => value,
+        FontSizeAdjustRatio::FromFont => actual_ratio,
+    };
+    if actual_ratio > 0.0 && actual_ratio.is_finite() && desired_ratio.is_finite() {
+        specified_size * desired_ratio / actual_ratio
+    } else {
+        specified_size
+    }
+}
+
 pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
     let mut metrics = FontMetrics::from_font_size(font_size(style));
     metrics.letter_spacing = letter_spacing(style);
     metrics.word_spacing = word_spacing(style);
     metrics.font_family = style.get("font-family").and_then(computed_font_family_key);
     metrics.font_scope_root = style.font_family_scope_root();
+    metrics.shaping_options = Arc::clone(style.shaping_options());
     metrics.font_weight = computed_font_weight(style);
     let font_style = computed_font_property(style, "font-style")
         .map(crate::font::FontStyleRange::parse)
@@ -3778,6 +3878,25 @@ pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
             style_angle: metrics.font_style_angle,
             stretch: metrics.font_stretch,
         };
+        let font_phase = super::profile::Scope::begin(super::profile::Phase::FontSelect);
+        let selected = select_text_font(
+            "layout",
+            metrics.font_family,
+            metrics.font_scope_root,
+            variant,
+            context.web_fonts.as_deref(),
+            &context.system_fonts,
+        );
+        drop(font_phase);
+        let selected = selected
+            .as_ref()
+            .map(AsRef::as_ref)
+            .or_else(|| context.system_fonts.first().map(AsRef::as_ref));
+        let Some(selected) = selected else {
+            return;
+        };
+        metrics.font_size =
+            adjusted_font_size(selected, metrics.font_size, font_size_adjust(style));
         let key = (
             metrics.font_family,
             metrics.font_scope_root,
@@ -3785,25 +3904,9 @@ pub(super) fn font_metrics(style: &ComputedStyle) -> FontMetrics {
             metrics.font_size.to_bits(),
         );
         let actual = context.metrics_cache.get(&key).copied().or_else(|| {
-            let font_phase = super::profile::Scope::begin(super::profile::Phase::FontSelect);
-            let selected = select_text_font(
-                "layout",
-                metrics.font_family,
-                metrics.font_scope_root,
-                variant,
-                context.web_fonts.as_deref(),
-                &context.system_fonts,
-            );
-            drop(font_phase);
-            let actual = selected
-                .as_ref()
-                .map(AsRef::as_ref)
-                .or_else(|| context.system_fonts.first().map(AsRef::as_ref))
-                .map(|font| font.layout_metrics(metrics.font_size));
-            if let Some(actual) = actual {
-                context.metrics_cache.insert(key, actual);
-            }
-            actual
+            let actual = selected.layout_metrics(metrics.font_size);
+            context.metrics_cache.insert(key, actual);
+            Some(actual)
         });
         if let Some(actual) = actual {
             metrics.ascent = actual.ascent;
@@ -4055,7 +4158,7 @@ impl InlineCursor {
             line_align,
             self.direction_rtl,
             self.strut_line_height,
-            self.strut_metrics,
+            self.strut_metrics.clone(),
         );
         self.y += used_height;
         if let Some(constraints) = line_constraints {
@@ -4100,7 +4203,7 @@ impl InlineCursor {
                 self.last_align,
                 self.direction_rtl,
                 self.strut_line_height,
-                self.strut_metrics,
+                self.strut_metrics.clone(),
             );
         }
     }
@@ -4153,7 +4256,7 @@ fn break_text_by_characters(
     for (index, ch_str) in split_chars(text).into_iter().enumerate() {
         let source = text_source::slice(text_source, text, text_byte..text_byte + ch_str.len());
         text_byte += ch_str.len();
-        let ch_width = measure_text_width(&ch_str, segment.metrics);
+        let ch_width = measure_text_width(&ch_str, &segment.metrics);
         if cursor.x > cursor.start_x
             && exceeds_available_inline_width(
                 cursor.x + ch_width - cursor.start_x,
@@ -4179,7 +4282,7 @@ fn break_text_by_characters(
                 width: ch_width,
                 height,
             },
-            metrics: segment.metrics,
+            metrics: segment.metrics.clone(),
             vertical_align: segment.vertical_align,
             source_end_token: source_start_token + index + 1,
             style: segment.style.clone(),
@@ -4219,13 +4322,13 @@ fn layout_hyphenated_text(
     if hyphen.is_empty() {
         return false;
     }
-    let hyphen_width = measure_text_width(&hyphen, segment.metrics);
+    let hyphen_width = measure_text_width(&hyphen, &segment.metrics);
     let mut byte_start = 0;
     let mut broke = false;
 
     while byte_start < text.len() {
         let remaining = &text[byte_start..];
-        let remaining_width = measure_text_width(remaining, segment.metrics);
+        let remaining_width = measure_text_width(remaining, &segment.metrics);
         let used = cursor.x - cursor.start_x;
         if !exceeds_available_inline_width(used + remaining_width, cursor.available_width) {
             if broke {
@@ -4247,7 +4350,7 @@ fn layout_hyphenated_text(
         let fitting = opportunities.into_iter().rev().find(|offset| {
             *offset < remaining.len()
                 && !exceeds_available_inline_width(
-                    used + measure_text_width(&remaining[..*offset], segment.metrics)
+                    used + measure_text_width(&remaining[..*offset], &segment.metrics)
                         + hyphen_width,
                     cursor.available_width,
                 )
@@ -4260,7 +4363,7 @@ fn layout_hyphenated_text(
                 segment,
                 prefix.to_string(),
                 text_source::slice(text_source, text, byte_start..byte_end),
-                measure_text_width(prefix, segment.metrics),
+                measure_text_width(prefix, &segment.metrics),
                 height,
                 token_end,
                 cursor,
@@ -4338,7 +4441,7 @@ fn push_hyphenated_fragment(
             width,
             height,
         },
-        metrics: segment.metrics,
+        metrics: segment.metrics.clone(),
         vertical_align: segment.vertical_align,
         source_end_token,
         style: segment.style.clone(),
@@ -4515,7 +4618,7 @@ fn layout_inline_fragment(
             width,
             height,
         },
-        metrics: segment.metrics,
+        metrics: segment.metrics.clone(),
         vertical_align: segment.vertical_align,
         source_end_token: source_token,
         style: segment.style.clone(),
@@ -4545,7 +4648,7 @@ fn layout_inline_newline(
             width: 0.0,
             height: segment.line_height,
         },
-        metrics: segment.metrics,
+        metrics: segment.metrics.clone(),
         vertical_align: segment.vertical_align,
         source_end_token: source_token,
         style: segment.style.clone(),
@@ -4583,7 +4686,7 @@ fn layout_inline_segments(
         available_width,
         wrap_width,
         strut_line_height,
-        strut_metrics,
+        strut_metrics.clone(),
         direction_rtl,
         first_line_indent,
         last_align,
@@ -4620,7 +4723,7 @@ fn layout_inline_segments(
                     {
                         *width = segment
                             .white_space_mode
-                            .tab_advance(cursor.x - cursor.start_x, segment.metrics);
+                            .tab_advance(cursor.x - cursor.start_x, &segment.metrics);
                     }
                     let input =
                         InlineFragmentInput::new(segment, piece, &mut text_byte, &mut source_token);
@@ -4711,7 +4814,7 @@ fn optimize_text_wrap_style(
             align,
             last_align,
             strut_line_height,
-            strut_metrics,
+            strut_metrics.clone(),
             direction_rtl,
             first_line_indent,
             line_constraints,
@@ -4775,7 +4878,7 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
     match &segment.content {
         InlineSegmentContent::Text(text) => split_text_segment(
             text,
-            segment.metrics,
+            &segment.metrics,
             segment.line_height,
             segment.word_break,
             segment.style.line_break,
@@ -4888,7 +4991,7 @@ fn split_segment(segment: &InlineSegment) -> Vec<InlinePiece> {
 
 fn split_text_segment(
     text: &str,
-    metrics: FontMetrics,
+    metrics: &FontMetrics,
     line_height: f32,
     wb: WordBreak,
     line_break: super::LineBreak,
@@ -5417,7 +5520,7 @@ fn justify_inter_character(
         };
         let measured = text
             .grapheme_indices(true)
-            .map(|(_, grapheme)| measure_text_width(grapheme, fragment.metrics))
+            .map(|(_, grapheme)| measure_text_width(grapheme, &fragment.metrics))
             .collect::<Vec<_>>();
         let measured_total = measured.iter().sum::<f32>();
         let scale = if measured_total > 0.0 {
@@ -5578,7 +5681,7 @@ fn bidi_controls(style: &FragmentStyle) -> (&'static str, &'static str) {
 
 // ── Text measurement ────────────────────────────────────────────────────────
 
-pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
+pub(super) fn measure_text_width(text: &str, metrics: &FontMetrics) -> f32 {
     let _measure_phase = super::profile::Scope::begin(super::profile::Phase::TextMeasure);
     LAYOUT_FONTS.with(|cell| {
         let mut fonts_ref = cell.borrow_mut();
@@ -5625,6 +5728,7 @@ pub(super) fn measure_text_width(text: &str, metrics: FontMetrics) -> f32 {
                 let base = measure_text_width_with_fallback(
                     text,
                     metrics.font_size,
+                    &metrics.shaping_options,
                     primary,
                     &web_candidates,
                     &context.system_fonts,
@@ -5656,6 +5760,7 @@ fn load_layout_fonts() -> Vec<Arc<Font>> {
 fn measure_text_width_with_fallback(
     text: &str,
     font_size: f32,
+    options: &crate::font::ShapingOptions,
     primary: Option<&Font>,
     web_fonts: &[WebFontCandidate<'_>],
     fonts: &[Arc<Font>],
@@ -5686,8 +5791,9 @@ fn measure_text_width_with_fallback(
             .map(FontFallbackCandidate::unrestricted),
     );
     if !run_fonts.is_empty()
-        && let Ok(runs) =
-            shape_text_with_fallback_candidates(&run_fonts, text, font_size, direction)
+        && let Ok(runs) = shape_text_with_fallback_candidates_and_options(
+            &run_fonts, text, font_size, direction, options,
+        )
     {
         return runs
             .iter()
@@ -5710,7 +5816,7 @@ fn measure_text_width_with_fallback(
         })
         .map(|candidate| candidate.font)
     {
-        if let Ok(glyphs) = font.shape_text(text, font_size, direction) {
+        if let Ok(glyphs) = font.shape_text_with_options(text, font_size, direction, options) {
             return glyphs.iter().map(|glyph| glyph.x_advance.abs()).sum();
         }
     }

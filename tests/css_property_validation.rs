@@ -101,7 +101,7 @@ fn property_support_agrees_with_css_supports_and_cascade() {
                 return element.style.getPropertyValue(name) === '10deg' &&
                     getComputedStyle(element).getPropertyValue(name) === '10deg';
             }
-            if (name === 'font-variation-settings' || name === 'counter-set' ||
+            if (name === 'font-feature-settings' || name === 'font-variation-settings' || name === 'counter-set' ||
                 name === 'hyphenate-character') {
                 return CSS.supports(name, value) &&
                     element.style.getPropertyValue(name) === value &&
@@ -144,7 +144,7 @@ fn cssom_rule_declarations_reject_unknown_properties_but_preserve_descriptors() 
         rule.setProperty('color', 'nonsense');
         const face = sheet.cssRules[1].style;
         return rule.getPropertyValue('unrecognized-property') === '' &&
-            rule.getPropertyValue('font-feature-settings') === '' &&
+            rule.getPropertyValue('font-feature-settings') === '"liga" 0' &&
             rule.getPropertyValue('color') === 'red' &&
             face.getPropertyValue('src') === 'url(probe.ttf)';
     })()"#).unwrap().as_boolean(), Some(true));

@@ -4,7 +4,7 @@
 //! Handles font file loading, character-to-glyph mapping, and rasterization.
 
 use ab_glyph::{Font as AbGlyphFont, FontVec, GlyphId, ScaleFont};
-use rustybuzz::{Direction, Face, UnicodeBuffer};
+use rustybuzz::{Direction, Face, Feature, UnicodeBuffer, Variation, ttf_parser::Tag};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -93,6 +93,57 @@ pub enum ShapingDirection {
     BottomToTop,
 }
 
+/// A validated four-byte OpenType feature tag and its unsigned value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OpenTypeFeature {
+    tag: [u8; 4],
+    value: u32,
+}
+
+impl OpenTypeFeature {
+    /// Creates a feature after the CSS boundary has validated its tag and value.
+    pub const fn new(tag: [u8; 4], value: u32) -> Self {
+        Self { tag, value }
+    }
+
+    fn rustybuzz(self) -> Feature {
+        Feature::new(Tag::from_bytes(&self.tag), self.value, ..)
+    }
+}
+
+/// A validated four-byte OpenType variation axis and its coordinate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OpenTypeVariation {
+    tag: [u8; 4],
+    value_bits: u32,
+}
+
+impl OpenTypeVariation {
+    /// Creates an axis setting after the CSS boundary has validated its tag.
+    pub fn new(tag: [u8; 4], value: f32) -> Self {
+        Self {
+            tag,
+            value_bits: value.to_bits(),
+        }
+    }
+
+    fn rustybuzz(self) -> Variation {
+        Variation {
+            tag: Tag::from_bytes(&self.tag),
+            value: f32::from_bits(self.value_bits),
+        }
+    }
+}
+
+/// Typed settings that affect OpenType shaping and therefore its cache key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct ShapingOptions {
+    /// Features in CSS application order; later duplicate tags take precedence.
+    pub features: Vec<OpenTypeFeature>,
+    /// Variation axes in CSS application order; later duplicate tags take precedence.
+    pub variations: Vec<OpenTypeVariation>,
+}
+
 /// Number of CSS letter-spacing boundaries in a source text run.
 ///
 /// Shaping can fold multiple grapheme clusters into one glyph, so callers
@@ -167,6 +218,23 @@ pub(crate) fn shape_text_with_fallback_candidates(
     size_px: f32,
     direction: ShapingDirection,
 ) -> Result<Vec<ShapedRun>, FontError> {
+    shape_text_with_fallback_candidates_and_options(
+        fonts,
+        text,
+        size_px,
+        direction,
+        &ShapingOptions::default(),
+    )
+}
+
+/// Shapes fallback runs using typed CSS OpenType settings.
+pub(crate) fn shape_text_with_fallback_candidates_and_options(
+    fonts: &[FontFallbackCandidate<'_>],
+    text: &str,
+    size_px: f32,
+    direction: ShapingDirection,
+    options: &ShapingOptions,
+) -> Result<Vec<ShapedRun>, FontError> {
     if text.is_empty() {
         return Ok(Vec::new());
     }
@@ -178,7 +246,9 @@ pub(crate) fn shape_text_with_fallback_candidates(
 
     // Most runs are fully covered by the primary font. Shape them once and
     // avoid probing and shaping every grapheme cluster independently.
-    let primary_glyphs = fonts[0].font.shape_text(text, size_px, direction);
+    let primary_glyphs = fonts[0]
+        .font
+        .shape_text_with_options(text, size_px, direction, options);
     if let Ok(primary_glyphs) = primary_glyphs
         && fonts[0].supports_range(text)
         && primary_glyphs.iter().all(|glyph| glyph.glyph_id != 0)
@@ -197,12 +267,17 @@ pub(crate) fn shape_text_with_fallback_candidates(
             .iter()
             .position(|font| {
                 font.supports_range(cluster)
-                    && cluster_supported_by_font(font.font, cluster, size_px, direction)
+                    && cluster_supported_by_font_with_options(
+                        font.font, cluster, size_px, direction, options,
+                    )
             })
             .or_else(|| {
                 fonts.iter().position(|font| {
                     font.supports_range(cluster)
-                        && font.font.shape_text(cluster, size_px, direction).is_ok()
+                        && font
+                            .font
+                            .shape_text_with_options(cluster, size_px, direction, options)
+                            .is_ok()
                 })
             })
             .ok_or_else(|| FontError::Other("No usable font available for shaping".to_string()))?;
@@ -217,10 +292,12 @@ pub(crate) fn shape_text_with_fallback_candidates(
 
     let mut runs = Vec::with_capacity(selections.len());
     for (font_index, range) in selections {
-        let mut glyphs =
-            fonts[font_index]
-                .font
-                .shape_text(&text[range.clone()], size_px, direction)?;
+        let mut glyphs = fonts[font_index].font.shape_text_with_options(
+            &text[range.clone()],
+            size_px,
+            direction,
+            options,
+        )?;
         for glyph in &mut glyphs {
             glyph.cluster += range.start;
         }
@@ -245,13 +322,29 @@ fn cluster_supported_by_font(
     size_px: f32,
     direction: ShapingDirection,
 ) -> bool {
+    cluster_supported_by_font_with_options(
+        font,
+        cluster,
+        size_px,
+        direction,
+        &ShapingOptions::default(),
+    )
+}
+
+fn cluster_supported_by_font_with_options(
+    font: &Font,
+    cluster: &str,
+    size_px: f32,
+    direction: ShapingDirection,
+    options: &ShapingOptions,
+) -> bool {
     if !cluster
         .chars()
         .all(|ch| ch.is_whitespace() || is_zero_advance_character(ch) || font.has_glyph(ch))
     {
         return false;
     }
-    font.shape_text(cluster, size_px, direction)
+    font.shape_text_with_options(cluster, size_px, direction, options)
         .is_ok_and(|glyphs| glyphs.iter().all(|glyph| glyph.glyph_id != 0))
 }
 
@@ -269,6 +362,7 @@ struct ShapeKey {
     text: String,
     size_bits: u32,
     direction: ShapingDirection,
+    options: ShapingOptions,
 }
 
 #[derive(Default)]
@@ -399,10 +493,22 @@ impl Font {
         size_px: f32,
         direction: ShapingDirection,
     ) -> Result<Vec<ShapedGlyph>, FontError> {
+        self.shape_text_with_options(text, size_px, direction, &ShapingOptions::default())
+    }
+
+    /// Shapes a complete script run with explicit OpenType features and axes.
+    pub fn shape_text_with_options(
+        &self,
+        text: &str,
+        size_px: f32,
+        direction: ShapingDirection,
+        options: &ShapingOptions,
+    ) -> Result<Vec<ShapedGlyph>, FontError> {
         let key = (text.len() <= 1024).then(|| ShapeKey {
             text: text.to_owned(),
             size_bits: size_px.to_bits(),
             direction,
+            options: options.clone(),
         });
         if let Some(cached) = key.as_ref().and_then(|key| {
             self.shape_cache
@@ -414,8 +520,21 @@ impl Font {
         }) {
             return Ok(cached);
         }
-        let face = Face::from_slice(self.inner.font_data(), self.face_index)
+        let mut face = Face::from_slice(self.inner.font_data(), self.face_index)
             .ok_or_else(|| FontError::InvalidFont("Failed to build shaping face".to_string()))?;
+        let variations = options
+            .variations
+            .iter()
+            .copied()
+            .map(OpenTypeVariation::rustybuzz)
+            .collect::<Vec<_>>();
+        face.set_variations(&variations);
+        let features = options
+            .features
+            .iter()
+            .copied()
+            .map(OpenTypeFeature::rustybuzz)
+            .collect::<Vec<_>>();
         let mut buffer = UnicodeBuffer::new();
         buffer.push_str(text);
         buffer.set_direction(match direction {
@@ -425,7 +544,7 @@ impl Font {
             ShapingDirection::BottomToTop => Direction::BottomToTop,
         });
         buffer.guess_segment_properties();
-        let glyphs = rustybuzz::shape(&face, &[], buffer);
+        let glyphs = rustybuzz::shape(&face, &features, buffer);
         let scale = size_px / face.units_per_em().max(1) as f32;
         let shaped: Vec<_> = glyphs
             .glyph_infos()

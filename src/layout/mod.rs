@@ -798,6 +798,8 @@ pub struct FragmentStyle {
     pub font_family: Option<String>,
     /// Tree scope captured by the `font-family` declaration.
     pub(crate) font_scope_root: Option<usize>,
+    /// Typed OpenType feature and variation settings shared with shaping.
+    pub(crate) shaping_options: Arc<crate::font::ShapingOptions>,
     /// Resolved writing mode for the inline fragment.  Keeping this small
     /// inherited value on the fragment lets paint use the same flow direction
     /// as layout even when a nested inline overrides its ancestor.
@@ -862,6 +864,7 @@ impl FragmentStyle {
             },
             font_family,
             font_scope_root: style.font_family_scope_root(),
+            shaping_options: Arc::clone(style.shaping_options()),
             writing_mode: normalize_lower(PropertyId::WritingMode),
             direction: normalize_lower(PropertyId::Direction),
             unicode_bidi: normalize_lower(PropertyId::UnicodeBidi),
@@ -1029,7 +1032,7 @@ pub struct TextOverflowPaint {
 }
 
 /// Approximate font metrics used by inline layout.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FontMetrics {
     pub font_size: f32,
     pub ascent: f32,
@@ -1046,6 +1049,7 @@ pub struct FontMetrics {
     pub(crate) font_style: FontStyle,
     pub(crate) font_style_angle: i32,
     pub(crate) font_stretch: crate::font::FontStretch,
+    pub(crate) shaping_options: Arc<crate::font::ShapingOptions>,
 }
 
 impl FontMetrics {
@@ -1065,6 +1069,7 @@ impl FontMetrics {
             font_style: FontStyle::default(),
             font_style_angle: 0,
             font_stretch: crate::font::FontStretch::default(),
+            shaping_options: Arc::new(crate::font::ShapingOptions::default()),
         }
     }
 }
@@ -5301,11 +5306,11 @@ fn minimum_content_width_inner_uncached(
                 let white_space_mode = white_space(&parent_style);
                 let normalized = normalize_text(&text, white_space_mode);
                 if !white_space_mode.allows_wrapping() {
-                    return measure_text_width(&normalized, metrics);
+                    return measure_text_width(&normalized, &metrics);
                 }
                 let mut minimum = 0.0f32;
                 for_each_word_preserving_spaces_cjk(&normalized, |word| {
-                    minimum = minimum.max(measure_text_width(word, metrics));
+                    minimum = minimum.max(measure_text_width(word, &metrics));
                 });
                 minimum
             })
@@ -5390,10 +5395,8 @@ fn intrinsic_width_inner_uncached(
                     .parent_node()
                     .map(|parent| resolver.computed_style(&parent))
                     .unwrap_or_default();
-                measure_text_width(
-                    &normalize_text(&text, white_space(&parent_style)),
-                    font_metrics(&parent_style),
-                )
+                let metrics = font_metrics(&parent_style);
+                measure_text_width(&normalize_text(&text, white_space(&parent_style)), &metrics)
             })
             .unwrap_or(0.0),
         NodeType::Element => {
@@ -5477,7 +5480,7 @@ fn intrinsic_width_inner_uncached(
                     ))
                     .map(|segment| match segment.content {
                         InlineSegmentContent::Text(text) => {
-                            measure_text_width(&text, segment.metrics)
+                            measure_text_width(&text, &segment.metrics)
                         }
                         InlineSegmentContent::InlineEdge(style, start) => {
                             let padding = edge_sizes(&style, "padding");

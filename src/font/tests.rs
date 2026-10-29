@@ -967,6 +967,25 @@ fn shaping_cache_reuses_exact_runs_without_mixing_size_or_direction() {
     font.shape_text("AB", 16.0, ShapingDirection::RightToLeft)
         .unwrap();
     assert_eq!(font.shape_cache.lock().unwrap().entries.len(), 3);
+
+    let feature_options = ShapingOptions {
+        features: vec![OpenTypeFeature::new(*b"liga", 0)],
+        variations: Vec::new(),
+    };
+    font.shape_text_with_options("AB", 16.0, ShapingDirection::LeftToRight, &feature_options)
+        .unwrap();
+    let variation_options = ShapingOptions {
+        features: Vec::new(),
+        variations: vec![OpenTypeVariation::new(*b"wght", 700.0)],
+    };
+    font.shape_text_with_options(
+        "AB",
+        16.0,
+        ShapingDirection::LeftToRight,
+        &variation_options,
+    )
+    .unwrap();
+    assert_eq!(font.shape_cache.lock().unwrap().entries.len(), 5);
 }
 
 #[test]
@@ -978,6 +997,7 @@ fn shaping_cache_evicts_old_runs_at_its_entry_limit() {
                 text: index.to_string(),
                 size_bits: 16.0_f32.to_bits(),
                 direction: ShapingDirection::LeftToRight,
+                options: ShapingOptions::default(),
             },
             Vec::new(),
         );

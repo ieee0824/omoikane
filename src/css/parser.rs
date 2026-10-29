@@ -1647,6 +1647,8 @@ impl Parser {
                     | "grid-auto-flow"
                     | "grid-auto-rows"
                     | "grid-auto-columns"
+                    | "font-feature-settings"
+                    | "font-variation-settings"
                     | "translate"
                     | "rotate"
                     | "scale"

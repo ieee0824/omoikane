@@ -4,7 +4,7 @@ use super::*;
 use crate::dom::{Node, NodeHandle};
 use crate::font::{
     FontFallbackCandidate, ShapingDirection, WebFontRegistry, grapheme_spacing_cluster_starts,
-    shape_text_with_fallback_candidates,
+    shape_text_with_fallback_candidates_and_options,
 };
 use crate::layout::{FragmentStyle, InlineFragment, InlineTextSource};
 use unicode_bidi::{BidiInfo, Level};
@@ -619,7 +619,7 @@ fn shaped_clusters(
     };
     let mut result = Vec::new();
     for (range, rtl) in runs {
-        let shaped = shape_text_with_fallback_candidates(
+        let shaped = shape_text_with_fallback_candidates_and_options(
             fonts,
             &text[range.clone()],
             size,
@@ -628,6 +628,7 @@ fn shaped_clusters(
             } else {
                 ShapingDirection::LeftToRight
             },
+            &style.shaping_options,
         )
         .ok()?;
         for run in shaped {
