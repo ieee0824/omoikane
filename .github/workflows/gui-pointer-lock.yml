@@ -85,13 +85,6 @@ jobs:
         run: |
           /usr/bin/python3 -m unittest discover -s scripts/tests -p test_gui_image_trace.py
           /usr/bin/python3 scripts/test-gui-image-loading.py --binary target/debug/omoikane --artifacts .artifacts/gui-image-loading
-      - name: TEMPORARY busy close diagnostics (#1532)
-        continue-on-error: true
-        env:
-          OMOIKANE_TRACE_STARTUP: "1"
-        run: |
-          sudo apt-get install -y --no-install-recommends gdb
-          /usr/bin/python3 scripts/diag-busy-close.py target/debug/omoikane .artifacts/diag-busy 25
       - name: Verify native window responds during busy page scripts
         run: |
           /usr/bin/python3 -m unittest discover -s scripts/tests -p test_gui_page_worker.py
@@ -113,6 +106,5 @@ jobs:
             .artifacts/gui-page-worker/
             .artifacts/gui-url-entry/
             .artifacts/gui-url-entry-negative/
-            .artifacts/diag-busy/
           include-hidden-files: true
           if-no-files-found: error
