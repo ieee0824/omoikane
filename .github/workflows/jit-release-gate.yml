@@ -35,6 +35,7 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p test_select_gate_artifacts.py
           python3 -m unittest discover -s scripts/tests -p test_jit_gate5.py
           python3 -m unittest discover -s scripts/tests -p test_diagnose_gate5_wpt.py
+          python3 -m unittest discover -s scripts/tests -p test_refresh_cached_path_deps.py
       - name: Resolve one dependency set for all six jobs
         run: python3 scripts/jit-gate5.py prepare .artifacts/jit-gate5/inputs
       - uses: actions/upload-artifact@v4
@@ -94,6 +95,15 @@ jobs:
           cache-workspace-crates: true
       # rust-cache sees only the root workspace and drops the nested Boa path
       # dependencies from target/debug. Restore them after rust-cache cleanup.
+      # The key covers every file these crates read (sources and ICU data under
+      # their directories) and the build configuration, because an exact hit
+      # is then marked fresh below instead of being rebuilt (#1537).
+      - name: Compute Boa suite cache key
+        if: matrix.kind == 'suite'
+        id: boa-key
+        run: echo "key=$KEY" >> "$GITHUB_OUTPUT"
+        env:
+          KEY: boa-gate5-v2-${{ matrix.target }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.github/workflows/jit-release-gate.yml', 'scripts/jit-gate5.py', 'engine/boa/Cargo.toml', 'engine/boa/Cargo.lock', 'engine/boa/core/**', 'engine/boa/utils/**', 'engine/regress/**') }}
       - name: Restore Boa suite artifacts
         if: matrix.kind == 'suite'
         id: boa-cache
@@ -102,10 +112,24 @@ jobs:
         with:
           path: |
             target/debug/.fingerprint/boa_*
+            target/debug/.fingerprint/regress-*
+            target/debug/.fingerprint/small_btree-*
+            target/debug/.fingerprint/tag_ptr-*
             target/debug/build/boa_*
             target/debug/deps/boa_*
             target/debug/deps/libboa_*
-          key: boa-gate5-v1-${{ matrix.target }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.github/workflows/jit-release-gate.yml', 'engine/boa/Cargo.lock', 'engine/boa/**/Cargo.toml', 'engine/boa/**/*.rs') }}
+            target/debug/deps/regress-*
+            target/debug/deps/libregress-*
+            target/debug/deps/small_btree-*
+            target/debug/deps/libsmall_btree-*
+            target/debug/deps/tag_ptr-*
+            target/debug/deps/libtag_ptr-*
+          key: ${{ steps.boa-key.outputs.key }}
+      # A fresh checkout makes every source newer than the restored outputs,
+      # and Cargo then rebuilds path dependencies by mtime alone.
+      - name: Mark restored Boa suite artifacts fresh
+        if: matrix.kind == 'suite' && steps.boa-cache.outputs.cache-hit == 'true'
+        run: python3 scripts/refresh_cached_path_deps.py target/debug
       - uses: actions/cache@v4
         if: matrix.kind == 'suite'
         with:
@@ -136,10 +160,19 @@ jobs:
         with:
           path: |
             target/debug/.fingerprint/boa_*
+            target/debug/.fingerprint/regress-*
+            target/debug/.fingerprint/small_btree-*
+            target/debug/.fingerprint/tag_ptr-*
             target/debug/build/boa_*
             target/debug/deps/boa_*
             target/debug/deps/libboa_*
-          key: boa-gate5-v1-${{ matrix.target }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.github/workflows/jit-release-gate.yml', 'engine/boa/Cargo.lock', 'engine/boa/**/Cargo.toml', 'engine/boa/**/*.rs') }}
+            target/debug/deps/regress-*
+            target/debug/deps/libregress-*
+            target/debug/deps/small_btree-*
+            target/debug/deps/libsmall_btree-*
+            target/debug/deps/tag_ptr-*
+            target/debug/deps/libtag_ptr-*
+          key: ${{ steps.boa-key.outputs.key }}
       - name: Upload the verified distribution archive
         if: matrix.kind == 'package'
         uses: actions/upload-artifact@v4
