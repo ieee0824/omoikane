@@ -3630,6 +3630,85 @@ fn hanging_punctuation_moves_first_and_last_graphemes_outside_the_line() {
 }
 
 #[test]
+fn initial_letter_sinks_and_excludes_following_lines() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let paragraph = NodeHandle::element("p");
+    paragraph.append_child(NodeHandle::text(
+        "A one two three four five six seven eight nine ten eleven twelve",
+    ));
+    let vertical = NodeHandle::element("p");
+    vertical.set_attribute("id", "vertical-initial");
+    vertical.append_child(NodeHandle::text(
+        "A one two three four five six seven eight nine ten eleven twelve",
+    ));
+    document.append_child(body.clone());
+    body.append_child(paragraph.clone());
+    body.append_child(vertical.clone());
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "p { margin:0; width:80px; font:10px monospace; line-height:10px } \
+             p::first-letter { initial-letter:3 2 } \
+             #vertical-initial { writing-mode:vertical-lr; height:80px }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 80.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let paragraph = find_layout_box(&layout, &paragraph).unwrap();
+    assert!(paragraph.lines.len() >= 3);
+    let initial = paragraph.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .expect("first-letter pseudo must create an owned initial fragment");
+    assert!((initial.rect.height - 30.0).abs() < 0.01);
+    assert!((initial.rect.y - paragraph.dimensions.content.y + 10.0).abs() < 0.01);
+    let initial_end = initial.rect.x + initial.rect.width;
+    for line in &paragraph.lines[..2] {
+        assert!(
+            line.fragments
+                .iter()
+                .filter(|fragment| fragment.text() != Some("A"))
+                .all(|fragment| fragment.rect.x >= initial_end - 0.01)
+        );
+    }
+    assert!(paragraph.lines[2].rect.x < initial_end - 0.01);
+
+    let vertical = find_layout_box(&layout, &vertical).unwrap();
+    assert!(vertical.lines.len() >= 3);
+    let initial = vertical.lines[0]
+        .fragments
+        .iter()
+        .find(|fragment| fragment.text() == Some("A"))
+        .unwrap();
+    assert!((initial.rect.width - 30.0).abs() < 0.01);
+    assert!((initial.rect.x - vertical.dimensions.content.x + 10.0).abs() < 0.01);
+    let initial_end = initial.rect.y + initial.rect.height;
+    for line in &vertical.lines[..2] {
+        assert!(
+            line.fragments
+                .iter()
+                .filter(|fragment| fragment.text() != Some("A"))
+                .all(|fragment| fragment.rect.y >= initial_end - 0.01)
+        );
+    }
+    assert!(vertical.lines[2].rect.y < initial_end - 0.01);
+}
+
+#[test]
 fn horizontal_rtl_inline_geometry_uses_logical_start_and_end() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

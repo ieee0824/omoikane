@@ -235,6 +235,166 @@ fn resolved_text_align_last(
     }
 }
 
+struct InitialLetterLayout {
+    node: NodeHandle,
+    text_source: Vec<InlineTextSource>,
+    text: String,
+    metrics: FontMetrics,
+    style: FragmentStyle,
+    width: f32,
+    height: f32,
+    sink: usize,
+    size: f32,
+    source_units: usize,
+}
+
+fn initial_letter_style(
+    owner: &NodeHandle,
+    resolver: &mut StyleResolver,
+    container_style: &ComputedStyle,
+) -> Option<(ComputedStyle, f32, usize)> {
+    let pseudo = resolver.computed_pseudo_style(owner, PseudoElement::FirstLetter);
+    let style = pseudo.as_ref().unwrap_or(container_style);
+    let Some(ComputedValue::Keyword(value)) = style.get("initial-letter") else {
+        return None;
+    };
+    if value.eq_ignore_ascii_case("normal") {
+        return None;
+    }
+    let mut components = value.split_ascii_whitespace();
+    let size = components.next()?.parse::<f32>().ok()?;
+    let sink = components.next()?.parse::<usize>().ok()?;
+    (size >= 1.0 && sink >= 1).then(|| (style.clone(), size, sink))
+}
+
+fn take_initial_letter(
+    segments: &mut Vec<InlineSegment>,
+    style: &ComputedStyle,
+    size: f32,
+    sink: usize,
+    strut_line_height: f32,
+) -> Option<InitialLetterLayout> {
+    let index = segments.iter().position(
+        |segment| matches!(&segment.content, InlineSegmentContent::Text(text) if !text.trim().is_empty()),
+    )?;
+    let segment = &mut segments[index];
+    let node = segment.node.clone();
+    let InlineSegmentContent::Text(text) = &segment.content else {
+        return None;
+    };
+    let mut start = None;
+    let mut end = 0;
+    let mut found_letter = false;
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        let Some(ch) = grapheme.chars().next() else {
+            continue;
+        };
+        if start.is_none() && ch.is_whitespace() {
+            end = offset + grapheme.len();
+            continue;
+        }
+        start.get_or_insert(offset);
+        end = offset + grapheme.len();
+        if !is_opening_hanging_punctuation(ch) {
+            found_letter = true;
+            break;
+        }
+    }
+    let start = start?;
+    if !found_letter {
+        return None;
+    }
+    let initial_text = text[start..end].to_string();
+    let source_units = text[..end].graphemes(true).count();
+    let initial_source = text_source::slice(&segment.text_source, text, start..end);
+    let remainder_source = text_source::slice(&segment.text_source, text, end..text.len());
+    let remainder = text[end..].to_string();
+    segment.text_source = remainder_source;
+    segment.content = InlineSegmentContent::Text(remainder);
+    if matches!(&segment.content, InlineSegmentContent::Text(text) if text.is_empty()) {
+        segments.remove(index);
+    }
+
+    let mut metrics = font_metrics(style);
+    let target_height = (size * strut_line_height).max(strut_line_height);
+    let scale = target_height / (metrics.ascent + metrics.descent).max(0.01);
+    metrics.font_size *= scale;
+    metrics.ascent *= scale;
+    metrics.descent *= scale;
+    metrics.line_gap *= scale;
+    metrics.average_advance *= scale;
+    metrics.letter_spacing *= scale;
+    metrics.word_spacing *= scale;
+    let width = measure_text_width(&initial_text, metrics).max(0.0);
+    Some(InitialLetterLayout {
+        node,
+        text_source: initial_source,
+        text: initial_text,
+        metrics,
+        style: FragmentStyle::from_computed(style),
+        width,
+        height: target_height,
+        sink,
+        size,
+        source_units,
+    })
+}
+
+fn attach_initial_letter(
+    lines: &mut Vec<LineBox>,
+    initial: InitialLetterLayout,
+    start_x: f32,
+    start_y: f32,
+    available_width: f32,
+    strut_line_height: f32,
+    direction_rtl: bool,
+) {
+    if lines.is_empty() {
+        lines.push(LineBox {
+            rect: Rect {
+                x: start_x,
+                y: start_y,
+                width: 0.0,
+                height: strut_line_height,
+            },
+            baseline: start_y + strut_line_height * 0.8,
+            fragments: Vec::new(),
+            text_overflow: None,
+        });
+    }
+    let line = &mut lines[0];
+    let x = if direction_rtl {
+        start_x + available_width - initial.width
+    } else {
+        start_x
+    };
+    let y = start_y + (initial.sink as f32 - initial.size) * strut_line_height;
+    let mut style = initial.style;
+    style.resolved_bidi_level = Some(if direction_rtl { 1 } else { 0 });
+    line.fragments.insert(
+        0,
+        InlineFragment {
+            node: initial.node,
+            text_source: initial.text_source,
+            content: InlineFragmentContent::Text(initial.text),
+            rect: Rect {
+                x,
+                y,
+                width: initial.width,
+                height: initial.height,
+            },
+            metrics: initial.metrics,
+            vertical_align: VerticalAlign::Baseline,
+            source_end_token: initial.source_units,
+            style,
+        },
+    );
+    let left = line.rect.x.min(x);
+    let right = (line.rect.x + line.rect.width).max(x + initial.width);
+    line.rect.x = left;
+    line.rect.width = right - left;
+}
+
 // ── Inline layout entry point ───────────────────────────────────────────────
 
 pub(super) struct InlineLayoutResult {
@@ -401,6 +561,20 @@ fn layout_inline_nodes_impl(
     let container_style = container_owner
         .as_ref()
         .map(|container| resolver.computed_style(container));
+    let mut initial_letter = (source_start_token == 0)
+        .then(|| {
+            container_owner
+                .as_ref()
+                .zip(container_style.as_ref())
+                .and_then(|(owner, style)| initial_letter_style(owner, resolver, style))
+                .and_then(|(style, size, sink)| {
+                    take_initial_letter(&mut segments, &style, size, sink, strut_line_height)
+                })
+        })
+        .flatten();
+    let initial_source_units = initial_letter
+        .as_ref()
+        .map_or(0, |initial| initial.source_units);
     let strut_metrics = container_style.as_ref().map(font_metrics);
     let mut first_line_indent = container_style
         .as_ref()
@@ -414,12 +588,28 @@ fn layout_inline_nodes_impl(
             resolved_text_align_last(owner, resolver, style, align)
         });
 
-    let (line_start_x, line_available_width) = line_constraints
+    let combined_constraints = |line_y: f32, line_height: f32| {
+        let (mut x, mut width) = line_constraints
+            .map(|constraints| constraints(line_y, line_height))
+            .unwrap_or((start_x, available_width));
+        if let Some(initial) = initial_letter.as_ref()
+            && line_y < start_y + initial.sink as f32 * strut_line_height - 0.01
+        {
+            width = (width - initial.width).max(0.0);
+            if !direction_rtl {
+                x += initial.width;
+            }
+        }
+        (x, width)
+    };
+    let effective_constraints = (line_constraints.is_some() || initial_letter.is_some())
+        .then_some(&combined_constraints as &dyn Fn(f32, f32) -> (f32, f32));
+    let (line_start_x, line_available_width) = effective_constraints
         .map(|constraints| constraints(start_y, strut_line_height))
         .unwrap_or((start_x, available_width));
     let mut lines = layout_inline_segments(
         &segments,
-        source_start_token,
+        source_start_token + initial_source_units,
         line_start_x,
         start_y,
         line_available_width,
@@ -429,13 +619,13 @@ fn layout_inline_nodes_impl(
         strut_metrics,
         direction_rtl,
         first_line_indent,
-        line_constraints,
+        effective_constraints,
         None,
     );
     // Balancing against a changing float exclusion would need a two-dimensional
     // search. Keep those lines on the ordinary greedy path; the common no-float
     // constraint is constant and can safely be optimized below.
-    let uniform_constraints = line_constraints.is_none_or(|constraints| {
+    let uniform_constraints = effective_constraints.is_none_or(|constraints| {
         lines.iter().all(|line| {
             let (constrained_x, constrained_width) = constraints(line.rect.y, strut_line_height);
             (constrained_x - line_start_x).abs() < 0.01
@@ -445,7 +635,7 @@ fn layout_inline_nodes_impl(
     if uniform_constraints {
         lines = optimize_text_wrap_style(
             &segments,
-            source_start_token,
+            source_start_token + initial_source_units,
             line_start_x,
             start_y,
             line_available_width,
@@ -455,11 +645,22 @@ fn layout_inline_nodes_impl(
             strut_metrics,
             direction_rtl,
             first_line_indent,
-            line_constraints,
+            effective_constraints,
             lines,
         );
     }
     boxes::finish(&mut lines, nodes, resolver, strut_line_height);
+    if let Some(initial) = initial_letter.take() {
+        attach_initial_letter(
+            &mut lines,
+            initial,
+            start_x,
+            start_y,
+            available_width,
+            strut_line_height,
+            direction_rtl,
+        );
+    }
     if let Some(style) = container_style.as_ref() {
         apply_hanging_punctuation(&mut lines, style, direction_rtl, available_width);
         apply_text_box_trim(&mut lines, style);
@@ -557,9 +758,6 @@ pub(super) fn layout_vertical_inline_nodes(
     };
     let local_constraints =
         column_constraints.map(|_| &local_constraints as &dyn Fn(f32, f32) -> (f32, f32));
-    let (line_start, line_height) = local_constraints
-        .map(|constraints| constraints(0.0, strut_line_height))
-        .unwrap_or((0.0, available_height.max(0.0)));
     let layout_align = match (align, direction_rtl) {
         (TextAlign::Start, true) => TextAlign::Right,
         (TextAlign::End, true) => TextAlign::Left,
@@ -571,6 +769,35 @@ pub(super) fn layout_vertical_inline_nodes(
     let container_style = container_owner
         .as_ref()
         .map(|owner| resolver.computed_style(owner));
+    let mut initial_letter = container_owner
+        .as_ref()
+        .zip(container_style.as_ref())
+        .and_then(|(owner, style)| initial_letter_style(owner, resolver, style))
+        .and_then(|(style, size, sink)| {
+            take_initial_letter(&mut segments, &style, size, sink, strut_line_height)
+        });
+    let initial_source_units = initial_letter
+        .as_ref()
+        .map_or(0, |initial| initial.source_units);
+    let combined_constraints = |line_y: f32, line_width: f32| {
+        let (mut start, mut width) = local_constraints
+            .map(|constraints| constraints(line_y, line_width))
+            .unwrap_or((0.0, available_height.max(0.0)));
+        if let Some(initial) = initial_letter.as_ref()
+            && line_y < initial.sink as f32 * strut_line_height - 0.01
+        {
+            width = (width - initial.width).max(0.0);
+            if !direction_rtl {
+                start += initial.width;
+            }
+        }
+        (start, width)
+    };
+    let effective_constraints = (local_constraints.is_some() || initial_letter.is_some())
+        .then_some(&combined_constraints as &dyn Fn(f32, f32) -> (f32, f32));
+    let (line_start, line_height) = effective_constraints
+        .map(|constraints| constraints(0.0, strut_line_height))
+        .unwrap_or((0.0, available_height.max(0.0)));
     let first_line_indent = container_style
         .as_ref()
         .map(|style| text_indent(style, available_height))
@@ -583,7 +810,7 @@ pub(super) fn layout_vertical_inline_nodes(
         });
     let mut horizontal_lines = layout_inline_segments(
         &segments,
-        0,
+        initial_source_units,
         line_start,
         0.0,
         line_height,
@@ -593,11 +820,22 @@ pub(super) fn layout_vertical_inline_nodes(
         None,
         false,
         first_line_indent,
-        local_constraints,
+        effective_constraints,
         None,
     );
 
     boxes::finish(&mut horizontal_lines, nodes, resolver, strut_line_height);
+    if let Some(initial) = initial_letter.take() {
+        attach_initial_letter(
+            &mut horizontal_lines,
+            initial,
+            0.0,
+            0.0,
+            available_height,
+            strut_line_height,
+            direction_rtl,
+        );
+    }
     if let Some(style) = container_style.as_ref() {
         apply_hanging_punctuation(
             &mut horizontal_lines,
