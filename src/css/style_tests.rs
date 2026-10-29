@@ -6761,6 +6761,88 @@ fn font_variant_alternates_resolve_named_feature_values() {
 }
 
 #[test]
+fn font_palette_values_resolve_for_the_selected_family_and_reach_fragments() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@font-palette-values --brand {
+                font-family: Demo;
+                base-palette: 0;
+                override-colors: 9 #090807, 4 rgba(1, 2, 3, 0.5), 9 #060504;
+             }
+             @media print {
+                @font-palette-values --brand {
+                    font-family: Demo;
+                    base-palette: 7;
+                }
+             }
+             @font-palette-values --invalid {
+                font-family: Demo;
+                override-colors: 9 red, nope blue, 4 green;
+             }
+             @font-palette-values --outside {
+                font-family: Demo;
+                override-colors: 70000 red, 4 green;
+             }
+             div { font-family: Demo, sans-serif; font-palette: --brand; }",
+        )
+        .unwrap(),
+    );
+
+    let style = resolver.computed_style(&element);
+    assert_eq!(
+        style.font_palette().as_ref(),
+        &crate::font::FontPalette {
+            base: crate::font::FontPaletteBase::Index(0),
+            overrides: vec![
+                (9, [9, 8, 7, 255]),
+                (4, [1, 2, 3, 128]),
+                (9, [6, 5, 4, 255])
+            ],
+        }
+    );
+    let fragment = crate::layout::FragmentStyle::from_computed(&style);
+    assert!(std::sync::Arc::ptr_eq(
+        style.font_palette(),
+        &fragment.font_palette
+    ));
+
+    let unresolved = NodeHandle::element("span");
+    let unresolved_style = resolver.computed_style(&unresolved);
+    assert_eq!(
+        unresolved_style.font_palette().as_ref(),
+        &crate::font::FontPalette::default()
+    );
+
+    for (name, expected) in [
+        ("--invalid", Vec::new()),
+        ("--outside", vec![(4, [0, 128, 0, 255])]),
+    ] {
+        let element = NodeHandle::element("p");
+        element.set_attribute("style", &format!("font-family: Demo; font-palette: {name}"));
+        assert_eq!(
+            resolver.computed_style(&element).font_palette().overrides,
+            expected
+        );
+    }
+
+    for (value, expected) in [
+        ("light", crate::font::FontPaletteBase::Light),
+        ("dark", crate::font::FontPaletteBase::Dark),
+        ("normal", crate::font::FontPaletteBase::Index(0)),
+    ] {
+        let element = NodeHandle::element("p");
+        element.set_attribute("style", &format!("font-palette: {value}"));
+        assert_eq!(
+            resolver.computed_style(&element).font_palette().base,
+            expected
+        );
+    }
+}
+
+#[test]
 fn inherits_font_stretch_from_parent() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");

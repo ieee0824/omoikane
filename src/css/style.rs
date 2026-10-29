@@ -460,6 +460,8 @@ pub struct ComputedStyle {
     font_family_scope_root: Option<usize>,
     /// OpenType settings validated and converted once at the style boundary.
     shaping_options: Arc<crate::font::ShapingOptions>,
+    /// CPAL palette selection resolved once at the style boundary.
+    font_palette: Arc<crate::font::FontPalette>,
     /// Decorations propagated through the box tree, separate from inheritance.
     text_decorations: Arc<[PropagatedTextDecoration]>,
 }
@@ -473,6 +475,10 @@ pub(crate) struct ViewportPaintStyle {
 impl ComputedStyle {
     pub(crate) fn shaping_options(&self) -> &Arc<crate::font::ShapingOptions> {
         &self.shaping_options
+    }
+
+    pub(crate) fn font_palette(&self) -> &Arc<crate::font::FontPalette> {
+        &self.font_palette
     }
 
     /// Animation-created stacking context, independent of the sampled values.
@@ -4347,6 +4353,8 @@ impl StyleResolver {
         );
         let font_feature_values = self.font_feature_values(font_family_scope_root);
         let shaping_options = Arc::new(computed_shaping_options(&properties, &font_feature_values));
+        let font_palette =
+            Arc::new(self.computed_font_palette(&properties, font_family_scope_root));
         ComputedStyle {
             properties,
             component_values,
@@ -4355,6 +4363,7 @@ impl StyleResolver {
             animation_name_scope_root,
             font_family_scope_root,
             shaping_options,
+            font_palette,
             text_decorations,
         }
     }
@@ -4381,6 +4390,58 @@ impl StyleResolver {
             }
         }
         values
+    }
+
+    fn computed_font_palette(
+        &self,
+        properties: &PropertyMap,
+        scope_root: Option<usize>,
+    ) -> crate::font::FontPalette {
+        let Some(ComputedValue::Keyword(name)) = properties.get(&PropertyId::FontPalette) else {
+            return crate::font::FontPalette::default();
+        };
+        if name.eq_ignore_ascii_case("light") {
+            return crate::font::FontPalette {
+                base: crate::font::FontPaletteBase::Light,
+                overrides: Vec::new(),
+            };
+        }
+        if name.eq_ignore_ascii_case("dark") {
+            return crate::font::FontPalette {
+                base: crate::font::FontPaletteBase::Dark,
+                overrides: Vec::new(),
+            };
+        }
+        if !name.starts_with("--") {
+            return crate::font::FontPalette::default();
+        }
+        let families = match properties.get(&PropertyId::FontFamily) {
+            Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
+                FontFamilyKey::new(value).member_keys()
+            }
+            _ => Vec::new(),
+        };
+        let mut definitions = FontPaletteValues::default();
+        for origin in [Origin::UserAgent, Origin::User, Origin::Author] {
+            for (input, scope) in self.stylesheets.iter().zip(&self.stylesheet_scopes) {
+                if input.origin != origin
+                    || scope
+                        .root
+                        .as_ref()
+                        .is_some_and(|root| Some(root.identity()) != scope_root)
+                {
+                    continue;
+                }
+                collect_font_palette_values(
+                    &input.stylesheet.rules,
+                    &mut definitions,
+                    self.viewport_width,
+                    self.viewport_height,
+                    &self.media_environment,
+                );
+            }
+        }
+        definitions.resolve(name, &families).unwrap_or_default()
     }
 
     /// Applies a deterministic animation snapshot. Paused animations are
@@ -11090,6 +11151,120 @@ fn serialized_opentype_settings(value: &ComputedValue) -> Vec<([u8; 4], &str)> {
         settings.push((tag, setting_value));
     }
     settings
+}
+
+#[derive(Default)]
+struct FontPaletteValues {
+    named: HashMap<(String, FontFamilyKey), crate::font::FontPalette>,
+}
+
+impl FontPaletteValues {
+    fn resolve(&self, name: &str, families: &[FontFamilyKey]) -> Option<crate::font::FontPalette> {
+        families.iter().find_map(|family| {
+            self.named
+                .get(&(name.to_ascii_lowercase(), *family))
+                .cloned()
+        })
+    }
+}
+
+fn collect_font_palette_values(
+    rules: &[Rule],
+    values: &mut FontPaletteValues,
+    viewport_width: f32,
+    viewport_height: f32,
+    media_environment: &MediaEnvironment,
+) {
+    for rule in rules {
+        let Rule::At(rule) = rule else {
+            continue;
+        };
+        if rule.name.eq_ignore_ascii_case("font-palette-values") {
+            let family = rule
+                .declarations
+                .iter()
+                .rev()
+                .find(|declaration| declaration.name.eq_ignore_ascii_case("font-family"))
+                .map(|declaration| FontFamilyKey::new(&render_value(&declaration.value)));
+            let Some(family) = family else {
+                continue;
+            };
+            let base = rule
+                .declarations
+                .iter()
+                .rev()
+                .find(|declaration| declaration.name.eq_ignore_ascii_case("base-palette"))
+                .and_then(|declaration| match &declaration.value {
+                    Value::Number(number)
+                        if number.is_finite()
+                            && *number >= 0.0
+                            && number.fract() == 0.0
+                            && *number <= f32::from(u16::MAX) =>
+                    {
+                        Some(crate::font::FontPaletteBase::Index(*number as u16))
+                    }
+                    Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("light") => {
+                        Some(crate::font::FontPaletteBase::Light)
+                    }
+                    Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("dark") => {
+                        Some(crate::font::FontPaletteBase::Dark)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let overrides = rule
+                .declarations
+                .iter()
+                .rev()
+                .find(|declaration| declaration.name.eq_ignore_ascii_case("override-colors"))
+                .and_then(|declaration| font_palette_overrides(&declaration.value))
+                .unwrap_or_default();
+            for family in family.member_keys() {
+                values.named.insert(
+                    (rule.prelude.to_ascii_lowercase(), family),
+                    crate::font::FontPalette {
+                        base,
+                        overrides: overrides.clone(),
+                    },
+                );
+            }
+        } else if let Some(block) = &rule.block
+            && !rule.name.eq_ignore_ascii_case("container")
+            && layer_group_rule_is_active(rule, viewport_width, viewport_height, media_environment)
+        {
+            collect_font_palette_values(
+                block,
+                values,
+                viewport_width,
+                viewport_height,
+                media_environment,
+            );
+        }
+    }
+}
+
+fn font_palette_overrides(value: &Value) -> Option<Vec<(u16, [u8; 4])>> {
+    let entries = match value {
+        Value::CommaList(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let mut overrides = Vec::new();
+    for entry in entries {
+        let Value::List(values) = entry else {
+            return None;
+        };
+        let [Value::Number(index), color] = values.as_slice() else {
+            return None;
+        };
+        if !index.is_finite() || *index < 0.0 || index.fract() != 0.0 {
+            return None;
+        }
+        let color = crate::paint::color::parse_color(&render_value(color))?;
+        if *index <= f32::from(u16::MAX) {
+            overrides.push((*index as u16, [color.r, color.g, color.b, color.a]));
+        }
+    }
+    Some(overrides)
 }
 
 #[derive(Default)]

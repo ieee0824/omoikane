@@ -89,6 +89,32 @@ pub struct ColorGlyphLayer {
     pub color: [u8; 4],
 }
 
+/// A base CPAL palette requested by CSS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontPaletteBase {
+    /// A zero-based palette index. Out-of-range indices resolve to palette 0.
+    Index(u16),
+    /// The first palette marked for use on a light background.
+    Light,
+    /// The first palette marked for use on a dark background.
+    Dark,
+}
+
+impl Default for FontPaletteBase {
+    fn default() -> Self {
+        Self::Index(0)
+    }
+}
+
+/// A resolved CSS palette request and explicit entry overrides.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct FontPalette {
+    /// Base palette selection, resolved against the selected font at paint time.
+    pub base: FontPaletteBase,
+    /// Palette entry replacements in source order; later duplicates win.
+    pub overrides: Vec<(u16, [u8; 4])>,
+}
+
 /// One positioned glyph produced by OpenType shaping.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShapedGlyph {
@@ -604,24 +630,34 @@ impl Font {
         &self,
         glyph_id: u16,
         size_px: f32,
-        palette: u16,
+        palette: &FontPalette,
         foreground: [u8; 4],
     ) -> Option<Vec<ColorGlyphLayer>> {
         let face = TtfFace::parse(self.inner.font_data(), self.face_index).ok()?;
         let glyph_id = TtfGlyphId(glyph_id);
-        if !face.is_color_glyph(glyph_id) || palette >= face.color_palettes()?.get() {
+        if !face.is_color_glyph(glyph_id) {
             return None;
         }
+        let cpal_data = face.raw_face().table(Tag::from_bytes(b"CPAL"))?;
+        let cpal = rustybuzz::ttf_parser::cpal::Table::parse(cpal_data)?;
+        let palette_index =
+            resolve_cpal_palette_index(cpal_data, cpal.palettes().get(), palette.base);
+        let entry_count = u16::from_be_bytes([*cpal_data.get(2)?, *cpal_data.get(3)?]);
+        let palette_entries = (0..entry_count)
+            .filter_map(|entry| cpal.get(palette_index, entry).map(|color| (entry, color)))
+            .collect::<Vec<_>>();
         let mut painter = SolidColorGlyphPainter {
             font: self,
             size_px,
             current: None,
             layers: Vec::new(),
             unsupported: false,
+            palette_entries,
+            overrides: &palette.overrides,
         };
         face.paint_color_glyph(
             glyph_id,
-            palette,
+            palette_index,
             RgbaColor::new(foreground[0], foreground[1], foreground[2], foreground[3]),
             &mut painter,
         )?;
@@ -783,12 +819,58 @@ impl Font {
     }
 }
 
+fn resolve_cpal_palette_index(data: &[u8], palette_count: u16, base: FontPaletteBase) -> u16 {
+    match base {
+        FontPaletteBase::Index(index) => (index < palette_count).then_some(index).unwrap_or(0),
+        FontPaletteBase::Light => first_cpal_palette_with_type(data, palette_count, 0x0001),
+        FontPaletteBase::Dark => first_cpal_palette_with_type(data, palette_count, 0x0002),
+    }
+}
+
+fn first_cpal_palette_with_type(data: &[u8], palette_count: u16, flag: u32) -> u16 {
+    let Some(version) = data
+        .get(0..2)
+        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+    else {
+        return 0;
+    };
+    if version != 1 {
+        return 0;
+    }
+    let offset_position = 12usize.saturating_add(usize::from(palette_count).saturating_mul(2));
+    let Some(offset_bytes) = data.get(offset_position..offset_position.saturating_add(4)) else {
+        return 0;
+    };
+    let Ok(types_offset) = usize::try_from(u32::from_be_bytes([
+        offset_bytes[0],
+        offset_bytes[1],
+        offset_bytes[2],
+        offset_bytes[3],
+    ])) else {
+        return 0;
+    };
+    if types_offset == 0 {
+        return 0;
+    }
+    (0..palette_count)
+        .find(|index| {
+            let start = types_offset.saturating_add(usize::from(*index).saturating_mul(4));
+            data.get(start..start.saturating_add(4))
+                .is_some_and(|bytes| {
+                    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) & flag != 0
+                })
+        })
+        .unwrap_or(0)
+}
+
 struct SolidColorGlyphPainter<'a> {
     font: &'a Font,
     size_px: f32,
     current: Option<TtfGlyphId>,
     layers: Vec<ColorGlyphLayer>,
     unsupported: bool,
+    palette_entries: Vec<(u16, RgbaColor)>,
+    overrides: &'a [(u16, [u8; 4])],
 }
 
 impl<'font> Painter<'font> for SolidColorGlyphPainter<'_> {
@@ -804,6 +886,22 @@ impl<'font> Painter<'font> for SolidColorGlyphPainter<'_> {
         let Some(glyph_id) = self.current else {
             self.unsupported = true;
             return;
+        };
+        let matching_entries = self
+            .palette_entries
+            .iter()
+            .filter(|(_, candidate)| *candidate == color)
+            .map(|(entry, _)| *entry)
+            .collect::<Vec<_>>();
+        let color = if let [entry] = matching_entries.as_slice() {
+            self.overrides
+                .iter()
+                .rev()
+                .find(|(candidate, _)| candidate == entry)
+                .map(|(_, color)| RgbaColor::new(color[0], color[1], color[2], color[3]))
+                .unwrap_or(color)
+        } else {
+            color
         };
         match self.font.rasterize_glyph(glyph_id.0, self.size_px) {
             Ok(raster) => self.layers.push(ColorGlyphLayer {

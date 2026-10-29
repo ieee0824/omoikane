@@ -2233,7 +2233,7 @@ pub(crate) fn paint_shaped_horizontal_text_with_candidates(
             let color_layers = font.rasterize_color_glyph(
                 shaped.glyph_id,
                 font_size,
-                0,
+                &style.font_palette,
                 [color.r, color.g, color.b, color.a],
             );
             if let Some(layers) = color_layers {

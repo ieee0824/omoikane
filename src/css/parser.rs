@@ -1666,6 +1666,7 @@ impl Parser {
                     | "grid-auto-columns"
                     | "font-feature-settings"
                     | "font-variation-settings"
+                    | "override-colors"
                     | "translate"
                     | "rotate"
                     | "scale"

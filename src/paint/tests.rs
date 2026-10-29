@@ -10308,7 +10308,7 @@ fn opentype_shaped_paint_uses_the_layout_advance_model() {
 #[test]
 fn shaped_paint_uses_solid_colr_layers_before_foreground_fallback() {
     use super::text::paint_shaped_horizontal_text;
-    use crate::font::Font;
+    use crate::font::{Font, FontPalette, FontPaletteBase};
 
     let font = Font::load_from_bytes(
         include_bytes!("../../tests/fixtures/color-font/twemoji-smiley-glyf-colr1.ttf").to_vec(),
@@ -10351,6 +10351,47 @@ fn shaped_paint_uses_solid_colr_layers_before_foreground_fallback() {
         "missing antialiased white COLR layer"
     );
     assert!(!colors.contains(&(1, 2, 3)), "used foreground fallback");
+
+    let mut overridden_canvas = Canvas::new(64, 64);
+    let overridden_style = FragmentStyle {
+        font_palette: Arc::new(FontPalette {
+            base: FontPaletteBase::Index(0),
+            overrides: vec![(9, [9, 8, 7, 255])],
+        }),
+        ..FragmentStyle::default()
+    };
+    paint_shaped_horizontal_text(
+        &mut overridden_canvas,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+        },
+        "😁",
+        48.0,
+        50.0,
+        &[&font],
+        &overridden_style,
+        Color::rgb(1, 2, 3),
+        None,
+        0.0,
+    )
+    .unwrap();
+    let overridden_colors = overridden_canvas
+        .pixels()
+        .chunks_exact(4)
+        .filter(|pixel| pixel[3] > 0)
+        .map(|pixel| (pixel[0], pixel[1], pixel[2]))
+        .collect::<HashSet<_>>();
+    assert!(
+        overridden_colors.contains(&(9, 8, 7)),
+        "missing overridden CPAL entry"
+    );
+    assert!(
+        !overridden_colors.contains(&(255, 204, 77)),
+        "paint ignored the resolved palette override"
+    );
 }
 
 #[test]

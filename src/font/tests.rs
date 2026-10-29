@@ -1541,7 +1541,7 @@ fn solid_colr_layers_rasterize_and_unsupported_transforms_fall_back() {
     .unwrap();
     let solid = font.inner.glyph_id('😁').0;
     let layers = font
-        .rasterize_color_glyph(solid, 32.0, 0, [1, 2, 3, 255])
+        .rasterize_color_glyph(solid, 32.0, &FontPalette::default(), [1, 2, 3, 255])
         .expect("solid COLR glyph");
     assert_eq!(layers.len(), 4);
     assert_eq!(layers[0].color, [255, 204, 77, 255]);
@@ -1550,13 +1550,65 @@ fn solid_colr_layers_rasterize_and_unsupported_transforms_fall_back() {
     assert_eq!(layers[3].color, [102, 69, 0, 255]);
     assert!(layers.iter().all(|layer| !layer.raster.bitmap.is_empty()));
     assert!(
-        font.rasterize_color_glyph(solid, 32.0, 1, [1, 2, 3, 255])
-            .is_none()
+        font.rasterize_color_glyph(
+            solid,
+            32.0,
+            &FontPalette {
+                base: FontPaletteBase::Index(1),
+                overrides: Vec::new(),
+            },
+            [1, 2, 3, 255],
+        )
+        .is_some()
     );
 
     let transformed = font.inner.glyph_id('☺').0;
     assert!(
-        font.rasterize_color_glyph(transformed, 32.0, 0, [1, 2, 3, 255])
+        font.rasterize_color_glyph(transformed, 32.0, &FontPalette::default(), [1, 2, 3, 255],)
             .is_none()
+    );
+
+    let overridden = font
+        .rasterize_color_glyph(
+            solid,
+            32.0,
+            &FontPalette {
+                base: FontPaletteBase::Index(0),
+                overrides: vec![(9, [9, 8, 7, 255])],
+            },
+            [1, 2, 3, 255],
+        )
+        .unwrap();
+    assert_eq!(overridden[0].color, [9, 8, 7, 255]);
+}
+
+#[test]
+fn cpal_base_palette_resolves_metadata_and_specified_fallbacks() {
+    let palette_count = 3u16;
+    let types_offset = 30u32;
+    let mut cpal = vec![0u8; 42];
+    cpal[0..2].copy_from_slice(&1u16.to_be_bytes());
+    cpal[4..6].copy_from_slice(&palette_count.to_be_bytes());
+    cpal[18..22].copy_from_slice(&types_offset.to_be_bytes());
+    cpal[30..34].copy_from_slice(&0u32.to_be_bytes());
+    cpal[34..38].copy_from_slice(&0x0002u32.to_be_bytes());
+    cpal[38..42].copy_from_slice(&0x0001u32.to_be_bytes());
+
+    assert_eq!(
+        resolve_cpal_palette_index(&cpal, palette_count, FontPaletteBase::Light),
+        2
+    );
+    assert_eq!(
+        resolve_cpal_palette_index(&cpal, palette_count, FontPaletteBase::Dark),
+        1
+    );
+    assert_eq!(
+        resolve_cpal_palette_index(&cpal, palette_count, FontPaletteBase::Index(9)),
+        0
+    );
+    cpal[18..22].copy_from_slice(&0u32.to_be_bytes());
+    assert_eq!(
+        resolve_cpal_palette_index(&cpal, palette_count, FontPaletteBase::Light),
+        0
     );
 }
