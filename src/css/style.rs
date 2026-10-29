@@ -4345,7 +4345,8 @@ impl StyleResolver {
             animation_name_scope_root,
             &properties,
         );
-        let shaping_options = Arc::new(computed_shaping_options(&properties));
+        let font_feature_values = self.font_feature_values(font_family_scope_root);
+        let shaping_options = Arc::new(computed_shaping_options(&properties, &font_feature_values));
         ComputedStyle {
             properties,
             component_values,
@@ -4356,6 +4357,30 @@ impl StyleResolver {
             shaping_options,
             text_decorations,
         }
+    }
+
+    fn font_feature_values(&self, scope_root: Option<usize>) -> FontFeatureValues {
+        let mut values = FontFeatureValues::default();
+        for origin in [Origin::UserAgent, Origin::User, Origin::Author] {
+            for (input, scope) in self.stylesheets.iter().zip(&self.stylesheet_scopes) {
+                if input.origin != origin
+                    || scope
+                        .root
+                        .as_ref()
+                        .is_some_and(|root| Some(root.identity()) != scope_root)
+                {
+                    continue;
+                }
+                collect_font_feature_values(
+                    &input.stylesheet.rules,
+                    &mut values,
+                    self.viewport_width,
+                    self.viewport_height,
+                    &self.media_environment,
+                );
+            }
+        }
+        values
     }
 
     /// Applies a deterministic animation snapshot. Paused animations are
@@ -5810,11 +5835,13 @@ fn validate_font_numeric_declaration(name: &str, value: &Value) -> Option<Declar
 }
 
 fn validate_font_variant_declaration(name: &str, value: &Value) -> Option<DeclarationValidation> {
+    if name == "font-variant-alternates" {
+        return Some(validate_font_variant_alternates(value));
+    }
     let allowed: &[&str] = match name {
         "font-kerning" => &["auto", "normal", "none"],
         "font-optical-sizing" => &["auto", "none"],
         "font-synthesis" => &["none", "weight", "style", "small-caps", "position"],
-        "font-variant-alternates" => &["normal", "historical-forms"],
         "font-variant-caps" => &[
             "normal",
             "small-caps",
@@ -5938,6 +5965,53 @@ fn validate_font_variant_declaration(name: &str, value: &Value) -> Option<Declar
     } else {
         DeclarationValidation::Invalid
     })
+}
+
+fn validate_font_variant_alternates(value: &Value) -> DeclarationValidation {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if values.len() == 1
+        && matches!(&values[0], Value::Keyword(keyword)
+            if keyword.eq_ignore_ascii_case("normal") || is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+    {
+        return DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)));
+    }
+    let mut categories = HashSet::<String>::new();
+    let valid = !values.is_empty()
+        && values.iter().all(|value| match value {
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("historical-forms") => {
+                categories.insert("historical-forms".to_string())
+            }
+            Value::Function { name, arguments } => {
+                let category = name.to_ascii_lowercase();
+                let valid_name = matches!(
+                    category.as_str(),
+                    "stylistic"
+                        | "styleset"
+                        | "character-variant"
+                        | "swash"
+                        | "ornaments"
+                        | "annotation"
+                );
+                valid_name
+                    && categories.insert(category)
+                    && !arguments.is_empty()
+                    && arguments.iter().all(|argument| {
+                        matches!(argument, Value::Keyword(identifier)
+                            if !identifier.is_empty()
+                                && !is_css_wide_keyword(&identifier.to_ascii_lowercase()))
+                    })
+                    && (name.eq_ignore_ascii_case("styleset") || arguments.len() == 1)
+            }
+            _ => false,
+        });
+    if valid {
+        DeclarationValidation::Valid(ComputedValue::Keyword(render_value(value)))
+    } else {
+        DeclarationValidation::Invalid
+    }
 }
 
 fn validate_font_size_adjust(value: &Value) -> DeclarationValidation {
@@ -11018,7 +11092,111 @@ fn serialized_opentype_settings(value: &ComputedValue) -> Vec<([u8; 4], &str)> {
     settings
 }
 
-fn computed_shaping_options(properties: &PropertyMap) -> crate::font::ShapingOptions {
+#[derive(Default)]
+struct FontFeatureValues {
+    named: HashMap<(FontFamilyKey, String, String), Vec<u32>>,
+}
+
+impl FontFeatureValues {
+    fn resolve(
+        &self,
+        families: Option<FontFamilyKey>,
+        category: &str,
+        name: &str,
+    ) -> Option<&[u32]> {
+        families?.member_keys().into_iter().find_map(|family| {
+            self.named
+                .get(&(family, category.to_string(), name.to_string()))
+                .map(Vec::as_slice)
+        })
+    }
+}
+
+fn collect_font_feature_values(
+    rules: &[Rule],
+    values: &mut FontFeatureValues,
+    viewport_width: f32,
+    viewport_height: f32,
+    media_environment: &MediaEnvironment,
+) {
+    for rule in rules {
+        let Rule::At(rule) = rule else {
+            continue;
+        };
+        if rule.name.eq_ignore_ascii_case("font-feature-values") {
+            let families = FontFamilyKey::new(&rule.prelude).member_keys();
+            for nested in rule.block.iter().flatten() {
+                let Rule::At(nested) = nested else {
+                    continue;
+                };
+                let category = nested.name.to_ascii_lowercase();
+                if !matches!(
+                    category.as_str(),
+                    "stylistic"
+                        | "styleset"
+                        | "character-variant"
+                        | "swash"
+                        | "ornaments"
+                        | "annotation"
+                ) {
+                    continue;
+                }
+                for declaration in &nested.declarations {
+                    let Some(numbers) = font_feature_value_numbers(&declaration.value) else {
+                        continue;
+                    };
+                    for family in &families {
+                        values.named.insert(
+                            (*family, category.clone(), declaration.name.to_lowercase()),
+                            numbers.clone(),
+                        );
+                    }
+                }
+            }
+        } else if let Some(block) = &rule.block
+            && !rule.name.eq_ignore_ascii_case("container")
+            && layer_group_rule_is_active(rule, viewport_width, viewport_height, media_environment)
+        {
+            collect_font_feature_values(
+                block,
+                values,
+                viewport_width,
+                viewport_height,
+                media_environment,
+            );
+        }
+    }
+}
+
+fn font_feature_value_numbers(value: &Value) -> Option<Vec<u32>> {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    (!values.is_empty())
+        .then(|| {
+            values
+                .iter()
+                .map(|value| match value {
+                    Value::Number(number)
+                        if number.is_finite()
+                            && *number >= 0.0
+                            && number.fract() == 0.0
+                            && *number <= u32::MAX as f32 =>
+                    {
+                        Some(*number as u32)
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .flatten()
+}
+
+fn computed_shaping_options(
+    properties: &PropertyMap,
+    font_feature_values: &FontFeatureValues,
+) -> crate::font::ShapingOptions {
     let words = |id| match properties.get(&id) {
         Some(ComputedValue::Keyword(value)) => value.split_ascii_whitespace().collect::<Vec<_>>(),
         _ => Vec::new(),
@@ -11107,9 +11285,7 @@ fn computed_shaping_options(properties: &PropertyMap) -> crate::font::ShapingOpt
         ["super"] => feature(b"sups", 1),
         _ => {}
     }
-    if words(PropertyId::FontVariantAlternates).contains(&"historical-forms") {
-        feature(b"hist", 1);
-    }
+    append_alternate_features(properties, font_feature_values, &mut feature);
     match words(PropertyId::FontKerning).as_slice() {
         ["normal"] => feature(b"kern", 1),
         ["none"] => feature(b"kern", 0),
@@ -11151,6 +11327,90 @@ fn computed_shaping_options(properties: &PropertyMap) -> crate::font::ShapingOpt
     crate::font::ShapingOptions {
         features,
         variations,
+    }
+}
+
+fn append_alternate_features(
+    properties: &PropertyMap,
+    values: &FontFeatureValues,
+    feature: &mut impl FnMut(&[u8; 4], u32),
+) {
+    let Some(ComputedValue::Keyword(text)) = properties.get(&PropertyId::FontVariantAlternates)
+    else {
+        return;
+    };
+    if text.eq_ignore_ascii_case("normal") {
+        return;
+    }
+    let families = match properties.get(&PropertyId::FontFamily) {
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
+            Some(FontFamilyKey::new(value))
+        }
+        _ => None,
+    };
+    let declarations = super::parse_style_attribute(&format!("--alternates: {text}"));
+    let Some(value) = declarations.first().map(|declaration| &declaration.value) else {
+        return;
+    };
+    let components = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    for component in components {
+        match component {
+            Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("historical-forms") => {
+                feature(b"hist", 1);
+            }
+            Value::Function { name, arguments } => {
+                for argument in arguments {
+                    let Value::Keyword(identifier) = argument else {
+                        continue;
+                    };
+                    let category = name.to_ascii_lowercase();
+                    let Some(numbers) =
+                        values.resolve(families, &category, &identifier.to_ascii_lowercase())
+                    else {
+                        continue;
+                    };
+                    match category.as_str() {
+                        "stylistic" => {
+                            if let [value] = numbers {
+                                feature(b"salt", *value);
+                            }
+                        }
+                        "styleset" => {
+                            for number in numbers
+                                .iter()
+                                .copied()
+                                .filter(|value| (1..=20).contains(value))
+                            {
+                                let tag = format!("ss{number:02}").into_bytes();
+                                feature(
+                                    tag.as_slice().try_into().expect("four-byte styleset tag"),
+                                    1,
+                                );
+                            }
+                        }
+                        "character-variant" => {
+                            if let Some(number @ 1..=99) = numbers.first().copied() {
+                                let tag = format!("cv{number:02}").into_bytes();
+                                feature(
+                                    tag.as_slice()
+                                        .try_into()
+                                        .expect("four-byte character variant tag"),
+                                    numbers.get(1).copied().unwrap_or(1),
+                                );
+                            }
+                        }
+                        "swash" if numbers.len() == 1 => feature(b"swsh", numbers[0]),
+                        "ornaments" if numbers.len() == 1 => feature(b"ornm", numbers[0]),
+                        "annotation" if numbers.len() == 1 => feature(b"nalt", numbers[0]),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 

@@ -1897,6 +1897,11 @@ impl FontFamilyKey {
         let intern = intern.lock().unwrap_or_else(PoisonError::into_inner);
         Arc::clone(&intern.families[self.0 as usize])
     }
+
+    /// Returns stable keys for each family in this ordered fallback list.
+    pub(crate) fn member_keys(self) -> Vec<Self> {
+        self.families().iter().map(FontFamilyMember::key).collect()
+    }
 }
 
 impl FontVariantKey {

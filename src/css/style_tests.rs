@@ -6707,6 +6707,60 @@ fn font_variant_properties_expand_before_explicit_opentype_settings() {
 }
 
 #[test]
+fn font_variant_alternates_resolve_named_feature_values() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@font-feature-values Demo {
+                @stylistic { flowing: 3; }
+                @styleset { display: 1 4; }
+                @character-variant { decorated: 12 7; }
+                @swash { fancy: 2; }
+                @ornaments { stars: 5; }
+                @annotation { boxed: 6; }
+             }
+             @media print {
+                @font-feature-values Demo { @stylistic { flowing: 9; } }
+             }
+             div { font-family: Demo; font-variant-alternates:
+                historical-forms stylistic(flowing) styleset(display)
+                character-variant(decorated) swash(fancy)
+                ornaments(stars) annotation(boxed); }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&element);
+    assert_eq!(
+        style.shaping_options().features,
+        vec![
+            crate::font::OpenTypeFeature::new(*b"hist", 1),
+            crate::font::OpenTypeFeature::new(*b"salt", 3),
+            crate::font::OpenTypeFeature::new(*b"ss01", 1),
+            crate::font::OpenTypeFeature::new(*b"ss04", 1),
+            crate::font::OpenTypeFeature::new(*b"cv12", 7),
+            crate::font::OpenTypeFeature::new(*b"swsh", 2),
+            crate::font::OpenTypeFeature::new(*b"ornm", 5),
+            crate::font::OpenTypeFeature::new(*b"nalt", 6),
+        ]
+    );
+
+    for value in [
+        "stylistic()",
+        "stylistic(one, two)",
+        "stylistic(one) stylistic(two)",
+        "normal swash(one)",
+        "unknown(one)",
+    ] {
+        assert!(
+            !supports_declaration("font-variant-alternates", value),
+            "{value}"
+        );
+    }
+}
+
+#[test]
 fn inherits_font_stretch_from_parent() {
     let document = NodeHandle::document();
     let html = NodeHandle::element("html");
