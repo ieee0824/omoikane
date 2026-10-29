@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import select
+import shlex
 import subprocess as S
 import time
 
@@ -109,8 +110,11 @@ class GuiSession:
     def _desktop(self):
         read_fd, write_fd = os.pipe()
         try:
+            # -noreset keeps the server from regenerating whenever its last
+            # client disconnects; a client connecting during that window,
+            # such as Openbox right after xdpyinfo, is otherwise refused.
             process = self.start(['Xvfb', '-displayfd', write_fd, '-screen', '0',
-                                  '1600x1000x24', '-nolisten', 'tcp'],
+                                  '1600x1000x24', '-nolisten', 'tcp', '-noreset'],
                                  'xvfb', pass_fds=(write_fd,))
         except BaseException:
             os.close(read_fd)
@@ -137,7 +141,13 @@ class GuiSession:
         self.inputs['display'] = self.env['DISPLAY']
         self._write_inputs()
         self.command('xdpyinfo')
-        self.start(['openbox'], 'openbox')
+        # Openbox publishes _NET_SUPPORTING_WM_CHECK before it finishes
+        # starting. A window mapped in between, which is likely while a cold
+        # fontconfig cache is built, is never managed and stays unmapped.
+        # Openbox runs the --startup command only once it manages windows.
+        started = self.out / 'openbox-started'
+        self.start(['openbox', '--startup', 'touch ' + shlex.quote(str(started))], 'openbox')
+        self.wait_for('window manager started', started.is_file, bool)
         self.wait_for('window manager ready',
                       lambda: self.command('xprop', '-root', '_NET_SUPPORTING_WM_CHECK'),
                       lambda value: 'window id #' in value)
