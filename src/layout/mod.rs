@@ -800,6 +800,8 @@ pub struct FragmentStyle {
     pub(crate) font_scope_root: Option<usize>,
     /// Typed OpenType feature and variation settings shared with shaping.
     pub(crate) shaping_options: Arc<crate::font::ShapingOptions>,
+    /// Synthetic face permissions consumed after font matching at paint time.
+    pub(crate) font_synthesis: crate::font::FontSynthesis,
     /// Resolved CPAL palette selection and entry overrides shared with paint.
     pub(crate) font_palette: Arc<crate::font::FontPalette>,
     /// Resolved writing mode for the inline fragment.  Keeping this small
@@ -867,6 +869,7 @@ impl FragmentStyle {
             font_family,
             font_scope_root: style.font_family_scope_root(),
             shaping_options: Arc::clone(style.shaping_options()),
+            font_synthesis: style.font_synthesis(),
             font_palette: Arc::clone(style.font_palette()),
             writing_mode: normalize_lower(PropertyId::WritingMode),
             direction: normalize_lower(PropertyId::Direction),

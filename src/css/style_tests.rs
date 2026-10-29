@@ -6540,6 +6540,10 @@ fn font_feature_and_variation_settings_compute_inherit_and_become_typed() {
     assert_eq!(
         style.shaping_options().variations,
         vec![
+            crate::font::OpenTypeVariation::new(*b"wght", 400.0),
+            crate::font::OpenTypeVariation::new(*b"wdth", 100.0),
+            crate::font::OpenTypeVariation::new(*b"ital", 0.0),
+            crate::font::OpenTypeVariation::new(*b"slnt", 0.0),
             crate::font::OpenTypeVariation::new(*b"opsz", 16.0),
             crate::font::OpenTypeVariation::new(*b"wght", 650.0),
             crate::font::OpenTypeVariation::new(*b"wdth", 90.0),
@@ -6634,6 +6638,10 @@ fn font_synthesis_uses_fonts_four_initial_and_canonical_order() {
             "weight style small-caps position".to_string()
         ))
     );
+    assert_eq!(
+        initial.font_synthesis(),
+        crate::font::FontSynthesis::default()
+    );
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet("div { font-synthesis: position weight small-caps style }").unwrap(),
@@ -6644,6 +6652,22 @@ fn font_synthesis_uses_fonts_four_initial_and_canonical_order() {
         Some(&ComputedValue::Keyword(
             "weight style small-caps position".to_string()
         ))
+    );
+    assert_eq!(
+        reordered.font_synthesis(),
+        crate::font::FontSynthesis::default()
+    );
+
+    let none = NodeHandle::element("span");
+    none.set_attribute("style", "font-synthesis: none");
+    assert_eq!(
+        resolver.computed_style(&none).font_synthesis(),
+        crate::font::FontSynthesis {
+            weight: false,
+            style: false,
+            small_caps: false,
+            position: false,
+        }
     );
 }
 
@@ -6687,6 +6711,10 @@ fn font_variant_properties_expand_before_explicit_opentype_settings() {
     assert_eq!(
         style.shaping_options().variations,
         vec![
+            crate::font::OpenTypeVariation::new(*b"wght", 400.0),
+            crate::font::OpenTypeVariation::new(*b"wdth", 100.0),
+            crate::font::OpenTypeVariation::new(*b"ital", 0.0),
+            crate::font::OpenTypeVariation::new(*b"slnt", 0.0),
             crate::font::OpenTypeVariation::new(*b"opsz", 20.0),
             crate::font::OpenTypeVariation::new(*b"wght", 700.0),
         ]
@@ -6704,6 +6732,26 @@ fn font_variant_properties_expand_before_explicit_opentype_settings() {
             "{property}: {value}"
         );
     }
+}
+
+#[test]
+fn basic_font_properties_drive_standard_variation_axes() {
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "font-weight: 575; font-stretch: 125%; font-style: oblique 12deg; \
+         font-optical-sizing: none; font-variation-settings: normal",
+    );
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(
+        style.shaping_options().variations,
+        vec![
+            crate::font::OpenTypeVariation::new(*b"wght", 575.0),
+            crate::font::OpenTypeVariation::new(*b"wdth", 125.0),
+            crate::font::OpenTypeVariation::new(*b"ital", 0.0),
+            crate::font::OpenTypeVariation::new(*b"slnt", -12.0),
+        ]
+    );
 }
 
 #[test]

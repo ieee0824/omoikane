@@ -10395,6 +10395,77 @@ fn shaped_paint_uses_solid_colr_layers_before_foreground_fallback() {
 }
 
 #[test]
+fn shaped_paint_synthesizes_only_permitted_missing_weight_and_style() {
+    use super::text::paint_shaped_horizontal_text;
+    use crate::font::{Font, FontSynthesis};
+
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/anonymized-font-face-ranges/regular.ttf").to_vec(),
+    )
+    .unwrap();
+    let paint = |style: FragmentStyle| {
+        let mut canvas = Canvas::new(96, 64);
+        paint_shaped_horizontal_text(
+            &mut canvas,
+            Rect {
+                x: 4.0,
+                y: 0.0,
+                width: 88.0,
+                height: 64.0,
+            },
+            "Test",
+            40.0,
+            48.0,
+            &[&font],
+            &style,
+            Color::rgb(0, 0, 0),
+            None,
+            0.0,
+        )
+        .unwrap();
+        canvas.pixels().to_vec()
+    };
+    let regular = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("normal".into()),
+        ..FragmentStyle::default()
+    });
+    let bold = paint(FragmentStyle {
+        font_weight: Some("700".into()),
+        font_style: Some("normal".into()),
+        ..FragmentStyle::default()
+    });
+    assert_ne!(bold, regular, "missing face was not emboldened");
+    let bold_disabled = paint(FragmentStyle {
+        font_weight: Some("700".into()),
+        font_style: Some("normal".into()),
+        font_synthesis: FontSynthesis {
+            weight: false,
+            ..FontSynthesis::default()
+        },
+        ..FragmentStyle::default()
+    });
+    assert_eq!(bold_disabled, regular, "font-synthesis disabled weight");
+
+    let oblique = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("italic".into()),
+        ..FragmentStyle::default()
+    });
+    assert_ne!(oblique, regular, "missing face was not obliqued");
+    let oblique_disabled = paint(FragmentStyle {
+        font_weight: Some("400".into()),
+        font_style: Some("italic".into()),
+        font_synthesis: FontSynthesis {
+            style: false,
+            ..FontSynthesis::default()
+        },
+        ..FragmentStyle::default()
+    });
+    assert_eq!(oblique_disabled, regular, "font-synthesis disabled style");
+}
+
+#[test]
 fn shaped_paint_does_not_space_after_non_advancing_leading_cluster() {
     use super::text::paint_shaped_horizontal_text;
     use crate::font::{ShapingDirection, load_default_text_fonts};

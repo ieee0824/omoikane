@@ -460,6 +460,8 @@ pub struct ComputedStyle {
     font_family_scope_root: Option<usize>,
     /// OpenType settings validated and converted once at the style boundary.
     shaping_options: Arc<crate::font::ShapingOptions>,
+    /// Font synthesis permissions validated once at the style boundary.
+    font_synthesis: crate::font::FontSynthesis,
     /// CPAL palette selection resolved once at the style boundary.
     font_palette: Arc<crate::font::FontPalette>,
     /// Decorations propagated through the box tree, separate from inheritance.
@@ -479,6 +481,10 @@ impl ComputedStyle {
 
     pub(crate) fn font_palette(&self) -> &Arc<crate::font::FontPalette> {
         &self.font_palette
+    }
+
+    pub(crate) fn font_synthesis(&self) -> crate::font::FontSynthesis {
+        self.font_synthesis
     }
 
     /// Animation-created stacking context, independent of the sampled values.
@@ -4353,6 +4359,7 @@ impl StyleResolver {
         );
         let font_feature_values = self.font_feature_values(font_family_scope_root);
         let shaping_options = Arc::new(computed_shaping_options(&properties, &font_feature_values));
+        let font_synthesis = computed_font_synthesis(&properties);
         let font_palette =
             Arc::new(self.computed_font_palette(&properties, font_family_scope_root));
         ComputedStyle {
@@ -4363,6 +4370,7 @@ impl StyleResolver {
             animation_name_scope_root,
             font_family_scope_root,
             shaping_options,
+            font_synthesis,
             font_palette,
             text_decorations,
         }
@@ -11153,6 +11161,19 @@ fn serialized_opentype_settings(value: &ComputedValue) -> Vec<([u8; 4], &str)> {
     settings
 }
 
+fn computed_font_synthesis(properties: &PropertyMap) -> crate::font::FontSynthesis {
+    let Some(ComputedValue::Keyword(value)) = properties.get(&PropertyId::FontSynthesis) else {
+        return crate::font::FontSynthesis::default();
+    };
+    let words = value.split_ascii_whitespace().collect::<HashSet<_>>();
+    crate::font::FontSynthesis {
+        weight: words.contains("weight"),
+        style: words.contains("style"),
+        small_caps: words.contains("small-caps"),
+        position: words.contains("position"),
+    }
+}
+
 #[derive(Default)]
 struct FontPaletteValues {
     named: HashMap<(String, FontFamilyKey), crate::font::FontPalette>,
@@ -11481,6 +11502,35 @@ fn computed_shaping_options(
     );
 
     let mut variations = Vec::new();
+    let weight = match properties.get(&PropertyId::FontWeight) {
+        Some(ComputedValue::Number(value)) => (*value).clamp(1.0, 1000.0),
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
+            f32::from(crate::font::FontWeight::parse(value).0)
+        }
+        _ => 400.0,
+    };
+    variations.push(crate::font::OpenTypeVariation::new(*b"wght", weight));
+    let stretch = match properties.get(&PropertyId::FontStretch) {
+        Some(ComputedValue::Percentage(value)) => *value,
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
+            crate::font::FontStretch::parse(value).0 as f32 / 1_000.0
+        }
+        _ => 100.0,
+    };
+    variations.push(crate::font::OpenTypeVariation::new(*b"wdth", stretch));
+    let style = match properties.get(&PropertyId::FontStyle) {
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value)) => {
+            crate::font::FontStyleRange::parse(value)
+        }
+        _ => crate::font::FontStyleRange::exact(crate::font::FontStyle::Normal),
+    };
+    let (italic, slant) = match style.style {
+        crate::font::FontStyle::Normal => (0.0, 0.0),
+        crate::font::FontStyle::Italic => (1.0, 0.0),
+        crate::font::FontStyle::Oblique => (0.0, -(style.requested_angle() as f32 / 1_000.0)),
+    };
+    variations.push(crate::font::OpenTypeVariation::new(*b"ital", italic));
+    variations.push(crate::font::OpenTypeVariation::new(*b"slnt", slant));
     if words(PropertyId::FontOpticalSizing).as_slice() == ["auto"]
         && let Some(ComputedValue::Px(size)) = properties.get(&PropertyId::FontSize)
     {

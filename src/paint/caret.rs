@@ -123,6 +123,8 @@ fn with_fragment_fonts<R>(
         .map(|face| FontFallbackCandidate {
             font: face.font,
             unicode_range: Some(face.unicode_range),
+            weight: face.weight,
+            style: face.style,
         })
         .collect();
     if web.is_empty()

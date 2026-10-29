@@ -5778,6 +5778,8 @@ fn measure_text_width_with_fallback(
     run_fonts.extend(web_fonts.iter().map(|candidate| FontFallbackCandidate {
         font: candidate.font,
         unicode_range: Some(candidate.unicode_range),
+        weight: candidate.weight,
+        style: candidate.style,
     }));
     if web_fonts.is_empty()
         && let Some(primary) = primary

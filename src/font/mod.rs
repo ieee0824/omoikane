@@ -185,6 +185,30 @@ pub struct ShapingOptions {
     pub variations: Vec<OpenTypeVariation>,
 }
 
+/// Font synthesis permissions resolved from the CSS `font-synthesis` property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FontSynthesis {
+    /// Whether missing bold faces may be synthesized.
+    pub weight: bool,
+    /// Whether missing italic or oblique faces may be synthesized.
+    pub style: bool,
+    /// Whether missing small-cap glyphs may be synthesized.
+    pub small_caps: bool,
+    /// Whether missing subscript or superscript glyphs may be synthesized.
+    pub position: bool,
+}
+
+impl Default for FontSynthesis {
+    fn default() -> Self {
+        Self {
+            weight: true,
+            style: true,
+            small_caps: true,
+            position: true,
+        }
+    }
+}
+
 /// Number of CSS letter-spacing boundaries in a source text run.
 ///
 /// Shaping can fold multiple grapheme clusters into one glyph, so callers
@@ -220,13 +244,18 @@ pub(crate) struct ShapedRun {
 pub(crate) struct FontFallbackCandidate<'a> {
     pub font: &'a Font,
     pub unicode_range: Option<&'a UnicodeRangeSet>,
+    pub weight: FontWeightRange,
+    pub style: FontStyleRange,
 }
 
 impl<'a> FontFallbackCandidate<'a> {
     pub fn unrestricted(font: &'a Font) -> Self {
+        let (weight, style) = font.face_weight_and_style();
         Self {
             font,
             unicode_range: None,
+            weight,
+            style,
         }
     }
 
@@ -454,6 +483,41 @@ pub(crate) fn is_zero_advance_character(ch: char) -> bool {
 }
 
 impl Font {
+    fn face_weight_and_style(&self) -> (FontWeightRange, FontStyleRange) {
+        let face = TtfFace::parse(self.inner.font_data(), self.face_index).ok();
+        let weight = face
+            .as_ref()
+            .and_then(|face| {
+                face.variation_axes()
+                    .into_iter()
+                    .find(|axis| axis.tag == Tag::from_bytes(b"wght"))
+                    .map(|axis| FontWeightRange {
+                        min: FontWeight(axis.min_value.round().clamp(1.0, 1000.0) as u16),
+                        max: FontWeight(axis.max_value.round().clamp(1.0, 1000.0) as u16),
+                    })
+            })
+            .unwrap_or_else(|| {
+                FontWeightRange::exact(
+                    face.as_ref()
+                        .map(|face| FontWeight(face.weight().to_number()))
+                        .unwrap_or_default(),
+                )
+            });
+        let style = face
+            .as_ref()
+            .map(|face| {
+                if face.is_oblique() {
+                    FontStyle::Oblique
+                } else if face.is_italic() {
+                    FontStyle::Italic
+                } else {
+                    FontStyle::Normal
+                }
+            })
+            .unwrap_or_default();
+        (weight, FontStyleRange::exact(style))
+    }
+
     /// Load a font from a file path.
     pub fn load_from_file(path: &Path) -> Result<Self, FontError> {
         let data = std::fs::read(path)?;
@@ -2344,6 +2408,8 @@ struct WebFontEntry {
 pub(crate) struct WebFontCandidate<'a> {
     pub font: &'a Font,
     pub unicode_range: &'a UnicodeRangeSet,
+    pub weight: FontWeightRange,
+    pub style: FontStyleRange,
 }
 
 #[derive(Default)]
@@ -2558,6 +2624,8 @@ fn select_best_web_fonts(
         .map(|entry| WebFontCandidate {
             font: entry.font.as_ref(),
             unicode_range: &entry.descriptors.unicode_range,
+            weight: entry.descriptors.weight,
+            style: entry.descriptors.style,
         })
         .collect()
 }

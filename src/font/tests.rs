@@ -1111,6 +1111,8 @@ fn unicode_range_composite_face_splits_grapheme_runs_in_source_order() {
         .map(|candidate| FontFallbackCandidate {
             font: candidate.font,
             unicode_range: Some(candidate.unicode_range),
+            weight: candidate.weight,
+            style: candidate.style,
         })
         .collect::<Vec<_>>();
     let runs =
