@@ -993,9 +993,6 @@ fn shaping_cache_reuses_exact_runs_without_mixing_size_or_direction() {
 #[test]
 fn unsupported_caps_and_position_features_use_typed_synthesis_fallbacks() {
     let font = load_selection_fixture();
-    assert!(!font.supports_opentype_feature(*b"smcp"));
-    assert!(!font.supports_opentype_feature(*b"sups"));
-
     let baseline = font
         .shape_text("aA", 20.0, ShapingDirection::LeftToRight)
         .unwrap();
@@ -1048,6 +1045,40 @@ fn unsupported_caps_and_position_features_use_typed_synthesis_fallbacks() {
         .unwrap();
     assert_eq!(disabled[0].glyph_id, baseline[0].glyph_id);
     assert_eq!(disabled[0].font_size_scale, 1.0);
+}
+
+#[test]
+fn position_feature_or_fallback_shrinks_the_whole_run() {
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/acid2/LiberationSans-Regular.ttf").to_vec(),
+    )
+    .unwrap();
+    let baseline = font
+        .shape_text("Open Abcde 123", 32.0, ShapingDirection::LeftToRight)
+        .unwrap();
+    let superscript = font
+        .shape_text_with_options(
+            "Open Abcde 123",
+            32.0,
+            ShapingDirection::LeftToRight,
+            &ShapingOptions {
+                features: vec![OpenTypeFeature::new(*b"sups", 1)],
+                synthetic_position: SyntheticPosition::Superscript,
+                ..ShapingOptions::default()
+            },
+        )
+        .unwrap();
+    let width = |glyphs: &[ShapedGlyph]| {
+        glyphs
+            .iter()
+            .map(|glyph| glyph.x_advance.abs())
+            .sum::<f32>()
+    };
+    let ratio = width(&superscript) / width(&baseline);
+    assert!(
+        ratio < 0.85,
+        "position feature must shrink the whole run: {ratio}"
+    );
 }
 
 #[test]

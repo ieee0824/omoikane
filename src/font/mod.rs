@@ -328,6 +328,40 @@ fn synthetic_position_fallback(position: SyntheticPosition, size_px: f32) -> (f3
     (0.8, shift)
 }
 
+fn feature_covers_text(
+    face: &Face<'_>,
+    text: &str,
+    direction: ShapingDirection,
+    tag: [u8; 4],
+    applies_to: impl Fn(char) -> bool,
+) -> bool {
+    text.graphemes(true)
+        .filter(|cluster| cluster.chars().any(&applies_to))
+        .all(|cluster| {
+            let shape = |enabled| {
+                let mut buffer = UnicodeBuffer::new();
+                buffer.push_str(cluster);
+                buffer.set_direction(match direction {
+                    ShapingDirection::LeftToRight => Direction::LeftToRight,
+                    ShapingDirection::RightToLeft => Direction::RightToLeft,
+                    ShapingDirection::TopToBottom => Direction::TopToBottom,
+                    ShapingDirection::BottomToTop => Direction::BottomToTop,
+                });
+                buffer.guess_segment_properties();
+                rustybuzz::shape(
+                    face,
+                    &[Feature::new(Tag::from_bytes(&tag), u32::from(enabled), ..)],
+                    buffer,
+                )
+                .glyph_infos()
+                .iter()
+                .map(|info| info.glyph_id)
+                .collect::<Vec<_>>()
+            };
+            shape(false) != shape(true)
+        })
+}
+
 /// Number of CSS letter-spacing boundaries in a source text run.
 ///
 /// Shaping can fold multiple grapheme clusters into one glyph, so callers
@@ -772,9 +806,13 @@ impl Font {
         let lowercase_tag = active_caps_tag([*b"smcp", *b"pcap"]);
         let uppercase_tag = active_caps_tag([*b"c2sc", *b"c2pc"]);
         let synthesize_lowercase = options.synthetic_caps != SyntheticCaps::None
-            && lowercase_tag.is_some_and(|tag| !self.supports_opentype_feature(tag));
+            && lowercase_tag.is_some_and(|tag| {
+                !feature_covers_text(&face, text, direction, tag, char::is_lowercase)
+            });
         let synthesize_uppercase = options.synthetic_caps == SyntheticCaps::All
-            && uppercase_tag.is_some_and(|tag| !self.supports_opentype_feature(tag));
+            && uppercase_tag.is_some_and(|tag| {
+                !feature_covers_text(&face, text, direction, tag, char::is_uppercase)
+            });
         let (shaping_text, cluster_map, small_cap_clusters) =
             if synthesize_lowercase || synthesize_uppercase {
                 synthetic_caps_text(text, synthesize_lowercase, synthesize_uppercase)
@@ -794,8 +832,11 @@ impl Font {
                 .find(|feature| feature.matches(tag))
                 .is_some_and(|feature| feature.enables(tag))
         });
-        let synthesize_position =
-            position_tag.is_some_and(|tag| !self.supports_opentype_feature(tag));
+        let synthesize_position = position_tag.is_some_and(|tag| {
+            !feature_covers_text(&face, text, direction, tag, |ch| {
+                !ch.is_whitespace() && !is_zero_advance_character(ch)
+            })
+        });
         let (position_scale, position_shift) = if synthesize_position {
             self.synthetic_position_metrics(options.synthetic_position, size_px)
         } else {
@@ -853,13 +894,6 @@ impl Font {
                 .insert(key, shaped.clone());
         }
         Ok(shaped)
-    }
-
-    fn supports_opentype_feature(&self, tag: [u8; 4]) -> bool {
-        TtfFace::parse(self.inner.font_data(), self.face_index)
-            .ok()
-            .and_then(|face| face.tables().gsub)
-            .is_some_and(|table| table.features.index(Tag::from_bytes(&tag)).is_some())
     }
 
     fn synthetic_position_metrics(&self, position: SyntheticPosition, size_px: f32) -> (f32, f32) {

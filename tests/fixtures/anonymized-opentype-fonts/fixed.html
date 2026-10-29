@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>OpenType font controls fixture</title>
+<style>
+  @font-face {
+    font-family: OpenTypeFixture;
+    src: url("../acid2/LiberationSans-Regular.ttf") format("truetype");
+  }
+  html, body {
+    margin: 0;
+    width: 640px;
+    height: 480px;
+    overflow: hidden;
+    background: white;
+    color: #18181b;
+    font: 32px/56px OpenTypeFixture, sans-serif;
+  }
+  .row {
+    box-sizing: border-box;
+    width: 640px;
+    height: 64px;
+    padding: 4px 16px;
+    border-bottom: 1px solid #d4d4d8;
+  }
+  #small { font-variant-caps: small-caps; }
+  #all-small { font-variant-caps: all-small-caps; }
+  #super { font-variant-position: super; }
+  #sub { font-variant-position: sub; }
+  #feature-off { font-variant-caps: small-caps; font-feature-settings: "smcp" 0; }
+  #caps-disabled { font-variant-caps: small-caps; font-synthesis: style weight; }
+</style>
+<div class="row" id="normal"><span data-probe id="normal-text">Open Abcde 123</span></div>
+<div class="row" id="small"><span data-probe id="small-text">Open Abcde 123</span></div>
+<div class="row" id="all-small"><span data-probe id="all-small-text">Open Abcde 123</span></div>
+<div class="row" id="super"><span data-probe id="super-text">Open Abcde 123</span></div>
+<div class="row" id="sub"><span data-probe id="sub-text">Open Abcde 123</span></div>
+<div class="row" id="feature-off"><span data-probe id="feature-off-text">Open Abcde 123</span></div>
+<div class="row" id="caps-disabled"><span data-probe id="caps-disabled-text">Open Abcde 123</span></div>
