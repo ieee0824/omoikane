@@ -1,0 +1,66 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CJK, vertical writing, and ruby fixed fixture</title>
+<style>
+  @font-face {
+    font-family: CjkFixture;
+    src: url("../text-spacing-trim/NotoSansCJKjp-Regular-subset-halt.otf") format("opentype");
+  }
+  html, body {
+    margin: 0;
+    width: 720px;
+    height: 720px;
+    overflow: hidden;
+    background: white;
+    color: #202020;
+    font: 24px/36px CjkFixture, sans-serif;
+  }
+  .row {
+    box-sizing: border-box;
+    min-height: 112px;
+    padding: 12px 20px;
+    border-bottom: 1px solid #d8d8d8;
+  }
+  .sample { background: #f1f3f5; }
+  ruby { ruby-align: space-around; }
+  rt { color: #7a2948; }
+  .ruby-line { width: 500px; }
+  .ruby-line .under { ruby-position: under; }
+  .vertical {
+    width: 150px;
+    height: 180px;
+    writing-mode: vertical-rl;
+  }
+  .upright { text-orientation: upright; }
+  .combine { text-combine-upright: digits 4; }
+  .autospace { width: 520px; text-autospace: ideograph-alpha ideograph-numeric punctuation; }
+  .trim { width: 360px; text-spacing-trim: trim-start trim-adjacent allow-end; }
+  .emphasis { width: 520px; text-emphasis: open sesame #b42318; text-emphasis-position: over left; }
+  .vertical-emphasis {
+    width: 150px;
+    height: 180px;
+    writing-mode: vertical-rl;
+    text-emphasis: dot #175cd3;
+    text-emphasis-position: under left;
+  }
+</style>
+<div class="row">
+  <div class="sample ruby-line" data-probe id="ruby-horizontal">
+    <ruby>漢字<rt>かんじ</rt></ruby>と<ruby class="under">東京<rt>とうきょう</rt></ruby>
+  </div>
+</div>
+<div class="row">
+  <div class="sample vertical" data-probe id="ruby-vertical">
+    <ruby>縦書<rt>たてがき</rt></ruby><span class="upright">AB</span><span class="combine">2026</span>
+  </div>
+</div>
+<div class="row">
+  <div class="sample autospace" data-probe id="autospace">漢A字2026年、B語。</div>
+  <div class="sample trim" data-probe id="spacing-trim">「漢字」「約物」</div>
+</div>
+<div class="row">
+  <div class="sample emphasis" data-probe id="emphasis-horizontal">強調文字 と 空白</div>
+</div>
+<div class="row">
+  <div class="sample vertical-emphasis" data-probe id="emphasis-vertical">縦書き強調</div>
+</div>

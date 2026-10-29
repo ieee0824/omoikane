@@ -3193,6 +3193,10 @@ fn ruby_elements_apply_annotation_and_fallback_ua_defaults() {
     );
     assert_eq!(rt_style.get("font-size"), Some(&ComputedValue::Px(10.0)));
     assert_eq!(
+        rt_style.get("line-height"),
+        Some(&ComputedValue::Number(1.0))
+    );
+    assert_eq!(
         rt_style.get("text-emphasis-style"),
         Some(&ComputedValue::Keyword("none".into()))
     );

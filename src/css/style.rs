@@ -14303,6 +14303,9 @@ fn apply_ua_defaults(
                 .entry(PropertyId::FontSize)
                 .or_insert(ComputedValue::Px(parent_font_size * 0.5));
             properties
+                .entry(PropertyId::LineHeight)
+                .or_insert(ComputedValue::Number(1.0));
+            properties
                 .entry(PropertyId::TextEmphasisStyle)
                 .or_insert(ComputedValue::Keyword("none".to_string()));
         }
