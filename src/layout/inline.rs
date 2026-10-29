@@ -6247,8 +6247,6 @@ fn push_line(
         fragment.rect.x += offset_x;
     }
 
-    resolve_line_bidi_geometry(fragments, x + offset_x, direction_rtl);
-
     let has_atomic_inline = fragments
         .iter()
         .any(|fragment| matches!(fragment.content, InlineFragmentContent::AtomicInline(_)));
@@ -6722,10 +6720,16 @@ fn apply_line_text_spacing_trim(
 
     let mut visual_order = (0..fragments.len()).collect::<Vec<_>>();
     visual_order.sort_by(|left, right| {
-        fragments[*left]
+        let left_start = fragments[*left]
             .rect
             .x
-            .total_cmp(&fragments[*right].rect.x)
+            .min(fragments[*left].rect.x + fragments[*left].rect.width);
+        let right_start = fragments[*right]
+            .rect
+            .x
+            .min(fragments[*right].rect.x + fragments[*right].rect.width);
+        left_start
+            .total_cmp(&right_start)
             .then_with(|| left.cmp(right))
     });
     let mut text_groups = vec![Vec::new()];

@@ -1281,12 +1281,7 @@ fn text_spacing_trim_space_first_and_allow_end_follow_line_break_state() {
         })
     };
 
-    let first_line = layout(
-        "（国",
-        20.0,
-        "space-first space-adjacent space-end",
-        "normal",
-    );
+    let first_line = layout("（国", 20.0, "space-first", "normal");
     let first_opening = first_line.lines[0]
         .fragments
         .iter()
@@ -1294,12 +1289,7 @@ fn text_spacing_trim_space_first_and_allow_end_follow_line_break_state() {
         .unwrap();
     assert!(!first_opening.punctuation_trim.first);
 
-    let soft_wrapped = layout(
-        "国（",
-        20.0,
-        "space-first space-adjacent space-end",
-        "normal",
-    );
+    let soft_wrapped = layout("国（", 20.0, "space-first", "normal");
     let second_opening = soft_wrapped.lines[1]
         .fragments
         .iter()
@@ -1307,12 +1297,7 @@ fn text_spacing_trim_space_first_and_allow_end_follow_line_break_state() {
         .unwrap();
     assert!(second_opening.punctuation_trim.first);
 
-    let forced = layout(
-        "国\n（",
-        20.0,
-        "space-first space-adjacent space-end",
-        "pre-line",
-    );
+    let forced = layout("国\n（", 20.0, "space-first", "pre-line");
     let forced_opening = forced.lines[1]
         .fragments
         .iter()

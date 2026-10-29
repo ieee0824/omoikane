@@ -368,7 +368,10 @@ fn inline_margins_advance_without_expanding_the_border_box() {
         "span{background:transparent}#second{margin-left:-5px}",
     );
     let negative_second = rects(&negative, "second")[0];
-    assert!((negative_second.x - plain_second.x + 5.0).abs() < 0.001);
+    assert!(
+        (negative_second.x - plain_second.x + 5.0).abs() < 0.001,
+        "plain={plain_second:?} negative={negative_second:?}"
+    );
 
     let (automatic, _) = render(
         "<p><span id='first'>Alpha</span><span id='second'>Beta</span></p>",
