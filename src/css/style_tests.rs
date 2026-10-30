@@ -2245,6 +2245,70 @@ fn accent_color_currentcolor_resolves_at_computed_value_time() {
 }
 
 #[test]
+fn scroll_ui_properties_validate_compute_and_inherit_at_the_style_boundary() {
+    for (property, valid, invalid) in [
+        ("scrollbar-width", "thin", "medium"),
+        ("scrollbar-gutter", "both-edges stable", "both-edges"),
+        ("scrollbar-color", "red blue", "red"),
+        ("overflow-anchor", "none", "always"),
+        (
+            "overflow-clip-margin",
+            "padding-box 8px",
+            "padding-box -1px",
+        ),
+    ] {
+        assert!(supports_declaration(property, valid), "{property}: {valid}");
+        assert!(
+            !supports_declaration(property, invalid),
+            "{property}: {invalid}"
+        );
+    }
+
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("div");
+    parent.append_child(child.clone());
+    parent.set_attribute(
+        "style",
+        "scrollbar-width: thin; scrollbar-color: red blue; \
+         scrollbar-gutter: stable both-edges; overflow-anchor: none; \
+         overflow-clip-margin: border-box 2em",
+    );
+    let mut resolver = StyleResolver::new();
+    let parent_style = resolver.computed_style(&parent);
+    let child_style = resolver.computed_style(&child);
+    for (property, expected) in [("scrollbar-width", "thin"), ("scrollbar-color", "red blue")] {
+        assert_eq!(
+            child_style.get(property).map(ComputedValue::css_text),
+            Some(expected.to_string()),
+            "{property} must inherit"
+        );
+    }
+    for (property, expected) in [
+        ("scrollbar-gutter", "auto"),
+        ("overflow-anchor", "auto"),
+        ("overflow-clip-margin", "0px"),
+    ] {
+        assert_eq!(
+            child_style.get(property).map(ComputedValue::css_text),
+            Some(expected.to_string()),
+            "{property} must use its initial value"
+        );
+    }
+    assert_eq!(
+        parent_style
+            .get("scrollbar-gutter")
+            .map(ComputedValue::css_text),
+        Some("stable both-edges".to_string())
+    );
+    assert_eq!(
+        parent_style
+            .get("overflow-clip-margin")
+            .map(ComputedValue::css_text),
+        Some("border-box 32px".to_string())
+    );
+}
+
+#[test]
 fn scroll_boundary_properties_validate_and_compute() {
     for (property, value) in [
         ("scroll-behavior", "smooth"),

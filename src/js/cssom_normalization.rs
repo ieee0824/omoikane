@@ -144,6 +144,16 @@ pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
     }
     if matches!(
         property,
+        "scrollbar-width"
+            | "scrollbar-gutter"
+            | "scrollbar-color"
+            | "overflow-anchor"
+            | "overflow-clip-margin"
+    ) {
+        return crate::css::style::normalize_scroll_ui_specified(property, value);
+    }
+    if matches!(
+        property,
         "border-image-slice"
             | "border-image-width"
             | "border-image-outset"
@@ -448,5 +458,23 @@ mod tests {
         );
         assert_eq!(normalize("field-sizing", "auto"), None);
         assert_eq!(normalize("user-select", "contain"), None);
+    }
+
+    #[test]
+    fn scroll_ui_values_validate_and_use_canonical_specified_serialization() {
+        assert_eq!(
+            normalize("scrollbar-gutter", "both-edges stable").as_deref(),
+            Some("stable both-edges")
+        );
+        assert_eq!(
+            normalize("scrollbar-color", "red blue").as_deref(),
+            Some("red blue")
+        );
+        assert_eq!(
+            normalize("overflow-clip-margin", "padding-box 2em").as_deref(),
+            Some("padding-box 2em")
+        );
+        assert_eq!(normalize("scrollbar-width", "medium"), None);
+        assert_eq!(normalize("overflow-anchor", "always"), None);
     }
 }
