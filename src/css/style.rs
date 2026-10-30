@@ -7453,7 +7453,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             );
         }
         "image-orientation" => {
-            return validate_keyword_value(value, &["from-image", "none"]);
+            return validate_image_orientation(value);
         }
         "border-image-source" | "mask-border-source" => {
             return validate_background_image_declaration(value);
@@ -7949,6 +7949,52 @@ fn validate_blend_mode_list(value: &Value) -> DeclarationValidation {
         }
         _ => DeclarationValidation::Invalid,
     }
+}
+
+fn validate_image_orientation(value: &Value) -> DeclarationValidation {
+    if let Value::Keyword(keyword) = value {
+        let keyword = keyword.to_ascii_lowercase();
+        if is_css_wide_keyword(&keyword) || matches!(keyword.as_str(), "from-image" | "none") {
+            return DeclarationValidation::Valid(ComputedValue::Keyword(keyword));
+        }
+        if keyword == "flip" {
+            return DeclarationValidation::Valid(ComputedValue::Keyword("0deg flip".to_string()));
+        }
+        return DeclarationValidation::Invalid;
+    }
+    let components = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let mut angle = None;
+    let mut flip = false;
+    for component in components {
+        match component {
+            Value::Length(value, unit) if angle.is_none() && value.is_finite() => {
+                let turns = match unit.to_ascii_lowercase().as_str() {
+                    "deg" => *value / 360.0,
+                    "grad" => *value / 400.0,
+                    "rad" => *value / std::f32::consts::TAU,
+                    "turn" => *value,
+                    _ => return DeclarationValidation::Invalid,
+                };
+                let quarter_turns = ((turns * 4.0 + 0.5).floor() as i32).rem_euclid(4);
+                angle = Some(quarter_turns * 90);
+            }
+            Value::Keyword(keyword) if !flip && keyword.eq_ignore_ascii_case("flip") => {
+                flip = true;
+            }
+            _ => return DeclarationValidation::Invalid,
+        }
+    }
+    let Some(angle) = angle else {
+        return DeclarationValidation::Invalid;
+    };
+    DeclarationValidation::Valid(ComputedValue::Keyword(if flip {
+        format!("{angle}deg flip")
+    } else {
+        format!("{angle}deg")
+    }))
 }
 
 fn valid_image_component(value: &Value) -> bool {

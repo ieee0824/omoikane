@@ -1846,6 +1846,16 @@ fn image_rendering_switches_between_smooth_and_pixelated_sampling() {
 }
 
 #[test]
+fn explicit_image_orientation_rotates_content_image_before_sizing() {
+    let image = Image::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+    let mut style = ComputedStyle::default();
+    style.set_paint_value("image-orientation", "90deg".to_string());
+    let oriented = orient_content_image(&image, &style).unwrap();
+    assert_eq!((oriented.width(), oriented.height()), (1, 2));
+    assert_eq!(oriented.pixels(), &[255, 0, 0, 255, 0, 0, 255, 255]);
+}
+
+#[test]
 fn paints_selected_image_set_candidate_as_a_background_layer() {
     let red = pixel_data_uri(Color::rgb(255, 0, 0));
     let blue = pixel_data_uri(Color::rgb(0, 0, 255));

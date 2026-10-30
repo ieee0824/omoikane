@@ -10974,6 +10974,25 @@ fn css_images_ui_properties_validate_and_compute() {
 }
 
 #[test]
+fn image_orientation_normalizes_to_quarter_turns() {
+    for (specified, computed) in [
+        ("44deg", "0deg"),
+        ("45deg", "90deg"),
+        ("-45deg", "0deg"),
+        ("0.75turn flip", "270deg flip"),
+        ("flip", "0deg flip"),
+    ] {
+        assert_eq!(
+            image_computed_keyword(
+                &format!("image-orientation:{specified}"),
+                "image-orientation"
+            ),
+            computed
+        );
+    }
+}
+
+#[test]
 fn image_set_keeps_typed_density_candidates_in_computed_style() {
     let value = image_computed_keyword(
         "background-image: image-set(url(\"one.png\") 1x, url(\"two.png\") 192dpi)",

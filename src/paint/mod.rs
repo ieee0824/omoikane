@@ -5471,6 +5471,8 @@ fn paint_replaced_image_box(
     let Some(image) = crate::layout::decode_or_fetch_image_asset(source, base_url.as_ref()) else {
         return;
     };
+    let oriented = orient_content_image(&image, style);
+    let image = oriented.as_ref().unwrap_or(&image);
 
     let content_box = offset.rect(layout.dimensions.content);
     let destination =
@@ -5485,11 +5487,50 @@ fn paint_replaced_image_box(
         None => content_box,
     };
     canvas.draw_image_scaled_clipped_with_sampling(
-        &image,
+        image,
         destination,
         Some(clip),
         image_sampling(style),
     );
+}
+
+fn orient_content_image(image: &Image, style: &ComputedStyle) -> Option<Image> {
+    let value = match style.get_by_id(PropertyId::ImageOrientation) {
+        Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
+        _ => return None,
+    };
+    let flip = value.split_ascii_whitespace().any(|part| part == "flip");
+    let quarter_turns = value
+        .split_ascii_whitespace()
+        .find_map(|part| part.strip_suffix("deg"))
+        .and_then(|degrees| degrees.parse::<i32>().ok())
+        .map(|degrees| degrees.rem_euclid(360) / 90)?;
+    if quarter_turns == 0 && !flip {
+        return None;
+    }
+    let (width, height) = if quarter_turns % 2 == 0 {
+        (image.width, image.height)
+    } else {
+        (image.height, image.width)
+    };
+    let mut pixels = vec![0; width as usize * height as usize * 4];
+    for source_y in 0..image.height {
+        for source_x in 0..image.width {
+            let (mut x, y) = match quarter_turns {
+                1 => (image.height - 1 - source_y, source_x),
+                2 => (image.width - 1 - source_x, image.height - 1 - source_y),
+                3 => (source_y, image.width - 1 - source_x),
+                _ => (source_x, source_y),
+            };
+            if flip {
+                x = width - 1 - x;
+            }
+            let source = ((source_y * image.width + source_x) * 4) as usize;
+            let destination = ((y * width + x) * 4) as usize;
+            pixels[destination..destination + 4].copy_from_slice(&image.pixels[source..source + 4]);
+        }
+    }
+    Image::new(width, height, pixels).ok()
 }
 
 fn image_sampling(style: &ComputedStyle) -> ImageSampling {
