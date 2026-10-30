@@ -670,6 +670,37 @@ impl StyleResolver {
             })
         })
     }
+    /// Whether a child-list change below `roots` can keep styles outside them.
+    ///
+    /// Evicted animated targets are resampled exactly as after a full clear,
+    /// and geometry is always rebuilt. Only a running animation on an ancestor
+    /// of a root is rejected: its retained sample would be inherited by the
+    /// recomputed descendants instead of the current value.
+    pub(super) fn animations_allow_tree_mutation_invalidation(&self, roots: &[NodeHandle]) -> bool {
+        let Some(timeline) = &self.animation_timeline else {
+            return true;
+        };
+        let timeline = timeline.borrow();
+        let running: HashSet<usize> = timeline
+            .elements
+            .iter()
+            .filter(|(_, state)| state.running(timeline.now_ms))
+            .map(|((identity, _), _)| *identity)
+            .collect();
+        if running.is_empty() {
+            return true;
+        }
+        !roots.iter().any(|root| {
+            let mut ancestor = root.parent_node();
+            while let Some(node) = ancestor {
+                if running.contains(&node.identity()) {
+                    return true;
+                }
+                ancestor = node.parent_node();
+            }
+            false
+        })
+    }
     pub(crate) fn animation_node_ids(&self) -> Vec<usize> {
         self.animation_timeline
             .as_ref()

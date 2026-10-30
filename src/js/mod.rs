@@ -22236,6 +22236,7 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         let source_document = document_root_for_node(&child);
         let target_document = document_root_for_node(&parent);
         let rebuild_stylesheets = tree_style_invalidation::requires_rebuild(&parent, &child);
+        let change = tree_style_invalidation::ChildListChange::insertion(&parent, &child);
         if source_document.is_some() && source_document != target_document {
             dom_removal_trace::trace("appendChild_move", &child, false, context);
         }
@@ -22247,10 +22248,10 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             }
             state.register_tree(&child);
             if let Some(document) = &source_document {
-                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets);
+                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets, &change);
             }
             if let Some(document) = &target_document {
-                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets);
+                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets, &change);
             }
             if source_document.is_some() {
                 state.destroy_iframe_contexts_in_subtree(&child);
@@ -26109,12 +26110,19 @@ fn set_text_content_native(
         let rebuild_stylesheets = tree_style_invalidation::text_replacement_requires_rebuild(&node);
         frame_diagnostics::record_scroll_mutation("set_text_content", id, None);
         // For text/comment leaf nodes, update data directly
+        let change;
         if is_character_data {
             node.set_data_owned(data);
+            change = tree_style_invalidation::ChildListChange::character_data(&node);
         } else {
             dom_removal_trace::trace("textContent", &node, true, context);
             // Remove all children
             let removed_children = node.child_nodes();
+            change = tree_style_invalidation::ChildListChange::children_replaced(
+                &node,
+                &removed_children,
+                &[],
+            );
             for child in &removed_children {
                 let _ = node.remove_child(&child);
             }
@@ -26138,11 +26146,9 @@ fn set_text_content_native(
         // Element textContent replaces an entire subtree and may add/remove a
         // style element. CharacterData normally only affects selector/style
         // results, except beneath <style>, where it changes stylesheet source.
-        if rebuild_stylesheets {
-            state.borrow_mut().mark_style_dirty_for_node(&node);
-        } else {
-            state.borrow_mut().invalidate_style_cache_for_node(&node);
-        }
+        state
+            .borrow_mut()
+            .invalidate_style_for_child_list(&node, rebuild_stylesheets, &change);
         Ok(JsValue::undefined())
     })
 }
@@ -26228,11 +26234,14 @@ fn set_inner_html_native(
             &removed_children,
             &inserted_children,
         );
-        if rebuild_stylesheets {
-            state.borrow_mut().mark_style_dirty_for_node(&node);
-        } else {
-            state.borrow_mut().invalidate_style_cache_for_node(&node);
-        }
+        let change = tree_style_invalidation::ChildListChange::children_replaced(
+            &target,
+            &removed_children,
+            &inserted_children,
+        );
+        state
+            .borrow_mut()
+            .invalidate_style_for_child_list(&node, rebuild_stylesheets, &change);
         Ok(JsValue::undefined())
     })
 }
@@ -26843,6 +26852,7 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         // longer be found from it. The parent keeps its place in the tree.
         let parent_document = document_root_for_node(&parent);
         let rebuild_stylesheets = tree_style_invalidation::requires_rebuild(&parent, &child);
+        let change = tree_style_invalidation::ChildListChange::removal(&parent, &child);
         dom_removal_trace::trace("removeChild", &child, false, context);
         parent
             .remove_child(&child)
@@ -26852,7 +26862,7 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
             state.cancel_smooth_scrolls_in_subtree(&child);
             state.destroy_iframe_contexts_in_subtree(&child);
             if let Some(document) = &parent_document {
-                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets);
+                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets, &change);
             }
         }
         Ok(JsValue::undefined())
@@ -26916,6 +26926,7 @@ fn insert_before_native_impl(
         let source_document = document_root_for_node(&new_node);
         let target_document = document_root_for_node(&parent);
         let rebuild_stylesheets = tree_style_invalidation::requires_rebuild(&parent, &new_node);
+        let change = tree_style_invalidation::ChildListChange::insertion(&parent, &new_node);
         if source_document.is_some() && source_document != target_document {
             dom_removal_trace::trace(
                 if preserve_state {
@@ -26944,10 +26955,10 @@ fn insert_before_native_impl(
                 trusted_types::invalidate_approvals_for_detached_element(&mut state, &new_node);
             }
             if let Some(document) = &source_document {
-                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets);
+                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets, &change);
             }
             if let Some(document) = &target_document {
-                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets);
+                state.invalidate_document_for_tree_mutation(document, rebuild_stylesheets, &change);
             }
             if !preserve_state && source_document.is_some() {
                 state.destroy_iframe_contexts_in_subtree(&new_node);

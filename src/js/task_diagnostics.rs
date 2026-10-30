@@ -26,6 +26,7 @@ struct TaskStyleInvalidationCounts {
     data_attribute_same_value: u32,
     data_attribute_changed_value: u32,
     local_user_action: u32,
+    local_tree_mutation: u32,
     deferred_resolver: u32,
     fallback_raw_style_selector: u32,
     fallback_active_transition: u32,
@@ -74,6 +75,7 @@ impl TaskStyleInvalidationCounts {
             "data_attribute_same_value": self.data_attribute_same_value,
             "data_attribute_changed_value": self.data_attribute_changed_value,
             "local_user_action": self.local_user_action,
+            "local_tree_mutation": self.local_tree_mutation,
             "deferred_resolver": self.deferred_resolver,
             "fallback_raw_style_selector": self.fallback_raw_style_selector,
             "fallback_active_transition": self.fallback_active_transition,
@@ -201,6 +203,19 @@ fn record_data_attribute_assignment_active(same_value: bool) {
 pub(super) fn record_data_attribute_assignment(same_value: bool) {
     if tracing_enabled() {
         record_data_attribute_assignment_active(same_value);
+    }
+}
+
+fn record_local_tree_mutation_invalidation_active() {
+    update_active_style_invalidations(|counts| {
+        TaskStyleInvalidationCounts::increment(&mut counts.local_tree_mutation);
+    });
+}
+
+/// Records one child-list change that retained styles outside its parents.
+pub(super) fn record_local_tree_mutation_invalidation() {
+    if tracing_enabled() {
+        record_local_tree_mutation_invalidation_active();
     }
 }
 
@@ -650,6 +665,7 @@ mod turn_timing_tests {
         record_data_attribute_assignment_active(true);
         record_data_attribute_assignment_active(false);
         record_local_user_action_invalidation_active();
+        record_local_tree_mutation_invalidation_active();
         record_ordinary_node_mutation_full_active();
         record_ordinary_node_mutation_full_active();
         record_document_dirty_active();
@@ -666,6 +682,7 @@ mod turn_timing_tests {
                 "data_attribute_same_value": 2,
                 "data_attribute_changed_value": 1,
                 "local_user_action": 1,
+                "local_tree_mutation": 1,
                 "deferred_resolver": 1,
                 "fallback_raw_style_selector": 1,
                 "fallback_active_transition": 1,
