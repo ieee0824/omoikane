@@ -566,6 +566,7 @@ pub(super) fn paint_text_with_context(
                         height: (*height).min(content_rect.height),
                     };
                     canvas.draw_image_scaled_clipped(image, image_rect, clip);
+                    super::outline::paint_outline(canvas, style, fragment_rect, clip);
                 }
             }
         }
@@ -1346,6 +1347,9 @@ fn paint_form_control_background(
 ) {
     let border = EdgeSizesForPaint::from_style(style);
     if paint_native_input_control(canvas, fragment, fragment_rect, style, clip) {
+        if fragment.node.identity() != layout.node.identity() {
+            super::outline::paint_outline(canvas, style, fragment_rect, clip);
+        }
         return;
     }
     // A block control's owning LayoutBox already painted its
@@ -1357,6 +1361,7 @@ fn paint_form_control_background(
         if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
             paint_rect_borders(canvas, fragment_rect, style, border, clip);
         }
+        super::outline::paint_outline(canvas, style, fragment_rect, clip);
     }
 }
 

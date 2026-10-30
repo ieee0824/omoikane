@@ -5046,7 +5046,7 @@ fn subtree_paint_bounds_internal(
     }
 
     let style = paint_box_style(layout, resolver);
-    if let Some(outline_bounds) = outline::solid_outline_bounds(&style, border_box_rect(layout)) {
+    if let Some(outline_bounds) = outline::outline_bounds(&style, border_box_rect(layout)) {
         bounds = union_rect(bounds, outline_bounds);
     }
     let shadow_value = match style.get_by_id(PropertyId::BoxShadow) {
@@ -5811,7 +5811,7 @@ fn paint_box_internal_to(
         // empty child list.
         if paint_decorations {
             border::paint_borders(canvas, layout, style, inherited_clip, offset);
-            outline::paint_solid_outline(canvas, style, border_box, inherited_clip);
+            outline::paint_outline(canvas, style, border_box, inherited_clip);
         }
         return;
     }
@@ -5918,7 +5918,7 @@ fn paint_box_internal_to(
         paint_scrollbars(canvas, layout, style, padding_box, inherited_clip);
     }
     if paint_decorations {
-        outline::paint_solid_outline(canvas, style, border_box, inherited_clip);
+        outline::paint_outline(canvas, style, border_box, inherited_clip);
     }
 }
 
@@ -6554,15 +6554,13 @@ fn paint_generated_box(
 
     let border = border::EdgeSizesForPaint::from_style(style);
     if border.total_horizontal() == 0.0 && border.total_vertical() == 0.0 {
-        return;
-    }
-
-    if rect.width == border.total_horizontal() && rect.height == border.total_vertical() {
+        // There is no border to paint, but outlines are independent of borders.
+    } else if rect.width == border.total_horizontal() && rect.height == border.total_vertical() {
         border::paint_zero_sized_border_box(canvas, rect, style, border, clip);
-        return;
+    } else {
+        border::paint_rect_borders(canvas, rect, style, border, clip);
     }
-
-    border::paint_rect_borders(canvas, rect, style, border, clip);
+    outline::paint_outline(canvas, style, rect, clip);
 }
 
 fn border_box_rect(layout: &LayoutBox) -> Rect {
