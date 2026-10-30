@@ -187,3 +187,76 @@ fn ordinary_tree_changes_refresh_form_constraint_state() {
             .to_boolean()
     );
 }
+
+#[test]
+fn script_insertion_and_removal_retain_rules_and_refresh_structural_selectors() {
+    let mut runtime = runtime();
+    let initial = generation(&runtime);
+    assert!(runtime.eval("(() => {const script=document.createElement('script');script.type='text/plain';script.textContent='inert';host.appendChild(script);if(host.getBoundingClientRect().width!==40)return false;host.removeChild(script);return host.getBoundingClientRect().width===10})()").unwrap().to_boolean());
+    assert_eq!(
+        generation(&runtime),
+        initial,
+        "script elements own no author stylesheet"
+    );
+}
+
+#[test]
+fn executed_script_insertion_retains_rules() {
+    let mut runtime = runtime();
+    let initial = generation(&runtime);
+    runtime
+        .eval("globalThis.ran=false;const script=document.createElement('script');script.textContent='globalThis.ran=true';host.appendChild(script)")
+        .unwrap();
+    assert!(
+        runtime
+            .eval("ran && host.getBoundingClientRect().width===40")
+            .unwrap()
+            .to_boolean()
+    );
+    assert_eq!(generation(&runtime), initial);
+}
+
+#[test]
+fn script_text_changes_retain_rules() {
+    let mut runtime = runtime();
+    runtime.eval("globalThis.script=document.createElement('script');script.type='text/plain';script.textContent='a';document.head.appendChild(script);host.getBoundingClientRect()").unwrap();
+    let initial = generation(&runtime);
+    runtime
+        .eval("script.firstChild.data='b';script.textContent='c';script.appendChild(document.createTextNode('d'));host.getBoundingClientRect()")
+        .unwrap();
+    assert_eq!(
+        generation(&runtime),
+        initial,
+        "script source text is not stylesheet input"
+    );
+}
+
+#[test]
+fn stylesheet_inside_a_script_element_still_rebuilds_rules() {
+    let mut runtime = runtime();
+    runtime.eval("globalThis.script=document.createElement('script');script.type='text/plain';document.head.appendChild(script);host.getBoundingClientRect()").unwrap();
+    let initial = generation(&runtime);
+    runtime
+        .eval("globalThis.sheet=document.createElement('style');sheet.textContent='#host:empty{width:70px}';script.appendChild(sheet)")
+        .unwrap();
+    assert_eq!(
+        runtime
+            .eval("host.getBoundingClientRect().width")
+            .unwrap()
+            .as_number(),
+        Some(70.0)
+    );
+    assert!(generation(&runtime) > initial);
+    let inserted = generation(&runtime);
+    runtime
+        .eval("sheet.textContent='#host:empty{width:80px}'")
+        .unwrap();
+    assert_eq!(
+        runtime
+            .eval("host.getBoundingClientRect().width")
+            .unwrap()
+            .as_number(),
+        Some(80.0)
+    );
+    assert!(generation(&runtime) > inserted);
+}
