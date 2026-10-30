@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Nine-slice border and mask comparison</title>
+<style>
+  * { box-sizing: border-box }
+  html, body { margin: 0; background: white; font: 14px sans-serif }
+  main { display: grid; grid-template-columns: repeat(3, 120px); gap: 24px; padding: 24px }
+  .sample {
+    width: 120px; height: 100px; padding: 18px; color: white; background: #145;
+    border: 16px solid transparent;
+    border-image-source: linear-gradient(135deg, #f33 0 25%, #fc3 25% 50%, #3c6 50% 75%, #36f 75%);
+    border-image-slice: 25% fill;
+    border-image-width: 16px;
+  }
+  #stretch { border-image-repeat: stretch }
+  #repeat { border-image-repeat: repeat }
+  #round { border-image-repeat: round }
+  #space { border-image-repeat: space }
+  #outset { border-image-outset: 8px; border-image-repeat: round space }
+  #mask {
+    border: 16px solid transparent; background: #d25;
+    mask-border-source: linear-gradient(135deg, transparent 0 22%, white 22% 78%, transparent 78%);
+    mask-border-slice: 25% fill;
+    mask-border-width: 16px;
+    mask-border-repeat: round;
+  }
+</style>
+<main>
+  <div class="sample" id="stretch" data-probe>stretch</div>
+  <div class="sample" id="repeat" data-probe>repeat</div>
+  <div class="sample" id="round" data-probe>round</div>
+  <div class="sample" id="space" data-probe>space</div>
+  <div class="sample" id="outset" data-probe>outset</div>
+  <div class="sample" id="mask" data-probe>mask</div>
+</main>

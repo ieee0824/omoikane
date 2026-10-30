@@ -15,12 +15,14 @@ use shadow_mask_cache::{
 };
 
 use crate::css::style::PropertyId;
-use crate::css::{ComputedStyle, ComputedValue};
+use crate::css::{
+    ComputedStyle, ComputedValue, NineSliceComputedValue, NineSliceLength, NineSliceRepeat,
+};
 use crate::layout::{LayoutBox, Rect};
 
 use super::color::{Color, parse_color};
 use super::{
-    BorderRegion, Canvas, border_box_rect, border_color, border_radius_corners,
+    BorderRegion, Canvas, Image, border_box_rect, border_color, border_radius_corners,
     fill_triangle_clipped, fill_triangle_clipped_inclusive, has_border_radius, length_property,
     normalize_rect, padding_box_rect, resolve_color_value, rounded_rect_pixel_coverage,
 };
@@ -32,6 +34,9 @@ pub(crate) fn paint_borders(
     clip: Option<Rect>,
     offset: super::PaintOffset,
 ) {
+    if paint_border_image(canvas, layout, style, clip, offset) {
+        return;
+    }
     if !has_any_solid_border(style) {
         return;
     }
@@ -237,6 +242,551 @@ pub(crate) fn paint_borders(
             clip,
         );
     }
+}
+
+#[derive(Clone, Copy)]
+struct Four<T> {
+    top: T,
+    right: T,
+    bottom: T,
+    left: T,
+}
+
+fn four<T: Clone>(values: &[T]) -> Option<Four<T>> {
+    Some(match values {
+        [all] => Four {
+            top: all.clone(),
+            right: all.clone(),
+            bottom: all.clone(),
+            left: all.clone(),
+        },
+        [vertical, horizontal] => Four {
+            top: vertical.clone(),
+            right: horizontal.clone(),
+            bottom: vertical.clone(),
+            left: horizontal.clone(),
+        },
+        [top, horizontal, bottom] => Four {
+            top: top.clone(),
+            right: horizontal.clone(),
+            bottom: bottom.clone(),
+            left: horizontal.clone(),
+        },
+        [top, right, bottom, left] => Four {
+            top: top.clone(),
+            right: right.clone(),
+            bottom: bottom.clone(),
+            left: left.clone(),
+        },
+        _ => return None,
+    })
+}
+
+fn nine_slice_lengths(style: &ComputedStyle, id: PropertyId) -> Option<Vec<NineSliceLength>> {
+    match style.get_by_id(id) {
+        Some(ComputedValue::NineSlice(NineSliceComputedValue::Width(values)))
+        | Some(ComputedValue::NineSlice(NineSliceComputedValue::Outset(values))) => {
+            Some(values.clone())
+        }
+        Some(ComputedValue::Number(value)) => Some(vec![NineSliceLength::Number(*value)]),
+        Some(ComputedValue::Percentage(value)) => Some(vec![NineSliceLength::Percentage(*value)]),
+        Some(ComputedValue::Px(value)) => Some(vec![NineSliceLength::Px(*value)]),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("auto") => {
+            Some(vec![NineSliceLength::Auto])
+        }
+        _ => None,
+    }
+}
+
+fn nine_slice_slice(style: &ComputedStyle, id: PropertyId) -> Option<(Vec<NineSliceLength>, bool)> {
+    match style.get_by_id(id) {
+        Some(ComputedValue::NineSlice(NineSliceComputedValue::Slice { values, fill })) => {
+            Some((values.clone(), *fill))
+        }
+        Some(ComputedValue::Number(value)) => Some((vec![NineSliceLength::Number(*value)], false)),
+        Some(ComputedValue::Percentage(value)) => {
+            Some((vec![NineSliceLength::Percentage(*value)], false))
+        }
+        Some(ComputedValue::Keyword(value)) => value
+            .strip_suffix('%')
+            .and_then(|value| value.parse::<f32>().ok())
+            .map(|value| (vec![NineSliceLength::Percentage(value)], false)),
+        _ => None,
+    }
+}
+
+fn nine_slice_repeat(style: &ComputedStyle, id: PropertyId) -> Option<Vec<NineSliceRepeat>> {
+    match style.get_by_id(id) {
+        Some(ComputedValue::NineSlice(NineSliceComputedValue::Repeat(values))) => {
+            Some(values.clone())
+        }
+        Some(ComputedValue::Keyword(value)) => value
+            .split_ascii_whitespace()
+            .map(|value| match value.to_ascii_lowercase().as_str() {
+                "stretch" => Some(NineSliceRepeat::Stretch),
+                "repeat" => Some(NineSliceRepeat::Repeat),
+                "round" => Some(NineSliceRepeat::Round),
+                "space" => Some(NineSliceRepeat::Space),
+                _ => None,
+            })
+            .collect(),
+        _ => None,
+    }
+}
+
+fn source_image(style: &ComputedStyle, source_id: PropertyId, area: Rect) -> Option<Image> {
+    let text = match style.get_by_id(source_id) {
+        Some(ComputedValue::Keyword(value))
+        | Some(ComputedValue::String(value))
+        | Some(ComputedValue::Color(value)) => value,
+        _ => return None,
+    };
+    if text.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    if let Some(gradient) = super::color::parse_gradient(text) {
+        let width = area.width.ceil().max(1.0) as u32;
+        let height = area.height.ceil().max(1.0) as u32;
+        let mut source = Canvas::new(width, height);
+        super::color::paint_gradient(
+            &mut source,
+            &gradient,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: width as f32,
+                height: height as f32,
+            },
+            None,
+        );
+        return Image::new(width, height, source.pixels).ok();
+    }
+    super::image::parse_background_image_value(text)
+}
+
+fn source_slice(value: &NineSliceLength, basis: f32) -> f32 {
+    match value {
+        NineSliceLength::Number(value) | NineSliceLength::Px(value) => *value,
+        NineSliceLength::Percentage(value) => basis * value / 100.0,
+        NineSliceLength::Math(value) => value.resolve(basis),
+        NineSliceLength::Auto => 0.0,
+    }
+    .clamp(0.0, basis)
+}
+
+fn border_image_width(value: &NineSliceLength, border: f32, basis: f32, auto: f32) -> f32 {
+    match value {
+        NineSliceLength::Number(value) => value * border,
+        NineSliceLength::Percentage(value) => basis * value / 100.0,
+        NineSliceLength::Px(value) => *value,
+        NineSliceLength::Math(value) => value.resolve(basis),
+        NineSliceLength::Auto => auto,
+    }
+    .max(0.0)
+}
+
+fn border_image_outset(value: &NineSliceLength, border: f32) -> f32 {
+    match value {
+        NineSliceLength::Number(value) => value * border,
+        NineSliceLength::Px(value) => *value,
+        NineSliceLength::Math(value) => value.resolve(0.0),
+        NineSliceLength::Percentage(_) | NineSliceLength::Auto => 0.0,
+    }
+    .max(0.0)
+}
+
+fn fit_opposing(start: &mut f32, end: &mut f32, available: f32) {
+    let total = *start + *end;
+    if total > available && total > 0.0 {
+        let scale = available / total;
+        *start *= scale;
+        *end *= scale;
+    }
+}
+
+fn draw_source_rect(
+    canvas: &mut Canvas,
+    image: &Image,
+    source: Rect,
+    destination: Rect,
+    clip: Option<Rect>,
+) {
+    if source.width <= 0.0
+        || source.height <= 0.0
+        || destination.width <= 0.0
+        || destination.height <= 0.0
+    {
+        return;
+    }
+    let scale_x = destination.width / source.width;
+    let scale_y = destination.height / source.height;
+    let mapped = Rect {
+        x: destination.x - source.x * scale_x,
+        y: destination.y - source.y * scale_y,
+        width: image.width() as f32 * scale_x,
+        height: image.height() as f32 * scale_y,
+    };
+    let tile_clip = match clip {
+        Some(clip) => super::intersect(destination, clip),
+        None => Some(destination),
+    };
+    if let Some(tile_clip) = tile_clip {
+        canvas.draw_image_scaled_clipped(image, mapped, Some(tile_clip));
+    }
+}
+
+fn axis_tiles(start: f32, length: f32, natural: f32, repeat: NineSliceRepeat) -> Vec<(f32, f32)> {
+    if length <= 0.0 || natural <= 0.0 {
+        return Vec::new();
+    }
+    match repeat {
+        NineSliceRepeat::Stretch => vec![(start, length)],
+        NineSliceRepeat::Repeat => {
+            let count = (length / natural).ceil().max(1.0) as usize;
+            let offset = (length - count as f32 * natural) / 2.0;
+            (0..count)
+                .map(|index| (start + offset + index as f32 * natural, natural))
+                .collect()
+        }
+        NineSliceRepeat::Round => {
+            let count = (length / natural).round().max(1.0) as usize;
+            let size = length / count as f32;
+            (0..count)
+                .map(|index| (start + index as f32 * size, size))
+                .collect()
+        }
+        NineSliceRepeat::Space => {
+            let count = (length / natural).floor() as usize;
+            if count <= 1 {
+                return vec![(start + (length - natural) / 2.0, natural.min(length))];
+            }
+            let gap = (length - count as f32 * natural) / (count - 1) as f32;
+            (0..count)
+                .map(|index| (start + index as f32 * (natural + gap), natural))
+                .collect()
+        }
+    }
+}
+
+#[cfg(test)]
+mod nine_slice_tests {
+    use super::*;
+
+    #[test]
+    fn repeat_modes_generate_specified_axis_geometry() {
+        assert_eq!(
+            axis_tiles(10.0, 20.0, 6.0, NineSliceRepeat::Stretch),
+            vec![(10.0, 20.0)]
+        );
+        assert_eq!(
+            axis_tiles(10.0, 20.0, 6.0, NineSliceRepeat::Repeat),
+            vec![(8.0, 6.0), (14.0, 6.0), (20.0, 6.0), (26.0, 6.0)]
+        );
+        assert_eq!(
+            axis_tiles(10.0, 20.0, 6.0, NineSliceRepeat::Round),
+            vec![
+                (10.0, 20.0 / 3.0),
+                (10.0 + 20.0 / 3.0, 20.0 / 3.0),
+                (10.0 + 40.0 / 3.0, 20.0 / 3.0),
+            ]
+        );
+        assert_eq!(
+            axis_tiles(10.0, 20.0, 6.0, NineSliceRepeat::Space),
+            vec![(10.0, 6.0), (17.0, 6.0), (24.0, 6.0)]
+        );
+    }
+
+    #[test]
+    fn opposing_slices_and_widths_shrink_by_one_common_factor() {
+        let (mut start, mut end) = (8.0, 12.0);
+        fit_opposing(&mut start, &mut end, 10.0);
+        assert_eq!((start, end), (4.0, 6.0));
+    }
+
+    #[test]
+    fn repeat_geometry_scales_with_device_pixel_ratio() {
+        for repeat in [
+            NineSliceRepeat::Stretch,
+            NineSliceRepeat::Repeat,
+            NineSliceRepeat::Round,
+            NineSliceRepeat::Space,
+        ] {
+            let css_pixels = axis_tiles(3.0, 24.0, 6.0, repeat);
+            let device_pixels = axis_tiles(6.0, 48.0, 12.0, repeat);
+            assert_eq!(css_pixels.len(), device_pixels.len(), "{repeat:?}");
+            for ((css_start, css_size), (device_start, device_size)) in
+                css_pixels.into_iter().zip(device_pixels)
+            {
+                assert_eq!(device_start, css_start * 2.0, "{repeat:?}");
+                assert_eq!(device_size, css_size * 2.0, "{repeat:?}");
+            }
+        }
+    }
+}
+
+fn draw_tiled_region(
+    canvas: &mut Canvas,
+    image: &Image,
+    source: Rect,
+    destination: Rect,
+    repeat_x: NineSliceRepeat,
+    repeat_y: NineSliceRepeat,
+    clip: Option<Rect>,
+) {
+    let natural_width = source.width * destination.height / source.height.max(1.0);
+    let natural_height = source.height * destination.width / source.width.max(1.0);
+    let xs = axis_tiles(destination.x, destination.width, natural_width, repeat_x);
+    let ys = axis_tiles(destination.y, destination.height, natural_height, repeat_y);
+    for (x, width) in xs {
+        for &(y, height) in &ys {
+            draw_source_rect(
+                canvas,
+                image,
+                source,
+                Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+                Some(destination).and_then(|area| match clip {
+                    Some(clip) => super::intersect(area, clip),
+                    None => Some(area),
+                }),
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NineSliceProperties {
+    source: PropertyId,
+    slice: PropertyId,
+    width: PropertyId,
+    outset: PropertyId,
+    repeat: PropertyId,
+}
+
+const BORDER_IMAGE_PROPERTIES: NineSliceProperties = NineSliceProperties {
+    source: PropertyId::BorderImageSource,
+    slice: PropertyId::BorderImageSlice,
+    width: PropertyId::BorderImageWidth,
+    outset: PropertyId::BorderImageOutset,
+    repeat: PropertyId::BorderImageRepeat,
+};
+
+const MASK_BORDER_PROPERTIES: NineSliceProperties = NineSliceProperties {
+    source: PropertyId::MaskBorderSource,
+    slice: PropertyId::MaskBorderSlice,
+    width: PropertyId::MaskBorderWidth,
+    outset: PropertyId::MaskBorderOutset,
+    repeat: PropertyId::MaskBorderRepeat,
+};
+
+fn paint_border_image(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    style: &ComputedStyle,
+    clip: Option<Rect>,
+    offset: super::PaintOffset,
+) -> bool {
+    let border_box = offset.rect(border_box_rect(layout));
+    let border = layout.dimensions.border;
+    paint_nine_slice_image(
+        canvas,
+        style,
+        BORDER_IMAGE_PROPERTIES,
+        border_box,
+        Four {
+            top: border.top,
+            right: border.right,
+            bottom: border.bottom,
+            left: border.left,
+        },
+        clip,
+    )
+}
+
+fn paint_nine_slice_image(
+    canvas: &mut Canvas,
+    style: &ComputedStyle,
+    properties: NineSliceProperties,
+    border_box: Rect,
+    border: Four<f32>,
+    clip: Option<Rect>,
+) -> bool {
+    let Some(image) = source_image(style, properties.source, border_box) else {
+        return false;
+    };
+    let Some((slice_values, fill)) = nine_slice_slice(style, properties.slice) else {
+        return false;
+    };
+    let Some(slice) = four(&slice_values) else {
+        return false;
+    };
+    let source_width = image.width() as f32;
+    let source_height = image.height() as f32;
+    let mut source = Four {
+        top: source_slice(&slice.top, source_height),
+        right: source_slice(&slice.right, source_width),
+        bottom: source_slice(&slice.bottom, source_height),
+        left: source_slice(&slice.left, source_width),
+    };
+    fit_opposing(&mut source.left, &mut source.right, source_width);
+    fit_opposing(&mut source.top, &mut source.bottom, source_height);
+    let Some(width_values) = nine_slice_lengths(style, properties.width) else {
+        return false;
+    };
+    let Some(outset_values) = nine_slice_lengths(style, properties.outset) else {
+        return false;
+    };
+    let Some(width_values) = four(&width_values) else {
+        return false;
+    };
+    let Some(outset_values) = four(&outset_values) else {
+        return false;
+    };
+    let outset = Four {
+        top: border_image_outset(&outset_values.top, border.top),
+        right: border_image_outset(&outset_values.right, border.right),
+        bottom: border_image_outset(&outset_values.bottom, border.bottom),
+        left: border_image_outset(&outset_values.left, border.left),
+    };
+    let area = Rect {
+        x: border_box.x - outset.left,
+        y: border_box.y - outset.top,
+        width: border_box.width + outset.left + outset.right,
+        height: border_box.height + outset.top + outset.bottom,
+    };
+    let mut widths = Four {
+        top: border_image_width(&width_values.top, border.top, area.height, source.top),
+        right: border_image_width(&width_values.right, border.right, area.width, source.right),
+        bottom: border_image_width(
+            &width_values.bottom,
+            border.bottom,
+            area.height,
+            source.bottom,
+        ),
+        left: border_image_width(&width_values.left, border.left, area.width, source.left),
+    };
+    fit_opposing(&mut widths.left, &mut widths.right, area.width);
+    fit_opposing(&mut widths.top, &mut widths.bottom, area.height);
+    let Some(repeat) = nine_slice_repeat(style, properties.repeat) else {
+        return false;
+    };
+    let repeat_x = repeat.first().copied().unwrap_or(NineSliceRepeat::Stretch);
+    let repeat_y = repeat.get(1).copied().unwrap_or(repeat_x);
+    let sx = [0.0, source.left, source_width - source.right, source_width];
+    let sy = [
+        0.0,
+        source.top,
+        source_height - source.bottom,
+        source_height,
+    ];
+    let dx = [
+        area.x,
+        area.x + widths.left,
+        area.x + area.width - widths.right,
+        area.x + area.width,
+    ];
+    let dy = [
+        area.y,
+        area.y + widths.top,
+        area.y + area.height - widths.bottom,
+        area.y + area.height,
+    ];
+    for row in 0..3 {
+        for column in 0..3 {
+            if row == 1 && column == 1 && !fill {
+                continue;
+            }
+            let source_rect = Rect {
+                x: sx[column],
+                y: sy[row],
+                width: (sx[column + 1] - sx[column]).max(0.0),
+                height: (sy[row + 1] - sy[row]).max(0.0),
+            };
+            let destination = Rect {
+                x: dx[column],
+                y: dy[row],
+                width: (dx[column + 1] - dx[column]).max(0.0),
+                height: (dy[row + 1] - dy[row]).max(0.0),
+            };
+            let tile_x = if column == 1 {
+                repeat_x
+            } else {
+                NineSliceRepeat::Stretch
+            };
+            let tile_y = if row == 1 {
+                repeat_y
+            } else {
+                NineSliceRepeat::Stretch
+            };
+            draw_tiled_region(
+                canvas,
+                &image,
+                source_rect,
+                destination,
+                tile_x,
+                tile_y,
+                clip,
+            );
+        }
+    }
+    true
+}
+
+pub(super) fn apply_mask_border_alpha(
+    canvas: &mut Canvas,
+    style: &ComputedStyle,
+    border_box: Rect,
+) -> bool {
+    if !matches!(
+        style.get_by_id(PropertyId::MaskBorderSource),
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
+            if !value.eq_ignore_ascii_case("none")
+    ) {
+        return false;
+    }
+    let border = EdgeSizesForPaint::from_style(style);
+    let mut mask = Canvas::new(canvas.width(), canvas.height());
+    if !paint_nine_slice_image(
+        &mut mask,
+        style,
+        MASK_BORDER_PROPERTIES,
+        border_box,
+        Four {
+            top: border.top,
+            right: border.right,
+            bottom: border.bottom,
+            left: border.left,
+        },
+        None,
+    ) {
+        return false;
+    }
+    let luminance = matches!(
+        style.get_by_id(PropertyId::MaskBorderMode),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("luminance")
+    );
+    for (destination, source) in canvas
+        .pixels
+        .chunks_exact_mut(4)
+        .zip(mask.pixels.chunks_exact(4))
+    {
+        let alpha = if luminance {
+            let lightness = (u32::from(source[0]) * 2126
+                + u32::from(source[1]) * 7152
+                + u32::from(source[2]) * 722
+                + 5_000)
+                / 10_000;
+            (lightness * u32::from(source[3]) / 255) as u8
+        } else {
+            source[3]
+        };
+        destination[3] = ((u16::from(destination[3]) * u16::from(alpha) + 127) / 255) as u8;
+    }
+    true
 }
 
 pub(crate) fn has_solid_border_side(style: &ComputedStyle, side: &str) -> bool {

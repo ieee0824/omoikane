@@ -9,7 +9,8 @@ pub(super) fn read_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let style = resolve_native_computed_style(args, true, true, context)?;
+    let node_id = parse_node_id(args.first(), context)?;
+    let style = resolve_native_computed_style(node_id, args, true, true, context)?;
     let operation = args.get(2).and_then(JsValue::as_string);
     match operation
         .as_ref()

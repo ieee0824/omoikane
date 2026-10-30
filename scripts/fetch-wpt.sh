@@ -238,6 +238,26 @@ collect_pattern \
 collect_pattern "/css/css-overflow/parsing/line-clamp-valid.html"
 collect_pattern "/css/css-overflow/parsing/line-clamp-invalid.html"
 collect_pattern "/css/css-overflow/parsing/webkit-line-clamp-valid.html"
+collect_pattern \
+  "/css/css-backgrounds/parsing/border-image-valid.html" \
+  "/css/css-backgrounds/parsing/border-image-invalid.html" \
+  "/css/css-backgrounds/parsing/border-image-shorthand.sub.html" \
+  "/css/css-backgrounds/parsing/border-image-source-valid.html" \
+  "/css/css-backgrounds/parsing/border-image-source-invalid.html" \
+  "/css/css-backgrounds/parsing/border-image-source-computed.sub.html" \
+  "/css/css-backgrounds/parsing/border-image-slice-valid.html" \
+  "/css/css-backgrounds/parsing/border-image-slice-invalid.html" \
+  "/css/css-backgrounds/parsing/border-image-slice-computed.html" \
+  "/css/css-backgrounds/parsing/border-image-width-valid.html" \
+  "/css/css-backgrounds/parsing/border-image-width-invalid.html" \
+  "/css/css-backgrounds/parsing/border-image-width-computed.html" \
+  "/css/css-backgrounds/parsing/border-image-outset-valid.html" \
+  "/css/css-backgrounds/parsing/border-image-outset-invalid.html" \
+  "/css/css-backgrounds/parsing/border-image-outset-computed.html" \
+  "/css/css-backgrounds/parsing/border-image-repeat-valid.html" \
+  "/css/css-backgrounds/parsing/border-image-repeat-invalid.html" \
+  "/css/css-backgrounds/parsing/border-image-repeat-computed.html" \
+  "/css/support/parsing-testcommon.js"
 collect_pattern "/css/css-overflow/parsing/webkit-line-clamp-invalid.html"
 collect_pattern "/css/css-overflow/parsing/webkit-line-clamp-computed.html"
 collect_pattern "/css/css-text/parsing/text-align-last-valid.html"

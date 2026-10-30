@@ -1,0 +1,21 @@
+{
+  "captured_at": "2026-10-30",
+  "viewport": [500, 300],
+  "device_pixel_ratio": 1,
+  "firefox": {
+    "version": "159.0",
+    "geckodriver": "0.37.1",
+    "repeat_sha256": "daf5b884d92b3ab1f0e4a25f1bf9f519738946bbe79569cd1ded8ba01e56db50"
+  },
+  "omoikane": {
+    "library_sha256": "3c9ee9ba25b83d3c3a5e049a380e94da04b0eb54dc7d253464f0f2449a61dabc",
+    "repeat_sha256": "1b3542dfff50a5febb0e2e5fe9c0c781d063de8dce84cf3bfa91d6a719f58821"
+  },
+  "geometry": "all probed border boxes match",
+  "changed_pixels": 27509,
+  "normalized_mae": 0.063336,
+  "notes": [
+    "Repeat phase and edge clipping differ visibly.",
+    "Firefox 159 does not apply the unprefixed mask-border sample."
+  ]
+}

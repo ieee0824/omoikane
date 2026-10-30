@@ -1050,6 +1050,10 @@ export const __omoikane_service_worker_lifecycle = {};
     "border-block-end-width", "border-inline-width", "border-block-width",
     "border-inline", "border-block", "border-inline-start", "border-inline-end",
     "border-block-start", "border-block-end",
+    "border-image", "border-image-source", "border-image-slice", "border-image-width",
+    "border-image-outset", "border-image-repeat",
+    "mask-border", "mask-border-source", "mask-border-slice", "mask-border-width",
+    "mask-border-outset", "mask-border-repeat", "mask-border-mode",
     "border-inline-start-style", "border-inline-end-style", "border-block-start-style",
     "border-block-end-style", "border-inline-style", "border-block-style",
     "border-inline-start-color", "border-inline-end-color", "border-block-start-color",
@@ -1143,6 +1147,14 @@ export const __omoikane_service_worker_lifecycle = {};
     "border-block": [
       "border-block-start-width", "border-block-start-style", "border-block-start-color",
       "border-block-end-width", "border-block-end-style", "border-block-end-color",
+    ],
+    "border-image": [
+      "border-image-source", "border-image-slice", "border-image-width",
+      "border-image-outset", "border-image-repeat",
+    ],
+    "mask-border": [
+      "mask-border-source", "mask-border-slice", "mask-border-width",
+      "mask-border-outset", "mask-border-repeat", "mask-border-mode",
     ],
     "columns": ["column-width", "column-count"],
     "column-rule": ["column-rule-width", "column-rule-style", "column-rule-color"],
@@ -1245,6 +1257,21 @@ export const __omoikane_service_worker_lifecycle = {};
       if (trim === "none" && edge === "auto") return "normal";
       if (trim === "trim-both") return edge === "auto" ? "trim-both" : edge;
       return edge === "auto" ? trim : trim + " " + edge;
+    }
+    if (kebab === "border-image" || kebab === "mask-border") {
+      if (parts.some(value => !value)) return "";
+      if (longhands.some(name => priorities.get(name) !== priorities.get(longhands[0]))) return "";
+      if (parts.some(value => /^(initial|inherit|unset|revert|revert-layer)$/.test(value))) {
+        return parts.every(value => value === parts[0]) ? parts[0] : "";
+      }
+      const [source, slice, width, outset, repeat, mode] = parts;
+      if (kebab === "border-image" && width === "1" && outset === "0" && repeat === "stretch") {
+        if (slice === "100%") return source;
+        if (source === "none" && !slice.includes(" ")) return slice;
+        return source + " " + slice;
+      }
+      return source + " " + slice + " / " + width + " / " + outset + " " + repeat +
+        (mode ? " " + mode : "");
     }
     if (logicalBoxStyleProperties.has(kebab)) {
       if (longhands.some(name => priorities.get(name) !== priorities.get(longhands[0]))) return "";
@@ -4280,8 +4307,7 @@ export const __omoikane_service_worker_lifecycle = {};
                      !nativeStyleSupports(declaration.name, declaration.value)) {
             continue;
           }
-          if (logicalBoxStyleProperties.has(declaration.name) &&
-              styleShorthandLonghands[declaration.name]) {
+          if (styleShorthandLonghands[declaration.name]) {
             for (const [name, value] of JSON.parse(__omoikane_expand_style_shorthand(
               declaration.name, declaration.value
             ))) normalized.push({ name, value, priority: declaration.priority });
@@ -4325,12 +4351,14 @@ export const __omoikane_service_worker_lifecycle = {};
       // Later declarations win, matching the inline cascade.
       const getValue = (kebab) => {
         const decls = parseDecls();
-        if (logicalBoxStyleProperties.has(kebab) || kebab === "text-wrap" ||
+        if (styleShorthandLonghands[kebab] &&
+            (logicalBoxStyleProperties.has(kebab) || kebab === "text-wrap" ||
             kebab === "line-clamp" || kebab === "-webkit-line-clamp" ||
             kebab === "text-box" ||
             kebab === "inset" || kebab.startsWith("inset-") ||
             kebab === "border-inline" || kebab.startsWith("border-inline-") ||
-            kebab === "border-block" || kebab.startsWith("border-block-")) {
+            kebab === "border-block" || kebab.startsWith("border-block-") ||
+            kebab === "border-image" || kebab === "mask-border")) {
           const shorthand = logicalShorthandValue(kebab, decls);
           if (shorthand !== null) return shorthand;
         }
@@ -4357,9 +4385,7 @@ export const __omoikane_service_worker_lifecycle = {};
       };
       const getPriority = (kebab) => {
         const decls = parseDecls();
-        const longhands = (logicalBoxStyleProperties.has(kebab) || kebab === "text-wrap" ||
-          kebab === "line-clamp" || kebab === "-webkit-line-clamp" || kebab === "text-box") &&
-          styleShorthandLonghands[kebab];
+        const longhands = styleShorthandLonghands[kebab];
         if (longhands) {
           if (!logicalShorthandValue(kebab, decls)) return "";
           for (let i = decls.length - 1; i >= 0; i--) {
@@ -4426,7 +4452,7 @@ export const __omoikane_service_worker_lifecycle = {};
         const remaining = decls.filter(d => !removed.has(d.name));
         if (remaining.length === decls.length) return "";
         let old = "";
-        if ((logicalBoxStyleProperties.has(kebab) || kebab === "text-wrap") && longhands.length) {
+        if (longhands.length) {
           old = logicalShorthandValue(kebab, decls) || "";
         }
         for (let i = decls.length - 1; i >= 0; i--) {

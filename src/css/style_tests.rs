@@ -172,6 +172,124 @@ fn text_shadow_accepts_lists_and_rejects_inset_spread_and_negative_blur() {
 }
 
 #[test]
+fn nine_slice_longhands_validate_and_compute_owned_components() {
+    for (property, valid) in [
+        ("border-image-source", "url(frame.png)"),
+        ("border-image-slice", "10 20% 30 40% fill"),
+        ("border-image-width", "auto 2 25% 2em"),
+        ("border-image-outset", "0 1px 2 3em"),
+        ("border-image-repeat", "round space"),
+        ("mask-border-mode", "luminance"),
+    ] {
+        assert!(supports_declaration(property, valid), "{property}: {valid}");
+    }
+    for (property, invalid) in [
+        ("border-image-slice", "fill"),
+        ("border-image-slice", "-1 fill"),
+        ("border-image-slice", "1 2 3 4 5"),
+        ("border-image-width", "-1px"),
+        ("border-image-width", "auto auto auto auto auto"),
+        ("border-image-outset", "10%"),
+        ("border-image-repeat", "round space repeat"),
+        ("mask-border-mode", "match-source"),
+    ] {
+        assert!(
+            !supports_declaration(property, invalid),
+            "{property}: {invalid}"
+        );
+    }
+
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "border-image-slice:10 20% 30 40% fill;\
+         border-image-width:auto 2 25% 2em;\
+         border-image-outset:0 1px 2 3em;\
+         border-image-repeat:round space;\
+         mask-border-mode:luminance",
+    );
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(
+        style.get("border-image-slice").unwrap().css_text(),
+        "10 20% 30 40% fill"
+    );
+    assert_eq!(
+        style.get("border-image-width").unwrap().css_text(),
+        "auto 2 25% 32px"
+    );
+    assert_eq!(
+        style.get("border-image-outset").unwrap().css_text(),
+        "0 1px 2 48px"
+    );
+    assert_eq!(
+        style.get("border-image-repeat").unwrap().css_text(),
+        "round space"
+    );
+    assert_eq!(
+        style.get("mask-border-mode").unwrap().css_text(),
+        "luminance"
+    );
+}
+
+#[test]
+fn nine_slice_shorthands_expand_slash_groups_and_reset_omitted_values() {
+    for (property, valid) in [
+        (
+            "border-image",
+            "linear-gradient(red, blue) 10 fill / 2 / 3 round space",
+        ),
+        ("border-image", "linear-gradient(red, blue)"),
+        (
+            "mask-border",
+            "linear-gradient(black, transparent) 20% / auto / 2 repeat luminance",
+        ),
+    ] {
+        assert!(supports_declaration(property, valid), "{property}: {valid}");
+    }
+    for (property, invalid) in [
+        ("border-image", "linear-gradient(red, blue) / 2"),
+        ("border-image", "10 /"),
+        ("border-image", "10 / 2 /"),
+        ("border-image", "10 round space repeat"),
+        ("mask-border", "10 alpha luminance"),
+    ] {
+        assert!(
+            !supports_declaration(property, invalid),
+            "{property}: {invalid}"
+        );
+    }
+
+    let element = NodeHandle::element("div");
+    element.set_attribute(
+        "style",
+        "border-image:linear-gradient(red, blue) 10 fill / 2 / 3 round space;\
+         mask-border:linear-gradient(black, transparent) 20% / auto / 2 repeat luminance",
+    );
+    let style = StyleResolver::new().computed_style(&element);
+    assert_eq!(
+        style.get("border-image-slice").unwrap().css_text(),
+        "10 fill"
+    );
+    assert_eq!(style.get("border-image-width").unwrap().css_text(), "2");
+    assert_eq!(style.get("border-image-outset").unwrap().css_text(), "3");
+    assert_eq!(
+        style.get("border-image-repeat").unwrap().css_text(),
+        "round space"
+    );
+    assert_eq!(style.get("mask-border-slice").unwrap().css_text(), "20%");
+    assert_eq!(style.get("mask-border-width").unwrap().css_text(), "auto");
+    assert_eq!(style.get("mask-border-outset").unwrap().css_text(), "2");
+    assert_eq!(
+        style.get("mask-border-repeat").unwrap().css_text(),
+        "repeat"
+    );
+    assert_eq!(
+        style.get("mask-border-mode").unwrap().css_text(),
+        "luminance"
+    );
+}
+
+#[test]
 fn shared_paint_style_preserves_owned_cssom_and_retained_snapshots() {
     let node = NodeHandle::element("div");
     node.set_attribute("style", "width: 10px; color: red");
