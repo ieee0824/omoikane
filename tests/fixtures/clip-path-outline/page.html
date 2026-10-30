@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Clip path, paint order, and outline comparison</title>
+<style>
+  * { box-sizing: border-box }
+  html, body { margin: 0; background: white; font: 16px sans-serif }
+  main { display: grid; grid-template-columns: repeat(4, 130px); gap: 28px 34px; padding: 28px }
+  .tile { width: 130px; height: 100px; background: #168aad }
+  #path { clip-path: path(evenodd, "M0 0 H130 V100 H0 Z M35 25 H95 V75 H35 Z") }
+  #shape { clip-path: shape(from 0 100%, curve to 100% 100% with 15% 0 / 85% 0, close) }
+  #arc { clip-path: shape(from 15% 50%, arc to 85% 50% of 35% 45% cw large, line to 85% 100%, line to 15% 100%, close) }
+  #xywh { clip-path: xywh(15% 15% 70% 70% round 14px) }
+  .outlined { width: 130px; height: 70px; border-radius: 18px; background: #ffe066; outline-width: 6px; outline-color: #9d0208 }
+  #dashed { outline-style: dashed }
+  #dotted { outline-style: dotted }
+  #double { outline-style: double }
+  #negative { outline: 6px solid #9d0208; outline-offset: -12px; border-radius: 34px }
+  #inline { width: 130px; line-height: 25px; color: #111 }
+  #inline span { outline: 3px dashed #6a00f4; background: #e0aaff }
+  input { width: 130px; height: 42px; border: 2px solid #333; border-radius: 10px; outline: 5px auto #0077b6; outline-offset: 4px }
+  .paint-order { width: 130px; height: 70px; font: bold 52px/70px sans-serif; text-align: center; color: #ffd60a; -webkit-text-fill-color: #ffd60a; -webkit-text-stroke-width: 5px; -webkit-text-stroke-color: #003566 }
+  #fill-first { paint-order: fill stroke }
+  #stroke-first { paint-order: stroke fill }
+</style>
+<main>
+  <div id="path" class="tile" data-probe></div>
+  <div id="shape" class="tile" data-probe></div>
+  <div id="arc" class="tile" data-probe></div>
+  <div id="xywh" class="tile" data-probe></div>
+  <div id="dashed" class="outlined" data-probe></div>
+  <div id="dotted" class="outlined" data-probe></div>
+  <div id="double" class="outlined" data-probe></div>
+  <div id="negative" class="outlined" data-probe></div>
+  <div id="inline" data-probe><span>multiline inline outline sample</span></div>
+  <input aria-label="outlined form control" data-probe value="control">
+  <div id="fill-first" class="paint-order" data-probe>A</div>
+  <div id="stroke-first" class="paint-order" data-probe>A</div>
+</main>

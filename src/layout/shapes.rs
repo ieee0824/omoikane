@@ -159,6 +159,7 @@ fn basic_shape_band_bounds(
             rounded_rect_band_bounds(*rect, *radii, y0, y1, margin)
         }
         ClipPathShape::Polygon { points, .. } => polygon_band_bounds(points, y0, y1, margin),
+        ClipPathShape::Path { bounds, .. } => rect_band_bounds(*bounds, y0, y1, margin),
     }
 }
 
@@ -179,6 +180,7 @@ fn basic_shape_column_bounds(
             rounded_rect_column_bounds(*rect, *radii, x0, x1, margin)
         }
         ClipPathShape::Polygon { points, .. } => polygon_column_bounds(points, x0, x1, margin),
+        ClipPathShape::Path { bounds, .. } => rect_column_bounds(*bounds, x0, x1, margin),
     }
 }
 

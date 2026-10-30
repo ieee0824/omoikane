@@ -16,9 +16,9 @@ use crate::font::{
 };
 use crate::layout::{
     FragmentStyle, InlineFragmentContent, LayoutBox, LineBox, ListMarker, MeterRegion, Rect,
-    TextOrientation, ValueIndicatorPaintState, fragment_autospace_boundary_offsets,
-    fragment_autospace_pair_applies, fragment_french_autospace_boundaries,
-    fragment_french_autospace_pair, text_is_combined_upright,
+    TextOrientation, TextPaintLayer, TextPaintOrder, ValueIndicatorPaintState,
+    fragment_autospace_boundary_offsets, fragment_autospace_pair_applies,
+    fragment_french_autospace_boundaries, fragment_french_autospace_pair, text_is_combined_upright,
 };
 use unicode_bidi::{BidiClass, BidiInfo, Level, bidi_class};
 use unicode_segmentation::UnicodeSegmentation;
@@ -430,7 +430,7 @@ pub(super) fn paint_text_with_context(
                     } else {
                         Vec::new()
                     };
-                    let (frag_color, vertical_mode) = paint_text_fragment_glyphs(
+                    let (frag_color, vertical_mode) = paint_ordered_text_fragment_glyphs(
                         canvas,
                         fragment,
                         fragment_rect,
@@ -566,6 +566,7 @@ pub(super) fn paint_text_with_context(
                         height: (*height).min(content_rect.height),
                     };
                     canvas.draw_image_scaled_clipped(image, image_rect, clip);
+                    super::outline::paint_outline(canvas, style, fragment_rect, clip);
                 }
             }
         }
@@ -843,6 +844,168 @@ fn paint_current_inline_image(
 /// paints its glyphs, falling back to placeholder rectangles when no font is
 /// available. Returns the fragment's paint color and vertical writing mode
 /// so the caller can paint the fragment's text decorations against them.
+#[allow(clippy::too_many_arguments)]
+fn paint_ordered_text_fragment_glyphs(
+    canvas: &mut Canvas,
+    fragment: &crate::layout::InlineFragment,
+    fragment_rect: Rect,
+    text: &str,
+    resolver: &mut crate::css::StyleResolver,
+    fallback_color: Color,
+    fonts: &[Arc<Font>],
+    web_fonts: Option<&WebFontRegistry>,
+    clip: Option<Rect>,
+    override_color: Option<Color>,
+) -> (Color, Option<VerticalPaintMode>) {
+    let ordinary = fragment_paint_color(fragment, resolver, fallback_color);
+    let paint_style = fragment_box_paint_style(fragment, resolver);
+    let value = |id: PropertyId| {
+        paint_style
+            .as_deref()
+            .and_then(|style| style.get_by_id(id))
+            .map(ComputedValue::css_text)
+    };
+    let used_color = |value: Option<String>, captured: Option<&str>| {
+        value
+            .as_deref()
+            .or(captured)
+            .filter(|value| !value.eq_ignore_ascii_case("currentcolor"))
+            .and_then(parse_color)
+            .unwrap_or(ordinary)
+    };
+    let fill = override_color.unwrap_or_else(|| {
+        used_color(
+            value(PropertyId::WebkitTextFillColor),
+            fragment.style.text_fill_color.as_deref(),
+        )
+    });
+    let stroke = used_color(
+        value(PropertyId::WebkitTextStrokeColor),
+        fragment.style.text_stroke_color.as_deref(),
+    );
+    let stroke_width = paint_style
+        .as_deref()
+        .and_then(|style| length_property(style, "-webkit-text-stroke-width"))
+        .unwrap_or(fragment.style.text_stroke_width)
+        .max(0.0);
+    let paint_order = paint_style
+        .as_deref()
+        .and_then(|style| style.get_by_id(PropertyId::PaintOrder))
+        .map(ComputedValue::css_text)
+        .map(|value| TextPaintOrder::from_computed(Some(&value)))
+        .unwrap_or(fragment.style.paint_order);
+    if stroke_width == 0.0 || stroke.a == 0 {
+        return paint_text_fragment_glyphs(
+            canvas,
+            fragment,
+            fragment_rect,
+            text,
+            resolver,
+            fallback_color,
+            fonts,
+            web_fonts,
+            clip,
+            Some(fill),
+        );
+    }
+
+    let mut mask = Canvas::new(canvas.width(), canvas.height());
+    let (_, vertical_mode) = paint_text_fragment_glyphs(
+        &mut mask,
+        fragment,
+        fragment_rect,
+        text,
+        resolver,
+        fallback_color,
+        fonts,
+        web_fonts,
+        clip,
+        Some(Color::rgb(255, 255, 255)),
+    );
+    let force_mask = super::FORCE_TEXT_MASK.with(std::cell::Cell::get);
+    let fill = force_mask
+        .then_some(Color::rgb(255, 255, 255))
+        .unwrap_or(fill);
+    let stroke = force_mask
+        .then_some(Color::rgb(255, 255, 255))
+        .unwrap_or(stroke);
+    composite_text_fill_and_stroke(canvas, &mask, fill, stroke, stroke_width, paint_order);
+    (fill, vertical_mode)
+}
+
+fn composite_text_fill_and_stroke(
+    canvas: &mut Canvas,
+    mask: &Canvas,
+    fill: Color,
+    stroke: Color,
+    stroke_width: f32,
+    order: TextPaintOrder,
+) {
+    let width = mask.width() as i32;
+    let height = mask.height() as i32;
+    let radius = (stroke_width / 2.0).ceil().max(1.0) as i32;
+    let mut bounds = None::<(i32, i32, i32, i32)>;
+    for y in 0..height {
+        for x in 0..width {
+            if mask.pixels[((y * width + x) * 4 + 3) as usize] == 0 {
+                continue;
+            }
+            bounds = Some(match bounds {
+                Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1)),
+                None => (x, y, x + 1, y + 1),
+            });
+        }
+    }
+    let Some((x0, y0, x1, y1)) = bounds else {
+        return;
+    };
+    let x0 = (x0 - radius).max(0);
+    let y0 = (y0 - radius).max(0);
+    let x1 = (x1 + radius).min(width);
+    let y1 = (y1 + radius).min(height);
+    for layer in order.layers() {
+        if layer == TextPaintLayer::Markers {
+            continue;
+        }
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let center = mask.pixels[((y * width + x) * 4 + 3) as usize];
+                let (color, alpha) = match layer {
+                    TextPaintLayer::Fill => (fill, center),
+                    TextPaintLayer::Stroke => {
+                        let mut maximum = 0u8;
+                        let mut minimum = u8::MAX;
+                        for sample_y in y - radius..=y + radius {
+                            for sample_x in x - radius..=x + radius {
+                                let alpha = if sample_x >= 0
+                                    && sample_y >= 0
+                                    && sample_x < width
+                                    && sample_y < height
+                                {
+                                    mask.pixels[((sample_y * width + sample_x) * 4 + 3) as usize]
+                                } else {
+                                    0
+                                };
+                                maximum = maximum.max(alpha);
+                                minimum = minimum.min(alpha);
+                            }
+                        }
+                        (stroke, maximum.saturating_sub(minimum))
+                    }
+                    TextPaintLayer::Markers => unreachable!(),
+                };
+                if alpha == 0 {
+                    continue;
+                }
+                let mut color = color;
+                color.a = ((u16::from(color.a) * u16::from(alpha) + 127) / 255) as u8;
+                let index = ((y * width + x) * 4) as usize;
+                super::blend_pixel(&mut canvas.pixels[index..index + 4], color);
+            }
+        }
+    }
+}
+
 fn paint_text_fragment_glyphs(
     canvas: &mut Canvas,
     fragment: &crate::layout::InlineFragment,
@@ -1346,6 +1509,9 @@ fn paint_form_control_background(
 ) {
     let border = EdgeSizesForPaint::from_style(style);
     if paint_native_input_control(canvas, fragment, fragment_rect, style, clip) {
+        if fragment.node.identity() != layout.node.identity() {
+            super::outline::paint_outline(canvas, style, fragment_rect, clip);
+        }
         return;
     }
     // A block control's owning LayoutBox already painted its
@@ -1357,6 +1523,7 @@ fn paint_form_control_background(
         if border.total_horizontal() > 0.0 || border.total_vertical() > 0.0 {
             paint_rect_borders(canvas, fragment_rect, style, border, clip);
         }
+        super::outline::paint_outline(canvas, style, fragment_rect, clip);
     }
 }
 

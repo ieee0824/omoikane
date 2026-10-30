@@ -996,6 +996,13 @@
     {"path": "uievents/constructors/inputevent-constructor.html"},
     {"path": "clipboard-apis/clipboard-events-synthetic.html"},
     {"path": "clipboard-apis/clipboard-item.https.html"},
-    {"path": "clipboard-apis/events/copy-event.html"}
+    {"path": "clipboard-apis/events/copy-event.html"},
+    {"path": "css/css-masking/parsing/clip-path-valid.html"},
+    {"path": "css/css-masking/parsing/clip-path-invalid.html"},
+    {"path": "css/css-masking/parsing/clip-path-computed.html"},
+    {"path": "css/css-masking/parsing/clip-path-shape-parsing.html"},
+    {"path": "svg/painting/parsing/paint-order-valid.svg"},
+    {"path": "svg/painting/parsing/paint-order-invalid.svg"},
+    {"path": "svg/painting/parsing/paint-order-computed.svg"}
   ]
 }
