@@ -31911,12 +31911,16 @@ fn dialog_show_modal_close_moves_and_restores_focus() {
                   document.activeElement.id,
                 ].join(":");
                 dialog.close("accepted");
+                globalThis.dialogLog = log;
+                // The close event is queued as a task.
                 return opened + "|" + log.join("|") + "|" + dialog.open;
             })()"#,
     );
+    assert_eq!(result, "true:true:inside||false");
+    runtime.run_until_idle().unwrap();
     assert_eq!(
-        result,
-        "true:true:inside|close:false:false:accepted:before|false"
+        eval_str(&mut runtime, "dialogLog.join('|')"),
+        "close:false:false:accepted:before"
     );
 }
 
@@ -31925,13 +31929,13 @@ fn dialog_escape_cancels_only_the_top_modal_and_honors_prevent_default() {
     let mut runtime = runtime_from_html(
         r#"<html><body><button id="before">before</button><dialog id="outer"><button id="outerButton">outer</button></dialog><dialog id="inner"><button id="innerButton">inner</button></dialog></body></html>"#,
     );
-    let result = eval_str(
+    eval_str(
         &mut runtime,
         r#"(() => {
                 const before = document.getElementById("before");
                 const outer = document.getElementById("outer");
                 const inner = document.getElementById("inner");
-                const log = [];
+                const log = globalThis.dialogLog = [];
                 before.focus();
                 outer.addEventListener("cancel", () => log.push("outer-cancel"));
                 outer.addEventListener("close", () => log.push("outer-close"));
@@ -31940,16 +31944,37 @@ fn dialog_escape_cancels_only_the_top_modal_and_honors_prevent_default() {
                   if (!inner.dataset.allowed) event.preventDefault();
                 });
                 inner.addEventListener("close", () => log.push("inner-close"));
+                // User activation separates the dialogs' close watcher groups and
+                // grants the history-action activation that lets cancel block.
+                const activate = () =>
+                  __omoikane_dispatch_keyboard_input("keydown", { key: "Control", code: "ControlLeft" });
                 outer.showModal();
+                activate();
                 inner.showModal();
+                activate();
                 __omoikane_dispatch_keyboard_input("keydown", { key: "Escape", code: "Escape" });
                 log.push("blocked=" + inner.open + ":" + document.activeElement.id);
                 inner.dataset.allowed = "yes";
                 __omoikane_dispatch_keyboard_input("keydown", { key: "Escape", code: "Escape" });
-                log.push("inner=" + inner.open + ":" + document.activeElement.id);
+                return "";
+            })()"#,
+    );
+    // Close events are queued, so run them before observing each step.
+    runtime.run_until_idle().unwrap();
+    eval_str(
+        &mut runtime,
+        r#"(() => {
+                dialogLog.push("inner=" + document.getElementById("inner").open + ":" + document.activeElement.id);
                 __omoikane_dispatch_keyboard_input("keydown", { key: "Escape", code: "Escape" });
-                log.push("outer=" + outer.open + ":" + document.activeElement.id);
-                return log.join("|");
+                return "";
+            })()"#,
+    );
+    runtime.run_until_idle().unwrap();
+    let result = eval_str(
+        &mut runtime,
+        r#"(() => {
+                dialogLog.push("outer=" + document.getElementById("outer").open + ":" + document.activeElement.id);
+                return dialogLog.join("|");
             })()"#,
     );
     assert_eq!(

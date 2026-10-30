@@ -29,6 +29,16 @@ collect_pattern \
 collect_pattern "/resources/" "/html/resources/common.js" "/shadow-dom/resources/event-path-test-helpers.js" "/shadow-dom/Element-interface-attachShadow.html" "/shadow-dom/Element-interface-shadowRoot-attribute.html" "/shadow-dom/HTMLSlotElement-interface.html" "/shadow-dom/Slottable-mixin.html" "/shadow-dom/Extensions-to-Event-Interface.html" "/shadow-dom/event-inside-shadow-tree.html" "/shadow-dom/event-inside-slotted-node.html" "/custom-elements/registries/upgrade.html" "/custom-elements/connected-callbacks-template.html" "/dom/nodes/Element-childElement-null.html" "/dom/nodes/Element-childElementCount-nochild.html" "/dom/nodes/Node-isConnected.html" "/dom/nodes/Element-childElementCount.html" "/dom/nodes/Element-childElementCount-dynamic-add.html" "/dom/nodes/Element-childElementCount-dynamic-remove.html" "/dom/nodes/CharacterData-remove.html" "/dom/nodes/ChildNode-remove.js" "/dom/nodes/Element-remove.html" "/dom/nodes/DocumentType-remove.html" "/dom/nodes/Text-splitText.html" "/dom/nodes/CharacterData-data.html" "/dom/nodes/CharacterData-appendData.html" "/dom/nodes/CharacterData-substringData.html" "/dom/nodes/CharacterData-insertData.html" "/dom/nodes/CharacterData-deleteData.html" "/dom/nodes/CharacterData-replaceData.html" "/dom/nodes/CharacterData-surrogates.html" "/dom/nodes/Node-nodeValue.html" "/dom/nodes/Node-normalize.html" "/dom/nodes/Node-textContent.html" "/dom/nodes/MutationObserver-sanity.html" "/dom/nodes/MutationObserver-callback-arguments.html" "/dom/nodes/MutationObserver-takeRecords.html" "/dom/nodes/MutationObserver-disconnect.html" "/dom/nodes/mutationobservers.js" "/dom/nodes/MutationObserver-attributes.html" "/dom/nodes/MutationObserver-characterData.html"
 collect_pattern "/css/css-overflow/parsing/" "/css/css-scroll-anchoring/parsing/" "/css/css-scrollbars/"
 collect_pattern "/css/css-shadow/shadow-cascade-order-001.html"
+# Close watchers, dialog closedby/requestClose and Invoker Commands (#1297).
+collect_pattern "/close-watcher/" "/html/semantics/the-button-element/command-and-commandfor/" \
+  "/html/semantics/forms/the-button-element/button-click-*-with-commandfor.html" \
+  "/html/semantics/interactive-elements/the-dialog-element/dialog-closedby*" \
+  "/html/semantics/interactive-elements/the-dialog-element/dialog-requestclose*" \
+  "/html/semantics/interactive-elements/the-dialog-element/dialog-popover-closedby*" \
+  "/html/semantics/interactive-elements/the-dialog-element/dialog-light-dismiss*" \
+  "/html/semantics/forms/the-input-element/show-picker*" "/html/semantics/forms/the-input-element/resources/" \
+  "/html/semantics/forms/the-input-element/input-types.js" "/common/top-layer.js" \
+  "/html/semantics/popovers/resources/popover-utils.js"
 collect_pattern \
   "/css/css-color/parsing/color-computed-color-function.html" \
   "/css/css-color/parsing/color-computed-hwb.html" \
