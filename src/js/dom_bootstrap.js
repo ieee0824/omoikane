@@ -21383,6 +21383,20 @@ export const __omoikane_service_worker_lifecycle = {};
     if (locked) return 1;
     return 1 | performScrollBoundaryDefault(target, init.deltaX, init.deltaY);
   };
+  function touchActionAllowsDefault(target, deltaX, deltaY) {
+    let allowX = true, allowY = true;
+    for (let current = target; current; current = internalParentNode(current)) {
+      if (internalNodeType(current) !== 1) continue;
+      const action = platformGetComputedStyleForInnerText(current).touchAction;
+      if (action === "none") return false;
+      if (action === "auto" || action === "manipulation") continue;
+      const tokens = action.split(/\s+/);
+      allowX &&= tokens.some(token => token === "pan-x" || token === "pan-left" || token === "pan-right");
+      allowY &&= tokens.some(token => token === "pan-y" || token === "pan-up" || token === "pan-down");
+    }
+    const horizontal = Math.abs(Number(deltaX) || 0) > Math.abs(Number(deltaY) || 0);
+    return horizontal ? allowX : allowY;
+  }
   globalThis.__omoikane_dispatch_touch_input = function(id, type, init) {
     const target = wrapNode(id) || document;
     const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
@@ -21420,7 +21434,8 @@ export const __omoikane_service_worker_lifecycle = {};
     });
     const notCanceled = target.dispatchEvent(event);
     if (!notCanceled) return 0;
-    if (type !== "touchmove" || init.defaultAllowed === false) return 1;
+    if (type !== "touchmove" || init.defaultAllowed === false ||
+        !touchActionAllowsDefault(target, init.deltaX, init.deltaY)) return 1;
     return 1 | performScrollBoundaryDefault(target, init.deltaX, init.deltaY);
   };
   globalThis.__omoikane_dispatch_keyboard_input = function(type, init) {
