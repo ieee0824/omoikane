@@ -534,6 +534,15 @@ collect_pattern \
   "/css/css-shapes/parsing/shape-margin-computed.html" \
   "/css/support/parsing-testcommon.js" \
   "/css/support/computed-testcommon.js"
+# CSS Masking/Fill and Stroke coverage for Issue #1552.
+collect_pattern \
+  "/css/css-masking/parsing/clip-path-valid.html" \
+  "/css/css-masking/parsing/clip-path-invalid.html" \
+  "/css/css-masking/parsing/clip-path-computed.html" \
+  "/css/css-masking/parsing/clip-path-shape-parsing.html" \
+  "/svg/painting/parsing/paint-order-valid.svg" \
+  "/svg/painting/parsing/paint-order-invalid.svg" \
+  "/svg/painting/parsing/paint-order-computed.svg"
 collect_pattern \
   "/storage/storagemanager-estimate.https.any.js" \
   "/storage/storagemanager-persisted.https.any.js" \
