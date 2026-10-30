@@ -21177,6 +21177,41 @@ export const __omoikane_service_worker_lifecycle = {};
     return false;
   };
 
+  const nativeResizeGetBoundingClientRect = Element.prototype.getBoundingClientRect;
+  let nativeResizeDrag = null;
+  function performCssResizeDefault(target, type, init, notCanceled, locked) {
+    if (type === "mouseup") {
+      const active = nativeResizeDrag !== null;
+      nativeResizeDrag = null;
+      return active;
+    }
+    if (locked || !notCanceled) return false;
+    if (type === "mousedown") {
+      nativeResizeDrag = null;
+      if (Number(init.button || 0) !== 0 || !(target instanceof Element)) return false;
+      const style = platformGetComputedStyleForInnerText(target);
+      const resize = style.resize;
+      if (resize === "none" || [style.overflowX, style.overflowY].every(value => value === "visible" || value === "clip")) return false;
+      const rect = safeApply(nativeResizeGetBoundingClientRect, target, []);
+      const handle = 12;
+      if (Number(init.clientX) < rect.right - handle || Number(init.clientY) < rect.bottom - handle) return false;
+      nativeResizeDrag = {
+        target,
+        x: Number(init.clientX), y: Number(init.clientY),
+        width: Number.parseFloat(style.width) || rect.width,
+        height: Number.parseFloat(style.height) || rect.height,
+        horizontal: resize === "both" || resize === "horizontal" || resize === "inline",
+        vertical: resize === "both" || resize === "vertical" || resize === "block",
+      };
+      return true;
+    }
+    if (type !== "mousemove" || !nativeResizeDrag || !(Number(init.buttons) & 1)) return false;
+    const drag = nativeResizeDrag;
+    if (drag.horizontal) drag.target.style.width = Math.max(1, drag.width + Number(init.clientX) - drag.x) + "px";
+    if (drag.vertical) drag.target.style.height = Math.max(1, drag.height + Number(init.clientY) - drag.y) + "px";
+    return true;
+  }
+
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
     const locked = nativePointerLockTarget() !== null;
     if (locked && ["mouseover", "mouseout", "mouseenter", "mouseleave"].includes(type)) return true;
@@ -21230,7 +21265,8 @@ export const __omoikane_service_worker_lifecycle = {};
       try { target.focus(); }
       finally { browsingInput.pointerFocusInProgress = false; }
     }
-    performMouseTextSelection(inputDocument, target, type, init || {}, notCanceled);
+    const resized = performCssResizeDefault(target, type, init || {}, notCanceled, locked);
+    if (!resized) performMouseTextSelection(inputDocument, target, type, init || {}, notCanceled);
     return notCanceled;
   };
   function performScrollBoundaryDefault(target, deltaX, deltaY) {
