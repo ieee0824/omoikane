@@ -20289,6 +20289,9 @@ fn resolve_native_computed_style(
                     "::marker" => Some(PseudoElement::Marker),
                     "::before::marker" => Some(PseudoElement::BeforeMarker),
                     "::after::marker" => Some(PseudoElement::AfterMarker),
+                    "::picker(select)" => Some(PseudoElement::Picker),
+                    "::picker-icon" => Some(PseudoElement::PickerIcon),
+                    "::checkmark" => Some(PseudoElement::Checkmark),
                     _ => return Ok(None),
                 }
             } else {

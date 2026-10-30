@@ -29,6 +29,9 @@ fn wrapped_options_belong_to_the_select() {
         &mut runtime,
         r#"() => {
           const select = document.getElementById('s');
+          const listBox = document.createElement('select');
+          listBox.multiple = true;
+          if (getComputedStyle(listBox, '::picker(select)').length !== 0) return 'list box has no picker';
           const texts = Array.from(select.options, option => option.text).join();
           if (texts !== 'one,two,three') return 'options ' + texts;
           if (select.value !== 'one') return 'value ' + select.value;
@@ -41,6 +44,11 @@ fn wrapped_options_belong_to_the_select() {
           if (wrapped.matches(':disabled')) return 'enabled option';
           optgroup.disabled = true;
           if (!wrapped.matches(':disabled')) return 'optgroup disables wrapped option';
+          optgroup.disabled = false;
+          select.disabled = true;
+          if (!wrapped.matches(':disabled') || !optgroup.matches(':disabled')) return 'select disables options';
+          if (!select.options[0].selected) return 'a disabled select keeps its selection';
+          if (getComputedStyle(select.options[0]).display !== 'block') return 'option display';
           return true;
         }"#,
     );
@@ -129,6 +137,55 @@ fn select_parsing_allows_arbitrary_content() {
           const fragment = document.createElement('select');
           fragment.innerHTML = '<button><selectedcontent></selectedcontent></button><option>z</option>';
           return fragment.querySelector('selectedcontent') !== null || 'fragment keeps button';
+        }"#,
+    );
+}
+
+#[test]
+fn base_appearance_select_uses_html_ua_rules() {
+    let mut runtime = runtime(
+        "<style>select, ::picker(select) { appearance: base-select }</style>\
+         <select id=s><button>b</button><option>one</option>\
+         <optgroup><legend>l</legend><option>two</option></optgroup></select>\
+         <select id=native><button>n</button><option>x</option></select>",
+    );
+    check(
+        &mut runtime,
+        r#"() => {
+          const select = document.getElementById('s');
+          const style = getComputedStyle(select);
+          const expect = (actual, expected, label) =>
+            actual === expected ? null : `${label}: ${actual} !== ${expected}`;
+          const option = select.querySelector('option');
+          const failures = [
+            expect(style.appearance, 'base-select', 'appearance'),
+            expect(style.display, 'inline-flex', 'select display'),
+            expect(style.backgroundColor, 'rgba(0, 0, 0, 0)', 'select background'),
+            expect(style.borderTopLeftRadius, '8px', 'select radius'),
+            expect(style.paddingLeft, '8px', 'select padding'),
+            expect(getComputedStyle(select, '::picker(select)').boxSizing, 'border-box', 'picker'),
+            expect(getComputedStyle(select, '::picker-icon').display, 'block', 'picker-icon'),
+            expect(getComputedStyle(option).display, 'flex', 'option display'),
+            getComputedStyle(option, '::checkmark').visibility === 'hidden' ? 'checked mark hidden' : null,
+            expect(getComputedStyle(option, '::checkmark').content, '"\u2713" / ""', 'checkmark content'),
+            expect(getComputedStyle(select.options[1], '::checkmark').visibility, 'hidden', 'unchecked mark'),
+            expect(getComputedStyle(select.querySelector('optgroup')).fontWeight, '700', 'optgroup'),
+            expect(getComputedStyle(select.options[1]).fontWeight, '400', 'optgroup option'),
+            expect(getComputedStyle(select.querySelector('legend')).display, 'block', 'legend'),
+            expect(getComputedStyle(select.querySelector('button')).display, 'contents', 'button'),
+            expect(CSS.supports('selector(::picker(select))'), true, 'picker selector'),
+            expect(CSS.supports('selector(::picker(input))'), false, 'picker argument'),
+            expect(CSS.supports('selector(::picker(select):hover)'), true, 'user action after picker'),
+            expect(CSS.supports('selector(::picker(select):popover-open)'), false, 'state after picker'),
+            expect(getComputedStyle(document.getElementById('native'), '::picker-icon').display, 'block', 'icon of a drop-down'),
+          ].filter(Boolean);
+          select.disabled = true;
+          if (getComputedStyle(select).cursor !== 'not-allowed') failures.push('disabled cursor');
+          const native = document.getElementById('native');
+          native.style.appearance = 'auto';
+          if (getComputedStyle(native).display !== 'inline-block') failures.push('native display');
+          if (getComputedStyle(native.querySelector('button')).display === 'contents') failures.push('native button');
+          return failures.length ? failures.join('; ') : true;
         }"#,
     );
 }

@@ -74,23 +74,42 @@ fn collect_options(parent: &NodeHandle, inside_optgroup: bool, options: &mut Vec
     }
 }
 
-/// Returns whether an `option` is disabled: by its own attribute, or by the
+/// Returns whether an `option` is disabled: by its own attribute, by the
 /// nearest `optgroup` ancestor reached before any `select`, `hr`, `datalist` or
-/// `option` ancestor.
+/// `option` ancestor, or by its nearest ancestor select.
 pub(crate) fn option_is_disabled(option: &NodeHandle) -> bool {
-    if option.attribute_value_ns(None, "disabled").is_some() {
+    option_or_optgroup_is_disabled(option)
+        || nearest_ancestor_select(option).is_some_and(|select| has_disabled_attribute(&select))
+}
+
+/// The option's own or nearest optgroup's `disabled` attribute. The selectedness
+/// setting algorithm uses this, so a disabled select keeps its selection.
+fn option_or_optgroup_is_disabled(option: &NodeHandle) -> bool {
+    if has_disabled_attribute(option) {
         return true;
     }
     let mut current = option.parent_node();
     while let Some(ancestor) = current {
         match role(&ancestor) {
-            Role::Select | Role::Barrier | Role::Option => return false,
-            Role::Optgroup => return ancestor.attribute_value_ns(None, "disabled").is_some(),
+            Role::Select | Role::Barrier | Role::Option => break,
+            Role::Optgroup if has_disabled_attribute(&ancestor) => return true,
+            Role::Optgroup => break,
             _ => {}
         }
         current = ancestor.parent_node();
     }
     false
+}
+
+/// An `optgroup` is disabled by its own attribute or by its nearest
+/// ancestor select's.
+pub(crate) fn optgroup_is_disabled(optgroup: &NodeHandle) -> bool {
+    has_disabled_attribute(optgroup)
+        || nearest_ancestor_select(optgroup).is_some_and(|select| has_disabled_attribute(&select))
+}
+
+fn has_disabled_attribute(element: &NodeHandle) -> bool {
+    element.attribute_value_ns(None, "disabled").is_some()
 }
 
 /// Returns the select's display size: a positive `size` attribute, otherwise
@@ -149,7 +168,7 @@ pub(crate) fn run_selectedness_setting(select: &NodeHandle) -> bool {
                 changed = true;
             }
         }
-        if first_enabled.is_none() && !option_is_disabled(&option) {
+        if first_enabled.is_none() && !option_or_optgroup_is_disabled(&option) {
             first_enabled = Some(option);
         }
     }

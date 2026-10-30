@@ -228,7 +228,7 @@ pub(crate) fn is_actually_disabled(node: &NodeHandle) -> bool {
     // options, by an enclosing optgroup; fieldsets do not disable them.
     match tag.as_str() {
         "option" => return select::option_is_disabled(node),
-        "optgroup" => return node.attribute_value_ns(None, "disabled").is_some(),
+        "optgroup" => return select::optgroup_is_disabled(node),
         _ => {}
     }
     if node.attribute_value_ns(None, "disabled").is_some() {
