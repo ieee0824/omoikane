@@ -74,6 +74,8 @@ pub(crate) fn highlight_pseudo_from_name(name: &str) -> Option<PseudoElement> {
         .next()
         .is_none()
         .then(|| PseudoElement::Highlight(highlight_name_key(ident)))
+}
+
 impl PseudoElement {
     /// Returns the pseudo-element name or chain without the leading `::`.
     pub fn as_str(self) -> &'static str {
