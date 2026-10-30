@@ -5734,6 +5734,16 @@ fn paint_scrollbars(
     if !layout.is_scroll_container() {
         return;
     }
+    let shows_scrollbar = |property| {
+        matches!(
+            style.get_by_id(property),
+            Some(ComputedValue::Keyword(value))
+                if value.eq_ignore_ascii_case("auto") || value.eq_ignore_ascii_case("scroll")
+        )
+    };
+    if !shows_scrollbar(PropertyId::OverflowX) && !shows_scrollbar(PropertyId::OverflowY) {
+        return;
+    }
     let thickness = crate::layout::scrollbar_thickness(style);
     if thickness <= 0.0 {
         return;
