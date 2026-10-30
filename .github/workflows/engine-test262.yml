@@ -28,7 +28,7 @@ jobs:
         platform:
           - {os: ubuntu-24.04, target: x86_64-unknown-linux-gnu}
           - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu}
-          - {os: macos-14, target: aarch64-apple-darwin}
+          - {os: macos-15, target: aarch64-apple-darwin}
     env:
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
@@ -42,6 +42,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.1
+      # macos-15 images link Homebrew OpenSSL 4 by default, which the curl
+      # vendored by curl-sys (via isahc) cannot compile against (#1578).
+      - name: Use OpenSSL 3 on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
       # No Rust cache: this Boa-only job is short and off the critical path,
       # and its entries would evict the long jobs' caches from the 10 GB
       # repository limit (#1451).

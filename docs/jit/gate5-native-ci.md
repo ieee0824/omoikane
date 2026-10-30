@@ -4,7 +4,7 @@ Issue: #544. Requires the ARM64 foundation, arithmetic and properties in #541–
 
 Previously release.yml cross-built Linux ARM64 and only ran cargo test on Linux
 x86_64. Native JIT targets now uses three actual hosts: ubuntu-24.04 (x86_64),
-ubuntu-24.04-arm and macos-14 (ARM64). The Rust host triple and
+ubuntu-24.04-arm and macos-15 (ARM64). The Rust host triple and
 machine architecture must match the distribution target. No QEMU is required.
 
 The reusable jit-native.yml runs for PRs, main, manual requests and release tags.
