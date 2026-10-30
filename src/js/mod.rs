@@ -130,6 +130,7 @@ mod leaf_paint;
 mod native_scroll_clock_tests;
 #[cfg(test)]
 mod scroll_anchor_tests;
+mod select_element;
 mod trusted_types;
 #[cfg(test)]
 mod trusted_types_tests;
@@ -2417,6 +2418,9 @@ struct HostState {
     /// Scroll targets waiting for the next rendering opportunity. This is an
     /// ordered set: first-queue order is retained and duplicate ids are skipped.
     pending_scroll_targets: Vec<usize>,
+    /// `[selectId, deferred]` pairs whose `selectedcontent` elements the
+    /// bootstrap refreshes after the current tree mutation.
+    pending_selectedcontent_updates: Vec<(usize, bool)>,
     /// Documents whose changed scroll geometry requires an IntersectionObserver
     /// update after all animation-frame callbacks in the rendering opportunity.
     pending_scroll_intersection_documents: Vec<usize>,
@@ -3374,6 +3378,7 @@ impl HostState {
             pending_visual_viewport_resize_documents: Vec::new(),
             pending_visual_viewport_scroll_documents: Vec::new(),
             pending_scroll_targets: Vec::new(),
+            pending_selectedcontent_updates: Vec::new(),
             pending_scroll_intersection_documents: Vec::new(),
             pending_layout_observer_documents: Vec::new(),
             smooth_scrolls: Vec::new(),
@@ -16503,6 +16508,7 @@ fn register_host_bindings(
     pointer_lock::register(context, &mut bindings)?;
     input_bridge::register(context, &mut bindings)?;
     text_selection::register(context, &mut bindings)?;
+    select_element::register(context, &mut bindings)?;
     let automation_enabled = host_state.borrow().input_bridge.automation.enabled();
     automation::register(context, automation_enabled)?;
     media_environment::register(context, host_state, &mut bindings)?;
@@ -22248,9 +22254,15 @@ fn append_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         if source_document.is_some() && source_document != target_document {
             dom_removal_trace::trace("appendChild_move", &child, false, context);
         }
+        let selects = select_element::capture(&child);
         parent.append_child(child.clone());
         {
             let mut state = state.borrow_mut();
+            select_element::finish(
+                &mut state,
+                selects,
+                crate::dom::select::TreeMutation::Insert,
+            );
             if target_document.is_none() && parent.node_type() == NodeType::Element {
                 trusted_types::invalidate_approvals_for_detached_element(&mut state, &child);
             }
@@ -23751,8 +23763,25 @@ fn set_option_selected_native(
                 .with_message("Illegal invocation")
                 .into());
         }
+        let was_selected = node.selected();
         node.set_selected(selected);
-        state.borrow_mut().invalidate_style_cache_for_node(&node);
+        let mut state = state.borrow_mut();
+        state.invalidate_style_cache_for_node(&node);
+        // Setting selectedness asks the option's select for a reset, which
+        // updates its `selectedcontent` elements synchronously.
+        if let Some(select) = crate::dom::select::nearest_ancestor_select(&node) {
+            let changed = crate::dom::select::run_selectedness_setting(&select);
+            select_element::invalidate_select_options(&mut state, &select);
+            if changed || was_selected != node.selected() {
+                select_element::record_updates(
+                    &mut state,
+                    vec![crate::dom::select::SelectedContentUpdate {
+                        select,
+                        deferred: false,
+                    }],
+                );
+            }
+        }
         Ok(JsValue::undefined())
     })
 }
@@ -26862,11 +26891,17 @@ fn remove_child_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         let rebuild_stylesheets = tree_style_invalidation::requires_rebuild(&parent, &child);
         let change = tree_style_invalidation::ChildListChange::removal(&parent, &child);
         dom_removal_trace::trace("removeChild", &child, false, context);
+        let selects = select_element::capture(&child);
         parent
             .remove_child(&child)
             .map_err(|e| JsError::from(JsNativeError::error().with_message(e.to_string())))?;
         {
             let mut state = state.borrow_mut();
+            select_element::finish(
+                &mut state,
+                selects,
+                crate::dom::select::TreeMutation::Remove,
+            );
             state.cancel_smooth_scrolls_in_subtree(&child);
             state.destroy_iframe_contexts_in_subtree(&child);
             if let Some(document) = &parent_document {
@@ -26947,6 +26982,7 @@ fn insert_before_native_impl(
                 context,
             );
         }
+        let selects = select_element::capture(&new_node);
         match ref_node {
             Some(ref_node) => {
                 parent
@@ -26959,6 +26995,15 @@ fn insert_before_native_impl(
         }
         {
             let mut state = state.borrow_mut();
+            select_element::finish(
+                &mut state,
+                selects,
+                if preserve_state {
+                    crate::dom::select::TreeMutation::Move
+                } else {
+                    crate::dom::select::TreeMutation::Insert
+                },
+            );
             if target_document.is_none() && parent.node_type() == NodeType::Element {
                 trusted_types::invalidate_approvals_for_detached_element(&mut state, &new_node);
             }

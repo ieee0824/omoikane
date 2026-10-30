@@ -17,6 +17,7 @@ pub(crate) mod editability;
 pub(crate) mod form_controls;
 pub(crate) mod input_range;
 pub(crate) mod input_value;
+pub(crate) mod select;
 mod string;
 mod view_transition;
 pub(crate) use string::DomString;
@@ -222,6 +223,13 @@ pub(crate) fn is_actually_disabled(node: &NodeHandle) -> bool {
     };
     if !DISABLEABLE_TAGS.contains(&tag.as_str()) && !node.is_form_associated_custom() {
         return false;
+    }
+    // Options and optgroups are disabled by their own attribute and, for
+    // options, by an enclosing optgroup; fieldsets do not disable them.
+    match tag.as_str() {
+        "option" => return select::option_is_disabled(node),
+        "optgroup" => return node.attribute_value_ns(None, "disabled").is_some(),
+        _ => {}
     }
     if node.attribute_value_ns(None, "disabled").is_some() {
         return true;
@@ -2836,47 +2844,13 @@ impl NodeHandle {
     }
 
     /// Updates an option element's live selectedness independently of its
-    /// `selected` content attribute.
+    /// `selected` content attribute, marking it dirty. Selecting an option of a
+    /// single-selection select deselects the rest of that select's options.
     pub(crate) fn set_selected(&self, selected: bool) {
-        {
-            let mut node = self.0.borrow_mut();
-            let NodeData::Element(element) = &mut node.data else {
-                return;
-            };
-            if element.tag_name != "option" {
-                return;
-            }
-            element.selected = selected;
-            element.dirty_selectedness = true;
-        }
-        if !selected {
+        if self.tag_name().as_deref() != Some("option") {
             return;
         }
-        let mut parent = self.parent_node();
-        if parent
-            .as_ref()
-            .is_some_and(|node| node.tag_name().as_deref() == Some("optgroup"))
-        {
-            parent = parent.and_then(|node| node.parent_node());
-        }
-        let Some(select) = parent.filter(|node| {
-            node.tag_name().as_deref() == Some("select") && node.get_attribute("multiple").is_none()
-        }) else {
-            return;
-        };
-        let mut pending = select.child_nodes();
-        while let Some(option) = pending.pop() {
-            if option.tag_name().as_deref() == Some("optgroup") {
-                pending.extend(option.child_nodes());
-            } else if option != *self {
-                if let NodeData::Element(element) = &mut option.0.borrow_mut().data
-                    && element.tag_name == "option"
-                {
-                    // Only the explicitly assigned option becomes dirty.
-                    element.selected = false;
-                }
-            }
-        }
+        select::set_option_selectedness(self, selected, true);
     }
 
     /// Updates the live editing state used by layout and paint for text controls.

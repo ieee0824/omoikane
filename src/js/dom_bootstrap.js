@@ -233,6 +233,13 @@ let omoikaneUserActivationState;
   const nativeSetPopoverOpen = globalThis.__omoikane_set_popover_open;
   const nativeGetPickerOpen = globalThis.__omoikane_get_picker_open;
   const nativeSetPickerOpen = globalThis.__omoikane_set_picker_open;
+  const nativeSelectOptions = globalThis.__omoikane_select_options;
+  const nativeOptionNearestSelect = globalThis.__omoikane_option_nearest_select;
+  const nativeSelectedcontentSelect = globalThis.__omoikane_selectedcontent_select;
+  const nativeResetSelect = globalThis.__omoikane_reset_select;
+  const nativeTakeSelectedcontentUpdates = globalThis.__omoikane_take_selectedcontent_updates;
+  const nativeOptionSelectedAttributeChanged = globalThis.__omoikane_option_selected_attribute_changed;
+  const nativeSelectOnly = globalThis.__omoikane_select_only;
   const nativeSetMediaSelectorState = globalThis.__omoikane_set_media_selector_state;
   const nativeSetDirectionalityControlValue = globalThis.__omoikane_set_directionality_control_value;
   const nativeSetAutofilled = globalThis.__omoikane_set_autofilled;
@@ -330,6 +337,13 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_set_popover_open;
   delete globalThis.__omoikane_get_picker_open;
   delete globalThis.__omoikane_set_picker_open;
+  delete globalThis.__omoikane_select_options;
+  delete globalThis.__omoikane_option_nearest_select;
+  delete globalThis.__omoikane_selectedcontent_select;
+  delete globalThis.__omoikane_reset_select;
+  delete globalThis.__omoikane_take_selectedcontent_updates;
+  delete globalThis.__omoikane_option_selected_attribute_changed;
+  delete globalThis.__omoikane_select_only;
   delete globalThis.__omoikane_set_media_selector_state;
   delete globalThis.__omoikane_set_directionality_control_value;
   delete globalThis.__omoikane_set_autofilled;
@@ -3657,6 +3671,7 @@ let omoikaneUserActivationState;
     queueMutation(parent, "childList", { removedNodes: [child], previousSibling, nextSibling }, suppressObservers);
     refreshSlotAssignments();
     signalFallbackSlotChanges(parent);
+    flushSelectedcontentUpdates();
     if (visibilityDocuments) {
       for (const document of visibilityDocuments) {
         document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
@@ -3748,6 +3763,7 @@ let omoikaneUserActivationState;
       }
       refreshSlotAssignments();
       signalFallbackSlotChanges(parent);
+      flushSelectedcontentUpdates();
       if (!reactions) executeRunnableInsertedScripts(children);
       return newNode;
     }
@@ -3773,6 +3789,7 @@ let omoikaneUserActivationState;
     }, suppressObservers);
     refreshSlotAssignments();
     signalFallbackSlotChanges(parent);
+    flushSelectedcontentUpdates();
     if (!reactions) executeRunnableInsertedScripts([newNode]);
     return newNode;
   }
@@ -5687,6 +5704,7 @@ let omoikaneUserActivationState;
     signalFallbackSlotChanges(this);
     queueMutation(oldParent, "childList", {removedNodes: [node], previousSibling, nextSibling});
     queueMutation(this, "childList", {addedNodes: [node], previousSibling: newPreviousSibling, nextSibling: reference});
+    flushSelectedcontentUpdates();
     if (internalIsConnected(this)) {
       customElementTreeWalk(node, element => {
         if (element.__customElementState !== "custom") return;
@@ -13742,6 +13760,10 @@ let omoikaneUserActivationState;
     Object.defineProperty(HTMLTrackElement.prototype, name, { enumerable: true, value });
   }
 
+  class HTMLSelectedContentElement extends HTMLElement {
+    constructor(...args) { super(...specialElementConstructor(HTMLSelectedContentElement, args)); }
+  }
+
   class HTMLDataListElement extends HTMLElement {
     constructor(...args) { super(...specialElementConstructor(HTMLDataListElement, args)); }
     get options() {
@@ -17138,7 +17160,11 @@ let omoikaneUserActivationState;
     }
 
     get options() {
-      return childElementsByTag(this, "OPTION");
+      return selectListOfOptions(this);
+    }
+    get selectedOptions() {
+      return specialElementCollection(this, "selectedOptions", () => makeHTMLCollection(() =>
+        selectListOfOptions(this).filter(option => option.selected), undefined, undefined, []));
     }
     get length() {
       return this.options.length;
@@ -17170,12 +17196,9 @@ let omoikaneUserActivationState;
     }
     set value(value) {
       const expected = String(value);
-      let matched = false;
-      this.options.forEach(option => {
-        const selected = !matched && String(option.value) === expected;
-        option.selected = selected;
-        matched ||= selected;
-      });
+      const option = this.options.find(candidate => String(candidate.value) === expected);
+      nativeSelectOnly(internalNodeId(this), option ? internalNodeId(option) : null);
+      flushSelectedcontentUpdates();
     }
     get selectedIndex() {
       const options = this.options;
@@ -17185,9 +17208,9 @@ let omoikaneUserActivationState;
       return -1;
     }
     set selectedIndex(index) {
-      this.options.forEach((option, i) => {
-        option.selected = i === index;
-      });
+      const option = this.options[Number(index) | 0];
+      nativeSelectOnly(internalNodeId(this), option ? internalNodeId(option) : null);
+      flushSelectedcontentUpdates();
     }
     add(element, before) {
       if (before === null || before === undefined) {
@@ -17216,6 +17239,89 @@ let omoikaneUserActivationState;
       fullscreenTransientActivation = false;
       this.focus();
       setSelectPickerOpen(this, true);
+    }
+  }
+
+  // The select's list of options, including options wrapped in other
+  // elements (customizable select).
+  function selectListOfOptions(select) {
+    const ids = nativeSelectOptions(internalNodeId(select));
+    return ids ? ids.map(wrapNode) : [];
+  }
+
+  // Clones the select's first selected option into one enabled
+  // `selectedcontent`, or clears it when nothing is selected.
+  function updateSelectedcontent(select, selectedcontent) {
+    if (nativeSelectedcontentSelect(internalNodeId(selectedcontent)) !== internalNodeId(select)) return;
+    const option = selectListOfOptions(select).find(candidate => candidate.selected) || null;
+    const fragment = nodeDocument(select).createDocumentFragment();
+    if (option) {
+      for (const child of Array.from(option.childNodes)) fragment.appendChild(child.cloneNode(true));
+    }
+    selectedcontent.replaceChildren(fragment);
+  }
+
+  // Select-related reactions to attribute changes. Edits inside a selected
+  // option deliberately leave its `selectedcontent` clones untouched.
+  function selectMutationHook(target, type, init) {
+    if (type === "attributes" && init.attributeNamespace == null) {
+      const localName = htmlFormControlLocalName(target);
+      if (localName === "option" && init.attributeName === "selected") {
+        nativeOptionSelectedAttributeChanged(internalNodeId(target));
+        flushSelectedcontentUpdates();
+        return;
+      }
+      if (localName === "select" && (init.attributeName === "multiple" || init.attributeName === "size")) {
+        if (nativeResetSelect(internalNodeId(target))) updateSelectDescendantSelectedcontents(target);
+        return;
+      }
+      // Enabling an option can make it the select's first enabled option.
+      if ((localName === "option" || localName === "optgroup") && init.attributeName === "disabled") {
+        const select = localName === "option"
+          ? wrapNode(nativeOptionNearestSelect(internalNodeId(target)))
+          : optgroupSelect(target);
+        if (select && nativeResetSelect(internalNodeId(select))) updateSelectDescendantSelectedcontents(select);
+      }
+    }
+  }
+
+  function optgroupSelect(optgroup) {
+    for (let node = internalParentNode(optgroup); node; node = internalParentNode(node)) {
+      const localName = internalNodeType(node) === 1 ? htmlFormControlLocalName(node) : null;
+      if (localName === "select") return node;
+      if (localName === "option" || localName === "hr" || localName === "datalist" ||
+          localName === "optgroup") return null;
+    }
+    return null;
+  }
+
+  // Selects with a microtask update already queued; later removals coalesce.
+  const queuedSelectedcontentUpdates = new WeakSet();
+
+  function updateSelectDescendantSelectedcontents(select) {
+    if (select.hasAttribute("multiple")) return;
+    for (const selectedcontent of Array.from(select.querySelectorAll("selectedcontent"))) {
+      updateSelectedcontent(select, selectedcontent);
+    }
+  }
+
+  // Applies the `selectedcontent` updates recorded by native tree mutations
+  // and selectedness changes. Removal and move steps defer to a microtask.
+  function flushSelectedcontentUpdates() {
+    const updates = nativeTakeSelectedcontentUpdates();
+    if (!updates) return;
+    for (const [id, deferred] of updates) {
+      const select = wrapNode(id);
+      if (!select) continue;
+      if (!deferred) {
+        updateSelectDescendantSelectedcontents(select);
+      } else if (!safeWeakSetHas(queuedSelectedcontentUpdates, select)) {
+        safeWeakSetAdd(queuedSelectedcontentUpdates, select);
+        queueMicrotask(() => {
+          safeWeakSetDelete(queuedSelectedcontentUpdates, select);
+          updateSelectDescendantSelectedcontents(select);
+        });
+      }
     }
   }
 
@@ -17427,20 +17533,58 @@ let omoikaneUserActivationState;
     }
     set selected(v) {
       nativeSetOptionSelected(canonicalNodeIdentity(this), !!v);
+      flushSelectedcontentUpdates();
     }
     get value() {
       if (this.hasAttribute("value")) return this.getAttribute("value");
-      return this.textContent;
+      return this.text;
     }
     set value(v) {
       this.setAttribute("value", String(v));
     }
+    // Descendant text outside SVG and HTML `script` elements, with ASCII
+    // whitespace stripped and collapsed.
     get text() {
-      return this.textContent;
+      let text = "";
+      const visit = node => {
+        for (const child of internalChildNodes(node)) {
+          const type = internalNodeType(child);
+          if (type === 3) text += child.data;
+          else if (type === 1 && internalNodeLocalName(child) !== "script") visit(child);
+        }
+      };
+      visit(this);
+      return text.replace(/[\t\n\f\r ]+/g, " ").replace(/^ | $/g, "");
     }
     set text(v) {
       this.textContent = v;
     }
+    get label() {
+      const label = this.getAttribute("label");
+      return label === null ? this.text : label;
+    }
+    set label(value) { this.setAttribute("label", String(value)); }
+    // The form owner of the option's nearest ancestor select.
+    get form() {
+      const select = wrapNode(nativeOptionNearestSelect(internalNodeId(this)));
+      return select ? formOwner(select) : null;
+    }
+    get index() {
+      const select = wrapNode(nativeOptionNearestSelect(internalNodeId(this)));
+      const index = select ? selectListOfOptions(select).indexOf(this) : -1;
+      return index < 0 ? 0 : index;
+    }
+  }
+
+  class HTMLOptGroupElement extends HTMLElement {
+    constructor(...args) { super(...specialElementConstructor(HTMLOptGroupElement, args)); }
+    get disabled() { return this.hasAttribute("disabled"); }
+    set disabled(value) {
+      if (value) this.setAttribute("disabled", "");
+      else this.removeAttribute("disabled");
+    }
+    get label() { return this.getAttribute("label") ?? ""; }
+    set label(value) { this.setAttribute("label", String(value)); }
   }
 
   class HTMLScriptElement extends HTMLElement {
@@ -19679,6 +19823,7 @@ let omoikaneUserActivationState;
     meta: HTMLMetaElement,
     select: HTMLSelectElement,
     option: HTMLOptionElement,
+    optgroup: HTMLOptGroupElement,
     output: HTMLOutputElement,
     iframe: HTMLIFrameElement,
     frame: HTMLFrameElement,
@@ -19700,6 +19845,7 @@ let omoikaneUserActivationState;
     source: HTMLSourceElement,
     track: HTMLTrackElement,
     datalist: HTMLDataListElement,
+    selectedcontent: HTMLSelectedContentElement,
     map: HTMLMapElement,
     embed: HTMLEmbedElement,
   };
@@ -20578,6 +20724,8 @@ let omoikaneUserActivationState;
     ["HTMLMeterElement", HTMLMeterElement], ["HTMLProgressElement", HTMLProgressElement],
     ["HTMLPictureElement", HTMLPictureElement], ["HTMLSourceElement", HTMLSourceElement],
     ["HTMLTrackElement", HTMLTrackElement], ["HTMLDataListElement", HTMLDataListElement],
+    ["HTMLSelectedContentElement", HTMLSelectedContentElement],
+    ["HTMLOptGroupElement", HTMLOptGroupElement],
     ["HTMLMapElement", HTMLMapElement], ["HTMLEmbedElement", HTMLEmbedElement],
     ["MathMLElement", MathMLElement],
     ["MathMLAnchorElement", MathMLAnchorElement],
@@ -24417,6 +24565,7 @@ let omoikaneUserActivationState;
     if (hasLayoutObservers && typeof nativeQueueLayoutObserverCheck === "function") {
       nativeQueueLayoutObserverCheck(internalNodeId(globalThis.document));
     }
+    selectMutationHook(target, type, init);
   }
 
   globalThis.MutationRecord = MutationRecord;
@@ -33781,4 +33930,10 @@ let omoikaneUserActivationState;
     // Parser-authored attributes precede author scripts in a newly created Realm.
     wireInlineHandlers(globalThis.document);
   };
+  // The parser already reset each select's selectedness. Mirror it into the
+  // selectedcontent elements before author scripts run.
+  for (const selectedcontent of Array.from(globalThis.document.getElementsByTagName("selectedcontent"))) {
+    const select = wrapNode(nativeSelectedcontentSelect(internalNodeId(selectedcontent)));
+    if (select && !select.hasAttribute("multiple")) updateSelectedcontent(select, selectedcontent);
+  }
 })();
