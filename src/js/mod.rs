@@ -81,6 +81,7 @@ mod navigation_transport;
 mod retained_scroll;
 mod tree_style_invalidation;
 mod view_transition;
+mod window_members;
 use child_document::{FetchedChildResource, LoadedChildDocument, NavigationRedirect};
 use cross_origin_isolation::{
     Disposition, GroupSwitchDecision, IsolationPolicy, OpenerPolicy, OpenerPolicyValue,
@@ -645,6 +646,8 @@ const DOM_BOOTSTRAP: &str = concat!(
     include_str!("xpath.js"),
     "\n",
     include_str!("font_loading.js"),
+    "\n",
+    include_str!("window_members.js"),
     "\n",
     include_str!("find_in_page.js")
 );
@@ -3475,6 +3478,7 @@ impl HostState {
                     response_status: 0,
                     referrer: String::new(),
                     referrer_policy: security_reporting::ReferrerPolicy::default(),
+                    last_modified: None,
                     endpoint_revision: 0,
                 },
             )]),
@@ -4527,6 +4531,8 @@ impl HostState {
             .get_mut(&prepared.document.identity())
         {
             metadata.referrer = std::mem::take(&mut prepared.referrer);
+            metadata.last_modified =
+                window_members::response_last_modified(&prepared.security_headers);
             metadata.referrer_policy =
                 prepared
                     .inherited_referrer_policy
@@ -5781,6 +5787,7 @@ impl HostState {
         self.register_document_reporting(document_id, &document_url, response_status);
         if let Some(metadata) = self.document_reporting.get_mut(&document_id) {
             metadata.referrer = referrer;
+            metadata.last_modified = window_members::response_last_modified(&headers);
             metadata.referrer_policy = if inherits_policy {
                 referrer_source.policy
             } else {
@@ -16534,6 +16541,7 @@ fn register_host_bindings(
         boa_engine::property::Attribute::all(),
     )?;
     language::register(context, &mut bindings)?;
+    window_members::register(context, &mut bindings)?;
     register_private_callable(
         context,
         &mut bindings,

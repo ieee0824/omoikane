@@ -4,6 +4,8 @@ export let __omoikane_cookie_change_reset;
 export let __omoikane_update_auxiliary_opener;
 export let __omoikane_parser_update;
 export const __omoikane_service_worker_lifecycle = {};
+// Read by window_members.js; assigned once the activation state exists.
+let omoikaneUserActivationState;
 
 (() => {
   // Capture intrinsic identities before author code can replace global Symbol.
@@ -6717,8 +6719,14 @@ export const __omoikane_service_worker_lifecycle = {};
   const pictureInPictureElementIds = new WeakMap();
   const scheduleFullscreenActivationExpiry = globalThis.setTimeout.bind(globalThis);
 
+  // Sticky activation (HTML §6.4.3) records that the Window has ever received
+  // an activation-triggering input; the transient flag above is consumed by
+  // fullscreen, focus, pickers and Storage Access.
+  let stickyUserActivation = false;
+  omoikaneUserActivationState = () => [stickyUserActivation, fullscreenTransientActivation];
   function grantFullscreenTransientActivation() {
     fullscreenTransientActivation = true;
+    stickyUserActivation = true;
     const generation = ++fullscreenActivationGeneration;
     const pointerGeneration = nativePointerLockActivation(true, 0);
     scheduleFullscreenActivationExpiry(() => {
@@ -9476,6 +9484,11 @@ export const __omoikane_service_worker_lifecycle = {};
 
     get images() {
       return documentHTMLCollection(this, "images", element => hasHTMLCollectionTag(element, ["img"]), []);
+    }
+
+    get scripts() {
+      requireNodeReceiver(this);
+      return documentHTMLCollection(this, "scripts", element => hasHTMLCollectionTag(element, ["script"]), []);
     }
 
     // Same live collection for named HTML anchors.

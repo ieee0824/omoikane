@@ -263,7 +263,8 @@ pub(super) fn parse_child_document(mime_type: &str, body: &[u8]) -> Option<NodeH
         .then(|| form_submission::plain_text_document(body))
 }
 
-/// Returns security and referrer policy headers, preserving repeated values.
+/// Returns security and referrer policy headers, plus the `Last-Modified`
+/// field reported by `document.lastModified`, preserving repeated values.
 pub(super) fn response_security_headers(
     response: &crate::http::HttpResponse,
 ) -> Vec<(String, String)> {
@@ -278,6 +279,7 @@ pub(super) fn response_security_headers(
                     | "permissions-policy"
                     | "reporting-endpoints"
                     | "referrer-policy"
+                    | "last-modified"
             )
         })
         .cloned()

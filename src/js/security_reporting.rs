@@ -18,6 +18,8 @@ pub(super) struct DocumentReportingMetadata {
     /// The referrer assigned when this Document was created, not its current URL.
     pub(super) referrer: String,
     pub(super) referrer_policy: ReferrerPolicy,
+    /// The response's `Last-Modified` time in Unix epoch milliseconds.
+    pub(super) last_modified: Option<f64>,
     /// Changes whenever this Document receives a new reporting endpoint map.
     pub(super) endpoint_revision: u64,
 }
@@ -369,10 +371,11 @@ impl JsRuntime {
             CspPolicy::from_response_headers_and_document(headers, &document, &state.location_href);
         state.advance_report_endpoint_revision(document.identity());
         state.document_csp.insert(document.identity(), policy);
-        if let Some(policy) = response_referrer_policy(headers)
-            && let Some(metadata) = state.document_reporting.get_mut(&document.identity())
-        {
-            metadata.referrer_policy = policy;
+        if let Some(metadata) = state.document_reporting.get_mut(&document.identity()) {
+            if let Some(policy) = response_referrer_policy(headers) {
+                metadata.referrer_policy = policy;
+            }
+            metadata.last_modified = window_members::response_last_modified(headers);
         }
         state.apply_connected_referrer_metas(&document);
         state.document_permissions.insert(
@@ -761,6 +764,7 @@ impl HostState {
                 response_status,
                 referrer: String::new(),
                 referrer_policy: ReferrerPolicy::default(),
+                last_modified: None,
                 endpoint_revision: 0,
             },
         );

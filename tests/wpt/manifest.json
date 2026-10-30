@@ -80,6 +80,9 @@
     {
       "path": "html/dom/idlharness.https.html?include=(HTMLMeterElement|HTMLProgressElement|HTMLPictureElement|HTMLSourceElement|HTMLTrackElement|HTMLDataListElement|HTMLMapElement|HTMLEmbedElement)"
     },
+    {
+      "path": "html/dom/idlharness.https.html?include=(BarProp|External|UserActivation|DOMStringList)"
+    },
     { "path": "mathml/idlharness.window.js" },
     { "path": "html/semantics/forms/the-meter-element/meter.html" },
     { "path": "html/semantics/forms/the-meter-element/meter-leading-plus-sign.html" },
