@@ -2167,6 +2167,71 @@ fn css_supports_uses_parser_and_supported_property_table() {
 }
 
 #[test]
+fn css_ui_properties_validate_initial_values_and_inheritance() {
+    for (property, valid, invalid) in [
+        ("appearance", "none", "normal"),
+        ("accent-color", "rebeccapurple", "auto auto"),
+        ("caret-color", "currentcolor", "auto red"),
+        ("color-scheme", "dark light only", "normal dark"),
+        ("field-sizing", "content", "auto"),
+        ("user-select", "all", "contain"),
+        ("touch-action", "pan-y pan-x", "auto none"),
+        ("resize", "horizontal", "auto"),
+    ] {
+        assert!(supports_declaration(property, valid), "{property}: {valid}");
+        assert!(
+            !supports_declaration(property, invalid),
+            "{property}: {invalid}"
+        );
+    }
+
+    let document = NodeHandle::document();
+    let parent = NodeHandle::element("div");
+    let child = NodeHandle::element("div");
+    document.append_child(parent.clone());
+    parent.append_child(child.clone());
+    parent.set_attribute(
+        "style",
+        "accent-color: red; caret-color: blue; color-scheme: dark; \
+         appearance: auto; field-sizing: content; user-select: none; \
+         touch-action: none; resize: both",
+    );
+    let mut resolver = StyleResolver::new();
+    let parent_style = resolver.computed_style(&parent);
+    let child_style = resolver.computed_style(&child);
+    for (property, expected) in [
+        ("accent-color", "red"),
+        ("caret-color", "blue"),
+        ("color-scheme", "dark"),
+    ] {
+        assert_eq!(
+            child_style.get(property).map(ComputedValue::css_text),
+            Some(expected.to_string()),
+            "{property} must inherit"
+        );
+    }
+    for (property, expected) in [
+        ("appearance", "none"),
+        ("field-sizing", "fixed"),
+        ("user-select", "auto"),
+        ("touch-action", "auto"),
+        ("resize", "none"),
+    ] {
+        assert_eq!(
+            child_style.get(property).map(ComputedValue::css_text),
+            Some(expected.to_string()),
+            "{property} must use its non-inherited initial value"
+        );
+    }
+    assert_eq!(
+        parent_style
+            .get("touch-action")
+            .map(ComputedValue::css_text),
+        Some("none".to_string())
+    );
+}
+
+#[test]
 fn scroll_boundary_properties_validate_and_compute() {
     for (property, value) in [
         ("scroll-behavior", "smooth"),

@@ -1024,6 +1024,8 @@ export const __omoikane_service_worker_lifecycle = {};
   });
   const validatesSpecialStyleProperties = new Set([
     "order", "grid-auto-flow", "grid-auto-rows", "grid-auto-columns",
+    "accent-color", "appearance", "caret-color", "color-scheme",
+    "field-sizing", "resize", "touch-action", "user-select",
     "translate", "rotate", "scale",
     "text-shadow",
     "all",
