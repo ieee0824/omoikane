@@ -30,6 +30,7 @@ pub use connection::{send, send_with_options};
 pub(crate) use cookie::CookieStoreSubscription;
 pub use cookie::{Cookie, CookieChangeSubscription, CookieJar, SameSite};
 pub(crate) use cookie::{CookieAccessContext, CookieStoreChange, CookieStoreWrite};
+pub(crate) use cookie::{is_public_suffix, parse_http_date};
 pub(crate) use data_uri::percent_decode_bytes;
 pub use data_uri::{DataUri, parse_data_uri};
 pub(crate) use referrer::{

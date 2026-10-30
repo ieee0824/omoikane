@@ -1243,7 +1243,8 @@ fn domain_matches(host: &str, domain: &str) -> bool {
     host.ends_with(&format!(".{}", domain))
 }
 
-fn is_public_suffix(domain: &str) -> bool {
+/// Returns whether `domain` is itself a public suffix, such as `com`.
+pub(crate) fn is_public_suffix(domain: &str) -> bool {
     domain.parse::<IpAddr>().is_err() && psl::suffix_str(domain) == Some(domain)
 }
 
@@ -1295,7 +1296,8 @@ fn default_path(request_path: &str) -> String {
 }
 
 /// Parses a cookie expiry date using the token order from RFC 6265 §5.1.1.
-fn parse_http_date(s: &str) -> Option<SystemTime> {
+/// The same algorithm accepts the IMF-fixdate used by other HTTP date fields.
+pub(crate) fn parse_http_date(s: &str) -> Option<SystemTime> {
     let mut day = None;
     let mut month = None;
     let mut year = None;

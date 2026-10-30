@@ -44,6 +44,11 @@ impl StorageOrigin {
         format!("{}://{}:{}", self.scheme, self.host, self.port)
     }
 
+    /// The lowercase host, which HTML calls the origin's effective domain.
+    pub(crate) fn host(&self) -> &str {
+        &self.host
+    }
+
     pub(crate) fn schemeful_site(&self) -> SchemefulSite {
         SchemefulSite::from_parts(&self.scheme, &self.host)
     }
