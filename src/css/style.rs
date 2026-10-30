@@ -1,6 +1,7 @@
 //! CSS cascade and computed style resolution.
 
 mod animation;
+mod base_select;
 mod class_invalidation;
 #[cfg(test)]
 mod container_dependency_tests;
@@ -3974,6 +3975,9 @@ impl StyleResolver {
         node: &NodeHandle,
         pseudo: PseudoElement,
     ) -> Option<Arc<ComputedStyle>> {
+        if !base_select::pseudo_element_applies(node, pseudo) {
+            return None;
+        }
         let key = (node.identity(), pseudo);
         if let Some(style) = self.pseudo_cache.get(&key) {
             return Some(style.clone());
@@ -4037,9 +4041,68 @@ impl StyleResolver {
         pseudo: Option<PseudoElement>,
         paint_custom_properties: Option<&BTreeMap<String, Value>>,
     ) -> ComputedStyle {
+        let part = self.base_select_part(node, pseudo, parent_style);
+        let style =
+            self.compute_cascaded_style(node, parent_style, pseudo, paint_custom_properties, part);
+        if part.is_some() || !has_base_select_appearance(&style) {
+            return style;
+        }
+        // A select and its picker opt in to base appearance through their own
+        // `appearance`, so their base UA rules apply after that value is known.
+        let part = match pseudo {
+            None if node.is_html_element() && node.has_tag_name("select") => {
+                base_select::select_part(node)
+            }
+            Some(PseudoElement::Picker)
+                if node.is_html_element()
+                    && node.has_tag_name("select")
+                    && crate::dom::select::is_drop_down(node)
+                    && parent_style.is_some_and(has_base_select_appearance) =>
+            {
+                base_select::BaseSelectPart::Picker
+            }
+            _ => return style,
+        };
+        self.compute_cascaded_style(
+            node,
+            parent_style,
+            pseudo,
+            paint_custom_properties,
+            Some(part),
+        )
+    }
+
+    /// The base appearance part of a select descendant or select
+    /// pseudo-element, when its owning select uses base appearance.
+    fn base_select_part(
+        &mut self,
+        node: &NodeHandle,
+        pseudo: Option<PseudoElement>,
+        parent_style: Option<&ComputedStyle>,
+    ) -> Option<base_select::BaseSelectPart> {
+        let (owner, part) = base_select::owner_and_part(node, pseudo)?;
+        let owner_is_base = if owner.identity() == node.identity() {
+            parent_style.is_some_and(has_base_select_appearance)
+        } else {
+            has_base_select_appearance(&self.computed_style_shared(&owner))
+        };
+        owner_is_base.then_some(part)
+    }
+
+    fn compute_cascaded_style(
+        &mut self,
+        node: &NodeHandle,
+        parent_style: Option<&ComputedStyle>,
+        pseudo: Option<PseudoElement>,
+        paint_custom_properties: Option<&BTreeMap<String, Value>>,
+        base_select_part: Option<base_select::BaseSelectPart>,
+    ) -> ComputedStyle {
         let mut candidates = Vec::new();
         let mut source_order = 0usize;
         collect_builtin_ua_candidates(node, pseudo, &mut source_order, &mut candidates);
+        if let Some(part) = base_select_part {
+            base_select::push_candidates(part, &mut source_order, &mut candidates);
+        }
         let viewport_width = self.viewport_width;
         let viewport_height = self.viewport_height;
         let color_scheme_dark = self.color_scheme_dark;
@@ -15834,7 +15897,9 @@ fn apply_ua_defaults(
         "address" | "article" | "aside" | "blockquote" | "body" | "dd" | "details" | "div"
         | "dl" | "dt" | "fieldset" | "figcaption" | "figure" | "footer" | "form" | "h1" | "h2"
         | "h3" | "h4" | "h5" | "h6" | "header" | "hgroup" | "hr" | "html" | "legend" | "main"
-        | "menu" | "nav" | "ol" | "p" | "pre" | "section" | "ul" => Some("block"),
+        | "menu" | "nav" | "ol" | "optgroup" | "option" | "p" | "pre" | "section" | "ul" => {
+            Some("block")
+        }
         "area" | "base" | "basefont" | "datalist" | "head" | "link" | "meta" | "noembed"
         | "noframes" | "noscript" | "param" | "rp" | "script" | "style" | "template" | "title"
         | "track" => Some("none"),
@@ -16500,6 +16565,10 @@ fn apply_scaled_inline_ua_defaults(
     properties
         .entry(PropertyId::FontSize)
         .or_insert(ComputedValue::Px(smaller));
+}
+
+fn has_base_select_appearance(style: &ComputedStyle) -> bool {
+    matches!(style.get("appearance"), Some(ComputedValue::Keyword(value)) if value == "base-select")
 }
 
 fn collect_builtin_ua_candidates(

@@ -2676,6 +2676,10 @@ fn collect_select_segment(
     out: &mut Vec<InlineSegment>,
 ) {
     let metrics = font_metrics(style);
+    if super::select_picker::renders_base_drop_down(node, style) {
+        collect_base_select_segment(node, style, resolver, metrics, out);
+        return;
+    }
     let mut options = Vec::new();
     collect_option_entries(node, resolver, &mut options);
 
@@ -2703,6 +2707,46 @@ fn collect_select_segment(
     let content_height =
         explicit_length(style, "height").unwrap_or_else(|| metrics.font_size.max(13.0));
 
+    push_form_control_segment(
+        node,
+        style,
+        label,
+        content_width,
+        content_height,
+        metrics,
+        out,
+    );
+}
+
+/// A base appearance drop-down sizes to its content: the leading `button`'s
+/// rendered text, or the selected option's label. It is at least 24px tall.
+fn collect_base_select_segment(
+    node: &NodeHandle,
+    style: &ComputedStyle,
+    resolver: &mut StyleResolver,
+    metrics: FontMetrics,
+    out: &mut Vec<InlineSegment>,
+) {
+    let label = match crate::dom::select::select_button(node) {
+        Some(button) => collect_rendered_text(&button, resolver),
+        None => {
+            let mut options = Vec::new();
+            collect_option_entries(node, resolver, &mut options);
+            options
+                .into_iter()
+                .find(|(_, selected)| *selected)
+                .map(|(text, _)| text)
+                .unwrap_or_default()
+        }
+    };
+    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    let padding = edge_sizes(style, "padding");
+    let border = edge_sizes(style, "border");
+    let chrome_height = padding.top + padding.bottom + border.top + border.bottom;
+    let content_width = explicit_length(style, "width")
+        .unwrap_or_else(|| measure_text_width(&label, &metrics).max(24.0));
+    let content_height = explicit_length(style, "height")
+        .unwrap_or_else(|| line_height(style).max(24.0 - chrome_height));
     push_form_control_segment(
         node,
         style,
