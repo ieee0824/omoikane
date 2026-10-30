@@ -5596,7 +5596,10 @@ fn image_sampling(style: &ComputedStyle) -> ImageSampling {
         {
             ImageSampling::Pixelated
         }
-        _ => ImageSampling::Smooth,
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("smooth") => {
+            ImageSampling::Smooth
+        }
+        _ => ImageSampling::Legacy,
     }
 }
 
