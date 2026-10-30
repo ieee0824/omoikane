@@ -764,6 +764,56 @@ impl Overflow {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextPaintLayer {
+    Fill,
+    Stroke,
+    Markers,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextPaintOrder([TextPaintLayer; 3]);
+
+impl Default for TextPaintOrder {
+    fn default() -> Self {
+        Self([
+            TextPaintLayer::Fill,
+            TextPaintLayer::Stroke,
+            TextPaintLayer::Markers,
+        ])
+    }
+}
+
+impl TextPaintOrder {
+    pub(crate) fn from_computed(value: Option<&str>) -> Self {
+        let Some(value) = value.filter(|value| !value.eq_ignore_ascii_case("normal")) else {
+            return Self::default();
+        };
+        let mut layers = Vec::with_capacity(3);
+        for keyword in value.split_ascii_whitespace() {
+            let layer = match keyword.to_ascii_lowercase().as_str() {
+                "fill" => TextPaintLayer::Fill,
+                "stroke" => TextPaintLayer::Stroke,
+                "markers" => TextPaintLayer::Markers,
+                _ => return Self::default(),
+            };
+            if !layers.contains(&layer) {
+                layers.push(layer);
+            }
+        }
+        for layer in Self::default().0 {
+            if !layers.contains(&layer) {
+                layers.push(layer);
+            }
+        }
+        Self(layers.try_into().unwrap_or(Self::default().0))
+    }
+
+    pub(crate) fn layers(self) -> [TextPaintLayer; 3] {
+        self.0
+    }
+}
+
 /// Minimal style information carried by each inline fragment.
 ///
 /// Rather than cloning the full `ComputedStyle` (a `BTreeMap`) for every
@@ -782,6 +832,13 @@ pub struct FragmentStyle {
     /// CSS `color` value (raw keyword or color string) from the computed style.
     /// May come from an explicit declaration, inheritance, or an initial value.
     pub color: Option<String>,
+    /// Computed text fill and stroke colors used by CSS Fill and Stroke.
+    pub(crate) text_fill_color: Option<String>,
+    pub(crate) text_stroke_color: Option<String>,
+    /// Used text stroke width in CSS pixels.
+    pub(crate) text_stroke_width: f32,
+    /// Typed order of text fill, stroke, and marker painting.
+    pub(crate) paint_order: TextPaintOrder,
     /// CSS `text-transform` keyword from the computed style (pre-normalized to lowercase).
     /// May reflect an explicitly set value or one inherited from an ancestor.
     pub text_transform: Option<String>,
@@ -878,6 +935,16 @@ impl FragmentStyle {
             pseudo: None,
             visibility: visibility(style),
             color: extract_str(PropertyId::Color),
+            text_fill_color: extract_str(PropertyId::WebkitTextFillColor),
+            text_stroke_color: extract_str(PropertyId::WebkitTextStrokeColor),
+            text_stroke_width: match style.get_by_id(PropertyId::WebkitTextStrokeWidth) {
+                Some(ComputedValue::Px(value) | ComputedValue::Number(value)) => *value,
+                _ => 0.0,
+            }
+            .max(0.0),
+            paint_order: TextPaintOrder::from_computed(
+                extract_str(PropertyId::PaintOrder).as_deref(),
+            ),
             text_transform: normalize_lower(PropertyId::TextTransform),
             text_decoration_line: normalize_lower(PropertyId::TextDecorationLine),
             text_decoration_color: extract_str(PropertyId::TextDecorationColor),

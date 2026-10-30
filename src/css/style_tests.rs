@@ -9606,6 +9606,52 @@ fn outline_initials_and_width_keywords_have_computed_values() {
 }
 
 #[test]
+fn html_text_fill_stroke_and_paint_order_are_typed_and_inherited() {
+    for (property, value) in [
+        ("-webkit-text-fill-color", "red"),
+        ("-webkit-text-stroke-color", "blue"),
+        ("-webkit-text-stroke-width", "2px"),
+        ("paint-order", "stroke fill markers"),
+        ("paint-order", "fill"),
+    ] {
+        assert!(supports_declaration(property, value), "{property}: {value}");
+    }
+    for value in ["fill fill", "stroke bogus", "fill stroke markers fill"] {
+        assert!(!supports_declaration("paint-order", value), "{value}");
+    }
+    assert!(!supports_declaration("-webkit-text-stroke-width", "-1px"));
+
+    let document = NodeHandle::document();
+    let parent = NodeHandle::element("div");
+    parent.set_attribute(
+        "style",
+        "color:green;-webkit-text-fill-color:red;-webkit-text-stroke-color:blue;\
+         -webkit-text-stroke-width:2px;paint-order:stroke fill",
+    );
+    let child = NodeHandle::element("span");
+    parent.append_child(child.clone());
+    document.append_child(parent.clone());
+    let mut resolver = StyleResolver::new();
+    let child_style = resolver.computed_style(&child);
+    assert_eq!(
+        child_style.get("-webkit-text-fill-color"),
+        Some(&ComputedValue::Color("red".into()))
+    );
+    assert_eq!(
+        child_style.get("-webkit-text-stroke-color"),
+        Some(&ComputedValue::Color("blue".into()))
+    );
+    assert_eq!(
+        child_style.get("-webkit-text-stroke-width"),
+        Some(&ComputedValue::Px(2.0))
+    );
+    assert_eq!(
+        child_style.get("paint-order"),
+        Some(&ComputedValue::Keyword("stroke fill".into()))
+    );
+}
+
+#[test]
 fn outline_auto_color_tracks_animated_text_color_and_outline_style() {
     let element = NodeHandle::element("div");
     let mut resolver = StyleResolver::new();

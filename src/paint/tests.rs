@@ -2182,6 +2182,87 @@ fn background_clip_text_masks_only_its_matching_layer() {
 }
 
 #[test]
+fn html_text_paint_order_changes_fill_and_stroke_overlap() {
+    let render = |order: &str| {
+        let stylesheet = parse_stylesheet(&format!(
+            "body {{ margin:0 }} div {{ width:50px;height:40px;font:32px/40px Fixture;\
+             -webkit-text-fill-color:red;-webkit-text-stroke-color:blue;\
+             -webkit-text-stroke-width:6px;paint-order:{order} }}"
+        ))
+        .unwrap();
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let div = NodeHandle::element("div");
+        div.append_child(NodeHandle::text("X"));
+        body.append_child(div);
+        document.append_child(body.clone());
+        let font = Font::load_from_bytes(
+            include_bytes!(
+                "../../tests/fixtures/anonymized-textarea-lines/LiberationSans-Regular.ttf"
+            )
+            .to_vec(),
+        )
+        .unwrap();
+        let mut registry = crate::font::WebFontRegistry::new();
+        registry.push(
+            "Fixture",
+            crate::font::FontWeight::default(),
+            crate::font::FontStyle::default(),
+            font,
+        );
+        let registry = Arc::new(registry);
+        let viewport = Rect {
+            width: 50.0,
+            height: 40.0,
+            ..Rect::default()
+        };
+        crate::layout::with_layout_fonts(vec![], Some(Arc::clone(&registry)), || {
+            let mut resolver = StyleResolver::new();
+            resolver.add_stylesheet(Origin::Author, stylesheet.clone());
+            let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+            let mut paint_resolver = StyleResolver::new();
+            paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+            paint_layout_with_web_fonts(
+                &layout,
+                &mut paint_resolver,
+                viewport,
+                vec![],
+                Some(registry.as_ref()),
+            )
+        })
+    };
+    let normal = render("normal");
+    let stroke_first = render("stroke fill");
+    let dominant_pixels = |canvas: &Canvas, red: bool| {
+        canvas
+            .pixels
+            .chunks_exact(4)
+            .filter(|pixel| {
+                pixel[3] > 0
+                    && if red {
+                        pixel[0] > pixel[2]
+                    } else {
+                        pixel[2] > pixel[0]
+                    }
+            })
+            .count()
+    };
+    assert!(dominant_pixels(&normal, false) > 0);
+    assert!(dominant_pixels(&stroke_first, true) > 0);
+    let changed = normal
+        .pixels
+        .chunks_exact(4)
+        .zip(stroke_first.pixels.chunks_exact(4))
+        .filter(|(left, right)| left != right)
+        .count();
+    assert!(changed > 0, "paint-order must change overlapping pixels");
+    assert!(
+        dominant_pixels(&stroke_first, true) > dominant_pixels(&normal, true),
+        "fill painted last must cover the inner half of the stroke"
+    );
+}
+
+#[test]
 fn paints_non_repeating_background_images_once() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

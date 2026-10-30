@@ -7563,6 +7563,49 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             }
             return validate_color_value(value);
         }
+        "-webkit-text-fill-color" | "-webkit-text-stroke-color" => {
+            return validate_color_value(value);
+        }
+        "-webkit-text-stroke-width" => {
+            let valid = match value {
+                Value::Keyword(keyword) => is_css_wide_keyword(&keyword.to_ascii_lowercase()),
+                Value::Number(number) => *number == 0.0,
+                Value::Length(number, unit) => {
+                    number.is_finite() && *number >= 0.0 && is_css_length_unit(unit)
+                }
+                Value::Function { name, .. }
+                    if name.eq_ignore_ascii_case("var") || name.eq_ignore_ascii_case("env") =>
+                {
+                    true
+                }
+                Value::Function { .. } | Value::List(_) => {
+                    typed_math::infer(value, Some(typed_math::NumericType::LENGTH))
+                        == Some(typed_math::NumericType::LENGTH)
+                }
+                _ => false,
+            };
+            return if valid {
+                DeclarationValidation::Unvalidated
+            } else {
+                DeclarationValidation::Invalid
+            };
+        }
+        "paint-order" => {
+            let rendered = render_value(value).to_ascii_lowercase();
+            let parts = super::split_top_level_whitespace(&rendered);
+            let valid = parts.as_slice() == ["normal"]
+                || (!parts.is_empty()
+                    && parts.len() <= 3
+                    && parts
+                        .iter()
+                        .all(|part| matches!(*part, "fill" | "stroke" | "markers"))
+                    && parts.iter().collect::<HashSet<_>>().len() == parts.len());
+            return if valid {
+                DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
+            } else {
+                DeclarationValidation::Invalid
+            };
+        }
         "appearance" => {
             return validate_keyword_value(
                 value,
@@ -10736,6 +10779,7 @@ fn is_length_property(name: &str) -> bool {
             | "column-rule-width"
             | "outline-width"
             | "outline-offset"
+            | "-webkit-text-stroke-width"
             | "shape-margin"
     )
 }
@@ -16317,6 +16361,13 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::OutlineWidth, InitialValue::Px(3.0)),
     (PropertyId::OutlineOffset, InitialValue::Px(0.0)),
     (PropertyId::OutlineColor, InitialValue::Keyword("auto")),
+    (PropertyId::WebkitTextFillColor, InitialValue::CurrentColor),
+    (
+        PropertyId::WebkitTextStrokeColor,
+        InitialValue::CurrentColor,
+    ),
+    (PropertyId::WebkitTextStrokeWidth, InitialValue::Px(0.0)),
+    (PropertyId::PaintOrder, InitialValue::Keyword("normal")),
     (PropertyId::BreakBefore, InitialValue::Keyword("auto")),
     (PropertyId::BreakAfter, InitialValue::Keyword("auto")),
     (PropertyId::BreakInside, InitialValue::Keyword("auto")),
@@ -16660,6 +16711,10 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::BorderCollapse,
     PropertyId::BorderSpacing,
     PropertyId::Color,
+    PropertyId::WebkitTextFillColor,
+    PropertyId::WebkitTextStrokeColor,
+    PropertyId::WebkitTextStrokeWidth,
+    PropertyId::PaintOrder,
     PropertyId::Cursor,
     PropertyId::Direction,
     PropertyId::FontFamily,
